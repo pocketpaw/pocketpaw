@@ -204,6 +204,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 from soul_protocol.spec.journal import Actor
 
 from pocketpaw.security.url_validators import validate_external_url_strict
+from pocketpaw_ee.agent.mcp_servers._audit import record_decision
 from pocketpaw_ee.cloud.decisions.journal_writer import (
     record_agent_proposed,
     record_decision_completed,
@@ -656,7 +657,7 @@ def _audit_action_run(
     """Write an audit-log entry for a write-action run.
 
     Mirrors ``source_executor._audit_source_run`` — category
-    ``pocket_backend_config``, severity WARNING. The token is NEVER passed;
+    ``pocket_action_run``, severity WARNING. The token is NEVER passed;
     ``base_url`` is query-stripped before it is logged. ``workspace_id`` is
     logged so write-action entries are tenant-filterable, the same way the
     backend-config audit entries already are. A rejected write (allowlist
@@ -685,13 +686,37 @@ def _audit_action_run(
                 action="pocket.actions.run",
                 target=pocket_id,
                 status=status,
-                category="pocket_backend_config",
+                category="pocket_action_run",
                 workspace_id=workspace_id,
                 **fields,
             )
         )
     except Exception:  # noqa: BLE001 — audit must never break the run
         logger.warning("pocket action-run audit-log write failed", exc_info=True)
+
+    # Also record to the workspace audit (MongoDB) so action executions
+    # appear in the rich-activity feed.
+    try:
+        import asyncio
+
+        from pocketpaw_ee.cloud.audit import service as _audit_service
+
+        asyncio.ensure_future(
+            _audit_service.record(
+                workspace_id=workspace_id,
+                actor_id=actor,
+                action="workspace.agent.action_executed",
+                target_type="pocket",
+                target_id=pocket_id,
+                metadata={
+                    "pocket_action": action,
+                    "status": status,
+                    "source": "pocket_page",
+                },
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the run
+        logger.warning("pocket action-run workspace-audit record failed", exc_info=True)
 
 
 def _error(action: str, message: str, code: str, on_error: list[dict]) -> dict:
@@ -1200,8 +1225,20 @@ async def run_action(
                 },
             },
         )
-
-    # ── 6. DNS pre-resolve ──────────────────────────────────────────────
+        # Also fire a workspace audit event so this decision appears in the
+        # activity feed under the "decisions" filter.
+        record_decision(
+            workspace_id=workspace_id,
+            actor_id=user_id or "agent",
+            pocket_id=pocket_id,
+            decision_action="agent.proposed",
+            outcome="proposed",
+            metadata={
+                "intent": f"{method} {path_decoded} via pocket {pocket_id}",
+                "correlation_id": str(correlation_id),
+                "action_name": action,
+            },
+        )
     try:
         await _assert_host_external(urllib.parse.urlsplit(url).hostname or "")
     except _GuardError as exc:
@@ -1520,6 +1557,30 @@ async def run_action(
             },
             causation_id=policy_event_id,
         )
+        # Workspace audit events for the decision activity feed.
+        record_decision(
+            workspace_id=workspace_id,
+            actor_id=user_id or "agent",
+            pocket_id=pocket_id,
+            decision_action="policy.evaluated",
+            outcome="approved",
+            metadata={
+                "policy": "auto",
+                "passed": True,
+                "correlation_id": str(correlation_id),
+            },
+        )
+        record_decision(
+            workspace_id=workspace_id,
+            actor_id=user_id or "agent",
+            pocket_id=pocket_id,
+            decision_action="decision.completed",
+            outcome="completed",
+            metadata={
+                "action_outcome": "landed",
+                "correlation_id": str(correlation_id),
+            },
+        )
 
     success = {
         "ok": True,
@@ -1607,6 +1668,21 @@ def _emit_direct_path_failure(
             "action_outcome": "failed",
             "error_class": error_class,
             "reason": reason,
+        },
+    )
+    # Workspace audit event for the decision activity feed.
+    record_decision(
+        workspace_id=workspace_id,
+        actor_id=user_id or "agent",
+        pocket_id=pocket_id,
+        decision_action="decision.completed",
+        outcome="failed",
+        metadata={
+            "passed": False,
+            "action_outcome": "failed",
+            "error_class": error_class,
+            "reason": reason,
+            "correlation_id": str(correlation_id),
         },
     )
 

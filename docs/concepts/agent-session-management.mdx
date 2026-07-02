@@ -1,0 +1,172 @@
+---
+title: "Agent Session Management: Native Resume and the Session Supervisor"
+description: "How PocketPaw keeps a per-user CLI agent session alive across turns — durable native resume backed by a tenancy-keyed SessionStore, a runtime mapping, and a per-session lifecycle supervisor."
+section: Concepts
+ogType: article
+keywords: ["agent session", "native resume", "session supervisor", "session store", "multi-tenant", "claude agent sdk"]
+tags: ["concepts", "agents", "architecture"]
+---
+
+# Agent Session Management: Native Resume and the Session Supervisor
+
+When a user chats with a CLI agent (the Claude Agent SDK backend, Codex, and the
+others), that conversation has to be **maintained across turns** — and, in the
+multi-tenant cloud, isolated per tenant and bounded in resource use. This page
+describes how that works.
+
+<Callout type="note">
+  This is the agent **execution** layer (`src/pocketpaw/agents/` plus the cloud
+  executor). Don't confuse it with the chat **`Session`** Mongo document (the
+  conversation thread the sidebar lists) or the **`AuthSession`** (a login/JWT
+  row). Those are separate. This page is about the *agent process / native CLI
+  session* underneath a chat turn.
+</Callout>
+
+## Three things called "session"
+
+| Term | What it is | Where |
+|------|------------|-------|
+| `AuthSession` | One row per minted JWT (login/device) | `ee/.../models/auth_session.py` |
+| chat `Session` | The conversation thread the user sees | `ee/.../models/session.py` |
+| **native CLI session** | The agent CLI's own on-disk conversation state (`~/.claude/projects/*.jsonl`), resumable via `resume` | the CLI / Claude Agent SDK |
+
+This page is about binding a chat `Session` to a durable **native CLI session**
+so the agent continues where it left off.
+
+## Why native resume, not a kept-alive process
+
+The substrate is the **Claude Agent SDK's native session resume**, not a
+persistent process held open per user (and not a terminal multiplexer like
+tmux/cmux):
+
+- The CLI already persists each session to disk and reloads exact context on
+  `resume` — more faithful than replaying chat history into the prompt, and more
+  durable than a process (a held process dies on restart; the session file does
+  not).
+- We already stream structured events (`stream-json` → `ChatRunDoc` → Redis
+  Stream → SSE). Driving the agent through a terminal would mean screen-scraping
+  instead.
+- One live process per active session per tenant does not scale on a shared
+  multi-tenant box. Cold sessions cost zero process under resume.
+
+A live, attachable process (for "watch and steer the terminal") is a **deferred
+LIVE tier**, exposed through `cmux` on a supervisor-owned PTY — not the default
+substrate.
+
+## The pieces
+
+```
+chat turn ──▶ SessionSupervisor.acquire(ws, session, agent)
+                 │  resolves prior native id from the runtime map (SS-3)
+                 ▼
+            SessionHandle{ cli_session_id, session_store }
+                 │  threaded into AgentBackend.run()
+                 ▼
+            Claude SDK backend
+                 ├─ resume=cli_session_id  → fresh launch reloads the session
+                 └─ session_store          → SDK materializes the transcript
+                                              from OUR store into an ephemeral
+                                              temp dir, mirrors new turns back
+```
+
+### SessionHandle (`agents/backend.py`)
+A small value (`cli_session_id`, `session_store`) threaded through
+`AgentPool.run` → `AgentBackend.run` **only when set** — the same
+withhold-when-empty contract used for tool deny/allow/skill kwargs, so the other
+backends keep their narrower signature. When it carries a `cli_session_id`, the
+Claude SDK backend sets `ClaudeAgentOptions.resume` and routes that turn down the
+fresh `query()` launch path (the warm persistent client's cache key omits
+`resume`, so it can't honor a fresh one). The per-turn system prompt is still
+rebuilt and applied, so a resumed turn honors fresh instructions and KB context.
+
+### SessionStore (`agents/session_store.py`, `ee/.../agent_sessions/store.py`)
+Implements the SDK's `SessionStore` protocol so resume reads from **our** store
+instead of local disk. Every key is `(workspace_id, project_key, session_id,
+subpath)` and a store is **bound to a workspace** at construction, so a store for
+tenant B can never read tenant A's transcripts. The OSS `InMemorySessionStore` is
+the reference impl; `MongoSessionStore` is the durable one (every query filters
+`workspace == workspace_id`). The store reaches the OSS backend opaquely, so the
+OSS core never imports `pocketpaw_ee`.
+
+### Runtime mapping (`ee/.../agent_sessions/runtime_service.py`)
+`AgentSessionRuntimeDoc` is the durable map
+`(workspace, session, agent) → cli_session_id`, with a unique index leading on
+`workspace`. The native id is captured on turn 1 (from the SDK's init message)
+and looked up on every later turn, so even a cold turn after a restart resumes
+the right session.
+
+### SessionSupervisor (`agents/session_supervisor.py`)
+Owns one `SessionRuntime` per `(workspace, session)` across **COLD / WARM** tiers
+(LIVE reserved). It:
+
+- decides per turn whether to reuse a warm slot or take a fresh launch;
+- forces **turn 1** of a session to its own fresh launch, so the captured native
+  id binds to that session and not a shared warm client;
+- enforces a **per-tenant warm quota** plus a global cap (the guardrail that
+  keeps one tenant from exhausting a shared box), LRU-evicting the oldest *idle*
+  warm session in scope;
+- never reaps or evicts a **busy** runtime (`active_runs > 0`), the same guard
+  the agent pool uses;
+- demotes to COLD on reap / evict / crash while keeping the `cli_session_id`, so
+  the next turn resumes from the store.
+
+It does not spawn processes itself — the executor supplies the warm slot and a
+teardown callback.
+
+## Executor wiring and the flag
+
+`ee/.../chat/runs/run_core.py` drives every supervised turn through the
+supervisor, behind **`POCKETPAW_SESSION_SUPERVISOR`** (default **off**). When off,
+the executor calls `pool.run` with no handle and the path is byte-for-byte the
+legacy one. When on, it resolves the prior native id, acquires the runtime,
+threads the `SessionHandle`, brackets the run with the busy-counter, persists the
+turn-1 id, and demotes to COLD on failure. Any supervisor or store error during a
+turn falls back to the legacy path for that turn rather than breaking the run.
+
+## Multi-tenant isolation and security
+
+On the multi-tenant SaaS track the isolation rests on the SessionStore and the
+SDK's own materialize path:
+
+- session bytes live in our tenancy-filtered store, not as persistent shared
+  files; on resume the SDK writes them to an **ephemeral** `mkdtemp` config dir
+  and removes it after the run;
+- `resume` ids are UUID-validated and subagent subpaths are checked, so a store
+  key can't traverse out of its session;
+- materialized files are written `0600`, and the OAuth **`refreshToken` is
+  redacted** before the subprocess sees it, so a per-tenant subprocess can't burn
+  the parent / account-pool token.
+
+An adversarial isolation suite covers shared-backing collisions, guessed/leaked
+native ids, and quota cross-starvation (see
+`tests/test_multitenant_session_isolation.py` and the cloud counterpart).
+
+## Status and deferred work
+
+**Shipped (flag-gated, off by default):**
+
+- **v1 substrate** — native resume, durable tenancy-keyed store, the runtime
+  mapping, the supervisor (COLD/WARM + per-tenant quota), flag-gated executor
+  wiring.
+- **SaaS hardening** — atomic store `append`/upsert (no read-modify-write race)
+  and a COLD-runtime memory prune.
+- **WARM hot-process reuse** — the supervisor owns a per-session live
+  `ClaudeSDKClient`; turn 2+ reuses it (zero re-materialize), `resume` is the
+  cold-recovery path only. Bounded by the per-tenant warm quota + idle reaper, so
+  cold sessions still cost zero process. `claude_sdk` backend only.
+
+**Deferred / follow-up:**
+
+- **LIVE / attach tier** — an attachable long-running process surfaced through
+  `cmux` for watch-and-steer (builds on WARM).
+- Codex native resume parity.
+- Skills + leased-client teardown reclaiming the materialized skills dir at
+  per-client teardown (currently reclaimed at backend `cleanup()` — benign
+  retention gap).
+
+## Related
+
+- [Claude Agent SDK backend](/backends/claude-sdk)
+- [Memory System](/concepts/memory-system)
+- [Agent Loop](/concepts/agent-loop)
+- [OSS / EE split](/concepts/oss-ee-split)

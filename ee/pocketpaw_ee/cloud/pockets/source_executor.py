@@ -251,7 +251,7 @@ def _audit_source_run(
                 action="pocket.sources.run",
                 target=pocket_id,
                 status=status,
-                category="pocket_backend_config",
+                category="pocket_source_run",
                 pocket_id=pocket_id,
                 base_url=_strip_query(base_url),
                 ran=ran,

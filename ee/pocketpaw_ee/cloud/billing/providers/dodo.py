@@ -39,13 +39,22 @@
 #
 # SUBSCRIPTIONS (BC-7), again adapting the real SDK:
 #
-#   * ``create_subscription`` — calls ``client.subscriptions.create(...)`` with a
-#     single ``product_id`` (NOT a product_cart — the SDK's subscription create
-#     takes one recurring product id + a ``quantity``, unlike the one-time cart),
-#     ``payment_link=True`` for a HOSTED checkout, and ``metadata={"workspace_id",
-#     "plan_key"}`` so the renewal webhook can route the grant to the right wallet
-#     at the right tier. The hosted url is ``response.payment_link``; the gateway
-#     subscription ref is ``response.subscription_id``.
+#   * ``create_subscription`` — opens a CHECKOUT SESSION via
+#     ``client.checkout_sessions.create(...)``: a recurring ``product_cart`` line
+#     ([{product_id, quantity:1}]) creates the SUBSCRIPTION at payment time,
+#     ``return_url`` / ``cancel_url`` send the buyer back to the app afterward,
+#     ``customer`` carries the email, ``billing_address.country`` keeps the
+#     configurable billing country (IN+INR → UPI), and ``metadata={"workspace_id",
+#     "plan_key"}`` lets the renewal webhook route the grant. The response is a
+#     SESSION: the hosted url is ``response.checkout_url`` and ``response.session_id``
+#     is carried on ``SubscriptionCheckout.subscription_id`` (the real gateway
+#     subscription id is created at payment and arrives on the subscription.active
+#     webhook body, NOT from this create call).
+#
+#     WHY checkout sessions (the fix): the prior ``subscriptions.create(
+#     payment_link=True)`` call accepted NO return_url, so after paying on Dodo the
+#     buyer was stranded — the app never got them back. Checkout Sessions is the
+#     Dodo API that supports return_url + cancel_url.
 #
 #   * ``cancel_subscription`` — calls ``client.subscriptions.update(<id>,
 #     status="cancelled")`` (the SDK has no ``.cancel`` — cancellation is a status
@@ -79,6 +88,15 @@
 #   WORKSPACE-plan sub. A per-site subscribe stamps ``site_id`` on the metadata;
 #   the service routes a delivery with one to the site, without one to the
 #   workspace path. No new SDK call — site subs reuse ``create_subscription``.
+# Updated 2026-06-28 (fix/billing-checkout-sessions): ``create_subscription`` now
+#   opens a Dodo CHECKOUT SESSION (``checkout_sessions.create``) instead of
+#   ``subscriptions.create(payment_link=True)``. The old call accepted no
+#   return_url, stranding the buyer after payment; the session carries return_url +
+#   cancel_url (threaded in from the caller's Origin) so the buyer is returned to
+#   the app. The recurring product rides as a ``product_cart`` line and the
+#   subscription is created at payment; the response ``session_id`` is carried on
+#   ``SubscriptionCheckout.subscription_id``. The webhook grant is untouched (it
+#   reads the subscription_id + metadata off the event body, not this response).
 
 from __future__ import annotations
 
@@ -269,6 +287,8 @@ class DodoProvider:
         workspace_id: str,
         customer_email: str | None,
         metadata: dict,
+        return_url: str | None = None,
+        cancel_url: str | None = None,
     ) -> SubscriptionCheckout:
         if not plan_key:
             raise ValidationError("billing.invalid_plan", "plan_key is required")
@@ -288,30 +308,47 @@ class DodoProvider:
         meta["workspace_id"] = str(workspace_id)
         meta["plan_key"] = str(plan_key)
 
-        # The SDK's subscription create takes a SINGLE recurring product_id +
-        # quantity (NOT a product_cart like the one-time path). payment_link=True
-        # returns a HOSTED checkout url on ``response.payment_link``.
-        client = self._client()
-        response = await client.subscriptions.create(
-            billing={"country": self._billing_country},
-            customer=_customer_param(customer_email),
-            product_id=product_id,
-            quantity=1,
-            payment_link=True,
-            metadata=meta,
-        )
+        # CHECKOUT SESSIONS (the fix): ``subscriptions.create(payment_link=True)``
+        # accepts NO return_url, so the buyer was stranded after paying on Dodo.
+        # The Checkout Sessions API DOES carry return_url + cancel_url. A recurring
+        # product passed as a ``product_cart`` line creates the SUBSCRIPTION at
+        # payment time; the response is a SESSION (checkout_url + session_id), and
+        # the real subscription_id arrives later on the verified subscription.active
+        # webhook body — NOT from this create call.
+        #
+        # ``billing_address.country`` (was ``billing={"country": ...}`` on the old
+        # subscriptions API) preserves the configurable billing country so IN+INR
+        # products still surface UPI; the buyer can change it on the hosted page.
+        create_kwargs: dict[str, Any] = {
+            "product_cart": [{"product_id": product_id, "quantity": 1}],
+            "customer": _customer_param(customer_email),
+            "billing_address": {"country": self._billing_country},
+            "metadata": meta,
+        }
+        # Only attach return_url/cancel_url when the caller supplied a base — Dodo
+        # treats a missing return_url as "no redirect"; sending an empty string is
+        # worse than omitting it. The sites publish path passes neither.
+        if return_url:
+            create_kwargs["return_url"] = return_url
+        if cancel_url:
+            create_kwargs["cancel_url"] = cancel_url
 
-        checkout_url = getattr(response, "payment_link", None)
-        subscription_id = getattr(response, "subscription_id", "") or ""
+        client = self._client()
+        response = await client.checkout_sessions.create(**create_kwargs)
+
+        checkout_url = getattr(response, "checkout_url", None)
+        # The session id is repurposed onto SubscriptionCheckout.subscription_id —
+        # the create response has no subscription yet (it's created at payment). The
+        # authoritative gateway subscription_id comes in on the webhook body.
+        session_id = getattr(response, "session_id", "") or ""
         if not checkout_url:
-            # payment_link is only populated when payment_link=True succeeds.
+            # checkout_url is None only when payment_method_id was passed (we never
+            # do) or the create failed — treat a missing url as a hard error.
             raise ValidationError(
                 "billing.no_checkout_url",
-                "Dodo did not return a hosted payment link for the subscription.",
+                "Dodo did not return a checkout session url for the subscription.",
             )
-        return SubscriptionCheckout(
-            checkout_url=str(checkout_url), subscription_id=str(subscription_id)
-        )
+        return SubscriptionCheckout(checkout_url=str(checkout_url), subscription_id=str(session_id))
 
     async def cancel_subscription(self, subscription_id: str) -> None:
         if not subscription_id:

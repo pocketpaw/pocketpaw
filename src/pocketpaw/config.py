@@ -13,6 +13,12 @@ Changes:
     (``instinct_template_default_deny`` on the workspace document; null = use
     this global default) is resolved exactly like
     ``instinct_approval_level``.
+  - 2026-06-28 (fix/billing-checkout-sessions): Added ``dodo_checkout_return_base``
+    (default "", env POCKETPAW_DODO_CHECKOUT_RETURN_BASE) — the fallback base URL a
+    Dodo subscription checkout session returns the buyer to after pay / cancel when
+    the /billing/subscribe request carries no Origin (or usable Referer) header.
+    Return urls become ``{base}/settings/billing?checkout=success|cancel``; empty
+    default omits the redirect when no origin is available.
   - 2026-06-26 (WU-F billing cutover): Added ``litellm_spend_mode``
     (Literal off|shadow|live, default 'off'; POCKETPAW_LITELLM_SPEND_MODE) — the
     three-position billing-cutover switch that supersedes the
@@ -56,6 +62,19 @@ Changes:
     SVL-2, landed here so later slices don't touch config). SVL-1 only reads
     the enable flag to stamp an observe-only OutcomeVerdict on a completing
     task. Env: POCKETPAW_DEEP_WORK_VERIFY_* .
+  - 2026-06-22: Added ``discovery_sovereign_model`` (default True) — the model-lane
+    sovereignty posture for discovery's categorize (F2) / refine (F3) passes.
+    True (default, unchanged behavior): hard-pin the model to the on-box Ollama
+    so tenant data never leaves the box. False: use the workspace's configured
+    provider via ``resolve_llm_client`` — a CLOUD model is allowed (explicit
+    tenant opt-in). The kb ingest/build tripwire holds regardless. Env:
+    POCKETPAW_DISCOVERY_SOVEREIGN_MODEL.
+  - 2026-06-21: Added ``instinct_enforce_discovered_rules`` (default False, F6) —
+    when true, approved workspace-discovered Instinct rules are merged with
+    template rules at the live gate and govern actions. Off by default; the
+    discovered branch is dead code on the default path. A separate, narrower
+    flag than ``instinct_approval_level``. Env:
+    POCKETPAW_INSTINCT_ENFORCE_DISCOVERED_RULES.
   - 2026-06-18: Added the four layered/learning Instinct gate defaults —
     ``instinct_approval_level`` (default "ASK", dormant),
     ``instinct_auto_approve_threshold`` (0.9), ``instinct_dry_run_mode``
@@ -67,6 +86,10 @@ Changes:
     Belt & Pulley code-change gate (BS-3). A ``belt_propose_change`` proposal's
     repo path must resolve inside one of these roots; empty defaults to the
     cwd's parent. Env: POCKETPAW_BELT_REPO_ALLOWLIST (JSON list).
+  - 2026-07-01: Added ``shield_api_socket`` + ``shield_api_token`` (SEC-5) —
+    the same-box shield daemon's control-API UNIX socket + Bearer token. The
+    cloud ``/api/v1/security/*`` proxy reads these to reach shield; the token
+    is never logged. Env: POCKETPAW_SHIELD_API_SOCKET / POCKETPAW_SHIELD_API_TOKEN.
   - 2026-06-10: Added ``loom_bin`` + ``loom_model_path`` — the codebase
     orientation (loom) MCP server settings. ``loom_model_path`` defaults
     to None, which disables the loom MCP server; set it to a built
@@ -982,6 +1005,31 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Shield — the same-box Go security daemon (deny-by-default connector
+    # egress + agent-decision control plane). shield serves a control API on a
+    # UNIX socket; the cloud ``/api/v1/security/*`` router proxies it,
+    # OWNER-gated, and degrades cleanly when shield is absent (a socket that is
+    # unset / missing / unreachable → a typed available:false read or a 409
+    # write, never a 500). The Bearer token authenticates the backend → shield
+    # hop over the socket; it is NEVER logged. Env auto-derives
+    # POCKETPAW_SHIELD_API_SOCKET / POCKETPAW_SHIELD_API_TOKEN.
+    shield_api_socket: str = Field(
+        default="/run/shield/api.sock",
+        description=(
+            "Filesystem path to shield's control-API UNIX socket. The cloud "
+            "security proxy connects here via an httpx UDS transport. When the "
+            "socket is missing or unreachable the proxy degrades to a typed "
+            "'shield_not_deployed' / 'unreachable' response."
+        ),
+    )
+    shield_api_token: str = Field(
+        default="",
+        description=(
+            "Bearer token the cloud security proxy presents to shield over the "
+            "socket. Sent as 'Authorization: Bearer <token>'. Never logged."
+        ),
+    )
+
     # Security
     bypass_permissions: bool = Field(
         default=False, description="Skip permission prompts for agent actions (use with caution)"
@@ -1514,6 +1562,25 @@ class Settings(BaseSettings):
             "POCKETPAW_INSTINCT_TEMPLATE_DEFAULT_DENY."
         ),
     )
+    # Sovereign Zero-Setup Discovery — F6 live enforcement (2026-06-21).
+    # When true, approved workspace-discovered Instinct rules
+    # (rules.service.get_active_rules) are merged with template rules at the
+    # live gate (instinct_dispatch.gate_action) and govern actions. OFF by
+    # default — the template-rule path is unchanged and the discovered branch
+    # is dead code on the default path (get_active_rules is never called).
+    # This is a SEPARATE, NARROWER flag than instinct_approval_level: enforcing
+    # WHICH discovered CEL conditions fire and activating WHETHER escalations can
+    # auto-resolve are independent risk axes and must toggle independently.
+    instinct_enforce_discovered_rules: bool = Field(
+        default=False,
+        description=(
+            "When true, approved workspace-discovered Instinct rules "
+            "(rules.service.get_active_rules) are merged with template rules at "
+            "the live gate. Off by default — the template-rule path is unchanged "
+            "and the whole discovered branch is dead code on the default path. "
+            "Set via POCKETPAW_INSTINCT_ENFORCE_DISCOVERED_RULES."
+        ),
+    )
 
     # Billing — Dodo Payments gateway (BC-2, the Gateway primitive).
     # The only payment gateway in v1; a provider abstraction
@@ -1576,6 +1643,19 @@ class Settings(BaseSettings):
             "POCKETPAW_DODO_PLAN_PRODUCTS as a JSON object, e.g. "
             '{"team":"prod_team","business":"prod_biz"}. Default empty disables '
             "subscriptions (subscribe raises a clear ValidationError)."
+        ),
+    )
+    dodo_checkout_return_base: str = Field(
+        default="",
+        description=(
+            "Fallback base URL the Dodo subscription CHECKOUT SESSION returns the "
+            "buyer to after pay / cancel, used ONLY when the /billing/subscribe "
+            "request carries no Origin (and no usable Referer) header. The return "
+            "urls become ``{base}/settings/billing?checkout=success|cancel``. Set "
+            "via POCKETPAW_DODO_CHECKOUT_RETURN_BASE (e.g. https://app.example.com). "
+            "Default empty: when both this and the request Origin are absent the "
+            "redirect is omitted (the checkout still works, the buyer just isn't "
+            "auto-returned)."
         ),
     )
 
@@ -1712,6 +1792,39 @@ class Settings(BaseSettings):
             "the sweep never auto-deploys or auto-cancels. Tuned above Dodo's "
             "webhook retry window so a transient delay is not flagged. Set via "
             "POCKETPAW_SITE_PENDING_ALERT_HOURS."
+        ),
+    )
+
+    # Sovereign Zero-Setup Discovery — model-lane sovereignty posture (2026-06-22).
+    # Discovery's categorize (F2) and refine (F3) passes send the tenant's data
+    # SHAPE (type/property names, article summaries — never raw exhaust) to a
+    # model. WHICH model is a sovereignty choice, not a code constant:
+    #   * sovereign-local (default, True): the model is hard-pinned to the
+    #     tenant's on-box Ollama. ``api_key is None``; no cloud key ever rides
+    #     into the request path. Nothing leaves the box. This is the safe
+    #     default and matches the original shipped behavior.
+    #   * configured-provider (False): discovery uses the workspace's CONFIGURED
+    #     provider via ``resolve_llm_client(settings)`` — anthropic / openai /
+    #     openai_compatible / gemini / litellm, a CLOUD model is allowed. This is
+    #     the tenant's EXPLICIT opt-in to send discovery exhaust to their own
+    #     configured model. Most businesses are fine here (faster, better
+    #     categories); regulated / sovereign tenants keep the default.
+    # Independent of the kb-ingest tripwire: ``kb ingest`` / ``kb build`` (which
+    # POST raw tenant text to Anthropic's KB API) are NEVER called regardless of
+    # this setting — that path is never correct and stays hard-blocked.
+    discovery_sovereign_model: bool = Field(
+        default=True,
+        description=(
+            "Sovereignty posture for discovery's categorize/refine model call. "
+            "True (default): hard-pin the model to the tenant's on-box Ollama — "
+            "data never leaves the box, no cloud key in the request path "
+            "(sovereign-local, the safe default for regulated tenants). False: "
+            "use the workspace's configured provider via resolve_llm_client — a "
+            "CLOUD model is allowed; this is the tenant's explicit opt-in to send "
+            "discovery's inferred data shape to their configured model (faster, "
+            "richer categories — fine for most businesses). The kb ingest/build "
+            "tripwire holds regardless of this setting. Set via "
+            "POCKETPAW_DISCOVERY_SOVEREIGN_MODEL."
         ),
     )
 

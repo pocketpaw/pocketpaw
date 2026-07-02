@@ -62,6 +62,8 @@ import json
 import logging
 from typing import Any
 
+from ._audit import record_tool_call
+
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "pocketpaw_pocket"
@@ -109,16 +111,45 @@ def _error(text: str) -> dict:
     return {"content": [{"type": "text", "text": f"Error: {text}"}], "is_error": True}
 
 
+def _identity() -> tuple[str | None, str | None]:
+    """Resolve the active workspace + user id from ContextVars."""
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import current_user_id, current_workspace_id
+
+        return current_workspace_id(), current_user_id()
+    except Exception:
+        return None, None
+
+
 async def _get_pocket_handler(args: dict) -> dict:
     from pocketpaw_ee.cloud.pockets.agent_context import fetch_pocket_for_agent
 
-    return _result_payload(await fetch_pocket_for_agent(args.get("pocket_id", "")))
+    ws_id, uid = _identity()
+    result = await fetch_pocket_for_agent(args.get("pocket_id", ""))
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server=SERVER_NAME,
+        tool_name="get_pocket",
+        status="ok" if result.get("ok") else "error",
+        ok=result.get("ok", False),
+    )
+    return _result_payload(result)
 
 
 async def _list_pockets_handler(args: dict) -> dict:
+    ws_id, uid = _identity()
     from pocketpaw_ee.cloud.pockets.agent_context import list_pockets_for_agent
 
     result = await list_pockets_for_agent()
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server=SERVER_NAME,
+        tool_name="list_pockets",
+        status="ok" if result.get("ok") else "error",
+        ok=result.get("ok", False),
+    )
     if not result.get("ok"):
         return {
             "content": [{"type": "text", "text": f"Error: {result.get('error')}"}],
@@ -248,6 +279,7 @@ async def _add_widget_handler(args: dict) -> dict:
     manifest first (skipped for native widgets); on a validation failure
     nothing is persisted and the agent gets a corrective error.
     """
+    ws_id, uid = _identity()
     pocket_id = args.get("pocket_id")
     if not pocket_id or not isinstance(pocket_id, str):
         return _error(
@@ -264,7 +296,17 @@ async def _add_widget_handler(args: dict) -> dict:
 
     from pocketpaw_ee.cloud.pockets.agent_context import add_widget_for_agent
 
-    return _result_payload(await add_widget_for_agent(pocket_id, widget))
+    result = await add_widget_for_agent(pocket_id, widget)
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server=SERVER_NAME,
+        tool_name="add_widget",
+        status="ok" if result.get("ok") else "error",
+        ok=result.get("ok", False),
+        metadata={"pocket_id": pocket_id},
+    )
+    return _result_payload(result)
 
 
 async def _update_widget_handler(args: dict) -> dict:
@@ -274,6 +316,7 @@ async def _update_widget_handler(args: dict) -> dict:
     the same way ``add_widget`` does; on failure nothing is persisted and
     the agent gets a corrective error. ``type="native"`` skips validation.
     """
+    ws_id, uid = _identity()
     pocket_id = args.get("pocket_id")
     if not pocket_id or not isinstance(pocket_id, str):
         return _error(
@@ -306,7 +349,17 @@ async def _update_widget_handler(args: dict) -> dict:
 
     from pocketpaw_ee.cloud.pockets.agent_context import update_widget_for_agent
 
-    return _result_payload(await update_widget_for_agent(pocket_id, widget_id, fields))
+    result = await update_widget_for_agent(pocket_id, widget_id, fields)
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server=SERVER_NAME,
+        tool_name="update_widget",
+        status="ok" if result.get("ok") else "error",
+        ok=result.get("ok", False),
+        metadata={"pocket_id": pocket_id, "widget_id": widget_id},
+    )
+    return _result_payload(result)
 
 
 def build_pocket_context_server() -> tuple[str, Any] | None:

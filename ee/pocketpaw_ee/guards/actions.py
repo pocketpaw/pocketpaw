@@ -42,6 +42,13 @@
 # detail) and its add-repo route. ``belt.manage`` is ADMIN because adding a repo
 # root extends the code-change security boundary workspace-wide — it must not be
 # open to every member (mirrors connector.manage / skills.manage).
+#
+# Updated: 2026-07-01 (feat/sec-5-security-proxy, SEC-5) — added
+# ``security.manage`` (OWNER) gating EVERY route on the shield control-plane
+# proxy (ee.cloud.security.router). OWNER because the proxy fronts shield's
+# ban-capable writes (resolve a decision, PATCH the egress deny/allow config)
+# AND its read feed exposes who-tried-to-egress-what; the whole surface is
+# owner-only, mirroring workspace.delete / billing.manage / instinct.activate.
 
 from __future__ import annotations
 
@@ -230,6 +237,16 @@ ACTIONS: dict[str, ActionRule] = {
     # diffs), mirroring connector.manage / skills.manage.
     "belt.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "belt.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Security — the shield control-plane proxy (ee.cloud.security.router,
+    # SEC-5). OWNER-only, the most restrictive workspace tier (mirrors
+    # workspace.delete / billing.manage / instinct.activate). shield fronts the
+    # ban-capable write endpoints (resolve a decision, PATCH the deny/allow
+    # config) and IS the workspace's egress security gate, so read AND write
+    # must both be owner-gated: a mere admin must not be able to see the
+    # decision stream or flip the security posture for everyone. A single
+    # action guards every route (reads included) because the decision feed
+    # itself carries who-tried-to-egress-what, which is sensitive.
+    "security.manage": ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
 }
 
 
