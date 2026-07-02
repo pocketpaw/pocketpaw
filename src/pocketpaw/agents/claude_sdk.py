@@ -940,22 +940,21 @@ class ClaudeSDKBackend(BaseAgentBackend):
         #
         # AT-5: the server carries a per-run entitlement/availability
         # provider so atlas answers reflect the CALLING workspace, not a
-        # global view. The connector scope key comes from THIS backend
-        # instance's per-run context — ``_extra_subprocess_env`` carries
-        # ``POCKETPAW_WORKSPACE_ID`` when an isolated cloud run attached
-        # tenancy via ``attach_subprocess_env`` (cloud connector rows are
-        # keyed ``ws:<workspace_id>``, see ee cloud connectors service);
-        # otherwise the OSS single-user ``"default"`` scope the builtin
-        # connector tools use. Never a process-global mode flag
-        # (repo lesson #1570/#1574).
+        # global view. Scope resolution lives in ``_tenant_scope_key``
+        # (per-run env, fail-closed on a blank workspace id, never a
+        # process-global mode flag — repo lesson #1570/#1574).
+        #
+        # Honesty note: under a ``ws:<id>`` scope the availability read is
+        # plumbed but currently INERT — the cloud connector state store does
+        # not enumerate tenant rows, so cloud runs conservatively report
+        # every connector unavailable until the EE availability provider
+        # lands. The OSS ``"default"`` scope reads live file-store state.
         try:
             from pocketpaw.agents.sdk_mcp_atlas import build_atlas_context_server
-            from pocketpaw.atlas.overlay import DEFAULT_SCOPE_KEY, DefaultEntitlementProvider
+            from pocketpaw.atlas.overlay import DefaultEntitlementProvider
 
-            _atlas_ws_id = self._extra_subprocess_env.get("POCKETPAW_WORKSPACE_ID", "")
-            _atlas_scope = f"ws:{_atlas_ws_id}" if _atlas_ws_id else DEFAULT_SCOPE_KEY
             atlas_server = build_atlas_context_server(
-                provider=DefaultEntitlementProvider(scope_key=_atlas_scope)
+                provider=DefaultEntitlementProvider(scope_key=self._tenant_scope_key())
             )
             if atlas_server is not None:
                 name, cfg_entry = atlas_server
@@ -1246,9 +1245,36 @@ class ClaudeSDKBackend(BaseAgentBackend):
         payload = ("b1:" if bundled else "b0:") + ",".join(sorted(skill_names))
         return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:16]
 
+    def _tenant_scope_key(self) -> str:
+        """Connector/entitlement scope for THIS backend instance.
+
+        Resolved from the per-run ``_extra_subprocess_env`` (never a
+        process-global mode flag — repo lesson #1570/#1574):
+
+        - no ``POCKETPAW_WORKSPACE_ID`` attached → the OSS single-user
+          ``"default"`` scope the builtin connector tools use;
+        - a non-blank id → ``ws:<id>`` (the EE cloud connector row keying);
+        - tenancy attached but BLANK id → fail CLOSED to a sentinel scope
+          that matches no rows. Never the shared ``"default"`` bucket:
+          a half-attached tenancy must degrade to "nothing available",
+          not to another scope's connector availability.
+        """
+        from pocketpaw.atlas.overlay import DEFAULT_SCOPE_KEY
+
+        raw = self._extra_subprocess_env.get("POCKETPAW_WORKSPACE_ID")
+        if raw is None:
+            return DEFAULT_SCOPE_KEY
+        ws = raw.strip()
+        return f"ws:{ws}" if ws else "ws:__missing-workspace-id__"
+
     @classmethod
     def _client_cache_key(
-        cls, options: Any, *, session_key: str | None = None, plugin_digest: str = ""
+        cls,
+        options: Any,
+        *,
+        session_key: str | None = None,
+        plugin_digest: str = "",
+        tenant_scope: str = "",
     ) -> str:
         """Persistent-client cache key: session + cwd + model + tools + a digest
         of the system prompt's stable behavioral prefix + the plugin-identity
@@ -1271,6 +1297,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
         session_key, a stale warm subprocess can never be reused across two
         different working directories (i.e. two tenants). The SDK fixes cwd at
         connect() time, so a changed cwd MUST force a fresh subprocess.
+
+        ``tenant_scope`` (AT-5) extends the same argument to the atlas
+        entitlement scope: the per-run provider is baked into the MCP server
+        set at connect() time, so a changed scope must also force a fresh
+        subprocess rather than reusing one warmed for another tenant.
         """
         prefix = cls._behavior_prefix(getattr(options, "system_prompt", None))
         prefix_digest = hashlib.sha256(prefix.encode("utf-8", "replace")).hexdigest()[:16]
@@ -1280,7 +1311,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
             f"{getattr(options, 'model', '')}:"
             f"{sorted(getattr(options, 'allowed_tools', []) or [])}:"
             f"{prefix_digest}:"
-            f"{plugin_digest}"
+            f"{plugin_digest}:"
+            f"{tenant_scope}"
         )
 
     async def _get_or_create_client(
@@ -1314,7 +1346,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
         if self._client_lock is None:
             self._client_lock = asyncio.Lock()
 
-        key = self._client_cache_key(options, session_key=session_key, plugin_digest=plugin_digest)
+        key = self._client_cache_key(
+            options,
+            session_key=session_key,
+            plugin_digest=plugin_digest,
+            tenant_scope=self._tenant_scope_key(),
+        )
 
         async with self._client_lock:
             # Re-check INSIDE the lock: a prewarm (or sibling) may have connected
@@ -2407,7 +2444,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # the per-agent warm client cannot misfire on a leased client.
             if warm_client is not None or on_client_built is not None:
                 this_turn_key = self._client_cache_key(
-                    options, session_key=session_key, plugin_digest=plugin_digest
+                    options,
+                    session_key=session_key,
+                    plugin_digest=plugin_digest,
+                    tenant_scope=self._tenant_scope_key(),
                 )
                 event_stream, _warm_lease = await self._leased_dispatch(
                     message=message,
