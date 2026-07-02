@@ -15,6 +15,10 @@
 #   * list_agents() keeps a disabled agent IN the list (no hard filter) and the
 #     wire dict carries disabled=True, so the client can grey/inactive the row
 #     instead of the agent just silently vanishing.
+# Updated: 2026-07-02 (feat/aiam-agent-revoke, AW-4 follow-up) — get_persona()
+#   returns None for a disabled agent, so the smart-relevance LLM probe in
+#   agent_bridge never fires for an agent pool.get would refuse to run (a
+#   revoked agent does zero LLM work in group/DM dispatch).
 
 from __future__ import annotations
 
@@ -218,3 +222,21 @@ async def test_list_agents_includes_disabled_with_flag(recording_bus) -> None:
     wire = {d["_id"]: d for d in (agent_to_dict(a) for a in listed)}
     assert wire[live.id]["disabled"] is False
     assert wire[dead.id]["disabled"] is True
+
+
+# --- get_persona short-circuit (AW-4 follow-up) ----------------------------
+
+
+async def test_get_persona_returns_none_for_disabled_agent(recording_bus) -> None:
+    """A disabled agent's persona resolves to None so the smart-relevance LLM
+    probe in agent_bridge never runs for a revoked agent — the disabled guard
+    reuses the doc get_persona already loads, so there is no extra DB read and
+    no wasted LLM call."""
+    agent = await agents_service.create(_ctx(), "w1", _create_body())
+    # Live agent has a resolvable persona (falls back to the display name).
+    assert await agents_service.get_persona(agent.id) is not None
+
+    await agents_service.disable(_ctx(), agent.id)
+    # Once disabled, the persona short-circuits to None → _smart_relevance_check
+    # returns False without ever building a backend or firing a model turn.
+    assert await agents_service.get_persona(agent.id) is None

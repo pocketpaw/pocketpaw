@@ -20,6 +20,11 @@ Public API:
 - ``set_scopes(agent_id, scopes)``
 - ``discover(ctx, workspace_id, body)``
 - ``legacy_ctx(user_id, workspace_id)`` — helper for the router
+
+Updated 2026-07-02 (feat/aiam-agent-revoke, AW-4 follow-up): ``get_persona``
+now returns ``None`` for a soft-disabled agent (reusing the doc it already
+loads — no extra read), so ``agent_bridge``'s smart-relevance LLM probe never
+fires for an agent ``pool.get`` would refuse to run.
 """
 
 from __future__ import annotations
@@ -544,12 +549,20 @@ async def get_persona(agent_id: str) -> str | None:
     Resolves to ``soul_persona`` when set, falling back to ``system_prompt``
     and finally the agent's display name. Returns ``None`` if the agent
     doesn't exist (callers degrade silently).
+
+    A soft-disabled agent (AW-4) also returns ``None``: this is the only
+    caller's short-circuit, so the smart-relevance probe in ``agent_bridge``
+    never fires a live LLM call for an agent that ``pool.get`` would refuse to
+    run anyway. The check reuses the doc this function already loads — no extra
+    read — so a revoked agent does zero LLM work in group/DM dispatch.
     """
     try:
         doc = await _AgentDoc.get(PydanticObjectId(agent_id))
     except Exception:
         return None
     if doc is None:
+        return None
+    if getattr(doc, "disabled", False):
         return None
     return doc.config.soul_persona or doc.config.system_prompt or doc.name
 
