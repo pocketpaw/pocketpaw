@@ -16,6 +16,12 @@ file is now a COMPILED artifact built by `pocketpaw atlas build` from
 hand-authored sources (atlas/authored/) + extracted connector and sense
 entries; CI gates freshness via `atlas build --check`; the store logs a
 stale-artifact WARNING on connector drift at first load.
+Updated: 2026-07-02 (feat/atlas-overlay, AT-5) — live overlay +
+fail-closed entitlement filter: atlas answers now reflect the CALLING
+workspace via a per-run EntitlementProvider (atlas/overlay.py) —
+connector cards carry `available`, unavailable connectors rank below
+available ones at equal relevance and describe points them at the
+integrations surface, and non-granted entries are absent everywhere.
 -->
 
 # Atlas — the OS self-model
@@ -120,6 +126,50 @@ field so `atlas_describe` answers include where to see the result:
 dedicated billing route in the client today; plan info lives on
 `/settings/workspace`.)
 
+## Live overlay + entitlement filter (`atlas/overlay.py`)
+
+The compiled artifact is global — the same entries in every workspace. Since
+AT-5 the MCP tools view it through a per-run **overlay** so answers reflect
+the calling workspace's reality:
+
+- **`EntitlementProvider` protocol** — a small structural protocol (duck
+  typed, like the repo's other protocols) answering two per-context
+  questions: `connected_connector_names() -> set[str]` (which connectors
+  are connected in THIS context) and `is_granted(entry) -> bool` (whether
+  this context may see the entry at all).
+- **Availability annotation** — connector entries gain `available: bool`:
+  connected in this context or not. Availability is a live fact, not an
+  entitlement — an unavailable connector stays visible, it just tells the
+  agent it isn't wired up yet.
+- **Fail-closed filtering** — an entry whose grant check does not answer a
+  literal `True` (returns `False`/`None`, or the provider raises) is
+  REMOVED: absent from search results, not describable (`atlas_describe`
+  answers exactly like an unknown id), and absent from the known-ids error
+  listing. No "upgrade to see this" leakage in v1. If
+  `connected_connector_names` raises, every connector is annotated
+  `available: false` (unavailable, not filtered).
+- **Re-ranking** — search results get a stable re-sort so an available
+  connector ranks above an unavailable one at EQUAL relevance; the store's
+  base scoring is untouched (an unavailable-but-more-relevant entry still
+  wins). Filtering happens before the result limit, so non-granted entries
+  never eat result slots.
+- **No mutation** — the overlay wraps store entries in `OverlaidEntry`
+  (result layer); the shared `AtlasStore` singleton's entries are never
+  modified, and the primer / drift check keep the unfiltered OS-level view.
+
+**`DefaultEntitlementProvider` (OSS default)** gates nothing —
+`is_granted` is always `True`, so primitives, surfaces, senses, and
+connectors all stay visible in OSS. Availability comes from the real
+connector seam: `ConnectorRegistry.status(scope_key)` (the same
+durable-state view the `connector_list` builtin reports, on the same shared
+registry), resolved per call so mid-session connects are reflected. The
+scope key is per run, never a process-global: the Claude Agent SDK backend
+builds the provider with `ws:<POCKETPAW_WORKSPACE_ID>` when an isolated
+cloud run attached tenancy via `attach_subprocess_env`, else the OSS
+single-user `"default"` scope. An EE provider that consults a tenant plan
+just implements the same two-method protocol and is passed to
+`build_atlas_context_server(provider=...)`.
+
 ## Agent tools (`pocketpaw_atlas` MCP server)
 
 The `pocketpaw_atlas` in-process MCP server is registered on the Claude Agent
@@ -131,9 +181,11 @@ path), so it is ambient on every agent run. Two tools:
 - **Args:** `intent` (string, required) — what the agent is trying to do,
   e.g. `"approve agent actions"` or `"publish a website"`.
 - **Returns:** ranked capability cards as JSON —
-  `{"results": [{id, kind, name, summary, surface?}, ...]}` (top 5). Simple
-  lexical scoring over name / keywords / summary / narrative; name and
-  keyword hits rank highest.
+  `{"results": [{id, kind, name, summary, surface?, available?}, ...]}`
+  (top 5). Simple lexical scoring over name / keywords / summary /
+  narrative; name and keyword hits rank highest. `available` appears on
+  connector cards only (overlay, AT-5); available connectors rank above
+  unavailable ones at equal relevance, and non-granted entries are absent.
 - **When:** before guessing whether the OS can do something or which
   primitive fits an intent.
 
@@ -143,7 +195,12 @@ path), so it is ambient on every agent run. Two tools:
   `"primitive:instinct"`.
 - **Returns:** the full entry as JSON (`narrative`, `how`, `requires`,
   `surface`, ...). An unknown id returns an error envelope listing the known
-  ids so the agent can self-correct.
+  ids so the agent can self-correct. With the overlay (AT-5): a connector
+  entry also carries `available`, an UNAVAILABLE connector adds a
+  `connect_hint` pointing at the integrations surface route (looked up from
+  the seed's `surface:integrations` entry, not hard-coded), a filtered
+  (non-granted) id answers exactly like an unknown id, and the known-ids
+  listing carries only ids the calling context may see.
 - **When:** after `atlas_search` picks a candidate, or before explaining /
   exercising a primitive.
 
@@ -173,7 +230,13 @@ from pocketpaw.atlas import get_atlas_store
 
 store = get_atlas_store()          # lazy singleton over the compiled artifact
 store.search("approve agent actions", limit=5)  # ranked AtlasEntry list
+store.search_scored("approve agent actions")    # (score, AtlasEntry) pairs (AT-5)
 store.describe("connector:stripe")              # full AtlasEntry or None
+
+from pocketpaw.atlas import AtlasOverlay, DefaultEntitlementProvider
+provider = DefaultEntitlementProvider(scope_key="default")  # or "ws:<id>"
+AtlasOverlay.search(store, "invoices", provider, limit=5)   # OverlaidEntry list
+AtlasOverlay.describe(store, "connector:stripe", provider)  # None if filtered
 
 from pocketpaw.atlas import check_artifact, compile_atlas, write_artifact
 compile_atlas()      # authored + extracted entries, sorted by id
@@ -183,4 +246,6 @@ check_artifact()     # (fresh, diff_summary) — what `--check` calls
 
 Tests: `tests/atlas/` (`test_compile.py` pins byte-determinism, the
 authored/compiled split, connector/sense extraction, `--check`, and the
-drift warning).
+drift warning; `test_overlay.py` pins the fail-closed filter, availability
+annotation + re-ranking, no-leak describe, and the MCP handlers under
+stubbed providers).
