@@ -49,6 +49,14 @@
 # ban-capable writes (resolve a decision, PATCH the egress deny/allow config)
 # AND its read feed exposes who-tried-to-egress-what; the whole surface is
 # owner-only, mirroring workspace.delete / billing.manage / instinct.activate.
+#
+# Updated: 2026-07-02 (feat/game-surface, PE-A) — added ``game.read`` and
+# ``game.write`` (both MEMBER, mirroring fabric.read/fabric.write) so the
+# game-worlds run router (ee.game.router) can guard its routes with
+# ``require_action_any_workspace``. Both MEMBER: playing a world (beat /
+# snapshot / events / reputation) and starting/seeding one are everyday
+# member actions; the plan gate (require_plan_feature("game"), go+) is the
+# tier restriction, not the role.
 
 from __future__ import annotations
 
@@ -181,6 +189,11 @@ ACTIONS: dict[str, ActionRule] = {
     # once a Fabric admin tier is validated with clients.
     "fabric.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "fabric.write": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    # Game worlds — run surface (start/beat/poll a living world + seed the
+    # example pocket). Both MEMBER: playing is an everyday member action; the
+    # plan feature gate ("game", go+) is the tier restriction, not the role.
+    "game.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "game.write": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     # Instinct — human-in-the-loop decision pipeline.
     # Propose and read are MEMBER (agents and analysts can propose + view actions).
     # Approve/reject and audit are ADMIN — governance actions with downstream

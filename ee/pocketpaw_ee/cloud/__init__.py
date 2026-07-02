@@ -1,5 +1,12 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-07-02 (feat/game-surface, PE-A) — Mounts the game-worlds RUN
+    surface (``pocketpaw_ee.game.router``) at ``/api/v1/game``: start a
+    persisted Pocket type="game" as a live in-memory GameWorld, beat it, poll
+    events/snapshot, read portable reputation, and seed the canonical Butcher
+    example. Sibling of the sites control plane; same plan-feature + action
+    guard wiring. The engine dep (soul_protocol.profiles.game) is guarded —
+    routes 503 cleanly when it isn't installed.
 Modified: 2026-06-24 (integration/billing-credits, BC-6) — Mounts the
     Entitlements resolver router (``GET /entitlements`` -> the caller workspace's
     plan + features + monthly credit allotment). The plan CATALOG read
@@ -355,6 +362,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.uploads.router import router as uploads_router
     from pocketpaw_ee.fabric.router import router as fabric_router
     from pocketpaw_ee.fleet.router import router as fleet_router
+    from pocketpaw_ee.game.router import router as game_router
     from pocketpaw_ee.instinct.router import router as instinct_router
     from pocketpaw_ee.paw_print.router import router as paw_print_router
     from pocketpaw_ee.sites.router import router as sites_router
@@ -399,6 +407,12 @@ def mount_cloud(app: FastAPI) -> None:
     # smoke-gate + WfP deploy), GET /sites, and the custom-domain pair
     # (Cloudflare for SaaS) the Domains panel drives.
     app.include_router(sites_router, prefix="/api/v1")
+    # Game worlds RUN surface — feat/game-surface PE-A. POST /game/worlds
+    # (wake a Pocket type="game" into a live in-memory GameWorld), the
+    # beat/events/snapshot/reputation loop, and POST /game/seed_example (the
+    # canonical Butcher pocket). Engine dep is guarded — 503s when
+    # soul_protocol.profiles.game isn't installed.
+    app.include_router(game_router, prefix="/api/v1")
 
     # Model Catalog — MCG-1. License-gated, tenant-independent reads of the
     # models a self-hosted LiteLLM proxy serves: GET /catalog/models (filtered by
