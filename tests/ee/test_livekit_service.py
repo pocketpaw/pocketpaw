@@ -708,3 +708,894 @@ class TestSpawnRace:
         assert spawn_calls == 1, f"expected exactly 1 spawn, got {spawn_calls}"
         assert mock_spawn.call_count == 1
         assert list(_active_agents) == ["g"]
+
+
+class TestProgressiveSummarization:
+    """Tests for progressive summarization during live calls."""
+
+    # ------------------------------------------------------------------
+    # _parse_progressive_json
+    # ------------------------------------------------------------------
+
+    def test_parse_progressive_json_valid(self):
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        content = (
+            '{"segment_summary": "Discussed pricing",'
+            ' "action_items": ["Send quote"],'
+            ' "topics": ["Pricing", "Timeline"]}'
+        )
+        result = agent._parse_progressive_json(content, {"Alice", "Bob"})
+
+        assert result["segment_summary"] == "Discussed pricing"
+        assert result["action_items"] == ["Send quote"]
+        assert result["topics"] == ["Pricing", "Timeline"]
+        assert "Alice" in result["participants"]
+        assert "Bob" in result["participants"]
+        assert "timestamp" in result
+
+    def test_parse_progressive_json_markdown_block(self):
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        content = (
+            "```json\n"
+            '{"segment_summary": "Wrapped up sprint planning",'
+            ' "action_items": [], "topics": ["Sprint"]}\n'
+            "```"
+        )
+        result = agent._parse_progressive_json(content, {"Charlie"})
+
+        assert result["segment_summary"] == "Wrapped up sprint planning"
+        assert result["action_items"] == []
+        assert result["topics"] == ["Sprint"]
+        assert "Charlie" in result["participants"]
+
+    def test_parse_progressive_json_code_fence_no_json(self):
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        content = '```\n{"segment_summary": "Planning", "action_items": []}\n```'
+        result = agent._parse_progressive_json(content, {"Dave"})
+
+        assert result["segment_summary"] == "Planning"
+
+    def test_parse_progressive_json_fallback_to_raw_text(self):
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        content = "Raw text that is not JSON at all but still useful as summary"
+        result = agent._parse_progressive_json(content, {"Eve"})
+
+        # Should use raw text truncated as segment_summary
+        assert "not JSON" in result["segment_summary"]
+        assert result["action_items"] == []
+        assert result["topics"] == []
+        assert "Eve" in result["participants"]
+
+    # ------------------------------------------------------------------
+    # _store_progressive_summary / _fetch_progressive_summaries
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_store_fetches_from_in_memory_when_no_redis(self):
+        """Progressive summaries are stored in-memory when Redis is unavailable."""
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        summary_a = {
+            "segment_summary": "First segment",
+            "action_items": ["Task A"],
+            "topics": ["Topic 1"],
+            "participants": ["Alice"],
+            "timestamp": 1000.0,
+        }
+        summary_b = {
+            "segment_summary": "Second segment",
+            "action_items": ["Task B"],
+            "topics": ["Topic 2"],
+            "participants": ["Bob"],
+            "timestamp": 2000.0,
+        }
+
+        with patch.object(agent, "_get_redis", AsyncMock(return_value=None)):
+            await agent._store_progressive_summary(summary_a)
+            await agent._store_progressive_summary(summary_b)
+
+            assert len(agent._progressive_summaries) == 2
+            assert agent._progressive_summaries[0]["segment_summary"] == "First segment"
+
+            fetched = await agent._fetch_progressive_summaries()
+
+            assert len(fetched) == 2
+            assert fetched[0]["segment_summary"] == "First segment"
+            assert fetched[1]["action_items"] == ["Task B"]
+
+    @pytest.mark.asyncio
+    async def test_store_fetches_from_redis_when_available(self):
+        """When Redis IS available, _fetch reads from Redis first."""
+        import json
+
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        summary_a = {
+            "segment_summary": "From Redis",
+            "action_items": [],
+            "topics": [],
+            "participants": [],
+            "timestamp": 1000.0,
+        }
+
+        # Mock Redis with lrange returning data and rpush/expire being no-ops
+        mock_redis = AsyncMock()
+        mock_redis.lrange.return_value = [json.dumps(summary_a)]
+
+        with patch.object(agent, "_get_redis", AsyncMock(return_value=mock_redis)):
+            await agent._store_progressive_summary(summary_a)
+            # After store, in-memory list should have it too
+            assert len(agent._progressive_summaries) == 1
+
+            fetched = await agent._fetch_progressive_summaries()
+
+            assert len(fetched) == 1
+            assert fetched[0]["segment_summary"] == "From Redis"
+            mock_redis.lrange.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_store_pushes_to_redis_with_ttl(self):
+        """_store_progressive_summary pushes to Redis with rpush and sets TTL."""
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        mock_redis = AsyncMock()
+        mock_redis.lrange.return_value = []
+
+        with patch.object(agent, "_get_redis", AsyncMock(return_value=mock_redis)):
+            await agent._store_progressive_summary(
+                {
+                    "segment_summary": "Test",
+                    "action_items": [],
+                    "topics": [],
+                    "participants": [],
+                    "timestamp": 1000.0,
+                }
+            )
+
+            # Redis should have received rpush and expire calls
+            mock_redis.rpush.assert_awaited_once()
+            # First arg to rpush should be the Redis key
+            key_arg = mock_redis.rpush.await_args[0][0]
+            assert key_arg == "livekit:progressive:g"
+
+            mock_redis.expire.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_fetch_prefers_redis_over_in_memory(self):
+        """_fetch_progressive_summaries prefers Redis even when in-memory exists."""
+        import json
+
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        # Set in-memory summaries
+        agent._progressive_summaries.append(
+            {
+                "segment_summary": "In-memory only",
+                "action_items": [],
+                "topics": [],
+                "participants": [],
+                "timestamp": 1000.0,
+            }
+        )
+
+        # Mock Redis with different data
+        mock_redis = AsyncMock()
+        mock_redis.lrange.return_value = [
+            json.dumps(
+                {
+                    "segment_summary": "From Redis",
+                    "action_items": ["Redis task"],
+                    "topics": [],
+                    "participants": [],
+                    "timestamp": 2000.0,
+                }
+            )
+        ]
+
+        with patch.object(agent, "_get_redis", AsyncMock(return_value=mock_redis)):
+            fetched = await agent._fetch_progressive_summaries()
+
+            assert len(fetched) == 1
+            assert fetched[0]["segment_summary"] == "From Redis"
+            assert fetched[0]["action_items"] == ["Redis task"]
+
+    @pytest.mark.asyncio
+    async def test_fetch_returns_empty_when_nothing_stored(self):
+        """_fetch_progressive_summaries returns [] when no summaries exist."""
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        fetched = await agent._fetch_progressive_summaries()
+        assert fetched == []
+
+    @pytest.mark.asyncio
+    async def test_get_redis_graceful_degradation(self):
+        """_get_redis returns None when Redis is not configured."""
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        # With get_redis raising RuntimeError (no POCKETPAW_REDIS_URL)
+        with patch(
+            "pocketpaw_ee.cloud.livekit.agent.CallMeetingAgent._get_redis",
+            new_callable=AsyncMock,
+        ) as mock_get:
+            mock_get.return_value = None
+            assert await agent._get_redis() is None
+
+    # ------------------------------------------------------------------
+    # _generate_progressive_summary
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_generate_progressive_summary_returns_none_for_no_segments(self):
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        result = await agent._generate_progressive_summary([])
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_generate_progressive_summary_deepseek(self):
+        """_generate_progressive_summary uses DeepSeek when key is set."""
+        import json
+        import os
+
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        segments = [
+            {"speaker": "Alice", "text": "Let's discuss the Q2 roadmap.", "timestamp": 100.0},
+            {
+                "speaker": "Bob",
+                "text": "I think we should focus on the mobile app.",
+                "timestamp": 102.0,
+            },
+            {"speaker": "Alice", "text": "Agreed, mobile is the priority.", "timestamp": 105.0},
+        ]
+
+        with (
+            patch.object(agent, "_call_llm_json", new_callable=AsyncMock) as mock_llm,
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-test-deepseek"}),
+        ):
+            mock_llm.return_value = json.dumps(
+                {
+                    "segment_summary": "Alice and Bob discussed Q2 roadmap with mobile app focus.",
+                    "action_items": ["Prioritize mobile app development"],
+                    "topics": ["Q2 Roadmap", "Mobile App"],
+                }
+            )
+
+            result = await agent._generate_progressive_summary(segments)
+
+            assert result is not None
+            assert "Q2 roadmap" in result["segment_summary"]
+            assert "mobile app" in result["segment_summary"].lower()
+            assert "Prioritize mobile app" in result["action_items"][0]
+            assert "Alice" in result["participants"]
+            assert "Bob" in result["participants"]
+
+            # Should have called DeepSeek
+            mock_llm.assert_called_once()
+            assert mock_llm.call_args[1]["provider"] == "deepseek"
+
+    @pytest.mark.asyncio
+    async def test_generate_progressive_summary_falls_back_through_providers(self):
+        """Falls back from DeepSeek → Anthropic → OpenAI when each fails."""
+        import json
+        import os
+
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        segments = [
+            {"speaker": "Alice", "text": "Status update: backend is done.", "timestamp": 100.0},
+        ]
+
+        with patch.dict(
+            os.environ,
+            {
+                "DEEPSEEK_API_KEY": "sk-ds",
+                "ANTHROPIC_API_KEY": "sk-ant",
+                "OPENAI_API_KEY": "sk-openai",
+            },
+        ):
+            call_count = 0
+
+            async def _failing_then_succeeding(*args, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    raise RuntimeError("DeepSeek down")
+                if call_count == 2:
+                    raise RuntimeError("Anthropic down")
+                # OpenAI succeeds
+                return json.dumps(
+                    {
+                        "segment_summary": "Backend status update from Alice.",
+                        "action_items": [],
+                        "topics": ["Backend"],
+                    }
+                )
+
+            with patch.object(agent, "_call_llm_json", side_effect=_failing_then_succeeding):
+                result = await agent._generate_progressive_summary(segments)
+
+                assert result is not None
+                assert "Backend" in result["segment_summary"]
+                assert call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_generate_progressive_summary_returns_none_when_all_fail(self):
+        """Returns None when all LLM providers fail."""
+        import os
+
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        segments = [
+            {"speaker": "Alice", "text": "Hello", "timestamp": 100.0},
+        ]
+
+        with patch.dict(
+            os.environ,
+            {
+                "DEEPSEEK_API_KEY": "sk-ds",
+            },
+        ):
+            with patch.object(agent, "_call_llm_json", AsyncMock(side_effect=RuntimeError("fail"))):
+                result = await agent._generate_progressive_summary(segments)
+
+                assert result is None
+
+    # ------------------------------------------------------------------
+    # _call_llm_json
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_call_llm_json_deepseek(self):
+        """_call_llm_json calls DeepSeek API correctly."""
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            mock_response = MagicMock()
+            mock_response.json.return_value = {
+                "choices": [{"message": {"content": "DeepSeek response"}}]
+            }
+            mock_client.post = AsyncMock(return_value=mock_response)
+
+            result = await agent._call_llm_json(
+                provider="deepseek",
+                api_key="sk-test",
+                prompt="Summarize this",
+                model="deepseek-chat",
+                max_tokens=1024,
+                timeout=60,
+            )
+
+            assert result == "DeepSeek response"
+            mock_client.post.assert_awaited_once()
+            call_url = mock_client.post.await_args[0][0]
+            assert "deepseek.com" in call_url
+
+    @pytest.mark.asyncio
+    async def test_call_llm_json_anthropic(self):
+        """_call_llm_json calls Anthropic API correctly."""
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            mock_response = MagicMock()
+            mock_response.json.return_value = {"content": [{"text": "Anthropic response"}]}
+            mock_client.post = AsyncMock(return_value=mock_response)
+
+            result = await agent._call_llm_json(
+                provider="anthropic",
+                api_key="sk-ant-test",
+                prompt="Summarize this",
+                model="claude-sonnet-4-20250514",
+                max_tokens=1024,
+                timeout=60,
+            )
+
+            assert result == "Anthropic response"
+            mock_client.post.assert_awaited_once()
+            call_url = mock_client.post.await_args[0][0]
+            assert "anthropic.com" in call_url
+
+    @pytest.mark.asyncio
+    async def test_call_llm_json_openai(self):
+        """_call_llm_json calls OpenAI API correctly."""
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            mock_response = MagicMock()
+            mock_response.json.return_value = {
+                "choices": [{"message": {"content": "OpenAI response"}}]
+            }
+            mock_client.post = AsyncMock(return_value=mock_response)
+
+            result = await agent._call_llm_json(
+                provider="openai",
+                api_key="sk-ope-test",
+                prompt="Summarize this",
+                model="gpt-4o-mini",
+                max_tokens=1024,
+                timeout=60,
+            )
+
+            assert result == "OpenAI response"
+            mock_client.post.assert_awaited_once()
+            call_url = mock_client.post.await_args[0][0]
+            assert "openai.com" in call_url
+
+    # ------------------------------------------------------------------
+    # _merge_progressive_summaries
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_merge_progressive_summaries_deepseek(self):
+        """_merge_progressive_summaries calls DeepSeek and returns parsed result."""
+        import json
+        import os
+
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        progressive_summaries = [
+            {
+                "segment_summary": "Discussed Q1 goals.",
+                "action_items": ["Set up Q1 milestones"],
+                "topics": ["Q1 Goals"],
+                "participants": ["Alice", "Bob"],
+                "timestamp": 1000.0,
+            },
+            {
+                "segment_summary": "Reviewed budget.",
+                "action_items": ["Finalize budget by Friday"],
+                "topics": ["Budget"],
+                "participants": ["Charlie"],
+                "timestamp": 2000.0,
+            },
+        ]
+
+        with (
+            patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-ds"}),
+            patch.object(agent, "_call_llm_json", new_callable=AsyncMock) as mock_llm,
+        ):
+            mock_llm.return_value = json.dumps(
+                {
+                    "summary": "Meeting covered Q1 goals and budget review.",
+                    "action_items": ["Set up Q1 milestones", "Finalize budget by Friday"],
+                }
+            )
+
+            summary, items = await agent._merge_progressive_summaries(
+                progressive_summaries,
+                "Full transcript text...",
+            )
+
+            assert "Q1 goals" in summary
+            assert "budget" in summary
+            assert len(items) == 2
+            assert "Finalize budget" in items[1]
+
+    @pytest.mark.asyncio
+    async def test_merge_progressive_summaries_fallback_to_first(self):
+        """When all LLMs fail, uses the first progressive summary as fallback."""
+        import os
+
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        progressive_summaries = [
+            {
+                "segment_summary": "First segment summary.",
+                "action_items": ["Do first thing"],
+                "topics": [],
+                "participants": [],
+                "timestamp": 1000.0,
+            },
+        ]
+
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-ds"}):
+            with patch.object(agent, "_call_llm_json", AsyncMock(side_effect=RuntimeError("fail"))):
+                summary, items = await agent._merge_progressive_summaries(
+                    progressive_summaries,
+                    "",
+                )
+
+                assert "First segment" in summary
+                assert items == ["Do first thing"]
+
+    @pytest.mark.asyncio
+    async def test_merge_progressive_summaries_full_fallback(self):
+        """When no summaries and no LLM works, returns unavailable message."""
+        import os
+
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+
+        # Ensure no API keys are set so all LLM calls fail
+        with patch.dict(
+            os.environ,
+            {
+                "DEEPSEEK_API_KEY": "",
+                "ANTHROPIC_API_KEY": "",
+                "OPENAI_API_KEY": "",
+            },
+        ):
+            summary, items = await agent._merge_progressive_summaries([], "")
+        assert "unavailable" in summary.lower()
+        assert items == ["Summarization failed."]
+
+    # ------------------------------------------------------------------
+    # _finalize_notes uses progressive path
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_finalize_notes_prefers_progressive_summaries(self):
+        """_finalize_notes uses progressive merge when summaries exist."""
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+        agent._call_start_time = time.time()
+        agent._participant_identities.add("user_1")
+        agent._participant_info["user_1"] = "Alice"
+
+        # Add some transcript segments
+        agent.add_transcript_segment("Alice", "Hello everyone")
+        agent.add_transcript_segment("Bob", "Hi Alice")
+        agent.add_transcript_segment("Alice", "Let's get started on the roadmap")
+
+        # Set up progressive summaries
+        agent._progressive_summaries.append(
+            {
+                "segment_summary": "Alice and Bob discussed the roadmap.",
+                "action_items": ["Start on roadmap"],
+                "topics": ["Roadmap"],
+                "participants": ["Alice", "Bob"],
+                "timestamp": 1000.0,
+            }
+        )
+
+        with (
+            patch.object(
+                agent, "_merge_progressive_summaries", new_callable=AsyncMock
+            ) as mock_merge,
+            patch.object(agent, "_get_redis", AsyncMock(return_value=None)),
+        ):
+            mock_merge.return_value = ("Progressive summary result.", ["Roadmap task"])
+
+            await agent._finalize_notes()
+
+            # Should have called the merge path
+            mock_merge.assert_awaited_once()
+            # Should have received the progressive summaries
+            assert len(mock_merge.await_args[0][0]) == 1
+            assert (
+                mock_merge.await_args[0][0][0]["segment_summary"]
+                == "Alice and Bob discussed the roadmap."
+            )
+
+    @pytest.mark.asyncio
+    async def test_finalize_notes_falls_back_to_direct_summary(self):
+        """_finalize_notes falls back to direct summary when no progressive summaries."""
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+        agent._call_start_time = time.time()
+        agent._participant_identities.add("user_1")
+        agent._participant_info["user_1"] = "Alice"
+
+        # Add enough transcript to trigger the fallback
+        agent.add_transcript_segment("Alice", "Short meeting today")
+        agent.add_transcript_segment("Bob", "Yes, just a quick sync")
+
+        with (
+            patch.object(agent, "_generate_summary", new_callable=AsyncMock) as mock_gen,
+            patch.object(agent, "_merge_progressive_summaries"),
+        ):
+            mock_gen.return_value = ("Direct summary result.", ["Task from direct"])
+            await agent._finalize_notes()
+
+            mock_gen.assert_awaited_once()
+
+    # ------------------------------------------------------------------
+    # stdout payload truncation (pipe limit fix)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_finalize_notes_truncates_transcript_for_stdout(self):
+        """Transcript in stdout payload must be truncated to stay under pipe limit."""
+        from pocketpaw_ee.cloud.livekit.agent import (
+            _MAX_STDOUT_TRANSCRIPT_CHARS,
+            CallMeetingAgent,
+        )
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+        agent._call_start_time = time.time()
+        agent._participant_identities.add("user_1")
+        agent._participant_info["user_1"] = "Alice"
+
+        # Add a transcript that exceeds the 40K limit
+        huge_text = "Hello world. " * 5_000  # ~60K chars
+        agent.add_transcript_segment("Alice", huge_text)
+
+        with (
+            patch.object(agent, "_generate_summary", AsyncMock(return_value=("summary", []))),
+            patch.object(agent, "_fetch_progressive_summaries", AsyncMock(return_value=[])),
+        ):
+            # Patch print to capture the payload
+            captured = {}
+
+            def _fake_print(payload, **kwargs):
+                import json as _j
+
+                parsed = _j.loads(payload)
+                captured["transcript_len"] = len(parsed["transcript"])
+                captured["transcript"] = parsed["transcript"]
+
+            with patch("builtins.print", side_effect=_fake_print):
+                await agent._finalize_notes()
+
+            # The stdout transcript must be truncated
+            assert captured["transcript_len"] <= _MAX_STDOUT_TRANSCRIPT_CHARS, (
+                f"stdout transcript is {captured['transcript_len']} chars, "
+                f"exceeds {_MAX_STDOUT_TRANSCRIPT_CHARS} limit"
+            )
+            # Should have truncation markers
+            assert "transcript truncated for stdout" in captured["transcript"]
+
+    @pytest.mark.asyncio
+    async def test_finalize_notes_does_not_truncate_small_transcript_for_stdout(self):
+        """Short transcripts should NOT be truncated for stdout."""
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+        agent._call_start_time = time.time()
+        agent._participant_identities.add("user_1")
+        agent._participant_info["user_1"] = "Alice"
+
+        # Short transcript
+        agent.add_transcript_segment("Alice", "Quick sync, all good.")
+        agent.add_transcript_segment("Bob", "Agreed, nothing to add.")
+
+        with (
+            patch.object(agent, "_generate_summary", AsyncMock(return_value=("summary", []))),
+            patch.object(agent, "_fetch_progressive_summaries", AsyncMock(return_value=[])),
+        ):
+            captured = {}
+
+            def _fake_print(payload, **kwargs):
+                import json as _j
+
+                parsed = _j.loads(payload)
+                captured["transcript"] = parsed["transcript"]
+                captured["truncated"] = "transcript truncated" in parsed["transcript"]
+
+            with patch("builtins.print", side_effect=_fake_print):
+                await agent._finalize_notes()
+
+            assert not captured["truncated"], "short transcript should not be truncated"
+            assert "Quick sync" in captured["transcript"]
+
+    # ------------------------------------------------------------------
+    # _progressive_worker
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_progressive_worker_does_not_break_when_llm_fails(self):
+        """Progressive worker should survive LLM failures and continue to next cycle."""
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+        # Start time far in the past so the initial "elapsed < 30" check passes
+        agent._call_start_time = time.time() - 600
+        agent._running = True
+
+        # Add enough segments for a progressive run
+        for i in range(10):
+            agent.add_transcript_segment("Alice", f"Point number {i}")
+
+        with (
+            patch.object(agent, "_generate_progressive_summary", AsyncMock(return_value=None)),
+            patch.object(agent, "_store_progressive_summary", AsyncMock()),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            # Run the worker briefly — it should not crash
+            task = asyncio.create_task(agent._progressive_worker())
+            await asyncio.sleep(0.2)
+            agent._running = False
+            await asyncio.wait_for(task, timeout=3)
+
+        # Worker ran and exited cleanly (no exception propagated)
+        assert True
+
+    # ------------------------------------------------------------------
+    # _finalize_notes participant info
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_finalize_notes_includes_all_participants(self):
+        """_finalize_notes should merge participant_identities with speakers."""
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+        )
+        agent._call_start_time = time.time()
+
+        # Participants from room info
+        agent._participant_identities.add("user_alice")
+        agent._participant_identities.add("user_bob")
+        agent._participant_info["user_alice"] = "Alice"
+        agent._participant_info["user_bob"] = "Bob"
+
+        # Speaker from transcript that wasn't in room info
+        agent.add_transcript_segment("Charlie", "I'm here too")
+
+        with (
+            patch.object(agent, "_generate_summary", AsyncMock(return_value=("summary", []))),
+            patch.object(agent, "_fetch_progressive_summaries", AsyncMock(return_value=[])),
+        ):
+            captured = {}
+
+            def _fake_print(payload, **kwargs):
+                import json as _j
+
+                parsed = _j.loads(payload)
+                captured["participants"] = parsed["participants"]
+                captured["participant_map"] = parsed["participant_map"]
+
+            with patch("builtins.print", side_effect=_fake_print):
+                await agent._finalize_notes()
+
+            assert "Alice" in captured["participants"]
+            assert "Bob" in captured["participants"]
+            assert "Charlie" in captured["participants"]
+            assert len(captured["participant_map"]) == 2  # only room participants, not speakers

@@ -24,6 +24,9 @@
 
 from __future__ import annotations
 
+import asyncio
+
+from pocketpaw.agents.backend import LeasedClient
 from pocketpaw.agents.session_supervisor import (
     Acquisition,
     SessionSupervisor,
@@ -53,6 +56,41 @@ class Teardown:
 
     def __call__(self) -> None:
         self.calls += 1
+
+
+class LeaseSpy:
+    """WH-2 — a fake live ``ClaudeSDKClient`` plus the ASYNC teardown the Claude
+    SDK backend hands the supervisor (mirrors ``claude_sdk._teardown``, which
+    ``await client.disconnect()``s).
+
+    ``disconnect_count`` increments only AFTER the disconnect coroutine runs to
+    completion — so it proves the supervisor actually released the live client on
+    a given path, not merely scheduled something. ``lease()`` wraps the spy in a
+    real WH-1 ``LeasedClient`` so the supervisor holds the exact production type.
+    """
+
+    def __init__(self) -> None:
+        self.disconnect_count = 0
+
+    async def disconnect(self) -> None:
+        # A realistic yield point, like a real subprocess disconnect — exercises
+        # the "awaited to completion" path rather than a no-await fast finish.
+        await asyncio.sleep(0)
+        self.disconnect_count += 1
+
+    async def teardown(self) -> None:
+        """The async callback the supervisor stores as ``runtime.teardown``."""
+        await self.disconnect()
+
+    def lease(self, options_key: str = "opts-key") -> LeasedClient:
+        return LeasedClient(client=self, options_key=options_key)
+
+
+async def _drain() -> None:
+    """Let fire-and-forget async-teardown tasks scheduled by ``_run_teardown``
+    (the sync reap / quota-evict / crash callers) run to completion."""
+    for _ in range(5):
+        await asyncio.sleep(0)
 
 
 # ===========================================================================
@@ -203,6 +241,45 @@ def test_per_tenant_quota_skips_busy_candidate() -> None:
     # just-bound runtime); a1 is busy → nothing evicted this cycle.
     assert td_a1.calls == 0 and a1.runtime.tier is SessionTier.WARM
     assert td_a2.calls == 0 and a2.runtime.tier is SessionTier.WARM
+
+
+def test_quota_cap_soak_no_unbounded_warm_clients() -> None:
+    """Soak (WH-4): binding warm clients across tenants far beyond the caps never
+    lets the held warm count exceed ``max_warm_per_tenant`` (per tenant) or
+    ``max_warm_global`` (overall), and every evicted slot is disconnected. Proves
+    WARM can't grow unbounded — no leaked ``claude`` processes under load."""
+    clock = FakeClock()
+    PER_TENANT, GLOBAL = 2, 4
+    sup = SessionSupervisor(
+        warm_ttl=10_000, max_warm_per_tenant=PER_TENANT, max_warm_global=GLOBAL, now=clock
+    )
+
+    tenants = ["ws-a", "ws-b", "ws-c"]
+    acqs = []
+    teardowns = []
+    for i in range(12):  # 12 binds round-robin across 3 tenants, all idle
+        clock.advance(1)
+        acq = sup.acquire(tenants[i % 3], f"sess-{i}", "agent", cli_session_id=f"cli-{i}")
+        td = Teardown()
+        sup.bind_warm_slot(acq.runtime, slot=f"slot-{i}", teardown=td)
+        acqs.append(acq)
+        teardowns.append(td)
+
+    warm = [
+        a.runtime
+        for a in acqs
+        if a.runtime.tier is SessionTier.WARM and a.runtime.warm_slot is not None
+    ]
+    # Global cap holds — never more live warm clients than the global ceiling.
+    assert len(warm) <= GLOBAL
+    # Per-tenant cap holds for every tenant.
+    for ws in tenants:
+        assert len([r for r in warm if r.workspace_id == ws]) <= PER_TENANT
+    # Every evicted slot's teardown (the ``disconnect``) fired exactly once — the
+    # released clients can't pile up. evicted == binds - held.
+    evicted = sum(td.calls for td in teardowns)
+    assert evicted == 12 - len(warm)
+    assert evicted > 0  # the soak actually exercised eviction
 
 
 # ===========================================================================
@@ -423,3 +500,154 @@ async def test_start_stop_tears_down_all_slots() -> None:
     assert td_a.calls == 1 and td_b.calls == 1
     assert a.runtime.tier is SessionTier.COLD
     assert b.runtime.tier is SessionTier.COLD
+
+
+# ===========================================================================
+# WH-2 — the WARM tier holds a real LeasedClient and DISCONNECTS the live
+# claude client on every release path (idle reap, quota evict, crash, stop).
+# Fakes only: a LeaseSpy whose async ``teardown`` mirrors claude_sdk._teardown.
+# ===========================================================================
+
+
+def test_warm_reuse_returns_leased_client_within_ttl() -> None:
+    """A bound ``LeasedClient`` slot is returned via ``Acquisition.slot`` on a
+    warm-reuse turn within TTL — and the live client is NOT disconnected."""
+    clock = FakeClock()
+    sup = SessionSupervisor(warm_ttl=120, now=clock)
+
+    acq1 = sup.acquire("ws-a", "sess-1", "agent-x", cli_session_id=None)
+    sup.record_cli_session_id(acq1.runtime, "cli-1")
+
+    spy = LeaseSpy()
+    lease = spy.lease()
+    sup.bind_warm_slot(acq1.runtime, slot=lease, teardown=spy.teardown)
+    assert isinstance(acq1.runtime.warm_slot, LeasedClient)
+
+    clock.advance(30)
+    acq2 = sup.acquire("ws-a", "sess-1", "agent-x", cli_session_id="cli-1")
+    assert acq2.warm_reuse is True
+    assert acq2.slot is lease  # the exact LeasedClient is handed back for reuse
+    assert acq2.slot.client is spy
+    assert spy.disconnect_count == 0  # warm reuse never disconnects
+
+
+async def test_idle_reap_disconnects_leased_client() -> None:
+    """Past ``warm_ttl``, one reaper pass disconnects the live client (releases it)."""
+    clock = FakeClock()
+    sup = SessionSupervisor(warm_ttl=120, now=clock)
+
+    acq = sup.acquire("ws-a", "sess-1", "agent-x", cli_session_id="cli-1")
+    spy = LeaseSpy()
+    sup.bind_warm_slot(acq.runtime, slot=spy.lease(), teardown=spy.teardown)
+
+    clock.advance(150)  # 150 > 120
+    assert sup.reap_once() == 1
+    await _drain()  # let the scheduled async disconnect complete
+    assert spy.disconnect_count == 1
+    assert acq.runtime.tier is SessionTier.COLD
+    assert acq.runtime.warm_slot is None
+
+
+async def test_quota_evict_disconnects_evicted_client_and_spares_busy() -> None:
+    """A per-tenant over-cap bind disconnects the evicted (oldest idle) client; a
+    BUSY warm runtime is never disconnected."""
+    clock = FakeClock()
+    sup = SessionSupervisor(warm_ttl=10_000, max_warm_per_tenant=2, now=clock)
+
+    # a1: oldest, idle. a2: busy (must be spared). Both warm for tenant A.
+    a1 = sup.acquire("ws-a", "sess-a1", "agent", cli_session_id="cli-a1")
+    spy1 = LeaseSpy()
+    sup.bind_warm_slot(a1.runtime, slot=spy1.lease(), teardown=spy1.teardown)
+
+    clock.advance(1)
+    a2 = sup.acquire("ws-a", "sess-a2", "agent", cli_session_id="cli-a2")
+    spy2 = LeaseSpy()
+    sup.bind_warm_slot(a2.runtime, slot=spy2.lease(), teardown=spy2.teardown)
+    sup.mark_run_start(a2.runtime)  # busy — cannot be evicted
+
+    # a3 → over the cap of 2. Only idle candidate is a1 (a2 busy, a3 protected).
+    clock.advance(1)
+    a3 = sup.acquire("ws-a", "sess-a3", "agent", cli_session_id="cli-a3")
+    spy3 = LeaseSpy()
+    sup.bind_warm_slot(a3.runtime, slot=spy3.lease(), teardown=spy3.teardown)
+    await _drain()
+
+    assert spy1.disconnect_count == 1  # oldest idle evicted → live client released
+    assert a1.runtime.tier is SessionTier.COLD
+    assert spy2.disconnect_count == 0  # busy runtime never torn down
+    assert a2.runtime.tier is SessionTier.WARM
+    assert spy3.disconnect_count == 0  # the just-bound runtime is protected
+    assert a3.runtime.tier is SessionTier.WARM
+
+
+async def test_crash_disconnects_leased_client_and_demotes_cold() -> None:
+    """mark_crashed disconnects the live client and demotes the runtime to COLD,
+    keeping ``cli_session_id`` for the resume-from-store path."""
+    clock = FakeClock()
+    sup = SessionSupervisor(warm_ttl=120, now=clock)
+
+    acq = sup.acquire("ws-a", "sess-1", "agent-x", cli_session_id=None)
+    sup.record_cli_session_id(acq.runtime, "cli-survives")
+    spy = LeaseSpy()
+    sup.bind_warm_slot(acq.runtime, slot=spy.lease(), teardown=spy.teardown)
+
+    sup.mark_crashed(acq.runtime)
+    await _drain()
+    assert spy.disconnect_count == 1
+    assert acq.runtime.tier is SessionTier.COLD
+    assert acq.runtime.warm_slot is None
+    assert acq.runtime.cli_session_id == "cli-survives"
+
+
+async def test_stop_awaits_every_leased_client_disconnect() -> None:
+    """stop() awaits each slot's async disconnect to completion (no _drain needed —
+    _run_teardown_async awaits inline)."""
+    clock = FakeClock()
+    sup = SessionSupervisor(warm_ttl=120, now=clock)
+    await sup.start()
+
+    a = sup.acquire("ws-a", "sess-1", "agent", cli_session_id="cli-a")
+    spy_a = LeaseSpy()
+    sup.bind_warm_slot(a.runtime, slot=spy_a.lease(), teardown=spy_a.teardown)
+
+    b = sup.acquire("ws-b", "sess-2", "agent", cli_session_id="cli-b")
+    spy_b = LeaseSpy()
+    sup.bind_warm_slot(b.runtime, slot=spy_b.lease(), teardown=spy_b.teardown)
+
+    await sup.stop()
+    assert spy_a.disconnect_count == 1
+    assert spy_b.disconnect_count == 1
+    assert a.runtime.tier is SessionTier.COLD
+    assert b.runtime.tier is SessionTier.COLD
+
+
+async def test_reaped_lease_then_cold_pruned_without_second_disconnect() -> None:
+    """SS-4 COLD-prune still holds with a real lease: a warm-reaped runtime (now
+    COLD, no slot) is pruned past ``cold_ttl`` with NO second disconnect; a busy
+    runtime is never pruned."""
+    clock = FakeClock()
+    sup = SessionSupervisor(warm_ttl=120, cold_ttl=3600, now=clock)
+
+    acq = sup.acquire("ws-a", "sess-1", "agent-x", cli_session_id="cli-1")
+    spy = LeaseSpy()
+    sup.bind_warm_slot(acq.runtime, slot=spy.lease(), teardown=spy.teardown)
+
+    # Warm reap disconnects once and demotes to COLD (slot dropped).
+    clock.advance(200)  # > warm_ttl, < cold_ttl
+    assert sup.reap_once() == 1
+    await _drain()
+    assert spy.disconnect_count == 1
+    assert acq.runtime.tier is SessionTier.COLD
+    assert ("ws-a", "sess-1") in sup._runtimes  # resident as COLD, not yet pruned
+
+    # A busy COLD runtime past cold_ttl is never pruned (busy-guard).
+    busy = sup.acquire("ws-a", "sess-busy", "agent-x", cli_session_id=None)
+    sup.mark_run_start(busy.runtime)
+
+    # Past cold_ttl → the slotless COLD runtime is pruned; no extra disconnect.
+    clock.advance(3601)
+    assert sup.reap_once() == 1  # only sess-1 pruned; busy spared
+    await _drain()
+    assert spy.disconnect_count == 1  # NOT torn down a second time
+    assert ("ws-a", "sess-1") not in sup._runtimes
+    assert ("ws-a", "sess-busy") in sup._runtimes  # busy survives

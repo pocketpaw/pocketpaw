@@ -1,5 +1,17 @@
 <!--
   Connectors documentation.
+  Updated: 2026-07-02 (AW-3 egress default-close) — clarified the "Development
+  against localhost" section: the egress guard rejects internal/metadata IPs BY
+  DEFAULT; POCKETPAW_ALLOW_INTERNAL_URLS opens the escape ONLY when set to an
+  explicit truthy value; unset ⇒ reject (safe production posture).
+  Updated: 2026-06-28 (AW-1/AW-2 connector egress guard) — added the "Egress
+  allow-list (SSRF protection)" section: the POCKETPAW_CONNECTOR_EGRESS_GUARD
+  flag (default-deny posture, off by default for safe rollout), the optional
+  top-level `allowed_hosts:` YAML key + the per-workspace WorkspaceConnector
+  `allowed_hosts` field, how the effective allow-list is auto-seeded (declared
+  base-URL host + auth-endpoint host, templated hosts resolved at call time)
+  and how to add hosts, the dev escape POCKETPAW_ALLOW_INTERNAL_URLS, and the
+  fail-closed-on-config-error / cookie-jar-preserving guarantees.
   Updated: 2026-06-12 (connector-store-unification CS-6) — added the
   "Lifecycle: definitions, state, cache" section: the three layers a connector
   lives in (YAML definitions with two scan dirs + CWD precedence, the durable
@@ -155,6 +167,9 @@ sync:
     price: price
     created: created_at
 
+allowed_hosts:                    # OPTIONAL — extra egress allow-list hosts
+  - cdn.myservice.com             # added ON TOP of the auto-seeded hosts
+
 surface_profile:                  # OPTIONAL — connector→skill/tool auto-authoring
   skill: my_service               # a skill to load in rooms with this connector
   allow_tools: []                 # tool-id patterns to add to the SDK allowlist
@@ -163,6 +178,9 @@ surface_profile:                  # OPTIONAL — connector→skill/tool auto-aut
 
 The `surface_profile` block is optional. Connectors without it parse and behave
 exactly as before. See [Connector → Skill / Tool auto-authoring](#connector--skill--tool-auto-authoring) below.
+
+The `allowed_hosts` block is optional and only matters when the egress guard is
+on — see [Egress allow-list (SSRF protection)](#egress-allow-list-ssrf-protection) below.
 
 ## Auth Methods
 
@@ -227,6 +245,95 @@ Each action has a trust level that controls how much human oversight the agent n
 | `auto` | Agent executes without asking | Read-only operations (list, search) |
 | `confirm` | Agent asks user before executing | Write operations (create, update, delete) |
 | `restricted` | Requires admin approval | Destructive or financial operations |
+
+## Egress allow-list (SSRF protection)
+
+A connector executes HTTP with stored credentials attached. Without a guard,
+a connector whose URL is influenced by a template, a credential, or a call-time
+param could be steered at an internal address (cloud metadata endpoint, an
+internal service) — a classic SSRF. The egress guard closes that.
+
+### Turning it on
+
+The guard is a per-deployment switch, **off by default** for a safe rollout:
+
+```bash
+POCKETPAW_CONNECTOR_EGRESS_GUARD=true
+```
+
+When on, every connector request is checked before it leaves: the URL must be
+`https://`, carry no userinfo (`user:pass@host`) and no fragment, its host must
+be on the connector's **allow-list**, and the host is DNS-resolved and rejected
+if it lands on an internal/loopback/private/metadata IP. The vetted IP is then
+*pinned* for the connection, so the name can't be re-resolved to an internal
+address between the check and the connect (DNS-rebinding).
+
+### Default-deny — the allow-list is the gate
+
+With the guard on, a request to any host **not** on the allow-list is blocked
+with a clean error (`Blocked by egress guard: host '…' is not in the egress
+allow-list`). The allow-list is auto-seeded from the connector's own declared
+topology, so the common case needs **no configuration**:
+
+1. **Every action's base-URL host** — taken from each action's `url:`. A
+   templated host (`https://{REGION}.freshdesk.com/...`, `{CONFLUENCE_BASE_URL}`)
+   is resolved with the connector's credentials at call time, so the *real*
+   runtime host is allow-listed, never the template string. The `BASE_URL`
+   credential's host (the build-from-base path) is included too.
+2. **The auth-endpoint host** — `auth.auth_url` / `auth.token_url`. Some
+   connectors authenticate on a different host than the API; both are seeded so
+   the auth call and the API call each pass.
+
+### Adding hosts
+
+When a connector legitimately reaches a host outside its declared topology (a
+CDN, a regional mirror, a webhook host), add it explicitly. Additions are
+layered **on top** of the auto-seeded hosts — they never narrow the list.
+
+* **Per connector (all workspaces)** — the top-level `allowed_hosts:` key in the
+  connector YAML:
+
+  ```yaml
+  allowed_hosts:
+    - cdn.myservice.com
+    - eu.myservice.com
+  ```
+
+* **Per workspace** — the `allowed_hosts` field on the workspace's connector
+  binding (`WorkspaceConnector.allowed_hosts`). Use this to permit one extra
+  host for a single workspace without editing the shared YAML.
+
+Host matching is case-insensitive; IPv6-literal and IP-literal base URLs are
+supported (the resolved-IP internal check still applies to them).
+
+### Development against localhost
+
+The egress guard **rejects internal/loopback/private/metadata IPs by default**.
+When `POCKETPAW_ALLOW_INTERNAL_URLS` is unset (or set to anything other than an
+explicit truthy value), a resolved internal IP is blocked — this is the safe
+production posture and needs no configuration.
+
+For local development against internal hosts (Ollama, a dev API on `127.0.0.1`),
+set the dev escape **explicitly**:
+
+```bash
+POCKETPAW_ALLOW_INTERNAL_URLS=true
+```
+
+Only an explicit `true` / `1` opens the escape. It permits resolved internal
+IPs **while the guard still enforces the allow-list** — so a localhost connector
+keeps working in development without disabling the guard entirely. This is a
+dev-only flag; leave it unset in production so internal IPs stay rejected.
+
+### Guarantees
+
+* **Fail closed on config error.** If `POCKETPAW_CONNECTOR_EGRESS_GUARD` is set
+  but the settings load fails, the guard does **not** silently turn off — it logs
+  the error and fails closed (the request is routed through the guard), so a
+  malformed config can never silently re-open the SSRF bypass.
+* **Session/cookie auth keeps working.** The pinned HTTP client is cached per
+  resolved host, so a `Set-Cookie` from one call is replayed on the next —
+  cookie/session-auth connectors are unaffected by the guard.
 
 ## Connector → Skill / Tool auto-authoring
 

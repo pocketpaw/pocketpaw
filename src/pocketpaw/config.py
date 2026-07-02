@@ -1,6 +1,47 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-07-02 (feat/judge-shadow-1168): Added the LLM-as-judge SHADOW settings
+    (J-1, issue #1168) — ``deep_work_verify_judge_shadow_enabled`` (default
+    False; when True AND deep_work_verify_loop_enabled is on, every completing
+    deep_work task is ALSO scored by the LlmJudgeVerdictProvider and the
+    verdict stamped observe-only on ``metadata["verify_judge_verdict"]`` — it
+    NEVER drives requeue/escalate; the deterministic verdict alone acts),
+    ``deep_work_verify_judge_model`` (default "haiku" — the ``claude`` CLI
+    ``--model`` alias for the cheap judge tier),
+    ``deep_work_verify_judge_timeout_seconds`` (default 60 — the CLI
+    subprocess timeout) and ``deep_work_verify_judge_confidence_floor``
+    (default 0.75 — below it the judge abstains to UNKNOWN). Env:
+    POCKETPAW_DEEP_WORK_VERIFY_JUDGE_* .
+  - 2026-07-02 (feat/svl-5-cloud-verify): Added the CLOUD planner-terminal
+    Self-Verifying Loop flags (SVL-5) — ``cloud_plan_verify_loop_enabled``
+    (default False; kill-switch — when False cloud plan tasks auto-complete
+    exactly as before) and ``cloud_plan_verify_max_requeues`` (default 2; the
+    verify-requeue bound, SEPARATE from any error-retry budget). Mirrors the
+    deep_work_verify_* pair at the ee/cloud planner terminal
+    (``_execute_ready_plan_tasks`` → ``_run_one``). Env:
+    POCKETPAW_CLOUD_PLAN_VERIFY_* .
+  - 2026-06-28 (AW-7 template gate deny-on-no-match): Added
+    ``instinct_template_default_deny`` (default False, env
+    POCKETPAW_INSTINCT_TEMPLATE_DEFAULT_DENY) — the host-wide default for the
+    TEMPLATE-level deny-by-default. When a template is BOUND to a pocket but
+    declares NO rule matching a MUTATING action, the template gate previously
+    returned EXECUTE (proceed). With this flag ON, that no-rule-match case
+    parks the write for human approval (PENDING_APPROVAL) instead; READS
+    (read_only / GET / HEAD actions) still proceed ungated. OFF by default so
+    day-one behavior is unchanged. A per-workspace override field
+    (``instinct_template_default_deny`` on the workspace document; null = use
+    this global default) is resolved exactly like
+    ``instinct_approval_level``.
+  - 2026-06-28 (AW-1 connector egress guard): Added
+    ``connector_egress_guard`` (default False; env
+    POCKETPAW_CONNECTOR_EGRESS_GUARD) — the kill-switch for routing
+    DirectREST connector HTTP through the SSRF egress guard
+    (``assert_egress_allowed`` + the pinned-IP transport). OFF by default so
+    flipping it on per-deployment closes the connector SSRF bypass without
+    risking live connectors in the same change. The existing
+    ``POCKETPAW_ALLOW_INTERNAL_URLS`` flag stays the dev escape that permits
+    internal/loopback hosts when the guard is on.
   - 2026-06-28 (fix/billing-checkout-sessions): Added ``dodo_checkout_return_base``
     (default "", env POCKETPAW_DODO_CHECKOUT_RETURN_BASE) — the fallback base URL a
     Dodo subscription checkout session returns the buyer to after pay / cancel when
@@ -547,6 +588,80 @@ class Settings(BaseSettings):
             "and ignores this bound."
         ),
     )
+    deep_work_verify_judge_shadow_enabled: bool = Field(
+        default=False,
+        description=(
+            "SHADOW switch for the LLM-as-judge verdict tier (J-1, #1168). "
+            "When True AND deep_work_verify_loop_enabled is on, every "
+            "completing deep_work task is ALSO scored by the "
+            "LlmJudgeVerdictProvider on the same (output, success_criteria) "
+            "and the judge's OutcomeVerdict is stamped observe-only on "
+            "``metadata['verify_judge_verdict']`` plus one structured "
+            "deterministic-vs-judge agreement log line. The judge verdict "
+            "NEVER feeds the requeue/escalate decision — the deterministic "
+            "verdict alone drives behaviour, exactly as with this flag off. "
+            "Requires the loop flag: judge-on + loop-off runs nothing."
+        ),
+    )
+    deep_work_verify_judge_model: str = Field(
+        default="haiku",
+        description=(
+            "Model passed to the ``claude`` CLI via ``--model`` for the "
+            "LLM-as-judge verdict call. A plain string so ops can point the "
+            "judge at any alias/id the installed CLI accepts (e.g. 'haiku', "
+            "'sonnet', or a full model id). Cheap tier by default — the "
+            "judge is one extra model call per completed task."
+        ),
+    )
+    deep_work_verify_judge_timeout_seconds: int = Field(
+        default=60,
+        description=(
+            "Timeout (seconds) for the LLM-as-judge ``claude`` CLI "
+            "subprocess. A hung CLI must never wedge task completion — on "
+            "timeout the judge abstains with an UNKNOWN verdict (fail-safe)."
+        ),
+    )
+    deep_work_verify_judge_confidence_floor: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Confidence floor for an LLM-as-judge verdict. A judge decision "
+            "whose self-reported confidence falls below this floor is "
+            "discarded and the judge abstains with an UNKNOWN verdict — an "
+            "uncertain judgment must never be recorded as a real "
+            "pass/fail signal (mirrors the auto-triage _MIN_CONFIDENCE "
+            "pattern)."
+        ),
+    )
+    cloud_plan_verify_loop_enabled: bool = Field(
+        default=False,
+        description=(
+            "Kill-switch for the Self-Verifying Loop at the CLOUD planner "
+            "terminal (ee/cloud plan-task execution — the paw-enterprise "
+            "product path). When False (default) plan tasks auto-complete "
+            "exactly as before — no outcome verification, byte-for-byte "
+            "today's behaviour. When True, every plan task that finishes its "
+            "agent run has its output checked against the cloud Task's "
+            "success_criteria and the OutcomeVerdict is stamped on the task "
+            "(``verify.verdict``). SOLVED / UNKNOWN complete exactly as "
+            "today; PARTIAL / NOT_SOLVED is requeued with the unmet criteria "
+            "fed back to the next attempt, bounded by "
+            "cloud_plan_verify_max_requeues, then failed with a stamped "
+            "``verify.escalation_reason``."
+        ),
+    )
+    cloud_plan_verify_max_requeues: int = Field(
+        default=2,
+        description=(
+            "Max verify-driven requeues a single CLOUD plan task may take "
+            "before the loop stops requeuing and fails the task with "
+            "``verify.escalation_reason='budget_exhausted'``. SEPARATE from "
+            "any error-retry budget — verify requeues and error retries "
+            "never share a counter. Mirrors deep_work_verify_max_requeues "
+            "at the cloud planner terminal (SVL-5)."
+        ),
+    )
     auto_install_bundled_skills: bool = Field(
         default=True,
         description=(
@@ -1039,6 +1154,16 @@ class Settings(BaseSettings):
         default_factory=list,
         description="Explicitly allowed A2A agent base URLs for task delegation (prevents SSRF)",
     )
+    connector_egress_guard: bool = Field(
+        default=False,
+        description=(
+            "Route DirectREST connector HTTP through the SSRF egress guard "
+            "(host allow-list, DNS pre-resolve + internal-range reject, pinned-IP "
+            "transport). OFF by default — a safe-rollout kill-switch; flip on "
+            "per-deployment to close the connector SSRF bypass. "
+            "POCKETPAW_ALLOW_INTERNAL_URLS permits internal hosts when set."
+        ),
+    )
     api_rate_limit_per_key: int = Field(
         default=60,
         gt=0,
@@ -1524,6 +1649,30 @@ class Settings(BaseSettings):
             "hard expiry. On expiry the registry fires an ALERT audit event and "
             "persists the expired handle (no heartbeat extension). Set via "
             "POCKETPAW_INSTINCT_OPTIMISTIC_TTL_SECONDS."
+        ),
+    )
+    # AW-7 — TEMPLATE-level deny-by-default. Binding-level deny-by-default
+    # (``ActionBinding.requires_instinct`` defaults True) is already live; this
+    # closes the remaining hole: a template BOUND to a pocket that declares NO
+    # rule matching a MUTATING action used to fall through to the template
+    # gate's EXECUTE default and fire. When this flag is ON the no-rule-match
+    # case parks the write for a human (PENDING_APPROVAL) instead. READS
+    # (read_only / GET / HEAD actions) still proceed ungated — a read has
+    # nothing to govern. DORMANT by default (False): shipping it changes zero
+    # behavior. A per-workspace override field of the same name on the
+    # workspace document (null = use this global default) is resolved exactly
+    # like ``instinct_approval_level`` via
+    # ``resolve_workspace_template_default_deny``.
+    instinct_template_default_deny: bool = Field(
+        default=False,
+        description=(
+            "When true, a template BOUND to a pocket that declares no rule "
+            "matching a MUTATING action (POST/PUT/PATCH/DELETE and not "
+            "read_only) parks the write for human approval instead of firing "
+            "(template-level deny-by-default). Reads (read_only / GET / HEAD) "
+            "still proceed ungated. Off by default (zero behavior change). "
+            "Per-workspace overrides live on the workspace document. Set via "
+            "POCKETPAW_INSTINCT_TEMPLATE_DEFAULT_DENY."
         ),
     )
     # Sovereign Zero-Setup Discovery — F6 live enforcement (2026-06-21).

@@ -146,10 +146,13 @@ def test_get_decisions_forwards_with_bearer_and_query_params():
     body = res.json()
     assert body["available"] is True
     assert body["decisions"] == [{"id": "d1"}]
-    # Forwarded to shield's /decisions with the query params + Bearer token.
+    # Forwarded to shield's /v1/decisions with the query params + Bearer token.
+    # shield versions its control API under /v1 (paw-shield internal/api); a
+    # live-smoke found the proxy was forwarding to the bare paths, which 404'd
+    # against a real shield — so these assert the /v1-prefixed contract.
     req = shield.last
     assert req.method == "GET"
-    assert req.url.path == "/decisions"
+    assert req.url.path == "/v1/decisions"
     assert dict(req.url.params) == {"status": "pending", "limit": "25"}
     assert req.headers["authorization"] == "Bearer sekret-token"
 
@@ -162,7 +165,7 @@ def test_get_stats_forwards_and_wraps_available_true():
     body = res.json()
     assert body["available"] is True
     assert body["egress_blocked"] == 3
-    assert shield.last.url.path == "/stats"
+    assert shield.last.url.path == "/v1/stats"
     assert shield.last.method == "GET"
 
 
@@ -174,7 +177,7 @@ def test_get_config_forwards():
     body = res.json()
     assert body["available"] is True
     assert body["mode"] == "deny"
-    assert shield.last.url.path == "/config"
+    assert shield.last.url.path == "/v1/config"
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +194,7 @@ def test_patch_config_forwards_json_body():
     assert res.json() == {"mode": "allow"}
     req = shield.last
     assert req.method == "PATCH"
-    assert req.url.path == "/config"
+    assert req.url.path == "/v1/config"
     import json as _json
 
     assert _json.loads(req.content) == {"mode": "allow"}
@@ -218,7 +221,7 @@ def test_resolve_forwards_and_injects_owner_as_actor():
     assert res.json() == {"id": "d9", "status": "resolved"}
     req = shield.last
     assert req.method == "POST"
-    assert req.url.path == "/decisions/d9/resolve"
+    assert req.url.path == "/v1/decisions/d9/resolve"
     import json as _json
 
     sent = _json.loads(req.content)

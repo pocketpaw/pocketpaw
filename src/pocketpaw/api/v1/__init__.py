@@ -73,6 +73,7 @@ _V1_ROUTERS: list[tuple[str, str, str]] = [
     ("pocketpaw.api.v1.tools", "router", "Tools"),
     ("pocketpaw.api.v1.oauth_integrations", "router", "OAuth Integrations"),
     ("pocketpaw.api.v1.uploads", "router", "Uploads"),
+    # Media serving moved to EE: pocketpaw_ee.cloud.media.router
     ("pocketpaw.api.v1.terminal", "router", "Terminal"),
     ("pocketpaw.api.v1.cloud_projects", "router", "Cloud Projects"),
     ("pocketpaw.audit.router", "router", "Audit"),

@@ -203,6 +203,17 @@ async def _spawn_agent_process(
     # subprocess never blocks on a full buffer.
     asyncio.create_task(_forward_agent_stderr(proc, room_name))
 
+    # Bump the stdout StreamReader limit from the default 64 KiB to 256 KiB.
+    # The agent writes a JSON payload to stdout at call end which can exceed
+    # 64 KiB for long meetings (the transcript alone can be ~50 KiB after
+    # truncation). Without this, readline() raises LimitOverrunError
+    # ("Separator is found, but chunk is longer than limit") and the meeting
+    # notes payload is silently dropped.
+    try:
+        proc.stdout._limit = 256 * 1024  # 256 KiB
+    except AttributeError:
+        pass  # graceful if internal API changes
+
     # Collect meeting notes from stdout.
     # The agent writes a JSON payload to stdout when the call ends.
     # We read it here in the parent process so we can post it to the
@@ -268,6 +279,16 @@ async def _collect_agent_notes(
                     )
             except json.JSONDecodeError:
                 pass  # ignore non-JSON output (shouldn't happen)
+    except asyncio.exceptions.LimitOverrunError as exc:
+        # Should not happen since both the bump to 256 KiB and the agent-side
+        # truncation (40 KiB transcript cap) keep the line under the limit.
+        logger.error(
+            "LimitOverrunError reading agent stdout for room %s — line exceeds "
+            "%d-byte limit. Meeting notes payload lost: %s",
+            room_name,
+            getattr(proc.stdout, "_limit", 65536),
+            exc,
+        )
     except Exception as exc:
         logger.warning("Error reading agent stdout for %s: %s", room_name, exc)
 

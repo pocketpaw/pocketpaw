@@ -29,6 +29,30 @@
 #   ``preconditions`` from each OSS TaskSpec onto the cloud Task it
 #   creates, so completion-time verification (pocketpaw#1162) can read
 #   machine-checkable criteria off the materialized Task.
+# Updated: 2026-07-02 (feat/svl-5-cloud-verify) — Self-Verifying Loop at
+#   the CLOUD planner terminal (SVL-5), behind
+#   ``cloud_plan_verify_loop_enabled`` (default False ⇒ byte-for-byte
+#   today's behaviour). ``_run_one`` now judges each finished run's
+#   output against the Task's ``success_criteria`` via the OSS
+#   ``DeterministicVerdictProvider`` BEFORE any DONE side-effect fires
+#   (``_verify_plan_task_outcome``): SOLVED / UNKNOWN stamp the verdict
+#   on ``Task.verify`` and complete exactly as today; PARTIAL /
+#   NOT_SOLVED is REQUEUED — unmet criteria appended to the cumulative
+#   ``verify.feedback`` record, a verify counter (SEPARATE from error
+#   retries) bumped, status back to ``proposed`` so the EXISTING
+#   dispatch path re-runs it (``_execute_ready_plan_tasks`` tail-calls
+#   itself when a batch requeued anything; no new dispatch machinery).
+#   The re-run's instructions carry a "Why the last attempt was
+#   rejected" section mirroring the OSS executor's prompt block. A
+#   no-progress guard (unmet-criteria frozenset repeats or count
+#   non-decreasing across two consecutive attempts) escalates EARLY;
+#   exhausting ``cloud_plan_verify_max_requeues`` escalates too — both
+#   terminate as ``failed`` (the existing terminal that already
+#   unblocks dependents here) with ``verify.escalation_reason`` stamped
+#   (``no_progress`` | ``budget_exhausted``) and emit TaskResolved so
+#   the dependent-dispatch cascade still fires. A requeued or escalated
+#   attempt never saves its output file, uploads artifacts, or
+#   auto-completes.
 """Planner entity — business logic service.
 
 Public API (all module-level ``async def``):
@@ -1223,6 +1247,7 @@ async def _execute_ready_plan_tasks(
     from types import SimpleNamespace
 
     from pocketpaw.agents.pool import get_agent_pool
+    from pocketpaw.config import get_settings
     from pocketpaw_ee.cloud.tasks.dto import ClaimTaskRequest
     from pocketpaw_ee.cloud.tasks.service import agent_claim_task as cloud_claim_task
 
@@ -1263,6 +1288,33 @@ async def _execute_ready_plan_tasks(
             instr += "## Success Criteria\\n"
             for i, sc in enumerate(d.success_criteria, 1):
                 instr += str(i) + ". " + sc + "\\n"
+        # SVL-5: if a prior attempt was rejected by the verify loop,
+        # surface the SPECIFIC unmet criteria — cumulative, most recent
+        # first — so the re-dispatched agent sees exactly what to fix
+        # rather than a bare "try again". Mirrors the OSS executor's
+        # ``_build_task_prompt`` "Why the last attempt was rejected"
+        # block. Flag-gated so a disabled loop renders today's
+        # instructions byte-for-byte even if old feedback is on the doc.
+        if get_settings().cloud_plan_verify_loop_enabled:
+            feedback = (getattr(d, "verify", None) or {}).get("feedback") or []
+            if feedback:
+                instr += "\\n## Why the last attempt was rejected\\n"
+                instr += (
+                    "A previous attempt did NOT meet the success criteria below. "
+                    "Address each unmet criterion in your work this time:\\n"
+                )
+                for record in reversed(feedback):
+                    attempt = record.get("attempt")
+                    summary = record.get("summary", "")
+                    if attempt:
+                        instr += "Attempt " + str(attempt) + " (" + summary + "):\\n"
+                    else:
+                        instr += summary + ":\\n"
+                    for item in record.get("unmet_criteria", []):
+                        line = "- " + item.get("criterion", "")
+                        if item.get("detail"):
+                            line += " — " + item.get("detail", "")
+                        instr += line + "\\n"
         instr += "\\n## Workflow\\n"
         instr += "1. Review the task and create the required output.\\n"
         instr += "2. When done, call the MCP tool complete_task\\n"
@@ -1284,6 +1336,27 @@ async def _execute_ready_plan_tasks(
                     pass
             full_output = "".join(output_chunks)[:50000] if output_chunks else ""
             logger.info("agent done task=%s output_len=%d", tid, len(full_output))
+
+            # SVL-5 (Self-Verifying Loop, cloud planner terminal): judge
+            # the run's output against the Task's success_criteria BEFORE
+            # any DONE side-effect fires. "done" = SOLVED / UNKNOWN (or
+            # flag off) — fall through to today's completion path
+            # untouched. "requeued" / "escalated" = the verify helper
+            # already moved the task (back to ``proposed`` / to
+            # ``failed``) and stamped why; a rejected attempt must NOT
+            # save its output file, upload artifacts, or auto-complete —
+            # returning here is what enforces that invariant.
+            resolution = "done"
+            if get_settings().cloud_plan_verify_loop_enabled:
+                resolution = await _verify_plan_task_outcome(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    task_id=tid,
+                    full_output=full_output,
+                )
+            if resolution != "done":
+                return resolution
+
             if full_output:
                 await _save_task_output_file(workspace_id, tid, d.title, full_output, project_id)
                 uf = await _scan_and_upload_agent_files(
@@ -1301,10 +1374,26 @@ async def _execute_ready_plan_tasks(
                 project_id,
                 result_summary=full_output[:2000],
             )
+            return "done"
         except Exception as e:
             logger.exception("agent exec failed for task %s: %s", tid, e)
+            return "error"
 
-    await asyncio.gather(*[_run_one(tid, aid, d) for tid, aid, d in batch])
+    results = await asyncio.gather(*[_run_one(tid, aid, d) for tid, aid, d in batch])
+
+    # SVL-5: a verify-requeued task is back to ``proposed`` with feedback
+    # stamped, but nothing emits TaskResolved for it — so re-enter the
+    # EXISTING dispatch path (this very function, same as the
+    # ``on_plan_task_resolved`` cascade does) to claim and re-run it.
+    # Bounded: each pass either solves, requeues within the budget, or
+    # escalates to ``failed``, so the recursion depth is capped by
+    # ``cloud_plan_verify_max_requeues``. Flag off ⇒ every result is
+    # "done"/"error" and this never fires.
+    if any(r == "requeued" for r in results):
+        await _execute_ready_plan_tasks(
+            workspace_id=workspace_id,
+            project_id=project_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1376,6 +1465,174 @@ async def _reassign_task(workspace_id: str, task_id: str, agent_id: str, agent_n
     except Exception as e:
         logger.warning("_reassign_task: failed for %s: %s", task_id, e)
         return False
+
+
+def _plan_task_event_payload(doc: Any, workspace_id: str, project_id: str) -> dict:
+    """Event payload for a planner-terminal task write (SVL-5).
+
+    Same shape ``_auto_complete_task`` hand-builds for TaskResolved —
+    ``cascade_plan_tasks`` reads ``workspace_id`` + ``task.project_id``
+    off it — with ``status`` taken from the doc's CURRENT state so a
+    requeue ships ``proposed`` and an escalation ships ``failed``.
+    """
+    return {
+        "task_id": str(doc.id),
+        "workspace_id": workspace_id,
+        "project_id": project_id,
+        "task": {
+            "id": str(doc.id),
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "title": doc.title,
+            "summary": doc.summary,
+            "status": doc.status,
+            "assignee": {
+                "kind": doc.assignee.kind,
+                "id": doc.assignee.id,
+                "name": doc.assignee.name,
+            },
+        },
+    }
+
+
+async def _verify_plan_task_outcome(
+    *,
+    workspace_id: str,
+    project_id: str,
+    task_id: str,
+    full_output: str,
+) -> str:
+    """SVL-5 verify hook — judge a finished plan-task run before completion.
+
+    Called from ``_run_one`` only when ``cloud_plan_verify_loop_enabled``
+    is on, after the agent run produced ``full_output`` and BEFORE any
+    DONE side-effect. The verifier is the OSS
+    ``DeterministicVerdictProvider`` — external to the agent that
+    produced the output. Returns the resolution the caller must honour:
+
+      - ``"done"`` — SOLVED / UNKNOWN (or the task doc vanished): a
+        passing or uncheckable result is NEVER requeued or mutated. The
+        verdict is stamped on ``Task.verify['verdict']``; the caller
+        completes exactly as today.
+      - ``"requeued"`` — PARTIAL / NOT_SOLVED, still progressing and
+        within budget: this attempt's unmet criteria (criterion +
+        detail) are APPENDED to the cumulative ``verify['feedback']``
+        record, the verify counter (``verify['requeue_count']``,
+        SEPARATE from any error-retry counter) is bumped, and status
+        goes back to ``proposed`` so the existing claim/dispatch path
+        re-runs it.
+      - ``"escalated"`` — the no-progress guard tripped (this attempt's
+        unmet-criteria frozenset equals the previous attempt's, or its
+        count is non-decreasing) OR the requeue budget is exhausted:
+        status flips to ``failed`` — the existing terminal that already
+        unblocks dependents in ``_execute_ready_plan_tasks`` — with
+        ``verify['escalation_reason']`` stamped (``no_progress`` |
+        ``budget_exhausted``). Emits TaskResolved so the same cascade
+        that dispatches dependents after a completion fires here too.
+
+    Mirrors the OSS executor's SVL-2/SVL-3 semantics at this seam.
+    """
+    from pocketpaw.config import get_settings
+    from pocketpaw.instinct.models import OutcomeStatus
+    from pocketpaw.instinct.verdict_provider import DeterministicVerdictProvider
+    from pocketpaw_ee.cloud._core.realtime.emit import emit
+    from pocketpaw_ee.cloud._core.realtime.events import TaskResolved, TaskUpdated
+    from pocketpaw_ee.cloud.models.task import Task as _TaskDoc
+
+    doc = await _TaskDoc.get(task_id)
+    if not doc or doc.workspace_id != workspace_id:
+        # Tenant guard on the read. A vanished / foreign doc falls
+        # through to the caller's normal completion path, which
+        # re-checks existence itself — same posture as today.
+        return "done"
+
+    verdict = DeterministicVerdictProvider().verify(full_output, list(doc.success_criteria or []))
+    verify_state = dict(doc.verify or {})
+    verify_state["verdict"] = verdict.model_dump()
+    logger.info(
+        "task %s verify verdict: %s (%s)",
+        task_id,
+        verdict.status,
+        verdict.summary,
+    )
+
+    if verdict.status not in (OutcomeStatus.PARTIAL, OutcomeStatus.NOT_SOLVED):
+        # SOLVED / UNKNOWN — stamp the verdict and pass through.
+        doc.verify = verify_state
+        await doc.save()
+        # no-event: the TaskResolved emitted by _auto_complete_task
+        # moments later announces this same completion; a separate
+        # TaskUpdated here would double-fire the feed for one logical
+        # completion write.
+        return "done"
+
+    unmet = [cr for cr in verdict.criteria_results if not cr.met]
+    n = int(verify_state.get("requeue_count", 0))
+    max_requeues = get_settings().cloud_plan_verify_max_requeues
+
+    # No-progress / oscillation guard (mirrors OSS SVL-3), checked
+    # BEFORE the budget: compare THIS attempt's unmet set against the
+    # PREVIOUS attempt's. Exact same criteria still failing, or the
+    # unmet count not shrinking — escalate early instead of burning the
+    # whole requeue budget circling a dead end.
+    prior_feedback = verify_state.get("feedback") or []
+    no_progress = False
+    if prior_feedback:
+        current = frozenset(cr.criterion for cr in unmet)
+        prev = frozenset(item["criterion"] for item in prior_feedback[-1].get("unmet_criteria", []))
+        no_progress = current == prev or len(current) >= len(prev)
+
+    if not no_progress and n < max_requeues:
+        # REQUEUE: append this attempt's rejections to the CUMULATIVE
+        # feedback log (attempt N's instructions carry 1..N-1), bump the
+        # verify counter, and put the task back where the existing
+        # dispatch machinery picks it up.
+        verify_state["feedback"] = [
+            *prior_feedback,
+            {
+                "attempt": n + 1,
+                "status": verdict.status.value,
+                "summary": verdict.summary,
+                "unmet_criteria": [
+                    {"criterion": cr.criterion, "detail": cr.detail} for cr in unmet
+                ],
+            },
+        ]
+        verify_state["requeue_count"] = n + 1
+        doc.verify = verify_state
+        doc.status = "proposed"
+        await doc.save()
+        await emit(TaskUpdated(data=_plan_task_event_payload(doc, workspace_id, project_id)))
+        logger.info(
+            "task %s failed verify (%s); requeue %d/%d with %d unmet criterion(s)",
+            task_id,
+            verdict.status,
+            n + 1,
+            max_requeues,
+            len(unmet),
+        )
+        return "requeued"
+
+    # ESCALATE: ``failed`` is the existing terminal — it already
+    # unblocks dependents in ``_execute_ready_plan_tasks``'s resolved
+    # set, and it surfaces in the operator's Snags. Stamp WHY so the
+    # operator sees the cause, and emit TaskResolved so the
+    # dependent-dispatch cascade fires exactly as it would after a
+    # completion.
+    reason = "no_progress" if no_progress else "budget_exhausted"
+    verify_state["escalation_reason"] = reason
+    doc.verify = verify_state
+    doc.status = "failed"
+    await doc.save()
+    await emit(TaskResolved(data=_plan_task_event_payload(doc, workspace_id, project_id)))
+    logger.info(
+        "task %s failed verify (%s) after %d requeue(s); escalating to failed (%s)",
+        task_id,
+        verdict.status,
+        n,
+        reason,
+    )
+    return "escalated"
 
 
 async def _auto_complete_task(

@@ -8,6 +8,26 @@
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-07-02 (harden apply_leaf_edits temp-file cleanup): ``apply_leaf_edits``
+# now assigns ``input_path = fh.name`` BEFORE ``json.dump`` inside the ``with`` and
+# wraps creation + write + exec in ONE guarded try/finally, so a serialization
+# failure mid-``json.dump`` no longer leaves ``input_path`` unbound (NameError in the
+# cleanup) nor leaks the delete=False tempfile — the finally only unlinks a path that
+# was assigned and still exists.
+#
+# Updated 2026-07-01 (NE-4b — native-editing leaf-edit bridge): added the
+# module-level ``apply_leaf_edits(source, edits, *, _exec=None)`` coroutine — the
+# Python bridge to the paw-sites ``apply-leaf-edit`` CLI (NE-4a). It shells out to
+# the SAME tokenised generator command (``_gen_cmd_argv()``) but with the
+# ``apply-leaf-edit`` subcommand: it writes ``{source, edits}`` to a tempfile
+# ``--input`` and parses the single JSON stdout line
+# ``{source, results:[{uid,applied,reason?}]}``. It reuses the build path's
+# ``_communicate_bounded`` timeout guard (a timed-out splice raises RuntimeError,
+# mirroring ``generate``); a non-zero exit raises RuntimeError with the CLI stderr.
+# Unlike ``build`` it is a PURE transform — no install, no ``bun run build``, no
+# workerd — so it is safe to call inline on the NE-4b persist path. ``_exec`` is an
+# injectable subprocess-exec seam so the bridge is unit-testable without Bun.
+#
 # Updated 2026-06-26 (fix/sites-build-subprocess-timeout — stop-gap: bound the build
 # subprocesses): all THREE _SubprocessRunner subprocesses (the generator, `bun
 # install`, and the `bun run build` static build) ran a bare ``await
@@ -623,6 +643,75 @@ class _SubprocessRunner:
         # The real path now routes through build_static; this delegates to it with
         # the gate ON so any direct/legacy caller keeps the publish-time semantics.
         return await self.build_static(project_dir, gate=True)
+
+
+async def apply_leaf_edits(
+    source: dict[str, str],
+    edits: list[dict[str, Any]],
+    *,
+    _exec: Any = None,
+) -> dict[str, Any]:
+    """Splice native-editor leaf edits into a svelte source map via the paw-sites
+    ``apply-leaf-edit`` CLI (NE-4b) and return its per-uid verdict.
+
+    The Python bridge to NE-4a's ``apply-leaf-edit`` subcommand. It shells out to
+    the SAME tokenised generator command as the build path (``_gen_cmd_argv()``) but
+    with ``apply-leaf-edit --input <tempfile>``, where the tempfile carries
+    ``{"source": {<relpath>: <contents>}, "edits": [{"uid","op"}, ...]}`` (``op`` is
+    ``{"kind":"setText","html":...}`` or ``{"kind":"setProp","name":...,"value":...}``).
+    The CLI applies each edit IN ORDER to the file that carries that leaf and emits
+    exactly ONE JSON line on stdout:
+    ``{"source": {<relpath>: <contents>}, "results": [{"uid","applied","reason"?}]}``.
+    A rejected edit (``applied: false`` + ``reason``) leaves ITS file byte-identical
+    in the returned ``source`` (the caller keeps the whole-file re-author for it).
+
+    Unlike ``build`` this is a PURE transform — no ``bun install``, no
+    ``bun run build``, no workerd — so it is fast and safe to call inline on the
+    NE-4b persist path (the native editor already rendered the edit optimistically;
+    persisting the spliced draft is the whole job).
+
+    Failure surfaces as a ``RuntimeError`` the caller must handle: a non-zero exit
+    (carrying the CLI's stderr) or a timed-out splice — a wedged splice is a failed
+    splice, mirroring how ``_SubprocessRunner.generate`` converts ``_BuildTimeout``.
+
+    ``_exec`` is an injectable subprocess-exec seam (defaults to
+    ``asyncio.create_subprocess_exec``): a test passes a fake returning a stub proc
+    with a canned ``communicate()`` so the bridge is unit-testable without Bun.
+    """
+    # Assign input_path FIRST (before json.dump) so a serialization failure can't
+    # leave the created temp file un-tracked: NamedTemporaryFile(delete=False)
+    # materializes the file immediately, so if json.dump raises mid-write we still
+    # need its path to clean it up. ONE outer try/finally covers creation + write +
+    # exec, and the finally is guarded (only unlink a path that was assigned AND still
+    # exists) so it never NameErrors on an early failure and never leaks the tempfile.
+    input_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            input_path = fh.name
+            json.dump({"source": source, "edits": edits}, fh)
+        timeout_s = _build_timeout_sec()
+        # start_new_session=True: own process group so a wedged splice (and any
+        # children it leaked) can be killed as a group on timeout — same as generate().
+        proc = await (_exec or asyncio.create_subprocess_exec)(
+            *_gen_cmd_argv(),
+            "apply-leaf-edit",
+            "--input",
+            input_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = await _communicate_bounded(proc, timeout_s, "apply-leaf-edit")
+        except _BuildTimeout as exc:
+            # A timed-out splice is a failed splice (mirror generate()'s raise-on-timeout).
+            raise RuntimeError(f"apply-leaf-edit timed out after {exc.timeout_s}s") from exc
+        if proc.returncode != 0:
+            raise RuntimeError(f"apply-leaf-edit failed: {stderr.decode()}")
+        return json.loads(stdout.decode().strip().splitlines()[-1])
+    finally:
+        if input_path and os.path.exists(input_path):
+            os.unlink(input_path)
 
 
 class GeneratorClient:

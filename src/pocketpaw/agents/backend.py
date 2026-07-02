@@ -3,6 +3,17 @@
 Every agent backend (Claude SDK, OpenAI Agents, Gemini CLI, OpenCode CLI)
 must expose a ``info()`` staticmethod and an async ``run()`` generator.
 
+Updated: 2026-06-30 (feat/warm-reuse WH-1) — adds the ``LeasedClient`` dataclass:
+a connected, CALLER-owned warm ``ClaudeSDKClient`` plus the backend cache key it
+was connected under. The ``SessionSupervisor`` (WH-2/WH-3) owns a per-(workspace,
+session) live client and LEASES it into ``ClaudeSDKBackend.run`` so turn 2+ reuses
+the live subprocess instead of resuming COLD. Generic by design (``client: Any``)
+so OSS / the supervisor hold it without importing the concrete SDK type — the same
+opaque pass-through discipline as ``SessionHandle.session_store`` — and it lives
+here (not in ``claude_sdk``) so the supervisor can import it without an import
+cycle. The backend never owns or tears down a leased client; the supervisor keeps
+it warm across turns and disconnects it on its own lifecycle.
+
 Updated: 2026-06-05 (feat/sites-svelte-engine) — the shared ``run`` signature
 grows a ``deny_mcp_tool_ids: frozenset[str] = frozenset()`` keyword: a
 per-surface MCP-tool deny set the chat loop threads through (resolved from the
@@ -117,6 +128,39 @@ class SessionHandle:
 
     cli_session_id: str | None = None
     session_store: Any | None = None
+
+
+@dataclass
+class LeasedClient:
+    """WH-1 — a connected, caller-owned warm SDK client leased into a backend run.
+
+    The ``SessionSupervisor`` (WH-2/WH-3) owns a per-(workspace, session) live
+    ``ClaudeSDKClient`` and LEASES it to ``ClaudeSDKBackend.run`` so turn 2+ reuses
+    the live subprocess instead of resuming COLD (re-materialize + a fresh
+    ``claude`` connect). The backend NEVER owns or tears down a leased client — the
+    supervisor keeps it warm across turns and disconnects it on its own lifecycle.
+
+    * ``client`` — a connected ``ClaudeSDKClient``. Typed ``Any`` so OSS / the
+      supervisor can hold it without importing the concrete SDK type, mirroring
+      ``SessionHandle.session_store``'s opaque pass-through.
+    * ``options_key`` — the backend's ``_client_cache_key`` for the options the
+      client was connected with (session + cwd + model + tools + system-prompt
+      behavioral-prefix digest + plugin-identity digest). The backend recomputes
+      THIS turn's key and reuses the leased client ONLY on an exact match; a
+      mismatch routes to a fresh build (and the supervisor rebinds the new slot).
+    * ``busy`` — set by the backend while it is driving a query on ``client`` so a
+      second concurrent turn never drives two queries on one subprocess. A busy
+      lease makes the second turn fall back to a fresh stateless client for that
+      turn (it does not block, corrupt the shared client, or rebind the slot).
+
+    Rides the same withhold-when-empty contract as ``SessionHandle``: ``AgentPool.run``
+    forwards ``warm_client`` to ``backend.run`` only when non-None, so backends that
+    keep the narrower signature are unaffected. Only the Claude SDK backend acts on it.
+    """
+
+    client: Any
+    options_key: str
+    busy: bool = False
 
 
 @runtime_checkable

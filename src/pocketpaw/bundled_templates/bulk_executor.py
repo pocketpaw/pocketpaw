@@ -1,4 +1,18 @@
 # src/pocketpaw/bundled_templates/bulk_executor.py
+# Updated: 2026-07-02 (AW-7 follow-up — security) — CLOSE THE BULK
+#   DENY-BY-DEFAULT HOLE. AW-7 threaded the per-workspace
+#   ``instinct_template_default_deny`` flag through the router + temporal
+#   dispatcher, but the BULK fan-out still bucketed a no-rule-match EXECUTE
+#   (``reason="auto"``) straight into ``executions`` — and ``_fire_executions``
+#   fires those un-re-gated — so an uncovered MUTATING bulk action EXECUTED
+#   ungated with the flag ON. ``plan_bulk_execution`` now takes
+#   ``template_default_deny`` + ``is_mutating`` (the EE caller resolves the flag
+#   and computes ``is_mutating`` from the parsed binding, since ``method`` /
+#   ``read_only`` live on the rippleSpec binding, not the template ActionDef)
+#   and, when both are True, routes a no-rule-match default EXECUTE into the
+#   BATCH APPROVAL bucket instead — semantics identical to ``gate_action``'s
+#   AW-7 branch. Reads (``is_mutating=False``) still fire; flag OFF (default)
+#   keeps every path byte-identical.
 # Created: 2026-05-28 (feat/rfc-03-v2-bulk) — pure-library
 # implementation of the RFC 03 v2 bulk-action fan-out planner. Given a
 # template, a ``kind: bulk`` action name, and a list of selected rows,
@@ -85,6 +99,13 @@ Reason codes on :class:`BulkApprovalRequest`
   observable; the per-row decisions live on
   :attr:`BulkApprovalRequest.per_row_decisions` for fine-grained
   audit.
+* ``template_default_deny`` (AW-7) — every approval-needing row parked
+  purely because the TEMPLATE-level deny-on-no-match flip caught an
+  uncovered MUTATING action (verdict EXECUTE, reason "auto", no rule
+  matched). Only emitted when ``template_default_deny`` + ``is_mutating``
+  are both passed True by the EE caller; a deny-on-no-match row mixed
+  with a real rule escalation still consolidates to
+  ``mixed_approval_reasons``.
 
 Scope (locked by the PR brief)
 ------------------------------
@@ -221,8 +242,10 @@ class BulkApprovalRequest(BaseModel):
     payload that will be invoked on approval."""
 
     reason: str
-    """One of ``operator_overlay_escalated``, ``author_floor``, or
-    ``mixed_approval_reasons``. See module docstring."""
+    """One of ``operator_overlay_escalated``, ``author_floor``,
+    ``mixed_approval_reasons``, or ``template_default_deny`` (AW-7 — a
+    deny-on-no-match park of an uncovered mutating action). See module
+    docstring."""
 
     matched_rules: list[InstinctRule] = Field(default_factory=list)
     """Union (by identity) of every overlay approval rule that
@@ -305,6 +328,8 @@ def plan_bulk_execution(
     resolver: IdentifierResolver | None = None,
     row_id_field: str | None = None,
     now: datetime | None = None,
+    template_default_deny: bool = False,
+    is_mutating: bool = True,
 ) -> BulkPlan:
     """Plan the fan-out for a ``kind: bulk`` action against N rows.
 
@@ -344,6 +369,28 @@ def plan_bulk_execution(
         Optional wall-clock for the CEL ``within(...)`` function.
         Defaults to ``datetime.now(UTC)``. Tests should pass a fixed
         value for determinism.
+    template_default_deny:
+        AW-7 TEMPLATE-level deny-on-no-match. The EE runtime resolves
+        the per-workspace / global flag
+        (``resolve_workspace_template_default_deny``) and passes it in.
+        When True AND ``is_mutating`` is True, a per-row NO-RULE-MATCH
+        default EXECUTE (``verdict == "EXECUTE"`` and ``reason == "auto"``
+        — the composer's fall-through when the bound template declares no
+        matching rule) is routed to the batch APPROVAL bucket instead of
+        ``executions`` — the same deny-by-default the router
+        (``router.py`` ~L1257-1285) and the temporal sweep enforce
+        through ``gate_action``. Default False keeps every path
+        byte-identical to before.
+    is_mutating:
+        AW-7 mutating-vs-read signal, computed by the EE caller from the
+        pocket's parsed action binding exactly as ``action_executor``
+        does (``method in {POST,PUT,PATCH,DELETE} and not read_only``).
+        A read (``read_only`` marker / GET / HEAD → ``is_mutating=False``)
+        is never re-bucketed — a read has nothing to govern. The planner
+        cannot compute this itself: ``method`` / ``read_only`` live on the
+        rippleSpec ``ActionBinding`` (EE-parsed), not on the template's
+        ``ActionDef``. Default True (fail-safe: an unresolved binding
+        parks rather than fires) matches ``gate_action``'s default.
 
     Returns
     -------
@@ -404,6 +451,27 @@ def plan_bulk_execution(
         if decision.verdict == "ESCALATE_APPROVAL":
             # Consolidate later — collect now and emit one request
             # for the whole batch.
+            approval_rows.append((row_id, row, decision))
+            continue
+
+        # AW-7 — TEMPLATE-level deny-on-no-match, mirroring
+        # ``instinct_dispatch.gate_action`` exactly. When the workspace/global
+        # flag is ON and this action ``is_mutating`` (EE-computed from the
+        # parsed binding), a NO-RULE-MATCH default EXECUTE — ``verdict ==
+        # "EXECUTE"`` with ``reason == "auto"`` (the composer's fall-through
+        # when the bound template declares no matching rule) — is routed to the
+        # batch APPROVAL bucket instead of firing. This is the same escalation
+        # the router and temporal sweep enforce through ``gate_action``; here
+        # the planner buckets it so ``_fire_executions`` (which fires
+        # ``plan.executions`` un-re-gated) never touches the parked row. Scope
+        # is tight: only the ``reason == "auto"`` no-rule-match default flips —
+        # a rule that matched and returned EXECUTE (non-"auto" reason) or a
+        # ``notify_only`` author floor (NOTIFY_AND_EXECUTE) is an explicit
+        # policy decision, never overridden. Reads (``is_mutating=False``) and
+        # a flag that is OFF (the default) keep the bucketing byte-identical to
+        # before.
+        no_rule_matched = decision.verdict == "EXECUTE" and decision.reason == "auto"
+        if template_default_deny and is_mutating and no_rule_matched:
             approval_rows.append((row_id, row, decision))
             continue
 
@@ -524,9 +592,18 @@ def _consolidate_approval(
         consolidated_reason = "operator_overlay_escalated"
     elif reasons == {"author_floor"}:
         consolidated_reason = "author_floor"
+    elif reasons == {"auto"}:
+        # AW-7 — every row in this batch parked solely because of the
+        # TEMPLATE-level deny-on-no-match flip (verdict EXECUTE, reason
+        # "auto" — no rule matched). Label it truthfully rather than folding
+        # it into ``mixed_approval_reasons``: the approver sees this was a
+        # deny-by-default park of an uncovered mutating action, not a rule
+        # escalation. (The per-row decisions still carry reason "auto".)
+        consolidated_reason = "template_default_deny"
     else:
-        # Any other mix (e.g. {operator_overlay_escalated, author_floor})
-        # consolidates to a single typed string per the brief.
+        # Any other mix (e.g. {operator_overlay_escalated, author_floor}, or a
+        # deny-on-no-match "auto" row alongside a rule escalation) consolidates
+        # to a single typed string per the brief.
         consolidated_reason = "mixed_approval_reasons"
 
     return BulkApprovalRequest(
