@@ -19,6 +19,16 @@
 #   vector path inherits the same scope variable so embeddings land in
 #   the same kb-go scope as the text article. Workspace uploads (no
 #   ``pocket_id``) keep the previous ``workspace:{wid}`` behaviour.
+# Updated: 2026-07-03 — FL-6 "Auto-tagging on ingest". The listener now
+#   (1) loads the FileUpload row up front and, if ``hide_from_ai`` is set,
+#   returns early — a hidden file is neither KB-indexed nor tagged (this
+#   gate also lands in FL-11b; the two agree). (2) After extraction produces
+#   text it derives a small set of free-form tags from title + captions +
+#   text (reusing what extraction already produced — no new LLM call) via
+#   ``uploads.tagging``, unions them with any pre-existing user tags, and
+#   writes the result back through ``MongoFileStore.set_library_metadata``.
+#   Tag derivation/write failures are contained: a broken tag write must
+#   never lose the KB ingest that already succeeded.
 """Upload bus subscribers.
 
 The upload pipeline emits :class:`FileReady` on every successful upload.
@@ -78,6 +88,23 @@ async def index_uploaded_file(event: Event) -> None:
         )
         return
 
+    # FL-6: load the library row up front so we can (a) honour the
+    # ``hide_from_ai`` opt-out before touching the KB and (b) union derived
+    # tags with any pre-existing user tags later. A hidden file must never be
+    # indexed OR tagged — bail immediately. ``doc`` is ``None`` in test
+    # contexts without Beanie initialised or for rows the store can't see; we
+    # proceed with indexing in that case (fail-open on indexing, never on the
+    # hide gate — a genuinely hidden row is always found by the store).
+    doc = await _load_upload_doc(file_id, str(workspace_id))
+    if doc is not None and getattr(doc, "hide_from_ai", False):
+        logger.info(
+            "file_id=%s is hidden from AI (hide_from_ai=True); skipping KB "
+            "index and auto-tagging",
+            file_id,
+        )
+        return
+    existing_tags = list(getattr(doc, "tags", []) or []) if doc is not None else []
+
     adapter = _resolve_adapter()
     if adapter is None or not storage_key:
         logger.info(
@@ -106,6 +133,16 @@ async def index_uploaded_file(event: Event) -> None:
         except Exception:
             logger.exception("extraction failed for file_id=%s", file_id)
             return
+
+        # FL-6: auto-tag from extraction output. Independent of KB ingest —
+        # runs before it so a file still gets tags even if the KB write later
+        # fails. Contained: a tag-write error must not abort indexing.
+        await _write_auto_tags(
+            file_id=file_id,
+            workspace_id=str(workspace_id),
+            result=result,
+            existing_tags=existing_tags,
+        )
 
         text = (result.text or "").strip()
         if not text:
@@ -320,6 +357,80 @@ async def _write_vector_to_kb(
             os.unlink(tmp.name)
         except OSError:
             logger.debug("temp vec cleanup failed for %s", tmp.name)
+
+
+async def _load_upload_doc(file_id: str, workspace_id: str):
+    """Load the workspace-scoped FileUpload row, or ``None`` on any failure.
+
+    Used for the FL-6 ``hide_from_ai`` gate and to read pre-existing user
+    tags for the union. Resilient by design: in test contexts without Beanie
+    initialised the store call raises, and we return ``None`` so the listener
+    proceeds with indexing (fail-open on indexing). The hide gate itself is
+    fail-open only when the row can't be found — a genuinely hidden row is
+    always visible to the workspace-scoped store lookup.
+    """
+    try:
+        from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+
+        return await MongoFileStore().get_doc_scoped(file_id, workspace_id)
+    except Exception:
+        logger.debug(
+            "could not load FileUpload row for file_id=%s (store unavailable); "
+            "proceeding without library metadata",
+            file_id,
+        )
+        return None
+
+
+async def _write_auto_tags(
+    *,
+    file_id: str,
+    workspace_id: str,
+    result,
+    existing_tags: list[str],
+) -> None:
+    """Derive free-form tags from extraction output and persist the union.
+
+    Reuses whatever extraction already produced (title, captions, text, and
+    any adapter-supplied labels in ``metadata``) — never calls a new external
+    LLM. Merges with ``existing_tags`` so a user-applied tag survives a
+    re-index. Fully contained: any failure (or an empty derivation, or a
+    missing row) leaves the file untagged rather than aborting the ingest.
+    """
+    try:
+        from pocketpaw_ee.cloud.uploads.tagging import derive_tags, merge_tags
+
+        derived = derive_tags(
+            title=getattr(result, "title", None),
+            captions=getattr(result, "captions", None),
+            text=getattr(result, "text", None),
+            metadata=getattr(result, "metadata", None),
+        )
+        merged = merge_tags(existing_tags, derived)
+        # Nothing new to write (derivation empty and no existing tags to
+        # normalize into place) — skip the DB round-trip.
+        if merged == list(existing_tags):
+            return
+
+        from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+
+        updated = await MongoFileStore().set_library_metadata(
+            file_id, workspace_id, tags=merged
+        )
+        if updated is None:
+            logger.debug(
+                "auto-tag write found no row for file_id=%s workspace=%s",
+                file_id,
+                workspace_id,
+            )
+        else:
+            logger.info(
+                "auto-tagged file_id=%s with %d tag(s)", file_id, len(merged)
+            )
+    except Exception:
+        logger.exception(
+            "auto-tagging failed for file_id=%s; KB ingest unaffected", file_id
+        )
 
 
 def _resolve_adapter():
