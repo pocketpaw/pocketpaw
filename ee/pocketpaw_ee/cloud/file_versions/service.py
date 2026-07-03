@@ -56,6 +56,17 @@
 #   this module (the import-linter "FileVersions" contract) — the agent tool
 #   never touches the Beanie doc directly. Tenant-filtered: the ``FileUpload``
 #   lookup and every ``FileVersionDoc`` read/write pins ``workspace_id``.
+# Updated: 2026-07-03 (FL-5, structural edit tools — port of dewani12's #1193)
+#   — added ``read_current_content``: the read half the FL-5 edit tools
+#   (edit_document / edit_slides / edit_spreadsheet) need to load a file's
+#   CURRENT text so they can apply structural block/deck/workbook operations and
+#   write the mutated result back through ``update_file_content`` (editor_kind
+#   ="agent"), so every structural edit lands as a NEW revertable version. It
+#   resolves BOTH id schemes via ``_resolve_upload`` (editor-namespaced id, then
+#   Library bare id) and reads the live blob through the shared adapter, keeping
+#   the FL-5 tools off the Beanie doc + storage adapter directly. Tenant-safe:
+#   the ``_resolve_upload`` lookup pins ``workspace_id``, so a cross-workspace
+#   file_id fails closed (NotFound).
 """FileVersions service — file-version write + history.
 
 Module-level ``async def`` functions. Sole owner of writes to the
@@ -513,6 +524,57 @@ async def update_file_content(
         size_bytes=new_size,
         content_hash=new_hash,
     )
+
+
+async def read_current_content(
+    ctx: RequestContext,
+    file_id: str,
+) -> str:
+    """Return a file's CURRENT live text content (FL-5 read half).
+
+    The structural edit tools (edit_document / edit_slides / edit_spreadsheet)
+    load the current content, apply their block/deck/workbook operations, then
+    write the result back via ``update_file_content`` so the edit archives as a
+    new revertable version. This is the read they need.
+
+    Resolves BOTH id schemes via ``_resolve_upload`` (the editor's
+    ``${workspace}:${path}`` id first, then a Library row's own bare ``file_id``)
+    and reads the live blob through the shared adapter — the FL-5 tools never
+    touch the Beanie doc or the adapter directly (import-linter "FileVersions"
+    contract). Tenant-filtered: ``_resolve_upload`` pins ``workspace_id``, so a
+    cross-workspace ``file_id`` raises ``NotFound``. A non-editable mime raises
+    422 (the same guard the write path uses).
+    """
+    workspace_id = ctx.workspace_id
+    if not workspace_id:
+        raise CloudError(400, "files.missing_workspace", "Workspace is required.")
+
+    doc = await _resolve_upload(workspace_id, file_id)
+    if not doc:
+        raise NotFound("file", file_id)
+
+    if not _is_editable(doc.mime):
+        raise CloudError(
+            422,
+            "files.not_editable",
+            f"File type '{doc.mime}' cannot be edited inline.",
+        )
+
+    adapter = _get_storage()
+    try:
+        return await _read_text(adapter, doc.storage_key)
+    except Exception as exc:
+        logger.error(
+            "read_current_content %s: cannot read blob %r: %s",
+            file_id,
+            doc.storage_key,
+            exc,
+        )
+        raise CloudError(
+            500,
+            "files.read_failed",
+            "Could not read the file's current content.",
+        ) from exc
 
 
 async def list_versions(

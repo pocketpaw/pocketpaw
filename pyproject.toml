@@ -561,4 +561,26 @@ ignore_imports = [
     "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud._core.realtime.events",
     "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.file_versions.service",
     "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.agents.knowledge",
+    # FL-5 structural edit tools (port of dewani12's #1193): the edit_document /
+    # edit_slides / edit_spreadsheet tools live in the OSS builtin tools package
+    # (registered via _EE_TOOLS, guarded by ee/ availability) but edit a cloud
+    # Library file through the FL-2 file_versions service. Same lazy try/except
+    # runtime-import pattern as the FL-3 verbs above: the module top-level imports
+    # only OSS (pocketpaw.tools.protocol); a community install degrades to an
+    # "enterprise feature" message.
+    "pocketpaw.tools.builtin.edit_document -> pocketpaw_ee.cloud.chat.agent_service",
+    "pocketpaw.tools.builtin.edit_document -> pocketpaw_ee.cloud._core.context",
+    "pocketpaw.tools.builtin.edit_document -> pocketpaw_ee.cloud._core.errors",
+    "pocketpaw.tools.builtin.edit_document -> pocketpaw_ee.cloud.file_versions.service",
+    "pocketpaw.tools.builtin.edit_document -> pocketpaw_ee.cloud.file_versions.dto",
+    "pocketpaw.tools.builtin.edit_slides -> pocketpaw_ee.cloud.chat.agent_service",
+    "pocketpaw.tools.builtin.edit_slides -> pocketpaw_ee.cloud._core.context",
+    "pocketpaw.tools.builtin.edit_slides -> pocketpaw_ee.cloud._core.errors",
+    "pocketpaw.tools.builtin.edit_slides -> pocketpaw_ee.cloud.file_versions.service",
+    "pocketpaw.tools.builtin.edit_slides -> pocketpaw_ee.cloud.file_versions.dto",
+    "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud.chat.agent_service",
+    "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud._core.context",
+    "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud._core.errors",
+    "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud.file_versions.service",
+    "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud.file_versions.dto",
 ]

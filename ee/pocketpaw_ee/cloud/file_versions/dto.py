@@ -10,6 +10,13 @@
 # Updated: 2026-07-03 (FL-2, port of #1193) — restored DiffResponse (the
 #   unified-diff transport DTO ART-1 deferred), now that the diff/revert history
 #   helpers land in the service.
+# Updated: 2026-07-03 (FL-5, port of #1193) — restored the document editor
+#   transport DTOs ART-1 deferred: ``AiEditRequest`` / ``AiEditResponse`` (the
+#   POST /files/{id}/ai-edit body + reply) and ``SyncEditingContextRequest`` (the
+#   PUT /files/{id}/editing-context body), now that the ai-edit + editing-context
+#   routes land on the router. The slides/spreadsheet edit DTOs already live in
+#   ``slides_dto`` / ``spreadsheet_dto`` (brought by FL-2). Pure transport, no
+#   Beanie — the "FileVersions" import-linter contract still holds.
 """FileVersions DTOs — request/response schemas for the file-version API."""
 
 from __future__ import annotations
@@ -99,3 +106,27 @@ class FileVersionResponse(BaseModel):
     created_at: datetime = Field(alias="createdAt")
 
     model_config = {"populate_by_name": True}
+
+
+class AiEditRequest(BaseModel):
+    """Request body for POST /files/{id}/ai-edit (Editor.js document)."""
+
+    content: str = Field(min_length=0)  # full document content (Editor.js JSON)
+    prompt: str = Field(min_length=1)  # what the user wants the AI to do
+    selected_block_id: str | None = Field(default=None, alias="selectedBlockId")
+    available_tools: list[str] = Field(default_factory=list, alias="availableTools")
+
+    model_config = {"populate_by_name": True}
+
+
+class AiEditResponse(BaseModel):
+    """AI-edited document blocks returned to the frontend."""
+
+    blocks: list[dict]  # updated Editor.js blocks array
+    summary: str = ""  # human-readable summary of changes
+
+
+class SyncEditingContextRequest(BaseModel):
+    """Request body for PUT /files/{id}/editing-context."""
+
+    blocks: list[dict]
