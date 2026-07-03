@@ -197,18 +197,32 @@ async def test_members_list_outside_stream_errors():
 
 
 @pytest.mark.asyncio
-async def test_member_update_role_admin_does_not_execute_inline(monkeypatch, _patch_user):
-    """An ADMIN passes the gate but the mutation is NEVER fired inline — the
-    ``update_member_role`` service call is spied and asserted NOT called. The
-    tool returns a non-executing (executed=False) envelope."""
+async def test_member_update_role_admin_files_proposal_not_inline(monkeypatch, _patch_user):
+    """WA-2 — an ADMIN passes the gate; the tool files a live Instinct proposal
+    (``propose_admin_action`` is spied) and returns a PENDING (executed=False)
+    envelope carrying the action id. The ``update_member_role`` service call is
+    spied and asserted NOT called inline (an admin write is human-gated)."""
     monkeypatch.setattr(
         "pocketpaw_ee.guards.deps.check_workspace_action", lambda *a, **k: WorkspaceRole.ADMIN
     )
 
-    spy = {"called": False}
+    # Spy the propose helper (the tool imports it function-locally).
+    propose_spy = {}
+
+    async def _propose_admin_action(**kwargs):  # noqa: ANN003
+        propose_spy.update(kwargs)
+        return "action-abc123"
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.admin_proposals.propose.propose_admin_action",
+        _propose_admin_action,
+    )
+
+    # Spy the mutation sink — it must NOT be called inline.
+    mutate_spy = {"called": False}
 
     async def _update_member_role(*a, **k):  # noqa: ANN002, ANN003
-        spy["called"] = True
+        mutate_spy["called"] = True
 
     import pocketpaw_ee.cloud.workspace.service as ws_service
 
@@ -220,13 +234,21 @@ async def test_member_update_role_admin_does_not_execute_inline(monkeypatch, _pa
     body = _body(res)
     assert body["ok"] is True
     assert body["executed"] is False  # the load-bearing rule
+    assert body["status"] == "pending_approval"
+    assert body["action_id"] == "action-abc123"
     assert body["proposed_change"] == {
         "user_id": "u2",
         "role": "admin",
         "workspace_id": "w1",
     }
+    # The proposal was filed with the right shape — RBAC action key, args, and
+    # the PROPOSER identity (used for the execute-time RBAC re-check).
+    assert propose_spy["workspace_id"] == "w1"
+    assert propose_spy["action"] == "workspace.member.role_change"
+    assert propose_spy["args"] == {"target_user_id": "u2", "role": "admin"}
+    assert propose_spy["proposer_user_id"] == "admin1"
     # THE assertion: the admin write did NOT fire inline.
-    assert spy["called"] is False
+    assert mutate_spy["called"] is False
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,23 @@
 # ee/instinct/router.py — FastAPI router for the Instinct decision pipeline API.
 # Created: 2026-03-28 — Propose, approve/reject, list pending, query audit.
+# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-2 — _admin_action proposal
+#   type) — added the 8th gated proposal kind: a gated workspace-admin write.
+#   ``_admin_action_blob`` + ``_assert_admin_action_workspace`` are the peers of
+#   the existing blob accessors + tenancy guards. The blob
+#   (``Action.parameters._admin_action``) carries {action=RBAC key, args,
+#   proposer_user_id, params_hash, idempotency_key, workspace_id}. On APPROVE the
+#   router emits ``human.corrected`` then fires
+#   ``admin_proposals.executor.execute_approved_admin_action`` — which whitelists
+#   the RBAC action, RE-CHECKS the PROPOSER's CURRENT workspace role (a demoted /
+#   removed proposer fails closed — the write never fires), then calls the seeded
+#   workspace-admin service (member.role_change → workspace.service.
+#   update_member_role) and OWNS the chain close. On REJECT the router emits
+#   ``human.corrected`` + ``decision.completed(rejected)`` itself (the executor
+#   never runs on reject — no admin write happens). The
+#   ``_assert_admin_action_workspace`` 403 runs in ALL FOUR locations (approve /
+#   bulk-approve / reject / bulk-reject) BEFORE any mutation — asymmetric tenant
+#   scope is no tenant scope (pocketpaw#1183 / #1250). Same exactly-one-terminal
+#   discipline as the external-action gate; the other 7 kinds are unchanged.
 # Updated: 2026-06-26 (ISO-2 — physical per-workspace isolation) — the store is
 #   no longer one shared ``~/.pocketpaw/instinct.db``. ``_store`` now takes the
 #   caller's ``workspace_id`` and routes through
@@ -760,6 +778,60 @@ def _assert_external_action_workspace(action: Any, current_workspace: str) -> No
         )
 
 
+def _admin_action_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_admin_action`` blob on an Action, or ``None``.
+
+    The blob is the gated workspace-admin-action payload
+    ``ee.cloud.admin_proposals.propose`` stores under
+    ``Action.parameters._admin_action`` (action=RBAC key / args / proposer_user_id
+    / params_hash / idempotency_key + the originating ``workspace_id``). This is
+    the 8th gated proposal kind (WA-2) — the approve path dispatches the
+    apply-on-approve executor on its presence, exactly as it dispatches the
+    external-action executor on ``_external_action``. On APPROVE the executor
+    RE-CHECKS the proposer's CURRENT RBAC role before firing the whitelisted
+    admin write; on REJECT the router closes the chain and nothing runs. Anything
+    that is not a dict is treated as "no admin action".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_admin_action")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_admin_action_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting an admin action from another workspace.
+
+    Mirror of ``_assert_external_action_workspace`` for the ``_admin_action``
+    blob. ``require_action_any_workspace("instinct.approve")`` only proves the
+    caller holds the role SOMEWHERE; this binds the admin-action Action to the
+    caller's active workspace. An admin action carries no pocket the way a parked
+    write does, so its tenancy lives entirely on the blob's ``workspace_id``. A
+    blob whose ``workspace_id`` differs from the caller's active workspace → 403,
+    on BOTH the approve and reject side (asymmetric tenant scope is no tenant
+    scope — pocketpaw#1183 / #1250). A non-admin-action Action (no blob) is
+    unaffected.
+
+    FAIL-CLOSED on an empty claim — an admin action's tenancy is mandatory; the
+    executor scopes the RBAC re-check + service call by this workspace, so an
+    empty one is a HARD 403, never a pass-through.
+    """
+    blob = _admin_action_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This admin action has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This admin action belongs to a different workspace",
+        )
+
+
 def _fabric_objects_blob(action: Any) -> dict[str, Any] | None:
     """Return the ``_fabric_objects`` blob on an Action, or ``None``.
 
@@ -1283,6 +1355,7 @@ async def bulk_approve_actions(
             _assert_instinct_rule_workspace(action, workspace_id)
             _assert_belt_plan_workspace(action, workspace_id)
             _assert_artifact_change_workspace(action, workspace_id)
+            _assert_admin_action_workspace(action, workspace_id)
 
     approved, missing, bulk_id = await store.bulk_approve(
         list(req.ids), approver=approver_id, note=req.note
@@ -1523,6 +1596,39 @@ async def bulk_approve_actions(
                 )
             continue
 
+        # WA-2 — a bulk-approved gated ``_admin_action`` Action fires the
+        # whitelisted workspace-admin write (with an execute-time RBAC re-check
+        # inside the executor). Mirrors the external-action branch above: per-item
+        # ``human.corrected(accepted)`` (bulk-approve has no edit surface), the
+        # ``agent.proposed`` event id (off the blob's ``proposed_event_id``) as
+        # causation, then the executor (which owns the chain close). Matched BEFORE
+        # the pocket-write fallthrough and ``continue``d so the kinds never cross.
+        admin_action_blob = _admin_action_blob(action)
+        if admin_action_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=admin_action_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(admin_action_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.admin_proposals import (
+                    executor as admin_action_executor,
+                )
+
+                await admin_action_executor.execute_approved_admin_action(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve admin-action execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
         action_blob = _pocket_write_blob(action)
         if action_blob is None:
             continue
@@ -1604,6 +1710,7 @@ async def bulk_reject_actions(
             _assert_instinct_rule_workspace(action, workspace_id)
             _assert_belt_plan_workspace(action, workspace_id)
             _assert_artifact_change_workspace(action, workspace_id)
+            _assert_admin_action_workspace(action, workspace_id)
 
     rejected, missing, bulk_id = await store.bulk_reject(
         list(req.ids), reason=req.reason, rejector=rejector_id
@@ -1824,6 +1931,31 @@ async def bulk_reject_actions(
                     "bulk-reject artifact-change discard failed for %s (non-fatal)",
                     action.id,
                 )
+            continue
+
+        # WA-2 — a bulk-rejected gated ``_admin_action`` Action closes its chain
+        # HERE (the executor never runs on reject — the router owns the close). NO
+        # admin write happens. Mirrors the external-action reject branch above.
+        admin_action_blob = _admin_action_blob(action)
+        if admin_action_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=admin_action_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(admin_action_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=admin_action_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            continue
 
     return BulkActionResponse(bulk_id=bulk_id, affected=rejected, missing=missing)
 
@@ -1889,6 +2021,11 @@ async def approve_action(
     # ``_artifact_change`` blob carries the workspace). Approving it moves the
     # published pointer + deploys, so the cross-workspace gate is mandatory here.
     _assert_artifact_change_workspace(before, workspace_id)
+    # WA-2 — same tenancy gate for a gated workspace-admin Action — its
+    # ``_admin_action`` blob carries the workspace, not a pocket. Approving it
+    # fires a workspace-admin write (e.g. a member role change) after an
+    # execute-time RBAC re-check, so the cross-workspace gate is mandatory here.
+    _assert_admin_action_workspace(before, workspace_id)
 
     req = req or ApproveRequest()
     # SHOULD-FIX 1 — the audit actor is the authenticated identity, not
@@ -2223,6 +2360,41 @@ async def approve_action(
         except Exception:
             logger.exception("artifact-change merge after approval failed (non-fatal)")
 
+    # WA-2 — when the approved Action carries a gated ``_admin_action`` blob, fire
+    # the whitelisted workspace-admin write (e.g. a member role change) via
+    # ``admin_proposals.executor``. Same best-effort, lazy-import,
+    # never-break-the-approve-response shape as the external-action hook above; the
+    # executor RE-CHECKS the proposer's CURRENT RBAC role before firing and records
+    # success / failure on the Action itself. A non-admin-action Action skips this.
+    #
+    # The admin action is part of its own Decision-Graph chain (the propose helper
+    # minted the ``correlation_id`` + emitted ``agent.proposed``). The router owns
+    # the ``human.corrected`` emit HERE (citing ``agent.proposed`` off the blob's
+    # ``proposed_event_id`` as causation, same field the external-action path
+    # reads); the EXECUTOR owns the chain CLOSE (success or failure). The router
+    # does NOT emit ``decision.completed`` here — no double terminal.
+    admin_action_blob = _admin_action_blob(approved)
+    if admin_action_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=admin_action_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(admin_action_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.admin_proposals import executor as admin_action_executor
+
+            await admin_action_executor.execute_approved_admin_action(
+                approved, human_event_id=human_event_id
+            )
+        except Exception:
+            logger.exception("admin-action execution after approval failed (non-fatal)")
+
     # gap2 — when the approved Action carries a ``_customer_reply`` blob (a
     # paw-print customer event awaiting a decision), deliver the owner's reply
     # back to the customer surface. Same best-effort, lazy-import,
@@ -2325,6 +2497,10 @@ async def reject_action(
     # would discard another tenant's candidate) must 403 before any mutation,
     # exactly like the approve side (pocketpaw#1183 / #1250).
     _assert_artifact_change_workspace(before, workspace_id)
+    # WA-2 — same tenancy gate for a gated workspace-admin Action on the REJECT
+    # side. Asymmetric tenant scope is no tenant scope: a cross-workspace reject
+    # must 403 before any mutation, exactly like the approve side.
+    _assert_admin_action_workspace(before, workspace_id)
 
     reason = req.reason if req else ""
     rejector_id = str(user.id)
@@ -2551,6 +2727,33 @@ async def reject_action(
             await artifact_executor.discard_rejected_change(action)
         except Exception:
             logger.exception("artifact-change discard after rejection failed (non-fatal)")
+
+    # WA-2 — a rejected gated ``_admin_action`` Action closes its chain HERE (the
+    # executor never runs on reject — the router owns the close, mirroring the
+    # external-action reject path). NO admin write happens.
+    # ``human.corrected(rejected)`` cites the ``agent.proposed`` event (off the
+    # blob's ``proposed_event_id``); ``decision.completed(rejected)`` cites the
+    # human event so the chain reads ``agent.proposed → human.corrected →
+    # decision.completed``.
+    admin_action_blob = _admin_action_blob(action)
+    if admin_action_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=admin_action_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(admin_action_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=admin_action_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
 
     # gap2 — a rejected ``_customer_reply`` Action delivers a DECLINED decision
     # (carrying the rejection reason) back to the customer surface. Same
