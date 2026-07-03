@@ -36,6 +36,15 @@ synthetic `fabric:<entity-type>` cards for the CALLING workspace's live
 ontology and atlas_describe answer `fabric:<type>` with properties +
 links. Never compiled into atlas.json; absent/erroring introspector →
 gracefully absent (OSS default).
+Updated: 2026-07-02 (feat/atlas-eval, AT-2) — added the "Eval" section:
+intent→capability ranking-regression harness (tests/atlas/eval_cases.json
++ tests/atlas/test_eval.py), measured strict-hit baseline 16/18.
+Updated: 2026-07-03 (integration/atlas) — re-baselined the eval against
+the full compiled model (237 entries) + fixpoint stemmer: baseline now
+21/22; fabric xfail promoted; three cases re-pointed at the more
+specific compiled entries; four new cases cover widget / skill /
+connector / sense intents; authored branch + soul keywords gained
+"roll back" and "persist".
 -->
 
 # Atlas — the OS self-model
@@ -385,3 +394,52 @@ intent-phrase search without exact names, the `get_widget_spec` routing in
 `test_fabric_introspection.py` pins the AT-7 fabric seam: fake-introspector
 search/describe, compiled results never displaced, OSS absence, raising →
 absent fail-closed, and the import-guarded real EE adapter).
+
+## Eval — intent→capability ranking regression
+
+The permanent quality gate for atlas ranking (same pattern that proved out
+on loom): a fixed set of real user intents, each mapped to the atlas entry
+that should win, replayed against `AtlasStore.search` on every test run.
+
+**Run it:**
+
+```bash
+uv run pytest tests/atlas/test_eval.py -q
+```
+
+**How it works.** `tests/atlas/eval_cases.json` holds the cases; each is
+`{"intent", "expected_id", "rank_within"}` — the expected id must appear
+within the top `rank_within` (1 = strict hit, 3 = top-3) results.
+`tests/atlas/test_eval.py` runs one parameterized test per case, plus a
+summary test that computes the strict-hit score (expected id at rank 1
+across ALL cases) and pins it to `STRICT_HIT_BASELINE`.
+
+**The baseline** is a measured fact, not a target: as of 2026-07-03,
+measured against the full compiled model (237 entries) with the fixpoint
+stemmer, the weighted lexical ranking puts the expected id at rank 1 for
+**21 of 22** cases, so `STRICT_HIT_BASELINE = 21`. The summary test fails
+in both directions — a ranking change that drops below 21 is a regression,
+and one that beats 21 must bump the constant in the same PR so the gain is
+locked in. The single current miss is documented next to the constant:
+branch ranks #3 behind instinct and the edit-pocket skill for "review the
+agent's edit before it goes live" (generic review/approve vocabulary
+overlaps instinct's core keywords — a vocabulary/authoring question, not a
+weight change). The 2026-07-03 re-baseline also promoted the original
+fabric xfail ("who are our competitors linked to" — the fixpoint stemmer
+now matches "competitors"/"linked" to the "competitor"/"links" keywords
+and fabric ranks 1), re-pointed three cases at the genuinely better
+specific entries the full model carries (`widget:chart`, `widget:kanban`,
+`connector:gcalendar` over the generic primitives), and fixed two authored
+vocabulary gaps at the source (`primitive:branch` gained "roll back",
+`primitive:soul` gained "persist"); each decision is recorded in the
+case's `"note"` field. A case can carry a **strict xfail**: never delete a
+case to go green — when a ranking upgrade fixes it, the xfail flips to a
+loud failure and the case and baseline get promoted.
+
+**Adding a case:** append to `eval_cases.json` with the intent phrased the
+way a real user would say it (not with the entry's own keywords), set
+`rank_within: 1`, and run the harness. If the case honestly lands at rank
+2–3 today, relax it to `rank_within: 3`; if the ranking misses it
+entirely, keep it with an `"xfail": "<reason>"` field. Then re-measure and
+update `STRICT_HIT_BASELINE` (and the seed's keywords — in a separate
+change — if the miss reveals a vocabulary gap).
