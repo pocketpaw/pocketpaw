@@ -242,6 +242,7 @@ belt = "pocketpaw_ee.extensions:CloudBeltMcpProvider"
 external_actions = "pocketpaw_ee.extensions:CloudExternalActionsMcpProvider"
 fabric = "pocketpaw_ee.extensions:CloudFabricMcpProvider"
 instinct = "pocketpaw_ee.extensions:CloudInstinctMcpProvider"
+workspace_admin = "pocketpaw_ee.extensions:CloudWorkspaceAdminMcpProvider"
 
 [project.entry-points."pocketpaw.agent_extensions"]
 cloud = "pocketpaw_ee.extensions:CloudAgentExtension"
