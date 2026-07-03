@@ -240,6 +240,25 @@ async def test_executor_happy_path_calls_service_once(store, monkeypatch):
     assert "executed_at" in blob["outcome"]
 
 
+async def test_reapprove_of_resolved_action_is_noop_no_double_fire(store, monkeypatch):
+    """A second approve of an already-approved action must NOT re-run the
+    executor (store.approve now guards require_status=PENDING). Prevents the
+    double-fire window where an executor mutated but failed to record its
+    outcome, leaving the row APPROVED."""
+    spy = SpyWorkspaceService()
+    _patch_service(monkeypatch, spy)
+    _allow_rbac(monkeypatch)
+
+    approved = await _propose_and_approve(store)
+    await aa_executor.execute_approved_admin_action(approved)
+    assert len(spy.calls) == 1
+
+    # Re-approving the now-EXECUTED (non-pending) action is a no-op.
+    reapproved = await store.approve(approved.id, approver="approver1")
+    assert reapproved is None
+    assert len(spy.calls) == 1  # service did NOT fire a second time
+
+
 async def test_executor_demoted_proposer_fails_closed(store, monkeypatch):
     """THE KEY SECURITY TEST — the proposer was demoted to MEMBER after
     proposing. The execute-time RBAC re-check DENIES, so the approved action
