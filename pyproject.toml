@@ -544,4 +544,21 @@ ignore_imports = [
     # dashboard_lifecycle drains the EE InProcessExecutor on shutdown via a
     # try/except runtime import; the OSS core never imports EE statically.
     "pocketpaw.dashboard_lifecycle -> pocketpaw_ee.cloud.chat.runs.executor",
+    # FL-3 agent Library verbs: the tag/move/annotate/search tools live in the
+    # OSS builtin tools package (registered via _EE_TOOLS, guarded by ee/
+    # availability) but act on the cloud Library. Every EE reach is a lazy
+    # try/except runtime import inside a method — the module top-level imports
+    # only OSS (pocketpaw.tools.protocol), and on a community install the tools
+    # degrade to an "enterprise feature" message. Same pattern the tools.cli
+    # dispatcher already uses for cloud pocket writes.
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.chat.agent_service",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.uploads.mongo_store",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.uploads.paths",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.uploads.folder_store",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud._core.context",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud._core.errors",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud._core.realtime.emit",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud._core.realtime.events",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.file_versions.service",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.agents.knowledge",
 ]

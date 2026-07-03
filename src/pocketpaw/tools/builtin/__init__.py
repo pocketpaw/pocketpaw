@@ -14,6 +14,9 @@
 #   - 2026-05-31: Added zero-config WeatherTool, WikiTool, CurrencyTool (no API key)
 #   - 2026-06-16: Added CodeModeTool — Programmatic Tool Calling v1 (read-only):
 #     the agent scripts N read-safe tool calls; only final stdout returns.
+#   - 2026-07-03: Added FL-3 Library verbs (EE) — TagFileTool, MoveFileTool,
+#     AnnotateFileTool, SearchLibraryTool — the single-file agent verbs that
+#     make /files agentic. Registered in _EE_TOOLS (guarded by ee/ availability).
 
 import importlib as _importlib
 
@@ -111,6 +114,12 @@ try:
         InstinctPendingTool,
         InstinctProposeTool,
     )
+    from pocketpaw.tools.builtin.library_verbs import (
+        AnnotateFileTool,
+        MoveFileTool,
+        SearchLibraryTool,
+        TagFileTool,
+    )
 
     _EE_TOOLS: list[type] = [
         FabricQueryTool,
@@ -120,6 +129,11 @@ try:
         InstinctPendingTool,
         InstinctAuditTool,
         InstinctCorrectionsTool,
+        # FL-3 — agent Library verbs (tag / move / annotate / search).
+        TagFileTool,
+        MoveFileTool,
+        AnnotateFileTool,
+        SearchLibraryTool,
     ]
     _EE_NAMES = {cls.__name__: cls for cls in _EE_TOOLS}
 except ImportError:

@@ -30,6 +30,17 @@
 #   ``get_version``. A stale ``If-Match`` now raises ``PreconditionFailed``
 #   (412) instead of ``ConflictError`` (409), matching HTTP conditional-request
 #   semantics for the file-version write path.
+# Updated: 2026-07-03 (FL-3, agent library verbs) — added ``annotate_upload``:
+#   the content-mutation entrypoint for the ``annotate_file`` agent verb. A
+#   Library file (a ``FileUpload`` row keyed by its OWN bare ``file_id``, NOT the
+#   ``${workspace}:${path}`` namespaced id the editor path uses) gets a short
+#   note prepended to its content as a NEW archived version, so the annotation is
+#   revertable through the same ``list_versions`` / ``get_version`` readers. It
+#   reuses the archive-then-rewrite mechanism of ``update_file_content`` but keys
+#   on the Library row's own id, keeping every ``FileVersionDoc`` write inside
+#   this module (the import-linter "FileVersions" contract) — the agent tool
+#   never touches the Beanie doc directly. Tenant-filtered: the ``FileUpload``
+#   lookup and every ``FileVersionDoc`` read/write pins ``workspace_id``.
 """FileVersions service — file-version write + history.
 
 Module-level ``async def`` functions. Sole owner of writes to the
@@ -579,4 +590,121 @@ async def diff_versions(
         from_version=v_from.version_number,
         to_version=v_to.version_number,
         diff=diff,
+    )
+
+
+async def annotate_upload(
+    ctx: RequestContext,
+    file_id: str,
+    note: str,
+) -> UpdateFileContentResponse:
+    """Prepend a short note to a Library file's content as a new version (FL-3).
+
+    Unlike ``update_file_content`` (which keys on the ``${workspace}:${path}``
+    namespaced editor id), this targets a Library ``FileUpload`` row by its OWN
+    bare ``file_id`` — the id the uploads pipeline stamps and the /files listing
+    surfaces. It archives the current blob as a ``FileVersionDoc`` and rewrites
+    the live blob with ``note`` prepended, bumping ``content_version`` so the
+    annotation is revertable via ``list_versions`` / ``get_version``.
+
+    Tenant-safe: the ``FileUpload`` lookup and the ``FileVersionDoc`` write both
+    pin ``workspace_id``, so a caller can never annotate another workspace's
+    file. Editable-mime only (a binary Library file returns 422); a blank note
+    is rejected (400). ``editor_kind`` is ``"agent"`` — this is the agent verb.
+    """
+    workspace_id = ctx.workspace_id
+    if not workspace_id:
+        raise CloudError(400, "files.missing_workspace", "Workspace is required.")
+
+    clean_note = (note or "").strip()
+    if not clean_note:
+        raise CloudError(400, "files.empty_note", "Annotation note must be non-empty.")
+
+    # Library rows key on the bare file_id (NOT the namespaced editor id).
+    doc = await FileUpload.find_one(
+        {"file_id": file_id, "workspace": workspace_id, "deleted_at": None}
+    )
+    if not doc:
+        raise NotFound("file", file_id)
+
+    if not _is_editable(doc.mime):
+        raise CloudError(
+            422,
+            "files.not_editable",
+            f"File type '{doc.mime}' cannot be annotated inline.",
+        )
+
+    editor_id = ctx.user_id or "unknown"
+    adapter = _get_storage()
+
+    # Read the current blob so it can be archived. A read failure must NOT be
+    # swallowed into an empty archive (same guard as ``update_file_content``).
+    try:
+        old_content = await _read_text(adapter, doc.storage_key)
+    except Exception as exc:
+        logger.error(
+            "annotate %s: cannot read current blob %r to archive prior version: %s",
+            file_id,
+            doc.storage_key,
+            exc,
+        )
+        raise CloudError(
+            500,
+            "files.archive_read_failed",
+            "Could not read the file's current content to archive it; "
+            "aborting to protect version history.",
+        ) from exc
+
+    old_hash = _sha256(old_content)
+    current_version = doc.content_version or 0
+
+    # Prepend the note as a comment-style banner. Kept plain so it round-trips
+    # through any text/* mime without corrupting structured formats badly.
+    new_content = f"[note] {clean_note}\n{old_content}"
+    new_hash = _sha256(new_content)
+    new_size = len(new_content.encode("utf-8"))
+
+    # Archive the OLD content under the version it actually was. A legacy
+    # Library row starts at content_version 0; label the archived blob with that
+    # so the history is monotonic and the revived counter bumps cleanly.
+    version_doc = FileVersionDoc(
+        file_id=file_id,
+        workspace_id=workspace_id,
+        version_number=current_version,
+        content=old_content,
+        content_hash=old_hash,
+        size_bytes=len(old_content.encode("utf-8")),
+        editor_kind="agent",
+        editor_id=editor_id,
+        created_at=datetime.now(UTC),
+    )
+    await version_doc.insert()
+
+    stored = await adapter.put(doc.storage_key, _bytes_iter(new_content), doc.mime)
+
+    new_version = current_version + 1
+    doc.size = stored.size
+    doc.content_version = new_version
+    await doc.save()
+
+    await emit(
+        Event(
+            type="file.annotated",
+            data={
+                "file_id": file_id,
+                "workspace_id": workspace_id,
+                "version": new_version,
+                "editor_kind": "agent",
+                "editor_id": editor_id,
+            },
+        )
+    )
+
+    logger.info("file %s annotated to version %d by agent:%s", file_id, new_version, editor_id)
+
+    return UpdateFileContentResponse(
+        file_id=file_id,
+        new_version=new_version,
+        size_bytes=new_size,
+        content_hash=new_hash,
     )
