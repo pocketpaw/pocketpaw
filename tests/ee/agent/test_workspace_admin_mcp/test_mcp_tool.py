@@ -1,9 +1,16 @@
 # tests/ee/agent/test_workspace_admin_mcp/test_mcp_tool.py — the agent-facing MCP
-# surface for workspace administration (feat/workspace-admin-tools, WA-1).
+# surface for workspace administration (feat/workspace-admin-tools, WA-1/WA-2/WA-4).
 #
 # Created: 2026-07-03 (feat/workspace-admin-tools, WA-1).
+# Updated: 2026-07-03 (WA-4) — added coverage for the five READ-only tools:
+#   workspace_settings_read, invites_list, connectors_list, billing_usage_read,
+#   audit_read. Each has a PASS case (correct role → the service is called and its
+#   data is returned) and a DENY case (insufficient role → a deny envelope with
+#   ok=False/denied=True/code, and the service is SPIED and asserted NOT called).
+#   READ tools EXECUTE directly on a gate pass (no Instinct proposal — that's
+#   writes only). The contract test now asserts all seven tool ids.
 #
-# What this pins — the two WA-1 MCP tools, driven through the REAL handlers:
+# What this pins — the WA-1/WA-2 tools, driven through the REAL handlers:
 #   * tool-id / server-name contract (SERVER_NAME, *_TOOL_ID, ADMIN_TOOL_IDS)
 #     and the provider exposing the server + tool ids (extensions wiring).
 #   * members_list (READ): a MEMBER identity → returns the roster (read allowed);
@@ -20,8 +27,8 @@
 #
 # ``pocketpaw_ee`` is import-skipped on an OSS-only install. The handlers read
 # identity through ee.cloud.chat.agent_service ContextVars (set in-test via
-# attach_agent_identity). RBAC + the workspace service are patched so nothing
-# touches Mongo — this pins the tool's gate + envelope behaviour, not the DB.
+# attach_agent_identity). RBAC + the services are patched so nothing touches
+# Mongo — this pins the tool's gate + envelope behaviour, not the DB.
 
 from __future__ import annotations
 
@@ -103,9 +110,22 @@ def test_server_name_and_tool_ids_contract():
     assert wa_mcp.SERVER_NAME == "pocketpaw_workspace_admin"
     assert wa_mcp.MEMBERS_LIST_TOOL_ID == "mcp__pocketpaw_workspace_admin__members_list"
     assert wa_mcp.MEMBER_UPDATE_ROLE_TOOL_ID == "mcp__pocketpaw_workspace_admin__member_update_role"
+    assert (
+        wa_mcp.WORKSPACE_SETTINGS_READ_TOOL_ID
+        == "mcp__pocketpaw_workspace_admin__workspace_settings_read"
+    )
+    assert wa_mcp.INVITES_LIST_TOOL_ID == "mcp__pocketpaw_workspace_admin__invites_list"
+    assert wa_mcp.CONNECTORS_LIST_TOOL_ID == "mcp__pocketpaw_workspace_admin__connectors_list"
+    assert wa_mcp.BILLING_USAGE_READ_TOOL_ID == "mcp__pocketpaw_workspace_admin__billing_usage_read"
+    assert wa_mcp.AUDIT_READ_TOOL_ID == "mcp__pocketpaw_workspace_admin__audit_read"
     assert set(wa_mcp.ADMIN_TOOL_IDS) == {
         wa_mcp.MEMBERS_LIST_TOOL_ID,
         wa_mcp.MEMBER_UPDATE_ROLE_TOOL_ID,
+        wa_mcp.WORKSPACE_SETTINGS_READ_TOOL_ID,
+        wa_mcp.INVITES_LIST_TOOL_ID,
+        wa_mcp.CONNECTORS_LIST_TOOL_ID,
+        wa_mcp.BILLING_USAGE_READ_TOOL_ID,
+        wa_mcp.AUDIT_READ_TOOL_ID,
     }
 
 
@@ -297,3 +317,406 @@ async def test_member_update_role_outside_stream_errors():
     res = await wa_mcp._member_update_role_handler({"user_id": "u2", "role": "admin"})
     assert res.get("is_error") is True
     assert "no active workspace" in res["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# WA-4 READ tools — shared helpers
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+
+def _allow(role=WorkspaceRole.MEMBER):
+    """Patch factory: check_workspace_action passes, returning ``role``."""
+    return lambda *a, **k: role
+
+
+def _deny_forbidden(code="workspace.insufficient_role", detail="nope"):
+    """Patch factory: check_workspace_action raises Forbidden."""
+
+    def _deny(*a, **k):  # noqa: ANN001, ANN002
+        raise Forbidden(code=code, detail=detail)
+
+    return _deny
+
+
+# ---------------------------------------------------------------------------
+# workspace_settings_read — READ (workspace.view / MEMBER)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_workspace_settings_read_member_allowed(monkeypatch, _patch_user):
+    """A MEMBER may read settings — gate passes, the service is called, and a
+    compact view (no owner id / asset refs) comes back."""
+    monkeypatch.setattr("pocketpaw_ee.guards.deps.check_workspace_action", _allow())
+
+    called = {}
+
+    async def _get(ctx, workspace_id):  # noqa: ANN001
+        called["ctx_user"] = ctx.user_id
+        called["ws"] = workspace_id
+        return SimpleNamespace(
+            name="Acme",
+            slug="acme",
+            plan="business",
+            seats=10,
+            member_count=3,
+            branding=SimpleNamespace(
+                display_name="Acme Inc",
+                tab_title="Acme",
+                accent_color="#123456",
+                show_paw_mark=False,
+                logo_asset="secret-asset-id",  # must NOT leak into the view
+            ),
+        )
+
+    import pocketpaw_ee.cloud.workspace.service as ws_service
+
+    monkeypatch.setattr(ws_service, "get", _get)
+
+    with _identity(workspace="w1", user="u1"):
+        res = await wa_mcp._workspace_settings_read_handler({})
+
+    body = _body(res)
+    assert body["ok"] is True
+    assert body["name"] == "Acme"
+    assert body["plan"] == "business"
+    assert body["seats"] == 10
+    assert body["seats_used"] == 3
+    assert body["seats_available"] == 7
+    assert body["branding"] == {
+        "display_name": "Acme Inc",
+        "tab_title": "Acme",
+        "accent_color": "#123456",
+        "show_paw_mark": False,
+    }
+    assert "logo_asset" not in body["branding"]  # asset refs are internal
+    assert "owner" not in body
+    assert called == {"ctx_user": "u1", "ws": "w1"}
+
+
+@pytest.mark.asyncio
+async def test_workspace_settings_read_denied_no_service_call(monkeypatch, _patch_user):
+    """A gate failure → deny envelope (not raised); the service is NOT reached."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        _deny_forbidden("workspace.not_member"),
+    )
+    hit = {"called": False}
+
+    async def _get(ctx, workspace_id):  # noqa: ANN001
+        hit["called"] = True
+
+    import pocketpaw_ee.cloud.workspace.service as ws_service
+
+    monkeypatch.setattr(ws_service, "get", _get)
+
+    with _identity(workspace="w1", user="outsider"):
+        res = await wa_mcp._workspace_settings_read_handler({})
+
+    body = _body(res)
+    assert body["ok"] is False
+    assert body["denied"] is True
+    assert body["code"] == "workspace.not_member"
+    assert hit["called"] is False
+
+
+# ---------------------------------------------------------------------------
+# invites_list — READ (invite.create / ADMIN)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_invites_list_admin_allowed(monkeypatch, _patch_user):
+    """An ADMIN may read pending invites — gate passes, the service returns rows."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action", _allow(WorkspaceRole.ADMIN)
+    )
+
+    called = {}
+
+    async def _list_invites(workspace_id):  # noqa: ANN001
+        called["ws"] = workspace_id
+        return [
+            SimpleNamespace(
+                id="inv1",
+                email="a@example.com",
+                role="member",
+                invited_by="admin1",
+                group_id=None,
+                expires_at=datetime.now(UTC),
+            )
+        ]
+
+    import pocketpaw_ee.cloud.workspace.service as ws_service
+
+    monkeypatch.setattr(ws_service, "list_invites", _list_invites)
+
+    with _identity(workspace="w1", user="admin1"):
+        res = await wa_mcp._invites_list_handler({})
+
+    body = _body(res)
+    assert body["ok"] is True
+    assert body["count"] == 1
+    assert body["invites"][0]["email"] == "a@example.com"
+    assert called == {"ws": "w1"}
+
+
+@pytest.mark.asyncio
+async def test_invites_list_member_denied_no_service_call(monkeypatch, _patch_user):
+    """A MEMBER (insufficient role) → deny envelope; the service is NOT reached."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        _deny_forbidden("workspace.insufficient_role"),
+    )
+    hit = {"called": False}
+
+    async def _list_invites(workspace_id):  # noqa: ANN001
+        hit["called"] = True
+        return []
+
+    import pocketpaw_ee.cloud.workspace.service as ws_service
+
+    monkeypatch.setattr(ws_service, "list_invites", _list_invites)
+
+    with _identity(workspace="w1", user="member1"):
+        res = await wa_mcp._invites_list_handler({})
+
+    body = _body(res)
+    assert body["ok"] is False
+    assert body["denied"] is True
+    assert body["code"] == "workspace.insufficient_role"
+    assert hit["called"] is False
+
+
+# ---------------------------------------------------------------------------
+# connectors_list — READ (workspace.view / MEMBER)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_connectors_list_member_allowed(monkeypatch, _patch_user):
+    """A MEMBER may list connectors — gate passes; the service is called with the
+    caller's user_id (so its per-user permission filter runs)."""
+    monkeypatch.setattr("pocketpaw_ee.guards.deps.check_workspace_action", _allow())
+
+    called = {}
+
+    async def _list_connectors(workspace_id, *, user_id=None):  # noqa: ANN001
+        called["ws"] = workspace_id
+        called["user_id"] = user_id
+        return [
+            SimpleNamespace(
+                name="gmail",
+                display_name="Gmail",
+                type="oauth",
+                enabled=True,
+                status="connected",
+                last_sync_status="ok",
+                last_sync_at=datetime.now(UTC),
+            )
+        ]
+
+    import pocketpaw_ee.cloud.connectors.service as conn_service
+
+    monkeypatch.setattr(conn_service, "list_connectors", _list_connectors)
+
+    with _identity(workspace="w1", user="u1"):
+        res = await wa_mcp._connectors_list_handler({})
+
+    body = _body(res)
+    assert body["ok"] is True
+    assert body["count"] == 1
+    assert body["connectors"][0]["name"] == "gmail"
+    assert body["connectors"][0]["status"] == "connected"
+    # The caller's user_id is threaded so the service applies their permissions.
+    assert called == {"ws": "w1", "user_id": "u1"}
+
+
+@pytest.mark.asyncio
+async def test_connectors_list_denied_no_service_call(monkeypatch, _patch_user):
+    """A gate failure → deny envelope; the connectors service is NOT reached."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        _deny_forbidden("workspace.not_member"),
+    )
+    hit = {"called": False}
+
+    async def _list_connectors(workspace_id, *, user_id=None):  # noqa: ANN001
+        hit["called"] = True
+        return []
+
+    import pocketpaw_ee.cloud.connectors.service as conn_service
+
+    monkeypatch.setattr(conn_service, "list_connectors", _list_connectors)
+
+    with _identity(workspace="w1", user="outsider"):
+        res = await wa_mcp._connectors_list_handler({})
+
+    body = _body(res)
+    assert body["ok"] is False
+    assert body["denied"] is True
+    assert hit["called"] is False
+
+
+# ---------------------------------------------------------------------------
+# billing_usage_read — READ (workspace.view / MEMBER)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_billing_usage_read_member_allowed(monkeypatch, _patch_user):
+    """A MEMBER may read usage — gate passes; start/end are threaded to the
+    service as start_date/end_date and the summary comes back."""
+    monkeypatch.setattr("pocketpaw_ee.guards.deps.check_workspace_action", _allow())
+
+    called = {}
+
+    async def _get_workspace_usage(workspace_id, *, start_date=None, end_date=None):  # noqa: ANN001
+        called["ws"] = workspace_id
+        called["start_date"] = start_date
+        called["end_date"] = end_date
+        return SimpleNamespace(
+            start_date="2026-06-01",
+            end_date="2026-06-30",
+            models=["gpt-4o"],
+            total_credits=42,
+            buckets=[
+                SimpleNamespace(
+                    date="2026-06-01",
+                    total_credits=42,
+                    by_model={"gpt-4o": SimpleNamespace(credits=42, requests=3, tokens=0)},
+                )
+            ],
+        )
+
+    import pocketpaw_ee.cloud.billing.usage as usage_service
+
+    monkeypatch.setattr(usage_service, "get_workspace_usage", _get_workspace_usage)
+
+    with _identity(workspace="w1", user="u1"):
+        res = await wa_mcp._billing_usage_read_handler({"start": "2026-06-01", "end": "2026-06-30"})
+
+    body = _body(res)
+    assert body["ok"] is True
+    assert body["total_credits"] == 42
+    assert body["models"] == ["gpt-4o"]
+    assert body["buckets"][0]["by_model"]["gpt-4o"]["credits"] == 42
+    assert called == {"ws": "w1", "start_date": "2026-06-01", "end_date": "2026-06-30"}
+
+
+@pytest.mark.asyncio
+async def test_billing_usage_read_denied_no_service_call(monkeypatch, _patch_user):
+    """A gate failure → deny envelope; the usage service is NOT reached."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        _deny_forbidden("workspace.not_member"),
+    )
+    hit = {"called": False}
+
+    async def _get_workspace_usage(workspace_id, *, start_date=None, end_date=None):  # noqa: ANN001
+        hit["called"] = True
+
+    import pocketpaw_ee.cloud.billing.usage as usage_service
+
+    monkeypatch.setattr(usage_service, "get_workspace_usage", _get_workspace_usage)
+
+    with _identity(workspace="w1", user="outsider"):
+        res = await wa_mcp._billing_usage_read_handler({})
+
+    body = _body(res)
+    assert body["ok"] is False
+    assert body["denied"] is True
+    assert hit["called"] is False
+
+
+# ---------------------------------------------------------------------------
+# audit_read — READ (audit.read / ADMIN)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_audit_read_admin_allowed(monkeypatch, _patch_user):
+    """An ADMIN may read the audit log — gate passes; limit is threaded into the
+    AuditQueryRequest and rows come back in the wire shape."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action", _allow(WorkspaceRole.ADMIN)
+    )
+
+    called = {}
+
+    async def _list_events_response(workspace_id, query):  # noqa: ANN001
+        called["ws"] = workspace_id
+        called["limit"] = query.limit
+        return SimpleNamespace(
+            items=[
+                SimpleNamespace(
+                    id="ev1",
+                    actorId="admin1",
+                    action="workspace.updated",
+                    targetType="workspace",
+                    targetId="w1",
+                    metadata={"patched": {"name": "New"}},
+                    at="2026-07-03T00:00:00Z",
+                )
+            ],
+            nextCursor="cursor-xyz",
+        )
+
+    import pocketpaw_ee.cloud.audit.service as audit_service
+
+    monkeypatch.setattr(audit_service, "list_events_response", _list_events_response)
+
+    with _identity(workspace="w1", user="admin1"):
+        res = await wa_mcp._audit_read_handler({"limit": 5})
+
+    body = _body(res)
+    assert body["ok"] is True
+    assert body["count"] == 1
+    assert body["items"][0]["action"] == "workspace.updated"
+    assert body["items"][0]["actor_id"] == "admin1"
+    assert body["next_cursor"] == "cursor-xyz"
+    assert called == {"ws": "w1", "limit": 5}
+
+
+@pytest.mark.asyncio
+async def test_audit_read_member_denied_no_service_call(monkeypatch, _patch_user):
+    """A MEMBER (insufficient role) → deny envelope; the audit service is NOT
+    reached (fail-closed — audit is ADMIN-only)."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        _deny_forbidden("workspace.insufficient_role"),
+    )
+    hit = {"called": False}
+
+    async def _list_events_response(workspace_id, query):  # noqa: ANN001
+        hit["called"] = True
+
+    import pocketpaw_ee.cloud.audit.service as audit_service
+
+    monkeypatch.setattr(audit_service, "list_events_response", _list_events_response)
+
+    with _identity(workspace="w1", user="member1"):
+        res = await wa_mcp._audit_read_handler({"limit": 5})
+
+    body = _body(res)
+    assert body["ok"] is False
+    assert body["denied"] is True
+    assert body["code"] == "workspace.insufficient_role"
+    assert hit["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_read_tools_outside_stream_error():
+    """Every WA-4 READ tool refuses (error envelope) with no identity context."""
+    for handler in (
+        wa_mcp._workspace_settings_read_handler,
+        wa_mcp._invites_list_handler,
+        wa_mcp._connectors_list_handler,
+        wa_mcp._billing_usage_read_handler,
+        wa_mcp._audit_read_handler,
+    ):
+        res = await handler({})
+        assert res.get("is_error") is True
+        assert "no active workspace" in res["content"][0]["text"]
