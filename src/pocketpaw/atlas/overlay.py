@@ -299,6 +299,13 @@ def build_role_aware_provider(scope_key: str) -> EntitlementProvider | None:
     granting them."""
     if not isinstance(scope_key, str) or not scope_key.startswith("ws:"):
         return None
+    # Reject the fail-closed sentinel and an empty workspace id in the helper
+    # itself (not only at the call site) so a role-aware provider is never built
+    # for a scope that can't resolve a real tenant — honors this docstring's
+    # "sentinel -> None" contract regardless of caller.
+    _ws_id = scope_key[len("ws:") :]
+    if not _ws_id or _ws_id == "__missing-workspace-id__":
+        return None
     try:
         from pocketpaw_ee.agent.atlas_provider import RoleAwareEntitlementProvider
     except ImportError:
