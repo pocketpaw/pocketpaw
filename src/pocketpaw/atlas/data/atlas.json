@@ -912,6 +912,7 @@
         "propose",
         "draft",
         "rollback",
+        "roll back",
         "history",
         "changes"
       ],
@@ -1076,6 +1077,7 @@
         "remember",
         "recall",
         "persistent",
+        "persist",
         "ocean",
         "episodic",
         "semantic",
