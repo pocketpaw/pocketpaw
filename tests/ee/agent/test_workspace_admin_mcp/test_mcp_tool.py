@@ -1,7 +1,16 @@
 # tests/ee/agent/test_workspace_admin_mcp/test_mcp_tool.py — the agent-facing MCP
-# surface for workspace administration (feat/workspace-admin-tools, WA-1/WA-2/WA-4).
+# surface for workspace administration (feat/workspace-admin-tools, WA-1/2/4/5).
 #
 # Created: 2026-07-03 (feat/workspace-admin-tools, WA-1).
+# Updated: 2026-07-03 (WA-5) — added propose+deny coverage for the seven ADMIN
+#   WRITE tools (member_remove, invite_create, invite_revoke, connector_enable,
+#   connector_disable, connector_config, workspace_update). Each pins: (a) an ADMIN
+#   identity → a PENDING (executed=False) envelope, the STRICT proposed args are
+#   right, and the underlying service is SPIED and asserted NOT called inline; (b)
+#   a non-ADMIN identity → a deny envelope, propose_admin_action NOT called; plus
+#   an unknown-arg-key-is-dropped test (an agent's stray key never reaches the
+#   proposal). The propose→approve→executor fires-once / reject-no-fire / adapter-
+#   drops-extras coverage lives in tests/cloud/test_admin_action_gate.py.
 # Updated: 2026-07-03 (WA-4) — added coverage for the five READ-only tools:
 #   workspace_settings_read, invites_list, connectors_list, billing_usage_read,
 #   audit_read. Each has a PASS case (correct role → the service is called and its
@@ -118,6 +127,14 @@ def test_server_name_and_tool_ids_contract():
     assert wa_mcp.CONNECTORS_LIST_TOOL_ID == "mcp__pocketpaw_workspace_admin__connectors_list"
     assert wa_mcp.BILLING_USAGE_READ_TOOL_ID == "mcp__pocketpaw_workspace_admin__billing_usage_read"
     assert wa_mcp.AUDIT_READ_TOOL_ID == "mcp__pocketpaw_workspace_admin__audit_read"
+    # WA-5 write tool ids.
+    assert wa_mcp.MEMBER_REMOVE_TOOL_ID == "mcp__pocketpaw_workspace_admin__member_remove"
+    assert wa_mcp.INVITE_CREATE_TOOL_ID == "mcp__pocketpaw_workspace_admin__invite_create"
+    assert wa_mcp.INVITE_REVOKE_TOOL_ID == "mcp__pocketpaw_workspace_admin__invite_revoke"
+    assert wa_mcp.CONNECTOR_ENABLE_TOOL_ID == "mcp__pocketpaw_workspace_admin__connector_enable"
+    assert wa_mcp.CONNECTOR_DISABLE_TOOL_ID == "mcp__pocketpaw_workspace_admin__connector_disable"
+    assert wa_mcp.CONNECTOR_CONFIG_TOOL_ID == "mcp__pocketpaw_workspace_admin__connector_config"
+    assert wa_mcp.WORKSPACE_UPDATE_TOOL_ID == "mcp__pocketpaw_workspace_admin__workspace_update"
     assert set(wa_mcp.ADMIN_TOOL_IDS) == {
         wa_mcp.MEMBERS_LIST_TOOL_ID,
         wa_mcp.MEMBER_UPDATE_ROLE_TOOL_ID,
@@ -126,6 +143,13 @@ def test_server_name_and_tool_ids_contract():
         wa_mcp.CONNECTORS_LIST_TOOL_ID,
         wa_mcp.BILLING_USAGE_READ_TOOL_ID,
         wa_mcp.AUDIT_READ_TOOL_ID,
+        wa_mcp.MEMBER_REMOVE_TOOL_ID,
+        wa_mcp.INVITE_CREATE_TOOL_ID,
+        wa_mcp.INVITE_REVOKE_TOOL_ID,
+        wa_mcp.CONNECTOR_ENABLE_TOOL_ID,
+        wa_mcp.CONNECTOR_DISABLE_TOOL_ID,
+        wa_mcp.CONNECTOR_CONFIG_TOOL_ID,
+        wa_mcp.WORKSPACE_UPDATE_TOOL_ID,
     }
 
 
@@ -718,5 +742,340 @@ async def test_read_tools_outside_stream_error():
         wa_mcp._audit_read_handler,
     ):
         res = await handler({})
+        assert res.get("is_error") is True
+        assert "no active workspace" in res["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# WA-5 ADMIN WRITE tools — propose (never inline) + deny. Shared helpers.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _spy_propose(monkeypatch):
+    """Spy ``propose_admin_action`` (imported function-locally by _propose_write)
+    and return a fixed action id. Captures the kwargs so tests can assert the
+    STRICT proposed args + proposer identity + RBAC action key."""
+    captured: dict = {}
+
+    async def _propose(**kwargs):  # noqa: ANN003
+        captured.update(kwargs)
+        return "action-wa5"
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.admin_proposals.propose.propose_admin_action", _propose)
+    return captured
+
+
+def _admin(monkeypatch):
+    """check_workspace_action passes as ADMIN."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action", lambda *a, **k: WorkspaceRole.ADMIN
+    )
+
+
+def _spy_service(monkeypatch, module_path: str, fn_name: str) -> dict:
+    """Spy a service function so a write tool can assert it was NOT called inline.
+    Returns a dict whose ``called`` flag flips True if the service is ever hit."""
+    import importlib
+
+    mod = importlib.import_module(module_path)
+    spy = {"called": False}
+
+    async def _fn(*a, **k):  # noqa: ANN002, ANN003
+        spy["called"] = True
+
+    monkeypatch.setattr(mod, fn_name, _fn)
+    return spy
+
+
+# ---- member_remove --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_member_remove_admin_proposes_not_inline(monkeypatch, _patch_user, _spy_propose):
+    """ADMIN → PENDING envelope; propose filed with STRICT args (only the target
+    user id); remove_member is spied and asserted NOT called inline."""
+    _admin(monkeypatch)
+    svc = _spy_service(monkeypatch, "pocketpaw_ee.cloud.workspace.service", "remove_member")
+
+    with _identity(workspace="w1", user="admin1"):
+        res = await wa_mcp._member_remove_handler({"user_id": "u2"})
+
+    body = _body(res)
+    assert body["ok"] is True
+    assert body["executed"] is False
+    assert body["status"] == "pending_approval"
+    assert body["action_id"] == "action-wa5"
+    assert _spy_propose["action"] == "workspace.member.remove"
+    assert _spy_propose["args"] == {"target_user_id": "u2"}
+    assert _spy_propose["proposer_user_id"] == "admin1"
+    assert svc["called"] is False  # the write did NOT fire inline
+
+
+@pytest.mark.asyncio
+async def test_member_remove_member_denied_no_propose(monkeypatch, _patch_user):
+    """A MEMBER → deny envelope; propose_admin_action is NOT called."""
+    propose_hit = {"called": False}
+
+    async def _propose(**kwargs):  # noqa: ANN003
+        propose_hit["called"] = True
+        return "x"
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.admin_proposals.propose.propose_admin_action", _propose)
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        _deny_forbidden("workspace.insufficient_role"),
+    )
+
+    with _identity(workspace="w1", user="member1"):
+        res = await wa_mcp._member_remove_handler({"user_id": "u2"})
+
+    body = _body(res)
+    assert body["ok"] is False
+    assert body["denied"] is True
+    assert body["code"] == "workspace.insufficient_role"
+    assert propose_hit["called"] is False
+
+
+# ---- invite_create --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_invite_create_admin_proposes_strict_args(monkeypatch, _patch_user, _spy_propose):
+    """ADMIN → PENDING; propose carries ONLY email + role; create_invite not inline."""
+    _admin(monkeypatch)
+    svc = _spy_service(monkeypatch, "pocketpaw_ee.cloud.workspace.service", "create_invite")
+
+    with _identity(workspace="w1", user="admin1"):
+        res = await wa_mcp._invite_create_handler({"email": "a@b.com", "role": "admin"})
+
+    body = _body(res)
+    assert body["ok"] is True
+    assert body["executed"] is False
+    assert _spy_propose["action"] == "invite.create"
+    assert _spy_propose["args"] == {"email": "a@b.com", "role": "admin"}
+    assert svc["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_invite_create_rejects_owner_role(monkeypatch, _patch_user):
+    """An invite can't mint an owner — refused before any gate/propose."""
+    _admin(monkeypatch)
+    with _identity(workspace="w1", user="admin1"):
+        res = await wa_mcp._invite_create_handler({"email": "a@b.com", "role": "owner"})
+    assert res.get("is_error") is True
+    assert "role must be one of" in res["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_invite_create_member_denied_no_propose(monkeypatch, _patch_user):
+    """A MEMBER → deny envelope; no proposal."""
+    propose_hit = {"called": False}
+
+    async def _propose(**kwargs):  # noqa: ANN003
+        propose_hit["called"] = True
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.admin_proposals.propose.propose_admin_action", _propose)
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        _deny_forbidden("workspace.insufficient_role"),
+    )
+    with _identity(workspace="w1", user="member1"):
+        res = await wa_mcp._invite_create_handler({"email": "a@b.com", "role": "member"})
+    body = _body(res)
+    assert body["ok"] is False
+    assert body["denied"] is True
+    assert propose_hit["called"] is False
+
+
+# ---- invite_revoke --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_invite_revoke_admin_proposes_correct_action(monkeypatch, _patch_user, _spy_propose):
+    """ADMIN → PENDING; the RBAC action is ``invite.revoke`` (the revoke route's
+    action, NOT invite.create); revoke_invite not inline."""
+    _admin(monkeypatch)
+    svc = _spy_service(monkeypatch, "pocketpaw_ee.cloud.workspace.service", "revoke_invite")
+
+    with _identity(workspace="w1", user="admin1"):
+        res = await wa_mcp._invite_revoke_handler({"invite_id": "inv1"})
+
+    body = _body(res)
+    assert body["ok"] is True
+    assert body["executed"] is False
+    assert _spy_propose["action"] == "invite.revoke"
+    assert _spy_propose["args"] == {"invite_id": "inv1"}
+    assert svc["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_invite_revoke_member_denied_no_propose(monkeypatch, _patch_user):
+    propose_hit = {"called": False}
+
+    async def _propose(**kwargs):  # noqa: ANN003
+        propose_hit["called"] = True
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.admin_proposals.propose.propose_admin_action", _propose)
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        _deny_forbidden("workspace.insufficient_role"),
+    )
+    with _identity(workspace="w1", user="member1"):
+        res = await wa_mcp._invite_revoke_handler({"invite_id": "inv1"})
+    body = _body(res)
+    assert body["ok"] is False
+    assert body["denied"] is True
+    assert propose_hit["called"] is False
+
+
+# ---- connector_enable / disable / config ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_connector_enable_admin_proposes(monkeypatch, _patch_user, _spy_propose):
+    _admin(monkeypatch)
+    svc = _spy_service(monkeypatch, "pocketpaw_ee.cloud.connectors.service", "enable_connector")
+    with _identity(workspace="w1", user="admin1"):
+        res = await wa_mcp._connector_enable_handler({"name": "gmail"})
+    body = _body(res)
+    assert body["ok"] is True and body["executed"] is False
+    assert _spy_propose["action"] == "connector.manage"
+    assert _spy_propose["args"] == {"op": "enable", "name": "gmail"}
+    assert svc["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_connector_disable_admin_proposes(monkeypatch, _patch_user, _spy_propose):
+    _admin(monkeypatch)
+    svc = _spy_service(monkeypatch, "pocketpaw_ee.cloud.connectors.service", "disable_connector")
+    with _identity(workspace="w1", user="admin1"):
+        res = await wa_mcp._connector_disable_handler({"name": "gmail"})
+    body = _body(res)
+    assert body["ok"] is True and body["executed"] is False
+    assert _spy_propose["action"] == "connector.manage"
+    assert _spy_propose["args"] == {"op": "disable", "name": "gmail"}
+    assert svc["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_connector_config_admin_proposes_opaque_config(
+    monkeypatch, _patch_user, _spy_propose
+):
+    """The structured config dict rides as OPAQUE data in the args — under a
+    single ``config`` key, never smuggled as top-level args."""
+    _admin(monkeypatch)
+    svc = _spy_service(monkeypatch, "pocketpaw_ee.cloud.connectors.service", "update_config")
+    with _identity(workspace="w1", user="admin1"):
+        res = await wa_mcp._connector_config_handler(
+            {"name": "gmail", "config": {"label": "Inbox", "max": 50}}
+        )
+    body = _body(res)
+    assert body["ok"] is True and body["executed"] is False
+    assert _spy_propose["action"] == "connector.manage"
+    assert _spy_propose["args"] == {
+        "op": "config",
+        "name": "gmail",
+        "config": {"label": "Inbox", "max": 50},
+    }
+    assert svc["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_connector_config_requires_config_object(monkeypatch, _patch_user):
+    """A missing / non-object config is refused before any gate/propose."""
+    _admin(monkeypatch)
+    with _identity(workspace="w1", user="admin1"):
+        res = await wa_mcp._connector_config_handler({"name": "gmail", "config": "not-an-object"})
+    assert res.get("is_error") is True
+    assert "config is required" in res["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_connector_enable_member_denied_no_propose(monkeypatch, _patch_user):
+    propose_hit = {"called": False}
+
+    async def _propose(**kwargs):  # noqa: ANN003
+        propose_hit["called"] = True
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.admin_proposals.propose.propose_admin_action", _propose)
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        _deny_forbidden("workspace.insufficient_role"),
+    )
+    with _identity(workspace="w1", user="member1"):
+        res = await wa_mcp._connector_enable_handler({"name": "gmail"})
+    body = _body(res)
+    assert body["ok"] is False
+    assert body["denied"] is True
+    assert propose_hit["called"] is False
+
+
+# ---- workspace_update -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_workspace_update_admin_proposes_only_recognized_fields(
+    monkeypatch, _patch_user, _spy_propose
+):
+    """UNKNOWN-KEY-DROPPED — an agent's stray ``seats`` / ``plan`` keys never reach
+    the proposal; only name / settings / branding are proposed."""
+    _admin(monkeypatch)
+    svc = _spy_service(monkeypatch, "pocketpaw_ee.cloud.workspace.service", "update")
+    with _identity(workspace="w1", user="admin1"):
+        res = await wa_mcp._workspace_update_handler(
+            {"name": "New Name", "seats": 999, "plan": "enterprise", "owner": "evil"}
+        )
+    body = _body(res)
+    assert body["ok"] is True and body["executed"] is False
+    assert _spy_propose["action"] == "workspace.update"
+    # Only the recognized field survived — the stray keys were dropped.
+    assert _spy_propose["args"] == {"name": "New Name"}
+    assert svc["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_update_requires_a_field(monkeypatch, _patch_user):
+    """No recognized field → refused before any gate/propose."""
+    _admin(monkeypatch)
+    with _identity(workspace="w1", user="admin1"):
+        res = await wa_mcp._workspace_update_handler({"seats": 5})
+    assert res.get("is_error") is True
+    assert "at least one of name / settings / branding" in res["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_update_member_denied_no_propose(monkeypatch, _patch_user):
+    propose_hit = {"called": False}
+
+    async def _propose(**kwargs):  # noqa: ANN003
+        propose_hit["called"] = True
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.admin_proposals.propose.propose_admin_action", _propose)
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        _deny_forbidden("workspace.insufficient_role"),
+    )
+    with _identity(workspace="w1", user="member1"):
+        res = await wa_mcp._workspace_update_handler({"name": "New Name"})
+    body = _body(res)
+    assert body["ok"] is False
+    assert body["denied"] is True
+    assert propose_hit["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_write_tools_outside_stream_error():
+    """Every WA-5 WRITE tool refuses (error envelope) with no identity context."""
+    for handler, args in (
+        (wa_mcp._member_remove_handler, {"user_id": "u2"}),
+        (wa_mcp._invite_create_handler, {"email": "a@b.com"}),
+        (wa_mcp._invite_revoke_handler, {"invite_id": "inv1"}),
+        (wa_mcp._connector_enable_handler, {"name": "gmail"}),
+        (wa_mcp._connector_disable_handler, {"name": "gmail"}),
+        (wa_mcp._connector_config_handler, {"name": "gmail", "config": {}}),
+        (wa_mcp._workspace_update_handler, {"name": "X"}),
+    ):
+        res = await handler(args)
         assert res.get("is_error") is True
         assert "no active workspace" in res["content"][0]["text"]
