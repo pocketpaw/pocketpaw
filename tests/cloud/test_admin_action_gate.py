@@ -1,7 +1,15 @@
 # tests/cloud/test_admin_action_gate.py — the gated workspace-admin-action proposal
-# type (the 8th gated Instinct kind, WA-2).
+# type (the 8th gated Instinct kind, WA-2), plus the WA-5 whitelist extensions.
 #
 # Created: 2026-07-03 (feat/workspace-admin-tools, WA-2).
+# Updated: 2026-07-03 (WA-5) — coverage for the five additional whitelisted ADMIN
+#   writes (member.remove / invite.create / invite.revoke / connector.manage
+#   {enable,disable,config} / workspace.update). Per action: approve → the
+#   whitelisted service fires EXACTLY ONCE with the adapted args; the STRICT
+#   adapter drops a smuggled key (or fails closed on an invalid one, e.g. an invite
+#   role=owner or an unknown connector op); reject via the REAL router → no service
+#   call (parametrized). The connector-config test asserts the config rides INSIDE
+#   the typed DTO, never as top-level kwargs.
 #
 # What this pins:
 #   * propose_admin_action — blob shape (schema 1, RBAC action key, args,
@@ -545,3 +553,268 @@ async def test_recheck_rbac_denies_demoted_proposer(monkeypatch):
 
     with pytest.raises(Forbidden):
         await aa_executor._recheck_rbac("w1", "admin1", "workspace.member.role_change")
+
+
+# ---------------------------------------------------------------------------
+# WA-5 — the additional whitelisted ADMIN writes (member.remove / invite.create /
+# invite.revoke / connector.manage / workspace.update). Per action:
+#   * approve → the whitelisted service fires EXACTLY ONCE with the adapted args;
+#   * reject  → the service is NEVER called;
+#   * the STRICT adapter drops an unknown key an agent smuggled into args.
+# The store/journal/graph fixtures + _make_client + _allow_rbac are reused.
+# ---------------------------------------------------------------------------
+
+
+class _CallSpy:
+    """Generic async spy — records (args, kwargs) per call, returns None (matches
+    the void workspace/connector service sinks)."""
+
+    def __init__(self, *, raises: Exception | None = None):
+        self.calls: list[tuple[tuple, dict]] = []
+        self._raises = raises
+
+    async def __call__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        self.calls.append((args, kwargs))
+        if self._raises is not None:
+            raise self._raises
+        return None
+
+
+async def _propose_approve_execute(store, monkeypatch, *, action: str, args: dict) -> Any:
+    """Propose the given admin action, approve it via the store, run the executor
+    (RBAC re-check stubbed to PASS). Returns the approved Action."""
+    _allow_rbac(monkeypatch)
+    action_id = await aa_propose.propose_admin_action(
+        workspace_id="w1",
+        action=action,
+        args=args,
+        proposer_user_id="admin1",
+    )
+    approved = await store.approve(action_id, approver="approver1")
+    await aa_executor.execute_approved_admin_action(approved)
+    return approved
+
+
+# ---- member.remove --------------------------------------------------------
+
+
+async def test_executor_member_remove_fires_once(store, monkeypatch):
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.workspace.service.remove_member", spy)
+    await _propose_approve_execute(
+        store, monkeypatch, action="workspace.member.remove", args={"target_user_id": "u2"}
+    )
+    # APPROVE-FIRES-ONCE — remove_member(workspace_id, target_user_id, actor).
+    assert len(spy.calls) == 1
+    assert spy.calls[0][0] == ("w1", "u2", "admin1")
+
+
+async def test_executor_member_remove_adapter_drops_extra(store, monkeypatch):
+    """A smuggled ``role='owner'`` in args never reaches remove_member."""
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.workspace.service.remove_member", spy)
+    await _propose_approve_execute(
+        store,
+        monkeypatch,
+        action="workspace.member.remove",
+        args={"target_user_id": "u2", "role": "owner", "cascade": "all"},
+    )
+    assert len(spy.calls) == 1
+    # Only (workspace_id, target_user_id, actor) — no smuggled kwargs.
+    assert spy.calls[0] == (("w1", "u2", "admin1"), {})
+
+
+# ---- invite.create --------------------------------------------------------
+
+
+async def test_executor_invite_create_fires_once(store, monkeypatch):
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.workspace.service.create_invite", spy)
+    await _propose_approve_execute(
+        store,
+        monkeypatch,
+        action="invite.create",
+        args={"email": "a@b.com", "role": "member"},
+    )
+    assert len(spy.calls) == 1
+    call_args = spy.calls[0][0]
+    ctx, workspace_id, body = call_args
+    # The ctx attributes the write to the PROPOSER; the DTO carries ONLY email+role.
+    assert ctx.user_id == "admin1"
+    assert workspace_id == "w1"
+    assert body.email == "a@b.com"
+    assert body.role == "member"
+    assert body.group_id is None  # a smuggle-free DTO
+
+
+async def test_executor_invite_create_adapter_drops_extra(store, monkeypatch):
+    """A smuggled ``group_id`` / ``role='owner'`` in args never reaches the DTO —
+    the strict adapter rejects owner and ignores group_id."""
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.workspace.service.create_invite", spy)
+    # role=owner is invalid for an invite → the adapter raises → MalformedArgs
+    # failure, service never called.
+    approved = await _propose_approve_execute(
+        store,
+        monkeypatch,
+        action="invite.create",
+        args={"email": "a@b.com", "role": "owner", "group_id": "sneaky"},
+    )
+    assert spy.calls == []
+    final = await store.get_action(approved.id)
+    assert final.status == ActionStatus.FAILED
+
+
+# ---- invite.revoke --------------------------------------------------------
+
+
+async def test_executor_invite_revoke_fires_once(store, monkeypatch):
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.workspace.service.revoke_invite", spy)
+    await _propose_approve_execute(
+        store, monkeypatch, action="invite.revoke", args={"invite_id": "inv1"}
+    )
+    # revoke_invite(workspace_id, invite_id, actor_user_id).
+    assert len(spy.calls) == 1
+    assert spy.calls[0][0] == ("w1", "inv1", "admin1")
+
+
+# ---- connector.manage (enable / disable / config) -------------------------
+
+
+async def test_executor_connector_enable_fires_once(store, monkeypatch):
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.connectors.service.enable_connector", spy)
+    await _propose_approve_execute(
+        store, monkeypatch, action="connector.manage", args={"op": "enable", "name": "gmail"}
+    )
+    assert len(spy.calls) == 1
+    call_args = spy.calls[0][0]
+    workspace_id, name, body = call_args
+    assert workspace_id == "w1"
+    assert name == "gmail"
+
+
+async def test_executor_connector_disable_fires_once(store, monkeypatch):
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.connectors.service.disable_connector", spy)
+    await _propose_approve_execute(
+        store, monkeypatch, action="connector.manage", args={"op": "disable", "name": "gmail"}
+    )
+    assert len(spy.calls) == 1
+    assert spy.calls[0][0] == ("w1", "gmail")
+
+
+async def test_executor_connector_config_passes_opaque_config(store, monkeypatch):
+    """op=config → update_config(workspace_id, name, UpdateConnectorConfigRequest)
+    with the config carried INSIDE the DTO (never as top-level kwargs)."""
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.connectors.service.update_config", spy)
+    await _propose_approve_execute(
+        store,
+        monkeypatch,
+        action="connector.manage",
+        args={"op": "config", "name": "gmail", "config": {"label": "Inbox"}},
+    )
+    assert len(spy.calls) == 1
+    call_args, call_kwargs = spy.calls[0]
+    workspace_id, name, body = call_args
+    assert workspace_id == "w1"
+    assert name == "gmail"
+    assert body.config == {"label": "Inbox"}  # opaque config inside the DTO
+    assert call_kwargs == {}  # nothing smuggled as kwargs
+
+
+async def test_executor_connector_manage_bad_op_fails(store, monkeypatch):
+    """An unknown ``op`` → the adapter raises → MalformedArgs failure, no call."""
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.connectors.service.enable_connector", spy)
+    approved = await _propose_approve_execute(
+        store, monkeypatch, action="connector.manage", args={"op": "delete", "name": "gmail"}
+    )
+    assert spy.calls == []
+    final = await store.get_action(approved.id)
+    assert final.status == ActionStatus.FAILED
+
+
+# ---- workspace.update -----------------------------------------------------
+
+
+async def test_executor_workspace_update_fires_once_only_recognized(store, monkeypatch):
+    """approve → update(ctx, workspace_id, UpdateWorkspaceRequest) with ONLY the
+    recognized field; a smuggled ``seats`` never reaches the DTO."""
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.workspace.service.update", spy)
+    await _propose_approve_execute(
+        store,
+        monkeypatch,
+        action="workspace.update",
+        # NOTE: only ``name`` is a recognized field — the tool would have stripped
+        # the rest, but even a hand-crafted blob with extras is stripped by the
+        # strict adapter (the ``fields`` key only carries recognized fields).
+        args={"name": "New Name"},
+    )
+    assert len(spy.calls) == 1
+    ctx, workspace_id, body = spy.calls[0][0]
+    assert ctx.user_id == "admin1"
+    assert workspace_id == "w1"
+    assert body.name == "New Name"
+    assert body.settings is None
+    assert body.branding is None
+
+
+# ---- reject path — the executor never runs for any new action -------------
+
+
+@pytest.mark.parametrize(
+    ("action", "args", "svc_path"),
+    [
+        (
+            "workspace.member.remove",
+            {"target_user_id": "u2"},
+            "pocketpaw_ee.cloud.workspace.service.remove_member",
+        ),
+        (
+            "invite.create",
+            {"email": "a@b.com", "role": "member"},
+            "pocketpaw_ee.cloud.workspace.service.create_invite",
+        ),
+        (
+            "invite.revoke",
+            {"invite_id": "inv1"},
+            "pocketpaw_ee.cloud.workspace.service.revoke_invite",
+        ),
+        (
+            "connector.manage",
+            {"op": "enable", "name": "gmail"},
+            "pocketpaw_ee.cloud.connectors.service.enable_connector",
+        ),
+        (
+            "workspace.update",
+            {"name": "New Name"},
+            "pocketpaw_ee.cloud.workspace.service.update",
+        ),
+    ],
+)
+async def test_production_path_reject_no_service_call_wa5(
+    store, journal, graph, monkeypatch, action, args, svc_path
+):
+    """REJECT-NO-FIRE for every WA-5 write: reject via the REAL router handler →
+    the executor never runs → the whitelisted service is NEVER called."""
+    spy = _CallSpy()
+    monkeypatch.setattr(svc_path, spy)
+    _allow_rbac(monkeypatch)
+
+    action_id = await aa_propose.propose_admin_action(
+        workspace_id="w1", action=action, args=args, proposer_user_id="admin1"
+    )
+
+    user = _FakeUser("approver1", "w1")
+    client = _make_client(user, monkeypatch)
+    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda *a, **k: store)
+    resp = client.post(f"/instinct/actions/{action_id}/reject", json={"reason": "no"})
+    assert resp.status_code == 200, resp.text
+
+    assert spy.calls == []
+    final = await store.get_action(action_id)
+    assert final.status == ActionStatus.REJECTED

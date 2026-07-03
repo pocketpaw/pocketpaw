@@ -66,6 +66,29 @@
 #   ``guards.deps`` + the read services (connectors / billing.usage / audit) +
 #   the User Beanie load, all lazily inside handlers, so the import surface stays
 #   minimal (mirrors connectors.py's function-local imports).
+#
+# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-5 — seven ADMIN WRITE tools).
+#   Each PROPOSES through the existing ``_admin_action`` Instinct gate exactly like
+#   member_update_role (WA-2) — validate args → RBAC-gate (deny envelope on
+#   Forbidden, never raised) → ``propose_admin_action`` → PENDING envelope. NONE
+#   mutates inline; the write fires only on human approval, after the executor
+#   re-checks the proposer's CURRENT role. The new tools + their RBAC action + the
+#   executor whitelist entry each extends (in admin_proposals/executor.py):
+#     * member_remove(user_id) → ``workspace.member.remove`` (ADMIN) →
+#       remove_member (cascades keys/sessions/member-data — the service's job).
+#     * invite_create(email, role) → ``invite.create`` (ADMIN) → create_invite
+#       (role constrained to admin|member).
+#     * invite_revoke(invite_id) → ``invite.revoke`` (ADMIN — the REST revoke
+#       route's action, NOT invite.create) → revoke_invite.
+#     * connector_enable(name) / connector_disable(name) / connector_config(name,
+#       config) → ``connector.manage`` (ADMIN) → the connectors enable / disable /
+#       update_config services. connector_config's ``config`` is carried as an
+#       OPAQUE dict the service validates — it never becomes top-level kwargs.
+#     * workspace_update(name?, settings?, branding?) → ``workspace.update``
+#       (ADMIN) → workspace.service.update. ONLY the recognized fields are
+#       proposed; any stray key an agent adds is dropped here AND in the strict
+#       adapter. The write-side helpers ``_gate_write`` + ``_propose_write`` are
+#       the shared chokepoint (parallel to WA-4's ``_gate_read``).
 """Agent-side MCP surface for workspace administration.
 
 Tools registered:
@@ -121,6 +144,15 @@ INVITES_LIST_TOOL_ID = f"mcp__{SERVER_NAME}__invites_list"
 CONNECTORS_LIST_TOOL_ID = f"mcp__{SERVER_NAME}__connectors_list"
 BILLING_USAGE_READ_TOOL_ID = f"mcp__{SERVER_NAME}__billing_usage_read"
 AUDIT_READ_TOOL_ID = f"mcp__{SERVER_NAME}__audit_read"
+# WA-5 — ADMIN WRITE tools. Each PROPOSES through the ``_admin_action`` Instinct
+# gate (never mutates inline), exactly like member_update_role.
+MEMBER_REMOVE_TOOL_ID = f"mcp__{SERVER_NAME}__member_remove"
+INVITE_CREATE_TOOL_ID = f"mcp__{SERVER_NAME}__invite_create"
+INVITE_REVOKE_TOOL_ID = f"mcp__{SERVER_NAME}__invite_revoke"
+CONNECTOR_ENABLE_TOOL_ID = f"mcp__{SERVER_NAME}__connector_enable"
+CONNECTOR_DISABLE_TOOL_ID = f"mcp__{SERVER_NAME}__connector_disable"
+CONNECTOR_CONFIG_TOOL_ID = f"mcp__{SERVER_NAME}__connector_config"
+WORKSPACE_UPDATE_TOOL_ID = f"mcp__{SERVER_NAME}__workspace_update"
 
 ADMIN_TOOL_IDS = (
     MEMBERS_LIST_TOOL_ID,
@@ -130,6 +162,13 @@ ADMIN_TOOL_IDS = (
     CONNECTORS_LIST_TOOL_ID,
     BILLING_USAGE_READ_TOOL_ID,
     AUDIT_READ_TOOL_ID,
+    MEMBER_REMOVE_TOOL_ID,
+    INVITE_CREATE_TOOL_ID,
+    INVITE_REVOKE_TOOL_ID,
+    CONNECTOR_ENABLE_TOOL_ID,
+    CONNECTOR_DISABLE_TOOL_ID,
+    CONNECTOR_CONFIG_TOOL_ID,
+    WORKSPACE_UPDATE_TOOL_ID,
 )
 
 # The RBAC action keys these tools gate on (canonical entries in
@@ -141,6 +180,16 @@ _READ_ACTION = "workspace.view"
 _ROLE_CHANGE_ACTION = "workspace.member.role_change"
 _INVITE_ACTION = "invite.create"
 _AUDIT_ACTION = "audit.read"
+# WA-5 ADMIN WRITE actions (all ADMIN in guards.actions.ACTIONS). The tool RBAC-
+# gates on these; the executor whitelists + re-checks the SAME keys.
+_MEMBER_REMOVE_ACTION = "workspace.member.remove"
+_INVITE_REVOKE_ACTION = "invite.revoke"  # the REST revoke route's action (not invite.create)
+_CONNECTOR_ACTION = "connector.manage"
+_WORKSPACE_UPDATE_ACTION = "workspace.update"
+
+# The roles a member may be INVITED as (mirrors CreateInviteRequest / the REST
+# invite DTO — an invite can never mint an owner).
+_VALID_INVITE_ROLES = frozenset({"admin", "member"})
 
 # The workspace roles a member may be assigned via member_update_role. Kept in
 # sync with ``guards.rbac.WorkspaceRole`` — an out-of-set value is refused
@@ -271,6 +320,82 @@ async def _gate_read(
         )
 
     return workspace_id, user_id, None
+
+
+async def _gate_write(
+    tool: str, action: str, deny_message: str
+) -> tuple[str, str, None] | dict:
+    """Shared identity-resolve + RBAC-gate for a WRITE tool.
+
+    IDENTICAL control flow to ``_gate_read`` — a Forbidden is CAUGHT and returned
+    as a deny envelope, never raised; the gate audits the denial. The difference
+    is purely semantic: a write tool that passes this gate does NOT execute — it
+    goes on to ``propose_admin_action`` (WA-2). Kept as its own name so the call
+    sites read as writes. Returns ``(workspace_id, user_id, None)`` on PASS or a
+    ready-to-return response ``dict`` on any failure."""
+    return await _gate_read(tool, action, deny_message)
+
+
+async def _propose_write(
+    *,
+    tool: str,
+    action: str,
+    workspace_id: str,
+    user_id: str,
+    args: dict[str, Any],
+    summary: str,
+    title: str,
+    proposed_change: dict[str, Any],
+    what: str,
+) -> dict:
+    """File a live ``_admin_action`` proposal and return a PENDING envelope.
+
+    The single write-side chokepoint (mirrors member_update_role's WA-2 tail):
+    the tool NEVER mutates inline — it proposes and returns "pending in the
+    Tray". ``args`` is the STRICT arg set the executor's adapter will read (only
+    the keys the matching ``_adapt_*`` expects). ``proposed_change`` is the
+    human-facing echo. ``what`` is a short noun phrase for the relay message."""
+    from pocketpaw_ee.cloud.admin_proposals.propose import propose_admin_action
+
+    try:
+        action_id = await propose_admin_action(
+            workspace_id=workspace_id,
+            action=action,
+            args=args,
+            proposer_user_id=user_id,
+            summary=summary,
+            title=title,
+        )
+    except Exception as exc:  # noqa: BLE001 — surface a clean MCP error, never a 500
+        logger.warning("%s: propose_admin_action failed", tool, exc_info=True)
+        return _error_response(f"could not file the {what} for approval: {exc}")
+
+    logger.info(
+        "%s PROPOSED (WA-5): actor=%s workspace=%s action=%s proposal=%s — "
+        "pending human approval in the Tray",
+        tool,
+        user_id,
+        workspace_id,
+        action,
+        action_id,
+    )
+    return _success_response(
+        {
+            "ok": True,
+            "executed": False,
+            "status": "pending_approval",
+            "action_id": action_id,
+            "proposal_id": action_id,
+            "proposed_change": proposed_change,
+            "message": (
+                f"This is an admin action ({what}) and must be approved by a human "
+                "— it is never applied directly from chat. I've proposed it; it's "
+                "now PENDING approval in the Tray and will take effect only once a "
+                "human approves it. No change has been made yet. Tell the user "
+                "you've requested it and it needs approval; do NOT claim it's done."
+            ),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -711,6 +836,289 @@ async def _audit_read_handler(args: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# WA-5 ADMIN WRITE tool handlers — each PROPOSES through the ``_admin_action``
+# gate (never mutates inline). Shape: validate args → _gate_write (deny envelope
+# on Forbidden) → _propose_write (pending envelope). The mutation fires ONLY on
+# human approval, after the executor re-checks the proposer's CURRENT role.
+# ---------------------------------------------------------------------------
+
+
+async def _member_remove_handler(args: dict) -> dict:
+    """WRITE: remove a member from the workspace. ADMIN-gated; Instinct-proposed.
+
+    The service cascade (API keys, sessions, member data) is the service's job —
+    the tool only proposes it. The proposal carries ONLY the target user id."""
+    workspace_id, user_id, _pocket_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "no active workspace — member_remove can only be called from inside a "
+            "cloud chat stream."
+        )
+    target_user_id = args.get("user_id")
+    if not isinstance(target_user_id, str) or not target_user_id.strip():
+        return _error_response("user_id is required (string — the member to remove).")
+
+    gate = await _gate_write(
+        "member_remove",
+        _MEMBER_REMOVE_ACTION,
+        "You don't have permission to remove members from this workspace",
+    )
+    if isinstance(gate, dict):
+        return gate
+
+    return await _propose_write(
+        tool="member_remove",
+        action=_MEMBER_REMOVE_ACTION,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        args={"target_user_id": target_user_id},
+        summary=f"Remove member {target_user_id} from the workspace.",
+        title=f"Remove member {target_user_id}",
+        proposed_change={"user_id": target_user_id, "workspace_id": workspace_id},
+        what="member removal",
+    )
+
+
+async def _invite_create_handler(args: dict) -> dict:
+    """WRITE: invite someone to the workspace. ADMIN-gated; Instinct-proposed.
+
+    The proposal carries ONLY email + role (constrained to admin | member — an
+    invite can't mint an owner)."""
+    workspace_id, user_id, _pocket_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "no active workspace — invite_create can only be called from inside a "
+            "cloud chat stream."
+        )
+    email = args.get("email")
+    if not isinstance(email, str) or not email.strip():
+        return _error_response("email is required (string — who to invite).")
+    role = args.get("role", "member")
+    if not isinstance(role, str) or role not in _VALID_INVITE_ROLES:
+        return _error_response(
+            f"role must be one of {sorted(_VALID_INVITE_ROLES)} (an invite can't be owner)."
+        )
+
+    gate = await _gate_write(
+        "invite_create",
+        _INVITE_ACTION,
+        "You don't have permission to invite members to this workspace",
+    )
+    if isinstance(gate, dict):
+        return gate
+
+    return await _propose_write(
+        tool="invite_create",
+        action=_INVITE_ACTION,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        args={"email": email, "role": role},
+        summary=f"Invite {email} as '{role}'.",
+        title=f"Invite {email} → {role}",
+        proposed_change={"email": email, "role": role, "workspace_id": workspace_id},
+        what="invite",
+    )
+
+
+async def _invite_revoke_handler(args: dict) -> dict:
+    """WRITE: revoke a pending invite. ADMIN-gated (``invite.revoke`` — the same
+    action the REST revoke route uses); Instinct-proposed. Carries ONLY the
+    invite id."""
+    workspace_id, user_id, _pocket_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "no active workspace — invite_revoke can only be called from inside a "
+            "cloud chat stream."
+        )
+    invite_id = args.get("invite_id")
+    if not isinstance(invite_id, str) or not invite_id.strip():
+        return _error_response("invite_id is required (string — from invites_list).")
+
+    gate = await _gate_write(
+        "invite_revoke",
+        _INVITE_REVOKE_ACTION,
+        "You don't have permission to revoke invites in this workspace",
+    )
+    if isinstance(gate, dict):
+        return gate
+
+    return await _propose_write(
+        tool="invite_revoke",
+        action=_INVITE_REVOKE_ACTION,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        args={"invite_id": invite_id},
+        summary=f"Revoke invite {invite_id}.",
+        title=f"Revoke invite {invite_id}",
+        proposed_change={"invite_id": invite_id, "workspace_id": workspace_id},
+        what="invite revocation",
+    )
+
+
+async def _connector_enable_handler(args: dict) -> dict:
+    """WRITE: enable a connector for the workspace. ADMIN-gated
+    (``connector.manage``); Instinct-proposed. Carries op=enable + name."""
+    workspace_id, user_id, _pocket_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "no active workspace — connector_enable can only be called from inside "
+            "a cloud chat stream."
+        )
+    name = args.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return _error_response("name is required (string — the connector to enable).")
+
+    gate = await _gate_write(
+        "connector_enable",
+        _CONNECTOR_ACTION,
+        "You don't have permission to manage connectors in this workspace",
+    )
+    if isinstance(gate, dict):
+        return gate
+
+    return await _propose_write(
+        tool="connector_enable",
+        action=_CONNECTOR_ACTION,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        args={"op": "enable", "name": name},
+        summary=f"Enable the '{name}' connector.",
+        title=f"Enable connector '{name}'",
+        proposed_change={"op": "enable", "name": name, "workspace_id": workspace_id},
+        what="connector enable",
+    )
+
+
+async def _connector_disable_handler(args: dict) -> dict:
+    """WRITE: disable a connector for the workspace. ADMIN-gated
+    (``connector.manage``); Instinct-proposed. Carries op=disable + name."""
+    workspace_id, user_id, _pocket_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "no active workspace — connector_disable can only be called from inside "
+            "a cloud chat stream."
+        )
+    name = args.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return _error_response("name is required (string — the connector to disable).")
+
+    gate = await _gate_write(
+        "connector_disable",
+        _CONNECTOR_ACTION,
+        "You don't have permission to manage connectors in this workspace",
+    )
+    if isinstance(gate, dict):
+        return gate
+
+    return await _propose_write(
+        tool="connector_disable",
+        action=_CONNECTOR_ACTION,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        args={"op": "disable", "name": name},
+        summary=f"Disable the '{name}' connector.",
+        title=f"Disable connector '{name}'",
+        proposed_change={"op": "disable", "name": name, "workspace_id": workspace_id},
+        what="connector disable",
+    )
+
+
+async def _connector_config_handler(args: dict) -> dict:
+    """WRITE: patch a connector's saved config. ADMIN-gated (``connector.manage``);
+    Instinct-proposed. ``config`` is a structured dict passed to the executor as
+    OPAQUE data — the connectors service validates it and only merges it into the
+    connector row's config (it never becomes top-level kwargs)."""
+    workspace_id, user_id, _pocket_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "no active workspace — connector_config can only be called from inside "
+            "a cloud chat stream."
+        )
+    name = args.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return _error_response("name is required (string — the connector to configure).")
+    config = args.get("config")
+    if not isinstance(config, dict):
+        return _error_response("config is required (object — the config patch to apply).")
+
+    gate = await _gate_write(
+        "connector_config",
+        _CONNECTOR_ACTION,
+        "You don't have permission to manage connectors in this workspace",
+    )
+    if isinstance(gate, dict):
+        return gate
+
+    return await _propose_write(
+        tool="connector_config",
+        action=_CONNECTOR_ACTION,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        args={"op": "config", "name": name, "config": config},
+        summary=f"Update the '{name}' connector config.",
+        title=f"Configure connector '{name}'",
+        proposed_change={"op": "config", "name": name, "workspace_id": workspace_id},
+        what="connector configuration",
+    )
+
+
+async def _workspace_update_handler(args: dict) -> dict:
+    """WRITE: update workspace name / settings / branding. ADMIN-gated
+    (``workspace.update``); Instinct-proposed. ONLY the recognized fields are
+    proposed — any other key is dropped here (and again in the strict adapter)."""
+    workspace_id, user_id, _pocket_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "no active workspace — workspace_update can only be called from inside "
+            "a cloud chat stream."
+        )
+
+    name = args.get("name")
+    settings = args.get("settings")
+    branding = args.get("branding")
+    if name is not None and not isinstance(name, str):
+        return _error_response("name must be a string when provided.")
+    if settings is not None and not isinstance(settings, dict):
+        return _error_response("settings must be an object when provided.")
+    if branding is not None and not isinstance(branding, dict):
+        return _error_response("branding must be an object when provided.")
+
+    # Build the STRICT proposed-args set from ONLY the recognized fields that were
+    # actually supplied (an agent's stray keys never make it into the proposal).
+    proposed_args: dict[str, Any] = {}
+    if name is not None:
+        proposed_args["name"] = name
+    if settings is not None:
+        proposed_args["settings"] = settings
+    if branding is not None:
+        proposed_args["branding"] = branding
+    if not proposed_args:
+        return _error_response(
+            "provide at least one of name / settings / branding to update."
+        )
+
+    gate = await _gate_write(
+        "workspace_update",
+        _WORKSPACE_UPDATE_ACTION,
+        "You don't have permission to update this workspace",
+    )
+    if isinstance(gate, dict):
+        return gate
+
+    return await _propose_write(
+        tool="workspace_update",
+        action=_WORKSPACE_UPDATE_ACTION,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        args=proposed_args,
+        summary="Update workspace settings.",
+        title="Update workspace settings",
+        proposed_change={"fields": sorted(proposed_args.keys()), "workspace_id": workspace_id},
+        what="workspace update",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Server factory
 # ---------------------------------------------------------------------------
 
@@ -874,6 +1282,202 @@ def build_admin_server() -> tuple[str, Any] | None:
     async def audit_read(args):  # type: ignore[no-untyped-def]
         return await _audit_read_handler(args)
 
+    @tool(
+        "member_remove",
+        (
+            "Propose REMOVING a member from the CURRENT workspace. This is an ADMIN "
+            "action and is NEVER applied directly from chat — it's proposed for a "
+            "human to approve and only takes effect once approved. Removing a member "
+            "also revokes their API keys and sessions and purges their personal "
+            "connector data. Arg: `user_id` (the member to remove, from "
+            "members_list). If you lack admin permission, the result says so "
+            "(denied) — relay that. On success the result says the removal is "
+            "PENDING approval, not done — do NOT claim the member was removed."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "user_id": {
+                    "type": "string",
+                    "description": "The member's user id (from members_list) to remove.",
+                },
+            },
+            "required": ["user_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def member_remove(args):  # type: ignore[no-untyped-def]
+        return await _member_remove_handler(args)
+
+    @tool(
+        "invite_create",
+        (
+            "Propose INVITING someone to the CURRENT workspace by email. This is an "
+            "ADMIN action and is NEVER applied directly from chat — it's proposed "
+            "for a human to approve. Args: `email` (who to invite) and `role` "
+            "('admin' or 'member' — an invite can't be owner; defaults to 'member'). "
+            "If you lack admin permission, the result says so (denied). On success "
+            "the result says the invite is PENDING approval — do NOT claim it was "
+            "sent."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "description": "The email address to invite.",
+                },
+                "role": {
+                    "type": "string",
+                    "enum": ["admin", "member"],
+                    "description": "The role the invitee will get. Defaults to member.",
+                },
+            },
+            "required": ["email"],
+            "additionalProperties": False,
+        },
+    )
+    async def invite_create(args):  # type: ignore[no-untyped-def]
+        return await _invite_create_handler(args)
+
+    @tool(
+        "invite_revoke",
+        (
+            "Propose REVOKING a pending invite in the CURRENT workspace. This is an "
+            "ADMIN action and is NEVER applied directly from chat — it's proposed "
+            "for a human to approve. Arg: `invite_id` (from invites_list). If you "
+            "lack admin permission, the result says so (denied). On success the "
+            "result says the revocation is PENDING approval — do NOT claim it was "
+            "revoked."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "invite_id": {
+                    "type": "string",
+                    "description": "The invite id (from invites_list) to revoke.",
+                },
+            },
+            "required": ["invite_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def invite_revoke(args):  # type: ignore[no-untyped-def]
+        return await _invite_revoke_handler(args)
+
+    @tool(
+        "connector_enable",
+        (
+            "Propose ENABLING a connector (integration like Gmail, GitHub) for the "
+            "CURRENT workspace. This is an ADMIN action and is NEVER applied "
+            "directly from chat — it's proposed for a human to approve. Arg: `name` "
+            "(the connector name, from connectors_list). If you lack admin "
+            "permission, the result says so (denied). On success the result says "
+            "the change is PENDING approval — do NOT claim it was enabled."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The connector name (from connectors_list) to enable.",
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    )
+    async def connector_enable(args):  # type: ignore[no-untyped-def]
+        return await _connector_enable_handler(args)
+
+    @tool(
+        "connector_disable",
+        (
+            "Propose DISABLING a connector for the CURRENT workspace. This is an "
+            "ADMIN action and is NEVER applied directly from chat — it's proposed "
+            "for a human to approve. Arg: `name` (from connectors_list). If you lack "
+            "admin permission, the result says so (denied). On success the result "
+            "says the change is PENDING approval — do NOT claim it was disabled."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The connector name (from connectors_list) to disable.",
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    )
+    async def connector_disable(args):  # type: ignore[no-untyped-def]
+        return await _connector_disable_handler(args)
+
+    @tool(
+        "connector_config",
+        (
+            "Propose UPDATING a connector's saved configuration in the CURRENT "
+            "workspace. This is an ADMIN action and is NEVER applied directly from "
+            "chat — it's proposed for a human to approve. Args: `name` (from "
+            "connectors_list) and `config` (an object of config keys to patch — the "
+            "connector validates it). If you lack admin permission, the result says "
+            "so (denied). On success the result says the change is PENDING approval "
+            "— do NOT claim it was applied."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The connector name (from connectors_list) to configure.",
+                },
+                "config": {
+                    "type": "object",
+                    "description": "The config keys to patch (merged into the saved config).",
+                },
+            },
+            "required": ["name", "config"],
+            "additionalProperties": False,
+        },
+    )
+    async def connector_config(args):  # type: ignore[no-untyped-def]
+        return await _connector_config_handler(args)
+
+    @tool(
+        "workspace_update",
+        (
+            "Propose UPDATING the CURRENT workspace's name, settings, or branding. "
+            "This is an ADMIN action and is NEVER applied directly from chat — it's "
+            "proposed for a human to approve. Optional args: `name` (new workspace "
+            "name), `settings` (a settings object), `branding` (a branding object); "
+            "provide at least one. Only these fields are proposed — anything else is "
+            "ignored. If you lack admin permission, the result says so (denied). On "
+            "success the result says the change is PENDING approval — do NOT claim "
+            "it was updated."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "New workspace name.",
+                },
+                "settings": {
+                    "type": "object",
+                    "description": "Workspace settings object to apply.",
+                },
+                "branding": {
+                    "type": "object",
+                    "description": "Branding object (display_name, tab_title, accent_color, ...).",
+                },
+            },
+            "additionalProperties": False,
+        },
+    )
+    async def workspace_update(args):  # type: ignore[no-untyped-def]
+        return await _workspace_update_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
@@ -885,6 +1489,13 @@ def build_admin_server() -> tuple[str, Any] | None:
             connectors_list,
             billing_usage_read,
             audit_read,
+            member_remove,
+            invite_create,
+            invite_revoke,
+            connector_enable,
+            connector_disable,
+            connector_config,
+            workspace_update,
         ],
     )
     return SERVER_NAME, server
@@ -895,10 +1506,17 @@ __all__ = [
     "AUDIT_READ_TOOL_ID",
     "BILLING_USAGE_READ_TOOL_ID",
     "CONNECTORS_LIST_TOOL_ID",
+    "CONNECTOR_CONFIG_TOOL_ID",
+    "CONNECTOR_DISABLE_TOOL_ID",
+    "CONNECTOR_ENABLE_TOOL_ID",
     "INVITES_LIST_TOOL_ID",
+    "INVITE_CREATE_TOOL_ID",
+    "INVITE_REVOKE_TOOL_ID",
     "MEMBERS_LIST_TOOL_ID",
+    "MEMBER_REMOVE_TOOL_ID",
     "MEMBER_UPDATE_ROLE_TOOL_ID",
     "SERVER_NAME",
     "WORKSPACE_SETTINGS_READ_TOOL_ID",
+    "WORKSPACE_UPDATE_TOOL_ID",
     "build_admin_server",
 ]
