@@ -1,4 +1,11 @@
 # test_mcp_tool.py — MCP server registration + handler tests.
+# Updated: 2026-07-03 (fix/mcp-tool-json-string-args) — added
+#   ``TestCreateHandlerCoercesJsonStringArgs`` and
+#   ``TestEditHandlerCoercesJsonStringArgs``, pinning the fix where the
+#   chat agent passes object/array args (hints/spec/ops) as JSON *strings*.
+#   Before the fix ``hints`` as a string crashed ``PocketSpecialistHints(**...)``
+#   and ``spec``/``ops`` strings were silently dropped, so the model burned a
+#   round-trip retrying. The handlers now coerce via ``coerce_json_object_args``.
 # Updated: 2026-05-23 (fix/pocket-edit-not-visible) — added the
 #   ``TestEditHandler`` class covering the regression where the
 #   ``pocket_specialist__edit`` MCP tool returned a "successful"
@@ -240,6 +247,194 @@ class TestCreateHandler:
         assert "is_error" not in payload, (
             "redraft is the create validation retry signal — flagging it breaks the retry loop"
         )
+
+
+class TestCreateHandlerCoercesJsonStringArgs:
+    """The captain's report: the chat agent sometimes passes an object-typed
+    arg as a JSON *string* (``hints='{"name":"x"}'``) instead of a real
+    object, and narrates "the tool needs an actual object, not a stringified
+    JSON" before retrying. Before the fix a stringified ``hints`` crashed
+    ``PocketSpecialistHints(**raw_hints)`` and a stringified ``spec`` was
+    silently dropped to ``None``. The handler now coerces both."""
+
+    @pytest.mark.asyncio
+    async def test_hints_as_json_string_is_coerced_not_crashed(self):
+        from pocketpaw_ee.agent.pocket_specialist.mcp_tool import _create_handler
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistCreateOutput,
+            PocketSpecialistHints,
+        )
+
+        captured = {}
+
+        async def _capture(payload, **kwargs):
+            captured["payload"] = payload
+            return PocketSpecialistCreateOutput(
+                ok=True,
+                action="created",
+                pocket={"id": "p-1"},
+                duration_ms=1,
+                backend_used="agent_mode",
+            )
+
+        with (
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_workspace_id",
+                return_value="ws-1",
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_user_id",
+                return_value="user-A",
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.run_specialist",
+                new=_capture,
+            ),
+        ):
+            payload = await _create_handler(
+                {"brief": "Build a tracker", "hints": '{"name": "Repos", "color": "blue"}'}
+            )
+
+        assert "is_error" not in payload, "a JSON-string hints must not error"
+        hints = captured["payload"].hints
+        assert isinstance(hints, PocketSpecialistHints)
+        assert hints.name == "Repos"
+
+    @pytest.mark.asyncio
+    async def test_spec_as_json_string_is_coerced_not_dropped(self):
+        from pocketpaw_ee.agent.pocket_specialist.mcp_tool import _create_handler
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistCreateOutput,
+        )
+
+        captured = {}
+
+        async def _capture(payload, **kwargs):
+            captured["payload"] = payload
+            return PocketSpecialistCreateOutput(
+                ok=True,
+                action="created",
+                pocket={"id": "p-1"},
+                duration_ms=1,
+                backend_used="agent_mode",
+            )
+
+        with (
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_workspace_id",
+                return_value="ws-1",
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_user_id",
+                return_value="user-A",
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.run_specialist",
+                new=_capture,
+            ),
+        ):
+            payload = await _create_handler(
+                {"brief": "Second call", "spec": '{"type": "grid", "children": []}'}
+            )
+
+        assert "is_error" not in payload
+        spec = captured["payload"].spec
+        assert isinstance(spec, dict), "a JSON-string spec must be decoded, not dropped to None"
+        assert spec["type"] == "grid"
+
+    @pytest.mark.asyncio
+    async def test_real_object_hints_still_work(self):
+        """The fix must not regress the normal path — a real object arg is
+        untouched."""
+        from pocketpaw_ee.agent.pocket_specialist.mcp_tool import _create_handler
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistCreateOutput,
+            PocketSpecialistHints,
+        )
+
+        captured = {}
+
+        async def _capture(payload, **kwargs):
+            captured["payload"] = payload
+            return PocketSpecialistCreateOutput(
+                ok=True,
+                action="created",
+                pocket={"id": "p-1"},
+                duration_ms=1,
+                backend_used="agent_mode",
+            )
+
+        with (
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_workspace_id",
+                return_value="ws-1",
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_user_id",
+                return_value="user-A",
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.run_specialist",
+                new=_capture,
+            ),
+        ):
+            await _create_handler({"brief": "Build a tracker", "hints": {"name": "Repos"}})
+
+        assert isinstance(captured["payload"].hints, PocketSpecialistHints)
+        assert captured["payload"].hints.name == "Repos"
+
+
+class TestEditHandlerCoercesJsonStringArgs:
+    """The ``edit`` twin: a stringified ``ops`` array was silently dropped to
+    ``None`` (so the agent's second-call op list vanished and the edit
+    no-op'd), and a stringified ``pocket``/``target_node_ids`` handoff was
+    passed through raw. The handler now coerces them."""
+
+    @pytest.mark.asyncio
+    async def test_ops_as_json_string_is_coerced_not_dropped(self):
+        from pocketpaw_ee.agent.pocket_specialist.mcp_tool import _edit_handler
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistEditOutput,
+        )
+
+        captured = {}
+
+        async def _capture(payload, **kwargs):
+            captured["payload"] = payload
+            return PocketSpecialistEditOutput(
+                ok=True,
+                action="applied",
+                pocket_id="p1",
+                ops=[{"op": "set_state", "args": {}}],
+                duration_ms=1,
+                backend_used="agent_mode",
+            )
+
+        with (
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_workspace_id",
+                return_value="ws-1",
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.current_user_id",
+                return_value="user-A",
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.mcp_tool.run_edit_specialist",
+                new=_capture,
+            ),
+        ):
+            await _edit_handler(
+                {
+                    "pocket_id": "p1",
+                    "intent": "mark done",
+                    "ops": '[{"op": "set_state", "args": {"path": "x", "value": 1}}]',
+                }
+            )
+
+        ops = captured["payload"].ops
+        assert isinstance(ops, list), "a JSON-string ops array must be decoded, not dropped to None"
+        assert ops[0]["op"] == "set_state"
 
 
 class TestEditHandler:

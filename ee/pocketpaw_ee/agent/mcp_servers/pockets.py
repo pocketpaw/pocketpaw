@@ -62,6 +62,8 @@ import json
 import logging
 from typing import Any
 
+from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
+
 from ._audit import record_tool_call
 
 logger = logging.getLogger(__name__)
@@ -286,6 +288,9 @@ async def _add_widget_handler(args: dict) -> dict:
             "add_widget requires a `pocket_id` — pass the id of the pocket "
             "(the current home pocket) the widget should be pinned to."
         )
+    # Decode a `widget` that the model serialized as a JSON string rather than
+    # a real object, so the first call succeeds instead of forcing a retry.
+    args = coerce_json_object_args(args, ("widget",))
     widget = args.get("widget")
     if not isinstance(widget, dict):
         return _error("add_widget requires a `widget` object.")
@@ -329,6 +334,7 @@ async def _update_widget_handler(args: dict) -> dict:
             "update_widget requires a `widget_id` — pass the widget's id from "
             "`get_pocket`'s widgets[] array."
         )
+    args = coerce_json_object_args(args, ("fields",))
     fields = args.get("fields")
     if not isinstance(fields, dict):
         return _error(
