@@ -245,8 +245,11 @@ async def propose_admin_action(
     call_args = dict(args or {})
     args_hash = compute_args_hash(action, call_args)
     # Deterministic idempotency key when the caller doesn't supply one — keyed on
-    # workspace + action + args hash so an identical re-propose dedupes at the
-    # executor (the executor never double-fires a key it already ran).
+    # workspace + action + args hash. NOTE: dedup is per-Action, not cross-Action:
+    # the executor's guard stops a SINGLE approved Action from firing twice (via
+    # its recorded outcome/status), but two distinct proposals with the same key
+    # each execute independently. The key is stored for future cross-Action dedup
+    # and for tracing; it does not itself prevent a re-propose from running.
     idem = idempotency_key or f"{workspace_id}:{action}:{args_hash[:16]}"
 
     corr = correlation_id or str(uuid4())
