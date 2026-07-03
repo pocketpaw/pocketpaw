@@ -2,6 +2,16 @@
 # type (the 8th gated Instinct kind, WA-2), plus the WA-5 whitelist extensions.
 #
 # Created: 2026-07-03 (feat/workspace-admin-tools, WA-2).
+# Updated: 2026-07-03 (WA-6) — coverage for the three OWNER writes
+#   (instinct.activate / workspace.delete / billing.manage). Per action: approve →
+#   the whitelisted service fires EXACTLY ONCE with the adapted args; reject via
+#   the REAL router → no service call. billing.manage is PAYMENT-HONEST: approve
+#   calls ``subscribe`` (which returns a {checkout_url}) — the executor records the
+#   checkout url as the outcome, and the test asserts NO ``set_workspace_plan``
+#   mutation is called (an agent must never flip a paid plan without checkout). The
+#   execute-time OWNER re-check is proven with the REAL ``_recheck_rbac``: a
+#   proposer DEMOTED from OWNER to ADMIN after proposing → approve FAILS CLOSED for
+#   an OWNER-gated action, the service is NOT called.
 # Updated: 2026-07-03 (WA-5) — coverage for the five additional whitelisted ADMIN
 #   writes (member.remove / invite.create / invite.revoke / connector.manage
 #   {enable,disable,config} / workspace.update). Per action: approve → the
@@ -807,6 +817,220 @@ async def test_production_path_reject_no_service_call_wa5(
 
     action_id = await aa_propose.propose_admin_action(
         workspace_id="w1", action=action, args=args, proposer_user_id="admin1"
+    )
+
+    user = _FakeUser("approver1", "w1")
+    client = _make_client(user, monkeypatch)
+    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda *a, **k: store)
+    resp = client.post(f"/instinct/actions/{action_id}/reject", json={"reason": "no"})
+    assert resp.status_code == 200, resp.text
+
+    assert spy.calls == []
+    final = await store.get_action(action_id)
+    assert final.status == ActionStatus.REJECTED
+
+
+# ---------------------------------------------------------------------------
+# WA-6 — the three OWNER writes (instinct.activate / workspace.delete /
+# billing.manage). Per action: approve → the whitelisted service fires EXACTLY
+# ONCE with the adapted args; reject → the service is NEVER called. billing.manage
+# produces a checkout url (an artifact), NOT a plan mutation. The demoted-OWNER
+# execute-time re-check is proven with the REAL _recheck_rbac.
+# ---------------------------------------------------------------------------
+
+
+# ---- instinct.activate ----------------------------------------------------
+
+
+async def test_executor_instinct_activate_fires_once(store, monkeypatch):
+    """approve → set_instinct_approval_level(ctx, workspace_id, level) fires once
+    with the adapted level; the proposer is the ctx actor."""
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.workspace.service.set_instinct_approval_level", spy)
+    await _propose_approve_execute(
+        store, monkeypatch, action="instinct.activate", args={"level": "TRUSTED"}
+    )
+    assert len(spy.calls) == 1
+    ctx, workspace_id, level = spy.calls[0][0]
+    assert ctx.user_id == "admin1"  # proposer attribution
+    assert workspace_id == "w1"
+    assert level == "TRUSTED"
+
+
+async def test_executor_instinct_activate_bad_level_fails(store, monkeypatch):
+    """An off-enum level → the strict adapter raises → MalformedArgs failure, no
+    service call (a hand-crafted blob can't set an invalid level)."""
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.workspace.service.set_instinct_approval_level", spy)
+    approved = await _propose_approve_execute(
+        store, monkeypatch, action="instinct.activate", args={"level": "YOLO"}
+    )
+    assert spy.calls == []
+    final = await store.get_action(approved.id)
+    assert final.status == ActionStatus.FAILED
+
+
+# ---- workspace.delete -----------------------------------------------------
+
+
+async def test_executor_workspace_delete_fires_once(store, monkeypatch):
+    """approve → delete(ctx, workspace_id) fires once; the delete takes NO steering
+    args (a smuggled key never reaches it)."""
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.workspace.service.delete", spy)
+    await _propose_approve_execute(
+        store,
+        monkeypatch,
+        action="workspace.delete",
+        # A hand-crafted blob with a smuggled key — the adapter ignores it entirely.
+        args={"force": True, "target_user_id": "evil"},
+    )
+    assert len(spy.calls) == 1
+    ctx, workspace_id = spy.calls[0][0]
+    assert ctx.user_id == "admin1"
+    assert workspace_id == "w1"
+    assert spy.calls[0][1] == {}  # nothing smuggled as kwargs
+
+
+# ---- billing.manage (propose→checkout-URL, NOT a plan mutation) -----------
+
+
+async def test_executor_billing_manage_produces_checkout_not_plan_mutation(store, monkeypatch):
+    """PAYMENT HONESTY — approve calls ``subscribe`` (which returns a checkout
+    url); the executor records that url as the outcome. The webhook-internal
+    ``set_workspace_plan`` is NEVER called — an agent can't flip a paid plan."""
+    subscribe_spy = _CallSpy()
+
+    async def _subscribe(*args, **kwargs):  # noqa: ANN002, ANN003
+        subscribe_spy.calls.append((args, kwargs))
+        return {"checkout_url": "https://checkout.dodo.test/session/abc"}
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.billing.service.subscribe", _subscribe)
+
+    # set_workspace_plan is the payment-bypassing sink that must NEVER be reached.
+    plan_mutation_spy = _CallSpy()
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.set_workspace_plan", plan_mutation_spy
+    )
+
+    approved = await _propose_approve_execute(
+        store, monkeypatch, action="billing.manage", args={"plan_key": "pro"}
+    )
+
+    # subscribe fired once with (workspace_id, proposer, plan_key).
+    assert len(subscribe_spy.calls) == 1
+    assert subscribe_spy.calls[0][0] == ("w1", "admin1", "pro")
+    # THE payment-honesty assertion: the plan was NOT silently mutated.
+    assert plan_mutation_spy.calls == []
+
+    final = await store.get_action(approved.id)
+    assert final.status == ActionStatus.EXECUTED
+    # The checkout url is recorded as the outcome artifact (not a "plan changed").
+    outcome = final.parameters["_admin_action"]["outcome"]
+    assert outcome["status"] == "executed"
+    assert "checkout.dodo.test" in outcome["response_summary"]
+
+
+async def test_executor_billing_manage_bad_plan_fails(store, monkeypatch):
+    """An unknown plan tier → the strict adapter raises → MalformedArgs, no call."""
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.billing.service.subscribe", spy)
+    approved = await _propose_approve_execute(
+        store, monkeypatch, action="billing.manage", args={"plan_key": "platinum"}
+    )
+    assert spy.calls == []
+    final = await store.get_action(approved.id)
+    assert final.status == ActionStatus.FAILED
+
+
+# ---- execute-time OWNER re-check — demoted proposer fails closed ----------
+
+
+async def test_recheck_rbac_denies_demoted_owner_on_owner_action(monkeypatch):
+    """THE KEY OWNER SECURITY TEST (real _recheck_rbac): a proposer DEMOTED from
+    OWNER to ADMIN after proposing is DENIED for an OWNER-gated action
+    (instinct.activate) — the executor's fail-closed hinge for the OWNER ops."""
+
+    class _M:
+        def __init__(self, ws, role):
+            self.workspace = ws
+            self.role = role
+
+    class _DemotedOwner:
+        id = "owner1"
+        workspaces = [_M("w1", "admin")]  # was OWNER at propose, now only ADMIN
+
+    async def _get(_id):  # noqa: ANN001
+        return _DemotedOwner()
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.models.user.User.get", staticmethod(_get))
+    monkeypatch.setattr("beanie.PydanticObjectId", lambda x: x)
+
+    # instinct.activate is OWNER-gated → an ADMIN proposer is refused.
+    with pytest.raises(Forbidden):
+        await aa_executor._recheck_rbac("w1", "owner1", "instinct.activate")
+    with pytest.raises(Forbidden):
+        await aa_executor._recheck_rbac("w1", "owner1", "workspace.delete")
+    with pytest.raises(Forbidden):
+        await aa_executor._recheck_rbac("w1", "owner1", "billing.manage")
+
+
+async def test_executor_owner_action_demoted_proposer_fails_closed(store, monkeypatch):
+    """End-to-end: an OWNER-gated action (workspace.delete) approved after the
+    proposer was demoted → the execute-time re-check DENIES → FAILS CLOSED, the
+    delete service is NOT called."""
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.workspace.service.delete", spy)
+    _deny_rbac(monkeypatch)  # proposer no longer holds OWNER
+
+    action_id = await aa_propose.propose_admin_action(
+        workspace_id="w1",
+        action="workspace.delete",
+        args={},
+        proposer_user_id="owner1",
+    )
+    approved = await store.approve(action_id, approver="approver1")
+    await aa_executor.execute_approved_admin_action(approved)  # must not raise
+
+    assert spy.calls == []
+    final = await store.get_action(approved.id)
+    assert final.status == ActionStatus.FAILED
+
+
+# ---- reject path — the executor never runs for any OWNER action -----------
+
+
+@pytest.mark.parametrize(
+    ("action", "args", "svc_path"),
+    [
+        (
+            "instinct.activate",
+            {"level": "TRUSTED"},
+            "pocketpaw_ee.cloud.workspace.service.set_instinct_approval_level",
+        ),
+        (
+            "workspace.delete",
+            {},
+            "pocketpaw_ee.cloud.workspace.service.delete",
+        ),
+        (
+            "billing.manage",
+            {"plan_key": "pro"},
+            "pocketpaw_ee.cloud.billing.service.subscribe",
+        ),
+    ],
+)
+async def test_production_path_reject_no_service_call_wa6(
+    store, journal, graph, monkeypatch, action, args, svc_path
+):
+    """REJECT-NO-FIRE for every WA-6 OWNER write: reject via the REAL router →
+    the executor never runs → the whitelisted service is NEVER called."""
+    spy = _CallSpy()
+    monkeypatch.setattr(svc_path, spy)
+    _allow_rbac(monkeypatch)
+
+    action_id = await aa_propose.propose_admin_action(
+        workspace_id="w1", action=action, args=args, proposer_user_id="owner1"
     )
 
     user = _FakeUser("approver1", "w1")
