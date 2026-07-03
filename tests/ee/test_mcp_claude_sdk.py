@@ -85,6 +85,9 @@ from pocketpaw_ee.agent.mcp_servers.planner import SERVER_NAME as _PLANNER_MCP_S
 from pocketpaw_ee.agent.mcp_servers.pockets import SERVER_NAME as _POCKET_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.sites import SERVER_NAME as _SITES_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.tasks import SERVER_NAME as _TASKS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.workspace_admin import (
+    SERVER_NAME as _WORKSPACE_ADMIN_MCP_SERVER_NAME,
+)
 from pocketpaw_ee.agent.pocket_specialist.mcp_tool import (
     SERVER_NAME as _POCKET_SPECIALIST_MCP_SERVER_NAME,
 )
@@ -148,6 +151,11 @@ def _strip_builtin_servers(result: dict) -> dict:
     # ``claude_sdk._get_mcp_servers`` so every agent can ground PocketPaw
     # capabilities instead of guessing from LLM priors (AT-1).
     out.pop(_ATLAS_MCP_SERVER_NAME, None)
+    # ``pocketpaw_workspace_admin`` is always-on too — the workspace-admin tool
+    # surface (members_list / member_update_role) is registered unconditionally;
+    # the RBAC gate on each tool is the security boundary, not registration
+    # (WA-1, feat/workspace-admin-tools).
+    out.pop(_WORKSPACE_ADMIN_MCP_SERVER_NAME, None)
     return out
 
 

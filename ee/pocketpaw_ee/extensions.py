@@ -905,6 +905,43 @@ class CloudExternalActionsMcpProvider:
         return list(EXTERNAL_ACTIONS_TOOL_IDS)
 
 
+class CloudWorkspaceAdminMcpProvider:
+    """`pocketpaw.mcp_servers` — the workspace-administration in-process server
+    (``pocketpaw_workspace_admin``, feat/workspace-admin-tools WA-1).
+
+    Lets the cloud chat agent perform workspace administration, gated by the
+    EXISTING RBAC system (``guards/``). Hosts two tools in WA-1: ``members_list``
+    (READ, gated at ``workspace.view`` — any member) and ``member_update_role``
+    (WRITE, gated at ``workspace.member.role_change`` — ADMIN). The write is
+    NEVER applied inline — an admin mutation is human-gated through Instinct. WA-1
+    ships the read fully; the write authorizes (fail-closed ADMIN gate) and
+    returns a pending envelope without mutating, because the Instinct
+    approve→execute spine for admin actions isn't wired yet (see the module
+    header on ``agent.mcp_servers.workspace_admin``).
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) — the same regime the sibling
+    connectors / belt / external_actions servers use; the RBAC gate is the
+    security boundary, not registration. ``build_admin_server`` returns None —
+    and the registration loop skips it — when the claude_agent_sdk isn't
+    installed, so chat never breaks.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.workspace_admin import build_admin_server
+
+            return build_admin_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the server is unavailable, same as
+            # the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.workspace_admin import ADMIN_TOOL_IDS
+
+        return list(ADMIN_TOOL_IDS)
+
+
 class CloudFabricMcpProvider:
     """`pocketpaw.mcp_servers` — read-only Fabric ontology access in-process
     server (``pocketpaw_fabric``). Hosts ``fabric_query`` + ``fabric_stats``.
