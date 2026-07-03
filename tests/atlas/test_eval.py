@@ -11,6 +11,13 @@
 # Updated: 2026-07-03 — re-baselined against the full compiled model
 # (237 entries) + fixpoint stemmer: baseline 16/18 → 21/22 (cases
 # re-pointed / promoted / added in eval_cases.json; see its note fields).
+# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-3) — the model grew to
+# 254 entries (17 role-gated admin ``capability`` cards added). Those cards
+# are hidden from the UNFILTERED store the eval uses, but their natural-phrase
+# names would have polluted rankings via bare stopwords; the store now drops a
+# tiny function-word stoplist (``store._STOPWORDS``). Net effect on the eval:
+# strict-hit baseline UNCHANGED at 21/22 (the "review the agent's edit" case
+# even tightened from rank 3 to rank 2, still within its rank_within budget).
 
 from __future__ import annotations
 

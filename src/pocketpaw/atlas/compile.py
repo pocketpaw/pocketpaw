@@ -47,10 +47,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Hand-authored source files, compiled in this order (before id-sorting).
+# ``capabilities.json`` (WA-3) carries ``kind:"capability"`` cards for the
+# workspace-admin tools, each gated by a ``role:<tier>`` marker in ``requires``
+# so a member never sees admin capabilities in atlas.
 _AUTHORED_DIR = Path(__file__).parent / "authored"
 AUTHORED_FILES = (
     _AUTHORED_DIR / "primitives.json",
     _AUTHORED_DIR / "surfaces.json",
+    _AUTHORED_DIR / "capabilities.json",
 )
 
 # Where connector YAML definitions live, relative to the repo root (the

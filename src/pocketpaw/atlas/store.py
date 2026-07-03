@@ -29,6 +29,14 @@
 # inflected query words match singular keywords ("competitors" now hits a
 # "competitor" keyword). Field weights and the search_scored / search /
 # describe signatures are unchanged.
+# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-3) — a tiny function-word
+# stoplist (``_STOPWORDS``) is dropped by ``_tokenize`` from both index and
+# query tokens. Without it, an entry whose NAME is a natural phrase (the WA-3
+# admin-capability cards, e.g. "Change a member's role") scored a full
+# name-weight hit on a query's bare "a"/"the"/"make", letting admin cards hijack
+# unrelated intents. Stopwords carry no intent signal, so removing them can only
+# drop spurious matches — no entry is ever the right answer *because of* a
+# stopword. Weights and signatures unchanged.
 
 from __future__ import annotations
 
@@ -48,6 +56,77 @@ _DATA_PATH = Path(__file__).parent / "data" / "atlas.json"
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
+# Function-word stoplist (WA-3). These carry no intent signal — an entry whose
+# NAME is a natural phrase ("Change a member's role") would otherwise score a
+# full name-weight hit on a query's bare "a", letting admin-capability cards
+# hijack unrelated intents ("make a landing page"). Dropped identically from
+# index and query tokens (via ``_stem_set`` → ``_tokenize``), so this can only
+# REMOVE spurious matches, never break a real one: no atlas entry is ever the
+# right answer *because of* a stopword. Kept deliberately tiny (closed-class
+# articles / prepositions / pronouns / auxiliaries + a couple of ubiquitous
+# instruction verbs) so it never swallows a content word.
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "this",
+        "that",
+        "these",
+        "those",
+        "it",
+        "its",
+        "i",
+        "me",
+        "my",
+        "we",
+        "our",
+        "us",
+        "you",
+        "your",
+        "they",
+        "them",
+        "of",
+        "to",
+        "for",
+        "in",
+        "on",
+        "at",
+        "by",
+        "with",
+        "from",
+        "into",
+        "and",
+        "or",
+        "but",
+        "as",
+        "so",
+        "if",
+        "then",
+        "is",
+        "are",
+        "be",
+        "been",
+        "am",
+        "was",
+        "were",
+        "do",
+        "does",
+        "did",
+        "can",
+        "will",
+        "would",
+        "should",
+        "could",
+        "make",
+        "let",
+        "want",
+        "need",
+        "please",
+        "just",
+    }
+)
+
 # Score weights: a hit on the name or a keyword is a much stronger signal
 # of intent than a word that merely appears somewhere in the narrative.
 _NAME_WEIGHT = 5.0
@@ -57,7 +136,7 @@ _NARRATIVE_WEIGHT = 1.0
 
 
 def _tokenize(text: str) -> list[str]:
-    return _TOKEN_RE.findall(text.lower())
+    return [t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOPWORDS]
 
 
 def _stem(token: str) -> str:

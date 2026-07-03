@@ -1,7 +1,23 @@
 # atlas/overlay.py — live workspace overlay + fail-closed entitlement filter
 # for the atlas OS self-model (AT-5). Created: 2026-07-02 (feat/atlas-overlay).
 #
-# The compiled artifact is GLOBAL — the same 72 entries in every workspace.
+# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-3 — role-aware atlas
+# entitlement). Admin ``kind:"capability"`` entries carry a ``role:<tier>``
+# marker in ``requires`` (role:member / role:admin / role:owner). Two changes
+# land here:
+#   * ROLE_REQUIRE_PREFIX + role helpers (``entry_role_requirement``) — the
+#     one place that reads a role marker off an entry's ``requires``.
+#   * ``DefaultEntitlementProvider.is_granted`` now HIDES any entry carrying a
+#     ``role:*`` requirement (returns False): the default provider has no role
+#     context, so it must never expose an admin capability. Non-role entries
+#     stay granted (unchanged OSS behavior). This keeps admin entries hidden
+#     EVERYWHERE except when the EE role-aware provider explicitly grants them
+#     — OSS never leaks admin capabilities even though the compiled artifact is
+#     global. The EE provider lives in ``pocketpaw_ee.agent.atlas_provider`` and
+#     is wired via the ``build_role_aware_provider`` bridge below (mirrors
+#     ``atlas.fabric.build_workspace_fabric_introspector``).
+#
+# The compiled artifact is GLOBAL — the same entries in every workspace.
 # This module makes atlas answers reflect the CALLING workspace's reality:
 #
 # * ``EntitlementProvider`` — a small structural protocol (like the repo's
@@ -44,6 +60,33 @@ logger = logging.getLogger(__name__)
 # Default connector scope in a single-user OSS install — the same literal
 # the builtin connector tools default their ``pocket_id`` argument to.
 DEFAULT_SCOPE_KEY = "default"
+
+# Marker prefix carried in an entry's ``requires`` list to gate it behind a
+# minimum workspace role (WA-3). ``role:member`` / ``role:admin`` / ``role:owner``
+# are additive ``requires`` values — NOT a schema change (``requires`` already
+# exists). An entry carrying ANY ``role:*`` marker is a role-gated entry: the
+# only provider that may grant it is the EE role-aware one; every role-blind
+# provider (the OSS default, a fail-closed fallback) hides it.
+ROLE_REQUIRE_PREFIX = "role:"
+
+# Role tier ordering for the ``role:*`` markers. Mirrors
+# ``pocketpaw_ee.guards.rbac._ROLE_LEVELS`` (owner > admin > member) so the EE
+# provider and this core module agree without an EE import at core scope.
+ROLE_LEVELS: dict[str, int] = {"member": 1, "admin": 2, "owner": 3}
+
+
+def entry_role_requirement(entry: AtlasEntry) -> str | None:
+    """The role tier an entry requires (``'member'`` / ``'admin'`` / ``'owner'``),
+    or ``None`` when the entry carries no ``role:*`` marker.
+
+    Reads the FIRST ``role:<tier>`` value in ``requires``. An unrecognized tier
+    (not in ``ROLE_LEVELS``) still counts as "role-gated" — it returns the raw
+    tier string so a role-blind provider hides it (fail-closed: an unknown
+    marker is treated as gated, never as ungated)."""
+    for req in entry.requires:
+        if isinstance(req, str) and req.startswith(ROLE_REQUIRE_PREFIX):
+            return req[len(ROLE_REQUIRE_PREFIX) :] or req
+    return None
 
 
 @runtime_checkable
@@ -201,9 +244,15 @@ class DefaultEntitlementProvider:
     the connector state scope: the tools' ``"default"`` pocket scope in a
     single-user install, or a cloud run's ``ws:<workspace_id>``.
 
-    Nothing is entitlement-gated in OSS: ``is_granted`` is always True,
-    so primitives, surfaces, senses, and connectors all stay visible —
-    connectors merely carry their live availability annotation.
+    Nothing is entitlement-gated in OSS EXCEPT role-gated entries: an entry
+    carrying a ``role:*`` marker in ``requires`` (admin capabilities, WA-3) is
+    HIDDEN — the default provider has no workspace-role context, so it must
+    never expose an admin capability. Every non-role entry (primitives,
+    surfaces, senses, connectors) stays visible, connectors merely carrying
+    their live availability annotation. Only the EE role-aware provider
+    (``pocketpaw_ee.agent.atlas_provider``) can grant a role-gated entry, so
+    admin capabilities are absent from atlas everywhere except a cloud run where
+    the caller's resolved role clears the bar.
     """
 
     def __init__(self, scope_key: str = DEFAULT_SCOPE_KEY, registry: Any | None = None) -> None:
@@ -226,14 +275,50 @@ class DefaultEntitlementProvider:
         rows = self._resolve_registry().status(self._scope_key)
         return {row["name"] for row in rows if row.get("status") == ConnectorStatus.CONNECTED}
 
-    def is_granted(self, entry: AtlasEntry) -> bool:  # noqa: ARG002 — protocol shape
-        return True
+    def is_granted(self, entry: AtlasEntry) -> bool:
+        # Role-gated entries (WA-3) require a workspace-role context this
+        # role-blind default provider does not have — hide them (fail-closed).
+        # Everything else is ungated in OSS.
+        return entry_role_requirement(entry) is None
+
+
+def build_role_aware_provider(scope_key: str) -> EntitlementProvider | None:
+    """EE wiring hook: a role-aware entitlement provider for *scope_key*, or None.
+
+    Mirrors ``atlas.fabric.build_workspace_fabric_introspector`` — the seam that
+    lets a cloud run swap the role-blind ``DefaultEntitlementProvider`` for the
+    EE provider that resolves the CALLER's workspace role and grants ``role:*``
+    entries only when the role clears the bar. Returns ``None`` (caller falls
+    back to the fail-closed default) on: a non-``ws:<id>`` scope (OSS / sentinel),
+    ``pocketpaw_ee.agent.atlas_provider`` not importable (OSS install), or
+    construction failure — all DEBUG-logged, all degrading to "no role-aware
+    provider" so admin entries stay hidden rather than leaking.
+
+    A ``None`` return is SAFE: the default provider hides every ``role:*`` entry,
+    so admin capabilities never surface without the EE provider explicitly
+    granting them."""
+    if not isinstance(scope_key, str) or not scope_key.startswith("ws:"):
+        return None
+    try:
+        from pocketpaw_ee.agent.atlas_provider import RoleAwareEntitlementProvider
+    except ImportError:
+        logger.debug("pocketpaw_ee.agent.atlas_provider not importable; role-aware atlas off")
+        return None
+    try:
+        return RoleAwareEntitlementProvider(scope_key=scope_key)
+    except Exception as exc:  # noqa: BLE001 — construction failure degrades, never crashes
+        logger.debug("atlas role-aware provider construction failed: %s", exc)
+        return None
 
 
 __all__ = [
     "DEFAULT_SCOPE_KEY",
+    "ROLE_LEVELS",
+    "ROLE_REQUIRE_PREFIX",
     "AtlasOverlay",
     "DefaultEntitlementProvider",
     "EntitlementProvider",
     "OverlaidEntry",
+    "build_role_aware_provider",
+    "entry_role_requirement",
 ]
