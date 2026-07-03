@@ -1,0 +1,125 @@
+{
+  "_comment": "eval_cases.json — atlas intent→capability eval cases (AT-2). Created 2026-07-02. Updated 2026-07-03: re-baselined against the full compiled model (237 entries: widgets, skills, connectors, senses — was the 31-entry hand seed) + the fixpoint stemmer; three cases re-pointed at genuinely better specific answers (see their note fields), the fabric stemming xfail promoted to a pass, and four new cases added covering the new kinds (widget, skill, connector, sense). Each case maps a REAL user intent to the expected top-hit atlas entry id. rank_within: 1 = expected id must be the top result (strict hit), 3 = must appear in the top 3. xfail (optional string): a known ranking miss kept on purpose — never delete a case to go green; the reason documents the weakness for the ranking-upgrade task. note (optional string): reasoning for a re-pointed expectation or measured behavior. Consumed by tests/atlas/test_eval.py.",
+  "cases": [
+    {
+      "intent": "build me an app to track tasks",
+      "expected_id": "primitive:pocket",
+      "rank_within": 1
+    },
+    {
+      "intent": "I want a human to approve what the agent does",
+      "expected_id": "primitive:instinct",
+      "rank_within": 1
+    },
+    {
+      "intent": "publish this as a website",
+      "expected_id": "primitive:sites",
+      "rank_within": 1
+    },
+    {
+      "intent": "remember this across sessions",
+      "expected_id": "primitive:soul",
+      "rank_within": 1
+    },
+    {
+      "intent": "connect my gmail",
+      "expected_id": "primitive:connector",
+      "rank_within": 1
+    },
+    {
+      "intent": "show this data as a chart",
+      "expected_id": "widget:chart",
+      "rank_within": 1,
+      "note": "2026-07-03 re-baseline: was primitive:ripple (rank 4 in the full model). widget:chart is the better answer — the user asks for a chart, and the chart widget IS the concrete capability; ripple is the rendering engine underneath it."
+    },
+    {
+      "intent": "review the agent's edit before it goes live",
+      "expected_id": "primitive:branch",
+      "rank_within": 3
+    },
+    {
+      "intent": "run this long job in the background",
+      "expected_id": "primitive:workspace-jobs",
+      "rank_within": 1
+    },
+    {
+      "intent": "who are our competitors linked to",
+      "expected_id": "primitive:fabric",
+      "rank_within": 3,
+      "note": "2026-07-03: xfail promoted — the fixpoint stemmer now maps 'competitors'→'competitor' and 'linked'→'link', so fabric ranks 1. Kept rank_within 3 as originally authored; the strict-hit baseline locks the rank-1 gain."
+    },
+    {
+      "intent": "let the AI write the code and I just review diffs",
+      "expected_id": "primitive:belt",
+      "rank_within": 1
+    },
+    {
+      "intent": "give my agent a personality that persists",
+      "expected_id": "primitive:soul",
+      "rank_within": 1,
+      "note": "2026-07-03 re-baseline: soul had slipped to rank 2 behind surface:agents — 'persists' stems to 'persist' which missed the 'persistent' keyword. Fixed as a vocabulary gap: added 'persist' to the authored soul keywords."
+    },
+    {
+      "intent": "sync my google calendar into the workspace",
+      "expected_id": "connector:gcalendar",
+      "rank_within": 1,
+      "note": "2026-07-03 re-baseline: was primitive:connector (now rank 2). The compiled model carries per-connector entries and connector:gcalendar is the better answer for a google-calendar-specific intent than the generic connector primitive."
+    },
+    {
+      "intent": "roll back the site to the previous version",
+      "expected_id": "primitive:branch",
+      "rank_within": 1,
+      "note": "2026-07-03 re-baseline: branch had slipped to rank 2 behind the site skills — the authored keyword was 'rollback' (one word) while users say 'roll back'. Fixed as a vocabulary gap: added 'roll back' to the authored branch keywords."
+    },
+    {
+      "intent": "make a landing page for my bakery",
+      "expected_id": "primitive:sites",
+      "rank_within": 1
+    },
+    {
+      "intent": "import all these records every night on a schedule",
+      "expected_id": "primitive:workspace-jobs",
+      "rank_within": 1
+    },
+    {
+      "intent": "map our customers and their relationships as a graph",
+      "expected_id": "primitive:fabric",
+      "rank_within": 1
+    },
+    {
+      "intent": "fix this bug in the code and propose the change",
+      "expected_id": "primitive:belt",
+      "rank_within": 1
+    },
+    {
+      "intent": "build a kanban board for my team",
+      "expected_id": "widget:kanban",
+      "rank_within": 1,
+      "note": "2026-07-03 re-baseline: was primitive:pocket (now rank 2). widget:kanban is the better answer — the user names the exact widget; the pocket is the container it lands in."
+    },
+    {
+      "intent": "let users upload a file in the form",
+      "expected_id": "widget:file-upload",
+      "rank_within": 1,
+      "note": "Added 2026-07-03: widget-kind coverage for the full-model re-baseline."
+    },
+    {
+      "intent": "make a video from this description",
+      "expected_id": "skill:studio",
+      "rank_within": 1,
+      "note": "Added 2026-07-03: skill-kind coverage for the full-model re-baseline."
+    },
+    {
+      "intent": "search our slack messages for the incident",
+      "expected_id": "connector:slack_data",
+      "rank_within": 1,
+      "note": "Added 2026-07-03: connector-action coverage for the full-model re-baseline."
+    },
+    {
+      "intent": "read our payment and billing data",
+      "expected_id": "sense:paw.payments.v1",
+      "rank_within": 1,
+      "note": "Added 2026-07-03: sense-flavored coverage for the full-model re-baseline — the payments sense outranks connector:stripe for the provider-agnostic phrasing."
+    }
+  ]
+}
