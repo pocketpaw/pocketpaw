@@ -21,22 +21,17 @@
 #       NEVER calls ``update_member_role`` inline. On an ADMIN pass it returns a
 #       "proposed for approval" envelope WITHOUT firing the mutation.
 #
-#   WA-1 STATUS — member_update_role is a DOCUMENTED PROPOSAL-ONLY STUB, not a
-#   live Instinct proposal. The Instinct approve→execute spine is a FIXED N-way
-#   dispatch on bespoke blob param-keys (``_external_action``, ``_pocket_write``,
-#   ``_code_change``, ``_fabric_objects``, ``_pocket_create``, ``_instinct_rule``,
-#   ``_artifact_change``), each with its own executor hard-wired into the ee
-#   instinct router's approve/reject/bulk paths. EVERY existing executor dispatches
-#   to a domain-specific sink — the external-action one is HARDWIRED to
-#   ``connectors.service.execute`` and cannot carry a workspace-admin service call
-#   (``update_member_role``). Making an admin mutation actually FIRE on approval
-#   requires inventing an 8th proposal kind: an ``_admin_action`` blob + an
-#   ``admin_proposals/executor.py`` that dispatches to the workspace-admin services
-#   + router wiring on approve/reject/bulk. That is out of scope for WA-1 and is
-#   flagged as NEEDS_CONTEXT. Until that seam exists, member_update_role
-#   authorizes (ADMIN gate, fail-closed) and returns a "pending — approval spine
-#   not yet wired" envelope; it does NOT mutate and does NOT file a phantom
-#   proposal. A member is denied before we ever reach that path.
+# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-2 — member_update_role now
+#   files a LIVE Instinct proposal). The 8th gated proposal kind (the
+#   ``_admin_action`` blob + ``ee.cloud.admin_proposals`` propose/executor +
+#   router wiring on approve/reject/bulk) now exists, so member_update_role's
+#   ADMIN pass calls ``admin_proposals.propose.propose_admin_action`` and returns
+#   a "pending in the Tray" envelope carrying the proposal/action id. The role
+#   change fires ONLY when a human approves the Action — and only after the
+#   executor RE-CHECKS this proposer's CURRENT workspace role at approve time (a
+#   since-demoted proposer's approved action fails closed). update_member_role is
+#   STILL never called inline from this tool; the "pending_approval_unavailable"
+#   stub is retired.
 #
 #   OSS-EE boundary: this module imports only ``workspace.service`` +
 #   ``guards.deps`` + the User Beanie load, all lazily inside handlers, so the
@@ -52,9 +47,9 @@ Tools registered:
   - ``member_update_role(user_id, role)`` — WRITE: change a member's workspace
     role. ADMIN-gated at ``workspace.member.role_change``. This does NOT mutate
     inline — an admin write is proposed for human approval through the Instinct
-    Tray and fires only on approval. WA-1: the approve→execute spine for admin
-    actions is not yet wired, so this authorizes and returns a "pending" envelope
-    without mutating (see the module header).
+    Tray (WA-2: a live ``_admin_action`` proposal) and fires only on approval,
+    after an execute-time re-check of the proposer's CURRENT role. Returns a
+    "pending in the Tray" envelope carrying the proposal/action id.
 
 Identity comes from ``agent_service.current_workspace_id`` /
 ``current_user_id``. Outside an SSE chat stream those are empty → the tools
@@ -248,11 +243,11 @@ async def _member_update_role_handler(args: dict) -> dict:
     """WRITE: change a member's workspace role. ADMIN-gated; Instinct-proposed.
 
     THE load-bearing security rule: this NEVER calls ``update_member_role``
-    inline. On an ADMIN pass it returns a "proposed for approval" envelope
-    WITHOUT firing the mutation. WA-1: the Instinct approve→execute spine for
-    admin actions is not yet wired (no ``_admin_action`` proposal kind exists —
-    see the module header), so this authorizes and returns a "pending" envelope
-    without mutating and without filing a phantom proposal.
+    inline. On an ADMIN pass it files a live Instinct ``_admin_action`` proposal
+    (WA-2) via ``admin_proposals.propose.propose_admin_action`` and returns a
+    "pending in the Tray" envelope carrying the proposal/action id — WITHOUT
+    firing the mutation. The role change fires only when a human approves the
+    Action, and only after the executor re-checks THIS proposer's CURRENT role.
     """
     workspace_id, user_id, _pocket_id = _identity()
     if not workspace_id or not user_id:
@@ -303,24 +298,43 @@ async def _member_update_role_handler(args: dict) -> dict:
             }
         )
 
-    # ADMIN passed. DO NOT MUTATE — an admin write is human-gated. WA-1: the
-    # Instinct approve→execute spine for admin actions is not yet wired (no
-    # ``_admin_action`` proposal kind), so we return a pending envelope WITHOUT
-    # filing a proposal and WITHOUT calling update_member_role. This is the
-    # fail-closed default: no phantom "done", no ungated mutation.
+    # ADMIN passed. DO NOT MUTATE INLINE — an admin write is human-gated. WA-2:
+    # file a real Instinct proposal carrying an ``_admin_action`` blob and return
+    # a "pending in Tray" envelope. The mutation fires ONLY when a human approves
+    # the Action in the Tray — and only after the executor re-checks THIS
+    # proposer's CURRENT role at approve time. update_member_role is NEVER called
+    # from here.
+    from pocketpaw_ee.cloud.admin_proposals.propose import propose_admin_action
+
+    try:
+        action_id = await propose_admin_action(
+            workspace_id=workspace_id,
+            action=_ROLE_CHANGE_ACTION,
+            args={"target_user_id": target_user_id, "role": role},
+            proposer_user_id=user_id,
+            summary=f"Change member {target_user_id} to role '{role}'.",
+            title=f"Role change — member {target_user_id} → {role}",
+        )
+    except Exception as exc:  # noqa: BLE001 — surface a clean MCP error, never a 500
+        logger.warning("member_update_role: propose_admin_action failed", exc_info=True)
+        return _error_response(f"could not file the role change for approval: {exc}")
+
     logger.info(
-        "member_update_role authorized but NOT executed (WA-1 stub): actor=%s "
-        "workspace=%s target=%s role=%s — admin-action Instinct spine not yet wired",
+        "member_update_role PROPOSED (WA-2): actor=%s workspace=%s target=%s "
+        "role=%s action=%s — pending human approval in the Tray",
         user_id,
         workspace_id,
         target_user_id,
         role,
+        action_id,
     )
     return _success_response(
         {
             "ok": True,
             "executed": False,
-            "status": "pending_approval_unavailable",
+            "status": "pending_approval",
+            "action_id": action_id,
+            "proposal_id": action_id,
             "proposed_change": {
                 "user_id": target_user_id,
                 "role": role,
@@ -328,10 +342,11 @@ async def _member_update_role_handler(args: dict) -> dict:
             },
             "message": (
                 "Role changes are admin-gated and must be approved by a human — "
-                "they are never applied directly from chat. The approval spine "
-                "for workspace-admin changes isn't wired up yet, so I can't file "
-                "this for approval right now. No change was made. (Tell the user "
-                "to change the role from the workspace members settings for now.)"
+                "they are never applied directly from chat. I've proposed this "
+                "change; it's now PENDING approval in the Tray and will take "
+                "effect only once a human approves it. No change has been made "
+                "yet. Tell the user you've requested the change and it needs "
+                "approval; do NOT claim the role was changed."
             ),
         }
     )
