@@ -29,6 +29,14 @@
 #   writes the result back through ``MongoFileStore.set_library_metadata``.
 #   Tag derivation/write failures are contained: a broken tag write must
 #   never lose the KB ingest that already succeeded.
+# Updated: 2026-07-03 — FL-11b "hide-from-AI enforcement". Hardened the hide
+#   gate to fail CLOSED: if the FileUpload row can't be resolved to confirm
+#   ``hide_from_ai``, the listener SKIPS indexing/tagging instead of proceeding
+#   (FL-6 failed open, which could index a hidden file on a metadata hiccup).
+#   NOTE: purging content ALREADY indexed when a file is later hidden requires
+#   a kb-go ``delete`` subcommand that does not exist yet — tracked as a
+#   follow-up; this change guarantees hidden files are never indexed going
+#   forward.
 """Upload bus subscribers.
 
 The upload pipeline emits :class:`FileReady` on every successful upload.
@@ -88,22 +96,34 @@ async def index_uploaded_file(event: Event) -> None:
         )
         return
 
-    # FL-6: load the library row up front so we can (a) honour the
+    # FL-6/FL-11b: load the library row up front so we can (a) honour the
     # ``hide_from_ai`` opt-out before touching the KB and (b) union derived
-    # tags with any pre-existing user tags later. A hidden file must never be
-    # indexed OR tagged — bail immediately. ``doc`` is ``None`` in test
-    # contexts without Beanie initialised or for rows the store can't see; we
-    # proceed with indexing in that case (fail-open on indexing, never on the
-    # hide gate — a genuinely hidden row is always found by the store).
+    # tags with any pre-existing user tags later.
+    #
+    # FL-11b hardening — FAIL CLOSED on the hide gate. ``hide_from_ai`` is a
+    # privacy control: if we cannot resolve the row to confirm the file is NOT
+    # hidden, we must NOT index it. FL-6 previously failed *open* here (``doc``
+    # is None -> proceed), which would index a genuinely hidden file whenever
+    # the metadata lookup hiccupped. There's no clean signal to distinguish
+    # "row genuinely absent" from "store unavailable", so any unresolvable
+    # status skips indexing/tagging. A resolvable, unhidden row proceeds.
     doc = await _load_upload_doc(file_id, str(workspace_id))
-    if doc is not None and getattr(doc, "hide_from_ai", False):
+    if doc is None:
+        logger.info(
+            "file_id=%s: could not resolve the library row to check "
+            "hide_from_ai; skipping KB index and auto-tagging (fail-closed "
+            "privacy gate)",
+            file_id,
+        )
+        return
+    if getattr(doc, "hide_from_ai", False):
         logger.info(
             "file_id=%s is hidden from AI (hide_from_ai=True); skipping KB "
             "index and auto-tagging",
             file_id,
         )
         return
-    existing_tags = list(getattr(doc, "tags", []) or []) if doc is not None else []
+    existing_tags = list(getattr(doc, "tags", []) or [])
 
     adapter = _resolve_adapter()
     if adapter is None or not storage_key:
@@ -362,12 +382,11 @@ async def _write_vector_to_kb(
 async def _load_upload_doc(file_id: str, workspace_id: str):
     """Load the workspace-scoped FileUpload row, or ``None`` on any failure.
 
-    Used for the FL-6 ``hide_from_ai`` gate and to read pre-existing user
-    tags for the union. Resilient by design: in test contexts without Beanie
-    initialised the store call raises, and we return ``None`` so the listener
-    proceeds with indexing (fail-open on indexing). The hide gate itself is
-    fail-open only when the row can't be found — a genuinely hidden row is
-    always visible to the workspace-scoped store lookup.
+    Used for the ``hide_from_ai`` gate and to read pre-existing user tags for
+    the union. Returns ``None`` when the store raises (e.g. Beanie not
+    initialised) or the row is genuinely absent. FL-11b: the caller treats
+    ``None`` as fail-CLOSED — indexing is skipped when the hide status can't be
+    confirmed, so a hidden file is never indexed on a metadata hiccup.
     """
     try:
         from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
