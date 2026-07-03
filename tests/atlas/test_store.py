@@ -21,13 +21,25 @@
 # skills) entries; COMPILED_KINDS widened to six. Search-ranking pins are
 # otherwise unchanged and must survive the ~165 new entries (widget/skill
 # specific pins live in tests/atlas/test_widgets_skills.py).
+# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-3) — the artifact now also
+# carries hand-authored ``capability`` cards (the workspace-admin tools, one per
+# tool, each role-gated); COMPILED_KINDS widened to seven so the
+# seed-completeness check accepts them.
 
 import json
 
 from pocketpaw.atlas.model import ATLAS_SCHEMA_V1, AtlasModel
 from pocketpaw.atlas.store import _DATA_PATH, AtlasStore, get_atlas_store
 
-COMPILED_KINDS = ("primitive", "surface", "connector", "sense", "widget", "skill")
+COMPILED_KINDS = (
+    "primitive",
+    "surface",
+    "connector",
+    "sense",
+    "widget",
+    "skill",
+    "capability",
+)
 
 EXPECTED_PRIMITIVE_IDS = {
     "primitive:pocket",

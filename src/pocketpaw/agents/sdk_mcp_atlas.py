@@ -33,6 +33,22 @@
 # (properties + links). Absent (OSS default) or erroring introspector →
 # fabric ids are unknown ids and no fabric cards appear (fail-closed);
 # workspace ontology is per-tenant and NEVER enters the compiled artifact.
+#
+# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-3) — before overlay
+# filtering, each handler AWAITS an optional async ``prime()`` on the provider
+# (``_prime_provider``). The EE role-aware provider (WA-3) resolves the caller's
+# workspace role via an async Beanie ``User`` load; its ``is_granted`` is sync
+# (the ``EntitlementProvider`` protocol shape) and reads a role resolved+cached
+# by ``prime()``. Priming here does the async DB work in the handler's own
+# event loop (never a nested ``asyncio.run`` inside sync ``is_granted``). A
+# provider WITHOUT ``prime`` (the default, fakes in tests) is untouched; a
+# priming FAILURE is swallowed (DEBUG-logged) so the provider falls back to its
+# own fail-closed "role unresolved → hide role-gated entries" behavior.
+# ALSO WA-3: the ``provider is None`` path (pre-AT-5 global view) now HIDES
+# role-gated (``role:*``) entries too — search skips them, describe answers a
+# role-gated id like an unknown id, and the known-ids error listing excludes
+# them. Belt-and-braces: admin capabilities can never leak from ANY atlas server
+# wiring, provider or not (matches DefaultEntitlementProvider's role hiding).
 
 from __future__ import annotations
 
@@ -71,6 +87,25 @@ def _text_result(text: str, *, is_error: bool = False) -> dict:
     return out
 
 
+async def _prime_provider(provider: EntitlementProvider | None) -> None:
+    """Await an optional async ``prime()`` on the provider before filtering.
+
+    The EE role-aware provider (WA-3) resolves the caller's workspace role
+    lazily via an async ``User`` load; ``prime`` does that DB work in THIS
+    handler's event loop so the sync ``is_granted`` protocol method can read a
+    cached role. Providers without a ``prime`` (the default, test fakes) are a
+    no-op. A priming error is swallowed (DEBUG log) — the provider then falls
+    back to its own fail-closed default (role unresolved → hide role-gated
+    entries), so a DB blip HIDES admin entries rather than leaking them."""
+    prime = getattr(provider, "prime", None)
+    if prime is None:
+        return
+    try:
+        await prime()
+    except Exception as exc:  # noqa: BLE001 — fail-closed: unresolved role hides gated entries
+        logger.debug("atlas provider prime failed (role stays unresolved): %s", exc)
+
+
 async def _atlas_search_handler(
     args: dict,
     provider: EntitlementProvider | None = None,
@@ -101,10 +136,23 @@ async def _atlas_search_handler(
 
     store = get_atlas_store()
     if provider is None:
-        overlaid = [(entry, None) for entry in store.search(intent, limit=5)]
+        # No provider = the pre-AT-5 global view, BUT role-gated entries (WA-3
+        # admin capabilities) must STILL be hidden: without a provider there is
+        # no role context, so surfacing them would leak admin capabilities.
+        # Fail-closed here matches DefaultEntitlementProvider (which also hides
+        # ``role:*`` entries) so no atlas server wiring can ever expose them.
+        from pocketpaw.atlas.overlay import entry_role_requirement
+
+        overlaid = [
+            (entry, None)
+            for entry in store.search(intent, limit=5)
+            if entry_role_requirement(entry) is None
+        ]
     else:
         from pocketpaw.atlas.overlay import AtlasOverlay
 
+        # WA-3: resolve the caller's role (async) before the sync grant filter.
+        await _prime_provider(provider)
         overlaid = [
             (o.entry, o.available) for o in AtlasOverlay.search(store, intent, provider, limit=5)
         ]
@@ -177,9 +225,18 @@ async def _atlas_describe_handler(
 
     store = get_atlas_store()
     if provider is None:
+        # No provider = the pre-AT-5 global view, BUT role-gated entries (WA-3
+        # admin capabilities) must STILL be hidden — describing one, or listing
+        # it in the known-ids error, would leak an admin capability with no role
+        # context to grant it. A role-gated id answers exactly like an unknown
+        # id (no leakage), and the known-ids listing excludes them.
+        from pocketpaw.atlas.overlay import entry_role_requirement
+
         entry = store.describe(entry_id.strip())
-        if entry is None:
-            known = ", ".join(sorted(e.id for e in store.entries))
+        if entry is None or entry_role_requirement(entry) is not None:
+            known = ", ".join(
+                sorted(e.id for e in store.entries if entry_role_requirement(e) is None)
+            )
             return _text_result(
                 f"Error: unknown atlas id {entry_id!r}. Known ids: {known}",
                 is_error=True,
@@ -188,6 +245,8 @@ async def _atlas_describe_handler(
 
     from pocketpaw.atlas.overlay import AtlasOverlay
 
+    # WA-3: resolve the caller's role (async) before the sync grant filter.
+    await _prime_provider(provider)
     overlaid = AtlasOverlay.describe(store, entry_id.strip(), provider)
     if overlaid is None:
         # Unknown AND filtered ids land here — same envelope, no leakage.

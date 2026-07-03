@@ -975,18 +975,32 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # there is no ambient OSS fabric registry to wire today).
         try:
             from pocketpaw.agents.sdk_mcp_atlas import build_atlas_context_server
-            from pocketpaw.atlas.overlay import DefaultEntitlementProvider
+            from pocketpaw.atlas.overlay import (
+                DefaultEntitlementProvider,
+                build_role_aware_provider,
+            )
 
             tenant_scope = self._tenant_scope_key()
             fabric_introspector = None
+            atlas_provider: Any = DefaultEntitlementProvider(scope_key=tenant_scope)
             if tenant_scope.startswith("ws:") and tenant_scope != _SENTINEL_TENANT_SCOPE:
                 from pocketpaw.atlas.fabric import build_workspace_fabric_introspector
 
                 fabric_introspector = build_workspace_fabric_introspector(
                     tenant_scope[len("ws:") :]
                 )
+                # WA-3: a real ws:<id> run gets the role-aware provider so
+                # non-admins don't see admin capabilities in atlas. It resolves
+                # the caller's role at query time and grants ``role:*`` entries
+                # by role tier; a None return (OSS install / EE provider not
+                # importable / construction failure) leaves the fail-closed
+                # default in place — which HIDES every role-gated entry, so admin
+                # capabilities never leak without the role-aware provider.
+                role_aware = build_role_aware_provider(tenant_scope)
+                if role_aware is not None:
+                    atlas_provider = role_aware
             atlas_server = build_atlas_context_server(
-                provider=DefaultEntitlementProvider(scope_key=tenant_scope),
+                provider=atlas_provider,
                 introspector=fabric_introspector,
             )
             if atlas_server is not None:

@@ -14,6 +14,13 @@
 # the known-ids error listing hides filtered ids, and describe of an
 # unavailable connector points at the integrations surface route (looked up
 # from the seed, not hard-coded).
+# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-3) — role-gating tests:
+# ``entry_role_requirement`` reads a ``role:<tier>`` marker off ``requires``;
+# the OSS ``DefaultEntitlementProvider`` HIDES any entry carrying a ``role:*``
+# marker (is_granted False — it has no role context) while still granting every
+# non-role entry, proving OSS never leaks admin capabilities; and
+# ``build_role_aware_provider`` returns None for a non-``ws:`` scope so the
+# fail-closed default stays in place.
 
 import json
 
@@ -26,10 +33,13 @@ from pocketpaw.agents.sdk_mcp_atlas import (
 from pocketpaw.atlas.model import AtlasEntry, AtlasModel
 from pocketpaw.atlas.overlay import (
     DEFAULT_SCOPE_KEY,
+    ROLE_LEVELS,
     AtlasOverlay,
     DefaultEntitlementProvider,
     EntitlementProvider,
     OverlaidEntry,
+    build_role_aware_provider,
+    entry_role_requirement,
 )
 from pocketpaw.atlas.store import AtlasStore
 
@@ -284,6 +294,93 @@ class TestDefaultProvider:
         assert by_id["connector:beta_crm"].available is False
 
 
+# ── WA-3: role markers + the default provider hides role:* entries ─────────
+
+
+def _cap(entry_id: str, tier: str | None) -> AtlasEntry:
+    """A capability entry, optionally carrying a ``role:<tier>`` requirement."""
+    requires = [f"role:{tier}"] if tier else []
+    return _entry(entry_id, "capability", entry_id.split(":", 1)[1], requires=requires)
+
+
+class TestRoleRequirementHelper:
+    def test_reads_the_role_marker_off_requires(self):
+        assert entry_role_requirement(_cap("capability:admin.x", "admin")) == "admin"
+        assert entry_role_requirement(_cap("capability:admin.y", "owner")) == "owner"
+        assert entry_role_requirement(_cap("capability:admin.z", "member")) == "member"
+
+    def test_none_when_no_role_marker(self):
+        # A non-role entry (primitive) and a capability with only non-role
+        # requires both return None.
+        assert entry_role_requirement(_entry("primitive:pocket", "primitive", "Pocket")) is None
+        entry = _entry("capability:x", "capability", "X", requires=["primitive:pocket"])
+        assert entry_role_requirement(entry) is None
+
+    def test_unknown_tier_still_counts_as_gated(self):
+        # An unrecognized tier is returned raw (not None) so a role-blind
+        # provider hides it — fail-closed on a bad marker.
+        entry = _cap("capability:admin.weird", "superuser")
+        assert entry_role_requirement(entry) == "superuser"
+
+
+class TestDefaultProviderHidesRoleEntries:
+    """The OSS default provider has NO role context, so it must HIDE every
+    ``role:*`` entry — this is what keeps admin capabilities from leaking in
+    OSS even though the compiled artifact is global (WA-3)."""
+
+    def test_role_gated_entries_are_hidden(self):
+        provider = DefaultEntitlementProvider()
+        for tier in ("member", "admin", "owner"):
+            assert provider.is_granted(_cap(f"capability:admin.{tier}", tier)) is False
+
+    def test_unknown_tier_is_hidden(self):
+        provider = DefaultEntitlementProvider()
+        assert provider.is_granted(_cap("capability:admin.weird", "superuser")) is False
+
+    def test_non_role_entries_still_granted(self):
+        provider = DefaultEntitlementProvider()
+        assert provider.is_granted(_entry("primitive:pocket", "primitive", "Pocket")) is True
+        assert provider.is_granted(_cap("capability:public", None)) is True
+
+    def test_search_and_describe_never_surface_role_entries(self):
+        """Through the overlay: role-gated entries are ABSENT from search /
+        describe / visible_ids under the default provider (OSS)."""
+        store = AtlasStore(
+            AtlasModel(
+                entries=[
+                    _entry("primitive:pocket", "primitive", "Pocket", keywords=["manage"]),
+                    _cap("capability:admin.workspace_delete", "owner"),
+                    _cap("capability:admin.members_list", "member"),
+                ]
+            )
+        )
+        provider = DefaultEntitlementProvider()
+        # The admin cards share the "manage" intent but never surface.
+        for cap_entry in store.entries:
+            if cap_entry.kind == "capability":
+                cap_entry.keywords.append("manage")
+        ids = [o.entry.id for o in AtlasOverlay.search(store, "manage", provider, limit=10)]
+        assert "capability:admin.workspace_delete" not in ids
+        assert "capability:admin.members_list" not in ids
+        assert AtlasOverlay.describe(store, "capability:admin.workspace_delete", provider) is None
+        visible = AtlasOverlay.visible_ids(store, provider)
+        assert not any(v.startswith("capability:admin.") for v in visible)
+        assert "primitive:pocket" in visible
+
+
+class TestRoleAwareBridge:
+    """The core bridge is import-optional and returns None outside a real
+    ``ws:`` scope, so the fail-closed default stays in place (WA-3)."""
+
+    def test_returns_none_for_non_ws_scope(self):
+        assert build_role_aware_provider(DEFAULT_SCOPE_KEY) is None
+        assert build_role_aware_provider("") is None
+        assert build_role_aware_provider("nonsense") is None
+
+    def test_role_levels_order(self):
+        assert ROLE_LEVELS["owner"] > ROLE_LEVELS["admin"] > ROLE_LEVELS["member"]
+
+
 # ── MCP tool handlers with stubbed providers (real packaged store) ──────
 
 
@@ -405,3 +502,106 @@ class TestTenantScopeKey:
             scope = backend._tenant_scope_key()
             assert scope == "ws:__missing-workspace-id__"
             assert scope != DEFAULT_SCOPE_KEY
+
+
+# ── WA-3: sdk_mcp_atlas awaits an optional async prime() before filtering ───
+
+
+class _PrimingRoleProvider:
+    """A provider whose role resolves in an async ``prime()`` (like the EE
+    role-aware one): before prime, role-gated entries are hidden (fail-closed);
+    after prime the caller's role grants them. Proves the sdk_mcp_atlas handler
+    awaits ``prime`` so a sync ``is_granted`` can read a resolved role."""
+
+    def __init__(self, tier_level: int):
+        self._tier_level = tier_level
+        self._role_level: int | None = None
+        self.primed = 0
+
+    async def prime(self):
+        self.primed += 1
+        self._role_level = self._tier_level
+
+    def connected_connector_names(self):
+        return set()
+
+    def is_granted(self, entry):
+        req = entry_role_requirement(entry)
+        if req is None:
+            return True
+        if self._role_level is None:
+            return False
+        return self._role_level >= ROLE_LEVELS.get(req, 999)
+
+
+class TestHandlerAwaitsPrime:
+    @pytest.mark.asyncio
+    async def test_describe_role_entry_needs_prime_then_grants(self):
+        # A real packaged role-gated admin id.
+        entry_id = "capability:admin.workspace_delete"
+        # OWNER-level provider: prime resolves owner, so describe finds it.
+        provider = _PrimingRoleProvider(ROLE_LEVELS["owner"])
+        out = await _atlas_describe_handler({"id": entry_id}, provider)
+        assert provider.primed == 1, "handler must await prime()"
+        assert not out.get("is_error"), "owner sees the owner card after prime"
+        entry = json.loads(_text_of(out))
+        assert entry["id"] == entry_id
+
+    @pytest.mark.asyncio
+    async def test_member_level_provider_hides_owner_card_through_handler(self):
+        provider = _PrimingRoleProvider(ROLE_LEVELS["member"])
+        out = await _atlas_describe_handler({"id": "capability:admin.workspace_delete"}, provider)
+        assert provider.primed == 1
+        assert out.get("is_error") is True  # unknown-id envelope, no leak
+        text = _text_of(out)
+        assert "capability:admin.workspace_delete" not in text.split("Known ids:")[1]
+
+    @pytest.mark.asyncio
+    async def test_member_search_hides_admin_capabilities_through_handler(self):
+        provider = _PrimingRoleProvider(ROLE_LEVELS["member"])
+        out = await _atlas_search_handler({"intent": "manage the workspace"}, provider)
+        ids = [c["id"] for c in _cards(out)]
+        assert provider.primed == 1
+        # No owner/admin admin-capability card surfaces for a member.
+        assert not any(
+            i in ids
+            for i in (
+                "capability:admin.workspace_delete",
+                "capability:admin.member_update_role",
+                "capability:admin.billing_plan_change",
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_provider_without_prime_is_untouched(self):
+        # The existing FakeProvider has no prime(); the handler must not choke.
+        out = await _atlas_search_handler({"intent": "approve agent actions"}, FakeProvider())
+        assert not out.get("is_error")
+
+
+# ── WA-3: the provider-less (None) path also hides role-gated entries ───────
+
+
+class TestNoProviderHidesRoleEntries:
+    @pytest.mark.asyncio
+    async def test_search_without_provider_omits_admin_capabilities(self):
+        # Admin cards carry these intent words; without a provider they must NOT
+        # surface (the result is either non-admin cards or a no-match message,
+        # never an admin capability id in the response text).
+        for intent in ("manage the workspace", "invite a member", "delete the workspace"):
+            out = await _atlas_search_handler({"intent": intent})
+            assert "capability:admin." not in _text_of(out), intent
+
+    @pytest.mark.asyncio
+    async def test_describe_without_provider_hides_admin_capability(self):
+        out = await _atlas_describe_handler({"id": "capability:admin.workspace_delete"})
+        assert out.get("is_error") is True
+        text = _text_of(out)
+        # answers like an unknown id, and the known-ids listing excludes it.
+        assert "capability:admin.workspace_delete" not in text.split("Known ids:")[1]
+
+    @pytest.mark.asyncio
+    async def test_describe_without_provider_still_serves_non_role_entry(self):
+        out = await _atlas_describe_handler({"id": "primitive:instinct"})
+        assert not out.get("is_error")
+        assert json.loads(_text_of(out))["id"] == "primitive:instinct"
