@@ -25,6 +25,24 @@
 #     * ``workspace.update`` → ``workspace.service.update`` (adapter passes ONLY
 #       the recognized name / settings / branding fields; any other key an agent
 #       puts in args is ignored, never forwarded).
+# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-6) — added the three OWNER
+#   write whitelist entries (destructive / financial / governance ops):
+#     * ``instinct.activate`` → ``workspace.service.set_instinct_approval_level``
+#       (adapter reads ONLY ``level``, constrained to the ApprovalLevel enum {ASK,
+#       TRIAGE, TRUSTED}; the proposer is the actor). A non-ASK level turns ON
+#       workspace-wide auto-approval of agent writes — hence OWNER + human-gated.
+#     * ``workspace.delete`` → ``workspace.service.delete`` (adapter reads NOTHING
+#       from args — a delete has no steering params; DESTRUCTIVE + IRREVERSIBLE,
+#       the service owns the cascade over members / rooms / agents / files).
+#     * ``billing.manage`` → ``billing.service.subscribe`` — PAYMENT-HONEST: this
+#       does NOT flip the plan. ``subscribe`` opens a Dodo HOSTED CHECKOUT and
+#       returns a ``{checkout_url}``; the plan changes only on the verified
+#       ``subscription.active`` webhook. The executor records the checkout url as
+#       the outcome (an artifact the human completes) — it never fakes a plan
+#       mutation. The webhook-internal ``set_workspace_plan`` (which would bypass
+#       payment) is DELIBERATELY not exposed. The adapter reads ONLY ``plan_key``,
+#       constrained to the plan catalog. (Seat management is NOT wired at all —
+#       there is no seat-change service / checkout flow in the codebase.)
 #   Every new adapter is STRICT (fixed known keys → fixed kwargs; unknown keys
 #   never reach the service — no ``**args`` splat), exactly like
 #   ``_adapt_member_role_change``. The execute-time RBAC re-check + args-hash +
@@ -380,6 +398,118 @@ async def _call_update_workspace(**kwargs: Any) -> Any:
     return await workspace_service.update(ctx, kwargs["workspace_id"], body)
 
 
+# --- instinct.activate (WA-6, OWNER) ---------------------------------------
+
+# The valid Instinct-gate activation levels (mirrors ApprovalLevel: ASK / TRIAGE
+# / TRUSTED). Constrained here too so a hand-crafted blob can't set an off-enum
+# level (the service re-validates and raises, but fail early + clearly).
+_APPROVAL_LEVELS = frozenset({"ASK", "TRIAGE", "TRUSTED"})
+
+
+def _adapt_instinct_activate(
+    args: dict[str, Any], workspace_id: str, proposer_user_id: str
+) -> dict[str, Any]:
+    """STRICT adapter for ``workspace.service.set_instinct_approval_level``.
+
+    Reads ONLY ``level`` and constrains it to the ApprovalLevel enum. A non-ASK
+    level turns ON workspace-wide auto-approval of agent writes — the single most
+    governance-sensitive switch — so no other key is read. The proposer is the
+    actor (audit attribution)."""
+    level = str(args.get("level") or "")
+    if level not in _APPROVAL_LEVELS:
+        raise ValueError(f"instinct.activate level must be one of {sorted(_APPROVAL_LEVELS)}")
+    return {
+        "workspace_id": workspace_id,
+        "proposer_user_id": proposer_user_id,
+        "level": level,
+    }
+
+
+async def _call_set_instinct_approval_level(**kwargs: Any) -> Any:
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    ctx = _proposer_ctx(kwargs["workspace_id"], kwargs["proposer_user_id"])
+    return await workspace_service.set_instinct_approval_level(
+        ctx, kwargs["workspace_id"], kwargs["level"]
+    )
+
+
+# --- workspace.delete (WA-6, OWNER) ----------------------------------------
+
+
+def _adapt_workspace_delete(
+    args: dict[str, Any],  # noqa: ARG001 — delete takes no steering args
+    workspace_id: str,
+    proposer_user_id: str,
+) -> dict[str, Any]:
+    """STRICT adapter for ``workspace.service.delete``.
+
+    Reads NOTHING from ``args`` — a workspace delete has no parameters that could
+    steer it; the only inputs are the tenancy (workspace_id) and the proposer
+    (audit attribution). This is DESTRUCTIVE + IRREVERSIBLE; the service owns the
+    cascade over members / rooms / agents / files."""
+    return {
+        "workspace_id": workspace_id,
+        "proposer_user_id": proposer_user_id,
+    }
+
+
+async def _call_delete_workspace(**kwargs: Any) -> Any:
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    ctx = _proposer_ctx(kwargs["workspace_id"], kwargs["proposer_user_id"])
+    return await workspace_service.delete(ctx, kwargs["workspace_id"])
+
+
+# --- billing.manage (WA-6, OWNER) — propose→checkout-URL, NOT a plan mutation
+
+
+# The plan tiers a billing-plan change may target (mirrors the billing plan
+# catalog). ``subscribe`` re-validates against the live catalog; constraining
+# here too rejects an obvious typo before the provider call.
+_PLAN_KEYS = frozenset({"free", "go", "pro", "pro_max", "enterprise"})
+
+
+def _adapt_billing_manage(
+    args: dict[str, Any], workspace_id: str, proposer_user_id: str
+) -> dict[str, Any]:
+    """STRICT adapter for the billing-plan change.
+
+    Reads ONLY ``plan_key`` and constrains it to the catalog. IMPORTANT: this does
+    NOT map to a synchronous plan mutation. The service (``subscribe``) opens a
+    Dodo HOSTED CHECKOUT and returns a ``{checkout_url}``; the plan flips only when
+    Dodo posts a verified ``subscription.active`` webhook. The webhook-internal
+    ``set_workspace_plan`` (which bypasses payment) is deliberately NOT wired —
+    an approved plan change PRODUCES a checkout the human completes, it never
+    silently flips a paid plan. The proposer is threaded as the subscribing user."""
+    plan_key = str(args.get("plan_key") or "")
+    if plan_key not in _PLAN_KEYS:
+        raise ValueError(f"billing.manage plan_key must be one of {sorted(_PLAN_KEYS)}")
+    return {
+        "workspace_id": workspace_id,
+        "proposer_user_id": proposer_user_id,
+        "plan_key": plan_key,
+    }
+
+
+async def _call_billing_subscribe(**kwargs: Any) -> Any:
+    """Open a subscription checkout for the requested plan and return its result.
+
+    Returns the ``{"checkout_url": ...}`` dict from ``subscribe`` — the honest
+    artifact the human must complete. The executor records this (via the outcome
+    ``response_summary``); the plan does NOT change here (it changes on the Dodo
+    ``subscription.active`` webhook). ``origin`` is None on the approve path (no
+    Origin header) — ``subscribe`` falls back to the ``dodo_checkout_return_base``
+    config for the return_url, so the checkout still works."""
+    from pocketpaw_ee.cloud.billing import service as billing_service
+
+    return await billing_service.subscribe(
+        kwargs["workspace_id"],
+        kwargs["proposer_user_id"],
+        kwargs["plan_key"],
+    )
+
+
 # THE WHITELIST — the ONLY workspace-admin actions an approved ``_admin_action``
 # can ever fire. Seeded (WA-2) with member.role_change; extended (WA-5) with the
 # member.remove / invite.create / invite.revoke / connector.manage /
@@ -409,6 +539,21 @@ _DISPATCH: dict[str, _Dispatch] = {
     "workspace.update": _Dispatch(
         service=_call_update_workspace,
         adapt=_adapt_workspace_update,
+    ),
+    # WA-6 OWNER writes — destructive / financial / governance. Each STRICT +
+    # OWNER-re-checked at execute time. billing.manage maps to a checkout-URL
+    # producer, NOT a plan mutation (payment honesty).
+    "instinct.activate": _Dispatch(
+        service=_call_set_instinct_approval_level,
+        adapt=_adapt_instinct_activate,
+    ),
+    "workspace.delete": _Dispatch(
+        service=_call_delete_workspace,
+        adapt=_adapt_workspace_delete,
+    ),
+    "billing.manage": _Dispatch(
+        service=_call_billing_subscribe,
+        adapt=_adapt_billing_manage,
     ),
 }
 

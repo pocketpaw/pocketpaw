@@ -2,6 +2,14 @@
 # surface for workspace administration (feat/workspace-admin-tools, WA-1/2/4/5).
 #
 # Created: 2026-07-03 (feat/workspace-admin-tools, WA-1).
+# Updated: 2026-07-03 (WA-6) — added propose+deny coverage for the three OWNER
+#   WRITE tools (instinct_approval_level_set, workspace_delete, billing_plan_change).
+#   Each pins: (a) an OWNER identity → a PENDING (executed=False) envelope, the
+#   STRICT proposed args are right, and the underlying service is SPIED and
+#   asserted NOT called inline; (b) a NON-OWNER identity (an ADMIN — proving ADMIN
+#   can't perform an OWNER op) → a deny envelope, propose_admin_action NOT called;
+#   plus arg-validation refusals (bad level / bad plan). billing_plan_change's
+#   envelope names the checkout step; workspace_delete's names irreversibility.
 # Updated: 2026-07-03 (WA-5) — added propose+deny coverage for the seven ADMIN
 #   WRITE tools (member_remove, invite_create, invite_revoke, connector_enable,
 #   connector_disable, connector_config, workspace_update). Each pins: (a) an ADMIN
@@ -135,6 +143,15 @@ def test_server_name_and_tool_ids_contract():
     assert wa_mcp.CONNECTOR_DISABLE_TOOL_ID == "mcp__pocketpaw_workspace_admin__connector_disable"
     assert wa_mcp.CONNECTOR_CONFIG_TOOL_ID == "mcp__pocketpaw_workspace_admin__connector_config"
     assert wa_mcp.WORKSPACE_UPDATE_TOOL_ID == "mcp__pocketpaw_workspace_admin__workspace_update"
+    # WA-6 OWNER write tool ids.
+    assert (
+        wa_mcp.INSTINCT_APPROVAL_LEVEL_SET_TOOL_ID
+        == "mcp__pocketpaw_workspace_admin__instinct_approval_level_set"
+    )
+    assert wa_mcp.WORKSPACE_DELETE_TOOL_ID == "mcp__pocketpaw_workspace_admin__workspace_delete"
+    assert (
+        wa_mcp.BILLING_PLAN_CHANGE_TOOL_ID == "mcp__pocketpaw_workspace_admin__billing_plan_change"
+    )
     assert set(wa_mcp.ADMIN_TOOL_IDS) == {
         wa_mcp.MEMBERS_LIST_TOOL_ID,
         wa_mcp.MEMBER_UPDATE_ROLE_TOOL_ID,
@@ -150,6 +167,9 @@ def test_server_name_and_tool_ids_contract():
         wa_mcp.CONNECTOR_DISABLE_TOOL_ID,
         wa_mcp.CONNECTOR_CONFIG_TOOL_ID,
         wa_mcp.WORKSPACE_UPDATE_TOOL_ID,
+        wa_mcp.INSTINCT_APPROVAL_LEVEL_SET_TOOL_ID,
+        wa_mcp.WORKSPACE_DELETE_TOOL_ID,
+        wa_mcp.BILLING_PLAN_CHANGE_TOOL_ID,
     }
 
 
@@ -1075,6 +1095,195 @@ async def test_write_tools_outside_stream_error():
         (wa_mcp._connector_disable_handler, {"name": "gmail"}),
         (wa_mcp._connector_config_handler, {"name": "gmail", "config": {}}),
         (wa_mcp._workspace_update_handler, {"name": "X"}),
+    ):
+        res = await handler(args)
+        assert res.get("is_error") is True
+        assert "no active workspace" in res["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# WA-6 OWNER WRITE tools — propose (never inline) + deny. The deny case uses an
+# ADMIN actor to prove ADMIN CANNOT perform an OWNER op (the gate is OWNER-only).
+# ---------------------------------------------------------------------------
+
+
+def _owner(monkeypatch):
+    """check_workspace_action passes as OWNER."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action", lambda *a, **k: WorkspaceRole.OWNER
+    )
+
+
+def _deny_not_owner(monkeypatch):
+    """check_workspace_action DENIES an OWNER-gated action for a non-owner — the
+    exact Forbidden the RBAC layer raises when an ADMIN attempts an OWNER op."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        _deny_forbidden("workspace.insufficient_role", "owner required"),
+    )
+
+
+# ---- instinct_approval_level_set ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_instinct_approval_level_set_owner_proposes_not_inline(
+    monkeypatch, _patch_user, _spy_propose
+):
+    """OWNER → PENDING envelope; propose carries ONLY the level;
+    set_instinct_approval_level is spied and asserted NOT called inline."""
+    _owner(monkeypatch)
+    svc = _spy_service(
+        monkeypatch, "pocketpaw_ee.cloud.workspace.service", "set_instinct_approval_level"
+    )
+    with _identity(workspace="w1", user="owner1"):
+        res = await wa_mcp._instinct_approval_level_set_handler({"level": "TRUSTED"})
+    body = _body(res)
+    assert body["ok"] is True
+    assert body["executed"] is False
+    assert body["status"] == "pending_approval"
+    assert body["action_id"] == "action-wa5"
+    assert _spy_propose["action"] == "instinct.activate"
+    assert _spy_propose["args"] == {"level": "TRUSTED"}
+    assert _spy_propose["proposer_user_id"] == "owner1"
+    assert svc["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_instinct_approval_level_set_rejects_bad_level(monkeypatch, _patch_user):
+    """An out-of-enum level is refused before any gate/propose."""
+    _owner(monkeypatch)
+    with _identity(workspace="w1", user="owner1"):
+        res = await wa_mcp._instinct_approval_level_set_handler({"level": "YOLO"})
+    assert res.get("is_error") is True
+    assert "level is required" in res["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_instinct_approval_level_set_admin_denied_no_propose(monkeypatch, _patch_user):
+    """AN ADMIN CANNOT DO AN OWNER OP — deny envelope, propose NOT called."""
+    propose_hit = {"called": False}
+
+    async def _propose(**kwargs):  # noqa: ANN003
+        propose_hit["called"] = True
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.admin_proposals.propose.propose_admin_action", _propose)
+    _deny_not_owner(monkeypatch)
+    with _identity(workspace="w1", user="admin1"):
+        res = await wa_mcp._instinct_approval_level_set_handler({"level": "TRIAGE"})
+    body = _body(res)
+    assert body["ok"] is False
+    assert body["denied"] is True
+    assert body["code"] == "workspace.insufficient_role"
+    assert propose_hit["called"] is False
+
+
+# ---- workspace_delete -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_workspace_delete_owner_proposes_not_inline(monkeypatch, _patch_user, _spy_propose):
+    """OWNER → PENDING envelope flagged irreversible; propose carries NO args;
+    the delete service is spied and asserted NOT called inline."""
+    _owner(monkeypatch)
+    svc = _spy_service(monkeypatch, "pocketpaw_ee.cloud.workspace.service", "delete")
+    with _identity(workspace="w1", user="owner1"):
+        res = await wa_mcp._workspace_delete_handler({})
+    body = _body(res)
+    assert body["ok"] is True
+    assert body["executed"] is False
+    assert body["status"] == "pending_approval"
+    assert body["proposed_change"]["irreversible"] is True
+    # The message must warn about irreversibility.
+    assert "IRREVERSIBLE" in body["message"]
+    assert _spy_propose["action"] == "workspace.delete"
+    assert _spy_propose["args"] == {}  # identity only — nothing steers the delete
+    assert _spy_propose["proposer_user_id"] == "owner1"
+    assert svc["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_delete_admin_denied_no_propose(monkeypatch, _patch_user):
+    """AN ADMIN CANNOT DELETE THE WORKSPACE — deny envelope, propose NOT called."""
+    propose_hit = {"called": False}
+
+    async def _propose(**kwargs):  # noqa: ANN003
+        propose_hit["called"] = True
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.admin_proposals.propose.propose_admin_action", _propose)
+    _deny_not_owner(monkeypatch)
+    with _identity(workspace="w1", user="admin1"):
+        res = await wa_mcp._workspace_delete_handler({})
+    body = _body(res)
+    assert body["ok"] is False
+    assert body["denied"] is True
+    assert body["code"] == "workspace.insufficient_role"
+    assert propose_hit["called"] is False
+
+
+# ---- billing_plan_change --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_billing_plan_change_owner_proposes_checkout_model(
+    monkeypatch, _patch_user, _spy_propose
+):
+    """OWNER → PENDING envelope; propose carries ONLY plan_key; the subscribe
+    service is spied and asserted NOT called inline; the message names the
+    checkout step (the plan does NOT flip on approval alone)."""
+    _owner(monkeypatch)
+    svc = _spy_service(monkeypatch, "pocketpaw_ee.cloud.billing.service", "subscribe")
+    with _identity(workspace="w1", user="owner1"):
+        res = await wa_mcp._billing_plan_change_handler({"plan": "pro"})
+    body = _body(res)
+    assert body["ok"] is True
+    assert body["executed"] is False
+    assert body["status"] == "pending_approval"
+    assert body["proposed_change"] == {"plan": "pro", "workspace_id": "w1"}
+    # Payment-honesty: the relay must name the checkout step.
+    assert "CHECKOUT" in body["message"] or "checkout" in body["message"]
+    assert _spy_propose["action"] == "billing.manage"
+    assert _spy_propose["args"] == {"plan_key": "pro"}
+    assert _spy_propose["proposer_user_id"] == "owner1"
+    assert svc["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_billing_plan_change_rejects_bad_plan(monkeypatch, _patch_user):
+    """An unknown plan tier is refused before any gate/propose."""
+    _owner(monkeypatch)
+    with _identity(workspace="w1", user="owner1"):
+        res = await wa_mcp._billing_plan_change_handler({"plan": "platinum"})
+    assert res.get("is_error") is True
+    assert "plan is required" in res["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_billing_plan_change_admin_denied_no_propose(monkeypatch, _patch_user):
+    """AN ADMIN CANNOT CHANGE BILLING — deny envelope, propose NOT called."""
+    propose_hit = {"called": False}
+
+    async def _propose(**kwargs):  # noqa: ANN003
+        propose_hit["called"] = True
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.admin_proposals.propose.propose_admin_action", _propose)
+    _deny_not_owner(monkeypatch)
+    with _identity(workspace="w1", user="admin1"):
+        res = await wa_mcp._billing_plan_change_handler({"plan": "pro"})
+    body = _body(res)
+    assert body["ok"] is False
+    assert body["denied"] is True
+    assert body["code"] == "workspace.insufficient_role"
+    assert propose_hit["called"] is False
+
+
+@pytest.mark.asyncio
+async def test_owner_write_tools_outside_stream_error():
+    """Every WA-6 OWNER WRITE tool refuses (error envelope) with no identity."""
+    for handler, args in (
+        (wa_mcp._instinct_approval_level_set_handler, {"level": "ASK"}),
+        (wa_mcp._workspace_delete_handler, {}),
+        (wa_mcp._billing_plan_change_handler, {"plan": "pro"}),
     ):
         res = await handler(args)
         assert res.get("is_error") is True
