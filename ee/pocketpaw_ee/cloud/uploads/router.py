@@ -1,5 +1,15 @@
 """EE /uploads router — workspace-scoped upload endpoints.
 
+2026-07-03 (FL-11b "hide-from-AI purge"): ``PATCH /uploads/{file_id}`` now
+retroactively purges a file's KB content when ``hide_from_ai`` flips false→true
+AND the row tracks a kb-go article (``kb_article_id`` + ``kb_scope`` recorded on
+ingest by the FileReady listener). It calls
+``KnowledgeService.remove_article`` then clears the tracking so a later re-index
+re-tracks. Best-effort: a purge failure logs a warning but the hide flag still
+applies (a sweeper can re-purge); no article tracked → no purge; already-hidden
+or a PATCH that doesn't change the flag → no purge. The file stays
+browsable/downloadable — only the KB copy is removed.
+
 2026-07-03 (FL-1 "Library metadata"): ``PATCH /uploads/{file_id}`` now also
 accepts ``tags`` (list[str]), ``collections`` (list[str]) and ``hide_from_ai``
 (bool) so a file can carry library organization. Only the provided fields are
@@ -37,6 +47,7 @@ into it.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
@@ -68,6 +79,8 @@ from pocketpaw_ee.cloud.uploads.folder_store import FolderStore
 from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
 from pocketpaw_ee.cloud.uploads.paths import normalize_path, parent_of
 from pocketpaw_ee.cloud.uploads.service import EEUploadService
+
+logger = logging.getLogger(__name__)
 
 # Module-level singletons — one adapter + store per process
 _ROOT = Path.home() / ".pocketpaw" / "uploads"
@@ -382,12 +395,53 @@ async def patch_upload(
             raise HTTPException(status_code=400, detail="collections must be a list of strings")
         doc.collections = new_collections
 
+    # FL-11b: detect a false→true hide transition so we can retroactively
+    # purge the file's KB article after the row is saved. Capture the pre-edit
+    # state + tracked article BEFORE mutating ``doc``.
+    was_hidden = bool(doc.hide_from_ai)
+    tracked_article_id = doc.kb_article_id
+    tracked_scope = doc.kb_scope
+
     if new_hide is not None:
         if not isinstance(new_hide, bool):
             raise HTTPException(status_code=400, detail="hide_from_ai must be a boolean")
         doc.hide_from_ai = new_hide
 
+    became_hidden = new_hide is True and not was_hidden
+
     await doc.save()
+
+    # FL-11b purge: a file that WAS indexed (has a tracked article) and is now
+    # being hidden gets its KB content removed so it stops being retrievable.
+    # Best-effort — a purge failure logs a warning but the hide flag stays
+    # applied (a retry/sweeper can re-purge). We do NOT purge when the file
+    # wasn't indexed (no tracked article) or was already hidden. On success we
+    # clear the tracking so a later re-index re-tracks the fresh article.
+    if became_hidden and tracked_article_id and tracked_scope:
+        from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
+
+        purged = await KnowledgeService.remove_article(tracked_scope, tracked_article_id)
+        if purged:
+            try:
+                await _META.set_kb_article(
+                    file_id, workspace=workspace, article_id=None, scope=None
+                )
+            except Exception:
+                logger.warning(
+                    "cleared-tracking write failed for file_id=%s after KB purge; "
+                    "re-index may re-purge harmlessly (idempotent delete)",
+                    file_id,
+                )
+        else:
+            logger.warning(
+                "KB purge failed for file_id=%s (article_id=%s scope=%s); hide "
+                "flag applied but content may still be retrievable until a "
+                "sweeper re-purges",
+                file_id,
+                tracked_article_id,
+                tracked_scope,
+            )
+
     return {
         "id": doc.file_id,
         "filename": doc.filename,

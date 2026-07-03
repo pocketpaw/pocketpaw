@@ -1,5 +1,11 @@
 """Mongo-backed metadata store, workspace-scoped.
 
+2026-07-03 (FL-11b "hide-from-AI purge"): added ``set_kb_article`` — a
+workspace-scoped setter the FileReady listener uses to record the kb-go
+``article_id`` + ``scope`` on a row after a successful ingest, and the PATCH
+route uses (with ``None`` args) to clear that tracking after a purge. The
+workspace filter is always applied on the read, so cross-tenant writes are
+impossible through this API.
 2026-07-03 (FL-1 "Library metadata"): the ``iter_by_workspace`` /
 ``iter_by_pocket`` dict rows now carry ``collections`` and ``hide_from_ai``
 alongside the pre-existing ``tags`` so library metadata round-trips into the
@@ -106,6 +112,32 @@ class MongoFileStore:
             doc.collections = [str(c) for c in collections]
         if hide_from_ai is not None:
             doc.hide_from_ai = bool(hide_from_ai)
+        await doc.save()
+        return doc
+
+    async def set_kb_article(
+        self,
+        file_id: str,
+        workspace: str,
+        *,
+        article_id: str | None,
+        scope: str | None,
+    ) -> FileUpload | None:
+        """Record (or clear) the tracked kb-go article on one row (FL-11b).
+
+        Workspace-scoped: the workspace filter is always applied, so a caller
+        cannot mutate another tenant's rows. Pass a non-empty ``article_id`` +
+        ``scope`` after a successful ingest to enable a later purge; pass
+        ``None`` for both to clear the tracking after a purge (so a re-index
+        re-populates it). Both fields are always written to the given values.
+        Returns the updated doc, or ``None`` if no live row matches
+        ``(file_id, workspace)``.
+        """
+        doc = await self.get_doc_scoped(file_id, workspace)
+        if doc is None:
+            return None
+        doc.kb_article_id = article_id
+        doc.kb_scope = scope
         await doc.save()
         return doc
 

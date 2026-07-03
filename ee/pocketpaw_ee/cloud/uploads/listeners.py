@@ -37,6 +37,13 @@
 #   a kb-go ``delete`` subcommand that does not exist yet — tracked as a
 #   follow-up; this change guarantees hidden files are never indexed going
 #   forward.
+# Updated: 2026-07-03 — FL-11b "hide-from-AI purge" (retroactive). After a
+#   successful KB ingest the listener now records the kb-go ``article_id`` and
+#   the ``scope`` it landed in onto the FileUpload row (via
+#   ``MongoFileStore.set_kb_article``). This lets the PATCH route retroactively
+#   purge exactly that article when the file is later hidden from AI (the
+#   companion delete path lives in ``uploads/router.py``). The tracking write is
+#   contained — a failure logs but never undoes the ingest that succeeded.
 """Upload bus subscribers.
 
 The upload pipeline emits :class:`FileReady` on every successful upload.
@@ -198,6 +205,18 @@ async def index_uploaded_file(event: Event) -> None:
                 file_id,
             )
             return
+
+        # FL-11b: record the article id + scope on the row so a later
+        # hide-from-AI toggle can purge exactly this article. Contained — a
+        # tracking-write failure must not break the ingest that already
+        # succeeded (worst case: the file can't be auto-purged and a sweeper
+        # handles it).
+        await _record_kb_article(
+            file_id=file_id,
+            workspace_id=str(workspace_id),
+            article_id=article_id,
+            scope=scope,
+        )
 
         await _maybe_attach_vector(
             path=path,
@@ -377,6 +396,39 @@ async def _write_vector_to_kb(
             os.unlink(tmp.name)
         except OSError:
             logger.debug("temp vec cleanup failed for %s", tmp.name)
+
+
+async def _record_kb_article(
+    *,
+    file_id: str,
+    workspace_id: str,
+    article_id: str,
+    scope: str,
+) -> None:
+    """Persist the kb-go article id + scope on the FileUpload row (FL-11b).
+
+    Lets a later hide-from-AI toggle purge exactly this article from the KB.
+    Fully contained: any failure (store unavailable, row already gone) is
+    logged and swallowed so the ingest that already succeeded is never undone.
+    """
+    try:
+        from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+
+        updated = await MongoFileStore().set_kb_article(
+            file_id, workspace_id, article_id=article_id, scope=scope
+        )
+        if updated is None:
+            logger.debug(
+                "kb-article tracking found no row for file_id=%s workspace=%s",
+                file_id,
+                workspace_id,
+            )
+    except Exception:
+        logger.exception(
+            "recording kb_article_id failed for file_id=%s; KB content is "
+            "ingested but won't auto-purge on hide (sweeper can reconcile)",
+            file_id,
+        )
 
 
 async def _load_upload_doc(file_id: str, workspace_id: str):

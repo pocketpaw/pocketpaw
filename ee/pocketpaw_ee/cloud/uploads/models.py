@@ -1,5 +1,13 @@
 """EE FileUpload document — Mongo metadata for blobs stored via StorageAdapter.
 
+2026-07-03 — FL-11b "hide-from-AI purge". Added ``kb_article_id`` and
+``kb_scope`` (both ``str | None``, default ``None``) so a row remembers the
+kb-go article it was ingested into. The FileReady listener records them after a
+successful ingest; the PATCH route reads them to purge that article when a file
+is later hidden from AI (``hide_from_ai`` flips false→true). Legacy rows read
+back ``None`` via the defaults — no migration needed (Beanie field-add). Not
+indexed: they're read only after resolving a row by ``file_id``.
+
 2026-07-03 — FL-1 "Library metadata". Added ``tags`` (list[str]),
 ``collections`` (list[str]) and ``hide_from_ai`` (bool) so a file can carry
 library organization + an AI-visibility flag that persist and round-trip
@@ -69,6 +77,13 @@ class FileUpload(TimestampedDocument):
     tags: list[str] = Field(default_factory=list)
     collections: list[str] = Field(default_factory=list)
     hide_from_ai: bool = False
+    # KB tracking (FL-11b). After a successful ingest the FileReady listener
+    # records the kb-go article id and the scope it landed in, so the file can
+    # be retroactively purged from the KB if it's later hidden from AI. ``None``
+    # means "not (currently) indexed" — a hide toggle then skips the purge, and
+    # a later re-index re-populates these. Legacy rows read ``None``.
+    kb_article_id: str | None = None
+    kb_scope: str | None = None
 
     class Settings:
         name = "file_uploads"
