@@ -89,6 +89,39 @@
 #       proposed; any stray key an agent adds is dropped here AND in the strict
 #       adapter. The write-side helpers ``_gate_write`` + ``_propose_write`` are
 #       the shared chokepoint (parallel to WA-4's ``_gate_read``).
+#
+# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-6 — three OWNER WRITE tools).
+#   The most security-sensitive tools in the surface: OWNER-only, destructive /
+#   financial workspace ops. Each PROPOSES through the SAME ``_admin_action``
+#   Instinct gate (validate → _gate_write deny-envelope → _propose_write pending),
+#   NEVER mutates inline, and fires only on human approval after the executor
+#   re-checks the proposer STILL holds OWNER. The new tools + their OWNER RBAC
+#   action + the executor whitelist entry each extends:
+#     * instinct_approval_level_set(level) → ``instinct.activate`` (OWNER) →
+#       workspace.service.set_instinct_approval_level. ``level`` is constrained to
+#       the canonical ``ApprovalLevel`` enum {ASK, TRIAGE, TRUSTED}; a non-ASK
+#       level turns ON workspace-wide auto-approval of agent writes, so it's the
+#       single most governance-sensitive switch — OWNER-gated + human-approved.
+#     * workspace_delete() → ``workspace.delete`` (OWNER) →
+#       workspace.service.delete. DESTRUCTIVE + IRREVERSIBLE (cascades every
+#       member / room / agent / file). No args beyond identity. The envelope is
+#       emphatic that it's irreversible and pending human approval — the tool only
+#       proposes; the cascade fires on approval.
+#     * billing_plan_change(plan) → ``billing.manage`` (OWNER) →
+#       billing.service.subscribe. IMPORTANT (payment honesty): a paid-plan change
+#       flows through Dodo's HOSTED CHECKOUT — the plan flips ONLY when Dodo posts
+#       a verified ``subscription.active`` webhook, NOT synchronously. So the
+#       executor does NOT fake a plan mutation: on approval it calls ``subscribe``,
+#       which returns a ``{checkout_url}`` the human must complete. The webhook-
+#       internal ``set_workspace_plan`` (which bypasses payment) is DELIBERATELY
+#       NOT wired — an agent must never flip a paid plan without the real payment
+#       flow. ``plan`` is constrained to the plan catalog keys.
+#     * seats_manage — DELIBERATELY NOT BUILT. There is NO seat-change service and
+#       no billing/checkout seat flow anywhere in the codebase (seats are a
+#       workspace-doc field set at creation; ``UpdateWorkspaceRequest`` has no
+#       ``seats`` field). With no safe, honest execution path, wiring it would mean
+#       either a silent seat DB write (bypassing billing) or a fabricated flow —
+#       both refused. Skipped; escalated as NEEDS_CONTEXT.
 """Agent-side MCP surface for workspace administration.
 
 Tools registered:
@@ -153,6 +186,12 @@ CONNECTOR_ENABLE_TOOL_ID = f"mcp__{SERVER_NAME}__connector_enable"
 CONNECTOR_DISABLE_TOOL_ID = f"mcp__{SERVER_NAME}__connector_disable"
 CONNECTOR_CONFIG_TOOL_ID = f"mcp__{SERVER_NAME}__connector_config"
 WORKSPACE_UPDATE_TOOL_ID = f"mcp__{SERVER_NAME}__workspace_update"
+# WA-6 — OWNER WRITE tools (the most security-sensitive: destructive / financial /
+# governance ops). Each PROPOSES through the ``_admin_action`` Instinct gate
+# exactly like the ADMIN writes, but gates on an OWNER RBAC action.
+INSTINCT_APPROVAL_LEVEL_SET_TOOL_ID = f"mcp__{SERVER_NAME}__instinct_approval_level_set"
+WORKSPACE_DELETE_TOOL_ID = f"mcp__{SERVER_NAME}__workspace_delete"
+BILLING_PLAN_CHANGE_TOOL_ID = f"mcp__{SERVER_NAME}__billing_plan_change"
 
 ADMIN_TOOL_IDS = (
     MEMBERS_LIST_TOOL_ID,
@@ -169,6 +208,9 @@ ADMIN_TOOL_IDS = (
     CONNECTOR_DISABLE_TOOL_ID,
     CONNECTOR_CONFIG_TOOL_ID,
     WORKSPACE_UPDATE_TOOL_ID,
+    INSTINCT_APPROVAL_LEVEL_SET_TOOL_ID,
+    WORKSPACE_DELETE_TOOL_ID,
+    BILLING_PLAN_CHANGE_TOOL_ID,
 )
 
 # The RBAC action keys these tools gate on (canonical entries in
@@ -186,6 +228,13 @@ _MEMBER_REMOVE_ACTION = "workspace.member.remove"
 _INVITE_REVOKE_ACTION = "invite.revoke"  # the REST revoke route's action (not invite.create)
 _CONNECTOR_ACTION = "connector.manage"
 _WORKSPACE_UPDATE_ACTION = "workspace.update"
+# WA-6 OWNER WRITE actions (all OWNER in guards.actions.ACTIONS — the top tier,
+# mirroring each other). The tool RBAC-gates on these; the executor whitelists +
+# re-checks the SAME keys (a proposer demoted from OWNER after proposing fails
+# closed at approve time).
+_INSTINCT_ACTIVATE_ACTION = "instinct.activate"
+_WORKSPACE_DELETE_ACTION = "workspace.delete"
+_BILLING_MANAGE_ACTION = "billing.manage"
 
 # The roles a member may be INVITED as (mirrors CreateInviteRequest / the REST
 # invite DTO — an invite can never mint an owner).
@@ -195,6 +244,19 @@ _VALID_INVITE_ROLES = frozenset({"admin", "member"})
 # sync with ``guards.rbac.WorkspaceRole`` — an out-of-set value is refused
 # before any gate check (defense in depth; the tool schema also constrains it).
 _VALID_ROLES = frozenset({"member", "admin", "owner"})
+
+# The Instinct-gate activation levels a workspace may be set to. Kept in sync with
+# ``cloud.pockets.instinct_triage.ApprovalLevel`` (a StrEnum: ASK / TRIAGE /
+# TRUSTED). A non-ASK level turns ON workspace-wide auto-approval of agent WRITE
+# actions — the single most governance-sensitive switch — so an out-of-set value
+# is refused before any gate (defense in depth; the service re-validates too).
+_VALID_APPROVAL_LEVELS = frozenset({"ASK", "TRIAGE", "TRUSTED"})
+
+# The plan tiers ``billing_plan_change`` may target. Mirrors the billing plan
+# catalog (cloud.billing.plans). ``subscribe`` re-validates against the live
+# catalog and refuses an unconfigured tier — this frozenset is the tool's own
+# fast-fail so an obvious typo never opens a proposal.
+_VALID_PLANS = frozenset({"free", "go", "pro", "pro_max", "enterprise"})
 
 
 def _error_response(message: str) -> dict[str, Any]:
@@ -1119,6 +1181,204 @@ async def _workspace_update_handler(args: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# WA-6 OWNER WRITE tool handlers — the most security-sensitive: destructive /
+# financial / governance ops. Same propose-only shape as the ADMIN writes
+# (validate → _gate_write deny-envelope → _propose_write pending) but gated on an
+# OWNER RBAC action. The mutation / checkout fires ONLY on human approval, after
+# the executor re-checks the proposer STILL holds OWNER. NONE mutates inline.
+# ---------------------------------------------------------------------------
+
+
+async def _instinct_approval_level_set_handler(args: dict) -> dict:
+    """WRITE: set the workspace's Instinct-gate activation level. OWNER-gated;
+    Instinct-proposed.
+
+    A non-ASK level enables workspace-wide AUTO-APPROVAL of agent WRITE actions —
+    the single most governance-sensitive switch in the gate — so this is OWNER-
+    only AND still human-approved (the agent can't flip its own leash off). The
+    ``level`` is constrained to the ApprovalLevel enum before any gate."""
+    workspace_id, user_id, _pocket_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "no active workspace — instinct_approval_level_set can only be called "
+            "from inside a cloud chat stream."
+        )
+    level = args.get("level")
+    if not isinstance(level, str) or level not in _VALID_APPROVAL_LEVELS:
+        return _error_response(
+            f"level is required and must be one of {sorted(_VALID_APPROVAL_LEVELS)}."
+        )
+
+    gate = await _gate_write(
+        "instinct_approval_level_set",
+        _INSTINCT_ACTIVATE_ACTION,
+        "You don't have permission to change this workspace's approval level",
+    )
+    if isinstance(gate, dict):
+        return gate
+
+    return await _propose_write(
+        tool="instinct_approval_level_set",
+        action=_INSTINCT_ACTIVATE_ACTION,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        args={"level": level},
+        summary=f"Set the Instinct approval level to '{level}'.",
+        title=f"Instinct approval level → {level}",
+        proposed_change={"level": level, "workspace_id": workspace_id},
+        what="Instinct approval-level change",
+    )
+
+
+async def _workspace_delete_handler(args: dict) -> dict:  # noqa: ARG001 — no args
+    """WRITE: DELETE the entire workspace. OWNER-gated; Instinct-proposed.
+
+    DESTRUCTIVE + IRREVERSIBLE — the service cascade strips the workspace from
+    every member and (on the delete path) purges rooms / agents / files. This
+    tool ONLY proposes it; the cascade fires on human approval. No args beyond
+    identity. The envelope is emphatic about irreversibility."""
+    workspace_id, user_id, _pocket_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "no active workspace — workspace_delete can only be called from inside "
+            "a cloud chat stream."
+        )
+
+    gate = await _gate_write(
+        "workspace_delete",
+        _WORKSPACE_DELETE_ACTION,
+        "You don't have permission to delete this workspace",
+    )
+    if isinstance(gate, dict):
+        return gate
+
+    # Bespoke pending envelope (not _propose_write) so the message can be emphatic
+    # about the IRREVERSIBLE cascade — a generic "pending" line under-warns for a
+    # workspace deletion.
+    from pocketpaw_ee.cloud.admin_proposals.propose import propose_admin_action
+
+    try:
+        action_id = await propose_admin_action(
+            workspace_id=workspace_id,
+            action=_WORKSPACE_DELETE_ACTION,
+            args={},  # identity only — nothing steers the delete
+            proposer_user_id=user_id,
+            summary="Delete the ENTIRE workspace (irreversible — cascades all members and data).",
+            title="Delete workspace (IRREVERSIBLE)",
+        )
+    except Exception as exc:  # noqa: BLE001 — surface a clean MCP error, never a 500
+        logger.warning("workspace_delete: propose_admin_action failed", exc_info=True)
+        return _error_response(f"could not file the workspace deletion for approval: {exc}")
+
+    logger.info(
+        "workspace_delete PROPOSED (WA-6): actor=%s workspace=%s proposal=%s — "
+        "pending human approval in the Tray (IRREVERSIBLE)",
+        user_id,
+        workspace_id,
+        action_id,
+    )
+    return _success_response(
+        {
+            "ok": True,
+            "executed": False,
+            "status": "pending_approval",
+            "action_id": action_id,
+            "proposal_id": action_id,
+            "proposed_change": {"workspace_id": workspace_id, "irreversible": True},
+            "message": (
+                "DANGER: this permanently DELETES the entire workspace and cascades "
+                "to EVERY member, room, agent, and file — it is IRREVERSIBLE and "
+                "cannot be undone. It is an owner-level action and is NEVER applied "
+                "directly from chat: I've proposed it and it is now PENDING approval "
+                "in the Tray. NOTHING has been deleted yet, and nothing will be "
+                "unless a human explicitly approves it. Tell the user you've "
+                "requested the deletion, that it is irreversible, and that it needs "
+                "a human to approve it — do NOT claim the workspace was deleted."
+            ),
+        }
+    )
+
+
+async def _billing_plan_change_handler(args: dict) -> dict:
+    """WRITE: change the workspace's paid PLAN. OWNER-gated; Instinct-proposed.
+
+    PAYMENT HONESTY: a paid-plan change flows through Dodo's HOSTED CHECKOUT — the
+    plan flips ONLY when Dodo posts a verified ``subscription.active`` webhook, not
+    synchronously. So on approval the executor does NOT fake a plan mutation: it
+    calls ``billing.service.subscribe``, which returns a ``{checkout_url}`` a human
+    must complete. The webhook-internal ``set_workspace_plan`` (which would bypass
+    payment) is DELIBERATELY not wired. ``plan`` is constrained to the catalog."""
+    workspace_id, user_id, _pocket_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "no active workspace — billing_plan_change can only be called from "
+            "inside a cloud chat stream."
+        )
+    plan = args.get("plan")
+    if not isinstance(plan, str) or plan not in _VALID_PLANS:
+        return _error_response(
+            f"plan is required and must be one of {sorted(_VALID_PLANS)}."
+        )
+
+    gate = await _gate_write(
+        "billing_plan_change",
+        _BILLING_MANAGE_ACTION,
+        "You don't have permission to change this workspace's billing plan",
+    )
+    if isinstance(gate, dict):
+        return gate
+
+    # Bespoke pending envelope so the message can explain that approval PRODUCES a
+    # checkout link the human must complete — the plan does NOT flip on approval
+    # alone (it flips on the payment webhook), and the agent must relay that
+    # honestly rather than claim the plan changed.
+    from pocketpaw_ee.cloud.admin_proposals.propose import propose_admin_action
+
+    try:
+        action_id = await propose_admin_action(
+            workspace_id=workspace_id,
+            action=_BILLING_MANAGE_ACTION,
+            args={"plan_key": plan},
+            proposer_user_id=user_id,
+            summary=f"Change the workspace plan to '{plan}' (opens a checkout on approval).",
+            title=f"Billing plan change → {plan}",
+        )
+    except Exception as exc:  # noqa: BLE001 — surface a clean MCP error, never a 500
+        logger.warning("billing_plan_change: propose_admin_action failed", exc_info=True)
+        return _error_response(f"could not file the plan change for approval: {exc}")
+
+    logger.info(
+        "billing_plan_change PROPOSED (WA-6): actor=%s workspace=%s plan=%s "
+        "proposal=%s — pending human approval; approval opens a Dodo checkout",
+        user_id,
+        workspace_id,
+        plan,
+        action_id,
+    )
+    return _success_response(
+        {
+            "ok": True,
+            "executed": False,
+            "status": "pending_approval",
+            "action_id": action_id,
+            "proposal_id": action_id,
+            "proposed_change": {"plan": plan, "workspace_id": workspace_id},
+            "message": (
+                "Changing the paid plan is an owner-level action and is NEVER "
+                "applied directly from chat. It also can't be flipped instantly: a "
+                "paid plan changes only after checkout is completed and the payment "
+                "provider confirms it. I've proposed this change; it's now PENDING "
+                "approval in the Tray. When a human approves it, they'll get a "
+                "secure CHECKOUT LINK to finish the change — the plan does NOT "
+                "change until that checkout is completed. No plan change has been "
+                "made yet. Tell the user you've requested it, that it needs approval "
+                "and a checkout step — do NOT claim the plan was changed."
+            ),
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
 # Server factory
 # ---------------------------------------------------------------------------
 
@@ -1478,6 +1738,84 @@ def build_admin_server() -> tuple[str, Any] | None:
     async def workspace_update(args):  # type: ignore[no-untyped-def]
         return await _workspace_update_handler(args)
 
+    @tool(
+        "instinct_approval_level_set",
+        (
+            "Propose changing the CURRENT workspace's Instinct APPROVAL LEVEL — how "
+            "much agent write activity is auto-approved. This is an OWNER-level "
+            "action and is NEVER applied directly from chat — it's proposed for a "
+            "human to approve. A non-ASK level turns ON workspace-wide "
+            "auto-approval of agent write actions, so it's highly sensitive. Arg: "
+            "`level` — 'ASK' (every write goes to a human), 'TRIAGE', or 'TRUSTED'. "
+            "If you lack owner permission, the result says so (denied) — relay that. "
+            "On success the result says the change is PENDING approval — do NOT "
+            "claim the level was changed."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "level": {
+                    "type": "string",
+                    "enum": ["ASK", "TRIAGE", "TRUSTED"],
+                    "description": "The Instinct-gate approval level to set.",
+                },
+            },
+            "required": ["level"],
+            "additionalProperties": False,
+        },
+    )
+    async def instinct_approval_level_set(args):  # type: ignore[no-untyped-def]
+        return await _instinct_approval_level_set_handler(args)
+
+    @tool(
+        "workspace_delete",
+        (
+            "Propose DELETING the ENTIRE current workspace. This is an OWNER-level, "
+            "IRREVERSIBLE action — it permanently removes the workspace and every "
+            "member, room, agent, and file in it, and it CANNOT be undone. It is "
+            "NEVER applied directly from chat — it's proposed for a human to "
+            "approve, and nothing is deleted unless a human explicitly approves it. "
+            "No arguments — the workspace is inferred from the active chat. If you "
+            "lack owner permission, the result says so (denied) — relay that. On "
+            "success the result says the deletion is PENDING approval and is "
+            "irreversible — warn the user clearly and do NOT claim the workspace "
+            "was deleted."
+        ),
+        {},
+    )
+    async def workspace_delete(args):  # type: ignore[no-untyped-def]
+        return await _workspace_delete_handler(args)
+
+    @tool(
+        "billing_plan_change",
+        (
+            "Propose changing the CURRENT workspace's paid PLAN. This is an "
+            "OWNER-level action and is NEVER applied directly from chat — it's "
+            "proposed for a human to approve. It also can't be flipped instantly: a "
+            "paid plan changes only after a secure CHECKOUT is completed and the "
+            "payment provider confirms it. When a human approves, they get a "
+            "checkout link to finish the change. Arg: `plan` — one of 'free', 'go', "
+            "'pro', 'pro_max', 'enterprise'. If you lack owner permission, the "
+            "result says so (denied). On success the result says the change is "
+            "PENDING approval and needs a checkout step — do NOT claim the plan was "
+            "changed."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "plan": {
+                    "type": "string",
+                    "enum": ["free", "go", "pro", "pro_max", "enterprise"],
+                    "description": "The plan tier to change to.",
+                },
+            },
+            "required": ["plan"],
+            "additionalProperties": False,
+        },
+    )
+    async def billing_plan_change(args):  # type: ignore[no-untyped-def]
+        return await _billing_plan_change_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
@@ -1496,6 +1834,9 @@ def build_admin_server() -> tuple[str, Any] | None:
             connector_disable,
             connector_config,
             workspace_update,
+            instinct_approval_level_set,
+            workspace_delete,
+            billing_plan_change,
         ],
     )
     return SERVER_NAME, server
@@ -1504,11 +1845,13 @@ def build_admin_server() -> tuple[str, Any] | None:
 __all__ = [
     "ADMIN_TOOL_IDS",
     "AUDIT_READ_TOOL_ID",
+    "BILLING_PLAN_CHANGE_TOOL_ID",
     "BILLING_USAGE_READ_TOOL_ID",
     "CONNECTORS_LIST_TOOL_ID",
     "CONNECTOR_CONFIG_TOOL_ID",
     "CONNECTOR_DISABLE_TOOL_ID",
     "CONNECTOR_ENABLE_TOOL_ID",
+    "INSTINCT_APPROVAL_LEVEL_SET_TOOL_ID",
     "INVITES_LIST_TOOL_ID",
     "INVITE_CREATE_TOOL_ID",
     "INVITE_REVOKE_TOOL_ID",
@@ -1516,6 +1859,7 @@ __all__ = [
     "MEMBER_REMOVE_TOOL_ID",
     "MEMBER_UPDATE_ROLE_TOOL_ID",
     "SERVER_NAME",
+    "WORKSPACE_DELETE_TOOL_ID",
     "WORKSPACE_SETTINGS_READ_TOOL_ID",
     "WORKSPACE_UPDATE_TOOL_ID",
     "build_admin_server",
