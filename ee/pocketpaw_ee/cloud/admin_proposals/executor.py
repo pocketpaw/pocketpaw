@@ -1,5 +1,35 @@
 # ee/cloud/admin_proposals/executor.py — apply an approved workspace-admin action.
 # Created: 2026-07-03 (feat/workspace-admin-tools, WA-2).
+# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-5) — extended the ``_DISPATCH``
+#   whitelist from the single ``workspace.member.role_change`` entry to the full set
+#   of ADMIN write actions the workspace_admin MCP server proposes:
+#     * ``workspace.member.remove`` → ``workspace.service.remove_member`` (cascades
+#       API keys / sessions / member data — the service's job; the adapter passes
+#       ONLY workspace_id + target user_id + the proposer as actor).
+#     * ``invite.create`` → ``workspace.service.create_invite`` (adapter builds a
+#       CreateInviteRequest from ONLY email + role, and a RequestContext from the
+#       proposer so the invite is attributed to them). NOTE: this ONE action key
+#       covers BOTH invite create AND revoke — the two tools carry different args
+#       shapes under the same RBAC action (the routes gate create on
+#       ``invite.create`` and revoke on ``invite.revoke``, but the executor
+#       whitelist keys on the RBAC action the PROPOSER was gated on; see below).
+#     * ``invite.revoke`` → ``workspace.service.revoke_invite`` (adapter passes
+#       ONLY workspace_id + invite_id + the proposer as actor).
+#     * ``connector.manage`` → connectors enable / disable / update-config. This
+#       ONE action key fans out to THREE services keyed on an ``op`` discriminator
+#       the adapter reads from the args (enable | disable | config) — a single
+#       whitelist entry can't map to three callables, so the ``connector.manage``
+#       dispatch's service is a router that switches on ``op`` and its adapter is
+#       op-aware + STRICT (config passes ``config`` as an OPAQUE dict the service
+#       validates; no top-level arg smuggles into the service call).
+#     * ``workspace.update`` → ``workspace.service.update`` (adapter passes ONLY
+#       the recognized name / settings / branding fields; any other key an agent
+#       puts in args is ignored, never forwarded).
+#   Every new adapter is STRICT (fixed known keys → fixed kwargs; unknown keys
+#   never reach the service — no ``**args`` splat), exactly like
+#   ``_adapt_member_role_change``. The execute-time RBAC re-check + args-hash +
+#   idempotency + fail-closed chokepoint are UNCHANGED and already apply to every
+#   whitelist entry (they key off the blob, not the specific action).
 #
 # What this module does (the apply-on-approve half of the admin-action gate): the
 # propose helper (``admin_proposals.propose.propose_admin_action``) files an
@@ -49,6 +79,10 @@
 #   * tenancy: the write is scoped by the blob's ``workspace_id``; an empty
 #     workspace_id is refused. The router's ``_assert_admin_action_workspace`` is
 #     the primary gate; this is belt-and-braces.
+#   * every WA-5 adapter is STRICT — it reads a FIXED set of known keys and never
+#     splats ``args`` into the service, so an agent cannot smuggle an extra kwarg
+#     (e.g. a ``role="owner"`` on an invite, or a ``seats`` bump on a workspace
+#     update) into a call the human didn't approve.
 
 from __future__ import annotations
 
@@ -121,13 +155,260 @@ async def _call_update_member_role(**kwargs: Any) -> Any:
     )
 
 
+# Valid roles for an invite (mirrors the CreateInviteRequest / route DTO, which
+# constrains role to ``admin | member`` — an invite can never mint an owner).
+_INVITE_ROLES = frozenset({"admin", "member"})
+
+
+def _proposer_ctx(workspace_id: str, proposer_user_id: str) -> Any:
+    """Build a minimal ``RequestContext`` for the ctx-taking workspace services
+    (``create_invite`` / ``update``), attributing the write to the PROPOSER.
+
+    Mirrors ``workspace_admin._legacy_ctx`` — the service reads ``ctx.user_id``
+    (audit attribution + invite ``invited_by``). Lazy import keeps this table
+    free of an ee.cloud dependency at module load."""
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+
+    return RequestContext(
+        user_id=proposer_user_id,
+        workspace_id=workspace_id,
+        request_id="admin-action",
+        scope=ScopeKind.NONE,
+        started_at=_dt.now(_UTC),
+    )
+
+
+# --- member.remove ---------------------------------------------------------
+
+
+def _adapt_member_remove(
+    args: dict[str, Any], workspace_id: str, proposer_user_id: str
+) -> dict[str, Any]:
+    """STRICT adapter for ``workspace.service.remove_member``.
+
+    Reads ONLY ``target_user_id``. The service owns the cascade (API keys,
+    sessions, member data); we pass nothing that could steer it. The actor is
+    the PROPOSER (audit attribution)."""
+    target_user_id = str(args.get("target_user_id") or "")
+    if not target_user_id:
+        raise ValueError("member.remove requires target_user_id")
+    return {
+        "workspace_id": workspace_id,
+        "target_user_id": target_user_id,
+        "actor_user_id": proposer_user_id,
+    }
+
+
+async def _call_remove_member(**kwargs: Any) -> Any:
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    return await workspace_service.remove_member(
+        kwargs["workspace_id"],
+        kwargs["target_user_id"],
+        kwargs["actor_user_id"],
+    )
+
+
+# --- invite.create ---------------------------------------------------------
+
+
+def _adapt_invite_create(
+    args: dict[str, Any], workspace_id: str, proposer_user_id: str
+) -> dict[str, Any]:
+    """STRICT adapter for ``workspace.service.create_invite``.
+
+    Reads ONLY ``email`` + ``role``, constrains role to ``admin | member`` (an
+    invite can't mint an owner), and threads the proposer as the inviter. No
+    other key (e.g. ``group_id``, ``context``) is read — an agent can't attach a
+    surprise onboarding payload to an approved invite."""
+    email = str(args.get("email") or "")
+    role = str(args.get("role") or "member")
+    if not email:
+        raise ValueError("invite.create requires email")
+    if role not in _INVITE_ROLES:
+        raise ValueError(f"invite.create role must be one of {sorted(_INVITE_ROLES)}")
+    return {
+        "workspace_id": workspace_id,
+        "proposer_user_id": proposer_user_id,
+        "email": email,
+        "role": role,
+    }
+
+
+async def _call_create_invite(**kwargs: Any) -> Any:
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+    from pocketpaw_ee.cloud.workspace.dto import CreateInviteRequest
+
+    ctx = _proposer_ctx(kwargs["workspace_id"], kwargs["proposer_user_id"])
+    body = CreateInviteRequest(email=kwargs["email"], role=kwargs["role"])
+    return await workspace_service.create_invite(ctx, kwargs["workspace_id"], body)
+
+
+# --- invite.revoke ---------------------------------------------------------
+
+
+def _adapt_invite_revoke(
+    args: dict[str, Any], workspace_id: str, proposer_user_id: str
+) -> dict[str, Any]:
+    """STRICT adapter for ``workspace.service.revoke_invite``. Reads ONLY
+    ``invite_id``; the proposer is the actor (audit attribution)."""
+    invite_id = str(args.get("invite_id") or "")
+    if not invite_id:
+        raise ValueError("invite.revoke requires invite_id")
+    return {
+        "workspace_id": workspace_id,
+        "invite_id": invite_id,
+        "actor_user_id": proposer_user_id,
+    }
+
+
+async def _call_revoke_invite(**kwargs: Any) -> Any:
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    return await workspace_service.revoke_invite(
+        kwargs["workspace_id"],
+        kwargs["invite_id"],
+        kwargs["actor_user_id"],
+    )
+
+
+# --- connector.manage (enable / disable / config) --------------------------
+
+
+def _adapt_connector_manage(
+    args: dict[str, Any], workspace_id: str, proposer_user_id: str  # noqa: ARG001
+) -> dict[str, Any]:
+    """STRICT, OP-AWARE adapter for the connector-manage fan-out.
+
+    One RBAC action (``connector.manage``) covers three writes; the ``op``
+    discriminator selects which. Reads ONLY ``op`` + ``name`` (+ ``config`` for
+    the config op). For ``config``, ``config`` is passed through as an OPAQUE
+    dict — the connectors service validates it and only ever merges it into the
+    row's config blob (it never splats it into kwargs), so no top-level key
+    smuggles into the service call. Any other arg key is ignored."""
+    op = str(args.get("op") or "")
+    name = str(args.get("name") or "")
+    if op not in ("enable", "disable", "config"):
+        raise ValueError("connector.manage requires op in {enable, disable, config}")
+    if not name:
+        raise ValueError("connector.manage requires name")
+    out: dict[str, Any] = {"op": op, "workspace_id": workspace_id, "name": name}
+    if op == "config":
+        config = args.get("config")
+        if not isinstance(config, dict):
+            raise ValueError("connector.manage op=config requires a config object")
+        out["config"] = config  # opaque data — the service validates + merges it
+    return out
+
+
+async def _call_connector_manage(**kwargs: Any) -> Any:
+    """Fan out to the connectors enable / disable / update-config service by op.
+
+    ``config`` (op=config) is handed to the service inside its typed request DTO,
+    so the config dict is data the service validates — never kwargs on the call."""
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    op = kwargs["op"]
+    workspace_id = kwargs["workspace_id"]
+    name = kwargs["name"]
+    if op == "enable":
+        from pocketpaw_ee.cloud.connectors.dto import EnableConnectorRequest
+
+        return await connectors_service.enable_connector(
+            workspace_id, name, EnableConnectorRequest()
+        )
+    if op == "disable":
+        return await connectors_service.disable_connector(workspace_id, name)
+    # op == "config"
+    from pocketpaw_ee.cloud.connectors.dto import UpdateConnectorConfigRequest
+
+    return await connectors_service.update_config(
+        workspace_id, name, UpdateConnectorConfigRequest(config=kwargs["config"])
+    )
+
+
+# --- workspace.update ------------------------------------------------------
+
+
+def _adapt_workspace_update(
+    args: dict[str, Any], workspace_id: str, proposer_user_id: str
+) -> dict[str, Any]:
+    """STRICT adapter for ``workspace.service.update``.
+
+    Reads ONLY the recognized ``name`` / ``settings`` / ``branding`` fields — any
+    other key an agent puts in args (``seats``, ``plan``, ``owner``, …) is
+    IGNORED, never forwarded. At least one recognized field must be present.
+    ``settings`` / ``branding`` must be dicts (or absent). The typed
+    UpdateWorkspaceRequest is built in the wrapper so the service's own
+    validation (accent_color format, asset ownership) runs."""
+    recognized: dict[str, Any] = {}
+    if "name" in args:
+        name = args.get("name")
+        if name is not None and not isinstance(name, str):
+            raise ValueError("workspace.update name must be a string")
+        recognized["name"] = name
+    if "settings" in args:
+        settings = args.get("settings")
+        if settings is not None and not isinstance(settings, dict):
+            raise ValueError("workspace.update settings must be an object")
+        recognized["settings"] = settings
+    if "branding" in args:
+        branding = args.get("branding")
+        if branding is not None and not isinstance(branding, dict):
+            raise ValueError("workspace.update branding must be an object")
+        recognized["branding"] = branding
+    if not recognized:
+        raise ValueError("workspace.update requires at least one of name/settings/branding")
+    return {
+        "workspace_id": workspace_id,
+        "proposer_user_id": proposer_user_id,
+        "fields": recognized,
+    }
+
+
+async def _call_update_workspace(**kwargs: Any) -> Any:
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+    from pocketpaw_ee.cloud.workspace.dto import UpdateWorkspaceRequest
+
+    ctx = _proposer_ctx(kwargs["workspace_id"], kwargs["proposer_user_id"])
+    # Only the recognized fields reach the DTO — the adapter already stripped any
+    # unknown keys, so this is a fixed known set.
+    body = UpdateWorkspaceRequest(**kwargs["fields"])
+    return await workspace_service.update(ctx, kwargs["workspace_id"], body)
+
+
 # THE WHITELIST — the ONLY workspace-admin actions an approved ``_admin_action``
-# can ever fire. Seeded with member.role_change; extend deliberately, never
-# dynamically. An action key absent from this table hard-fails at execute time.
+# can ever fire. Seeded (WA-2) with member.role_change; extended (WA-5) with the
+# member.remove / invite.create / invite.revoke / connector.manage /
+# workspace.update ADMIN writes. Extend deliberately, never dynamically. An action
+# key absent from this table hard-fails at execute time.
 _DISPATCH: dict[str, _Dispatch] = {
     "workspace.member.role_change": _Dispatch(
         service=_call_update_member_role,
         adapt=_adapt_member_role_change,
+    ),
+    "workspace.member.remove": _Dispatch(
+        service=_call_remove_member,
+        adapt=_adapt_member_remove,
+    ),
+    "invite.create": _Dispatch(
+        service=_call_create_invite,
+        adapt=_adapt_invite_create,
+    ),
+    "invite.revoke": _Dispatch(
+        service=_call_revoke_invite,
+        adapt=_adapt_invite_revoke,
+    ),
+    "connector.manage": _Dispatch(
+        service=_call_connector_manage,
+        adapt=_adapt_connector_manage,
+    ),
+    "workspace.update": _Dispatch(
+        service=_call_update_workspace,
+        adapt=_adapt_workspace_update,
     ),
 }
 
