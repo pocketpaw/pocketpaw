@@ -17,6 +17,9 @@
 #   - 2026-07-03: Added FL-3 Library verbs (EE) — TagFileTool, MoveFileTool,
 #     AnnotateFileTool, SearchLibraryTool — the single-file agent verbs that
 #     make /files agentic. Registered in _EE_TOOLS (guarded by ee/ availability).
+#   - 2026-07-03: Added FL-4 OrganizeFolderTool (EE) — the folder-batch executor
+#     that fans an FL-3 verb (annotate | tag) over every file in a folder as
+#     separate metered invocations, capped + partial-failure isolated.
 
 import importlib as _importlib
 
@@ -117,6 +120,7 @@ try:
     from pocketpaw.tools.builtin.library_verbs import (
         AnnotateFileTool,
         MoveFileTool,
+        OrganizeFolderTool,
         SearchLibraryTool,
         TagFileTool,
     )
@@ -134,6 +138,8 @@ try:
         MoveFileTool,
         AnnotateFileTool,
         SearchLibraryTool,
+        # FL-4 — folder-batch executor (fans an FL-3 verb over a folder).
+        OrganizeFolderTool,
     ]
     _EE_NAMES = {cls.__name__: cls for cls in _EE_TOOLS}
 except ImportError:
