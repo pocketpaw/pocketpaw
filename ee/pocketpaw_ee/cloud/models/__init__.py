@@ -1,5 +1,9 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-07-03 (feat/files-share-links FL-12b) — added ``ShareLink`` (the
+public, token-gated file share-link doc) to the lazy uploads loader,
+``get_all_documents()`` and ``__all__`` so the ``file_share_links`` collection
+is wired into ``init_beanie``. Only ``ee.cloud.uploads.share_store`` writes it.
 Updated: 2026-06-30 (feat/session-supervisor SS-3) — added
 ``AgentSessionRuntimeDoc`` (the durable, tenant-scoped
 ``(workspace, session_id, agent_id) -> cli_session_id`` mapping) to the
@@ -160,6 +164,9 @@ from pocketpaw_ee.cloud.models.workspace_job import WorkspaceJobDoc
 # Lazy import to avoid circular imports
 FileUpload: type = None  # type: ignore[assignment]
 FileFolder: type = None  # type: ignore[assignment]
+# FL-12b public share links. Lazy-loaded with FileUpload (same package) so
+# init_beanie registers it without ee.cloud.models hard-importing uploads.
+ShareLink: type = None  # type: ignore[assignment]
 _CalendarDoc: type = None  # type: ignore[assignment]
 _EventDoc: type = None  # type: ignore[assignment]
 # The Belt MANDATE docs live in ee.cloud.mandates.domain (4-file entity, sole
@@ -177,13 +184,15 @@ _ArtifactVersionDoc: type = None  # type: ignore[assignment]
 
 
 def _ensure_file_upload():
-    global FileUpload, FileFolder
+    global FileUpload, FileFolder, ShareLink
     if FileUpload is None:
         from pocketpaw_ee.cloud.uploads.models import FileFolder as _FileFolder
         from pocketpaw_ee.cloud.uploads.models import FileUpload as _FileUpload
+        from pocketpaw_ee.cloud.uploads.share_models import ShareLink as _ShareLink
 
         FileUpload = _FileUpload
         FileFolder = _FileFolder
+        ShareLink = _ShareLink
     return FileUpload
 
 
@@ -253,6 +262,7 @@ __all__ = [
     "FileObj",
     "FileUpload",
     "FileVersionDoc",
+    "ShareLink",
     "ForesightBacktest",
     "ForesightPredictionRecord",
     "ForesightProjectedDecision",
@@ -336,6 +346,9 @@ def get_all_documents():
         FileObj,
         FileUpload,
         FileFolder,
+        # Public file share links (FL-12b). Only ``uploads.share_store``
+        # writes these; the public GET /share/{token} route reads by token.
+        ShareLink,
         # file_versions edit history (ART-1). Only ``file_versions.service``
         # imports this class (import-linter "FileVersions" contract).
         FileVersionDoc,

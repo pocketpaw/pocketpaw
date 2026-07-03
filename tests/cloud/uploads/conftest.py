@@ -1,3 +1,6 @@
+# conftest.py — shared fixtures for the EE uploads test package.
+# 2026-07-03 (FL-12b): ``beanie_upload_db`` now also registers ``ShareLink`` so
+# the public share-link store/route tests get a real (mongomock) collection.
 from __future__ import annotations
 
 import uuid
@@ -32,8 +35,9 @@ async def beanie_upload_db():
 
     # Import after db creation to avoid circular imports
     from pocketpaw_ee.cloud.uploads.models import FileFolder, FileUpload
+    from pocketpaw_ee.cloud.uploads.share_models import ShareLink
 
-    await init_beanie(database=db, document_models=[FileUpload, FileFolder])
+    await init_beanie(database=db, document_models=[FileUpload, FileFolder, ShareLink])
     yield db
 
 
