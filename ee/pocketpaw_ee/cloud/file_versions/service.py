@@ -30,6 +30,21 @@
 #   ``get_version``. A stale ``If-Match`` now raises ``PreconditionFailed``
 #   (412) instead of ``ConflictError`` (409), matching HTTP conditional-request
 #   semantics for the file-version write path.
+# Updated: 2026-07-03 (FL-16, editor↔Library bridge) — the editor version path
+#   (``update_file_content`` and, transitively, ``revert_to_version``) now
+#   resolves BOTH id schemes via the new ``_resolve_upload`` helper: it tries the
+#   editor's workspace-namespaced id (``${workspace}:${path}``) first, then falls
+#   back to a Library ``FileUpload`` row keyed by its OWN bare ``file_id`` (a
+#   uuid). Before this, the frontend editor (FL-7/8/9) opened a Library file with
+#   its bare ``file_id`` and ``PUT /files/{file_id}`` resolved nothing (the
+#   path-based lookup namespaced the uuid and missed the row), so editing a real
+#   Library file end-to-end was broken. Both lookups pin ``workspace``, so the
+#   bridge keeps tenant isolation (a cross-workspace bare id fails closed).
+#   ``FileVersionDoc`` is still keyed on the client-facing ``file_id`` inside this
+#   module (the import-linter "FileVersions" contract), so ``list_versions`` /
+#   ``get_version`` / ``revert_to_version`` find the archived rows for either
+#   scheme. The path-based flow FL-2's tests cover is preserved (namespaced id
+#   tried first).
 # Updated: 2026-07-03 (FL-3, agent library verbs) — added ``annotate_upload``:
 #   the content-mutation entrypoint for the ``annotate_file`` agent verb. A
 #   Library file (a ``FileUpload`` row keyed by its OWN bare ``file_id``, NOT the
@@ -139,6 +154,36 @@ _UPLOAD_ROOT = Path.home() / ".pocketpaw" / "uploads"
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+async def _resolve_upload(workspace_id: str, file_id: str) -> FileUpload | None:
+    """Resolve the live ``FileUpload`` row a client ``file_id`` refers to (FL-16).
+
+    Two id schemes reach the version path and BOTH must resolve:
+
+    * The editor's own ``write_file``-created files store the FileUpload under
+      the workspace-namespaced id ``${workspace}:${path}`` (see ``_storage_id``);
+      the client passes the bare ``path``.
+    * A Library file (uploaded via the /files pipeline, FL-1) keys the FileUpload
+      by its OWN globally-unique bare ``file_id`` (a uuid); the frontend editor
+      (FL-7/8/9) opens it with exactly that bare id.
+
+    Try the namespaced editor id first (the historical behavior the FL-2 tests
+    cover), then fall back to the bare Library id. Both lookups pin
+    ``workspace`` so a caller can never resolve another tenant's row — the bare
+    ``file_id`` is globally unique but the workspace filter still fail-closes
+    cross-tenant access. Returns the live (non-tombstoned) row or ``None``.
+    """
+    stored_id = _storage_id(workspace_id, file_id)
+    doc = await FileUpload.find_one(
+        {"file_id": stored_id, "workspace": workspace_id, "deleted_at": None}
+    )
+    if doc is not None:
+        return doc
+    # Fall back to a Library row keyed by its own bare file_id.
+    return await FileUpload.find_one(
+        {"file_id": file_id, "workspace": workspace_id, "deleted_at": None}
+    )
 
 
 def _storage_id(workspace_id: str, path: str) -> str:
@@ -335,22 +380,28 @@ async def update_file_content(
 ) -> UpdateFileContentResponse:
     """Replace a text file's content with optimistic concurrency.
 
-    ``file_id`` is the bare client path. Steps:
-    1. Fetch the ``FileUpload`` doc by the workspace-namespaced stored id.
+    ``file_id`` is the client-facing id. It resolves to a ``FileUpload`` row via
+    ``_resolve_upload`` — either the editor's workspace-namespaced id
+    (``${workspace}:${path}``) for a ``write_file``-created file, OR a Library
+    row's own bare ``file_id`` (FL-16 bridge), so the frontend editor can save a
+    real Library file end-to-end. Steps:
+    1. Resolve the ``FileUpload`` doc (editor-namespaced id, then Library id).
     2. Check the ``If-Match`` precondition against ``content_version``.
     3. Read + archive the current blob as a ``FileVersionDoc`` (labelled with
        the version it actually was). A read failure aborts — never archive an
        empty "prior" version.
     4. Upload the new content and bump the version counter.
+
+    ``FileVersionDoc`` is always keyed on the client-facing ``file_id`` passed
+    here, so ``list_versions`` / ``get_version`` / ``revert_to_version`` — which
+    query by that same id — find the archived rows regardless of which id scheme
+    resolved the FileUpload.
     """
     workspace_id = ctx.workspace_id
     if not workspace_id:
         raise CloudError(400, "files.missing_workspace", "Workspace is required.")
 
-    stored_id = _storage_id(workspace_id, file_id)
-    doc = await FileUpload.find_one(
-        {"file_id": stored_id, "workspace": workspace_id, "deleted_at": None}
-    )
+    doc = await _resolve_upload(workspace_id, file_id)
     if not doc:
         raise NotFound("file", file_id)
 
