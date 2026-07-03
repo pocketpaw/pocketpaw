@@ -1,4 +1,11 @@
-"""Public schemas for the files module."""
+"""Public schemas for the files module.
+
+2026-07-03 (FL-1 "Library metadata"): ``FileEntry`` grew ``collections``
+(list[str]) and ``hide_from_ai`` (bool) alongside the existing ``tags`` so a
+file's library metadata surfaces in the unified /files listing. Both default
+empty/False, so providers that don't set them (kb, drive, etc.) keep their
+current shape.
+"""
 
 from __future__ import annotations
 
@@ -46,6 +53,10 @@ class FileEntry(BaseModel):
     workspace_id: str | None = None
     scope: Scope
     tags: list[str] = Field(default_factory=list)
+    # FL-1 library metadata. Only the uploads provider sets these today;
+    # other providers leave the defaults (empty list / False).
+    collections: list[str] = Field(default_factory=list)
+    hide_from_ai: bool = False
     created_at: datetime
     updated_at: datetime
     source_ref: dict[str, Any] = Field(default_factory=dict)

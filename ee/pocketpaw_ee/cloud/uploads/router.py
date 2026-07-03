@@ -1,5 +1,12 @@
 """EE /uploads router — workspace-scoped upload endpoints.
 
+2026-07-03 (FL-1 "Library metadata"): ``PATCH /uploads/{file_id}`` now also
+accepts ``tags`` (list[str]), ``collections`` (list[str]) and ``hide_from_ai``
+(bool) so a file can carry library organization. Only the provided fields are
+touched; the existing ``filename`` / ``folder_path`` behaviour is unchanged.
+The write-side ACL (owner OR workspace admin) already gates the route, and the
+response echoes the current metadata so the FE can round-trip it.
+
 2026-04-19 (Cluster E sub-PR 3): added ``GET /uploads/{id}/download-url``
 as an explicitly-named alias for the existing ``/grant`` endpoint. The
 alias returns the same signed-URL-or-cookie-URL payload plus a
@@ -341,6 +348,9 @@ async def patch_upload(
 
     new_filename = body.get("filename")
     new_folder = body.get("folder_path")
+    new_tags = body.get("tags")
+    new_collections = body.get("collections")
+    new_hide = body.get("hide_from_ai")
 
     if new_filename is not None:
         if not isinstance(new_filename, str) or not new_filename.strip():
@@ -358,6 +368,25 @@ async def patch_upload(
             raise HTTPException(status_code=400, detail="destination folder does not exist")
         doc.folder_path = norm
 
+    # FL-1 library metadata. Tags / collections must be lists of strings;
+    # hide_from_ai must be a bool. Omitted fields are left untouched.
+    if new_tags is not None:
+        if not isinstance(new_tags, list) or not all(isinstance(t, str) for t in new_tags):
+            raise HTTPException(status_code=400, detail="tags must be a list of strings")
+        doc.tags = new_tags
+
+    if new_collections is not None:
+        if not isinstance(new_collections, list) or not all(
+            isinstance(c, str) for c in new_collections
+        ):
+            raise HTTPException(status_code=400, detail="collections must be a list of strings")
+        doc.collections = new_collections
+
+    if new_hide is not None:
+        if not isinstance(new_hide, bool):
+            raise HTTPException(status_code=400, detail="hide_from_ai must be a boolean")
+        doc.hide_from_ai = new_hide
+
     await doc.save()
     return {
         "id": doc.file_id,
@@ -365,6 +394,9 @@ async def patch_upload(
         "folder_path": doc.folder_path or "/",
         "mime": doc.mime,
         "size": doc.size,
+        "tags": list(doc.tags or []),
+        "collections": list(doc.collections or []),
+        "hide_from_ai": bool(doc.hide_from_ai),
     }
 
 

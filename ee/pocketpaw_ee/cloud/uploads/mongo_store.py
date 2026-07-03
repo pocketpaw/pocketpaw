@@ -1,5 +1,13 @@
 """Mongo-backed metadata store, workspace-scoped.
 
+2026-07-03 (FL-1 "Library metadata"): the ``iter_by_workspace`` /
+``iter_by_pocket`` dict rows now carry ``collections`` and ``hide_from_ai``
+alongside the pre-existing ``tags`` so library metadata round-trips into the
+/files listing. Added ``set_library_metadata`` — a workspace-scoped setter the
+PATCH /uploads/{id} route uses to update ``tags`` / ``collections`` /
+``hide_from_ai`` on one row (only the provided fields are touched). The
+workspace filter is always applied on the read, so cross-tenant writes are
+impossible through this API.
 2026-04-19 (Cluster E sub-PR 4): added ``list_by_workspace`` so the
 unified files endpoint can pull chat-sourced uploads alongside local
 filesystem entries. Soft-deleted rows are skipped. Results are capped
@@ -72,6 +80,34 @@ class MongoFileStore:
             FileUpload.workspace == workspace,
             FileUpload.deleted_at == None,  # noqa: E711
         )
+
+    async def set_library_metadata(
+        self,
+        file_id: str,
+        workspace: str,
+        *,
+        tags: list[str] | None = None,
+        collections: list[str] | None = None,
+        hide_from_ai: bool | None = None,
+    ) -> FileUpload | None:
+        """Set library metadata on one live row, workspace-scoped (FL-1).
+
+        Only the fields passed as non-``None`` are updated — omitted fields
+        keep their current value. Returns the updated doc, or ``None`` if no
+        live row matches ``(file_id, workspace)``. The workspace filter is
+        always applied, so a caller cannot mutate another tenant's rows.
+        """
+        doc = await self.get_doc_scoped(file_id, workspace)
+        if doc is None:
+            return None
+        if tags is not None:
+            doc.tags = [str(t) for t in tags]
+        if collections is not None:
+            doc.collections = [str(c) for c in collections]
+        if hide_from_ai is not None:
+            doc.hide_from_ai = bool(hide_from_ai)
+        await doc.save()
+        return doc
 
     async def rewrite_folder_prefix(
         self,
@@ -206,6 +242,8 @@ class MongoFileStore:
                 "created_at": created,
                 "updated_at": updated,
                 "tags": list(getattr(doc, "tags", []) or []),
+                "collections": list(getattr(doc, "collections", []) or []),
+                "hide_from_ai": bool(getattr(doc, "hide_from_ai", False)),
             }
 
     async def list_by_workspace(
@@ -284,6 +322,8 @@ class MongoFileStore:
                 "created_at": created,
                 "updated_at": updated,
                 "tags": list(getattr(doc, "tags", []) or []),
+                "collections": list(getattr(doc, "collections", []) or []),
+                "hide_from_ai": bool(getattr(doc, "hide_from_ai", False)),
             }
 
     async def count_by_pocket(self, workspace: str, pocket_id: str) -> int:
