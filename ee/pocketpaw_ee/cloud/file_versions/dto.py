@@ -7,6 +7,9 @@
 # Updated: 2026-06-26 (ART-1 quality fix loop, I2) — WriteFileRequest gained an
 #   optional `mime`; when omitted the service guesses from the filename
 #   extension instead of hardcoding application/json.
+# Updated: 2026-07-03 (FL-2, port of #1193) — restored DiffResponse (the
+#   unified-diff transport DTO ART-1 deferred), now that the diff/revert history
+#   helpers land in the service.
 """FileVersions DTOs — request/response schemas for the file-version API."""
 
 from __future__ import annotations
@@ -68,6 +71,16 @@ class FileVersionListItem(BaseModel):
     editor_kind: str = Field(alias="editorKind")
     editor_id: str = Field(alias="editorId")
     created_at: datetime = Field(alias="createdAt")
+
+    model_config = {"populate_by_name": True}
+
+
+class DiffResponse(BaseModel):
+    """Unified diff between two archived versions (GET .../diff/{v2})."""
+
+    from_version: int = Field(alias="fromVersion")
+    to_version: int = Field(alias="toVersion")
+    diff: str
 
     model_config = {"populate_by_name": True}
 

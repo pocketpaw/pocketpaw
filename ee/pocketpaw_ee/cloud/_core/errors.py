@@ -6,6 +6,10 @@ to JSON responses.
 
 Re-exports remain accessible via `ee.cloud.shared.errors` (a shim) for
 the transition period; new code should import from this module.
+
+FL-2 (file-version spine, port of dewani12's #1193) added
+``PreconditionFailed`` (412) for stale ``If-Match`` optimistic-concurrency
+failures on the file-version write path.
 """
 
 from __future__ import annotations
@@ -50,6 +54,21 @@ class ConflictError(CloudError):
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(409, code, message)
+
+
+class PreconditionFailed(CloudError):
+    """A conditional request precondition failed (412).
+
+    Standard HTTP ``If-Match`` optimistic-concurrency semantics: the caller
+    supplied an ``If-Match`` etag (here the file's ``content_version``) that no
+    longer matches the current resource, so the write is refused. Distinct from
+    ``ConflictError`` (409, a generic resource conflict) — a stale ``If-Match``
+    is precisely a 412. Added by FL-2 (file-version spine, port of #1193) so a
+    stale-etag PUT/revert returns 412.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(412, code, message)
 
 
 class ValidationError(CloudError):

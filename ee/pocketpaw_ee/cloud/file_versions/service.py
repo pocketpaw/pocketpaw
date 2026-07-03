@@ -23,6 +23,13 @@
 #     actually was (the pre-bump version), so version->content stays correct.
 #   M1 — read paths map FileVersionDoc -> FileVersion domain -> DTO.
 #   M2 — list/get reject an empty workspace (400), matching write/update.
+# Updated: 2026-07-03 (FL-2, port of #1193) — completes the deferred Slice-D
+#   history helpers dropped by ART-1: ``revert_to_version`` (restore a prior
+#   version's content as a new live version) and ``diff_versions`` (unified
+#   diff between two archived versions). Both are tenant-filtered via
+#   ``get_version``. A stale ``If-Match`` now raises ``PreconditionFailed``
+#   (412) instead of ``ConflictError`` (409), matching HTTP conditional-request
+#   semantics for the file-version write path.
 """FileVersions service — file-version write + history.
 
 Module-level ``async def`` functions. Sole owner of writes to the
@@ -34,6 +41,8 @@ Public API:
 - ``update_file_content(ctx, file_id, body)`` — PUT /files/{id}
 - ``list_versions(ctx, file_id)`` — version list (no content)
 - ``get_version(ctx, file_id, version_id)`` — full version with content
+- ``revert_to_version(ctx, file_id, version_id)`` — restore a prior version
+- ``diff_versions(ctx, file_id, from_id, to_id)`` — unified diff between two
 
 The client-facing file id is the bare ``path`` throughout. The FileUpload
 row stores a workspace-namespaced id (``${workspace}:${path}``) because that
@@ -43,6 +52,7 @@ bare path (its reads are always workspace-filtered, so no global collision).
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import logging
 import mimetypes
@@ -56,11 +66,12 @@ from beanie import PydanticObjectId
 from pocketpaw.uploads.adapter import StorageAdapter
 from pocketpaw.uploads.factory import build_adapter
 from pocketpaw_ee.cloud._core.context import RequestContext
-from pocketpaw_ee.cloud._core.errors import CloudError, ConflictError, NotFound
+from pocketpaw_ee.cloud._core.errors import CloudError, NotFound, PreconditionFailed
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import Event
 from pocketpaw_ee.cloud.file_versions.domain import FileVersion
 from pocketpaw_ee.cloud.file_versions.dto import (
+    DiffResponse,
     FileVersionListItem,
     FileVersionResponse,
     UpdateFileContentRequest,
@@ -342,7 +353,9 @@ async def update_file_content(
     current_version = doc.content_version
     expected = body.expected_version
     if expected is not None and expected != current_version:
-        raise ConflictError(
+        # Stale ``If-Match`` — a conditional-request precondition failure (412),
+        # not a generic 409 conflict. Standard optimistic-concurrency semantics.
+        raise PreconditionFailed(
             "files.version_conflict",
             f"Expected version {expected} but current is {current_version}. "
             "Someone else edited this file. Reload and try again.",
@@ -515,4 +528,55 @@ async def get_version(
         editor_kind=fv.editor_kind,
         editor_id=fv.editor_id,
         created_at=fv.created_at,
+    )
+
+
+async def revert_to_version(
+    ctx: RequestContext,
+    file_id: str,
+    version_id: str,
+) -> UpdateFileContentResponse:
+    """Restore the live file to a historical version's content.
+
+    Fetches the target version (tenant-filtered via ``get_version`` — a
+    cross-workspace id is a NotFound), then routes its content back through
+    ``update_file_content`` so the restore is itself a normal versioned write:
+    the current (pre-revert) content is archived as a new version and the live
+    counter bumps. A no-op revert (target content == current content) returns
+    the stored version without archiving, matching the update path.
+
+    ``NotFound`` propagates when the version is missing / cross-tenant.
+    """
+    version = await get_version(ctx, file_id, version_id)
+    body = UpdateFileContentRequest(content=version.content)
+    return await update_file_content(ctx, file_id, body, editor_kind="human")
+
+
+async def diff_versions(
+    ctx: RequestContext,
+    file_id: str,
+    from_version_id: str,
+    to_version_id: str,
+) -> DiffResponse:
+    """Return a unified diff between two archived versions.
+
+    Both versions are fetched via ``get_version`` (tenant-filtered), so a diff
+    can never span a workspace boundary. Produces a standard ``difflib``
+    unified diff of ``from`` -> ``to`` content.
+    """
+    v_from = await get_version(ctx, file_id, from_version_id)
+    v_to = await get_version(ctx, file_id, to_version_id)
+
+    diff = "".join(
+        difflib.unified_diff(
+            v_from.content.splitlines(keepends=True),
+            v_to.content.splitlines(keepends=True),
+            fromfile=f"v{v_from.version_number}",
+            tofile=f"v{v_to.version_number}",
+        )
+    )
+    return DiffResponse(
+        from_version=v_from.version_number,
+        to_version=v_to.version_number,
+        diff=diff,
     )

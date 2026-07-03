@@ -8,6 +8,12 @@
 #   the service raises CloudError subclasses and ``_core.http`` maps them to
 #   JSON. Coexists with the existing /files router (GET /files, /tree,
 #   /browse) — no method+path collisions.
+# Updated: 2026-07-03 (FL-2, port of #1193) — restored the two history routes
+#   ART-1 deferred: POST /files/{id}/versions/{vid}/revert (restore a prior
+#   version) and GET /files/{id}/versions/{v1}/diff/{v2} (unified diff). The
+#   AI-edit / editing-context routes remain deferred (they pull in FL-5 tool
+#   deps). Doc note: a stale If-Match now maps to 412 (PreconditionFailed),
+#   not 409.
 """FileVersions router — file-version write + history API."""
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.errors import BadRequest
 from pocketpaw_ee.cloud.file_versions import service as _svc
 from pocketpaw_ee.cloud.file_versions.dto import (
+    DiffResponse,
     FileVersionListItem,
     FileVersionResponse,
     UpdateFileContentRequest,
@@ -57,7 +64,8 @@ async def update_file(
     takes precedence over ``expectedVersion`` when present.
 
     Raises (mapped to JSON by ``_core.http``): 404 if the file is missing,
-    409 on a version conflict, 422 if the file type isn't editable.
+    412 on a stale ``If-Match`` (version conflict), 422 if the file type isn't
+    editable.
     """
     # If-Match header (optimistic concurrency) wins over the body field.
     if if_match is not None:
@@ -86,3 +94,39 @@ async def get_file_version(
 ) -> FileVersionResponse:
     """Fetch a single version with full content (for revert preview / diff)."""
     return await _svc.get_version(ctx, file_id, version_id)
+
+
+@router.post(
+    "/{file_id}/versions/{version_id}/revert",
+    response_model=UpdateFileContentResponse,
+)
+async def revert_file_version(
+    file_id: str,
+    version_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> UpdateFileContentResponse:
+    """Restore the live file to a historical version.
+
+    Archives the current content as a new version, then writes the target
+    version's content as the new live content. Tenant-filtered: a
+    cross-workspace ``version_id`` is a 404.
+    """
+    return await _svc.revert_to_version(ctx, file_id, version_id)
+
+
+@router.get(
+    "/{file_id}/versions/{from_version_id}/diff/{to_version_id}",
+    response_model=DiffResponse,
+)
+async def diff_file_versions(
+    file_id: str,
+    from_version_id: str,
+    to_version_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> DiffResponse:
+    """Return a unified diff between two archived versions (``from`` -> ``to``).
+
+    Tenant-filtered: both versions are fetched workspace-scoped, so a diff can
+    never span a workspace boundary (a cross-workspace id is a 404).
+    """
+    return await _svc.diff_versions(ctx, file_id, from_version_id, to_version_id)
