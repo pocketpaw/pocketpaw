@@ -36,6 +36,16 @@
 # svelte-engine create test with the strengthened preamble: the directive moved
 # from "prefer" to "this track is MANDATORY ... Use the skill", so the test now
 # pins "mandatory" instead of "prefer".
+# Updated: 2026-07-04 (feat/sites-chat-mode, CHAT-BE) — the /sites/[siteId] surface
+# now carries a Build/Chat mode. The refine branch (pocket_id present) forks on
+# `meta.mode`: "build" (default — today's behavior) keeps the mutate-and-republish
+# refine preamble; "chat" routes to a NO-MUTATION Q&A preamble that answers
+# questions about the existing site WITHOUT calling pocket_specialist__edit,
+# without republishing, and without creating pockets. The new chat-mode tests at
+# the bottom pin: (a) chat + pocket_id yields a Q&A preamble that does NOT instruct
+# the edit tool / mutation; (b) build (or unset) + pocket_id is byte-identical to
+# the existing refine preamble (regression guard); (c) create path (no pocket_id)
+# is unaffected by mode.
 
 from __future__ import annotations
 
@@ -276,3 +286,98 @@ async def test_engine_threads_through_meta_from_request() -> None:
 
     meta = _meta_from_request(SurfaceMetaRequest(engine="svelte", route_path="/sites"))
     assert meta.engine == "svelte"
+
+
+# --- Chat mode (the /sites/[siteId] Build/Chat toggle set to Chat) ---
+#
+# The refine branch (pocket_id present) forks on meta.mode. mode="chat" must
+# route to a NO-MUTATION Q&A preamble; mode="build" (or unset) keeps today's
+# mutate-and-republish refine preamble byte-for-byte.
+
+CHAT_POCKET = "pkt-existing-site-chat-456"
+
+
+async def test_sites_handler_chat_mode_is_no_mutation_qa() -> None:
+    """mode="chat" + pocket_id yields a Q&A preamble that ANSWERS questions about
+    the existing site WITHOUT editing it: it must NOT instruct the edit tool, must
+    NOT republish, and must NOT create a new pocket."""
+    preamble = await sites_handler.build_preamble(
+        WORKSPACE,
+        USER,
+        SurfaceMeta(
+            route_path="/sites/site-abc",
+            pocket_id=CHAT_POCKET,
+            site_id="site-abc",
+            mode="chat",
+        ),
+    )
+
+    lower = preamble.lower()
+    # Still the sites surface, tagged as chat mode.
+    assert '<surface kind="sites"' in preamble
+    assert 'mode="chat"' in preamble
+    # Oriented to the EXISTING site the user is chatting about.
+    assert "existing" in lower
+    assert CHAT_POCKET in preamble
+    # It must READ as a question/answer surface.
+    assert "question" in lower or "answer" in lower
+    # NO-MUTATION: never the edit tool, never a republish, never a new pocket.
+    assert "mcp__pocketpaw_pocket_specialist__edit" not in preamble
+    assert "republish" not in lower
+    assert "do not modify" in lower or "do not edit" in lower or "without editing" in lower
+    # Keeps the site/page vocabulary (not "pocket" as the deliverable).
+    assert "site" in lower
+
+
+async def test_sites_handler_build_mode_identical_to_refine() -> None:
+    """mode="build" (and unset) + pocket_id is byte-for-byte the existing refine
+    preamble — the Build side of the toggle is today's behavior, unchanged."""
+    unset = await sites_handler.build_preamble(
+        WORKSPACE,
+        USER,
+        SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
+    )
+    build = await sites_handler.build_preamble(
+        WORKSPACE,
+        USER,
+        SurfaceMeta(
+            route_path="/sites/site-abc",
+            pocket_id=REFINE_POCKET,
+            site_id="site-abc",
+            mode="build",
+        ),
+    )
+
+    # The toggle's Build side is exactly the refine preamble; unset defaults to it.
+    assert build == unset
+    # And it is the mutate-and-republish refine preamble (regression guard).
+    assert "mcp__pocketpaw_pocket_specialist__edit" in build
+    assert 'mode="refine"' in build
+
+
+async def test_sites_handler_chat_mode_ignored_without_pocket_id() -> None:
+    """mode="chat" with NO pocket_id is still the create surface — chat mode only
+    applies to an existing site, so the gallery/create path is unaffected."""
+    chat_no_pocket = await sites_handler.build_preamble(
+        WORKSPACE, USER, SurfaceMeta(route_path="/sites", mode="chat")
+    )
+    plain_create = await sites_handler.build_preamble(
+        WORKSPACE, USER, SurfaceMeta(route_path="/sites")
+    )
+
+    # No pocket to chat about → the create preamble is unchanged by mode.
+    assert chat_no_pocket == plain_create
+    assert "build and publish" in chat_no_pocket.lower()
+
+
+async def test_mode_threads_through_meta_from_request() -> None:
+    """The wire `mode` hint survives DTO→domain mapping so the handler can branch
+    on it (mirrors how engine/site_id are threaded). Default is "build"."""
+    from pocketpaw_ee.cloud.surface.dto import SurfaceMetaRequest
+    from pocketpaw_ee.cloud.surface.service import _meta_from_request
+
+    meta = _meta_from_request(SurfaceMetaRequest(mode="chat", route_path="/sites"))
+    assert meta.mode == "chat"
+    # Default preserves current (build) behavior when the client omits it.
+    default_meta = _meta_from_request(SurfaceMetaRequest(route_path="/sites"))
+    assert default_meta.mode == "build"

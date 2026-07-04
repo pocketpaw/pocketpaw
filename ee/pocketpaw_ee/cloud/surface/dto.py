@@ -23,6 +23,10 @@
 # new ``repo`` + ``base_branch`` Belt console hints so the /belt page can stamp
 # the bound repo + branch on the wire and the belt handler injects them into the
 # preamble (agent stops asking for the repo).
+# Updated: 2026-07-04 (feat/sites-chat-mode, CHAT-BE) — mirror ``SurfaceMeta``'s
+# new ``mode`` hint ("build" default | "chat") so the /sites/[siteId] Build/Chat
+# toggle can stamp it on the wire and the sites handler routes the refine branch
+# to the no-mutation Q&A preamble when "chat".
 
 from __future__ import annotations
 
@@ -55,6 +59,10 @@ class SurfaceMetaRequest(BaseModel):
     # "Use Svelte pages" toggle: "ripple" (default) | "svelte". Selects which
     # create-site authoring skill the preamble prefers. Optional.
     engine: str | None = None
+    # Sites refine hint — mirror SurfaceMeta. Set by the /sites/[siteId] Build/Chat
+    # toggle: "build" (default) | "chat". On the refine branch, "chat" routes the
+    # handler to the no-mutation Q&A preamble. Default "build" preserves behavior.
+    mode: str = "build"
     # Belt console hints — mirror SurfaceMeta. Set by the /belt page once the
     # user has bound a repo + branch for the run. ``repo`` is the absolute repo
     # path; ``base_branch`` is the branch to base the change off. Optional.

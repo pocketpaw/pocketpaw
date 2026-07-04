@@ -11,6 +11,10 @@
 # ``GENERIC`` context with empty preamble. The chat path is the consumer
 # — never let a surface failure break a chat send.
 #
+# Changes: 2026-07-04 (feat/sites-chat-mode, CHAT-BE) — thread the new
+# ``SurfaceMeta.mode`` hint through ``_meta_from_request`` (DTO→domain) so the
+# /sites/[siteId] Build/Chat toggle reaches the sites handler's refine branch.
+#
 # Changes: 2026-06-05 (feat/surface-profile-bias-kill) — added
 # ``resolve_profile(surface_kind, meta) -> SurfaceProfile``, the resolver
 # for the new per-surface policy descriptor (the data backbone of the
@@ -300,6 +304,7 @@ def _meta_from_request(req: SurfaceMetaRequest) -> SurfaceMeta:
         panel=req.panel,
         site_id=req.site_id,
         engine=req.engine,
+        mode=req.mode,
         repo=req.repo,
         base_branch=req.base_branch,
     )

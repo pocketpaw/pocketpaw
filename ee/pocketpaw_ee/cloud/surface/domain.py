@@ -61,6 +61,13 @@
 # so the belt handler's ``build_preamble`` injects them into the preamble and
 # tells the agent NOT to ask for the repo (and to pass exactly these into
 # ``belt_propose_change``). Absent → the handler keeps the ask-first behavior.
+# Changes: 2026-07-04 (feat/sites-chat-mode, CHAT-BE) — ``SurfaceMeta`` grows a
+# ``mode`` hint ("build" | "chat", default "build"). Set by the /sites/[siteId]
+# Build/Chat toggle. On the refine branch (``pocket_id`` present) the sites
+# handler forks on it: "build" keeps today's mutate-and-republish refine preamble;
+# "chat" routes to a NO-MUTATION Q&A preamble that answers questions about the
+# existing site without editing or republishing it. Default "build" preserves
+# current behavior; ignored on the create branch (no ``pocket_id``).
 
 from __future__ import annotations
 
@@ -140,6 +147,13 @@ class SurfaceMeta:
     # "svelte"; absent / "ripple" keeps the default marketing brain. Does not
     # affect the refine branch (keyed on ``pocket_id``).
     engine: str | None = None
+    # Sites refine hint — set by the /sites/[siteId] Build/Chat toggle: "build"
+    # (default) | "chat". On the refine branch (``pocket_id`` present) the handler
+    # forks on this: "build" keeps the mutate-and-republish refine preamble;
+    # "chat" routes to a NO-MUTATION Q&A preamble (answer questions about the site
+    # without editing or republishing it). Default preserves current behavior;
+    # ignored on the create branch (no ``pocket_id``).
+    mode: str = "build"
     # Belt console hints — set by the /belt page once the user has bound a repo
     # + branch for the run. ``repo`` is the absolute repo path; ``base_branch``
     # is the branch to base the change off. The belt handler injects both into
