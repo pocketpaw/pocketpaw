@@ -40,6 +40,15 @@
 # action projects as ``nudge:<id>`` with pocket_name "Workspace", even when
 # the workspace has zero visible pockets, and (2) another tenant's
 # workspace-scoped action stays invisible (store-level W4c scoping intact).
+# Updated: 2026-07-04 (fix/approval-resolution) — added
+# ``TestWorkspaceScopedNudgeApproveResolves`` (the list-vs-approve consistency
+# the bug broke: a workspace-scoped nudge that LISTS must RESOLVE on
+# bulk-approve — approved non-empty, missing empty — while another tenant's
+# stays blocked) and ``TestBulkApproveExecutesGatedKinds`` (the façade
+# bulk-approve must FIRE every non-pocket-write gated kind's executor —
+# ``_admin_action`` / ``_external_action`` — not just ``_pocket_write``, so a
+# bulk-approved admin action actually executes; plus per-item isolation on the
+# gated path).
 
 from __future__ import annotations
 
@@ -349,6 +358,125 @@ class TestWorkspaceScopedNudges:
 
 
 # ---------------------------------------------------------------------------
+# list-vs-approve consistency for workspace-scoped nudges (the resolver bug)
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspaceScopedNudgeApproveResolves:
+    """Regression — a workspace-scoped nudge (``pocket_id == workspace_id``,
+    e.g. an ``_admin_action`` / ``_external_action`` proposal) that LISTS in
+    The Tray must also RESOLVE on bulk-approve.
+
+    The bug: ``agent_list_work_items`` admits ``a.pocket_id == workspace_id``
+    (workspace-scoped nudges reach the feed), but ``_split_ids_by_tenancy``
+    on the approve path only admitted ``action.pocket_id in visible_pockets``.
+    A workspace id is never a visible POCKET id, so a workspace-scoped nudge
+    that listed fine was pushed to ``blocked`` on approve and reported as
+    ``missing`` — the proposal stayed pending forever. The list and approve
+    tenancy filters MUST agree.
+    """
+
+    @pytest.mark.asyncio
+    async def test_listed_workspace_scoped_nudge_resolves_on_bulk_approve(
+        self, store: InstinctStore
+    ) -> None:
+        # A gated admin-action proposal stamps ``Action.pocket_id = workspace_id``
+        # (it isn't pocket-bound — see admin_proposals/propose.py).
+        a = await store.propose(
+            "w1",  # pocket_id carries the workspace
+            "Billing plan change → pro",
+            "gated admin write",
+            "approve to open checkout for 'pro'",
+            _trigger(),
+            parameters={
+                "_admin_action": {
+                    "schema": 1,
+                    "kind": "admin_action",
+                    "action": "billing.manage",
+                    "args": {"plan_key": "pro"},
+                    "workspace_id": "w1",
+                    "proposer_user_id": "u1",
+                }
+            },
+            workspace_id="w1",
+        )
+
+        # It LISTS as a workspace-scoped nudge (the autouse list_pockets mock
+        # returns p1/p2 — the workspace id "w1" is never among them).
+        items = await mc_service.agent_list_work_items(_ctx(workspace_id="w1"), {})
+        assert [it.id for it in items] == [f"nudge:{a.id}"]
+
+        # The exact wire id the LIST returned must RESOLVE on bulk-approve:
+        # approved non-empty, missing empty — the list-vs-approve consistency
+        # the bug broke.
+        result = await mc_service.agent_bulk_approve(
+            _ctx(workspace_id="w1"), BulkActionRequest(ids=[f"nudge:{a.id}"])
+        )
+        assert {row["id"] for row in result["approved"]} == {a.id}
+        assert result["missing"] == []
+        # The action flipped out of pending — it no longer sits in the Tray.
+        assert (await store.get_action(a.id)).status.value == "approved"
+
+    @pytest.mark.asyncio
+    async def test_external_action_nudge_also_resolves_not_just_admin(
+        self, store: InstinctStore
+    ) -> None:
+        # The fix must not special-case admin — any workspace-scoped gated
+        # kind (external_action here) that lists must also resolve.
+        a = await store.propose(
+            "w1",
+            "External action — send invoice",
+            "gated call",
+            "approve to call 'send_invoice'",
+            _trigger(),
+            parameters={"_external_action": {"connector": "stripe", "action": "send_invoice"}},
+            workspace_id="w1",
+        )
+        items = await mc_service.agent_list_work_items(_ctx(workspace_id="w1"), {})
+        assert [it.id for it in items] == [f"nudge:{a.id}"]
+
+        result = await mc_service.agent_bulk_approve(
+            _ctx(workspace_id="w1"), BulkActionRequest(ids=[f"nudge:{a.id}"])
+        )
+        assert {row["id"] for row in result["approved"]} == {a.id}
+        assert result["missing"] == []
+
+    @pytest.mark.asyncio
+    async def test_other_tenants_workspace_scoped_nudge_stays_blocked_on_approve(
+        self, store: InstinctStore
+    ) -> None:
+        # Admitting ``pocket_id == workspace_id`` must only admit the CALLER'S
+        # own workspace — never another tenant's workspace-scoped nudge.
+        other = await store.propose(
+            "w2",
+            "theirs — admin action",
+            "",
+            "",
+            _trigger(),
+            parameters={
+                "_admin_action": {
+                    "schema": 1,
+                    "kind": "admin_action",
+                    "action": "billing.manage",
+                    "args": {"plan_key": "pro"},
+                    "workspace_id": "w2",
+                    "proposer_user_id": "u2",
+                }
+            },
+            workspace_id="w2",
+        )
+        # A w1 caller trying to approve w2's workspace-scoped nudge is blocked:
+        # the store-level scope keeps the row out of eligibility → missing.
+        result = await mc_service.agent_bulk_approve(
+            _ctx(workspace_id="w1"), BulkActionRequest(ids=[f"nudge:{other.id}"])
+        )
+        assert result["approved"] == []
+        # Blocked ids come back mapped to the operator's original wire id.
+        assert f"nudge:{other.id}" in result["missing"]
+        assert (await store.get_action(other.id)).status.value == "pending"
+
+
+# ---------------------------------------------------------------------------
 # bulk_approve / bulk_reject
 # ---------------------------------------------------------------------------
 
@@ -389,6 +517,159 @@ class TestBulkApproveService:
                 BulkActionRequest(ids=[a.id], reason=None),
             )
         assert exc.value.code == "mission_control.reason_required"
+
+
+# ---------------------------------------------------------------------------
+# bulk_approve — non-pocket-write gated kinds must FIRE their executor
+# ---------------------------------------------------------------------------
+
+
+class TestBulkApproveExecutesGatedKinds:
+    """The façade bulk-approve must dispatch EVERY gated proposal kind's
+    executor, not just ``_pocket_write``. Before the fix
+    ``_execute_bulk_approved_nudge`` only fired the pocket-write bridge, so a
+    bulk-approved ``_admin_action`` / ``_external_action`` / etc. flipped to
+    ``approved`` and STRANDED the write (e.g. a ``billing.manage`` admin action
+    never opened its checkout). These tests pin the façade to the router's
+    per-kind dispatch: the matching executor is invoked with the approved
+    Action + a ``human_event_id``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_admin_action_nudge_fires_its_executor_on_bulk_approve(
+        self, monkeypatch, store: InstinctStore
+    ) -> None:
+        fired: list[str] = []
+
+        async def _spy_admin_executor(action, *, human_event_id=None):
+            fired.append(str(action.id))
+
+        # Patch the admin executor at its source module — the façade lazy-imports
+        # ``pocketpaw_ee.cloud.admin_proposals.executor`` and reads the attr.
+        monkeypatch.setattr(
+            "pocketpaw_ee.cloud.admin_proposals.executor.execute_approved_admin_action",
+            _spy_admin_executor,
+        )
+
+        a = await store.propose(
+            "w1",  # workspace-scoped admin action
+            "Billing plan change → pro",
+            "gated admin write",
+            "approve to open checkout",
+            _trigger(),
+            parameters={
+                "_admin_action": {
+                    "schema": 1,
+                    "kind": "admin_action",
+                    "action": "billing.manage",
+                    "args": {"plan_key": "pro"},
+                    "workspace_id": "w1",
+                    "proposer_user_id": "u1",
+                }
+            },
+            workspace_id="w1",
+        )
+
+        result = await mc_service.agent_bulk_approve(
+            _ctx(workspace_id="w1"), BulkActionRequest(ids=[f"nudge:{a.id}"])
+        )
+        # Resolved (not missing) AND the admin executor actually fired.
+        assert {row["id"] for row in result["approved"]} == {a.id}
+        assert result["missing"] == []
+        assert fired == [a.id]
+        executed = {row["id"]: row for row in result["executed"]}
+        assert executed[a.id]["executed"] is True
+        assert executed[a.id]["error"] is None
+
+    @pytest.mark.asyncio
+    async def test_external_action_nudge_fires_its_executor_on_bulk_approve(
+        self, monkeypatch, store: InstinctStore
+    ) -> None:
+        fired: list[str] = []
+
+        async def _spy_external_executor(action, *, human_event_id=None):
+            fired.append(str(action.id))
+
+        monkeypatch.setattr(
+            "pocketpaw_ee.cloud.external_actions.executor.execute_approved_external_action",
+            _spy_external_executor,
+        )
+
+        a = await store.propose(
+            "w1",
+            "External action — send invoice",
+            "gated call",
+            "approve to call 'send_invoice'",
+            _trigger(),
+            parameters={
+                "_external_action": {
+                    "connector": "stripe",
+                    "action": "send_invoice",
+                    "workspace_id": "w1",
+                }
+            },
+            workspace_id="w1",
+        )
+
+        result = await mc_service.agent_bulk_approve(
+            _ctx(workspace_id="w1"), BulkActionRequest(ids=[f"nudge:{a.id}"])
+        )
+        assert {row["id"] for row in result["approved"]} == {a.id}
+        assert fired == [a.id]
+
+    @pytest.mark.asyncio
+    async def test_one_failing_gated_executor_does_not_drop_the_rest(
+        self, monkeypatch, store: InstinctStore
+    ) -> None:
+        """Per-item isolation on the gated path — an executor that raises is
+        reported failed while sibling items still fire."""
+
+        async def _boom_executor(action, *, human_event_id=None):
+            raise RuntimeError("admin service exploded")
+
+        monkeypatch.setattr(
+            "pocketpaw_ee.cloud.admin_proposals.executor.execute_approved_admin_action",
+            _boom_executor,
+        )
+
+        good = await store.propose(
+            "w1",
+            "External — ok",
+            "",
+            "",
+            _trigger(),
+            parameters={"_external_action": {"connector": "gmail", "action": "send"}},
+            workspace_id="w1",
+        )
+        bad = await store.propose(
+            "w1",
+            "Admin — boom",
+            "",
+            "",
+            _trigger(),
+            parameters={
+                "_admin_action": {
+                    "schema": 1,
+                    "kind": "admin_action",
+                    "action": "billing.manage",
+                    "args": {"plan_key": "pro"},
+                    "workspace_id": "w1",
+                    "proposer_user_id": "u1",
+                }
+            },
+            workspace_id="w1",
+        )
+
+        result = await mc_service.agent_bulk_approve(
+            _ctx(workspace_id="w1"), BulkActionRequest(ids=[f"nudge:{good.id}", f"nudge:{bad.id}"])
+        )
+        # Both flipped to approved regardless of execution outcome.
+        assert {row["id"] for row in result["approved"]} == {good.id, bad.id}
+        executed = {row["id"]: row for row in result["executed"]}
+        # The failing admin executor is isolated + reported; the good one fired.
+        assert executed[bad.id]["executed"] is False
+        assert executed[bad.id]["error"] is not None
+        assert executed[good.id]["executed"] is True
 
 
 # ---------------------------------------------------------------------------
