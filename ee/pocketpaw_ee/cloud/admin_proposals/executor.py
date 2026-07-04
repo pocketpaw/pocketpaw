@@ -297,7 +297,9 @@ async def _call_revoke_invite(**kwargs: Any) -> Any:
 
 
 def _adapt_connector_manage(
-    args: dict[str, Any], workspace_id: str, proposer_user_id: str  # noqa: ARG001
+    args: dict[str, Any],
+    workspace_id: str,
+    proposer_user_id: str,  # noqa: ARG001
 ) -> dict[str, Any]:
     """STRICT, OP-AWARE adapter for the connector-manage fan-out.
 
