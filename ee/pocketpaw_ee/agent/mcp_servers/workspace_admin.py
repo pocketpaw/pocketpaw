@@ -336,9 +336,7 @@ def _legacy_ctx(user_id: str, workspace_id: str) -> Any:
     )
 
 
-async def _gate_read(
-    tool: str, action: str, deny_message: str
-) -> tuple[str, str, None] | dict:
+async def _gate_read(tool: str, action: str, deny_message: str) -> tuple[str, str, None] | dict:
     """Shared identity-resolve + RBAC-gate for a READ tool.
 
     Returns ``(workspace_id, user_id, None)`` when the gate PASSES, or a ready-to-
@@ -384,9 +382,7 @@ async def _gate_read(
     return workspace_id, user_id, None
 
 
-async def _gate_write(
-    tool: str, action: str, deny_message: str
-) -> tuple[str, str, None] | dict:
+async def _gate_write(tool: str, action: str, deny_message: str) -> tuple[str, str, None] | dict:
     """Shared identity-resolve + RBAC-gate for a WRITE tool.
 
     IDENTICAL control flow to ``_gate_read`` — a Forbidden is CAUGHT and returned
@@ -500,8 +496,7 @@ async def _members_list_handler(args: dict) -> dict:  # noqa: ARG001 — no args
                 "denied": True,
                 "code": exc.code,
                 "message": (
-                    "You don't have permission to view this workspace's members "
-                    f"({exc.code})."
+                    f"You don't have permission to view this workspace's members ({exc.code})."
                 ),
             }
         )
@@ -557,9 +552,7 @@ async def _member_update_role_handler(args: dict) -> dict:
         return _error_response("user_id is required (string — the member to change).")
     role = args.get("role")
     if not isinstance(role, str) or role not in _VALID_ROLES:
-        return _error_response(
-            f"role is required and must be one of {sorted(_VALID_ROLES)}."
-        )
+        return _error_response(f"role is required and must be one of {sorted(_VALID_ROLES)}.")
 
     from pocketpaw_ee.guards.deps import check_workspace_action
     from pocketpaw_ee.guards.rbac import Forbidden
@@ -1155,9 +1148,7 @@ async def _workspace_update_handler(args: dict) -> dict:
     if branding is not None:
         proposed_args["branding"] = branding
     if not proposed_args:
-        return _error_response(
-            "provide at least one of name / settings / branding to update."
-        )
+        return _error_response("provide at least one of name / settings / branding to update.")
 
     gate = await _gate_write(
         "workspace_update",
@@ -1316,9 +1307,7 @@ async def _billing_plan_change_handler(args: dict) -> dict:
         )
     plan = args.get("plan")
     if not isinstance(plan, str) or plan not in _VALID_PLANS:
-        return _error_response(
-            f"plan is required and must be one of {sorted(_VALID_PLANS)}."
-        )
+        return _error_response(f"plan is required and must be one of {sorted(_VALID_PLANS)}.")
 
     gate = await _gate_write(
         "billing_plan_change",

@@ -544,4 +544,10 @@ ignore_imports = [
     # dashboard_lifecycle drains the EE InProcessExecutor on shutdown via a
     # try/except runtime import; the OSS core never imports EE statically.
     "pocketpaw.dashboard_lifecycle -> pocketpaw_ee.cloud.chat.runs.executor",
+    # atlas resolves optional EE introspection (Fabric schema) and the
+    # role-aware entitlement provider via try/except ImportError seams — an
+    # OSS-only install degrades to "no introspection"/default overlay and
+    # never imports EE statically.
+    "pocketpaw.atlas.fabric -> pocketpaw_ee.fabric",
+    "pocketpaw.atlas.overlay -> pocketpaw_ee.agent.atlas_provider",
 ]
