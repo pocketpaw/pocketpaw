@@ -1,5 +1,12 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-07-03 (integration/atlas AT-1) — ``_strip_builtin_servers`` now
+  also drops ``pocketpaw_atlas`` (the new always-on capability-atlas server:
+  atlas_search / atlas_describe, registered unconditionally in core
+  ``claude_sdk._get_mcp_servers``), so the external-config assertions stay
+  focused. ``test_startup_summary_no_servers`` additionally patches
+  ``build_atlas_context_server`` to None (same regime as the widgets server)
+  to keep the empty-server scenario truly empty.
 Updated: 2026-06-11 (feat/fabric-instinct-mcp-providers) —
   ``_strip_builtin_servers`` now also drops ``pocketpaw_fabric`` (fabric_query /
   fabric_stats) and ``pocketpaw_instinct`` (instinct_pending / instinct_audit),
@@ -78,11 +85,15 @@ from pocketpaw_ee.agent.mcp_servers.planner import SERVER_NAME as _PLANNER_MCP_S
 from pocketpaw_ee.agent.mcp_servers.pockets import SERVER_NAME as _POCKET_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.sites import SERVER_NAME as _SITES_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.tasks import SERVER_NAME as _TASKS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.workspace_admin import (
+    SERVER_NAME as _WORKSPACE_ADMIN_MCP_SERVER_NAME,
+)
 from pocketpaw_ee.agent.pocket_specialist.mcp_tool import (
     SERVER_NAME as _POCKET_SPECIALIST_MCP_SERVER_NAME,
 )
 
 from pocketpaw.agents.claude_sdk import ClaudeAgentSDK
+from pocketpaw.agents.sdk_mcp_atlas import SERVER_NAME as _ATLAS_MCP_SERVER_NAME
 from pocketpaw.agents.sdk_mcp_widgets import SERVER_NAME as _WIDGETS_MCP_SERVER_NAME
 from pocketpaw.config import Settings
 from pocketpaw.mcp.config import MCPServerConfig
@@ -135,6 +146,16 @@ def _strip_builtin_servers(result: dict) -> dict:
     # read-only.
     out.pop(_FABRIC_MCP_SERVER_NAME, None)
     out.pop(_INSTINCT_MCP_SERVER_NAME, None)
+    # ``pocketpaw_atlas`` is always-on too — the capability atlas
+    # (atlas_search / atlas_describe) is registered unconditionally in core
+    # ``claude_sdk._get_mcp_servers`` so every agent can ground PocketPaw
+    # capabilities instead of guessing from LLM priors (AT-1).
+    out.pop(_ATLAS_MCP_SERVER_NAME, None)
+    # ``pocketpaw_workspace_admin`` is always-on too — the workspace-admin tool
+    # surface (members_list / member_update_role) is registered unconditionally;
+    # the RBAC gate on each tool is the security boundary, not registration
+    # (WA-1, feat/workspace-admin-tools).
+    out.pop(_WORKSPACE_ADMIN_MCP_SERVER_NAME, None)
     return out
 
 
@@ -546,6 +567,13 @@ class TestMcpProviderLoadFailures:
             patch("pocketpaw._registry.providers", return_value=[]),
             patch(
                 "pocketpaw.agents.sdk_mcp_widgets.build_widgets_context_server",
+                return_value=None,
+            ),
+            # The atlas server is always-on (AT-1) — patch its builder to None
+            # (same regime as the widgets server above) so the empty-server
+            # scenario stays truly empty.
+            patch(
+                "pocketpaw.agents.sdk_mcp_atlas.build_atlas_context_server",
                 return_value=None,
             ),
             caplog.at_level(logging.INFO, logger="pocketpaw.agents.claude_sdk"),

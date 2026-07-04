@@ -1,5 +1,27 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-07-02 (feat/atlas-fabric AT-7) — the ``pocketpaw_atlas`` server
+  additionally gets a per-run live Fabric introspector (``atlas/fabric.py``)
+  when — and only when — the tenant scope is a real ``ws:<id>`` (not the OSS
+  ``"default"`` scope, not the blank-id sentinel, now the module constant
+  ``_SENTINEL_TENANT_SCOPE``) AND ``pocketpaw_ee.fabric`` imports; import or
+  construction failure degrades to no-introspector (fail-closed, DEBUG log).
+  Lets agents ask atlas "what entity types exist in THIS workspace" without
+  ever baking per-tenant ontology into the compiled artifact.
+Updated: 2026-07-02 (feat/atlas-overlay AT-5) — the ``pocketpaw_atlas`` server
+  is now built with a per-run ``DefaultEntitlementProvider``
+  (``atlas/overlay.py``): the connector scope key resolves from THIS backend
+  instance's ``_extra_subprocess_env`` (``ws:<POCKETPAW_WORKSPACE_ID>`` when an
+  isolated cloud run attached tenancy, else the OSS ``"default"`` scope), so
+  atlas answers carry the calling workspace's connector availability and the
+  fail-closed entitlement filter — never keyed off a process-global flag.
+Updated: 2026-07-02 (feat/atlas-core AT-1) — registered the ``pocketpaw_atlas``
+  in-process MCP server (``agents/sdk_mcp_atlas.py``) alongside
+  ``pocketpaw_widgets``: built in ``_get_mcp_servers`` behind the same tool
+  policy gate, its two tool ids (``atlas_search`` / ``atlas_describe``) added to
+  the allowlist in ``_collect_mcp_tool_ids`` and to the mode-scope grant, so the
+  agent can query the OS self-model (paw primitive meanings) instead of guessing
+  capabilities from LLM priors. Pure core — the atlas seed is packaged data.
 Updated: 2026-07-01 (fix/warm-reuse session_id) — the native ``session_id`` is now
   ALSO captured from the terminal ``ResultMessage`` (``getattr(event,
   "session_id", None)``), as a robust FALLBACK to the SS-1 init-``SystemMessage``
@@ -301,6 +323,12 @@ _DEFAULT_IDENTITY = (
 )
 
 _HTTP_TRANSPORTS: frozenset[str] = frozenset({"http", "sse", "streamable-http"})
+
+# Fail-closed sentinel scope minted by ``_tenant_scope_key`` when tenancy is
+# attached with a BLANK workspace id (AT-5). Matches no connector rows and
+# must never unlock per-workspace features (e.g. the AT-7 Fabric
+# introspector) — a half-attached tenancy degrades to "nothing available".
+_SENTINEL_TENANT_SCOPE = "ws:__missing-workspace-id__"
 
 # Universal pocket-creation grant. When a surface imposes a restrictive MCP
 # allow-list (``SurfaceProfile.allow_mcp_tool_ids``), these ids are always kept
@@ -918,6 +946,72 @@ class ClaudeSDKBackend(BaseAgentBackend):
         except Exception as exc:  # noqa: BLE001
             logger.debug("pocketpaw_widgets MCP server not registered: %s", exc)
 
+        # In-process MCP server: the atlas OS self-model (atlas_search,
+        # atlas_describe). Pure core — the hand-authored seed ships as
+        # packaged data (pocketpaw.atlas), no cloud dependency. Lets the
+        # agent query what the OS is and can do (paw meanings of Pocket /
+        # Instinct / Fabric / ...) before guessing from LLM priors.
+        #
+        # AT-5: the server carries a per-run entitlement/availability
+        # provider so atlas answers reflect the CALLING workspace, not a
+        # global view. Scope resolution lives in ``_tenant_scope_key``
+        # (per-run env, fail-closed on a blank workspace id, never a
+        # process-global mode flag — repo lesson #1570/#1574).
+        #
+        # Honesty note: under a ``ws:<id>`` scope the availability read is
+        # plumbed but currently INERT — the cloud connector state store does
+        # not enumerate tenant rows, so cloud runs conservatively report
+        # every connector unavailable until the EE availability provider
+        # lands. The OSS ``"default"`` scope reads live file-store state.
+        #
+        # AT-7: a real ``ws:<id>`` scope ALSO gets a live Fabric
+        # introspector (EE workspace ontology — entity types, properties,
+        # links) so atlas can answer "what entity types exist in THIS
+        # workspace". Built per run with the run's workspace id, never a
+        # process-global. The builder degrades to None (fail-closed, DEBUG
+        # log) when pocketpaw_ee isn't importable or construction fails;
+        # the "default" scope and the blank-id sentinel get NO introspector
+        # (the OSS JSONFileFabricRegistry needs an explicit registry file —
+        # there is no ambient OSS fabric registry to wire today).
+        try:
+            from pocketpaw.agents.sdk_mcp_atlas import build_atlas_context_server
+            from pocketpaw.atlas.overlay import (
+                DefaultEntitlementProvider,
+                build_role_aware_provider,
+            )
+
+            tenant_scope = self._tenant_scope_key()
+            fabric_introspector = None
+            atlas_provider: Any = DefaultEntitlementProvider(scope_key=tenant_scope)
+            if tenant_scope.startswith("ws:") and tenant_scope != _SENTINEL_TENANT_SCOPE:
+                from pocketpaw.atlas.fabric import build_workspace_fabric_introspector
+
+                fabric_introspector = build_workspace_fabric_introspector(
+                    tenant_scope[len("ws:") :]
+                )
+                # WA-3: a real ws:<id> run gets the role-aware provider so
+                # non-admins don't see admin capabilities in atlas. It resolves
+                # the caller's role at query time and grants ``role:*`` entries
+                # by role tier; a None return (OSS install / EE provider not
+                # importable / construction failure) leaves the fail-closed
+                # default in place — which HIDES every role-gated entry, so admin
+                # capabilities never leak without the role-aware provider.
+                role_aware = build_role_aware_provider(tenant_scope)
+                if role_aware is not None:
+                    atlas_provider = role_aware
+            atlas_server = build_atlas_context_server(
+                provider=atlas_provider,
+                introspector=fabric_introspector,
+            )
+            if atlas_server is not None:
+                name, cfg_entry = atlas_server
+                if self._policy.is_mcp_server_allowed(name):
+                    servers[name] = cfg_entry
+                else:
+                    logger.info("MCP server '%s' blocked by tool policy", name)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pocketpaw_atlas MCP server not registered: %s", exc)
+
         # EE-provided in-process MCP servers — cloud pocket context, Mission
         # Control tasks, the planner, and the pocket specialist. Discovered
         # via the ``pocketpaw.mcp_servers`` entry-point (see
@@ -985,7 +1079,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         """Collect the in-process MCP tool ids to add to the SDK allowlist.
 
         An MCP tool is only callable if its id is on the allowlist. This
-        gathers the core ripple widget-spec ids plus every cloud
+        gathers the core ripple widget-spec + atlas self-model ids plus every cloud
         ``pocketpaw.mcp_servers`` provider's ``tool_ids()`` (which includes
         the ``pocketpaw_pocket`` server's writable ``add_widget`` tool).
 
@@ -995,9 +1089,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
         server name is the segment between the first and second ``__``.
         """
         from pocketpaw._registry import providers as _ext_providers
+        from pocketpaw.agents.sdk_mcp_atlas import ATLAS_TOOL_IDS
         from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
 
-        ids: list[str] = list(WIDGET_TOOL_IDS)
+        ids: list[str] = list(WIDGET_TOOL_IDS) + list(ATLAS_TOOL_IDS)
         for provider in _ext_providers("pocketpaw.mcp_servers"):
             try:
                 tool_ids = list(provider.tool_ids())
@@ -1197,9 +1292,36 @@ class ClaudeSDKBackend(BaseAgentBackend):
         payload = ("b1:" if bundled else "b0:") + ",".join(sorted(skill_names))
         return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:16]
 
+    def _tenant_scope_key(self) -> str:
+        """Connector/entitlement scope for THIS backend instance.
+
+        Resolved from the per-run ``_extra_subprocess_env`` (never a
+        process-global mode flag — repo lesson #1570/#1574):
+
+        - no ``POCKETPAW_WORKSPACE_ID`` attached → the OSS single-user
+          ``"default"`` scope the builtin connector tools use;
+        - a non-blank id → ``ws:<id>`` (the EE cloud connector row keying);
+        - tenancy attached but BLANK id → fail CLOSED to a sentinel scope
+          that matches no rows. Never the shared ``"default"`` bucket:
+          a half-attached tenancy must degrade to "nothing available",
+          not to another scope's connector availability.
+        """
+        from pocketpaw.atlas.overlay import DEFAULT_SCOPE_KEY
+
+        raw = self._extra_subprocess_env.get("POCKETPAW_WORKSPACE_ID")
+        if raw is None:
+            return DEFAULT_SCOPE_KEY
+        ws = raw.strip()
+        return f"ws:{ws}" if ws else _SENTINEL_TENANT_SCOPE
+
     @classmethod
     def _client_cache_key(
-        cls, options: Any, *, session_key: str | None = None, plugin_digest: str = ""
+        cls,
+        options: Any,
+        *,
+        session_key: str | None = None,
+        plugin_digest: str = "",
+        tenant_scope: str = "",
     ) -> str:
         """Persistent-client cache key: session + cwd + model + tools + a digest
         of the system prompt's stable behavioral prefix + the plugin-identity
@@ -1222,6 +1344,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
         session_key, a stale warm subprocess can never be reused across two
         different working directories (i.e. two tenants). The SDK fixes cwd at
         connect() time, so a changed cwd MUST force a fresh subprocess.
+
+        ``tenant_scope`` (AT-5) extends the same argument to the atlas
+        entitlement scope: the per-run provider is baked into the MCP server
+        set at connect() time, so a changed scope must also force a fresh
+        subprocess rather than reusing one warmed for another tenant.
         """
         prefix = cls._behavior_prefix(getattr(options, "system_prompt", None))
         prefix_digest = hashlib.sha256(prefix.encode("utf-8", "replace")).hexdigest()[:16]
@@ -1231,7 +1358,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
             f"{getattr(options, 'model', '')}:"
             f"{sorted(getattr(options, 'allowed_tools', []) or [])}:"
             f"{prefix_digest}:"
-            f"{plugin_digest}"
+            f"{plugin_digest}:"
+            f"{tenant_scope}"
         )
 
     async def _get_or_create_client(
@@ -1265,7 +1393,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
         if self._client_lock is None:
             self._client_lock = asyncio.Lock()
 
-        key = self._client_cache_key(options, session_key=session_key, plugin_digest=plugin_digest)
+        key = self._client_cache_key(
+            options,
+            session_key=session_key,
+            plugin_digest=plugin_digest,
+            tenant_scope=self._tenant_scope_key(),
+        )
 
         async with self._client_lock:
             # Re-check INSIDE the lock: a prewarm (or sibling) may have connected
@@ -1617,15 +1750,22 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # Per-MODE restrictive MCP allow-list (distinct from the additive
         # ``allow_sdk_tools`` above). ``None`` keeps every MCP tool (broad
         # surfaces like /chat). When set, keep only MCP tools that are in the
-        # mode's set, in the pocket-creation grant, a ripple widget tool, OR
-        # from an always-allowed server (connectors + pocket lifecycle).
+        # mode's set, in the pocket-creation grant, a ripple widget / atlas
+        # tool, OR from an always-allowed server (connectors + pocket
+        # lifecycle).
         # Built-in SDK tools (Read/Write/Bash/...) are NEVER filtered here —
         # only ``mcp__*`` ids — so scoping a mode can't strip core tools.
         # Applied AFTER deny so a denied id can't sneak back via the grant.
         if allow_mcp_tool_ids is not None:
+            from pocketpaw.agents.sdk_mcp_atlas import ATLAS_TOOL_IDS
             from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
 
-            grant = allow_mcp_tool_ids | POCKET_CREATION_GRANT | frozenset(WIDGET_TOOL_IDS)
+            grant = (
+                allow_mcp_tool_ids
+                | POCKET_CREATION_GRANT
+                | frozenset(WIDGET_TOOL_IDS)
+                | frozenset(ATLAS_TOOL_IDS)
+            )
             before_count = len(allowed_tools)
             allowed_tools = [
                 t
@@ -2351,7 +2491,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # the per-agent warm client cannot misfire on a leased client.
             if warm_client is not None or on_client_built is not None:
                 this_turn_key = self._client_cache_key(
-                    options, session_key=session_key, plugin_digest=plugin_digest
+                    options,
+                    session_key=session_key,
+                    plugin_digest=plugin_digest,
+                    tenant_scope=self._tenant_scope_key(),
                 )
                 event_stream, _warm_lease = await self._leased_dispatch(
                     message=message,

@@ -1,6 +1,14 @@
 """
 Builder for assembling the full agent context.
 Created: 2026-02-02
+Updated: 2026-07-02 (feat/atlas-surface, AT-3) — new always-on "Paw OS
+primer" block (#8b, ``atlas_primer``): a compact OS-identity paragraph, the
+primitive one-liners generated at build time from the atlas store (never
+hard-coded, so seed edits can't drift), and the instruction to call
+``atlas_search`` before guessing about OS capabilities and to include the
+``surface`` route when pointing a user somewhere. Same MEDIUM priority as
+the skills block (#8) and wrapped in try/except so an atlas load failure
+never breaks prompt building.
 Updated: 2026-06-08 (VIP Onboarding Phase B — session-gated per-user KB scope)
 — ``KbContext`` gains an optional ``user_id``; ``_resolve_kb_scopes`` emits a
 member-private ``user:{user_id}`` scope at the HEAD of the list (highest
@@ -143,6 +151,7 @@ _INJECTION_CAPS: dict[str, int | None] = {
     "file_context": 2000,
     "health_state": 300,
     "skills_list": 2000,
+    "atlas_primer": 2000,  # ~500 tokens hard ceiling for the Paw OS primer
     "agents_md": 3000,
     "gws_instructions": 1000,
 }
@@ -441,6 +450,18 @@ class AgentContextBuilder:
         except Exception as exc:
             logger.debug("Skill injection skipped: %s", exc)
 
+        # 8b. Inject the Paw OS primer (atlas) — OS identity, the primitive
+        # one-liners (generated from the atlas store so they can't drift from
+        # the seed), and the atlas_search / surface-route instructions. Same
+        # MEDIUM priority as the skills block; an atlas failure never breaks
+        # prompt building.
+        try:
+            primer = self._build_atlas_primer()
+            if primer:
+                blocks.append(("atlas_primer", _Priority.MEDIUM, primer))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Atlas primer skipped (non-fatal): %s", exc)
+
         # 9. Inject AGENTS.md constraints from the target repo
         if agents_md_dir:
             try:
@@ -512,6 +533,62 @@ class AgentContextBuilder:
             remaining -= len(content)
 
         return "\n\n".join(result_parts)
+
+    @staticmethod
+    def _build_atlas_primer() -> str:
+        """Build the compact always-on "Paw OS primer" block (AT-3).
+
+        Three parts, ~500 tokens hard ceiling (enforced twice: the seed keeps
+        each line short, and ``_INJECTION_CAPS['atlas_primer']`` caps the
+        rendered block at 2000 chars):
+
+        1. One-paragraph OS identity ("you run inside paw-os ...").
+        2. One line per primitive — name + gist, generated at build time from
+           the atlas store so a seed edit can never drift from the prompt.
+           The gist is the entry summary's first clause, hard-capped so ten
+           lines stay inside the budget.
+        3. The standing instruction: ``atlas_search`` before guessing about
+           OS capabilities, and include the ``surface`` route when pointing
+           a user somewhere.
+
+        Returns "" when the store has no primitives. Raises on store load
+        failure — the caller wraps this in try/except (same pattern as the
+        skills block) so prompt building never breaks.
+        """
+        from pocketpaw.atlas.store import get_atlas_store
+
+        primitives = [e for e in get_atlas_store().entries if e.kind == "primitive"]
+        if not primitives:
+            return ""
+
+        lines: list[str] = []
+        for entry in primitives:
+            # First clause of the one-line summary; keep each line short so
+            # the whole block stays comfortably under the token budget.
+            gist = entry.summary.split(";")[0].strip().rstrip(".")
+            if len(gist) > 110:
+                # Cut at a word boundary so a line never ends mid-word, and
+                # drop an unclosed parenthetical so the cut reads clean.
+                gist = gist[:108].rsplit(" ", 1)[0]
+                if gist.count("(") > gist.count(")"):
+                    gist = gist[: gist.rindex("(")]
+                gist = gist.rstrip(" ,.:;(") + "…"
+            suffix = "" if gist.endswith("…") else "."
+            lines.append(f"- {entry.name}: {gist}{suffix}")
+
+        return (
+            "\n# Paw OS Primer\n"
+            "You run inside paw-os, an agentic workspace OS. Its primitives "
+            "carry paw-specific meanings (a Pocket is a workspace app, not "
+            "clothing), and users see results on frontend surfaces — routes "
+            "like /sites.\n\n"
+            "OS primitives:\n" + "\n".join(lines) + "\n\n"
+            "Before guessing whether the OS can do something or which "
+            "primitive fits, call atlas_search with your intent, then "
+            "atlas_describe on the best id. When an action has a home "
+            "surface, tell the user where to see it by route (e.g. "
+            '"see it at /sites") — entries carry it in their `surface` field.'
+        )
 
     @staticmethod
     async def _get_kb_context(

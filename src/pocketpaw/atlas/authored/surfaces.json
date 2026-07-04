@@ -1,0 +1,413 @@
+{
+  "schema": "paw.atlas/v1",
+  "entries": [
+    {
+      "id": "surface:home",
+      "kind": "surface",
+      "name": "Home",
+      "summary": "The OS home screen: live Ripple widget grid, workspace activity feed, greeting, and chat pill.",
+      "narrative": "Home is the landing surface of the paw-enterprise client: a live widget grid (pinned pockets, the member 'intent of the day' board), an activity river, and a chat pill. Point a user here when they want their day at a glance or a place to start — everything else is one hop away.",
+      "how": "",
+      "surface": "/",
+      "requires": [],
+      "keywords": [
+        "home",
+        "start",
+        "overview",
+        "widget grid",
+        "landing",
+        "today",
+        "intent"
+      ]
+    },
+    {
+      "id": "surface:chat",
+      "kind": "surface",
+      "name": "Chat",
+      "summary": "Chat panel with the rooms rail: DMs, agent rooms, groups, channels, and entity rooms bound to pockets.",
+      "narrative": "Chat is where users talk to agents and each other: a rooms rail with DMs, agent rooms, groups, channels, plus entity rooms scoped to a pocket (/chat/<pocketId>). Point a user here to converse with an agent, resume a room, or work inside a pocket-bound conversation.",
+      "how": "",
+      "surface": "/chat",
+      "requires": [],
+      "keywords": [
+        "chat",
+        "rooms",
+        "dm",
+        "message",
+        "conversation",
+        "talk",
+        "agent room",
+        "channel",
+        "group"
+      ]
+    },
+    {
+      "id": "surface:pockets",
+      "kind": "surface",
+      "name": "Pockets",
+      "summary": "Pockets dashboard: the list of workspace pockets plus the canvas detail view for each one.",
+      "narrative": "The Pockets surface lists every pocket in the workspace and opens each one's live canvas (/pockets/<id>). After creating or editing a pocket, point the user here to see and use it. This is the home surface of the Pocket primitive.",
+      "how": "",
+      "surface": "/pockets",
+      "requires": [
+        "primitive:pocket"
+      ],
+      "keywords": [
+        "pockets",
+        "canvas",
+        "dashboard",
+        "apps",
+        "open pocket",
+        "workspace apps",
+        "tracker"
+      ]
+    },
+    {
+      "id": "surface:sites",
+      "kind": "surface",
+      "name": "Sites",
+      "summary": "Sites gallery: published Paw Sites as cards, with a chat rail that drives the create-and-publish flow.",
+      "narrative": "The Sites surface shows the workspace's published websites as a card gallery and opens each site's detail (/sites/<siteId>). Describing a site in its chat rail triggers the create-then-publish flow. After publishing a website, point the user here to see the live site and manage it.",
+      "how": "",
+      "surface": "/sites",
+      "requires": [
+        "primitive:sites"
+      ],
+      "keywords": [
+        "sites",
+        "website",
+        "publish",
+        "landing page",
+        "gallery",
+        "domain",
+        "live site",
+        "online"
+      ]
+    },
+    {
+      "id": "surface:belt",
+      "kind": "surface",
+      "name": "Belt",
+      "summary": "Belt develop-station console: repo picker, run cards, and a read-only diff viewer, chat-first.",
+      "narrative": "The Belt surface is where a human hands the develop station a coding task and watches it run: repo picker, run cards, and the read-only diff viewer, with the station agent in the chat rail. Point a user here to request code changes or review proposed diffs. This is the home surface of the Belt primitive.",
+      "how": "",
+      "surface": "/belt",
+      "requires": [
+        "primitive:belt"
+      ],
+      "keywords": [
+        "belt",
+        "coding task",
+        "diff",
+        "station",
+        "develop",
+        "code change",
+        "proposed change"
+      ]
+    },
+    {
+      "id": "surface:paw-print",
+      "kind": "surface",
+      "name": "Paw Print",
+      "summary": "Org-wide decision feed: recent Instinct corrections across the workspace's pockets, with diff viewers.",
+      "narrative": "Paw Print is the org-wide decision feed — recent Instinct corrections across the workspace, each rendered through a diff viewer. Point a user here to review what decisions agents and humans have been making. It is the decision-feed home of the Instinct primitive; the historical query layer is /decisions-graph.",
+      "how": "",
+      "surface": "/paw-print",
+      "requires": [
+        "primitive:instinct"
+      ],
+      "keywords": [
+        "decisions",
+        "corrections",
+        "feed",
+        "governance",
+        "what happened",
+        "instinct",
+        "review decisions"
+      ]
+    },
+    {
+      "id": "surface:decisions-graph",
+      "kind": "surface",
+      "name": "Decision Graph",
+      "summary": "Visual query layer over the historical Decision projection: trace a decision's graph by id, depth, and mode.",
+      "narrative": "Decision Graph lets an operator query the historical Decision projection visually — deep-linkable by decision id, depth, and mode. Point a user here to trace WHY a decision happened and what it connects to; for the live feed of recent decisions use /paw-print instead.",
+      "how": "",
+      "surface": "/decisions-graph",
+      "requires": [
+        "primitive:instinct"
+      ],
+      "keywords": [
+        "decision graph",
+        "trace",
+        "why",
+        "history",
+        "projection",
+        "drill down",
+        "audit trail"
+      ]
+    },
+    {
+      "id": "surface:mission-control",
+      "kind": "surface",
+      "name": "Mission Control",
+      "summary": "Operator surface: unified work feed with cycles, plan, activity, and analytics tabs, filterable by project.",
+      "narrative": "Mission Control is the operator surface — a unified work feed (Feed, Cycles, Analytics tabs) with per-item actions and project filters. Point a user here to run the workspace's ongoing work: what is in flight, what needs attention, and how it is trending.",
+      "how": "",
+      "surface": "/mission-control",
+      "requires": [],
+      "keywords": [
+        "mission control",
+        "operator",
+        "work feed",
+        "cycles",
+        "plan",
+        "analytics",
+        "in flight"
+      ]
+    },
+    {
+      "id": "surface:agents",
+      "kind": "surface",
+      "name": "Agents",
+      "summary": "Agents shell: the agent list plus a per-agent editor (identity, reasoning, soul evolution).",
+      "narrative": "The Agents surface lists the workspace's agents and opens each one's editor (/agents/<id>) — identity, reasoning, and soul evolution. Point a user here to create, inspect, or tune an agent.",
+      "how": "",
+      "surface": "/agents",
+      "requires": [],
+      "keywords": [
+        "agents",
+        "agent editor",
+        "personas",
+        "configure agent",
+        "plugins",
+        "soul",
+        "tune"
+      ]
+    },
+    {
+      "id": "surface:settings",
+      "kind": "surface",
+      "name": "Settings",
+      "summary": "Personal + workspace settings: profile, security, notifications, preferences, API keys, and the workspace admin area.",
+      "narrative": "Settings hosts per-user pages (profile, security, notifications, preferences, API keys) and the workspace admin area under /settings/workspace (members, channels, integrations, policy, memory, SSO, voice — including the workspace plan). Point a user here to change how their account or workspace behaves.",
+      "how": "",
+      "surface": "/settings",
+      "requires": [],
+      "keywords": [
+        "settings",
+        "profile",
+        "preferences",
+        "api keys",
+        "security",
+        "notifications",
+        "configure"
+      ]
+    },
+    {
+      "id": "surface:integrations",
+      "kind": "surface",
+      "name": "Integrations",
+      "summary": "Workspace-level third-party credentials: web search, OAuth apps, image generation providers.",
+      "narrative": "The Integrations settings page manages workspace-level third-party credentials (web search, OAuth apps, image generation). Point a user here to wire up or fix an external service; connectors bound to pockets draw on these credentials. This is the home surface of the Connector primitive.",
+      "how": "",
+      "surface": "/settings/workspace/integrations",
+      "requires": [
+        "primitive:connector"
+      ],
+      "keywords": [
+        "integrations",
+        "credentials",
+        "oauth",
+        "connect",
+        "api key",
+        "external service",
+        "providers"
+      ]
+    },
+    {
+      "id": "surface:workspace-admin",
+      "kind": "surface",
+      "name": "Workspace Admin",
+      "summary": "Workspace administration: name, plan, members, channels, integrations, memory, policy, SSO, voice, advanced.",
+      "narrative": "Workspace Admin is the workspace-scoped settings area: workspace name and plan, members, channels, integrations, memory, policy, SSO, voice, and advanced options. Point a user here for anything that affects the whole workspace — including checking the current plan. There is no dedicated billing route today; plan info lives here.",
+      "how": "",
+      "surface": "/settings/workspace",
+      "requires": [],
+      "keywords": [
+        "workspace",
+        "admin",
+        "members",
+        "plan",
+        "billing",
+        "usage",
+        "policy",
+        "sso",
+        "channels"
+      ]
+    },
+    {
+      "id": "surface:knowledge",
+      "kind": "surface",
+      "name": "Knowledge",
+      "summary": "Workspace knowledge-base browser: compiled articles from source files and documents, searchable.",
+      "narrative": "The Knowledge surface hosts the workspace-level KB browser — compiled, searchable articles built from the workspace's files and sources. Point a user here to read or verify what the workspace knows about a topic.",
+      "how": "",
+      "surface": "/knowledge",
+      "requires": [],
+      "keywords": [
+        "knowledge base",
+        "kb",
+        "articles",
+        "wiki",
+        "search knowledge",
+        "docs"
+      ]
+    },
+    {
+      "id": "surface:files",
+      "kind": "surface",
+      "name": "Files",
+      "summary": "Workspace file browser panel.",
+      "narrative": "The Files surface is the workspace file browser. Point a user here to browse, inspect, or manage the files the workspace holds — including files that feed the knowledge base.",
+      "how": "",
+      "surface": "/files",
+      "requires": [],
+      "keywords": [
+        "files",
+        "browser",
+        "documents",
+        "uploads",
+        "folders"
+      ]
+    },
+    {
+      "id": "surface:studio",
+      "kind": "surface",
+      "name": "Studio",
+      "summary": "Media generation gallery: describe an image or short video in the rail and the agent generates it into the gallery.",
+      "narrative": "Studio is the media-generation surface: the user describes an image or short video in the chat rail, the agent generates it, and results land in a gallery pocket on the left. Point a user here for any describe-to-media request.",
+      "how": "",
+      "surface": "/studio",
+      "requires": [],
+      "keywords": [
+        "studio",
+        "image",
+        "video",
+        "generate",
+        "media",
+        "poster",
+        "illustration",
+        "gallery"
+      ]
+    },
+    {
+      "id": "surface:code",
+      "kind": "surface",
+      "name": "Code",
+      "summary": "In-browser IDE: real workspace file tree, editor tabs, and an agent-side edit-run-verify loop.",
+      "narrative": "The Code surface is an in-browser IDE over the shared workspace: a real file tree, editor tabs, and an honest activity indicator while the agent does the work agent-side. Point a user here to read or edit workspace code with the agent alongside.",
+      "how": "",
+      "surface": "/code",
+      "requires": [],
+      "keywords": [
+        "code",
+        "ide",
+        "editor",
+        "file tree",
+        "scripts",
+        "edit code"
+      ]
+    },
+    {
+      "id": "surface:foresight",
+      "kind": "surface",
+      "name": "Foresight",
+      "summary": "Scenario rehearsal: create, run, and compare what-if scenarios (runs, insights, fabric, aggregate views).",
+      "narrative": "Foresight is the rehearsal surface: create what-if scenarios, run them, and inspect runs, insights, and aggregate views before committing to a decision. Point a user here to rehearse, simulate, or forecast a decision.",
+      "how": "",
+      "surface": "/foresight",
+      "requires": [],
+      "keywords": [
+        "foresight",
+        "scenario",
+        "simulate",
+        "rehearse",
+        "forecast",
+        "what if",
+        "runs",
+        "insights"
+      ]
+    },
+    {
+      "id": "surface:calendar",
+      "kind": "surface",
+      "name": "Calendar",
+      "summary": "Workspace calendar (operator surface).",
+      "narrative": "The Calendar surface shows the workspace calendar. Point a user here to see upcoming events; calendar data arrives via bound connectors (e.g. Google Calendar).",
+      "how": "",
+      "surface": "/calendar",
+      "requires": [],
+      "keywords": [
+        "calendar",
+        "events",
+        "schedule",
+        "upcoming",
+        "meetings schedule"
+      ]
+    },
+    {
+      "id": "surface:meetings",
+      "kind": "surface",
+      "name": "Meetings",
+      "summary": "Unified meetings timeline.",
+      "narrative": "The Meetings surface is the unified meetings timeline. Point a user here to review past and upcoming meetings and their details; meeting preferences live at /settings/meetings.",
+      "how": "",
+      "surface": "/meetings",
+      "requires": [],
+      "keywords": [
+        "meetings",
+        "timeline",
+        "recordings",
+        "notes",
+        "transcript"
+      ]
+    },
+    {
+      "id": "surface:activity",
+      "kind": "surface",
+      "name": "Activity",
+      "summary": "Workspace activity feed, polled live; shares its source with the home river.",
+      "narrative": "The Activity surface is the workspace-wide activity feed (same source as the home screen's river, polled live). Point a user here to see what has been happening across the workspace recently.",
+      "how": "",
+      "surface": "/activity",
+      "requires": [],
+      "keywords": [
+        "activity",
+        "feed",
+        "recent",
+        "events",
+        "river",
+        "what happened"
+      ]
+    },
+    {
+      "id": "surface:audit",
+      "kind": "surface",
+      "name": "Audit",
+      "summary": "Workspace audit log.",
+      "narrative": "The Audit surface is the workspace audit log — the compliance-grade record of actions. Point a user here when they need the authoritative trail of who or what did something; for a lighter live feed use /activity.",
+      "how": "",
+      "surface": "/audit",
+      "requires": [],
+      "keywords": [
+        "audit",
+        "log",
+        "compliance",
+        "trail",
+        "record",
+        "who did what"
+      ]
+    }
+  ]
+}

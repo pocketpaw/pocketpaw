@@ -7,6 +7,9 @@
 # through the store directly. Coverage: per-method behaviour against a
 # populated store, empty-store defaults, workspace isolation, and
 # runtime Protocol conformance.
+# Updated: 2026-07-02 (feat/atlas-fabric, AT-7) — coverage for the new
+# ``list_entity_links()`` pass-through (workspace-bound, either-end
+# enumeration for the atlas Fabric introspector).
 """Tests for ``pocketpaw_ee.fabric.registry.WorkspaceFabricRegistry``.
 
 The registry satisfies the :class:`FabricRegistry` Protocol declared in
@@ -125,6 +128,24 @@ def test_list_entity_types_is_workspace_isolated(
     reg_a = WorkspaceFabricRegistry(store=populated_store, workspace_id="ws-a")
     assert sorted(reg_a.list_entity_types()) == ["Lease", "Property", "Tenant"]
     assert "Customer" not in reg_a.list_entity_types()
+
+
+def test_list_entity_links_passes_through_bound_workspace(
+    populated_store: WorkspaceFabricStore,
+) -> None:
+    """AT-7 pass-through: links touching the type (either end) in the
+    bound workspace only, in the store's stable order."""
+    reg_a = WorkspaceFabricRegistry(store=populated_store, workspace_id="ws-a")
+    assert reg_a.list_entity_links("Lease") == [
+        {"name": "lease_property", "from_type": "Lease", "to_type": "Property"},
+        {"name": "lease_tenant", "from_type": "Lease", "to_type": "Tenant"},
+    ]
+    assert reg_a.list_entity_links("Tenant") == [
+        {"name": "lease_tenant", "from_type": "Lease", "to_type": "Tenant"},
+    ]
+    # ws-b's invoice_customer link never leaks into ws-a's view.
+    assert reg_a.list_entity_links("Customer") == []
+    assert reg_a.list_entity_links("Ghost") == []
 
 
 # ---------------------------------------------------------------------------
