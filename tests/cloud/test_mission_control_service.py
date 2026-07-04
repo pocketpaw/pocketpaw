@@ -49,6 +49,16 @@
 # ``_admin_action`` / ``_external_action`` — not just ``_pocket_write``, so a
 # bulk-approved admin action actually executes; plus per-item isolation on the
 # gated path).
+# Updated: 2026-07-04 (fix/approval-resolution — projection fixes) — added
+# ``TestActorNameResolution`` (a gated proposal's ``trigger.source`` is the
+# proposer user id, so the tray must render the resolved display name, not the
+# raw ObjectId hex — with full_name → email → id fallback, non-ObjectId
+# graceful, and a single-batch-query efficiency guard) and ``TestStatusFilter``
+# (``?status=pending`` returns only awaiting-approval items and EXCLUDES
+# terminal executed/failed ones; ``status=None`` returns everything; a raw
+# WorkItemStatus value also filters; status composes with the pocket filter).
+# The name-resolution tests use the ``mongo_db`` fixture to seed real ``User``
+# docs so ``_resolve_actor_names`` exercises the live ``_UserDoc.find`` path.
 
 from __future__ import annotations
 
@@ -971,3 +981,198 @@ class TestListActivity:
             )
         out = await mc_service.agent_list_activity(_ctx(), ListActivityRequest(limit=10))
         assert [e.summary for e in out] == ["step 2", "step 1", "step 0"]
+
+
+# ---------------------------------------------------------------------------
+# actor-name resolution — trigger.source (proposer user id) → display name
+# ---------------------------------------------------------------------------
+
+
+class TestActorNameResolution:
+    """A gated proposal's ``trigger.source`` is the PROPOSER user id (a raw
+    ObjectId hex — see ``admin_proposals/propose.py`` /
+    ``external_actions/propose.py``, both ``trigger.type == "agent"``).
+    Before the fix, ``_action_to_work_item`` projected that raw id straight
+    into ``agent_name`` / ``assignee_name``, so the approval tray rendered
+    ``6a47…`` instead of a person. The façade now batch-resolves every
+    source id to a display name once and the projection renders the name.
+    """
+
+    @pytest.mark.asyncio
+    async def test_agent_name_is_resolved_display_name_not_raw_id(
+        self, mongo_db, store: InstinctStore
+    ) -> None:
+        from pocketpaw_ee.cloud.models.user import User
+
+        # Seed a real user; ``str(user.id)`` is the ObjectId hex the
+        # proposer path stamps on ``trigger.source``.
+        proposer = User(
+            email="captain@atlassmoke.dev",
+            hashed_password="x",
+            full_name="Atlas Captain",
+        )
+        await proposer.insert()
+        proposer_id = str(proposer.id)
+
+        a = await store.propose(
+            "w1",  # pocket_id carries the workspace for gated proposals
+            "Billing plan change → pro",
+            "gated admin write",
+            "approve to open checkout for 'pro'",
+            ActionTrigger(type="agent", source=proposer_id, reason="admin action"),
+            parameters={
+                "_admin_action": {
+                    "schema": 1,
+                    "kind": "admin_action",
+                    "action": "billing.manage",
+                    "args": {"plan_key": "pro"},
+                    "workspace_id": "w1",
+                    "proposer_user_id": proposer_id,
+                }
+            },
+            workspace_id="w1",
+        )
+
+        items = await mc_service.agent_list_work_items(_ctx(workspace_id="w1"), {})
+        assert [it.id for it in items] == [f"nudge:{a.id}"]
+        item = items[0]
+        # The whole point: a NAME, not the raw ObjectId hex.
+        assert item.agent_name == "Atlas Captain"
+        assert item.agent_name != proposer_id
+        # ``agent_id`` still carries the raw id for downstream links.
+        assert item.agent_id == proposer_id
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_email_then_id(self, mongo_db, store: InstinctStore) -> None:
+        from pocketpaw_ee.cloud.models.user import User
+
+        # A user with no full_name resolves to their email.
+        no_name = User(email="nameless@atlassmoke.dev", hashed_password="x", full_name="")
+        await no_name.insert()
+        email_id = str(no_name.id)
+        await store.propose(
+            "w1",
+            "External action — send invoice",
+            "",
+            "",
+            ActionTrigger(type="agent", source=email_id, reason="ext"),
+            parameters={"_external_action": {"connector": "stripe", "action": "send_invoice"}},
+            workspace_id="w1",
+        )
+        items = await mc_service.agent_list_work_items(_ctx(workspace_id="w1"), {})
+        assert items[0].agent_name == "nameless@atlassmoke.dev"
+
+        # An id with no matching user (or a malformed source) falls back to
+        # the id itself — never raises, never renders empty.
+        b = await store.propose(
+            "w1",
+            "External action — no such user",
+            "",
+            "",
+            ActionTrigger(type="agent", source="not-an-object-id", reason="ext"),
+            parameters={"_external_action": {"connector": "gmail", "action": "send"}},
+            workspace_id="w1",
+        )
+        items2 = await mc_service.agent_list_work_items(_ctx(workspace_id="w1"), {})
+        target = next(it for it in items2 if it.id == f"nudge:{b.id}")
+        assert target.agent_name == "not-an-object-id"
+
+    @pytest.mark.asyncio
+    async def test_resolves_names_in_one_batch_query(
+        self, mongo_db, monkeypatch, store: InstinctStore
+    ) -> None:
+        # Efficiency guard: the union of source ids is resolved with a
+        # SINGLE _UserDoc.find, mirroring _pocket_name_map's build-once — not
+        # one query per action.
+        from pocketpaw_ee.cloud.models.user import User
+
+        u1 = User(email="a@x.dev", hashed_password="x", full_name="Alice")
+        u2 = User(email="b@x.dev", hashed_password="x", full_name="Bob")
+        await u1.insert()
+        await u2.insert()
+
+        calls = {"n": 0}
+        real_find = User.find.__func__
+
+        def _counting_find(cls, *args, **kwargs):
+            calls["n"] += 1
+            return real_find(cls, *args, **kwargs)
+
+        monkeypatch.setattr(User, "find", classmethod(_counting_find))
+
+        for uid in (str(u1.id), str(u2.id), str(u1.id)):
+            await store.propose(
+                "w1",
+                f"gated by {uid}",
+                "",
+                "",
+                ActionTrigger(type="agent", source=uid, reason="ext"),
+                parameters={"_external_action": {"connector": "s", "action": "a"}},
+                workspace_id="w1",
+            )
+        items = await mc_service.agent_list_work_items(_ctx(workspace_id="w1"), {})
+        names = {it.agent_name for it in items}
+        assert names == {"Alice", "Bob"}
+        # Three actions, two distinct proposers — resolved in ONE find call.
+        assert calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# status filter — ?status=pending excludes terminal items
+# ---------------------------------------------------------------------------
+
+
+class TestStatusFilter:
+    """``GET /mission-control/items?status=pending`` must return only the
+    awaiting-approval feed. Before the fix the endpoint accepted no
+    ``status`` param, so terminal (done/failed) items leaked into the tray.
+    ``pending`` is aliased to ``WorkItemStatus.AWAITING_APPROVAL`` (the
+    projection maps ``ActionStatus.PENDING`` → that).
+    """
+
+    @pytest.mark.asyncio
+    async def test_pending_excludes_terminal_items(self, store: InstinctStore) -> None:
+        pending = await store.propose("p1", "still pending", "", "", _trigger())
+        executed = await store.propose("p1", "already done", "", "", _trigger())
+        await store.approve(executed.id)
+        await store.mark_executed(executed.id, outcome="done")
+        failed = await store.propose("p1", "it failed", "", "", _trigger())
+        await store.approve(failed.id)
+        await store.mark_failed(failed.id, error="boom")
+
+        # No filter → all three surface.
+        all_items = await mc_service.agent_list_work_items(_ctx(), {})
+        assert {it.source_id for it in all_items} == {pending.id, executed.id, failed.id}
+
+        # ?status=pending → only the awaiting-approval one; terminal excluded.
+        out = await mc_service.agent_list_work_items(_ctx(), ListWorkItemsRequest(status="pending"))
+        assert [it.source_id for it in out] == [pending.id]
+        assert out[0].status == WorkItemStatus.AWAITING_APPROVAL
+
+    @pytest.mark.asyncio
+    async def test_status_none_returns_everything(self, store: InstinctStore) -> None:
+        a = await store.propose("p1", "pending", "", "", _trigger())
+        b = await store.propose("p1", "done", "", "", _trigger())
+        await store.approve(b.id)
+        await store.mark_executed(b.id, outcome="done")
+        out = await mc_service.agent_list_work_items(_ctx(), ListWorkItemsRequest(status=None))
+        assert {it.source_id for it in out} == {a.id, b.id}
+
+    @pytest.mark.asyncio
+    async def test_status_accepts_raw_workitemstatus_value(self, store: InstinctStore) -> None:
+        # ``status`` also accepts a raw WorkItemStatus value (e.g. "done").
+        await store.propose("p1", "pending", "", "", _trigger())
+        b = await store.propose("p1", "done", "", "", _trigger())
+        await store.approve(b.id)
+        await store.mark_executed(b.id, outcome="done")
+        out = await mc_service.agent_list_work_items(_ctx(), ListWorkItemsRequest(status="done"))
+        assert [it.source_id for it in out] == [b.id]
+
+    @pytest.mark.asyncio
+    async def test_status_composes_with_pocket_filter(self, store: InstinctStore) -> None:
+        p1a = await store.propose("p1", "p1 pending", "", "", _trigger())
+        await store.propose("p2", "p2 pending", "", "", _trigger())
+        out = await mc_service.agent_list_work_items(
+            _ctx(), ListWorkItemsRequest(status="pending", pocket="p1")
+        )
+        assert [it.source_id for it in out] == [p1a.id]
