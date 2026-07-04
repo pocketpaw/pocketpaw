@@ -125,6 +125,23 @@
 #       to ``WorkItemStatus.AWAITING_APPROVAL`` (the projection already maps
 #       ``ActionStatus.PENDING`` → that). ``status=None`` returns everything as
 #       before; ``status`` composes with the section/agent/pocket filters.
+# Updated: 2026-07-04 (fix/deep-work-feed-500-created-at-sort) — fixed a 500 on
+# the unfiltered Deep Work feed (``GET /items`` with no section). The final
+# ``items.sort`` compared ``(created_at, id)`` tuples across two projections
+# whose ``created_at`` types disagree: a Nudge carries ``Action.created_at`` —
+# a tz-NAIVE ``datetime`` — while a Task carries ``TaskResponse.created_at`` —
+# an ISO ``str`` (``iso_utc``). When both coexisted in one list, ``datetime <
+# str`` raised ``TypeError`` and the endpoint returned 500. Section-filtered
+# fetches (tray = nudges only, agents = tasks only) stayed homogeneous and
+# never crashed, so operators saw an EMPTY main feed but a populated in-flight
+# tab. Fixed at BOTH points: (1) ``_task_to_work_item`` now coerces
+# ``created_at`` / ``updated_at`` str→datetime, mirroring the existing
+# ``due_at`` coercion, so the projection is homogeneous; (2) the sort key is a
+# new module-level ``_sort_created_at`` that normalises ANY input — str, naive
+# datetime, aware datetime, or None — to a single tz-aware datetime, so the sort
+# can never raise regardless of caller (also fixes the naive-vs-aware case).
+# Sort semantics are unchanged (newest-first, ``id`` tiebreak); the fix restores
+# the full feed including completed/approved (Pawprints) items alongside pending.
 """Mission Control façade service.
 
 Every function is module-level ``async def`` per ee/cloud rule #5. The
@@ -473,6 +490,24 @@ def _task_to_work_item(task: Any, workspace_id: str, pocket_name: str = "") -> W
             due_at = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
         except (ValueError, TypeError):
             due_at = None
+    # Same normalisation for created_at / updated_at. TaskResponse serialises
+    # both to ISO strings (``iso_utc``) while a domain Task keeps datetimes;
+    # the WorkItem model types them ``datetime | None``, and the unified feed
+    # sorts on ``created_at`` alongside Nudge WorkItems (whose created_at is a
+    # datetime). Leaving them as str crashes that sort with a TypeError when a
+    # Nudge and a Task coexist. Coerce here so the projection is homogeneous.
+    created_at = getattr(task, "created_at", None)
+    if isinstance(created_at, str):
+        try:
+            created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            created_at = None
+    updated_at = getattr(task, "updated_at", None)
+    if isinstance(updated_at, str):
+        try:
+            updated_at = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            updated_at = None
     return WorkItem(
         id=f"task:{task.id}",
         workspace_id=workspace_id,
@@ -491,11 +526,46 @@ def _task_to_work_item(task: Any, workspace_id: str, pocket_name: str = "") -> W
         source_id=task.id,
         priority=task.priority,
         due_at=due_at,
-        created_at=task.created_at,
-        updated_at=task.updated_at,
+        created_at=created_at,
+        updated_at=updated_at,
         fabric_refs=(),
         blocked_by=blocked_by,
     )
+
+
+# A tz-aware floor for WorkItems that have no ``created_at`` — they sort last
+# under newest-first ordering. Kept tz-aware so it never re-introduces the
+# naive-vs-aware comparison the sort key is designed to avoid.
+_CREATED_AT_FLOOR = datetime.min.replace(tzinfo=UTC)
+
+
+def _sort_created_at(it: WorkItem) -> datetime:
+    """Return a mutually-comparable, tz-aware ``created_at`` for sorting.
+
+    The unified feed mixes WorkItems projected from two sources with
+    inconsistent ``created_at`` shapes:
+      - Nudges carry ``Action.created_at`` — a tz-NAIVE ``datetime``
+        (``datetime.now`` default).
+      - Tasks carry ``TaskResponse.created_at`` — an ISO ``str`` (``iso_utc``).
+    Sorting ``(created_at, id)`` tuples across the two raised
+    ``TypeError: '<' not supported between 'datetime' and 'str'`` (and would
+    likewise fail on naive-vs-aware datetimes). ``_task_to_work_item`` already
+    coerces str→datetime, but this is the last line of defence: it normalises
+    ANY input — str, naive datetime, aware datetime, or None — to a single
+    tz-aware datetime so the sort key can never raise regardless of caller.
+    """
+    value = it.created_at
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return _CREATED_AT_FLOOR
+    if value is None:
+        return _CREATED_AT_FLOOR
+    if value.tzinfo is None:
+        # Attach UTC to a naive datetime so all keys are mutually comparable.
+        return value.replace(tzinfo=UTC)
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -614,7 +684,11 @@ async def agent_list_work_items(
         target = _STATUS_FILTER_ALIASES.get(body.status, body.status)
         items = [it for it in items if it.status.value == target]
     # Stable order: newest first by created_at, falling back to id.
-    items.sort(key=lambda it: (it.created_at or datetime.min, it.id), reverse=True)
+    # ``_sort_created_at`` normalises every key to a tz-aware datetime so the
+    # tuple comparison can never raise on a mixed datetime/str or naive/aware
+    # feed (Nudge created_at is a naive datetime; Task created_at arrives as an
+    # ISO str). See the helper docstring for the full failure mode.
+    items.sort(key=lambda it: (_sort_created_at(it), it.id), reverse=True)
     return [work_item_to_response(it) for it in items[: body.limit]]
 
 

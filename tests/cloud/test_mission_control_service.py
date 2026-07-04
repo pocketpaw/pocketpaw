@@ -294,6 +294,189 @@ class TestListWorkItems:
 
 
 # ---------------------------------------------------------------------------
+# mixed created_at types in one feed — the Deep Work 500 regression
+# ---------------------------------------------------------------------------
+
+
+class TestMixedCreatedAtSort:
+    """The unfiltered feed mixes two projections whose ``created_at`` types
+    disagree: a Nudge carries a tz-NAIVE ``datetime`` (Action.created_at
+    defaults to ``datetime.now``) and a Task carries a ``str`` (TaskResponse
+    serializes it via ``iso_utc``). The final ``items.sort`` compared
+    ``(created_at, id)`` tuples, so a datetime vs str comparison raised
+    ``TypeError`` and the endpoint returned 500 — but only when BOTH kinds
+    were present at once. Section-filtered fetches (tray = nudges only,
+    agents = tasks only) stayed homogeneous and never crashed, which is why
+    operators saw an EMPTY main feed but a populated in-flight tab.
+
+    ``test_includes_tasks_alongside_nudges`` misses this: it seeds a task
+    with zero coexisting nudges, so its feed is all-str and sorts fine.
+    These tests seed a nudge AND a task in the SAME workspace.
+    """
+
+    def _sample_task(
+        self,
+        *,
+        created_offset_seconds: float = 0.0,
+        assignee_kind: str = "human",
+        status: str = "in_progress",
+    ):
+        """A domain Task whose DTO carries a str/iso ``created_at``.
+
+        ``task_to_dto`` runs ``iso_utc`` over the datetime, so the WorkItem
+        projection receives ``created_at`` as a ``str`` — the other half of
+        the mixed-type sort.
+
+        ``assignee_kind`` picks the Mission Control section: an ``agent``
+        in-progress task lands in AGENTS; a ``human`` one falls through to
+        TRAY. ``status`` drives the projected WorkItemStatus (e.g.
+        ``awaiting_approval`` survives the ``?status=pending`` filter). Neither
+        changes that the pre-sort feed mixes str and datetime ``created_at``.
+        """
+        from datetime import UTC
+        from datetime import datetime as _dt
+
+        from pocketpaw_ee.cloud.tasks.domain import Task, TaskAssignee, TaskSource
+
+        ts = _dt.now(UTC) + timedelta(seconds=created_offset_seconds)
+        return Task(
+            id="t_mixed",
+            workspace_id="w1",
+            creator_id="u1",
+            assignee=TaskAssignee(kind=assignee_kind, id="a1", name="a1"),
+            status=status,
+            priority="normal",
+            kind="task",
+            source=TaskSource(type="user_request"),
+            title="Task with iso-str created_at",
+            summary="",
+            pocket_id=None,
+            created_at=ts,
+            updated_at=ts,
+        )
+
+    def _wire_task(self, monkeypatch, task) -> None:
+        from pocketpaw_ee.cloud.tasks.dto import task_to_dto
+
+        async def fake_list_tasks(_ctx_, _body):
+            return [task_to_dto(task)]
+
+        monkeypatch.setattr("pocketpaw_ee.cloud.tasks.service.agent_list_tasks", fake_list_tasks)
+
+    @pytest.mark.asyncio
+    async def test_unfiltered_feed_with_nudge_and_task_does_not_500(
+        self, monkeypatch, store: InstinctStore
+    ) -> None:
+        # (a) a Task whose created_at is a str/iso value
+        self._wire_task(monkeypatch, self._sample_task())
+        # (b) a Nudge whose created_at is a tz-NAIVE datetime (store default)
+        await store.propose("p1", "Nudge with naive datetime", "", "", _trigger())
+
+        # NO section filter — the crash surface. Both kinds coexist.
+        out = await mc_service.agent_list_work_items(_ctx(), {})
+        titles = {it.title for it in out}
+        assert "Task with iso-str created_at" in titles
+        assert "Nudge with naive datetime" in titles
+
+    @pytest.mark.asyncio
+    async def test_tray_section_still_returns_nudge_with_task_present(
+        self, monkeypatch, store: InstinctStore
+    ) -> None:
+        # Agent-assigned in-progress task → AGENTS section (out of the tray),
+        # so ?section=tray is nudge-only. Both kinds still coexist pre-sort.
+        self._wire_task(monkeypatch, self._sample_task(assignee_kind="agent"))
+        await store.propose("p1", "Nudge with naive datetime", "", "", _trigger())
+
+        tray = await mc_service.agent_list_work_items(
+            _ctx(), ListWorkItemsRequest(section=WorkItemSection.TRAY)
+        )
+        assert [it.title for it in tray] == ["Nudge with naive datetime"]
+
+    @pytest.mark.asyncio
+    async def test_status_pending_filter_with_nudge_and_task_does_not_500(
+        self, monkeypatch, store: InstinctStore
+    ) -> None:
+        # An awaiting_approval task (str created_at) survives the pending
+        # filter and mixes with the pending nudge (naive datetime) — so the
+        # sort runs over a genuinely mixed list even AFTER the status filter.
+        self._wire_task(monkeypatch, self._sample_task(status="awaiting_approval"))
+        await store.propose("p1", "Nudge with naive datetime", "", "", _trigger())
+
+        out = await mc_service.agent_list_work_items(_ctx(), ListWorkItemsRequest(status="pending"))
+        titles = {it.title for it in out}
+        assert "Nudge with naive datetime" in titles
+        assert "Task with iso-str created_at" in titles
+
+    @pytest.mark.asyncio
+    async def test_mixed_feed_sorts_newest_first(self, monkeypatch, store: InstinctStore) -> None:
+        # Task is the NEWEST item (created 60s in the future); the nudge's
+        # created_at is 'now'. Newest-first ordering must put the task first
+        # once str and datetime keys are made mutually comparable.
+        self._wire_task(monkeypatch, self._sample_task(created_offset_seconds=60))
+        await store.propose("p1", "Older nudge", "", "", _trigger())
+
+        out = await mc_service.agent_list_work_items(_ctx(), {})
+        assert [it.title for it in out] == [
+            "Task with iso-str created_at",
+            "Older nudge",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_completed_and_approved_items_visible_alongside_pending(
+        self, monkeypatch, store: InstinctStore
+    ) -> None:
+        """Captain ask: the unfiltered feed must surface approved/executed
+        nudges (Pawprints) and done tasks, not just pending ones — once the
+        sort no longer crashes on the mixed-type feed.
+        """
+        # A pending nudge (Tray) and a resolved nudge (approved → Pawprints).
+        await store.propose("p1", "pending nudge", "", "", _trigger())
+        approved = await store.propose("p1", "approved nudge", "", "", _trigger())
+        await store.approve(approved.id)
+        executed = await store.propose("p1", "executed nudge", "", "", _trigger())
+        await store.approve(executed.id)
+        await store.mark_executed(executed.id, "done")
+
+        # A done Task (str created_at) coexisting with the naive-datetime
+        # nudges — this is the mixed-type feed that used to 500.
+        from datetime import UTC
+        from datetime import datetime as _dt
+
+        from pocketpaw_ee.cloud.tasks.domain import Task, TaskAssignee, TaskSource
+
+        ts = _dt.now(UTC)
+        done_task = Task(
+            id="t_done",
+            workspace_id="w1",
+            creator_id="u1",
+            assignee=TaskAssignee(kind="human", id="u1", name="u1"),
+            status="done",
+            priority="normal",
+            kind="task",
+            source=TaskSource(type="user_request"),
+            title="Completed task",
+            summary="",
+            pocket_id=None,
+            created_at=ts,
+            updated_at=ts,
+        )
+        self._wire_task(monkeypatch, done_task)
+
+        out = await mc_service.agent_list_work_items(_ctx(), {})
+        by_title = {it.title: it for it in out}
+        # Pending is present.
+        assert "pending nudge" in by_title
+        # Approved + executed nudges are surfaced (Pawprints section).
+        assert by_title["approved nudge"].section == WorkItemSection.PAWPRINTS
+        assert by_title["approved nudge"].status == WorkItemStatus.APPROVED
+        assert by_title["executed nudge"].section == WorkItemSection.PAWPRINTS
+        assert by_title["executed nudge"].status == WorkItemStatus.DONE
+        # The completed task is surfaced too.
+        assert by_title["Completed task"].section == WorkItemSection.PAWPRINTS
+        assert by_title["Completed task"].status == WorkItemStatus.DONE
+
+
+# ---------------------------------------------------------------------------
 # workspace-scoped nudges (external-action proposals) must reach The Tray
 # ---------------------------------------------------------------------------
 
