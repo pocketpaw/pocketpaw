@@ -177,6 +177,7 @@ from pocketpaw_ee.api import get_instinct_store
 from pocketpaw_ee.cloud._core.context import RequestContext
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.activity.buffer import ActivityEvent, get_buffer
+from pocketpaw_ee.cloud.auth import service as auth_service
 from pocketpaw_ee.cloud.mission_control.domain import (
     AssigneeKind,
     WorkItem,
@@ -300,37 +301,18 @@ async def _resolve_actor_names(source_ids: set[str]) -> dict[str, str]:
     name so The Tray never renders the raw id.
 
     Built ONCE per ``agent_list_work_items`` call from the union of all
-    projected actions' sources — a single ``_UserDoc.find`` over the id
-    set, mirroring how ``_pocket_name_map`` resolves pocket names once
-    (and the ``ripple_sources`` / ``chat.group_service`` batch pattern).
+    projected actions' sources, mirroring how ``_pocket_name_map`` resolves
+    pocket names once. Routes through ``auth_service.resolve_display_names``
+    (a single ``User.find`` over the id set) rather than touching the Beanie
+    user model here — the façade layer must not read models directly (the
+    "Mission Control — no Beanie touches from façade layer" contract).
 
-    Name preference: ``full_name`` → ``email`` → the id. Never raises: a
-    non-ObjectId / malformed source is skipped (stays the id via the
-    caller's ``.get(source, source)`` fallback), and an id with no
-    matching user simply isn't in the returned map (same fallback). We
-    resolve names across the workspace's user set, not just members, so a
-    proposer who has since left still renders as a name.
+    Name preference (``full_name`` → ``email`` → the id) and the skip/
+    fallback behavior for a non-ObjectId source or an id with no matching
+    user both live in ``resolve_display_names``; the caller's
+    ``.get(source, source)`` fallback keeps unresolved ids as the raw id.
     """
-    from beanie import PydanticObjectId
-
-    from pocketpaw_ee.cloud.models.user import User as _UserDoc
-
-    object_ids: list[PydanticObjectId] = []
-    for sid in source_ids:
-        try:
-            object_ids.append(PydanticObjectId(sid))
-        except Exception:
-            # Non-ObjectId source (e.g. an agent name, or a sentinel like
-            # "external_action" / "admin_action") — leave it as the id.
-            logger.debug("mission_control: skipping non-ObjectId trigger source %r", sid)
-    if not object_ids:
-        return {}
-
-    users = await _UserDoc.find({"_id": {"$in": object_ids}}).to_list()
-    return {
-        str(u.id): ((u.full_name or "").strip() or (u.email or "").strip() or str(u.id))
-        for u in users
-    }
+    return await auth_service.resolve_display_names(source_ids)
 
 
 def _status_to_section_status(s: ActionStatus) -> tuple[WorkItemSection, WorkItemStatus]:
