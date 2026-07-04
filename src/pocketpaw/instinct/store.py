@@ -586,6 +586,12 @@ class InstinctStore:
         return await self._update_status(
             action_id,
             ActionStatus.APPROVED,
+            # Only a PENDING action may be approved — same guard auto_approve /
+            # bulk_approve already carry. Without it, re-approving an action that
+            # already flipped to APPROVED (e.g. after an executor that mutated but
+            # then failed to record its outcome) would re-enter the executor and
+            # double-fire the underlying write. Returns None on a non-pending row.
+            require_status=ActionStatus.PENDING,
             approved_by=approver,
             approved_at=datetime.now().isoformat(),
             event="action_approved",

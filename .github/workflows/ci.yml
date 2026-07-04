@@ -20,6 +20,10 @@
 # 3.13 matrix only on push to dev/main; PRs test 3.12 alone (the prod version,
 # per the Dockerfile), so version-specific breaks are still caught at the merge
 # gate. The duplicate full-suite run in tests.yaml was removed in the same pass.
+# Updated: 2026-07-02 — lint job gains the `atlas build --check` freshness
+# gate (AT-4): the compiled atlas artifact (src/pocketpaw/atlas/data/
+# atlas.json) must match a fresh compile of authored entries + connector/
+# senses extraction, or the step fails with a diff summary.
 name: CI
 
 on:
@@ -54,6 +58,12 @@ jobs:
 
       - name: Ruff format check
         run: uv run ruff format --check .
+
+      # AT-4 — the checked-in atlas artifact is compiled (lockfile-style);
+      # fail with a diff summary when it lags the authored files or the
+      # connector YAMLs. Cheap: compiles to memory, byte-compare only.
+      - name: Atlas artifact freshness (atlas build --check)
+        run: uv run pocketpaw atlas build --check
 
   build:
     name: Build wheels
