@@ -17,6 +17,12 @@
 # (mirrors the audit + plan-sessions guard); the actual Beanie write
 # is delegated to ``cycles.service.agent_create_cycle`` via the MC
 # service so the cycles entity stays the sole owner of the write path.
+# Updated: 2026-07-04 (fix/approval-resolution) — ``GET /items`` now
+# accepts a ``status`` query param and threads it into
+# ``ListWorkItemsRequest``. Previously the endpoint documented a status
+# filter but never accepted the param, so ``?status=pending`` was silently
+# ignored and terminal (done/failed) items leaked into the awaiting-approval
+# feed; the service now honors it (``pending`` → awaiting-approval).
 """Mission Control façade router.
 
 Thin per ee/cloud rule #4 — parses requests, delegates to
@@ -81,21 +87,25 @@ async def list_items(
     agent: str | None = Query(None),
     pocket: str | None = Query(None),
     project_id: str | None = Query(None),
+    status: str | None = Query(None),
     limit: int = Query(50, ge=1, le=500),
     ctx: RequestContext = Depends(request_context),
 ) -> list[WorkItemResponse]:
     """Workspace-aware work item feed.
 
     Filters compose: ``section`` narrows to one pane; ``agent``, ``pocket``,
-    and ``project_id`` further restrict; ``limit`` caps the projected list.
-    Pass ``project_id`` as an empty string to filter for "no project
-    assigned".
+    ``project_id``, and ``status`` further restrict; ``limit`` caps the
+    projected list. Pass ``project_id`` as an empty string to filter for
+    "no project assigned". ``status=pending`` returns only the
+    awaiting-approval feed (excludes terminal done/failed items); omit
+    ``status`` for the full feed.
     """
     body = ListWorkItemsRequest(
         section=section,
         agent=agent,
         pocket=pocket,
         project_id=project_id,
+        status=status,
         limit=limit,
     )
     return await mc_service.agent_list_work_items(ctx, body)

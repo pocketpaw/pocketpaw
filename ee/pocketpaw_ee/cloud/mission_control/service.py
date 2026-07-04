@@ -103,6 +103,28 @@
 # url) instead of flipping to ``approved`` and stranding the write. The router's
 # approve/executor logic is unchanged; the façade reuses its blob accessors +
 # executors.
+# Updated: 2026-07-04 (fix/approval-resolution) — two projection fixes so The
+# Tray shows human names and honors its status filter:
+#   (1) Actor NAME resolution — a gated proposal's ``trigger.source`` is the
+#       PROPOSER user id (a raw ObjectId hex — see ``admin_proposals/propose.py``
+#       and ``external_actions/propose.py``, both ``trigger.type == "agent"``).
+#       ``_action_to_work_item`` projected that raw id into ``agent_name`` /
+#       ``assignee_name``, so the approval tray rendered ``6a47…`` instead of a
+#       person. ``agent_list_work_items`` now collects the unique trigger.source
+#       ids across all projected actions and batch-resolves them ONCE via a
+#       single ``_UserDoc.find({"_id": {"$in": ...}})`` (the ripple_sources /
+#       group_service pattern, mirroring how ``_pocket_name_map`` builds its map
+#       once), then passes an ``actor_name_map`` into ``_action_to_work_item``.
+#       Name preference: ``full_name`` → ``email`` → the id (never raises; a
+#       malformed / non-ObjectId source or an unknown user falls back to the id).
+#   (2) ``status`` filter — the ``/items`` endpoint accepted ``section`` but not
+#       the ``status`` it documents, so ``GET /items?status=pending`` was
+#       silently ignored and terminal (done/failed) items leaked into the
+#       awaiting-approval feed. ``agent_list_work_items`` now filters the
+#       assembled items by ``body.status`` when set, with ``"pending"`` aliased
+#       to ``WorkItemStatus.AWAITING_APPROVAL`` (the projection already maps
+#       ``ActionStatus.PENDING`` → that). ``status=None`` returns everything as
+#       before; ``status`` composes with the section/agent/pocket filters.
 """Mission Control façade service.
 
 Every function is module-level ``async def`` per ee/cloud rule #5. The
@@ -269,6 +291,48 @@ async def _pocket_name_map(ctx: RequestContext, *, project_id: str | None = None
     return {p["_id"]: p.get("name", p["_id"]) for p in pockets if p.get("_id")}
 
 
+async def _resolve_actor_names(source_ids: set[str]) -> dict[str, str]:
+    """Batch-resolve a set of trigger.source user ids → display names.
+
+    A gated proposal's ``trigger.source`` is the proposer user id (a raw
+    ObjectId hex — see ``admin_proposals/propose.py`` /
+    ``external_actions/propose.py``). This maps each to a human display
+    name so The Tray never renders the raw id.
+
+    Built ONCE per ``agent_list_work_items`` call from the union of all
+    projected actions' sources — a single ``_UserDoc.find`` over the id
+    set, mirroring how ``_pocket_name_map`` resolves pocket names once
+    (and the ``ripple_sources`` / ``chat.group_service`` batch pattern).
+
+    Name preference: ``full_name`` → ``email`` → the id. Never raises: a
+    non-ObjectId / malformed source is skipped (stays the id via the
+    caller's ``.get(source, source)`` fallback), and an id with no
+    matching user simply isn't in the returned map (same fallback). We
+    resolve names across the workspace's user set, not just members, so a
+    proposer who has since left still renders as a name.
+    """
+    from beanie import PydanticObjectId
+
+    from pocketpaw_ee.cloud.models.user import User as _UserDoc
+
+    object_ids: list[PydanticObjectId] = []
+    for sid in source_ids:
+        try:
+            object_ids.append(PydanticObjectId(sid))
+        except Exception:
+            # Non-ObjectId source (e.g. an agent name, or a sentinel like
+            # "external_action" / "admin_action") — leave it as the id.
+            logger.debug("mission_control: skipping non-ObjectId trigger source %r", sid)
+    if not object_ids:
+        return {}
+
+    users = await _UserDoc.find({"_id": {"$in": object_ids}}).to_list()
+    return {
+        str(u.id): ((u.full_name or "").strip() or (u.email or "").strip() or str(u.id))
+        for u in users
+    }
+
+
 def _status_to_section_status(s: ActionStatus) -> tuple[WorkItemSection, WorkItemStatus]:
     """Map Instinct ``ActionStatus`` to the (section, status) pair Mission
     Control consumes."""
@@ -287,18 +351,34 @@ def _status_to_section_status(s: ActionStatus) -> tuple[WorkItemSection, WorkIte
     return WorkItemSection.SNAGS, WorkItemStatus.BLOCKED
 
 
-def _action_to_work_item(action: Action, workspace_id: str, pocket_name: str = "") -> WorkItem:
+def _action_to_work_item(
+    action: Action,
+    workspace_id: str,
+    pocket_name: str = "",
+    actor_name_map: dict[str, str] | None = None,
+) -> WorkItem:
     """Project an Instinct ``Action`` into a Mission Control ``WorkItem``.
 
     The assignee field on Instinct is optional — when missing we surface
     the trigger source as the implicit assignee so The Tray still shows
     "who needs to act". This matches the operator mental model better
     than an empty avatar slot.
+
+    ``actor_name_map`` maps a ``trigger.source`` user id → the user's
+    display name (built once by ``agent_list_work_items`` — see
+    ``_resolve_actor_names``). For a gated proposal ``trigger.source`` is
+    the PROPOSER user id (a raw ObjectId hex), so we render the name
+    instead of leaking the id into ``agent_name`` / ``assignee_name``.
+    When the source isn't in the map (unknown user, malformed id) we fall
+    back to the id — the same non-leaking behavior the map's builder uses.
     """
+    name_map = actor_name_map or {}
     section, status = _status_to_section_status(action.status)
     assignee_id = action.assignee or _trigger_assignee(action) or ""
     agent_id = action.trigger.source if action.trigger.type == "agent" else None
-    agent_name = action.trigger.source if action.trigger.type == "agent" else ""
+    agent_name = name_map.get(agent_id, agent_id) if agent_id else ""
+    assignee_name_raw = _trigger_assignee_name(action) or assignee_id
+    assignee_name = name_map.get(assignee_name_raw, assignee_name_raw)
     return WorkItem(
         id=f"nudge:{action.id}",
         workspace_id=workspace_id,
@@ -308,7 +388,7 @@ def _action_to_work_item(action: Action, workspace_id: str, pocket_name: str = "
         description=action.description or action.recommendation or "",
         assignee_kind=AssigneeKind.USER,
         assignee_id=assignee_id,
-        assignee_name=_trigger_assignee_name(action) or assignee_id,
+        assignee_name=assignee_name,
         agent_id=agent_id,
         agent_name=agent_name,
         pocket_id=action.pocket_id,
@@ -343,6 +423,16 @@ def _trigger_assignee_name(action: Action) -> str | None:
     if action.assignee:
         return action.assignee
     return None
+
+
+# Aliases the ``status`` query param accepts on top of the raw
+# ``WorkItemStatus`` values. The frontend calls ``/items?status=pending``
+# for the awaiting-approval feed; map it to the canonical status so the
+# filter matches the projected items (which carry
+# ``WorkItemStatus.AWAITING_APPROVAL``, not "pending").
+_STATUS_FILTER_ALIASES: dict[str, str] = {
+    "pending": WorkItemStatus.AWAITING_APPROVAL.value,
+}
 
 
 # Status maps for projecting Tasks into the unified WorkItem shape.
@@ -480,6 +570,13 @@ async def agent_list_work_items(
             continue
         seen.add(a.id)
         actions.append(a)
+    # Batch-resolve every trigger.source (the proposer user id on a gated
+    # Nudge) to a display name ONCE — a single _UserDoc.find over the union
+    # of source ids, mirroring how name_map resolves pockets once — so The
+    # Tray renders a person, not a raw ObjectId hex.
+    actor_name_map = await _resolve_actor_names(
+        {a.trigger.source for a in actions if a.trigger and a.trigger.source}
+    )
     items.extend(
         _action_to_work_item(
             a,
@@ -491,6 +588,7 @@ async def agent_list_work_items(
                 if a.pocket_id == workspace_id
                 else name_map.get(a.pocket_id, a.pocket_id or "")
             ),
+            actor_name_map=actor_name_map,
         )
         for a in actions
     )
@@ -524,6 +622,15 @@ async def agent_list_work_items(
 
     if body.section is not None:
         items = [it for it in items if it.section == body.section]
+    # Honor the endpoint's documented ``status`` filter. Composes with the
+    # section/agent/pocket filters above. ``"pending"`` is the frontend's
+    # alias for the awaiting-approval state (the projection maps
+    # ``ActionStatus.PENDING`` → ``WorkItemStatus.AWAITING_APPROVAL`` via
+    # ``_status_to_section_status``), so it excludes terminal (done/failed)
+    # items. ``status=None`` returns everything, unchanged.
+    if body.status is not None:
+        target = _STATUS_FILTER_ALIASES.get(body.status, body.status)
+        items = [it for it in items if it.status.value == target]
     # Stable order: newest first by created_at, falling back to id.
     items.sort(key=lambda it: (it.created_at or datetime.min, it.id), reverse=True)
     return [work_item_to_response(it) for it in items[: body.limit]]
