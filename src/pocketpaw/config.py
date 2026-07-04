@@ -1039,6 +1039,12 @@ class Settings(BaseSettings):
     tavily_api_key: str | None = Field(default=None, description="Tavily search API key")
     brave_search_api_key: str | None = Field(default=None, description="Brave Search API key")
     parallel_api_key: str | None = Field(default=None, description="Parallel AI API key")
+    # Stock photography (Paw Sites imagery — search_stock_images). Both optional;
+    # with neither set, stock search returns [] and sites ship text-only.
+    pexels_api_key: str | None = Field(default=None, description="Pexels stock-photo API key")
+    unsplash_access_key: str | None = Field(
+        default=None, description="Unsplash Access Key (stock-photo API)"
+    )
     url_extract_provider: str = Field(
         default="auto", description="URL extract provider: 'auto', 'parallel', or 'local'"
     )

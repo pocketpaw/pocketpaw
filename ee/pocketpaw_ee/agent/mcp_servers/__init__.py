@@ -35,6 +35,8 @@ Server surfaces (module → server name → tools):
 * ``planner.py`` → ``pocketpaw_planner`` (opt-in) + ``pocketpaw_pocket_planner``
 * ``pockets.py`` → ``pocketpaw_pocket`` → pocket context + widget pinning
 * ``sites.py`` / ``sites_create.py`` → ``pocketpaw_sites_manager`` → Paw Sites
+* ``stock_images.py`` → ``pocketpaw_stock`` → ``search_stock_images`` (free
+  Pexels + Unsplash photo search for site imagery; pure read, no identity)
 * ``tasks.py`` → ``pocketpaw_tasks`` → task CRUD
 
 Moved here from ``src/pocketpaw/agents/sdk_mcp_*.py`` in the OSS-EE split
