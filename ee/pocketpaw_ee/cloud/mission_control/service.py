@@ -86,6 +86,23 @@
 # has zero visible pockets, and a workspace-scoped item projects with
 # pocket_name "Workspace" instead of leaking the raw workspace hex id.
 # Pocket-bound nudges keep the exact same visibility filter as before.
+# Updated: 2026-07-04 (fix/approval-resolution) — closed the list-vs-approve
+# tenancy mismatch that made a workspace-scoped nudge (``pocket_id ==
+# workspace_id`` — ``_admin_action`` / ``_external_action`` proposals) LIST in
+# The Tray but report ``missing`` on bulk-approve, leaving the proposal pending
+# forever. TWO fixes: (1) ``_split_ids_by_tenancy`` now admits ``pocket_id ==
+# workspace_id`` — the SAME clause ``agent_list_work_items`` uses — so a nudge
+# that lists also resolves; the store read is already tenant-scoped, so this
+# only ever admits the caller's own workspace. (2) ``_execute_bulk_approved_nudge``
+# now dispatches EVERY gated blob kind's executor (new
+# ``_execute_gated_bulk_approved_nudge`` mirrors the router's per-kind dispatch
+# for ``_admin_action`` / ``_external_action`` / ``_code_change`` /
+# ``_fabric_objects`` / ``_pocket_create`` / ``_instinct_rule`` / ``_belt_plan``
+# / ``_artifact_change``), not just ``_pocket_write`` — so a bulk-approved admin
+# action actually EXECUTES (e.g. ``billing.manage`` produces its Dodo checkout
+# url) instead of flipping to ``approved`` and stranding the write. The router's
+# approve/executor logic is unchanged; the façade reuses its blob accessors +
+# executors.
 """Mission Control façade service.
 
 Every function is module-level ``async def`` per ee/cloud rule #5. The
@@ -512,28 +529,147 @@ async def agent_list_work_items(
     return [work_item_to_response(it) for it in items[: body.limit]]
 
 
+async def _execute_gated_bulk_approved_nudge(action: Any, *, ctx: RequestContext) -> bool:
+    """Fire the apply-on-approve executor for a non-pocket-write gated Nudge.
+
+    The 8 non-pocket-write gated proposal kinds (``_code_change`` /
+    ``_external_action`` / ``_fabric_objects`` / ``_pocket_create`` /
+    ``_instinct_rule`` / ``_belt_plan`` / ``_artifact_change`` /
+    ``_admin_action``) each park a write that only lands when its OWN executor
+    fires. The single-/bulk-approve HTTP path
+    (``ee.instinct.router.bulk_approve_actions``) dispatches these per blob
+    kind; the Mission Control façade must do the same or a bulk-approved
+    admin / external / etc. Nudge flips to ``approved`` and STRANDS the write
+    (no billing checkout url, no connector call, no admin write) — the exact
+    execution gap the pocket-write path already closes.
+
+    We reuse the router's blob accessors + the shared
+    ``_code_change_proposed_event_id`` causation helper (lazy import — no
+    module-top instinct→mission_control coupling) and each kind's own
+    executor, which OWNS its Decision-Graph chain close. This mirrors the
+    router's dispatch, it does not fork the executor logic (the executors are
+    unchanged). Emits the per-item ``human.corrected(accepted)`` first
+    (bulk-approve has no edit surface, so disposition is always ``accepted``),
+    threading the ``agent.proposed`` id as causation, exactly like the router.
+
+    Returns True when a gated (non-pocket-write) executor was dispatched,
+    False when the Action carries no such blob (so the caller can fall through
+    to the pocket-write path). Raising is left to the caller's per-item
+    isolation wrapper.
+    """
+    from pocketpaw_ee.instinct.chain_emitters import _code_change_proposed_event_id
+    from pocketpaw_ee.instinct.router import (
+        _admin_action_blob,
+        _artifact_change_blob,
+        _belt_plan_blob,
+        _code_change_blob,
+        _emit_human_corrected,
+        _external_action_blob,
+        _fabric_objects_blob,
+        _instinct_rule_blob,
+        _pocket_create_blob,
+    )
+
+    workspace_id = ctx.workspace_id or ""
+
+    # (blob-accessor, "module path", "executor attr") — same order + executors
+    # the router's bulk_approve_actions dispatch uses. Lazy-imported per hit so
+    # the façade keeps no module-top dependency on the executor packages.
+    dispatch: list[tuple[Any, str, str]] = [
+        (_code_change_blob, "pocketpaw_ee.cloud.belt.executor", "execute_approved_change"),
+        (
+            _external_action_blob,
+            "pocketpaw_ee.cloud.external_actions.executor",
+            "execute_approved_external_action",
+        ),
+        (
+            _fabric_objects_blob,
+            "pocketpaw_ee.cloud.fabric_proposals.executor",
+            "execute_approved_fabric_objects",
+        ),
+        (
+            _pocket_create_blob,
+            "pocketpaw_ee.cloud.pocket_proposals.executor",
+            "execute_approved_pocket_create",
+        ),
+        (
+            _instinct_rule_blob,
+            "pocketpaw_ee.cloud.instinct_rule_proposals.executor",
+            "execute_approved_instinct_rule",
+        ),
+        (_belt_plan_blob, "pocketpaw_ee.cloud.mandates.executor", "execute_approved_plan"),
+        (
+            _artifact_change_blob,
+            "pocketpaw_ee.versions.instinct_executor",
+            "execute_approved_change",
+        ),
+        (
+            _admin_action_blob,
+            "pocketpaw_ee.cloud.admin_proposals.executor",
+            "execute_approved_admin_action",
+        ),
+    ]
+
+    for blob_of, module_path, executor_attr in dispatch:
+        blob = blob_of(action)
+        if blob is None:
+            continue
+        import importlib
+
+        human_event_id = _emit_human_corrected(
+            blob=blob,
+            action=action,
+            user_id=ctx.user_id,
+            workspace_id=workspace_id,
+            disposition="accepted",
+            note=None,
+            causation_override=_code_change_proposed_event_id(blob),
+        )
+        executor = getattr(importlib.import_module(module_path), executor_attr)
+        await executor(action, human_event_id=human_event_id)
+        return True
+
+    return False
+
+
 async def _execute_bulk_approved_nudge(action: Any, *, ctx: RequestContext) -> dict[str, Any]:
-    """Execute one bulk-approved Nudge's parked pocket write + emit chain.
+    """Execute one bulk-approved Nudge's parked write + emit chain.
 
     Mirrors the single-/bulk-approve HTTP path
-    (``ee.instinct.router.bulk_approve_actions``) for ONE approved Action:
-    emit ``human.corrected(accepted)`` + ``policy.evaluated(passed=True)``,
-    then fire ``execute_approved_write`` so the parked write actually
-    lands and the bridge closes the Decision-Graph chain. We reuse the
-    shared chain-emit helpers from ``ee.instinct.chain_emitters`` (lazy
+    (``ee.instinct.router.bulk_approve_actions``) for ONE approved Action.
+    Two families of gated proposal park a write that only lands when its
+    executor fires:
+
+      * the pocket-write bridge (``_pocket_write``) — emit
+        ``human.corrected(accepted)`` + ``policy.evaluated(passed=True)`` then
+        fire ``instinct_bridge.execute_approved_write`` (the bridge owns the
+        chain close);
+      * every OTHER gated kind (``_admin_action`` / ``_external_action`` /
+        ``_code_change`` / ``_fabric_objects`` / ``_pocket_create`` /
+        ``_instinct_rule`` / ``_belt_plan`` / ``_artifact_change``) —
+        dispatched by ``_execute_gated_bulk_approved_nudge`` to that kind's own
+        executor, which owns its chain close.
+
+    Handling ALL gated kinds (not just pocket-write) is what makes a
+    bulk-approved admin / external / etc. Nudge actually EXECUTE (e.g. a
+    ``billing.manage`` admin action produces its Dodo checkout url) instead of
+    flipping to ``approved`` and stranding the write forever.
+
+    We reuse the shared chain-emit helpers + the router's blob accessors (lazy
     import — no module-top instinct→mission_control coupling) so the chain
     logic is shared, not forked, and the façade no longer reaches into the
     router's internals.
 
     Returns a per-item outcome dict ``{"id", "executed", "error"}``:
-      - non-pocket-write Actions report ``executed=False`` with no error
-        (nothing to fire — flipping to ``approved`` is the whole action);
-      - a parked-write Action reports ``executed=True`` on a clean fire,
-        or ``executed=False`` + ``error`` when the execution raised.
+      - Actions with no parked write of any gated kind report
+        ``executed=False`` with no error (flipping to ``approved`` is the
+        whole action);
+      - a gated Action reports ``executed=True`` on a clean dispatch, or
+        ``executed=False`` + ``error`` when the execution raised.
 
-    Error isolation: ``execute_approved_write`` is best-effort (it records
-    failures on the Action and never raises), but we still wrap the whole
-    body so one item's unexpected crash can't strand the rest of the batch.
+    Error isolation: every executor is best-effort by contract (it records
+    failures on the Action and never raises), but we still wrap the whole body
+    so one item's unexpected crash can't strand the rest of the batch.
     """
     from pocketpaw_ee.cloud.pockets import instinct_bridge
     from pocketpaw_ee.instinct.chain_emitters import (
@@ -543,13 +679,27 @@ async def _execute_bulk_approved_nudge(action: Any, *, ctx: RequestContext) -> d
     )
 
     action_id = str(getattr(action, "id", "") or "")
+    workspace_id = ctx.workspace_id or ""
+
+    # Every non-pocket-write gated kind dispatches to its own executor first,
+    # exactly like the router's bulk-approve dispatch. On a hit the executor
+    # ran (and owns its chain close) — report executed and stop.
+    try:
+        if await _execute_gated_bulk_approved_nudge(action, ctx=ctx):
+            return {"id": action_id, "executed": True, "error": None}
+    except Exception as exc:  # noqa: BLE001 — per-item isolation
+        logger.exception(
+            "mission_control.bulk_approve: gated execution failed for %s",
+            action_id,
+        )
+        return {"id": action_id, "executed": False, "error": str(exc)}
+
     blob = _pocket_write_blob(action)
     if blob is None:
-        # No parked write — the approval flip is the entire effect. Nothing
-        # to execute, nothing to chain-emit.
+        # No parked write of any gated kind — the approval flip is the entire
+        # effect. Nothing to execute, nothing to chain-emit.
         return {"id": action_id, "executed": False, "error": None}
 
-    workspace_id = ctx.workspace_id or ""
     try:
         # Chain symmetry with the HTTP approve path: human.corrected first,
         # then a passing policy.evaluated whose causation points at it.
@@ -671,7 +821,9 @@ async def agent_bulk_approve(
         visible = await _visible_pocket_ids(ctx)
         # ISO: HTTP path (no ContextVar) — scope the store to the caller.
         store = get_instinct_store(workspace_id=workspace_id or None)
-        eligible, blocked = await _split_ids_by_tenancy(store, nudge_store_ids, visible)
+        eligible, blocked = await _split_ids_by_tenancy(
+            store, nudge_store_ids, visible, workspace_id
+        )
         nudge_approved, nudge_missing, _ = await store.bulk_approve(
             eligible, approver=ctx.user_id, note=body.note
         )
@@ -773,7 +925,9 @@ async def agent_bulk_reject(
         visible = await _visible_pocket_ids(ctx)
         # ISO: HTTP path (no ContextVar) — scope the store to the caller.
         store = get_instinct_store(workspace_id=workspace_id or None)
-        eligible, blocked = await _split_ids_by_tenancy(store, nudge_store_ids, visible)
+        eligible, blocked = await _split_ids_by_tenancy(
+            store, nudge_store_ids, visible, workspace_id
+        )
         nudge_rejected, nudge_missing, _ = await store.bulk_reject(
             eligible, reason=body.reason, rejector=ctx.user_id
         )
@@ -797,7 +951,7 @@ async def agent_bulk_reject(
 
 
 async def _split_ids_by_tenancy(
-    store: Any, ids: list[str], visible_pockets: set[str]
+    store: Any, ids: list[str], visible_pockets: set[str], workspace_id: str
 ) -> tuple[list[str], list[str]]:
     """Partition ``ids`` into (visible-to-caller, blocked).
 
@@ -806,6 +960,18 @@ async def _split_ids_by_tenancy(
     of items the operator sees). Missing rows fall on the eligible side
     so Instinct's store returns them in its own ``missing`` slot and the
     bulk-action response carries a single deduplicated list.
+
+    Tenancy must match ``agent_list_work_items`` EXACTLY — the list path
+    admits an action if ``a.pocket_id in visible OR a.pocket_id ==
+    workspace_id``. The second clause is what surfaces WORKSPACE-SCOPED
+    nudges (``pocket_id == workspace_id`` — e.g. ``_admin_action`` /
+    ``_external_action`` proposals, which aren't pocket-bound). Without the
+    same clause here, a workspace-scoped nudge that LISTS in The Tray would
+    be pushed to ``blocked`` on approve and reported ``missing`` — the
+    proposal would stay pending forever. Admitting ``pocket_id ==
+    workspace_id`` can only ever match the CALLER'S own workspace: the
+    store read is already W4c/ISO-2 tenant-scoped, so another tenant's
+    workspace-scoped nudge never reaches this loop as an approvable row.
     """
     eligible: list[str] = []
     blocked: list[str] = []
@@ -817,7 +983,7 @@ async def _split_ids_by_tenancy(
             # behavior the operator console expects.
             eligible.append(action_id)
             continue
-        if action.pocket_id in visible_pockets:
+        if action.pocket_id in visible_pockets or action.pocket_id == workspace_id:
             eligible.append(action_id)
         else:
             blocked.append(action_id)
