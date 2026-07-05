@@ -28,10 +28,13 @@
 
 import json
 import logging
+import os
 import re
+from pathlib import Path
 
 from pocketpaw.atlas.compile import (
     AUTHORED_FILES,
+    DEFAULT_CONNECTORS_DIR,
     check_artifact,
     compile_atlas,
     compile_atlas_bytes,
@@ -182,7 +185,6 @@ class TestConnectorExtraction:
         )
 
     def test_every_repo_connector_yaml_has_an_entry(self):
-        from pathlib import Path
 
         import yaml
 
@@ -274,3 +276,90 @@ class TestDriftCheck:
         store = AtlasStore.load(path)
         assert store.describe("primitive:pocket") is not None
         assert store.describe("connector:stripe") is not None
+
+
+class TestNullDisplayName:
+    """FINDING A — a connector YAML with an explicit ``display_name: null``
+    parses cleanly but must not crash the whole compiler on ``.lower()``.
+
+    The module's own posture ("one bad file can't block the build") is
+    broken if a single well-formed-but-null field aborts the entire build
+    (and the CI drift gate) with AttributeError.
+    """
+
+    def test_connector_with_null_display_name_compiles(self, tmp_path):
+        (tmp_path / "quiet.yaml").write_text(
+            "name: quiet\n"
+            "display_name: null\n"
+            "type: generic\n"
+            "actions:\n"
+            "  - name: ping\n"
+            "    description: check liveness\n",
+            encoding="utf-8",
+        )
+        model = compile_atlas(connectors_dir=tmp_path)
+        entry = next(e for e in model.entries if e.id == "connector:quiet")
+        # Falls back to the connector name — never the string "None".
+        assert entry.name == "quiet"
+        assert "None" not in entry.summary
+        assert "None" not in entry.narrative
+        assert "quiet" in entry.keywords
+
+
+class TestConnectorsDirAnchoring:
+    """FINDING C — the default connectors dir must not be CWD-relative.
+
+    ``compile_atlas`` / ``write_artifact`` / ``check_artifact`` called with
+    defaults from any dir other than the repo root would otherwise read ZERO
+    connector YAMLs and silently drop every connector + sense entry;
+    ``write_artifact`` would then persist a truncated artifact.
+    """
+
+    def test_default_connectors_dir_is_absolute(self):
+        assert DEFAULT_CONNECTORS_DIR.is_absolute(), (
+            "DEFAULT_CONNECTORS_DIR must be anchored to a stable location, not CWD-relative"
+        )
+        assert DEFAULT_CONNECTORS_DIR.is_dir(), "the anchored connectors dir must exist"
+
+    def test_compile_from_other_cwd_still_finds_connectors(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        # A CWD-relative default would find nothing here.
+        assert not (Path(os.getcwd()) / "connectors").exists()
+        model = compile_atlas()
+        connectors = [e for e in model.entries if e.kind == "connector"]
+        senses = [e for e in model.entries if e.kind == "sense"]
+        assert connectors, "connectors must still be extracted from a different CWD"
+        assert senses, "senses must still be extracted from a different CWD"
+        assert any(e.id == "connector:stripe" for e in connectors)
+
+    def test_check_artifact_fresh_from_other_cwd(self, tmp_path, monkeypatch):
+        """The CI drift gate runs from repo root today; anchoring keeps it
+        correct even if invoked elsewhere — no truncated-artifact false
+        'stale' with everything dropped."""
+        monkeypatch.chdir(tmp_path)
+        fresh, summary = check_artifact()
+        assert fresh, summary
+
+
+class TestDuplicateIdDiff:
+    """FINDING E — the drift diff collapses duplicate-id entries.
+
+    ``check_artifact`` built its per-id map with a dict comprehension, so two
+    entries sharing an id silently collapse to one: CI still fails on bytes,
+    but the printed added/removed/changed lists misreport what actually
+    differs. Duplicate ids should be surfaced explicitly.
+    """
+
+    def test_duplicate_ids_reported(self, tmp_path):
+        path, _model = write_artifact(output_path=tmp_path / "atlas.json")
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        # Inject a duplicate of an existing id (authoring collision shape).
+        first = doc["entries"][0]
+        doc["entries"].append(dict(first))
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        fresh, summary = check_artifact(artifact_path=path)
+        assert not fresh
+        assert "duplicate" in summary.lower(), (
+            f"duplicate id must be surfaced in the diff summary, got:\n{summary}"
+        )
+        assert first["id"] in summary
