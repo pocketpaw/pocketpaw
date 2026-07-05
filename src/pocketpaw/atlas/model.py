@@ -17,6 +17,13 @@
 # Updated: 2026-07-02 (feat/atlas-widgets, AT-6) — no schema change: the
 # previously reserved ``widget`` (ripple canvas catalog) and ``skill``
 # (bundled skills) kinds are now emitted by the compiler.
+# Updated: 2026-07-05 (fix/atlas-relevance-round2) — additive optional ``gist``
+# field on ``AtlasEntry`` (still paw.atlas/v1). A dedicated, complete
+# one-liner for the always-on Paw OS primer so each primer line ends on a full
+# clause instead of a mid-phrase truncation of ``summary`` that dropped
+# load-bearing words (Belt's "Instinct gate", Branch's "review/merge/publish").
+# Defaults to "" — the compiler passes it through and the primer builder
+# prefers it, falling back to a clause-aware truncation of ``summary``.
 
 from __future__ import annotations
 
@@ -47,6 +54,15 @@ class AtlasEntry(BaseModel):
     kind: AtlasKind = Field(description="Entry kind; 'primitive' and 'surface' are seeded.")
     name: str = Field(description="Display name, e.g. 'Pocket'.")
     summary: str = Field(description="One-line description for ranked result cards.")
+    gist: str = Field(
+        default="",
+        description=(
+            "Optional complete, self-contained one-liner for the always-on Paw "
+            "OS primer — authored so each primer line ends on a full clause "
+            "instead of a mid-phrase truncation of ``summary``. Falls back to a "
+            "clause-aware truncation of ``summary`` when empty."
+        ),
+    )
     narrative: str = Field(
         description="When to reach for it and what it pairs with — the agent-facing story."
     )

@@ -9,6 +9,14 @@ hard-coded, so seed edits can't drift), and the instruction to call
 ``surface`` route when pointing a user somewhere. Same MEDIUM priority as
 the skills block (#8) and wrapped in try/except so an atlas load failure
 never breaks prompt building.
+Updated: 2026-07-05 (fix/atlas-relevance-round2) — ``_build_atlas_primer``
+now prefers each primitive's authored ``gist`` field (a complete,
+distinguishing one-liner) over the old fixed-108-char truncation of
+``summary``. The truncation dropped load-bearing words mid-phrase (Belt's
+"Instinct gate", Branch's "review/merge/publish + revert"), weakening exactly
+the Instinct-vs-Branch distinction the primer exists to sharpen. The gist
+falls back to a clause-aware truncation of ``summary`` for any primitive
+without one; the whole block still fits the ~500-token / 2000-char budget.
 Updated: 2026-06-08 (VIP Onboarding Phase B — session-gated per-user KB scope)
 — ``KbContext`` gains an optional ``user_id``; ``_resolve_kb_scopes`` emits a
 member-private ``user:{user_id}`` scope at the HEAD of the list (highest
@@ -545,8 +553,12 @@ class AgentContextBuilder:
         1. One-paragraph OS identity ("you run inside paw-os ...").
         2. One line per primitive — name + gist, generated at build time from
            the atlas store so a seed edit can never drift from the prompt.
-           The gist is the entry summary's first clause, hard-capped so ten
-           lines stay inside the budget.
+           Prefer the entry's authored ``gist`` (a complete, self-contained
+           one-liner that ends on a full clause). Only when a primitive has no
+           ``gist`` fall back to a clause-aware truncation of ``summary`` — cut
+           at the last full word before the cap so a line never dangles
+           mid-phrase (the old fixed-108-char cut dropped load-bearing words
+           like Belt's "Instinct gate" and Branch's "review/merge/publish").
         3. The standing instruction: ``atlas_search`` before guessing about
            OS capabilities, and include the ``surface`` route when pointing
            a user somewhere.
@@ -563,16 +575,17 @@ class AgentContextBuilder:
 
         lines: list[str] = []
         for entry in primitives:
-            # First clause of the one-line summary; keep each line short so
-            # the whole block stays comfortably under the token budget.
-            gist = entry.summary.split(";")[0].strip().rstrip(".")
-            if len(gist) > 110:
-                # Cut at a word boundary so a line never ends mid-word, and
-                # drop an unclosed parenthetical so the cut reads clean.
-                gist = gist[:108].rsplit(" ", 1)[0]
-                if gist.count("(") > gist.count(")"):
-                    gist = gist[: gist.rindex("(")]
-                gist = gist.rstrip(" ,.:;(") + "…"
+            gist = (entry.gist or "").strip().rstrip(".")
+            if not gist:
+                # No authored gist — fall back to the summary's first clause,
+                # cut clause-aware at the last full word before the cap so the
+                # line still ends cleanly rather than mid-phrase.
+                gist = entry.summary.split(";")[0].strip().rstrip(".")
+                if len(gist) > 110:
+                    gist = gist[:108].rsplit(" ", 1)[0]
+                    if gist.count("(") > gist.count(")"):
+                        gist = gist[: gist.rindex("(")]
+                    gist = gist.rstrip(" ,.:;(") + "…"
             suffix = "" if gist.endswith("…") else "."
             lines.append(f"- {entry.name}: {gist}{suffix}")
 

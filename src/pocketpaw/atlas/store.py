@@ -55,6 +55,18 @@
 #     Keyword / summary / narrative weights are untouched (those fields carry
 #     deliberate, per-entry intent vocabulary), so a discriminating keyword now
 #     out-scores a generic name collision. Signatures unchanged.
+# Updated: 2026-07-05 (fix/atlas-relevance-round2) — a kind-priority bias so a
+# governing primitive can't be outranked by a management SURFACE (or an admin
+# capability) at equal keyword overlap. Governance paraphrases ("gate the
+# agent", "sign-off", "approve what the agent does") were landing on the
+# /agents list route (surface:agents), dropping primitive:instinct below it.
+# Two small levers in ``search_scored``: (1) ``_KIND_SCALE`` multiplies every
+# non-primitive score by 0.96 (primitive = 1.0) — the largest damping that
+# leaves the eval strict-hit baseline untouched; (2) ``_KIND_TIEBREAK`` is a
+# deterministic secondary sort key (primitive first) so an exact tie resolves
+# toward the primitive, not seed order. Both are near-tie only — a match that
+# out-scores the primitive by a real margin still wins. Field weights and the
+# search_scored / search / describe signatures are unchanged.
 
 from __future__ import annotations
 
@@ -165,6 +177,36 @@ _NARRATIVE_WEIGHT = 1.0
 # a discriminating keyword can tie/beat a generic name collision but a name hit
 # is never worth less than a keyword hit.
 _NAME_IDF_FLOOR = 0.6
+
+# Kind-priority bias (relevance fix, round 2). Governance paraphrases ("gate the
+# agent", "sign-off") kept steering to the /agents management LIST route
+# (kind='surface') or an admin capability card, dropping the GOVERNING primitive
+# (Instinct) below them at equal-ish overlap. Two complementary levers, both
+# small on purpose so they only re-rank near-ties and never overpower a real
+# margin:
+#   * ``_KIND_SCALE`` multiplies a non-primitive's score by 0.96 (primitive =
+#     1.0), so at the SAME keyword overlap the governing primitive edges out a
+#     surface / capability / connector. 0.96 was picked as the largest damping
+#     that leaves the intent→capability eval strict-hit baseline untouched
+#     (measured: 0.96 keeps 30/31; 0.95 and below start to regress genuine
+#     specific-kind answers like widget:kanban).
+#   * ``_KIND_TIEBREAK`` is a deterministic secondary sort key (primitive > sense
+#     > capability > connector > widget > skill > surface) so an EXACT numeric
+#     tie always resolves toward the primitive instead of falling to seed order.
+# Neither lever can flip a match that outscores the primitive by a real margin
+# (e.g. the owner-only approval-LEVEL capability still legitimately co-answers
+# "approval gate") — the primitive is protected on ties and near-ties only.
+_KIND_SCALE: dict[str, float] = {"primitive": 1.0}
+_KIND_SCALE_DEFAULT = 0.96
+_KIND_TIEBREAK: dict[str, int] = {
+    "primitive": 6,
+    "sense": 5,
+    "capability": 4,
+    "connector": 3,
+    "widget": 2,
+    "skill": 1,
+    "surface": 0,
+}
 
 
 def _tokenize(text: str) -> list[str]:
@@ -328,9 +370,20 @@ class AtlasStore:
                 elif token in narrative_t:
                     score += _NARRATIVE_WEIGHT
             if score > 0:
+                # Kind-priority scale (relevance fix, round 2): a non-primitive
+                # is damped slightly so the governing primitive edges out a
+                # surface / capability at equal overlap. Small enough to leave a
+                # real margin untouched.
+                score *= _KIND_SCALE.get(entry.kind, _KIND_SCALE_DEFAULT)
                 scored.append((score, entry))
 
-        scored.sort(key=lambda pair: pair[0], reverse=True)
+        # Primary key: score (desc). Secondary: kind priority (desc) so an EXACT
+        # tie resolves toward the primitive instead of seed order — the
+        # ``atlas_search steered to /agents instead of Instinct`` class of miss.
+        scored.sort(
+            key=lambda pair: (pair[0], _KIND_TIEBREAK.get(pair[1].kind, 0)),
+            reverse=True,
+        )
         return scored if limit is None else scored[:limit]
 
     def describe(self, entry_id: str) -> AtlasEntry | None:

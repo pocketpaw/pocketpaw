@@ -174,6 +174,36 @@
       "expected_id": "surface:home",
       "rank_within": 1,
       "note": "Added 2026-07-05: relevance fix #8 — the most common orientation question had no useful landing. Added 'what can you do','help','get started','capabilities','overview' to surface:home. Content-word orientation phrasings now land home first; the bare 'what can you do' still ties the interrogative-'what' surfaces (activity/audit/foresight) and is a known keyword-vocabulary limit, not pinned here."
+    },
+    {
+      "intent": "how do I approve what the agent does",
+      "expected_id": "primitive:instinct",
+      "rank_within": 1,
+      "note": "Added 2026-07-05 (round 2, Finding A): governance paraphrases were landing on surface:agents (the /agents management LIST route), dropping the governing Instinct primitive below it. Fixed by (a) adding governance keywords ('sign off','gate the agent','approval gate','approve what the agent does') to primitive:instinct and (b) a kind-priority bias in the store so a surface/capability can't outrank a primitive at equal overlap."
+    },
+    {
+      "intent": "sign-off",
+      "expected_id": "primitive:instinct",
+      "rank_within": 1,
+      "note": "Added 2026-07-05 (round 2, Finding A): 'sign-off' had no Instinct keyword and buried the primitive; 'sign off' is now an authored Instinct keyword."
+    },
+    {
+      "intent": "gate the agent",
+      "expected_id": "primitive:instinct",
+      "rank_within": 1,
+      "note": "Added 2026-07-05 (round 2, Finding A): 'agent' hit surface:agents at name weight and dropped Instinct; the 'gate the agent' keyword + kind-priority bias put the governing primitive first."
+    },
+    {
+      "intent": "gate what the agent can do",
+      "expected_id": "primitive:instinct",
+      "rank_within": 1,
+      "note": "Added 2026-07-05 (round 2, Finding A): same class as 'gate the agent' — the management surface no longer outranks the Instinct gate."
+    },
+    {
+      "intent": "approval gate",
+      "expected_id": "primitive:instinct",
+      "rank_within": 2,
+      "note": "Added 2026-07-05 (round 2, Finding A): Instinct measures rank 2 here, behind the owner-only 'Set the Instinct approval level' capability (which legitimately co-answers the query and is overlay-hidden from non-owners). The kind bias is deliberately small — it protects the primitive on ties/near-ties but never overpowers a real margin, so this case is pinned rank_within 2 rather than forcing a regression on genuine specific-kind answers elsewhere in the eval."
     }
   ]
 }
