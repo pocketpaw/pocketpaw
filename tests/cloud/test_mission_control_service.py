@@ -1075,6 +1075,33 @@ class TestOutcomesSummary:
         # Only the "recent" row falls in the 24h window.
         assert summary.total == 1
 
+    @pytest.mark.asyncio
+    async def test_counts_workspace_scoped_nudge(self, store: InstinctStore) -> None:
+        # Regression — a workspace-scoped nudge (``pocket_id == workspace_id``,
+        # e.g. an ``_admin_action`` / ``_external_action`` proposal) LISTS in
+        # The Tray / Pawprints but was DROPPED from the outcomes counters
+        # because the in-window filter only admitted ``a.pocket_id in visible``.
+        # A workspace id is never a visible POCKET id, so the summary
+        # undercounted vs the list. The filter must match the list path's
+        # ``in visible OR == workspace_id`` clause.
+        a = await store.propose(
+            "w1",  # pocket_id carries the workspace for gated proposals
+            "External action — send invoice",
+            "gated call",
+            "approve to call 'send_invoice'",
+            _trigger(),
+            parameters={"_external_action": {"connector": "stripe", "action": "send_invoice"}},
+            workspace_id="w1",
+        )
+        await store.approve(a.id)
+
+        summary = await mc_service.agent_outcomes_summary(
+            _ctx(workspace_id="w1"), OutcomesQueryRequest(window="24h")
+        )
+        # The resolved workspace-scoped nudge must be counted (was 0).
+        assert summary.total == 1
+        assert summary.approved == 1
+
 
 # ---------------------------------------------------------------------------
 # W4c — store-level workspace scoping on the instinct reads
@@ -1298,6 +1325,45 @@ class TestActorNameResolution:
         assert names == {"Alice", "Bob"}
         # Three actions, two distinct proposers — resolved in ONE find call.
         assert calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_agent_filter_matches_resolved_display_name(
+        self, mongo_db, store: InstinctStore
+    ) -> None:
+        # Regression — the feed projects ``agent_name`` as the RESOLVED display
+        # name, but ``?agent=`` filtered against the raw ``trigger.source``
+        # ObjectId hex. Filtering by the visible name matched ZERO items. The
+        # filter must accept the display name too (or the raw source id).
+        from pocketpaw_ee.cloud.models.user import User
+
+        proposer = User(email="captain@x.dev", hashed_password="x", full_name="Atlas Captain")
+        await proposer.insert()
+        proposer_id = str(proposer.id)
+
+        a = await store.propose(
+            "w1",
+            "gated by the captain",
+            "",
+            "",
+            ActionTrigger(type="agent", source=proposer_id, reason="admin action"),
+            parameters={"_external_action": {"connector": "s", "action": "send"}},
+            workspace_id="w1",
+        )
+        # Sanity: unfiltered, the item renders the resolved display name.
+        unfiltered = await mc_service.agent_list_work_items(_ctx(workspace_id="w1"), {})
+        assert [it.agent_name for it in unfiltered] == ["Atlas Captain"]
+
+        # Filtering by the DISPLAY NAME returns the item.
+        by_name = await mc_service.agent_list_work_items(
+            _ctx(workspace_id="w1"), ListWorkItemsRequest(agent="Atlas Captain")
+        )
+        assert [it.id for it in by_name] == [f"nudge:{a.id}"]
+
+        # Filtering by the raw source id still works (backward compatible).
+        by_id = await mc_service.agent_list_work_items(
+            _ctx(workspace_id="w1"), ListWorkItemsRequest(agent=proposer_id)
+        )
+        assert [it.id for it in by_id] == [f"nudge:{a.id}"]
 
 
 # ---------------------------------------------------------------------------
