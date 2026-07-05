@@ -45,6 +45,28 @@ the full compiled model (237 entries) + fixpoint stemmer: baseline now
 specific compiled entries; four new cases cover widget / skill /
 connector / sense intents; authored branch + soul keywords gained
 "roll back" and "persist".
+Updated: 2026-07-05 (atlas refinement arc) — a 35-agent adversarial
+edge-case audit drove a round of accuracy + robustness fixes.
+ACCURACY: added surface:billing (/settings/billing) and surface:security
+(/security, owner-gated), repointed the operator surface from the retired
+/mission-control redirect to /deep-work ("Deep Work"), and removed a false
+"no dedicated billing route" narrative — the drift check is FIDELITY-only
+(authored == compiled) and never caught these, so a TestFactualClaimGuard
+now flags negative route-existence claims + hedged numeric counts. Always
+verify a surface against paw-enterprise/src/routes, not just that it
+recompiles. RELEVANCE: an IDF name-weight damper (generic tokens like
+"workspace" no longer hand every card a full name hit), instruction-filler
+stopwords, "user" vocabulary on the member cards, a small kind bias
+(primitive > surface at a near-tie), and governance paraphrases on
+primitive:instinct — eval strict-hit baseline 21/22 → 34/36. PRIMER: each
+primitive gained an optional `gist` field (a complete one-liner) so lines
+no longer truncate mid-clause. ROBUSTNESS: the compiler no longer crashes
+on display_name: null, anchors the connectors dir off __file__ (no silent
+CWD truncation), splits acronym CamelCase, surfaces duplicate ids; Fabric
+search dropped a 3N sqlite N+1. SECURITY (separate PRs): the role-aware
+provider now re-resolves per turn (a warm shared client had leaked owner
+cards to a member), and the admin path gained an OWNER guard on owner-grants
++ an atomic approve.
 -->
 
 # Atlas — the OS self-model
