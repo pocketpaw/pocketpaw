@@ -6,6 +6,14 @@ so the POST endpoint must rehydrate history from the persisted ``Message``
 collection and ship it on the ``RunSpec`` to the executor. Before this fix,
 ``history=None`` was passed unconditionally and the agent replied with no
 memory of prior turns after any process restart.
+
+Changes: 2026-06-18 (fix/session-history-workspace-scope) — added
+``test_load_history_for_session_scope_filters_by_workspace_id`` and the
+workspace-aware ``_WorkspaceScopedMessageModel`` stub. The new test proves
+the pocket/session history query scopes by ``workspace_id`` so two rows that
+share a ``session_key`` but live in different workspaces can never bleed
+across the tenant boundary (defense-in-depth — globally-unique ObjectIds make
+a real collision impossible today, but the query no longer relies on that).
 """
 
 from __future__ import annotations
@@ -141,6 +149,7 @@ async def test_load_history_for_session_scope_uses_session_key(monkeypatch):
     assert captured["query"] == {
         "context_type": "session",
         "session_key": session_key_for(ctx),
+        "workspace_id": ctx.workspace_id,
     }
     assert captured["limit"] == 25
     assert result == [
@@ -189,6 +198,105 @@ async def test_load_history_returns_empty_on_mongo_error(monkeypatch):
 
     # Mongo blowing up must NOT kill the stream — degrade to no-context reply.
     assert await load_history_for_scope(_session_ctx()) == []
+
+
+# ---------------------------------------------------------------------------
+# Defense-in-depth: pocket/session history must scope by workspace_id so two
+# rows sharing a session_key but living in different workspaces never bleed
+# across the tenant boundary. ObjectId global uniqueness makes a real
+# collision impossible today, but the query must not RELY on that.
+# ---------------------------------------------------------------------------
+
+
+class _WorkspaceStubMsg:
+    """Stub Message carrying the workspace_id the real adapter stamps."""
+
+    def __init__(self, *, role=None, sender_type="user", content="", workspace_id=None):
+        self.role = role
+        self.sender_type = sender_type
+        self.content = content
+        self.workspace_id = workspace_id
+
+
+class _WorkspaceScopedFindChain:
+    """find().sort().limit().to_list() chain that filters like Mongo would.
+
+    Applies the captured query's ``workspace_id`` (and ``session_key``)
+    predicates to the in-memory docs, so a query that OMITS ``workspace_id``
+    leaks every workspace's rows — exactly the seam under test.
+    """
+
+    def __init__(self, query: dict, docs: list[_WorkspaceStubMsg]):
+        self._query = query
+        self._docs = docs
+
+    def sort(self, *args, **kwargs):  # noqa: ARG002
+        return self
+
+    def limit(self, n):  # noqa: ARG002
+        return self
+
+    async def to_list(self):
+        out = []
+        for d in self._docs:
+            if "session_key" in self._query and self._query["session_key"] is not None:
+                # The stub doesn't model session_key per-doc; assume all docs
+                # share the key under test (the test constructs them that way).
+                pass
+            if "workspace_id" in self._query:
+                if getattr(d, "workspace_id", None) != self._query["workspace_id"]:
+                    continue
+            out.append(d)
+        return out
+
+
+class _WorkspaceScopedMessageModel:
+    _captured: dict = {}
+    _docs: list[_WorkspaceStubMsg] = []
+
+    @classmethod
+    def configure(cls, docs: list[_WorkspaceStubMsg]) -> dict:
+        cls._captured = {}
+        cls._docs = docs
+        return cls._captured
+
+    @classmethod
+    def find(cls, query):
+        cls._captured["query"] = query
+        return _WorkspaceScopedFindChain(query, cls._docs)
+
+
+@pytest.mark.asyncio
+async def test_load_history_for_session_scope_filters_by_workspace_id(monkeypatch):
+    """Two rows share a session_key but live in different workspaces.
+
+    ``load_history_for_scope`` for ``ctx.workspace_id == "w1"`` must return
+    ONLY the ``w1`` row. Without a ``workspace_id`` predicate in the query the
+    stub (modeling Mongo's filter) returns both rows and this assertion fails,
+    proving the unscoped query is the seam.
+    """
+    captured = _WorkspaceScopedMessageModel.configure(
+        [
+            _WorkspaceStubMsg(role="user", content="mine", workspace_id="w1"),
+            _WorkspaceStubMsg(role="user", content="not mine", workspace_id="w2"),
+        ]
+    )
+    import pocketpaw_ee.cloud.models.message as message_mod
+
+    monkeypatch.setattr(message_mod, "Message", _WorkspaceScopedMessageModel)
+
+    ctx = _session_ctx()  # workspace_id == "w1"
+    result = await load_history_for_scope(ctx)
+
+    # The query itself must carry the workspace predicate.
+    assert captured["query"].get("workspace_id") == "w1", (
+        f"pocket/session history query must filter by workspace_id; got query={captured['query']!r}"
+    )
+    # And only this workspace's row may come back.
+    assert result == [{"role": "user", "content": "mine"}], (
+        "history must not include rows from another workspace that happen to "
+        f"share the session_key; got {result!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
