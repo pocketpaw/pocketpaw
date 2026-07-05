@@ -1,5 +1,5 @@
 {
-  "_comment": "eval_cases.json — atlas intent→capability eval cases (AT-2). Created 2026-07-02. Updated 2026-07-03: re-baselined against the full compiled model (237 entries: widgets, skills, connectors, senses — was the 31-entry hand seed) + the fixpoint stemmer; three cases re-pointed at genuinely better specific answers (see their note fields), the fabric stemming xfail promoted to a pass, and four new cases added covering the new kinds (widget, skill, connector, sense). Each case maps a REAL user intent to the expected top-hit atlas entry id. rank_within: 1 = expected id must be the top result (strict hit), 3 = must appear in the top 3. xfail (optional string): a known ranking miss kept on purpose — never delete a case to go green; the reason documents the weakness for the ranking-upgrade task. note (optional string): reasoning for a re-pointed expectation or measured behavior. Consumed by tests/atlas/test_eval.py.",
+  "_comment": "eval_cases.json — atlas intent→capability eval cases (AT-2). Created 2026-07-02. Updated 2026-07-03: re-baselined against the full compiled model (237 entries: widgets, skills, connectors, senses — was the 31-entry hand seed) + the fixpoint stemmer; three cases re-pointed at genuinely better specific answers (see their note fields), the fabric stemming xfail promoted to a pass, and four new cases added covering the new kinds (widget, skill, connector, sense). Updated 2026-07-05 (fix/atlas-data-accuracy-and-relevance): nine cases added pinning the data-accuracy + relevance fixes — the /settings/billing, /deep-work, and /security surfaces (new/repointed authored entries), the 'user' member-card vocabulary, the IDF name-weight damper that stops a destructive card ranking first, the five new instruction-filler stopwords, and the orientation query. Each case maps a REAL user intent to the expected top-hit atlas entry id. rank_within: 1 = expected id must be the top result (strict hit), 3 = must appear in the top 3. xfail (optional string): a known ranking miss kept on purpose — never delete a case to go green; the reason documents the weakness for the ranking-upgrade task. note (optional string): reasoning for a re-pointed expectation or measured behavior. Consumed by tests/atlas/test_eval.py.",
   "cases": [
     {
       "intent": "build me an app to track tasks",
@@ -120,6 +120,60 @@
       "expected_id": "sense:paw.payments.v1",
       "rank_within": 1,
       "note": "Added 2026-07-03: sense-flavored coverage for the full-model re-baseline — the payments sense outranks connector:stripe for the provider-agnostic phrasing."
+    },
+    {
+      "intent": "change my plan and top up my wallet",
+      "expected_id": "surface:billing",
+      "rank_within": 1,
+      "note": "Added 2026-07-05: pins the new /settings/billing surface (data-accuracy fix #1). Before, atlas had no billing surface and workspace-admin falsely claimed there was no billing route; the agent misdirected users to /settings/workspace."
+    },
+    {
+      "intent": "review approvals in deep work",
+      "expected_id": "surface:mission-control",
+      "rank_within": 1,
+      "note": "Added 2026-07-05: pins the repointed operator surface (data-accuracy fix #2). The id stays surface:mission-control but now names 'Deep Work', routes to /deep-work (was the stale /mission-control 308-redirect), and carries approvals/tray vocabulary."
+    },
+    {
+      "intent": "paw-shield security console",
+      "expected_id": "surface:security",
+      "rank_within": 1,
+      "note": "Added 2026-07-05: pins the new owner-gated /security surface (data-accuracy fix #3). paw-shield had no atlas entry at all; the entry carries a role:owner marker so the overlay hides it fail-closed from non-owners."
+    },
+    {
+      "intent": "remove a user",
+      "expected_id": "capability:admin.member_remove",
+      "rank_within": 1,
+      "note": "Added 2026-07-05: relevance fix #5 — the member cards spoke only 'member', so 'user' phrasing missed. Added 'user' synonyms to members_list / member_update_role / member_remove."
+    },
+    {
+      "intent": "delete a user",
+      "expected_id": "capability:admin.member_remove",
+      "rank_within": 1,
+      "note": "Added 2026-07-05: relevance fix #6 — before, the irreversible 'Delete the workspace' card ranked first for this benign intent (its name literally contains 'delete'). The 'user' keyword on member_remove now scores it a full keyword pair, and the IDF name-weight damper keeps generic name hits from dominating; member_remove ranks first, the destructive card no longer above it."
+    },
+    {
+      "intent": "manage workspace users",
+      "expected_id": "capability:admin.members_list",
+      "rank_within": 1,
+      "note": "Added 2026-07-05: relevance fix #7 — 'workspace' hits 8 entry names, so this was an 8-way tie broken by seed order. The IDF name-weight damper plus discriminating keywords ('manage users','manage members','team management') on members_list break the tie toward the read card."
+    },
+    {
+      "intent": "set up memory",
+      "expected_id": "primitive:soul",
+      "rank_within": 1,
+      "note": "Added 2026-07-05: relevance fix #9 — 'set' hit the approval-level card's name and 'up' hit widget:follow-up, both at name weight, burying soul. 'up','set','get','open','show' are now instruction-filler stopwords, so only 'memory' scores and soul wins."
+    },
+    {
+      "intent": "disconnect gmail",
+      "expected_id": "capability:admin.connector_disable",
+      "rank_within": 3,
+      "note": "Added 2026-07-05: relevance fix #10 — the disable-connector action buried at #3 behind skill:gmail and connector:gmail. Added provider-action disconnect keywords; kept rank_within 3 (the action legitimately shares the query with the provider surfaces) though it now measures rank 1."
+    },
+    {
+      "intent": "what are your capabilities",
+      "expected_id": "surface:home",
+      "rank_within": 1,
+      "note": "Added 2026-07-05: relevance fix #8 — the most common orientation question had no useful landing. Added 'what can you do','help','get started','capabilities','overview' to surface:home. Content-word orientation phrasings now land home first; the bare 'what can you do' still ties the interrogative-'what' surfaces (activity/audit/foresight) and is a known keyword-vocabulary limit, not pinned here."
     }
   ]
 }
