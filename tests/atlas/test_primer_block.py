@@ -6,6 +6,12 @@
 # the _INJECTION_CAPS['atlas_primer'] ceiling); and that an atlas load
 # failure degrades gracefully — the prompt still builds, minus the primer
 # (same try/except pattern as the skills block #8).
+# Updated: 2026-07-05 (fix/atlas-relevance-round2, Finding B) — the primer now
+# prefers each primitive's authored ``gist`` over a mid-phrase truncation of
+# ``summary``. New assertions pin that the load-bearing distinguishing clauses
+# survive intact (Belt ends on "Instinct gate", Branch keeps "merge/publish"
+# and "revert", Soul keeps "5-tier memory") and that no gist-backed line ends
+# in the truncation ellipsis — the class of miss the fix targets.
 
 from __future__ import annotations
 
@@ -74,6 +80,34 @@ class TestPrimerContent:
         primer = AgentContextBuilder._build_atlas_primer()
         assert "- Mission Control:" not in primer
         assert "- Decision Graph:" not in primer
+
+    async def test_primer_preserves_distinguishing_clauses(self):
+        """Finding B: the primer must not truncate a primitive's load-bearing
+        clause mid-phrase. The authored gists end on a full clause, so the
+        words that distinguish Belt-vs-Branch-vs-Instinct survive."""
+        primer = AgentContextBuilder._build_atlas_primer()
+        # Belt's line must keep "Instinct gate" (the old 108-char cut dropped it).
+        assert "Instinct gate" in primer
+        # Branch's line must keep the full pipeline + revert.
+        assert "merge/publish" in primer
+        assert "revert" in primer
+        # Soul's line must keep the memory-architecture detail.
+        assert "5-tier memory" in primer
+
+    async def test_gist_backed_lines_do_not_end_in_ellipsis(self):
+        """Every primitive carrying an authored gist renders a line that ends
+        on a complete clause — never the truncation ellipsis."""
+        import pocketpaw.atlas.store as atlas_store_mod
+
+        primer = AgentContextBuilder._build_atlas_primer()
+        for entry in atlas_store_mod.get_atlas_store().entries:
+            if entry.kind == "primitive" and entry.gist:
+                # Find this primitive's line and assert it does not dangle.
+                marker = f"- {entry.name}:"
+                line = next(ln for ln in primer.splitlines() if ln.startswith(marker))
+                assert not line.rstrip().endswith("…"), (
+                    f"{entry.name} line was truncated despite an authored gist: {line!r}"
+                )
 
 
 class TestPrimerBudget:

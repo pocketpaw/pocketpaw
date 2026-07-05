@@ -1,6 +1,7 @@
 {
   "entries": [
     {
+      "gist": "",
       "how": "mcp__pocketpaw_workspace_admin__audit_read (optional limit 1-100)",
       "id": "capability:admin.audit_read",
       "keywords": [
@@ -21,6 +22,7 @@
       "surface": "/audit"
     },
     {
+      "gist": "",
       "how": "mcp__pocketpaw_workspace_admin__billing_plan_change (plan) — proposes for human approval; opens checkout, never mutates inline",
       "id": "capability:admin.billing_plan_change",
       "keywords": [
@@ -40,6 +42,7 @@
       "surface": "/settings/workspace"
     },
     {
+      "gist": "",
       "how": "mcp__pocketpaw_workspace_admin__billing_usage_read (optional start / end YYYY-MM-DD)",
       "id": "capability:admin.billing_usage_read",
       "keywords": [
@@ -60,6 +63,7 @@
       "surface": "/settings/workspace"
     },
     {
+      "gist": "",
       "how": "mcp__pocketpaw_workspace_admin__connector_config (name, config) — proposes for human approval; never mutates inline",
       "id": "capability:admin.connector_config",
       "keywords": [
@@ -78,6 +82,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "mcp__pocketpaw_workspace_admin__connector_disable (name) — proposes for human approval; never mutates inline",
       "id": "capability:admin.connector_disable",
       "keywords": [
@@ -102,6 +107,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "mcp__pocketpaw_workspace_admin__connector_enable (name) — proposes for human approval; never mutates inline",
       "id": "capability:admin.connector_enable",
       "keywords": [
@@ -120,6 +126,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "mcp__pocketpaw_workspace_admin__connectors_list (no args)",
       "id": "capability:admin.connectors_list",
       "keywords": [
@@ -140,6 +147,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "mcp__pocketpaw_workspace_admin__instinct_approval_level_set (level) — proposes for human approval; never mutates inline",
       "id": "capability:admin.instinct_approval_level_set",
       "keywords": [
@@ -159,6 +167,7 @@
       "surface": "/settings/workspace"
     },
     {
+      "gist": "",
       "how": "mcp__pocketpaw_workspace_admin__invite_create (email, role) — proposes for human approval; never mutates inline",
       "id": "capability:admin.invite_create",
       "keywords": [
@@ -178,6 +187,7 @@
       "surface": "/settings/workspace"
     },
     {
+      "gist": "",
       "how": "mcp__pocketpaw_workspace_admin__invite_revoke (invite_id) — proposes for human approval; never mutates inline",
       "id": "capability:admin.invite_revoke",
       "keywords": [
@@ -196,6 +206,7 @@
       "surface": "/settings/workspace"
     },
     {
+      "gist": "",
       "how": "mcp__pocketpaw_workspace_admin__invites_list (no args)",
       "id": "capability:admin.invites_list",
       "keywords": [
@@ -215,6 +226,7 @@
       "surface": "/settings/workspace"
     },
     {
+      "gist": "",
       "how": "mcp__pocketpaw_workspace_admin__member_remove (user_id) — proposes for human approval; never mutates inline",
       "id": "capability:admin.member_remove",
       "keywords": [
@@ -240,6 +252,7 @@
       "surface": "/settings/workspace"
     },
     {
+      "gist": "",
       "how": "mcp__pocketpaw_workspace_admin__member_update_role (user_id, role) — proposes for human approval; never mutates inline",
       "id": "capability:admin.member_update_role",
       "keywords": [
@@ -265,6 +278,7 @@
       "surface": "/settings/workspace"
     },
     {
+      "gist": "",
       "how": "member_update_role's read sibling — mcp__pocketpaw_workspace_admin__members_list (no args; the workspace is the active chat stream's)",
       "id": "capability:admin.members_list",
       "keywords": [
@@ -292,6 +306,7 @@
       "surface": "/settings/workspace"
     },
     {
+      "gist": "",
       "how": "mcp__pocketpaw_workspace_admin__workspace_delete (no args) — proposes for human approval; never mutates inline",
       "id": "capability:admin.workspace_delete",
       "keywords": [
@@ -310,6 +325,7 @@
       "surface": "/settings/workspace"
     },
     {
+      "gist": "",
       "how": "mcp__pocketpaw_workspace_admin__workspace_settings_read (no args)",
       "id": "capability:admin.workspace_settings_read",
       "keywords": [
@@ -330,6 +346,7 @@
       "surface": "/settings/workspace"
     },
     {
+      "gist": "",
       "how": "mcp__pocketpaw_workspace_admin__workspace_update (name?, settings?, branding?) — proposes for human approval; never mutates inline",
       "id": "capability:admin.workspace_update",
       "keywords": [
@@ -349,6 +366,7 @@
       "surface": "/settings/workspace"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'airtable' connector once it is bound",
       "id": "connector:airtable",
       "keywords": [
@@ -373,6 +391,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'bigquery' connector once it is bound",
       "id": "connector:bigquery",
       "keywords": [
@@ -397,6 +416,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'confluence' connector once it is bound",
       "id": "connector:confluence",
       "keywords": [
@@ -421,6 +441,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'csv' connector once it is bound",
       "id": "connector:csv",
       "keywords": [
@@ -445,6 +466,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'datadog' connector once it is bound",
       "id": "connector:datadog",
       "keywords": [
@@ -470,6 +492,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'firebase' connector once it is bound",
       "id": "connector:firebase",
       "keywords": [
@@ -502,6 +525,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'freshdesk' connector once it is bound",
       "id": "connector:freshdesk",
       "keywords": [
@@ -526,6 +550,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'gcalendar' connector once it is bound",
       "id": "connector:gcalendar",
       "keywords": [
@@ -548,6 +573,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'gcp' connector once it is bound",
       "id": "connector:gcp",
       "keywords": [
@@ -585,6 +611,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'gdocs' connector once it is bound",
       "id": "connector:gdocs",
       "keywords": [
@@ -606,6 +633,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'github' connector once it is bound",
       "id": "connector:github",
       "keywords": [
@@ -633,6 +661,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'gitlab' connector once it is bound",
       "id": "connector:gitlab",
       "keywords": [
@@ -658,6 +687,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'gmail' connector once it is bound",
       "id": "connector:gmail",
       "keywords": [
@@ -684,6 +714,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'google_drive' connector once it is bound",
       "id": "connector:google_drive",
       "keywords": [
@@ -706,6 +737,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'hubspot' connector once it is bound",
       "id": "connector:hubspot",
       "keywords": [
@@ -730,6 +762,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'intercom' connector once it is bound",
       "id": "connector:intercom",
       "keywords": [
@@ -755,6 +788,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'jira' connector once it is bound",
       "id": "connector:jira",
       "keywords": [
@@ -779,6 +813,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'linear' connector once it is bound",
       "id": "connector:linear",
       "keywords": [
@@ -803,6 +838,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'mongodb' connector once it is bound",
       "id": "connector:mongodb",
       "keywords": [
@@ -831,6 +867,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'ms_teams_data' connector once it is bound",
       "id": "connector:ms_teams_data",
       "keywords": [
@@ -856,6 +893,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'notion' connector once it is bound",
       "id": "connector:notion",
       "keywords": [
@@ -880,6 +918,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'pagerduty' connector once it is bound",
       "id": "connector:pagerduty",
       "keywords": [
@@ -905,6 +944,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'postgresql' connector once it is bound",
       "id": "connector:postgresql",
       "keywords": [
@@ -930,6 +970,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'quickbooks' connector once it is bound",
       "id": "connector:quickbooks",
       "keywords": [
@@ -957,6 +998,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'reddit' connector once it is bound",
       "id": "connector:reddit",
       "keywords": [
@@ -976,6 +1018,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'rest_generic' connector once it is bound",
       "id": "connector:rest_generic",
       "keywords": [
@@ -998,6 +1041,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'salesforce' connector once it is bound",
       "id": "connector:salesforce",
       "keywords": [
@@ -1023,6 +1067,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'servicenow' connector once it is bound",
       "id": "connector:servicenow",
       "keywords": [
@@ -1048,6 +1093,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'sharepoint' connector once it is bound",
       "id": "connector:sharepoint",
       "keywords": [
@@ -1074,6 +1120,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'shopify' connector once it is bound",
       "id": "connector:shopify",
       "keywords": [
@@ -1099,6 +1146,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'slack_data' connector once it is bound",
       "id": "connector:slack_data",
       "keywords": [
@@ -1124,6 +1172,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'snowflake' connector once it is bound",
       "id": "connector:snowflake",
       "keywords": [
@@ -1148,6 +1197,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'spotify' connector once it is bound",
       "id": "connector:spotify",
       "keywords": [
@@ -1168,6 +1218,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'stripe' connector once it is bound",
       "id": "connector:stripe",
       "keywords": [
@@ -1198,6 +1249,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "list_connector_actions / connector_execute over the 'zendesk' connector once it is bound",
       "id": "connector:zendesk",
       "keywords": [
@@ -1223,6 +1275,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "the autonomous software assembly line — AI orients, develops, and proposes a diff; the human mans the Instinct gate",
       "how": "belt develop station: orient → develop → mcp__pocketpaw_belt__belt_propose_change through the Instinct gate",
       "id": "primitive:belt",
       "keywords": [
@@ -1248,6 +1301,7 @@
       "surface": "/belt"
     },
     {
+      "gist": "universal version-control + review for any artifact: propose -> branch -> review -> merge/publish, plus diff and revert",
       "how": "branch primitive APIs: propose / review / merge / publish / revert on a (scope_type, scope_id) artifact",
       "id": "primitive:branch",
       "keywords": [
@@ -1274,6 +1328,7 @@
       "surface": ""
     },
     {
+      "gist": "a workspace-scoped integration to an external system (Gmail, Postgres, GitHub), each a typed YAML declaring senses",
       "how": "connector registry + typed YAML definitions; bind a connector to a pocket to expose its senses",
       "id": "primitive:connector",
       "keywords": [
@@ -1298,6 +1353,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "the typed knowledge graph — typed objects (Customer, Competitor) joined by typed links (competes_with, raised)",
       "how": "fabric query surface (e.g. fabric_query / fabric_stats MCP tools where a fabric server is bound)",
       "id": "primitive:fabric",
       "keywords": [
@@ -1321,6 +1377,7 @@
       "surface": ""
     },
     {
+      "gist": "the governance gate — agents PROPOSE actions and a human approves, rejects, or edits each one at the gate",
       "how": "Instinct action store + gate APIs; agents emit proposals, humans resolve them at the gate",
       "id": "primitive:instinct",
       "keywords": [
@@ -1335,7 +1392,13 @@
         "permission",
         "triage",
         "trust",
-        "audit"
+        "audit",
+        "sign off",
+        "sign-off",
+        "gate the agent",
+        "approval gate",
+        "approve what the agent does",
+        "agent actions"
       ],
       "kind": "primitive",
       "name": "Instinct",
@@ -1345,6 +1408,7 @@
       "surface": "/paw-print"
     },
     {
+      "gist": "the 'app' primitive — one workspace container for agents, data, tools, connectors, and Instinct rules",
       "how": "pocket_specialist__create / POST /api/v1/pockets (create), pocket_specialist__edit + POST /api/v1/pockets/<id>/spec/merge (edit)",
       "id": "primitive:pocket",
       "keywords": [
@@ -1368,6 +1432,7 @@
       "surface": "/pockets"
     },
     {
+      "gist": "the generative UI layer — a rippleSpec says WHAT to show and Ripple renders it as live Svelte from 150+ widgets",
       "how": "author a rippleSpec; get_widget_spec / get_inline_widget_help fetch canonical prop schemas, start_flow scaffolds multi-step flows",
       "id": "primitive:ripple",
       "keywords": [
@@ -1391,6 +1456,7 @@
       "surface": ""
     },
     {
+      "gist": "publish a pocket as a real standalone website on the edge — static landing or dynamic with a per-tenant D1 database",
       "how": "publish flow: build/pick a pocket stamped type=\"site\", then publish it to the edge",
       "id": "primitive:sites",
       "keywords": [
@@ -1416,6 +1482,7 @@
       "surface": "/sites"
     },
     {
+      "gist": "persistent agent identity + memory — portable .soul files, OCEAN personality, and a 5-tier memory across sessions",
       "how": "soul CLI / soul memory APIs: soul remember, soul recall, soul status against a .soul file",
       "id": "primitive:soul",
       "keywords": [
@@ -1440,6 +1507,7 @@
       "surface": ""
     },
     {
+      "gist": "the durable async-work primitive — ARQ-backed long-running jobs that survive restarts and write back under a system identity",
       "how": "enqueue a named job on the ARQ-backed workspace-jobs queue; results write back under the system identity",
       "id": "primitive:workspace-jobs",
       "keywords": [
@@ -1463,6 +1531,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "bind a declaring connector; connectors declare senses in their YAML (senses: [...]), resolved via connectors_for_sense",
       "id": "sense:paw.calendar.v1",
       "keywords": [
@@ -1479,6 +1548,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "bind a declaring connector; connectors declare senses in their YAML (senses: [...]), resolved via connectors_for_sense",
       "id": "sense:paw.code.v1",
       "keywords": [
@@ -1497,6 +1567,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "bind a declaring connector; connectors declare senses in their YAML (senses: [...]), resolved via connectors_for_sense",
       "id": "sense:paw.db.v1",
       "keywords": [
@@ -1516,6 +1587,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "bind a declaring connector; connectors declare senses in their YAML (senses: [...]), resolved via connectors_for_sense",
       "id": "sense:paw.docs.v1",
       "keywords": [
@@ -1535,6 +1607,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "bind a declaring connector; connectors declare senses in their YAML (senses: [...]), resolved via connectors_for_sense",
       "id": "sense:paw.email.v1",
       "keywords": [
@@ -1551,6 +1624,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "bind a declaring connector; connectors declare senses in their YAML (senses: [...]), resolved via connectors_for_sense",
       "id": "sense:paw.payments.v1",
       "keywords": [
@@ -1567,6 +1641,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "a user invokes it as /belt in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:belt",
       "keywords": [
@@ -1580,6 +1655,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "a user invokes it as /code in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:code",
       "keywords": [
@@ -1593,6 +1669,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "a user invokes it as /foresight-create-sim in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:foresight-create-sim",
       "keywords": [
@@ -1606,6 +1683,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "a user invokes it as /github in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:github",
       "keywords": [
@@ -1619,6 +1697,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "a user invokes it as /gmail in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:gmail",
       "keywords": [
@@ -1632,6 +1711,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "a user invokes it as /pocketpaw-create-dynamic-site in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:pocketpaw-create-dynamic-site",
       "keywords": [
@@ -1645,6 +1725,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "a user invokes it as /pocketpaw-create-paw-site in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:pocketpaw-create-paw-site",
       "keywords": [
@@ -1658,6 +1739,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "a user invokes it as /pocketpaw-create-pocket in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:pocketpaw-create-pocket",
       "keywords": [
@@ -1671,6 +1753,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "a user invokes it as /pocketpaw-create-site in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:pocketpaw-create-site",
       "keywords": [
@@ -1684,6 +1767,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "a user invokes it as /pocketpaw-create-svelte-site in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:pocketpaw-create-svelte-site",
       "keywords": [
@@ -1697,6 +1781,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "a user invokes it as /pocketpaw-edit-pocket in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:pocketpaw-edit-pocket",
       "keywords": [
@@ -1710,6 +1795,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "a user invokes it as /pocketpaw-pocket-planner in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:pocketpaw-pocket-planner",
       "keywords": [
@@ -1723,6 +1809,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "a user invokes it as /pocketpaw-pocket-specialist in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:pocketpaw-pocket-specialist",
       "keywords": [
@@ -1736,6 +1823,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "a user invokes it as /studio in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:studio",
       "keywords": [
@@ -1749,6 +1837,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:activity",
       "keywords": [
@@ -1767,6 +1856,7 @@
       "surface": "/activity"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:agents",
       "keywords": [
@@ -1786,6 +1876,7 @@
       "surface": "/agents"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:audit",
       "keywords": [
@@ -1804,6 +1895,7 @@
       "surface": "/audit"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:belt",
       "keywords": [
@@ -1825,6 +1917,7 @@
       "surface": "/belt"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:billing",
       "keywords": [
@@ -1849,6 +1942,7 @@
       "surface": "/settings/billing"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:calendar",
       "keywords": [
@@ -1866,6 +1960,7 @@
       "surface": "/calendar"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:chat",
       "keywords": [
@@ -1887,6 +1982,7 @@
       "surface": "/chat"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:code",
       "keywords": [
@@ -1905,6 +2001,7 @@
       "surface": "/code"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:decisions-graph",
       "keywords": [
@@ -1926,6 +2023,7 @@
       "surface": "/decisions-graph"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:files",
       "keywords": [
@@ -1943,6 +2041,7 @@
       "surface": "/files"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:foresight",
       "keywords": [
@@ -1963,6 +2062,7 @@
       "surface": "/foresight"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:home",
       "keywords": [
@@ -1987,6 +2087,7 @@
       "surface": "/"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:integrations",
       "keywords": [
@@ -2008,6 +2109,7 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:knowledge",
       "keywords": [
@@ -2026,6 +2128,7 @@
       "surface": "/knowledge"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:meetings",
       "keywords": [
@@ -2043,6 +2146,7 @@
       "surface": "/meetings"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:mission-control",
       "keywords": [
@@ -2066,6 +2170,7 @@
       "surface": "/deep-work"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:paw-print",
       "keywords": [
@@ -2087,6 +2192,7 @@
       "surface": "/paw-print"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:pockets",
       "keywords": [
@@ -2108,6 +2214,7 @@
       "surface": "/pockets"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:security",
       "keywords": [
@@ -2132,6 +2239,7 @@
       "surface": "/security"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:settings",
       "keywords": [
@@ -2151,6 +2259,7 @@
       "surface": "/settings"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:sites",
       "keywords": [
@@ -2173,6 +2282,7 @@
       "surface": "/sites"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:studio",
       "keywords": [
@@ -2193,6 +2303,7 @@
       "surface": "/studio"
     },
     {
+      "gist": "",
       "how": "",
       "id": "surface:workspace-admin",
       "keywords": [
@@ -2211,6 +2322,7 @@
       "surface": "/settings/workspace"
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"accordion\"]) for the full prop schema, then emit a {\"type\": \"accordion\"} node in a rippleSpec",
       "id": "widget:accordion",
       "keywords": [
@@ -2227,6 +2339,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"alert\"]) for the full prop schema, then emit a {\"type\": \"alert\"} node in a rippleSpec",
       "id": "widget:alert",
       "keywords": [
@@ -2243,6 +2356,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"analyst-bar\"]) for the full prop schema, then emit a {\"type\": \"analyst-bar\"} node in a rippleSpec",
       "id": "widget:analyst-bar",
       "keywords": [
@@ -2260,6 +2374,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"analytics-dashboard\"]) for the full prop schema, then emit a {\"type\": \"analytics-dashboard\"} node in a rippleSpec",
       "id": "widget:analytics-dashboard",
       "keywords": [
@@ -2278,6 +2393,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"api-key\"]) for the full prop schema, then emit a {\"type\": \"api-key\"} node in a rippleSpec",
       "id": "widget:api-key",
       "keywords": [
@@ -2294,6 +2410,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"app-shell\"]) for the full prop schema, then emit a {\"type\": \"app-shell\"} node in a rippleSpec",
       "id": "widget:app-shell",
       "keywords": [
@@ -2311,6 +2428,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"article-meta\"]) for the full prop schema, then emit a {\"type\": \"article-meta\"} node in a rippleSpec",
       "id": "widget:article-meta",
       "keywords": [
@@ -2327,6 +2445,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"ask-user-questions\"]) for the full prop schema, then emit a {\"type\": \"ask-user-questions\"} node in a rippleSpec",
       "id": "widget:ask-user-questions",
       "keywords": [
@@ -2343,6 +2462,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"audit-log\"]) for the full prop schema, then emit a {\"type\": \"audit-log\"} node in a rippleSpec",
       "id": "widget:audit-log",
       "keywords": [
@@ -2361,6 +2481,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"avatar\"]) for the full prop schema, then emit a {\"type\": \"avatar\"} node in a rippleSpec",
       "id": "widget:avatar",
       "keywords": [
@@ -2377,6 +2498,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"avatar-group\"]) for the full prop schema, then emit a {\"type\": \"avatar-group\"} node in a rippleSpec",
       "id": "widget:avatar-group",
       "keywords": [
@@ -2393,6 +2515,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"badge\"]) for the full prop schema, then emit a {\"type\": \"badge\"} node in a rippleSpec",
       "id": "widget:badge",
       "keywords": [
@@ -2409,6 +2532,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"breadcrumb\"]) for the full prop schema, then emit a {\"type\": \"breadcrumb\"} node in a rippleSpec",
       "id": "widget:breadcrumb",
       "keywords": [
@@ -2426,6 +2550,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"bulk-action-bar\"]) for the full prop schema, then emit a {\"type\": \"bulk-action-bar\"} node in a rippleSpec",
       "id": "widget:bulk-action-bar",
       "keywords": [
@@ -2443,6 +2568,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"button\"]) for the full prop schema, then emit a {\"type\": \"button\"} node in a rippleSpec",
       "id": "widget:button",
       "keywords": [
@@ -2459,6 +2585,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"c4\"]) for the full prop schema, then emit a {\"type\": \"c4\"} node in a rippleSpec",
       "id": "widget:c4",
       "keywords": [
@@ -2476,6 +2603,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"calendar\"]) for the full prop schema, then emit a {\"type\": \"calendar\"} node in a rippleSpec",
       "id": "widget:calendar",
       "keywords": [
@@ -2494,6 +2622,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"callout\"]) for the full prop schema, then emit a {\"type\": \"callout\"} node in a rippleSpec",
       "id": "widget:callout",
       "keywords": [
@@ -2510,6 +2639,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"card\"]) for the full prop schema, then emit a {\"type\": \"card\"} node in a rippleSpec",
       "id": "widget:card",
       "keywords": [
@@ -2526,6 +2656,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"chart\"]) for the full prop schema, then emit a {\"type\": \"chart\"} node in a rippleSpec",
       "id": "widget:chart",
       "keywords": [
@@ -2542,6 +2673,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"checkbox\"]) for the full prop schema, then emit a {\"type\": \"checkbox\"} node in a rippleSpec",
       "id": "widget:checkbox",
       "keywords": [
@@ -2558,6 +2690,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"checklist-layout\"]) for the full prop schema, then emit a {\"type\": \"checklist-layout\"} node in a rippleSpec",
       "id": "widget:checklist-layout",
       "keywords": [
@@ -2577,6 +2710,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"chip\"]) for the full prop schema, then emit a {\"type\": \"chip\"} node in a rippleSpec",
       "id": "widget:chip",
       "keywords": [
@@ -2593,6 +2727,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"citation\"]) for the full prop schema, then emit a {\"type\": \"citation\"} node in a rippleSpec",
       "id": "widget:citation",
       "keywords": [
@@ -2609,6 +2744,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"coachmark\"]) for the full prop schema, then emit a {\"type\": \"coachmark\"} node in a rippleSpec",
       "id": "widget:coachmark",
       "keywords": [
@@ -2628,6 +2764,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"code\"]) for the full prop schema, then emit a {\"type\": \"code\"} node in a rippleSpec",
       "id": "widget:code",
       "keywords": [
@@ -2644,6 +2781,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"code-block\"]) for the full prop schema, then emit a {\"type\": \"code-block\"} node in a rippleSpec",
       "id": "widget:code-block",
       "keywords": [
@@ -2660,6 +2798,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"code-editor\"]) for the full prop schema, then emit a {\"type\": \"code-editor\"} node in a rippleSpec",
       "id": "widget:code-editor",
       "keywords": [
@@ -2677,6 +2816,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"collapsible\"]) for the full prop schema, then emit a {\"type\": \"collapsible\"} node in a rippleSpec",
       "id": "widget:collapsible",
       "keywords": [
@@ -2693,6 +2833,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"color-picker\"]) for the full prop schema, then emit a {\"type\": \"color-picker\"} node in a rippleSpec",
       "id": "widget:color-picker",
       "keywords": [
@@ -2709,6 +2850,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"combobox\"]) for the full prop schema, then emit a {\"type\": \"combobox\"} node in a rippleSpec",
       "id": "widget:combobox",
       "keywords": [
@@ -2725,6 +2867,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"command-palette\"]) for the full prop schema, then emit a {\"type\": \"command-palette\"} node in a rippleSpec",
       "id": "widget:command-palette",
       "keywords": [
@@ -2745,6 +2888,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"comment-thread\"]) for the full prop schema, then emit a {\"type\": \"comment-thread\"} node in a rippleSpec",
       "id": "widget:comment-thread",
       "keywords": [
@@ -2763,6 +2907,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"company-header\"]) for the full prop schema, then emit a {\"type\": \"company-header\"} node in a rippleSpec",
       "id": "widget:company-header",
       "keywords": [
@@ -2779,6 +2924,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"comparison-layout\"]) for the full prop schema, then emit a {\"type\": \"comparison-layout\"} node in a rippleSpec",
       "id": "widget:comparison-layout",
       "keywords": [
@@ -2799,6 +2945,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"comparison-table\"]) for the full prop schema, then emit a {\"type\": \"comparison-table\"} node in a rippleSpec",
       "id": "widget:comparison-table",
       "keywords": [
@@ -2815,6 +2962,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"confirm-dialog\"]) for the full prop schema, then emit a {\"type\": \"confirm-dialog\"} node in a rippleSpec",
       "id": "widget:confirm-dialog",
       "keywords": [
@@ -2832,6 +2980,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"container\"]) for the full prop schema, then emit a {\"type\": \"container\"} node in a rippleSpec",
       "id": "widget:container",
       "keywords": [
@@ -2848,6 +2997,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"context-menu\"]) for the full prop schema, then emit a {\"type\": \"context-menu\"} node in a rippleSpec",
       "id": "widget:context-menu",
       "keywords": [
@@ -2864,6 +3014,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"copy\"]) for the full prop schema, then emit a {\"type\": \"copy\"} node in a rippleSpec",
       "id": "widget:copy",
       "keywords": [
@@ -2881,6 +3032,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"dashboard\"]) for the full prop schema, then emit a {\"type\": \"dashboard\"} node in a rippleSpec",
       "id": "widget:dashboard",
       "keywords": [
@@ -2896,6 +3048,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"dashboard-slot\"]) for the full prop schema, then emit a {\"type\": \"dashboard-slot\"} node in a rippleSpec",
       "id": "widget:dashboard-slot",
       "keywords": [
@@ -2912,6 +3065,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"data-grid\"]) for the full prop schema, then emit a {\"type\": \"data-grid\"} node in a rippleSpec",
       "id": "widget:data-grid",
       "keywords": [
@@ -2930,6 +3084,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"date-picker\"]) for the full prop schema, then emit a {\"type\": \"date-picker\"} node in a rippleSpec",
       "id": "widget:date-picker",
       "keywords": [
@@ -2946,6 +3101,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"definition-list\"]) for the full prop schema, then emit a {\"type\": \"definition-list\"} node in a rippleSpec",
       "id": "widget:definition-list",
       "keywords": [
@@ -2962,6 +3118,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"diff\"]) for the full prop schema, then emit a {\"type\": \"diff\"} node in a rippleSpec",
       "id": "widget:diff",
       "keywords": [
@@ -2979,6 +3136,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"discover-card\"]) for the full prop schema, then emit a {\"type\": \"discover-card\"} node in a rippleSpec",
       "id": "widget:discover-card",
       "keywords": [
@@ -2995,6 +3153,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"dropdown-menu\"]) for the full prop schema, then emit a {\"type\": \"dropdown-menu\"} node in a rippleSpec",
       "id": "widget:dropdown-menu",
       "keywords": [
@@ -3013,6 +3172,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"embed\"]) for the full prop schema, then emit a {\"type\": \"embed\"} node in a rippleSpec",
       "id": "widget:embed",
       "keywords": [
@@ -3029,6 +3189,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"empty-state\"]) for the full prop schema, then emit a {\"type\": \"empty-state\"} node in a rippleSpec",
       "id": "widget:empty-state",
       "keywords": [
@@ -3045,6 +3206,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"entity-detail\"]) for the full prop schema, then emit a {\"type\": \"entity-detail\"} node in a rippleSpec",
       "id": "widget:entity-detail",
       "keywords": [
@@ -3065,6 +3227,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"error-state\"]) for the full prop schema, then emit a {\"type\": \"error-state\"} node in a rippleSpec",
       "id": "widget:error-state",
       "keywords": [
@@ -3081,6 +3244,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"exec-dashboard\"]) for the full prop schema, then emit a {\"type\": \"exec-dashboard\"} node in a rippleSpec",
       "id": "widget:exec-dashboard",
       "keywords": [
@@ -3099,6 +3263,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"file-upload\"]) for the full prop schema, then emit a {\"type\": \"file-upload\"} node in a rippleSpec",
       "id": "widget:file-upload",
       "keywords": [
@@ -3115,6 +3280,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"filter-bar\"]) for the full prop schema, then emit a {\"type\": \"filter-bar\"} node in a rippleSpec",
       "id": "widget:filter-bar",
       "keywords": [
@@ -3131,6 +3297,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"flex\"]) for the full prop schema, then emit a {\"type\": \"flex\"} node in a rippleSpec",
       "id": "widget:flex",
       "keywords": [
@@ -3147,6 +3314,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"follow-up\"]) for the full prop schema, then emit a {\"type\": \"follow-up\"} node in a rippleSpec",
       "id": "widget:follow-up",
       "keywords": [
@@ -3163,6 +3331,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"form\"]) for the full prop schema, then emit a {\"type\": \"form\"} node in a rippleSpec",
       "id": "widget:form",
       "keywords": [
@@ -3179,6 +3348,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"form-layout\"]) for the full prop schema, then emit a {\"type\": \"form-layout\"} node in a rippleSpec",
       "id": "widget:form-layout",
       "keywords": [
@@ -3199,6 +3369,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"funnel\"]) for the full prop schema, then emit a {\"type\": \"funnel\"} node in a rippleSpec",
       "id": "widget:funnel",
       "keywords": [
@@ -3216,6 +3387,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"gantt\"]) for the full prop schema, then emit a {\"type\": \"gantt\"} node in a rippleSpec",
       "id": "widget:gantt",
       "keywords": [
@@ -3234,6 +3406,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"gauge\"]) for the full prop schema, then emit a {\"type\": \"gauge\"} node in a rippleSpec",
       "id": "widget:gauge",
       "keywords": [
@@ -3252,6 +3425,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"glass-card\"]) for the full prop schema, then emit a {\"type\": \"glass-card\"} node in a rippleSpec",
       "id": "widget:glass-card",
       "keywords": [
@@ -3269,6 +3443,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"grid\"]) for the full prop schema, then emit a {\"type\": \"grid\"} node in a rippleSpec",
       "id": "widget:grid",
       "keywords": [
@@ -3285,6 +3460,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"heading\"]) for the full prop schema, then emit a {\"type\": \"heading\"} node in a rippleSpec",
       "id": "widget:heading",
       "keywords": [
@@ -3301,6 +3477,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"heatmap\"]) for the full prop schema, then emit a {\"type\": \"heatmap\"} node in a rippleSpec",
       "id": "widget:heatmap",
       "keywords": [
@@ -3319,6 +3496,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"hero\"]) for the full prop schema, then emit a {\"type\": \"hero\"} node in a rippleSpec",
       "id": "widget:hero",
       "keywords": [
@@ -3335,6 +3513,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"highlight\"]) for the full prop schema, then emit a {\"type\": \"highlight\"} node in a rippleSpec",
       "id": "widget:highlight",
       "keywords": [
@@ -3351,6 +3530,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"hover-card\"]) for the full prop schema, then emit a {\"type\": \"hover-card\"} node in a rippleSpec",
       "id": "widget:hover-card",
       "keywords": [
@@ -3367,6 +3547,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"icon\"]) for the full prop schema, then emit a {\"type\": \"icon\"} node in a rippleSpec",
       "id": "widget:icon",
       "keywords": [
@@ -3384,6 +3565,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"image\"]) for the full prop schema, then emit a {\"type\": \"image\"} node in a rippleSpec",
       "id": "widget:image",
       "keywords": [
@@ -3400,6 +3582,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"input\"]) for the full prop schema, then emit a {\"type\": \"input\"} node in a rippleSpec",
       "id": "widget:input",
       "keywords": [
@@ -3415,6 +3598,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"invoice-layout\"]) for the full prop schema, then emit a {\"type\": \"invoice-layout\"} node in a rippleSpec",
       "id": "widget:invoice-layout",
       "keywords": [
@@ -3434,6 +3618,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"invoice-lines\"]) for the full prop schema, then emit a {\"type\": \"invoice-lines\"} node in a rippleSpec",
       "id": "widget:invoice-lines",
       "keywords": [
@@ -3450,6 +3635,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"kanban\"]) for the full prop schema, then emit a {\"type\": \"kanban\"} node in a rippleSpec",
       "id": "widget:kanban",
       "keywords": [
@@ -3468,6 +3654,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"kbd\"]) for the full prop schema, then emit a {\"type\": \"kbd\"} node in a rippleSpec",
       "id": "widget:kbd",
       "keywords": [
@@ -3485,6 +3672,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"kv-table\"]) for the full prop schema, then emit a {\"type\": \"kv-table\"} node in a rippleSpec",
       "id": "widget:kv-table",
       "keywords": [
@@ -3501,6 +3689,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"link-preview\"]) for the full prop schema, then emit a {\"type\": \"link-preview\"} node in a rippleSpec",
       "id": "widget:link-preview",
       "keywords": [
@@ -3517,6 +3706,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"loading\"]) for the full prop schema, then emit a {\"type\": \"loading\"} node in a rippleSpec",
       "id": "widget:loading",
       "keywords": [
@@ -3534,6 +3724,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"location-picker\"]) for the full prop schema, then emit a {\"type\": \"location-picker\"} node in a rippleSpec",
       "id": "widget:location-picker",
       "keywords": [
@@ -3552,6 +3743,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"map\"]) for the full prop schema, then emit a {\"type\": \"map\"} node in a rippleSpec",
       "id": "widget:map",
       "keywords": [
@@ -3571,6 +3763,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"markdown\"]) for the full prop schema, then emit a {\"type\": \"markdown\"} node in a rippleSpec",
       "id": "widget:markdown",
       "keywords": [
@@ -3587,6 +3780,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"master-detail\"]) for the full prop schema, then emit a {\"type\": \"master-detail\"} node in a rippleSpec",
       "id": "widget:master-detail",
       "keywords": [
@@ -3603,6 +3797,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"mention\"]) for the full prop schema, then emit a {\"type\": \"mention\"} node in a rippleSpec",
       "id": "widget:mention",
       "keywords": [
@@ -3620,6 +3815,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"metric\"]) for the full prop schema, then emit a {\"type\": \"metric\"} node in a rippleSpec",
       "id": "widget:metric",
       "keywords": [
@@ -3636,6 +3832,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"modal\"]) for the full prop schema, then emit a {\"type\": \"modal\"} node in a rippleSpec",
       "id": "widget:modal",
       "keywords": [
@@ -3655,6 +3852,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"model-viewer\"]) for the full prop schema, then emit a {\"type\": \"model-viewer\"} node in a rippleSpec",
       "id": "widget:model-viewer",
       "keywords": [
@@ -3671,6 +3869,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"multi-select\"]) for the full prop schema, then emit a {\"type\": \"multi-select\"} node in a rippleSpec",
       "id": "widget:multi-select",
       "keywords": [
@@ -3687,6 +3886,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"news-card\"]) for the full prop schema, then emit a {\"type\": \"news-card\"} node in a rippleSpec",
       "id": "widget:news-card",
       "keywords": [
@@ -3703,6 +3903,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"notification-center\"]) for the full prop schema, then emit a {\"type\": \"notification-center\"} node in a rippleSpec",
       "id": "widget:notification-center",
       "keywords": [
@@ -3721,6 +3922,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"number-input\"]) for the full prop schema, then emit a {\"type\": \"number-input\"} node in a rippleSpec",
       "id": "widget:number-input",
       "keywords": [
@@ -3737,6 +3939,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"ops-dashboard\"]) for the full prop schema, then emit a {\"type\": \"ops-dashboard\"} node in a rippleSpec",
       "id": "widget:ops-dashboard",
       "keywords": [
@@ -3756,6 +3959,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"order-status\"]) for the full prop schema, then emit a {\"type\": \"order-status\"} node in a rippleSpec",
       "id": "widget:order-status",
       "keywords": [
@@ -3776,6 +3980,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"org-chart\"]) for the full prop schema, then emit a {\"type\": \"org-chart\"} node in a rippleSpec",
       "id": "widget:org-chart",
       "keywords": [
@@ -3794,6 +3999,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"otp-input\"]) for the full prop schema, then emit a {\"type\": \"otp-input\"} node in a rippleSpec",
       "id": "widget:otp-input",
       "keywords": [
@@ -3811,6 +4017,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"page-header\"]) for the full prop schema, then emit a {\"type\": \"page-header\"} node in a rippleSpec",
       "id": "widget:page-header",
       "keywords": [
@@ -3827,6 +4034,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"people-picker\"]) for the full prop schema, then emit a {\"type\": \"people-picker\"} node in a rippleSpec",
       "id": "widget:people-picker",
       "keywords": [
@@ -3843,6 +4051,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"permission-matrix\"]) for the full prop schema, then emit a {\"type\": \"permission-matrix\"} node in a rippleSpec",
       "id": "widget:permission-matrix",
       "keywords": [
@@ -3859,6 +4068,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"pipeline-dashboard\"]) for the full prop schema, then emit a {\"type\": \"pipeline-dashboard\"} node in a rippleSpec",
       "id": "widget:pipeline-dashboard",
       "keywords": [
@@ -3877,6 +4087,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"popover\"]) for the full prop schema, then emit a {\"type\": \"popover\"} node in a rippleSpec",
       "id": "widget:popover",
       "keywords": [
@@ -3893,6 +4104,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"pricing-table\"]) for the full prop schema, then emit a {\"type\": \"pricing-table\"} node in a rippleSpec",
       "id": "widget:pricing-table",
       "keywords": [
@@ -3912,6 +4124,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"progress\"]) for the full prop schema, then emit a {\"type\": \"progress\"} node in a rippleSpec",
       "id": "widget:progress",
       "keywords": [
@@ -3928,6 +4141,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"progress-ring\"]) for the full prop schema, then emit a {\"type\": \"progress-ring\"} node in a rippleSpec",
       "id": "widget:progress-ring",
       "keywords": [
@@ -3944,6 +4158,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"project-dashboard\"]) for the full prop schema, then emit a {\"type\": \"project-dashboard\"} node in a rippleSpec",
       "id": "widget:project-dashboard",
       "keywords": [
@@ -3962,6 +4177,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"pros-cons\"]) for the full prop schema, then emit a {\"type\": \"pros-cons\"} node in a rippleSpec",
       "id": "widget:pros-cons",
       "keywords": [
@@ -3979,6 +4195,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"qr\"]) for the full prop schema, then emit a {\"type\": \"qr\"} node in a rippleSpec",
       "id": "widget:qr",
       "keywords": [
@@ -3996,6 +4213,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"quote\"]) for the full prop schema, then emit a {\"type\": \"quote\"} node in a rippleSpec",
       "id": "widget:quote",
       "keywords": [
@@ -4012,6 +4230,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"radio-group\"]) for the full prop schema, then emit a {\"type\": \"radio-group\"} node in a rippleSpec",
       "id": "widget:radio-group",
       "keywords": [
@@ -4028,6 +4247,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"range-bar\"]) for the full prop schema, then emit a {\"type\": \"range-bar\"} node in a rippleSpec",
       "id": "widget:range-bar",
       "keywords": [
@@ -4045,6 +4265,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"rating\"]) for the full prop schema, then emit a {\"type\": \"rating\"} node in a rippleSpec",
       "id": "widget:rating",
       "keywords": [
@@ -4061,6 +4282,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"report-layout\"]) for the full prop schema, then emit a {\"type\": \"report-layout\"} node in a rippleSpec",
       "id": "widget:report-layout",
       "keywords": [
@@ -4080,6 +4302,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"rich-text\"]) for the full prop schema, then emit a {\"type\": \"rich-text\"} node in a rippleSpec",
       "id": "widget:rich-text",
       "keywords": [
@@ -4097,6 +4320,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"ripple-frame\"]) for the full prop schema, then emit a {\"type\": \"ripple-frame\"} node in a rippleSpec",
       "id": "widget:ripple-frame",
       "keywords": [
@@ -4113,6 +4337,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"sankey\"]) for the full prop schema, then emit a {\"type\": \"sankey\"} node in a rippleSpec",
       "id": "widget:sankey",
       "keywords": [
@@ -4130,6 +4355,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"saved-views\"]) for the full prop schema, then emit a {\"type\": \"saved-views\"} node in a rippleSpec",
       "id": "widget:saved-views",
       "keywords": [
@@ -4148,6 +4374,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"search\"]) for the full prop schema, then emit a {\"type\": \"search\"} node in a rippleSpec",
       "id": "widget:search",
       "keywords": [
@@ -4164,6 +4391,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"section\"]) for the full prop schema, then emit a {\"type\": \"section\"} node in a rippleSpec",
       "id": "widget:section",
       "keywords": [
@@ -4180,6 +4408,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"segmented\"]) for the full prop schema, then emit a {\"type\": \"segmented\"} node in a rippleSpec",
       "id": "widget:segmented",
       "keywords": [
@@ -4196,6 +4425,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"select\"]) for the full prop schema, then emit a {\"type\": \"select\"} node in a rippleSpec",
       "id": "widget:select",
       "keywords": [
@@ -4214,6 +4444,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"separator\"]) for the full prop schema, then emit a {\"type\": \"separator\"} node in a rippleSpec",
       "id": "widget:separator",
       "keywords": [
@@ -4231,6 +4462,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"settings-list\"]) for the full prop schema, then emit a {\"type\": \"settings-list\"} node in a rippleSpec",
       "id": "widget:settings-list",
       "keywords": [
@@ -4247,6 +4479,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"sheet\"]) for the full prop schema, then emit a {\"type\": \"sheet\"} node in a rippleSpec",
       "id": "widget:sheet",
       "keywords": [
@@ -4264,6 +4497,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"sidebar\"]) for the full prop schema, then emit a {\"type\": \"sidebar\"} node in a rippleSpec",
       "id": "widget:sidebar",
       "keywords": [
@@ -4282,6 +4516,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"skeleton\"]) for the full prop schema, then emit a {\"type\": \"skeleton\"} node in a rippleSpec",
       "id": "widget:skeleton",
       "keywords": [
@@ -4299,6 +4534,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"slider\"]) for the full prop schema, then emit a {\"type\": \"slider\"} node in a rippleSpec",
       "id": "widget:slider",
       "keywords": [
@@ -4315,6 +4551,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"soul-status\"]) for the full prop schema, then emit a {\"type\": \"soul-status\"} node in a rippleSpec",
       "id": "widget:soul-status",
       "keywords": [
@@ -4331,6 +4568,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"source-card\"]) for the full prop schema, then emit a {\"type\": \"source-card\"} node in a rippleSpec",
       "id": "widget:source-card",
       "keywords": [
@@ -4347,6 +4585,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"sources-bar\"]) for the full prop schema, then emit a {\"type\": \"sources-bar\"} node in a rippleSpec",
       "id": "widget:sources-bar",
       "keywords": [
@@ -4363,6 +4602,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"sparkline\"]) for the full prop schema, then emit a {\"type\": \"sparkline\"} node in a rippleSpec",
       "id": "widget:sparkline",
       "keywords": [
@@ -4379,6 +4619,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"split\"]) for the full prop schema, then emit a {\"type\": \"split\"} node in a rippleSpec",
       "id": "widget:split",
       "keywords": [
@@ -4395,6 +4636,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"stat\"]) for the full prop schema, then emit a {\"type\": \"stat\"} node in a rippleSpec",
       "id": "widget:stat",
       "keywords": [
@@ -4411,6 +4653,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"status-dot\"]) for the full prop schema, then emit a {\"type\": \"status-dot\"} node in a rippleSpec",
       "id": "widget:status-dot",
       "keywords": [
@@ -4427,6 +4670,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"steps\"]) for the full prop schema, then emit a {\"type\": \"steps\"} node in a rippleSpec",
       "id": "widget:steps",
       "keywords": [
@@ -4444,6 +4688,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"switch\"]) for the full prop schema, then emit a {\"type\": \"switch\"} node in a rippleSpec",
       "id": "widget:switch",
       "keywords": [
@@ -4460,6 +4705,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"table\"]) for the full prop schema, then emit a {\"type\": \"table\"} node in a rippleSpec",
       "id": "widget:table",
       "keywords": [
@@ -4476,6 +4722,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"tabs\"]) for the full prop schema, then emit a {\"type\": \"tabs\"} node in a rippleSpec",
       "id": "widget:tabs",
       "keywords": [
@@ -4493,6 +4740,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"terminal\"]) for the full prop schema, then emit a {\"type\": \"terminal\"} node in a rippleSpec",
       "id": "widget:terminal",
       "keywords": [
@@ -4510,6 +4758,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"text\"]) for the full prop schema, then emit a {\"type\": \"text\"} node in a rippleSpec",
       "id": "widget:text",
       "keywords": [
@@ -4526,6 +4775,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"textarea\"]) for the full prop schema, then emit a {\"type\": \"textarea\"} node in a rippleSpec",
       "id": "widget:textarea",
       "keywords": [
@@ -4542,6 +4792,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"ticker\"]) for the full prop schema, then emit a {\"type\": \"ticker\"} node in a rippleSpec",
       "id": "widget:ticker",
       "keywords": [
@@ -4558,6 +4809,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"time-picker\"]) for the full prop schema, then emit a {\"type\": \"time-picker\"} node in a rippleSpec",
       "id": "widget:time-picker",
       "keywords": [
@@ -4574,6 +4826,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"timeline\"]) for the full prop schema, then emit a {\"type\": \"timeline\"} node in a rippleSpec",
       "id": "widget:timeline",
       "keywords": [
@@ -4591,6 +4844,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"toast\"]) for the full prop schema, then emit a {\"type\": \"toast\"} node in a rippleSpec",
       "id": "widget:toast",
       "keywords": [
@@ -4607,6 +4861,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"tooltip\"]) for the full prop schema, then emit a {\"type\": \"tooltip\"} node in a rippleSpec",
       "id": "widget:tooltip",
       "keywords": [
@@ -4623,6 +4878,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"tree\"]) for the full prop schema, then emit a {\"type\": \"tree\"} node in a rippleSpec",
       "id": "widget:tree",
       "keywords": [
@@ -4641,6 +4897,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"tree-table\"]) for the full prop schema, then emit a {\"type\": \"tree-table\"} node in a rippleSpec",
       "id": "widget:tree-table",
       "keywords": [
@@ -4658,6 +4915,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"treemap\"]) for the full prop schema, then emit a {\"type\": \"treemap\"} node in a rippleSpec",
       "id": "widget:treemap",
       "keywords": [
@@ -4675,6 +4933,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"trend\"]) for the full prop schema, then emit a {\"type\": \"trend\"} node in a rippleSpec",
       "id": "widget:trend",
       "keywords": [
@@ -4691,6 +4950,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"virtual-list\"]) for the full prop schema, then emit a {\"type\": \"virtual-list\"} node in a rippleSpec",
       "id": "widget:virtual-list",
       "keywords": [
@@ -4707,6 +4967,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"wizard-layout\"]) for the full prop schema, then emit a {\"type\": \"wizard-layout\"} node in a rippleSpec",
       "id": "widget:wizard-layout",
       "keywords": [
@@ -4726,6 +4987,7 @@
       "surface": ""
     },
     {
+      "gist": "",
       "how": "call get_widget_spec([\"workflow\"]) for the full prop schema, then emit a {\"type\": \"workflow\"} node in a rippleSpec",
       "id": "widget:workflow",
       "keywords": [

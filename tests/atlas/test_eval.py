@@ -24,6 +24,14 @@
 # deep-work / security surfaces, 'user' member vocabulary, the IDF name-weight
 # damper, the five new instruction-filler stopwords, the orientation query).
 # All nine measure rank 1, so the strict-hit baseline rises 21/22 → 30/31.
+# Updated: 2026-07-05 (fix/atlas-relevance-round2, Finding A) — five governance
+# paraphrase cases added. Four ("how do I approve what the agent does",
+# "sign-off", "gate the agent", "gate what the agent can do") measure rank 1
+# after the governance keywords on primitive:instinct + the store's kind-priority
+# bias (a management surface can no longer outrank the governing primitive at
+# equal overlap). The fifth ("approval gate") is pinned rank_within 2 — Instinct
+# co-answers behind the owner-only approval-LEVEL capability, which the small
+# kind bias deliberately does not overpower. Strict-hit baseline 30/31 → 34/36.
 
 from __future__ import annotations
 
@@ -37,15 +45,16 @@ from pocketpaw.atlas.store import AtlasStore
 _CASES_PATH = Path(__file__).parent / "eval_cases.json"
 
 # Measured baseline (2026-07-05, full compiled model of 256 entries, fixpoint
-# stemmer + IDF name-weight damper): 30 of 31 cases put the expected id at
-# rank 1. The single miss: "review the agent's edit before it goes live" ranks
-# branch #3 behind instinct and the edit-pocket skill (generic review/approve
-# vocabulary overlaps instinct's core keywords — known weakness for the
-# ranking-upgrade task). All nine 2026-07-05 accuracy/relevance cases measure
-# rank 1, so the baseline rose from 21/22.
+# stemmer + IDF name-weight damper + round-2 kind-priority bias): 34 of 36
+# cases put the expected id at rank 1. The two non-rank-1: "review the agent's
+# edit before it goes live" ranks branch #3 behind instinct and the edit-pocket
+# skill (generic review/approve vocabulary overlaps instinct's core keywords —
+# known weakness), and "approval gate" ranks instinct #2 behind the owner-only
+# approval-LEVEL capability (a legitimate co-answer the small kind bias does not
+# overpower). Both are within their rank_within budgets.
 # If a ranking change LOWERS the strict-hit count below this, the summary
 # test fails; if it raises it, bump the constant in the same PR.
-STRICT_HIT_BASELINE = 30
+STRICT_HIT_BASELINE = 34
 
 # Search depth for the eval: at least as deep as the largest rank_within,
 # generous enough that "not found at all" is a ranking fact, not a limit
