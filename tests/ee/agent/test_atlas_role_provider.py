@@ -262,6 +262,86 @@ class TestFailClosed:
 # ── construction + delegation ────────────────────────────────────────────────
 
 
+# ── FINDING D — cross-user role bleed on a shared (warm-client) provider ─────
+#
+# The provider instance lives on the atlas MCP server, which is built once and
+# carried on the WARM ClaudeSDKClient shared across users of a workspace/public
+# pocket (its cache key omits user_id). ``prime()`` was idempotent (``_primed``),
+# so it cached the FIRST caller's role forever: a MEMBER querying atlas after an
+# OWNER saw the OWNER's admin/owner capability cards. The fix re-resolves the
+# caller's role per turn from the CURRENT identity ContextVars. This is a
+# DISCOVERY-layer leak (the RBAC gate inside each admin tool still re-checks the
+# live role), but a real capability-disclosure leak worth closing.
+
+
+class TestCrossUserRoleBleed:
+    @pytest.fixture
+    def _patch_user_by_id(self, monkeypatch):
+        """Patch ``_load_user`` to map user_id → role, so priming as one user
+        then switching identity to another reflects the SECOND user's role."""
+
+        def _install(roles_by_user: dict[str, str]):
+            async def _fake_load_user(user_id: str):  # noqa: ANN001
+                role = roles_by_user.get(user_id)
+                if role is None:
+                    return None
+                return _FakeUser([_Membership(WS, role)])
+
+            monkeypatch.setattr(
+                ap.RoleAwareEntitlementProvider, "_load_user", staticmethod(_fake_load_user)
+            )
+
+        return _install
+
+    @pytest.mark.asyncio
+    async def test_member_after_owner_does_not_see_admin_cards(self, _patch_user_by_id):
+        """Prime as OWNER, then a MEMBER queries on the SAME provider instance
+        (shared warm client). The member must NOT inherit the owner's cards.
+
+        BEFORE the fix: ``prime()`` was a no-op on the second turn (``_primed``),
+        so the cached OWNER role level leaked and every admin card stayed visible
+        to the member. AFTER: the role is re-resolved per turn, so the member sees
+        only member-level cards.
+        """
+        _patch_user_by_id({"owner_uid": "owner", "member_uid": "member"})
+        store = _store()
+        provider = RoleAwareEntitlementProvider(scope_key=SCOPE)
+
+        # Turn 1 — OWNER primes the shared provider and sees every admin card.
+        with _identity(user="owner_uid"):
+            await provider.prime()
+            assert _visible_admin_ids(store, provider) == {
+                "capability:admin.members_list",
+                "capability:admin.member_update_role",
+                "capability:admin.workspace_delete",
+            }
+
+        # Turn 2 — a MEMBER on the SAME provider instance. Re-priming must reflect
+        # the member's role, not the owner's cached one.
+        with _identity(user="member_uid"):
+            await provider.prime()
+            assert _visible_admin_ids(store, provider) == {"capability:admin.members_list"}
+
+    @pytest.mark.asyncio
+    async def test_mid_session_role_change_is_reflected(self, _patch_user_by_id):
+        """The P3 case — the SAME user's role changes mid-session (owner→member).
+        A re-prime on the next turn reflects the downgrade instead of freezing the
+        first-seen role."""
+        roles = {"u1": "owner"}
+        _patch_user_by_id(roles)
+        store = _store()
+        provider = RoleAwareEntitlementProvider(scope_key=SCOPE)
+
+        with _identity(user="u1"):
+            await provider.prime()
+            assert "capability:admin.workspace_delete" in _visible_admin_ids(store, provider)
+
+            # The user is demoted to member mid-session.
+            roles["u1"] = "member"
+            await provider.prime()
+            assert _visible_admin_ids(store, provider) == {"capability:admin.members_list"}
+
+
 class TestConstructionAndDelegation:
     def test_rejects_non_ws_scope(self):
         with pytest.raises(ValueError):
