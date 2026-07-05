@@ -84,7 +84,13 @@
         "disable connector",
         "turn off integration",
         "deactivate connector",
-        "disconnect"
+        "disconnect",
+        "disconnect gmail",
+        "disconnect provider",
+        "disconnect integration",
+        "disable integration",
+        "unlink",
+        "revoke connector"
       ],
       "kind": "capability",
       "name": "Disable a connector",
@@ -216,7 +222,13 @@
         "kick",
         "offboard",
         "delete member",
-        "revoke access"
+        "revoke access",
+        "user",
+        "remove user",
+        "delete user",
+        "remove a user",
+        "delete a user",
+        "manage users"
       ],
       "kind": "capability",
       "name": "Remove a member",
@@ -236,7 +248,12 @@
         "demote member",
         "make admin",
         "member role",
-        "update role"
+        "update role",
+        "user",
+        "user role",
+        "change user role",
+        "manage users",
+        "manage members"
       ],
       "kind": "capability",
       "name": "Change a member's role",
@@ -256,7 +273,14 @@
         "who is in the workspace",
         "team",
         "people",
-        "member list"
+        "member list",
+        "user",
+        "users",
+        "list users",
+        "who are my users",
+        "manage users",
+        "manage members",
+        "team management"
       ],
       "kind": "capability",
       "name": "List workspace members",
@@ -1361,9 +1385,9 @@
       ],
       "kind": "primitive",
       "name": "Ripple",
-      "narrative": "Ripple is the generative UI layer of the OS: a pocket (or the chat agent) describes WHAT to show as a rippleSpec — a declarative JSON tree — and Ripple renders it as live Svelte UI from a catalog of ~190 widgets. Reach for it whenever UI needs to be produced from a description: dashboards, charts, forms, feeds, flows. It pairs with Pockets (every pocket canvas is a rippleSpec) and Sites (landing pages render ripple specs on the edge). NOT a water effect — Ripple is the widget rendering layer.",
+      "narrative": "Ripple is the generative UI layer of the OS: a pocket (or the chat agent) describes WHAT to show as a rippleSpec — a declarative JSON tree — and Ripple renders it as live Svelte UI from a catalog of 150+ widgets. Reach for it whenever UI needs to be produced from a description: dashboards, charts, forms, feeds, flows. It pairs with Pockets (every pocket canvas is a rippleSpec) and Sites (landing pages render ripple specs on the edge). NOT a water effect — Ripple is the widget rendering layer.",
       "requires": [],
-      "summary": "Generative UI layer: pockets describe WHAT to show as a rippleSpec; Ripple renders it as live Svelte UI (~190 widgets).",
+      "summary": "Generative UI layer: pockets describe WHAT to show as a rippleSpec; Ripple renders it as live Svelte UI (150+ widgets).",
       "surface": ""
     },
     {
@@ -1802,6 +1826,30 @@
     },
     {
       "how": "",
+      "id": "surface:billing",
+      "keywords": [
+        "billing",
+        "usage",
+        "plan",
+        "plans",
+        "wallet",
+        "invoice",
+        "credits",
+        "subscription",
+        "spend",
+        "upgrade",
+        "top up",
+        "pricing"
+      ],
+      "kind": "surface",
+      "name": "Billing",
+      "narrative": "Billing is the workspace's money-and-plan surface at /settings/billing — a tabbed page: Usage (a consumption graph over the ledger plus the monthly allowance meter), Plans (the tiered plan cards for choosing or changing the subscription), and Billing (the wallet balance, top-up flow, and full ledger history). Point a user here for anything about spend, plan choice, the credit wallet, invoices, or upgrading. Linked from the user menu, the plan badge, and the settings nav; owner action to actually change the paid plan still goes through the human-gated billing_plan_change proposal.",
+      "requires": [],
+      "summary": "Workspace billing surface: three tabs — Usage (consumption graph + allowance), Plans (plan cards), and Billing (wallet, top-up, ledger).",
+      "surface": "/settings/billing"
+    },
+    {
+      "how": "",
       "id": "surface:calendar",
       "keywords": [
         "calendar",
@@ -1924,7 +1972,12 @@
         "widget grid",
         "landing",
         "today",
-        "intent"
+        "intent",
+        "what can you do",
+        "help",
+        "get started",
+        "capabilities",
+        "getting started"
       ],
       "kind": "surface",
       "name": "Home",
@@ -1993,20 +2046,24 @@
       "how": "",
       "id": "surface:mission-control",
       "keywords": [
-        "mission control",
+        "deep work",
+        "approvals",
+        "review approvals",
+        "tray",
         "operator",
         "work feed",
         "cycles",
         "plan",
         "analytics",
-        "in flight"
+        "in flight",
+        "mission control"
       ],
       "kind": "surface",
-      "name": "Mission Control",
-      "narrative": "Mission Control is the operator surface — a unified work feed (Feed, Cycles, Analytics tabs) with per-item actions and project filters. Point a user here to run the workspace's ongoing work: what is in flight, what needs attention, and how it is trending.",
+      "name": "Deep Work",
+      "narrative": "Deep Work is the operator surface at /deep-work — a unified work feed (Feed, Cycles, Analytics tabs) with per-item actions and project filters, plus the approvals tray where a human reviews and resolves the agent proposals the Instinct gate raises. Point a user here to run the workspace's ongoing work: what is in flight, what needs attention, what is waiting on approval, and how it is trending. It moved here from /mission-control on 2026-06-12 (the old URL still 308-redirects); the UI has always been labeled Deep Work.",
       "requires": [],
-      "summary": "Operator surface: unified work feed with cycles, plan, activity, and analytics tabs, filterable by project.",
-      "surface": "/mission-control"
+      "summary": "Operator + approvals surface at /deep-work: unified work feed with cycles, plan, activity, and analytics tabs, plus the approvals tray, filterable by project.",
+      "surface": "/deep-work"
     },
     {
       "how": "",
@@ -2049,6 +2106,30 @@
       ],
       "summary": "Pockets dashboard: the list of workspace pockets plus the canvas detail view for each one.",
       "surface": "/pockets"
+    },
+    {
+      "how": "",
+      "id": "surface:security",
+      "keywords": [
+        "security",
+        "shield",
+        "paw-shield",
+        "defense",
+        "threats",
+        "decisions",
+        "allow-list",
+        "mode",
+        "blocked",
+        "protection"
+      ],
+      "kind": "surface",
+      "name": "Security",
+      "narrative": "Security is the paw-shield console at /security — origin-side AI behavioral defense, gated to workspace owners. It shows the live decisions feed (what the shield allowed or blocked), defense stats, the config (thresholds and allow-list), and the mode switch that arms or disarms the shield. Point an owner here to watch what the defense layer is doing, tune its threat thresholds, manage the allow-list, or change the defense mode. Non-owners see a denied state; the endpoints are owner-gated server-side too.",
+      "requires": [
+        "role:owner"
+      ],
+      "summary": "Owner-gated paw-shield console at /security: live AI-defense decisions feed, stats, config, and the defense-mode switch.",
+      "surface": "/security"
     },
     {
       "how": "",
@@ -2118,16 +2199,13 @@
         "workspace",
         "admin",
         "members",
-        "plan",
-        "billing",
-        "usage",
         "policy",
         "sso",
         "channels"
       ],
       "kind": "surface",
       "name": "Workspace Admin",
-      "narrative": "Workspace Admin is the workspace-scoped settings area: workspace name and plan, members, channels, integrations, memory, policy, SSO, voice, and advanced options. Point a user here for anything that affects the whole workspace — including checking the current plan. There is no dedicated billing route today; plan info lives here.",
+      "narrative": "Workspace Admin is the workspace-scoped settings area: workspace name and plan, members, channels, integrations, memory, policy, SSO, voice, and advanced options. Point a user here for anything that affects the whole workspace — members, policy, SSO, and workspace identity. For billing, usage, plans, and the wallet, point the user at the dedicated /settings/billing surface instead.",
       "requires": [],
       "summary": "Workspace administration: name, plan, members, channels, integrations, memory, policy, SSO, voice, advanced.",
       "surface": "/settings/workspace"

@@ -69,6 +69,7 @@ EXPECTED_SURFACE_IDS = {
     "surface:settings",
     "surface:integrations",
     "surface:workspace-admin",
+    "surface:billing",
     "surface:knowledge",
     "surface:files",
     "surface:studio",
@@ -78,6 +79,7 @@ EXPECTED_SURFACE_IDS = {
     "surface:meetings",
     "surface:activity",
     "surface:audit",
+    "surface:security",
 }
 
 # primitive id → the home route its ``surface`` field must carry (AT-3
