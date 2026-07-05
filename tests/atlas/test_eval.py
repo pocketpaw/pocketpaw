@@ -18,6 +18,12 @@
 # tiny function-word stoplist (``store._STOPWORDS``). Net effect on the eval:
 # strict-hit baseline UNCHANGED at 21/22 (the "review the agent's edit" case
 # even tightened from rank 3 to rank 2, still within its rank_within budget).
+# Updated: 2026-07-05 (fix/atlas-data-accuracy-and-relevance) — the model grew
+# to 256 entries (two new authored surfaces: /settings/billing and /security).
+# Nine cases added pinning the data-accuracy + relevance fixes (billing /
+# deep-work / security surfaces, 'user' member vocabulary, the IDF name-weight
+# damper, the five new instruction-filler stopwords, the orientation query).
+# All nine measure rank 1, so the strict-hit baseline rises 21/22 → 30/31.
 
 from __future__ import annotations
 
@@ -30,16 +36,16 @@ from pocketpaw.atlas.store import AtlasStore
 
 _CASES_PATH = Path(__file__).parent / "eval_cases.json"
 
-# Measured baseline (2026-07-03, full compiled model of 237 entries,
-# fixpoint stemmer): 21 of 22 cases put the expected id at rank 1. The
-# single miss: "review the agent's edit before it goes live" ranks branch
-# #3 behind instinct and the edit-pocket skill (generic review/approve
+# Measured baseline (2026-07-05, full compiled model of 256 entries, fixpoint
+# stemmer + IDF name-weight damper): 30 of 31 cases put the expected id at
+# rank 1. The single miss: "review the agent's edit before it goes live" ranks
+# branch #3 behind instinct and the edit-pocket skill (generic review/approve
 # vocabulary overlaps instinct's core keywords — known weakness for the
-# ranking-upgrade task). The former fabric xfail ("who are our competitors
-# linked to") now hits rank 1 thanks to stemming and was promoted.
+# ranking-upgrade task). All nine 2026-07-05 accuracy/relevance cases measure
+# rank 1, so the baseline rose from 21/22.
 # If a ranking change LOWERS the strict-hit count below this, the summary
 # test fails; if it raises it, bump the constant in the same PR.
-STRICT_HIT_BASELINE = 21
+STRICT_HIT_BASELINE = 30
 
 # Search depth for the eval: at least as deep as the largest rank_within,
 # generous enough that "not found at all" is a ranking fact, not a limit

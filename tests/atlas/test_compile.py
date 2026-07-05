@@ -17,9 +17,18 @@
 # connector-knowledge pin checks limit=10 because the ripple invoice widgets
 # legitimately occupy top name-weight slots (see the test docstring).
 # Widget/skill extraction itself is pinned in test_widgets_skills.py.
+# Updated: 2026-07-05 (fix/atlas-data-accuracy-and-relevance) — new
+# ``TestFactualClaimGuard``: the fidelity check only proves the artifact was
+# recompiled, not that a narrative is TRUE. Two false narratives had shipped
+# and misdirected users (a "no dedicated billing route" claim and a "~190
+# widgets" count); this guard flags negative route-existence claims and
+# hedged numeric counts in authored prose so they can't silently pass a
+# fidelity-only drift check. Surface count assertion bumped 21 → 23 for the
+# new /settings/billing and /security authored surfaces.
 
 import json
 import logging
+import re
 
 from pocketpaw.atlas.compile import (
     AUTHORED_FILES,
@@ -72,7 +81,7 @@ class TestAuthoredFiles:
         assert {e.kind for e in prims.entries} == {"primitive"}
         assert {e.kind for e in surfs.entries} == {"surface"}
         assert len(prims.entries) == 10
-        assert len(surfs.entries) == 21
+        assert len(surfs.entries) == 23
 
     def test_authored_entries_survive_compile_unchanged(self):
         """Every authored entry appears in the compiled model identical
@@ -80,6 +89,61 @@ class TestAuthoredFiles:
         compiled = {e.id: e for e in compile_atlas().entries}
         for entry in load_authored_entries():
             assert compiled[entry.id] == entry
+
+
+class TestFactualClaimGuard:
+    """Flag brittle factual / numeric claims in authored prose.
+
+    The fidelity check (`atlas build --check`) only proves the artifact was
+    recompiled from the sources — it cannot tell a TRUE narrative from a
+    FALSE one. Two false-narrative classes shipped and misdirected users
+    (fixed 2026-07-05): a negative existence claim ("there is no dedicated
+    billing route today") that went stale the moment /settings/billing
+    shipped, and a hedged widget count ("~190 widgets") that drifted from
+    the real 151. This guard catches both patterns so a stale factual claim
+    can't silently pass a fidelity-only drift check. It is deliberately
+    narrow — it flags the specific brittle shapes, not all prose — so it
+    stays low-noise.
+    """
+
+    # Negative existence claims about routes / surfaces / pages: these go
+    # stale exactly when the OS gains the thing they deny.
+    _NEGATIVE_EXISTENCE = re.compile(
+        r"\bno\s+(?:dedicated\s+)?[\w\s]{0,20}?(?:route|surface|page)\b", re.IGNORECASE
+    )
+    # Hedged / approximate counts ("~190 widgets", "about 150 widgets",
+    # "roughly 200 widgets"): an approximation invites silent drift. A
+    # verified exact count ("150+ widgets") is allowed.
+    _APPROX_COUNT = re.compile(
+        r"(?:[~≈]\s*|\b(?:about|around|roughly|approx(?:imately)?)\s+)\d{2,}\b",
+        re.IGNORECASE,
+    )
+
+    def test_no_negative_route_existence_claims(self):
+        offenders = []
+        for entry in load_authored_entries():
+            for field in ("summary", "narrative"):
+                text = getattr(entry, field)
+                if self._NEGATIVE_EXISTENCE.search(text):
+                    offenders.append(f"{entry.id}.{field}: {text}")
+        assert not offenders, (
+            "authored prose asserts a route/surface does NOT exist — these go "
+            "stale when the OS gains it (a false narrative misdirects users). "
+            "State what IS, not what is absent:\n" + "\n".join(offenders)
+        )
+
+    def test_no_hedged_numeric_claims(self):
+        offenders = []
+        for entry in load_authored_entries():
+            for field in ("summary", "narrative"):
+                text = getattr(entry, field)
+                if self._APPROX_COUNT.search(text):
+                    offenders.append(f"{entry.id}.{field}: {text}")
+        assert not offenders, (
+            "authored prose carries a hedged/approximate count (e.g. '~190 "
+            "widgets') — approximations drift silently past the fidelity-only "
+            "check. Use a verified exact count or an open-ended '150+':\n" + "\n".join(offenders)
+        )
 
 
 class TestConnectorExtraction:

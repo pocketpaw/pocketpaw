@@ -18,7 +18,14 @@
         "who is in the workspace",
         "team",
         "people",
-        "member list"
+        "member list",
+        "user",
+        "users",
+        "list users",
+        "who are my users",
+        "manage users",
+        "manage members",
+        "team management"
       ]
     },
     {
@@ -137,7 +144,12 @@
         "demote member",
         "make admin",
         "member role",
-        "update role"
+        "update role",
+        "user",
+        "user role",
+        "change user role",
+        "manage users",
+        "manage members"
       ]
     },
     {
@@ -156,7 +168,13 @@
         "kick",
         "offboard",
         "delete member",
-        "revoke access"
+        "revoke access",
+        "user",
+        "remove user",
+        "delete user",
+        "remove a user",
+        "delete a user",
+        "manage users"
       ]
     },
     {
@@ -229,7 +247,13 @@
         "disable connector",
         "turn off integration",
         "deactivate connector",
-        "disconnect"
+        "disconnect",
+        "disconnect gmail",
+        "disconnect provider",
+        "disconnect integration",
+        "disable integration",
+        "unlink",
+        "revoke connector"
       ]
     },
     {
