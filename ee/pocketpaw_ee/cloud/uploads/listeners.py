@@ -125,8 +125,7 @@ async def index_uploaded_file(event: Event) -> None:
         return
     if getattr(doc, "hide_from_ai", False):
         logger.info(
-            "file_id=%s is hidden from AI (hide_from_ai=True); skipping KB "
-            "index and auto-tagging",
+            "file_id=%s is hidden from AI (hide_from_ai=True); skipping KB index and auto-tagging",
             file_id,
         )
         return
@@ -485,9 +484,7 @@ async def _write_auto_tags(
 
         from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
 
-        updated = await MongoFileStore().set_library_metadata(
-            file_id, workspace_id, tags=merged
-        )
+        updated = await MongoFileStore().set_library_metadata(file_id, workspace_id, tags=merged)
         if updated is None:
             logger.debug(
                 "auto-tag write found no row for file_id=%s workspace=%s",
@@ -495,13 +492,9 @@ async def _write_auto_tags(
                 workspace_id,
             )
         else:
-            logger.info(
-                "auto-tagged file_id=%s with %d tag(s)", file_id, len(merged)
-            )
+            logger.info("auto-tagged file_id=%s with %d tag(s)", file_id, len(merged))
     except Exception:
-        logger.exception(
-            "auto-tagging failed for file_id=%s; KB ingest unaffected", file_id
-        )
+        logger.exception("auto-tagging failed for file_id=%s; KB ingest unaffected", file_id)
 
 
 def _resolve_adapter():
