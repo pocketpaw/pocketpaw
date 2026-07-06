@@ -47,6 +47,20 @@
 # Every other engine value (None / "ripple") keeps the existing ripple marketing
 # brain (`pocketpaw-create-paw-site` + create_landing_site) byte-for-byte. The
 # refine branch (keyed on `pocket_id`) is untouched by the toggle.
+# Updated: 2026-07-06 (feat/sites-crew-create-flow, SC-crew) — the CREATE branch
+# now optionally runs a guided two-phase authoring-crew flow behind the
+# `settings.sites_crew_enabled` flag (default OFF). When the flag is ON, a create
+# meta returns `_crew_create_preamble`: PHASE 1 assesses the request's clarity
+# and interviews the user (one round of 3–5 questions) when it is vague, with a
+# "just build it" escape hatch; PHASE 2 retrieves a design system
+# (`mcp__pocketpaw_design_systems__*`), pulls real assets (stock/icons/palette
+# MCP tools), states a one-line brief, and BUILDS via the same engine skill the
+# single-shot path uses (`pocketpaw-create-svelte-site` on svelte,
+# `pocketpaw-create-paw-site` on ripple) — the skill still owns the SSR page
+# assembly, the crew preamble only feeds it the design system, sections, copy,
+# and assets. When the flag is OFF, the create branch returns
+# `_create_preamble(meta)` byte-for-byte (no behaviour change). The refine/chat
+# branches (keyed on `pocket_id`) are untouched.
 
 from __future__ import annotations
 
@@ -66,7 +80,24 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
     """
     if meta.pocket_id:
         return _refine_preamble(meta)
+    if _crew_enabled():
+        return _crew_create_preamble(meta)
     return _create_preamble(meta)
+
+
+def _crew_enabled() -> bool:
+    """Read the ``sites_crew_enabled`` flag (default OFF).
+
+    Isolated so a config-import failure can never break the create path — a
+    bad read falls back to the shipped single-shot builder, not a 5xx. Mirrors
+    the ``get_settings()`` access pattern in ``handlers/foresight.py``.
+    """
+    try:
+        from pocketpaw.config import get_settings
+
+        return bool(getattr(get_settings(), "sites_crew_enabled", False))
+    except Exception:
+        return False
 
 
 def _create_preamble(meta: SurfaceMeta) -> str:
@@ -180,6 +211,145 @@ def _svelte_create_preamble(meta: SurfaceMeta) -> str:
     )
 
 
+def _crew_create_preamble(meta: SurfaceMeta) -> str:
+    """The /sites create preamble on the guided authoring-crew flow.
+
+    Gated behind ``settings.sites_crew_enabled`` (default OFF). Same visible
+    behaviour as a design agent that asks questions and then builds, realized
+    as ONE agent running two staged phases behind the proven build pipeline:
+
+    * **Phase 1** — a clarity gate. Assess whether the request already covers
+      the design dimensions; if it does, restate and proceed; if it is vague,
+      ask ONE round of 3–5 high-value questions and stop (always with a "just
+      build it" escape hatch).
+    * **Phase 2** — retrieve/adapt a design system, gather real assets, state a
+      one-line brief, then BUILD via the SAME engine skill the single-shot path
+      uses. The skill owns the SSR page assembly + rules; the crew preamble only
+      feeds it the chosen design system, sections, copy, and assets.
+
+    The BUILD step forks on ``meta.engine`` exactly like ``_create_preamble``:
+    ``"svelte"`` → the ``pocketpaw-create-svelte-site`` skill +
+    ``create_svelte_site``; anything else → the ``pocketpaw-create-paw-site``
+    skill + the ripple create/publish path.
+    """
+    route = meta.route_path or "/sites"
+    is_svelte = meta.engine == "svelte"
+    engine_attr = ' engine="svelte"' if is_svelte else ""
+    engine_note = (
+        " On this track the page is authored as hand-written SvelteKit "
+        "components and PRERENDERED to static HTML (no JavaScript runs for the "
+        "visitor on first paint)."
+        if is_svelte
+        else " The page is rendered STATICALLY (no JavaScript runs for the visitor)."
+    )
+    if is_svelte:
+        build_step = (
+            "BUILD via the `pocketpaw-create-svelte-site` skill — invoke it by "
+            "intent (no slash command). It is the Svelte-track authoring brain: "
+            "YOU write the premium hand-written SvelteKit components (Hero, "
+            "Pricing, Faq, …) at the design quality bar, THEME them with the "
+            "chosen design system's tokens + your asset URLs, and it persists "
+            'the source pocket `type="site"` + `pattern="landing"` + '
+            '`engine="svelte"` and publishes it. There is NO rippleSpec and NO '
+            "widget catalog on this track. If the skill is unavailable, author "
+            "the source map yourself and call "
+            "`mcp__pocketpaw_sites_manager__create_svelte_site` then "
+            "`mcp__pocketpaw_sites_manager__publish`. The skill owns the "
+            "component assembly and the resting-state SSR rule — defer to it "
+            "for those; your job is to hand it the design system, sections, "
+            "copy, and real assets."
+        )
+    else:
+        build_step = (
+            "BUILD via the `pocketpaw-create-paw-site` skill — invoke it by "
+            "intent (no slash command). It is the marketing brain: it composes "
+            'the page by conversion role, stamps the source pocket `type="site"` '
+            '+ `pattern="landing"`, and publishes it. THEME the page with the '
+            "chosen design system's tokens + your asset URLs. If the skill is "
+            "unavailable, fall back to "
+            "`mcp__pocketpaw_pocket_specialist__create` (build the "
+            "conversion-ordered landing spec) then "
+            "`mcp__pocketpaw_sites_manager__publish`. The skill owns the page "
+            "assembly and the static-site (SSR) rules — defer to it for those; "
+            "your job is to hand it the design system, sections, copy, and real "
+            "assets."
+        )
+    return (
+        f'<surface kind="sites" route="{route}"{engine_attr} mode="crew" />\n'
+        "<sites-orientation>\n"
+        "The user is on the SITES surface, building a publishable WEBSITE that "
+        "deploys as a standalone static page on the edge — not an in-app pocket "
+        "dashboard. It renders as a real marketing landing page read top to "
+        "bottom as a conversion funnel: nav, hero, services, social proof, "
+        "pricing, a call-to-action, a lead-capture form, footer. Talk about it "
+        "as a 'site' or 'page' — never a 'pocket'. The pocket is only the "
+        f"source spec; it auto-publishes to a live URL.{engine_note} You are "
+        "the AUTHORING CREW: rather than building blindly from one line, you "
+        "run a guided two-phase flow — first make sure you understand the "
+        "request, then design and build a coherent, on-brand site.\n"
+        "</sites-orientation>\n"
+        "<sites-procedure>\n"
+        "Run TWO phases. Do not skip Phase 1, and do not start building until "
+        "Phase 1 is resolved.\n"
+        "\n"
+        "PHASE 1 — CLARITY GATE + INTERVIEW.\n"
+        "Assess the user's request across these dimensions: (a) the purpose / "
+        "goal of the site, (b) the business and its audience, (c) the key "
+        "sections they want, (d) brand — colors, vibe, any existing logo or "
+        "brand assets, (e) voice / tone.\n"
+        "- IF the request ALREADY covers most of these dimensions (a detailed "
+        "prompt) → do NOT interrogate. Briefly restate the plan in one or two "
+        "lines and proceed straight to Phase 2.\n"
+        "- IF the request is VAGUE (e.g. 'make me a site for my cafe') → ask "
+        "3–5 SHORT, high-value questions in ONE message covering the biggest "
+        "gaps: what the site should achieve, the vibe or brands they admire, "
+        "the must-have sections, and any brand colors. THEN STOP and wait for "
+        "the reply — do not build yet. Always offer an out: end with '…or say "
+        "\"just build it\" and I'll pick sensible defaults.' NEVER ask more "
+        "than ONE round of questions; if the user already gave detail, or "
+        "replies, or says 'just build it', move on to Phase 2 immediately.\n"
+        "\n"
+        "PHASE 2 — DESIGN + BUILD.\n"
+        "1. PICK A LOOK. Call "
+        "`mcp__pocketpaw_design_systems__list_design_systems` to see the "
+        "library, choose the best fit by industry + aesthetic, then "
+        "`mcp__pocketpaw_design_systems__get_design_system` with its slug to "
+        "load the DESIGN.md + tokens.css. THEME the site with those tokens — "
+        "colors, type scale, spacing, component styles — and honor the "
+        "system's rationale and anti-patterns.\n"
+        "2. CUSTOM COLORS. If the user gave a brand color, call "
+        "`mcp__pocketpaw_palette__scale_from_color` with the hex to get a full "
+        "scale and OVERRIDE the design system's primary with it. If they gave "
+        "a logo or reference-image URL, call "
+        "`mcp__pocketpaw_palette__extract_palette` on it and key the palette "
+        "off that.\n"
+        "3. REAL ASSETS. Use `mcp__pocketpaw_stock__search_stock_images` for "
+        "hero and section photography and `mcp__pocketpaw_icons__search_icons` "
+        "for feature icons. Wire the REAL returned URLs into the page — never "
+        "leave placeholders or invent image paths.\n"
+        "4. BRIEF. State a one-line brief back so the user sees the plan — e.g. "
+        "'Building a [design-system vibe] site for [business] with sections "
+        "[…], palette [primary].' Then build.\n"
+        f"5. {build_step}\n"
+        "6. PUBLISH and SHOW the live `url` plus a link to /sites where the "
+        "user manages their sites.\n"
+        "\n"
+        "ROBUSTNESS (this flow must never stall or disappoint in real use):\n"
+        "- If ANY tool errors (design-system, stock, palette, or icons), do "
+        "NOT retry blindly or stall. Proceed with sensible defaults — a "
+        "reasonable built-in look, generic-but-tasteful section imagery — and "
+        "briefly note what you fell back on. A tool failure must NEVER block "
+        "the build.\n"
+        "- ONE round of questions maximum. If the user already gave detail or "
+        "says 'just build it', skip straight to Phase 2 with sensible "
+        "defaults.\n"
+        "- Never claim a publish that didn't happen — relay the real publish "
+        "error and show the real `url`. No phantom URLs.\n"
+        "- Keep the 'site' / 'page' vocabulary throughout; never say 'pocket'.\n"
+        "</sites-procedure>"
+    )
+
+
 def _refine_preamble(meta: SurfaceMeta) -> str:
     """The /sites/[siteId] refine preamble — edit an EXISTING published site.
 
@@ -239,4 +409,4 @@ def _refine_preamble(meta: SurfaceMeta) -> str:
     )
 
 
-__all__ = ["build_preamble"]
+__all__ = ["build_preamble", "_crew_create_preamble"]

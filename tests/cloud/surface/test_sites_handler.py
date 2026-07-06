@@ -36,8 +36,20 @@
 # svelte-engine create test with the strengthened preamble: the directive moved
 # from "prefer" to "this track is MANDATORY ... Use the skill", so the test now
 # pins "mandatory" instead of "prefer".
+# Updated: 2026-07-06 (feat/sites-crew-create-flow, SC-crew) — the CREATE branch
+# now optionally runs a guided two-phase authoring-crew flow behind the
+# `settings.sites_crew_enabled` flag (default OFF). The crew tests at the bottom
+# pin: (1) flag OFF → the create branch is BYTE-FOR-BYTE `_create_preamble` for
+# both ripple and svelte metas, and refine is untouched; (2) flag ON → a create
+# meta returns the crew preamble carrying the two-phase structure (interview +
+# build), the design-system / stock / palette MCP tool ids, the "just build it"
+# escape hatch, and the correct engine skill (`pocketpaw-create-svelte-site` on
+# the svelte track, `pocketpaw-create-paw-site` otherwise). The flag is toggled
+# via monkeypatch of `pocketpaw.config.get_settings` (not process env).
 
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import pytest
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
@@ -276,3 +288,148 @@ async def test_engine_threads_through_meta_from_request() -> None:
 
     meta = _meta_from_request(SurfaceMetaRequest(engine="svelte", route_path="/sites"))
     assert meta.engine == "svelte"
+
+
+# --- Authoring-crew create flow (behind settings.sites_crew_enabled) ---
+#
+# Default OFF: the create branch returns `_create_preamble(meta)` byte-for-byte.
+# Flag ON: a create meta returns the guided two-phase crew preamble. The flag is
+# toggled by monkeypatching `pocketpaw.config.get_settings` (the `_crew_enabled`
+# helper imports it lazily), never via leaking process env.
+
+
+def _set_crew_flag(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
+    """Toggle `sites_crew_enabled` by patching `config.get_settings`."""
+    from pocketpaw import config
+
+    fake = SimpleNamespace(sites_crew_enabled=enabled)
+    monkeypatch.setattr(config, "get_settings", lambda *a, **k: fake)
+
+
+async def test_crew_flag_off_is_byte_identical_ripple(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flag OFF → a ripple create meta returns `_create_preamble` byte-for-byte."""
+    _set_crew_flag(monkeypatch, False)
+    meta = SurfaceMeta(route_path="/sites")
+    out = await sites_handler.build_preamble(WORKSPACE, USER, meta)
+    assert out == sites_handler._create_preamble(meta)
+    assert 'mode="crew"' not in out
+
+
+async def test_crew_flag_off_is_byte_identical_svelte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flag OFF → a svelte create meta returns `_create_preamble` byte-for-byte."""
+    _set_crew_flag(monkeypatch, False)
+    meta = SurfaceMeta(route_path="/sites", engine="svelte")
+    out = await sites_handler.build_preamble(WORKSPACE, USER, meta)
+    assert out == sites_handler._create_preamble(meta)
+    assert 'mode="crew"' not in out
+
+
+async def test_crew_flag_off_default_settings_still_single_shot() -> None:
+    """With no monkeypatch (real settings, flag defaults False) the create branch
+    is the shipped single-shot builder — the flag can't regress by default."""
+    meta = SurfaceMeta(route_path="/sites")
+    out = await sites_handler.build_preamble(WORKSPACE, USER, meta)
+    assert out == sites_handler._create_preamble(meta)
+
+
+async def test_crew_flag_on_returns_two_phase_ripple(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Flag ON → a ripple create meta returns the crew preamble with BOTH phases:
+    an interview/questions instruction AND a build instruction."""
+    _set_crew_flag(monkeypatch, True)
+    out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    lower = out.lower()
+
+    # Still the sites surface, tagged as the crew flow.
+    assert '<surface kind="sites"' in out
+    assert 'mode="crew"' in out
+    # Two-phase structure: a clarity/interview front AND a build back.
+    assert "phase 1" in lower
+    assert "phase 2" in lower
+    assert "question" in lower  # the interview instruction
+    assert "build" in lower
+
+
+async def test_crew_flag_on_names_design_and_asset_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The crew preamble names the design-system, stock, and custom-color tool
+    ids so the agent themes the site and wires real assets."""
+    _set_crew_flag(monkeypatch, True)
+    out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+
+    assert "mcp__pocketpaw_design_systems__list_design_systems" in out
+    assert "mcp__pocketpaw_design_systems__get_design_system" in out
+    assert "mcp__pocketpaw_stock__search_stock_images" in out
+    # Custom-color path: brand hex → full scale.
+    assert "mcp__pocketpaw_palette__scale_from_color" in out
+
+
+async def test_crew_flag_on_has_just_build_it_escape_hatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The interview must always offer the 'just build it' out and cap at one
+    round of questions so the flow never traps the user."""
+    _set_crew_flag(monkeypatch, True)
+    out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    lower = out.lower()
+
+    assert "just build it" in lower
+    # One round of questions maximum — the anti-interrogation guard.
+    assert "one round" in lower or "never ask more than one" in lower
+
+
+async def test_crew_flag_on_ripple_uses_ripple_skill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On the ripple (default) engine the crew BUILD step uses the ripple
+    marketing skill, not the svelte one."""
+    _set_crew_flag(monkeypatch, True)
+    out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+
+    assert "pocketpaw-create-paw-site" in out
+    assert "create-svelte-site" not in out
+    assert 'engine="svelte"' not in out
+
+
+async def test_crew_flag_on_svelte_uses_svelte_skill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On the svelte engine the crew BUILD step uses the svelte authoring skill
+    and stamps engine="svelte" — still a crew preamble with the design tools."""
+    _set_crew_flag(monkeypatch, True)
+    out = await sites_handler.build_preamble(
+        WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="svelte")
+    )
+    lower = out.lower()
+
+    assert 'mode="crew"' in out
+    assert 'engine="svelte"' in out
+    assert "pocketpaw-create-svelte-site" in out
+    # Same design-system + interview machinery on both engines.
+    assert "mcp__pocketpaw_design_systems__list_design_systems" in out
+    assert "phase 1" in lower
+    # The svelte build step names its create/publish fallback tools.
+    assert "mcp__pocketpaw_sites_manager__create_svelte_site" in out
+
+
+async def test_crew_flag_on_leaves_refine_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The flag only governs the CREATE branch — a refine meta (pocket_id set)
+    still returns the refine preamble, never the crew flow."""
+    _set_crew_flag(monkeypatch, True)
+    out = await sites_handler.build_preamble(
+        WORKSPACE,
+        USER,
+        SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
+    )
+
+    assert 'mode="refine"' in out
+    assert 'mode="crew"' not in out
+    assert "phase 1" not in out.lower()
