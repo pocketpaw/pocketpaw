@@ -36,6 +36,12 @@ Changes:
     routes to ``build_flow`` (the preset shorthand), JSON-string args are
     coerced, and a ``FlowBuildError`` is surfaced verbatim so the model can
     fix the graph and retry.
+  - 2026-07-03 (fix/mcp-tool-json-string-args): ``get_widget_spec`` and
+    ``get_inline_widget_help`` now run their ``types`` array through the shared
+    ``coerce_json_object_args`` helper, so a ``types`` value the model sent as a
+    JSON string (``'["chart","stat"]'``) is decoded instead of mistaken for a
+    single type name. Same class of fix as start_flow's ``_coerce_json_arg``,
+    now shared across every in-process MCP handler.
 """
 
 from __future__ import annotations
@@ -43,6 +49,8 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+
+from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +74,7 @@ async def _get_widget_spec_handler(args: dict) -> dict:
     from pocketpaw.config import get_settings
     from pocketpaw.ripple.manifest import format_for_prompt, get_manifest
 
+    args = coerce_json_object_args(args, ("types",))
     raw_types = args.get("types") or []
     if isinstance(raw_types, str):
         raw_types = [raw_types]
@@ -126,6 +135,7 @@ async def _get_inline_widget_help_handler(args: dict) -> dict:
     """
     from pocketpaw.ripple._inline_core import widget_help
 
+    args = coerce_json_object_args(args, ("types",))
     types = args.get("types") or []
     if not isinstance(types, list):
         types = []

@@ -1079,6 +1079,7 @@ async def create_invite(
             kind="invite",
             title=f"You were invited to join {doc.name}",
             body="",
+            actor_id=ctx.user_id,
             source=NotificationSource(
                 type="invite",
                 id=invite.id,  # the invite document id, not the token
@@ -1158,6 +1159,7 @@ async def bulk_create_invites(
                 kind="invite",
                 title=f"You were invited to join {doc.name}",
                 body="",
+                actor_id=ctx.user_id,
                 source=NotificationSource(
                     type="invite",
                     id=invite.id,

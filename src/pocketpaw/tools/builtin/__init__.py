@@ -27,6 +27,9 @@
 #     through file_versions.service.update_file_content so every edit lands as a
 #     new revertable version. Registered in _EE_TOOLS at trust_level "medium"
 #     (mutating, matching the FL-3 verbs).
+#   - 2026-07-04: Added StockImageTool — search free Pexels/Unsplash stock photos
+#     for Paw Sites imagery (shared search_stock_images() helper; EE MCP surface
+#     for the SDK backend).
 
 import importlib as _importlib
 
@@ -44,6 +47,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "WebSearchTool": (".web_search", "WebSearchTool"),
     "UrlExtractTool": (".url_extract", "UrlExtractTool"),
     "ImageGenerateTool": (".image_gen", "ImageGenerateTool"),
+    "StockImageTool": (".stock_images", "StockImageTool"),
     "CreateSkillTool": (".skill_gen", "CreateSkillTool"),
     "GmailSearchTool": (".gmail", "GmailSearchTool"),
     "GmailReadTool": (".gmail", "GmailReadTool"),

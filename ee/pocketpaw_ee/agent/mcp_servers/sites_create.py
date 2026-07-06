@@ -138,6 +138,8 @@ import json
 import logging
 from typing import Any
 
+from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
+
 from ._audit import record_tool_call
 
 logger = logging.getLogger(__name__)
@@ -398,6 +400,11 @@ async def _create_landing_site_handler(args: dict) -> dict:
         ok=True,
     )
 
+    # Decode a `content` object the model serialized as a JSON string. Note:
+    # for a LARGE payload the model's stringified JSON is often malformed
+    # (unescaped quotes in the copy), which json.loads can't recover — those
+    # still fall to the error below. This rescues the well-formed-string case.
+    args = coerce_json_object_args(args, ("content",))
     content = args.get("content")
     if not isinstance(content, dict) or not content:
         return _error_response(
@@ -588,6 +595,7 @@ async def _create_dynamic_site_handler(args: dict) -> dict:
         ok=True,
     )
 
+    args = coerce_json_object_args(args, ("spec",))
     spec = args.get("spec")
     if not isinstance(spec, dict) or not spec:
         return _error_response(
@@ -769,6 +777,7 @@ async def _create_svelte_site_handler(args: dict) -> dict:
         ok=True,
     )
 
+    args = coerce_json_object_args(args, ("source",))
     source = args.get("source")
     if not isinstance(source, dict) or not source:
         return _error_response(
@@ -1001,6 +1010,7 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
     # P3 — the edit can be a TARGETED diff (``edits``) OR a full rewrite
     # (``new_source``); exactly one is required. ``edits`` is preferred for small
     # changes so the agent emits only the diff, not the whole file.
+    args = coerce_json_object_args(args, ("edits",))
     edits = args.get("edits")
     new_source = args.get("new_source")
     has_edits = edits is not None

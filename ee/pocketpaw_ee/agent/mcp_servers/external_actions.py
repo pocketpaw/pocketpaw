@@ -51,6 +51,8 @@ import json
 import logging
 from typing import Any
 
+from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
+
 from ._audit import record_tool_call
 
 logger = logging.getLogger(__name__)
@@ -129,6 +131,9 @@ async def _propose_external_action_handler(args: dict) -> dict:
         ok=True,
     )
 
+    # `params` (the connector call payload) may arrive as a JSON string; decode
+    # it so a well-formed proposal isn't rejected before it reaches the gate.
+    args = coerce_json_object_args(args, ("params",))
     connector = args.get("connector")
     action = args.get("action")
     params = args.get("params")
