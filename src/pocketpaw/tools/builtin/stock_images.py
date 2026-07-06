@@ -139,9 +139,7 @@ def _search_unsplash(
                         "url": url,
                         "alt": (p.get("alt_description") or p.get("description") or query).strip(),
                         "credit": f"Photo by {name} on Unsplash",
-                        "credit_url": (user.get("links") or {}).get(
-                            "html", "https://unsplash.com"
-                        ),
+                        "credit_url": (user.get("links") or {}).get("html", "https://unsplash.com"),
                         "provider": "unsplash",
                         "width": p.get("width"),
                         "height": p.get("height"),
