@@ -72,16 +72,22 @@ distinctive type, a bespoke animated hero graphic, real testimonials, a
 priced pricing table, a native FAQ, a lead form. **Match that bar.** Use
 the design skills to get there:
 
-- Invoke **`frontend-design`** (or **`taste-skill`**) for the look: a real
-  type system, a considered palette, generous spacing, a hero with a
-  bespoke visual — not a centered headline on a gradient. Avoid generic
-  "AI landing page" aesthetics.
-- **Also apply the `design-taste-svelte` skill** while authoring the
-  components — it's the Svelte-specific, static-safe taste layer (layout
-  variance, materiality, CSS-first motion, and the anti-slop "AI tells"
-  list) that sits ON TOP of the chosen design system's tokens. It mirrors
-  the prerender resting-state rule below, so its taste never fights the
-  static render.
+- **Run `design-taste-svelte` FIRST — before you author a line.** It is the
+  Svelte-specific, static-safe taste brain, and its opening steps are what
+  stop every site looking the same: (1) read the room and declare a one-line
+  **Design Read** (business kind, audience, vibe), (2) pick an aesthetic
+  **direction/family** (clean-tech / soft-premium / editorial-luxury /
+  warm-minimalist / brutalist / dark-tech) that sets the palette, type,
+  materiality, and motion, (3) set the three dials from the read. THEN author
+  the sections honouring that direction. Do not skip to a default clean house
+  style — the Design Read + family pick is the difference between "designed
+  for this business" and "generic AI landing page". The skill also carries the
+  layout-variance, materiality, CSS-first-motion, and anti-slop "AI tells"
+  rules, and it mirrors the prerender resting-state rule below so its taste
+  never fights the static render.
+- Invoke **`frontend-design`** (or **`taste-skill`**) alongside it for extra
+  look reference: a real type system, generous spacing, a hero with a bespoke
+  visual — not a centered headline on a gradient.
 - One **component per section**. The page is an ordered list of sections;
   each section owns its own copy, data, styles, and motion. This is the
   whole edit-model payoff: to refine the hero later you edit one file.
