@@ -161,6 +161,11 @@ extraction = [
     "trafilatura",
     "python-docx>=1.1.0",
     "pytesseract>=0.3.10",
+    # PyMuPDF (fitz) rasterizes image-heavy PDF pages so the Gemini adapter can
+    # caption scanned/diagram pages (FL-15). Pure-wheel, no system poppler.
+    # Lazy-imported in gemini_flash.py, so it stays optional. Floor 1.24.0
+    # (released 2024, well past the workspace 7-day supply-chain min-age rule).
+    "pymupdf>=1.24.0",
 ]
 # Firestore→Fabric ingest worker (ee/pocketpaw_ee/cloud/fabric_ingest). The
 # reader lazy-imports google-cloud-firestore behind a Protocol, so it stays

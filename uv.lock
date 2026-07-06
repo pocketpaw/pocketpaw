@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -5357,6 +5357,7 @@ requires-dist = [
     { name = "pocketpaw", specifier = "~=0.4.16" },
     { name = "pwdlib", extras = ["argon2"], specifier = ">=0.2.0" },
     { name = "py-vapid", specifier = ">=1.9.0" },
+    { name = "pymupdf", marker = "extra == 'extraction'", specifier = ">=1.24.0" },
     { name = "pyotp", specifier = ">=2.9.0" },
     { name = "pypdf", marker = "extra == 'extraction'" },
     { name = "pytesseract", marker = "extra == 'extraction'", specifier = ">=0.3.10" },
