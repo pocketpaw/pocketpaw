@@ -58,6 +58,7 @@ async def _on_meeting_scheduled(data: dict[str, Any]) -> None:
         return
 
     provider = data.get("provider") or source or "meeting"
+    created_by = data.get("created_by") or data.get("organizer_user_id")
     for recipient in recipients:
         await _create(
             workspace_id=workspace_id,
@@ -66,6 +67,7 @@ async def _on_meeting_scheduled(data: dict[str, Any]) -> None:
             title="Meeting scheduled",
             body=f"A {_pretty(provider)} meeting was scheduled.",
             meeting_id=meeting_id,
+            actor_id=created_by,
         )
 
 
@@ -112,6 +114,7 @@ async def _on_meeting_cancelled(data: dict[str, Any]) -> None:
         title="Meeting cancelled",
         body="A scheduled meeting was cancelled.",
         meeting_id=meeting_id,
+        actor_id=data.get("cancelled_by_user_id"),
     )
 
 
@@ -184,6 +187,7 @@ async def _create(
     body: str,
     meeting_id: str,
     room_id: str | None = None,
+    actor_id: str | None = None,
 ) -> None:
     """Wrap notifications_service.create — late import to avoid circular
     deps and tolerate the service being unavailable in unit-test contexts."""
@@ -196,6 +200,7 @@ async def _create(
             kind=kind,
             title=title,
             body=body,
+            actor_id=actor_id,
             # type=kind so the frontend's sourceUrl switch can deep-link
             # (meeting_started → ?join=meeting-{id}, meeting_reminder → chat, etc.)
             source=NotificationSource(type=kind, id=meeting_id, room_id=room_id),

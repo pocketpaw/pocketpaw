@@ -833,6 +833,7 @@ async def add_members(
             kind="group_invite",
             title=f"You were added to {group_name}" if group_name else "You were added to a group",
             body="",
+            actor_id=user_id,
             source=NotificationSource(
                 type="message",
                 id=group_id,
