@@ -4,37 +4,37 @@
  * This is a DARK theme: the canvas is neutral-900 and text is the light end of
  * the neutral scale. Created: 2026-07-06 (feat/sites-crew-design-systems, SC-7b). */
 :root {
-  /* Colors — primary (champagne gold), secondary (emerald), neutral (warm charcoal) */
-  --color-primary-50: #F9F7F3;
-  --color-primary-100: #F4F0E6;
-  --color-primary-200: #ECE2CB;
-  --color-primary-300: #E4D1A5;
-  --color-primary-400: #DABD79;
-  --color-primary-500: #D0A94E;
-  --color-primary-600: #BF9533;
-  --color-primary-700: #9C7A2B;
-  --color-primary-800: #755D24;
-  --color-primary-900: #4E3F1B;
-  --color-secondary-50: #F4F9F7;
-  --color-secondary-100: #E7F3EE;
-  --color-secondary-200: #CDEADE;
-  --color-secondary-300: #A9DFCA;
-  --color-secondary-400: #80D3B2;
-  --color-secondary-500: #57C79A;
-  --color-secondary-600: #3DB685;
-  --color-secondary-700: #33946D;
-  --color-secondary-800: #297054;
-  --color-secondary-900: #1E4A39;
-  --color-neutral-50: #F6F6F6;
-  --color-neutral-100: #EDECEB;
-  --color-neutral-200: #D9D8D6;
-  --color-neutral-300: #C0BDB9;
-  --color-neutral-400: #A39F99;
-  --color-neutral-500: #878178;
-  --color-neutral-600: #6C6760;
-  --color-neutral-700: #514D48;
-  --color-neutral-800: #312E2B;
-  --color-neutral-900: #191715;
+  /* Colors — primary (jade emerald), secondary (cool steel), neutral (cool graphite) */
+  --color-primary-50: #E8FDF6;
+  --color-primary-100: #C7FAE9;
+  --color-primary-200: #94F5D4;
+  --color-primary-300: #61F0C0;
+  --color-primary-400: #32EBAD;
+  --color-primary-500: #16DF9C;
+  --color-primary-600: #12BA82;
+  --color-primary-700: #0E9568;
+  --color-primary-800: #0A6B4B;
+  --color-primary-900: #06412D;
+  --color-secondary-50: #EFF2F5;
+  --color-secondary-100: #D9E0E8;
+  --color-secondary-200: #B6C3D2;
+  --color-secondary-300: #94A7BD;
+  --color-secondary-400: #748DAA;
+  --color-secondary-500: #5D7898;
+  --color-secondary-600: #4E647E;
+  --color-secondary-700: #3E5065;
+  --color-secondary-800: #2D3A49;
+  --color-secondary-900: #1B232C;
+  --color-neutral-50: #F2F2F3;
+  --color-neutral-100: #DFE0E1;
+  --color-neutral-200: #C3C4C6;
+  --color-neutral-300: #A6A8AB;
+  --color-neutral-400: #8B8E92;
+  --color-neutral-500: #77797E;
+  --color-neutral-600: #636569;
+  --color-neutral-700: #4F5154;
+  --color-neutral-800: #393A3C;
+  --color-neutral-900: #232325;
   /* Dark-theme roles: canvas is the dark end, text is the light end */
   --color-surface: var(--color-neutral-900);
   --color-surface-raised: var(--color-neutral-800);
@@ -77,9 +77,9 @@
   --radius-xl: 0.75rem;
   --radius-full: 9999px;
 
-  /* Elevation — deep shadow + a soft gold glow (xl) for the focal accent */
+  /* Elevation — deep shadow + a soft emerald glow (xl) for the focal accent */
   --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4);
   --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.5);
   --shadow-lg: 0 20px 50px rgba(0, 0, 0, 0.6);
-  --shadow-xl: 0 0 40px rgba(208, 169, 78, 0.25);
+  --shadow-xl: 0 0 40px rgba(22, 223, 156, 0.20);
 }

@@ -2,7 +2,7 @@
 name: Northwind
 slug: clean-saas
 description: >-
-  A calm, cool-neutral SaaS system with one confident indigo accent — the
+  A calm, cool-neutral SaaS system with one confident cobalt-blue accent — the
   trust-first look of a modern product landing page. Generous whitespace,
   restrained shadows, precise type. Inspired by the clarity of Linear/Stripe-era
   product design without copying any brand's tokens.
@@ -10,39 +10,39 @@ aesthetic: [clean, modern, professional, trustworthy, minimal, cool]
 industries: [saas, b2b-software, fintech, developer-tools, startup, analytics]
 page_types: [landing, pricing, product, docs, changelog, waitlist]
 colors:
-  primary:   # indigo — the single confident accent
-    "50": "#F3F2FA"
-    "100": "#E6E4F6"
-    "200": "#CAC6F0"
-    "300": "#A39CEC"
-    "400": "#766CE8"
-    "500": "#4A3CE2"
-    "600": "#2E1FD3"
-    "700": "#271BAC"
-    "800": "#211881"
-    "900": "#191355"
+  primary:   # cobalt — the single confident accent, no violet
+    "50": "#E8EEFD"
+    "100": "#C7D7FA"
+    "200": "#94B2F5"
+    "300": "#608DF0"
+    "400": "#316CEC"
+    "500": "#1554E0"
+    "600": "#1146BB"
+    "700": "#0E3895"
+    "800": "#0A286B"
+    "900": "#061941"
   secondary:   # supportive teal — used sparingly for a second data hue
-    "50": "#F3F8F9"
-    "100": "#E6F2F4"
-    "200": "#CAE7EC"
-    "300": "#A4DAE5"
-    "400": "#77CBDC"
-    "500": "#4BBCD2"
-    "600": "#30AAC2"
-    "700": "#298A9E"
-    "800": "#226977"
-    "900": "#1A464F"
+    "50": "#E9F9FB"
+    "100": "#CAF1F6"
+    "200": "#9AE4EE"
+    "300": "#6AD7E6"
+    "400": "#3ECBDF"
+    "500": "#23BCD2"
+    "600": "#1D9CAF"
+    "700": "#177D8C"
+    "800": "#115A65"
+    "900": "#0A373D"
   neutral:   # cool slate — text, surfaces, borders
-    "50": "#F5F6F7"
-    "100": "#ECEDEF"
-    "200": "#D8DADE"
-    "300": "#BFC3CA"
-    "400": "#A1A7B2"
-    "500": "#838B9B"
-    "600": "#6C7586"
-    "700": "#58606F"
-    "800": "#434956"
-    "900": "#2E323B"
+    "50": "#F1F2F3"
+    "100": "#DEE0E3"
+    "200": "#A0A7B0"
+    "300": "#A0A7B0"
+    "400": "#848D99"
+    "500": "#6F7886"
+    "600": "#5D646F"
+    "700": "#4A5059"
+    "800": "#353940"
+    "900": "#202327"
 typography:
   fonts:
     display: "'Plus Jakarta Sans', system-ui, sans-serif"
@@ -100,7 +100,7 @@ components:
 
 Northwind is the look of software that expects to be trusted before it is
 understood. It leans on cool slate neutrals, deliberate whitespace, and a single
-indigo accent that appears only where it earns attention: the primary call to
+cobalt accent that appears only where it earns attention: the primary call to
 action, an active nav item, a focused field. Everything else recedes so the
 product screenshot and the value proposition carry the page.
 
@@ -110,12 +110,12 @@ the restraint is the message.
 
 ## Colors
 
-- **Primary (indigo)** is the accent, not the background. Reserve `primary.500`
+- **Primary (cobalt)** is the accent, not the background. Reserve `primary.500`
   and `primary.600` for interactive emphasis — buttons, links, focus rings,
   selected states. On a landing page it should cover well under 10% of the
   pixels. That scarcity is what makes it read as confident rather than loud.
 - **Secondary (teal)** is a supporting hue for a second data series, an
-  informational badge, or a subtle gradient partner to indigo. Never let it
+  informational badge, or a subtle gradient partner to cobalt. Never let it
   compete with primary for the CTA.
 - **Neutral (cool slate)** does the real work. `neutral.900` for headings,
   `neutral.600`–`700` for body copy, `neutral.200`–`300` for borders and
@@ -181,17 +181,17 @@ component type and never mix three radii in a single card.
 ## Do's and Don'ts
 
 **Do**
-- Let the indigo be rare. One primary action per view.
+- Let the cobalt be rare. One primary action per view.
 - Use `neutral.700` for body copy on white — it reads more premium than black.
 - Alternate `#FFFFFF` and `neutral.50` section backgrounds to segment a long page.
 - Keep shadows tinted with the slate hue for cohesion.
 
 **Don't**
-- ❌ Don't paint large surfaces in `primary.500` — indigo is an accent, not a
-  brand wash. A full indigo hero reads as a template, not a product.
+- ❌ Don't paint large surfaces in `primary.500` — cobalt is an accent, not a
+  brand wash. A full cobalt hero reads as a template, not a product.
 - ❌ Don't center every section. Center the hero; left-align dense feature copy
   so the eye has an anchor. Centered-everything is the canonical "AI slop" tell.
-- ❌ Don't stack teal and indigo at equal weight — the teal is support, not a
+- ❌ Don't stack teal and cobalt at equal weight — the teal is support, not a
   co-lead.
 - ❌ Don't use pure-black shadows or pure-black text; both feel harsh against the
   cool neutrals.

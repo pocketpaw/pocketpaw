@@ -3,44 +3,44 @@
  * ripple and svelte render engines consume. Keep in lockstep with DESIGN.md.
  * Created: 2026-07-06 (feat/sites-crew-design-systems, SC-7b). */
 :root {
-  /* Colors — primary (terracotta), secondary (sage), neutral (warm sand) */
-  --color-primary-50: #F9F5F3;
-  --color-primary-100: #F4EAE6;
-  --color-primary-200: #EDD4CA;
-  --color-primary-300: #E6B6A3;
-  --color-primary-400: #DD9376;
-  --color-primary-500: #D47149;
-  --color-primary-600: #C4592E;
-  --color-primary-700: #A04927;
-  --color-primary-800: #783A21;
-  --color-primary-900: #502819;
-  --color-secondary-50: #F5F8F5;
-  --color-secondary-100: #EBF1EA;
-  --color-secondary-200: #D5E4D3;
-  --color-secondary-300: #B8D5B4;
-  --color-secondary-400: #97C390;
-  --color-secondary-500: #76B06D;
-  --color-secondary-600: #5E9D55;
-  --color-secondary-700: #4E8146;
-  --color-secondary-800: #3D6237;
-  --color-secondary-900: #2A4227;
-  --color-neutral-50: #F7F6F5;
-  --color-neutral-100: #EFEDEB;
-  --color-neutral-200: #E0DCD7;
-  --color-neutral-300: #CCC5BC;
-  --color-neutral-400: #B6AB9D;
-  --color-neutral-500: #A0917E;
-  --color-neutral-600: #8D7C66;
-  --color-neutral-700: #746653;
-  --color-neutral-800: #5A4E3F;
-  --color-neutral-900: #3E362B;
+  /* Colors — primary (honey amber), secondary (deep teal), neutral (soft stone) */
+  --color-primary-50: #FCF4E9;
+  --color-primary-100: #F7E4CA;
+  --color-primary-200: #EFCB99;
+  --color-primary-300: #E8B369;
+  --color-primary-400: #E19C3D;
+  --color-primary-500: #D48921;
+  --color-primary-600: #B1721B;
+  --color-primary-700: #8D5B16;
+  --color-primary-800: #664210;
+  --color-primary-900: #3E280A;
+  --color-secondary-50: #E9FCF9;
+  --color-secondary-100: #CAF7F0;
+  --color-secondary-200: #98F0E1;
+  --color-secondary-300: #67E9D3;
+  --color-secondary-400: #3BE3C7;
+  --color-secondary-500: #1FD6B7;
+  --color-secondary-600: #1AB299;
+  --color-secondary-700: #158F7A;
+  --color-secondary-800: #0F6758;
+  --color-secondary-900: #093E35;
+  --color-neutral-50: #F3F3F1;
+  --color-neutral-100: #E3E1DE;
+  --color-neutral-200: #C9C6C0;
+  --color-neutral-300: #AFAAA1;
+  --color-neutral-400: #989186;
+  --color-neutral-500: #847D71;
+  --color-neutral-600: #6E685E;
+  --color-neutral-700: #58544B;
+  --color-neutral-800: #3F3C36;
+  --color-neutral-900: #272521;
   --color-surface: #FFFFFF;
   --color-text: var(--color-neutral-900);
   --color-text-muted: var(--color-neutral-700);
 
   /* Typography */
-  --font-display: 'Fraunces', Georgia, serif;
-  --font-heading: 'Fraunces', Georgia, serif;
+  --font-display: 'Bricolage Grotesque', Georgia, sans-serif;
+  --font-heading: 'Bricolage Grotesque', Georgia, sans-serif;
   --font-body: 'Nunito Sans', system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
   --text-display: 3.583rem;
@@ -74,8 +74,8 @@
   --radius-full: 9999px;
 
   /* Elevation — soft, warm-tinted */
-  --shadow-sm: 0 2px 6px rgba(90, 78, 63, 0.08);
-  --shadow-md: 0 6px 18px rgba(90, 78, 63, 0.10);
-  --shadow-lg: 0 16px 40px rgba(90, 78, 63, 0.12);
-  --shadow-xl: 0 28px 70px rgba(90, 78, 63, 0.14);
+  --shadow-sm: 0 2px 6px rgba(39, 37, 33, 0.08);
+  --shadow-md: 0 6px 18px rgba(39, 37, 33, 0.10);
+  --shadow-lg: 0 16px 40px rgba(39, 37, 33, 0.12);
+  --shadow-xl: 0 28px 70px rgba(39, 37, 33, 0.14);
 }

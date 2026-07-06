@@ -3,50 +3,50 @@ name: Hearth
 slug: warm-local-service
 description: >-
   A warm, earthy, friendly system for local businesses — cafes, salons,
-  dentists, studios. Terracotta and sage on soft sand, rounded corners, a
-  characterful soft-serif display, and gentle shadows. Approachable and human,
+  dentists, studios. Honey amber and deep teal on soft stone, rounded corners, a
+  characterful display, and gentle shadows. Approachable and human,
   never corporate.
 aesthetic: [warm, friendly, earthy, approachable, rounded, cozy, organic]
 industries: [cafe, restaurant, salon, spa, dentist, wellness, local-service, boutique, bakery]
 page_types: [landing, services, menu, booking, about, contact, gallery]
 colors:
-  primary:   # terracotta clay — warm and inviting
-    "50": "#F9F5F3"
-    "100": "#F4EAE6"
-    "200": "#EDD4CA"
-    "300": "#E6B6A3"
-    "400": "#DD9376"
-    "500": "#D47149"
-    "600": "#C4592E"
-    "700": "#A04927"
-    "800": "#783A21"
-    "900": "#502819"
-  secondary:   # sage — calm, natural counterpoint
-    "50": "#F5F8F5"
-    "100": "#EBF1EA"
-    "200": "#D5E4D3"
-    "300": "#B8D5B4"
-    "400": "#97C390"
-    "500": "#76B06D"
-    "600": "#5E9D55"
-    "700": "#4E8146"
-    "800": "#3D6237"
-    "900": "#2A4227"
-  neutral:   # warm sand — text and surfaces, never cold gray
-    "50": "#F7F6F5"
-    "100": "#EFEDEB"
-    "200": "#E0DCD7"
-    "300": "#CCC5BC"
-    "400": "#B6AB9D"
-    "500": "#A0917E"
-    "600": "#8D7C66"
-    "700": "#746653"
-    "800": "#5A4E3F"
-    "900": "#3E362B"
+  primary:   # honey amber — warm and inviting, not terracotta
+    "50": "#FCF4E9"
+    "100": "#F7E4CA"
+    "200": "#EFCB99"
+    "300": "#E8B369"
+    "400": "#E19C3D"
+    "500": "#D48921"
+    "600": "#B1721B"
+    "700": "#8D5B16"
+    "800": "#664210"
+    "900": "#3E280A"
+  secondary:   # deep teal — natural, grounded counterpoint
+    "50": "#E9FCF9"
+    "100": "#CAF7F0"
+    "200": "#98F0E1"
+    "300": "#67E9D3"
+    "400": "#3BE3C7"
+    "500": "#1FD6B7"
+    "600": "#1AB299"
+    "700": "#158F7A"
+    "800": "#0F6758"
+    "900": "#093E35"
+  neutral:   # soft stone — earthy but near-neutral, never sand
+    "50": "#F3F3F1"
+    "100": "#E3E1DE"
+    "200": "#C9C6C0"
+    "300": "#AFAAA1"
+    "400": "#989186"
+    "500": "#847D71"
+    "600": "#6E685E"
+    "700": "#58544B"
+    "800": "#3F3C36"
+    "900": "#272521"
 typography:
   fonts:
-    display: "'Fraunces', Georgia, serif"
-    heading: "'Fraunces', Georgia, serif"
+    display: "'Bricolage Grotesque', Georgia, sans-serif"
+    heading: "'Bricolage Grotesque', Georgia, sans-serif"
     body: "'Nunito Sans', system-ui, sans-serif"
     mono: "'IBM Plex Mono', ui-monospace, monospace"
   scale:   # display → caption — gentle 1.2 ratio, nothing jarring
@@ -75,10 +75,10 @@ rounded:   # soft and friendly — this is the signature
   xl: "2rem"
   full: "9999px"
 elevation:   # soft, warm-tinted — like afternoon light
-  sm: "0 2px 6px rgba(90, 78, 63, 0.08)"
-  md: "0 6px 18px rgba(90, 78, 63, 0.10)"
-  lg: "0 16px 40px rgba(90, 78, 63, 0.12)"
-  xl: "0 28px 70px rgba(90, 78, 63, 0.14)"
+  sm: "0 2px 6px rgba(39, 37, 33, 0.08)"
+  md: "0 6px 18px rgba(39, 37, 33, 0.10)"
+  lg: "0 16px 40px rgba(39, 37, 33, 0.12)"
+  xl: "0 28px 70px rgba(39, 37, 33, 0.14)"
 components:
   button:
     default: { bg: "primary.500", fg: "#FFFFFF", radius: "rounded.full", padding: "0.75rem 1.75rem", weight: 700, shadow: "elevation.sm" }
@@ -100,41 +100,40 @@ components:
 
 Hearth is for the business around the corner — the cafe that knows your order,
 the salon you book by name, the dentist who does not want the site to feel like
-a hospital. It trades cool corporate neutrals for warm sand and clay, softens
-every corner, and pairs a friendly soft-serif with a rounded body sans. The
+a hospital. It trades cool corporate neutrals for soft stone and amber, softens
+every corner, and pairs a characterful display with a rounded body sans. The
 result feels like a person, not a company.
 
-The emotional target is welcome. Warm terracotta invites, sage reassures, and
+The emotional target is welcome. Warm honey amber invites, deep teal reassures, and
 generous rounding makes every button feel like it wants to be pressed. Photos of
 real people, real food, and real spaces belong here — this system is a frame for
 warmth, not a substitute for it.
 
 ## Colors
 
-- **Primary (terracotta)** is the warmth. Use `primary.500`/`600` for buttons,
+- **Primary (honey amber)** is the warmth. Use `primary.500`/`600` for buttons,
   links, and the one or two moments that should feel inviting. It can also wash a
   soft `primary.50`/`100` section background — unlike a cool accent, a warm one
   can cover more surface without feeling aggressive.
-- **Secondary (sage)** is the calm. It pairs naturally with terracotta (they sit
+- **Secondary (deep teal)** is the calm. It pairs naturally with amber (they sit
   opposite on the warm/cool axis) for tags, secondary buttons, "open now"
-  badges, and botanical accents. A terracotta + sage duo is the signature combo.
-- **Neutral (warm sand)** replaces gray everywhere. Text is `neutral.800`/`900`
-  (a soft warm brown-black, never `#000`), borders are `neutral.200`, and
-  surfaces alternate `#FFFFFF` with `neutral.50`. The warmth in the neutral is
+  badges, and botanical accents. An amber + teal duo is the signature combo.
+- **Neutral (soft stone)** replaces cold gray everywhere. Text is `neutral.800`/`900`
+  (a soft near-black with a hint of warmth, never `#000`), borders are `neutral.200`, and
+  surfaces alternate `#FFFFFF` with `neutral.50`. The quiet warmth in the neutral is
   what keeps the whole page cohesive.
-- Avoid any true cool gray — a single cold neutral will look out of place and
-  break the cozy mood instantly.
+- Keep neutrals in the stone family — a starkly cold gray will fight the cozy mood.
 
 ## Typography
 
-Fraunces sets the display and headings — a soft, old-style serif with optical
-sizing and just enough wobble to feel handmade rather than institutional. Its
-gentle contrast reads warm at large sizes. Nunito Sans carries body copy with
+Bricolage Grotesque sets the display and headings — a warm, characterful
+grotesque with just enough quirk to feel handmade rather than institutional. Its
+friendly forms read warm at large sizes. Nunito Sans carries body copy with
 rounded terminals that echo the rounded UI. Together they feel friendly and
 legible without tipping into childish.
 
-- Headlines can be a touch playful — Fraunces at weight 600 with a soft italic
-  for an emphasized word works beautifully.
+- Headlines can be a touch playful — Bricolage Grotesque at weight 600 with an
+  italic for an emphasized word works beautifully.
 - Body line-height runs generous (1.7) so menus, service lists, and hours are
   easy to scan.
 - Keep the type scale gentle (1.2 ratio) — no dramatic jumps. This is a calm
@@ -152,7 +151,7 @@ legible without tipping into childish.
 
 ## Elevation & Depth
 
-Shadows are soft and warm-tinted (`rgba(90,78,63,…)`), like light through a
+Shadows are soft and low (`rgba(39,37,33,…)`), like light through a
 window rather than a hard studio spotlight. Cards rest at `elevation.sm` and
 lift gently on hover with a small upward translate — a friendly little bounce.
 Nothing is sharp; depth here is cozy, not architectural.
@@ -166,23 +165,23 @@ photos and avatars reinforce the human, personal tone.
 
 ## Components
 
-- **Button** — terracotta fill, white bold label, fully pill-shaped. On hover it
-  deepens to `primary.600`, lifts 2px, and grows its soft shadow; focus draws a
-  wide 4px `primary.200` ring. Secondary buttons use a sage fill or a
-  `primary.100` tint with terracotta text.
+- **Button** — honey-amber fill (`primary.500`), deep bold label (`neutral.900`), fully
+  pill-shaped. On hover it deepens to `primary.600`, lifts 2px, and grows its soft
+  shadow; focus draws a wide 4px `primary.200` ring. Secondary buttons use a teal
+  fill (`secondary.700`, white label) or a `primary.100` tint with amber text (`primary.700`).
 - **Card** — white fill, hairline `neutral.200` border, `rounded.lg`, soft
   resting shadow. On hover it floats up 3px with a warmer shadow. Great for
   service tiles, menu items, and testimonials with a rounded avatar.
 - **Input** — sits on a `neutral.50` fill (slightly inset from white) with a
-  `neutral.300` border, focusing to terracotta with a wide soft ring. The inset
+  `neutral.300` border, focusing to amber with a wide soft ring. The inset
   fill makes forms feel gentle and tactile.
 
 ## Do's and Don'ts
 
 **Do**
-- Pair terracotta and sage — it is the signature warm/calm duo.
+- Pair amber and teal — it is the signature warm/calm duo.
 - Keep every corner rounded and every button a pill.
-- Use warm-tinted shadows and warm neutrals throughout.
+- Use soft low shadows and stone neutrals throughout.
 - Lead with a real, warm photograph — people, food, or the space.
 
 **Don't**
@@ -190,8 +189,8 @@ photos and avatars reinforce the human, personal tone.
   breaks the entire warm mood.
 - ❌ Don't square the corners — sharp edges make Hearth feel clinical, the exact
   opposite of the goal.
-- ❌ Don't over-saturate the terracotta into a hot red; keep it earthy and clay,
+- ❌ Don't over-saturate the amber into a hot orange; keep it warm and mellow,
   not alarming.
-- ❌ Don't use hard, blurred-black drop shadows; keep them soft and warm.
+- ❌ Don't use hard, blurred-black drop shadows; keep them soft and low.
 - ❌ Don't cram the layout — a local business page should feel unhurried, with
   room to breathe between sections.

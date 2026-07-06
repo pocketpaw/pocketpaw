@@ -2,47 +2,47 @@
 name: Quill
 slug: minimal-editorial
 description: >-
-  A minimal, editorial system built on whitespace: a warm paper canvas, a
+  A minimal, editorial system built on whitespace: a soft near-neutral canvas, a
   beautiful serif display over a clean sans body, hairline rules instead of
-  shadows, and one restrained oxblood accent. For writers, studios, and brands
+  shadows, and one restrained garnet accent. For writers, studios, and brands
   that want a magazine's quiet authority.
 aesthetic: [minimal, editorial, elegant, refined, whitespace, magazine, timeless]
 industries: [publishing, writer, consultancy, studio, nonprofit, architecture, personal-brand, journal]
 page_types: [landing, essay, about, portfolio, newsletter, contact]
 colors:
-  primary:   # editorial oxblood / ink-red — the one restrained accent
-    "50": "#F9F4F3"
-    "100": "#F5E7E6"
-    "200": "#EECDC9"
-    "300": "#E7A9A2"
-    "400": "#DF7F74"
-    "500": "#D75547"
-    "600": "#C73B2C"
-    "700": "#A23225"
-    "800": "#7A281F"
-    "900": "#511E18"
+  primary:   # garnet crimson — the one restrained accent
+    "50": "#FBE9ED"
+    "100": "#F6CBD4"
+    "200": "#EE9BAC"
+    "300": "#E66B84"
+    "400": "#DE3F60"
+    "500": "#D12447"
+    "600": "#AE1E3B"
+    "700": "#8B1830"
+    "800": "#641122"
+    "900": "#3D0A15"
   secondary:   # muted ink blue — quiet links and meta
-    "50": "#F5F6F7"
-    "100": "#EAECF0"
-    "200": "#D3D8E3"
-    "300": "#B5BED3"
-    "400": "#92A0C1"
-    "500": "#6F82AE"
-    "600": "#576C9B"
-    "700": "#48597F"
-    "800": "#394560"
-    "900": "#282F41"
-  neutral:   # warm paper → ink — the whole system lives here
-    "50": "#F7F6F6"
-    "100": "#EEEEEC"
-    "200": "#DEDCD9"
-    "300": "#C9C6C0"
-    "400": "#B0ACA3"
-    "500": "#989285"
-    "600": "#847D6E"
-    "700": "#6D675A"
-    "800": "#544F45"
-    "900": "#3A362F"
+    "50": "#F0F2F5"
+    "100": "#DBDFE6"
+    "200": "#B9C1D0"
+    "300": "#98A4B9"
+    "400": "#7989A4"
+    "500": "#637492"
+    "600": "#536179"
+    "700": "#424E61"
+    "800": "#2F3846"
+    "900": "#1D222B"
+  neutral:   # soft near-neutral → ink — the whole system lives here
+    "50": "#F3F2F2"
+    "100": "#E1E1E0"
+    "200": "#C6C5C3"
+    "300": "#AAA9A6"
+    "400": "#91908C"
+    "500": "#7D7B77"
+    "600": "#686764"
+    "700": "#545250"
+    "800": "#3C3B39"
+    "900": "#252423"
 typography:
   fonts:
     display: "'Newsreader', Georgia, serif"
@@ -76,9 +76,9 @@ rounded:   # nearly none — editorial precision
   full: "9999px"
 elevation:   # hairlines, not shadows — depth by rule, not by lift
   sm: "none"
-  md: "0 1px 0 rgba(58, 54, 47, 0.10)"
-  lg: "0 12px 40px rgba(58, 54, 47, 0.08)"
-  xl: "0 24px 60px rgba(58, 54, 47, 0.10)"
+  md: "0 1px 0 rgba(37, 36, 35, 0.10)"
+  lg: "0 12px 40px rgba(37, 36, 35, 0.08)"
+  xl: "0 24px 60px rgba(37, 36, 35, 0.10)"
 components:
   button:
     default: { bg: "neutral.900", fg: "neutral.50", radius: "rounded.sm", padding: "0.75rem 1.5rem", weight: 500, tracking: "0.01em", shadow: "none" }
@@ -99,9 +99,9 @@ components:
 ## Overview
 
 Quill is a system made of whitespace and type. It puts a beautiful serif display
-over a clean sans body on a warm paper canvas, separates content with hairline
+over a clean sans body on a soft near-neutral canvas, separates content with hairline
 rules instead of boxes and shadows, and spends its single accent — a restrained
-oxblood — only where a link or a pull-quote asks for it. The effect is a
+garnet — only where a link or a pull-quote asks for it. The effect is a
 magazine's quiet authority: it looks read, not designed.
 
 Reach for it when the words are the product — a writer, a consultancy, a studio,
@@ -110,23 +110,23 @@ page. Its confidence comes from what it leaves out.
 
 ## Colors
 
-- **Neutral (warm paper → ink)** is nearly the whole system. The canvas is
-  `neutral.50` (`#F7F6F6`), a warm off-white; text is `neutral.900` (`#3A362F`),
+- **Neutral (near-neutral → ink)** is nearly the whole system. The canvas is
+  `neutral.50` (`#F3F2F2`), a soft off-white; text is `neutral.900` (`#252423`),
   a soft ink that reads as black without the harshness. Meta and captions use
   `neutral.500`/`600`. Rules and borders are `neutral.200`/`300`.
-- **Primary (oxblood)** is the one editorial accent — for links, a pull-quote
+- **Primary (garnet)** is the one editorial accent — for links, a pull-quote
   bar, a drop-cap, a small "read more" arrow. It should appear a handful of times
   per page, never as a fill across a large surface. `primary.600`/`700` for
   links on paper.
 - **Secondary (ink blue)** is even quieter — an alternative link color, a
   footnote, a subtle tag. It exists so not every accent has to be red.
-- The palette is deliberately close-valued and warm. The drama comes from type
-  and space, not from color.
+- The palette is deliberately close-valued and restrained. The drama comes from
+  type and space, not from color.
 
 ## Typography
 
 Newsreader sets the display and headings — a serif designed for on-screen
-reading with a warm, literary voice. Set the display at a light weight (400) and
+reading with a quiet, literary voice. Set the display at a light weight (400) and
 large size so it reads like a magazine masthead. IBM Plex Sans carries body copy
 with an engineered neutrality that lets the serif headings sing. Body runs at a
 long 1.8 line-height with a comfortable measure — this system expects real
@@ -168,14 +168,14 @@ rounding would make Quill look like a generic app.
 ## Components
 
 - **Button** — solid ink (`neutral.900`) with paper text, minimal radius, no
-  shadow. On hover it shifts to oxblood (`primary.700`); focus is a 1px outline
-  offset from the label. A "text button" — oxblood label with an underline on
+  shadow. On hover it shifts to garnet (`primary.700`); focus is a 1px outline
+  offset from the label. A "text button" — garnet label with an underline on
   hover — is the more common editorial affordance.
 - **Card** — paper fill, 1px `neutral.200` border, minimal radius, no shadow. On
   hover the border darkens to `neutral.400`. Often you need no card at all — a
   rule and spacing do the same job with less furniture.
 - **Input** — underlined, not boxed: transparent fill, a single `neutral.400`
-  bottom border that thickens to oxblood on focus. It reads like a form in a
+  bottom border that thickens to garnet on focus. It reads like a form in a
   printed booklet.
 
 ## Do's and Don'ts
@@ -184,12 +184,12 @@ rounding would make Quill look like a generic app.
 - Let whitespace do the heavy lifting — more space between sections, not less.
 - Set headlines in Newsreader, large and light; keep body measure narrow.
 - Use hairline rules to segment content instead of boxes and shadows.
-- Keep the oxblood accent rare — links and one or two emphases per page.
+- Keep the garnet accent rare — links and one or two emphases per page.
 
 **Don't**
 - ❌ Don't box everything in cards with shadows — that is the app look this system
   rejects. Reach for a rule and space first.
-- ❌ Don't fill large surfaces with the oxblood; it is an ink accent, not a brand
+- ❌ Don't fill large surfaces with the garnet; it is an ink accent, not a brand
   color wash.
 - ❌ Don't round the corners heavily or the editorial precision collapses into a
   generic SaaS look.
