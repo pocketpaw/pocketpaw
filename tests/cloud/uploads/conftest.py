@@ -1,12 +1,14 @@
 # conftest.py — shared fixtures for the cloud/uploads test package.
 # 2026-07-03 (FL-6): the ``beanie_upload_db`` fixture now resets the Beanie
-#   binding on ``FileUpload`` / ``FileFolder`` after each test. Before FL-6 no
-#   test read Beanie state from inside the listener, so a leaked binding (the
-#   torn-down mongomock db still attached to the Document classes) was
-#   harmless. FL-6's listener loads the FileUpload row to honour hide_from_ai,
-#   so a leaked binding let one test's seeded rows bleed into an unrelated
-#   listener test (e.g. test_listener_vector), flipping the hide gate. Clearing
-#   the per-class Beanie settings on teardown restores isolation.
+#   binding on ``FileUpload`` / ``FileFolder`` / ``ShareLink`` after each test.
+#   Before FL-6 no test read Beanie state from inside the listener, so a leaked
+#   binding (the torn-down mongomock db still attached to the Document classes)
+#   was harmless. FL-6's listener loads the FileUpload row to honour
+#   hide_from_ai, so a leaked binding let one test's seeded rows bleed into an
+#   unrelated listener test (e.g. test_listener_vector), flipping the hide gate.
+#   Clearing the per-class Beanie settings on teardown restores isolation.
+# 2026-07-03 (FL-12b): ``beanie_upload_db`` also registers ``ShareLink`` so the
+#   public share-link store/route tests get a real (mongomock) collection.
 from __future__ import annotations
 
 import uuid
@@ -41,8 +43,9 @@ async def beanie_upload_db():
 
     # Import after db creation to avoid circular imports
     from pocketpaw_ee.cloud.uploads.models import FileFolder, FileUpload
+    from pocketpaw_ee.cloud.uploads.share_models import ShareLink
 
-    await init_beanie(database=db, document_models=[FileUpload, FileFolder])
+    await init_beanie(database=db, document_models=[FileUpload, FileFolder, ShareLink])
     try:
         yield db
     finally:
@@ -51,7 +54,7 @@ async def beanie_upload_db():
         # seeded rows into a later test that reads Beanie state (FL-6 listener
         # loads the FileUpload row). Beanie stores the collection on a private
         # settings object per Document; drop it so the next init rebinds clean.
-        for model in (FileUpload, FileFolder):
+        for model in (FileUpload, FileFolder, ShareLink):
             for attr in ("_document_settings", "_settings"):
                 if hasattr(model, attr):
                     try:
