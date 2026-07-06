@@ -834,6 +834,35 @@ class CloudIconsMcpProvider:
         return list(ICON_TOOL_IDS)
 
 
+class CloudPaletteMcpProvider:
+    """`pocketpaw.mcp_servers` — the palette-extraction in-process server
+    (``pocketpaw_palette``). Hosts ``extract_palette`` only.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so the bundled
+    ``pocketpaw-create-svelte-site`` skill can derive a coherent color system
+    from a brand photo/logo for a generated marketing site without an explicit
+    opt-in — the same regime the icons + stock-images + sites manager + media
+    servers use. The cloud chat agent runs on the claude_agent_sdk backend,
+    which only sees in-process MCP servers (a plain BaseTool is invisible to
+    it), so palette extraction MUST be surfaced here.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.palette import build_palette_server
+
+            return build_palette_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the palette server is
+            # unavailable, same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.palette import PALETTE_TOOL_IDS
+
+        return list(PALETTE_TOOL_IDS)
+
+
 class CloudDeliverMcpProvider:
     """`pocketpaw.mcp_servers` — the artifact-delivery in-process server
     (``pocketpaw_deliver``). Hosts ``deliver_artifact`` only (ART-4).

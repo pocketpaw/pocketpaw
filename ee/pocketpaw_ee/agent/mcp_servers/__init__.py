@@ -34,6 +34,9 @@ Server surfaces (module → server name → tools):
 * ``media.py`` → ``pocketpaw_media`` → ``image_generate`` / ``audio_generate`` /
   ``audio_transcribe`` / ``video_generate`` (routed through the LiteLLM proxy)
 * ``meetings.py`` → ``pocketpaw_meetings`` → meeting queries
+* ``palette.py`` → ``pocketpaw_palette`` → ``extract_palette`` (derive a full
+  50–900 role-scaled color palette from a reference image URL for site theming;
+  pure read, no identity)
 * ``planner.py`` → ``pocketpaw_planner`` (opt-in) + ``pocketpaw_pocket_planner``
 * ``pockets.py`` → ``pocketpaw_pocket`` → pocket context + widget pinning
 * ``sites.py`` / ``sites_create.py`` → ``pocketpaw_sites_manager`` → Paw Sites
