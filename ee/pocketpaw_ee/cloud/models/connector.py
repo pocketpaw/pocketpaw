@@ -5,6 +5,14 @@
 # granted at, and a free-form config blob the connector adapter reads on
 # execute. Token bytes themselves stay in src/pocketpaw/clients/
 # token_store.py for Phase 1 — only the *reference* + scope live here.
+# Updated: 2026-06-28 (AW-2 connector multi-host egress allow-list) — added
+#   ``allowed_hosts: list[str]``: per-workspace operator additions to the
+#   connector's egress allow-list, layered ON TOP of the auto-seeded hosts
+#   (the connector YAML's declared base-URL host + auth-endpoint host). Lets an
+#   operator permit an extra host (e.g. a regional API mirror) for one
+#   workspace without editing the shared YAML. Empty by default — no extra
+#   hosts. Read by the connector engine when the POCKETPAW_CONNECTOR_EGRESS_GUARD
+#   guard is on; never narrows the auto-seeded list.
 
 from __future__ import annotations
 
@@ -37,6 +45,12 @@ class WorkspaceConnector(TimestampedDocument):
     pocket_id: str | None = None  # set when scope == "pocket"
     user_id: str | None = None  # set when scope == "user"
     config: dict[str, Any] = Field(default_factory=dict)
+    # AW-2 — per-workspace egress allow-list additions, layered on top of the
+    # connector YAML's auto-seeded hosts (declared base-URL + auth-endpoint
+    # host). Lets an operator permit one extra host for this workspace without
+    # editing the shared YAML. Empty = no additions. Only consulted when the
+    # connector egress guard is enabled; never narrows the auto-seeded list.
+    allowed_hosts: list[str] = Field(default_factory=list)
     last_sync_at: datetime | None = None
     last_sync_status: str = "never"  # "never" | "ok" | "error"
     last_sync_error: str = ""

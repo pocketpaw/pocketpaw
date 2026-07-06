@@ -50,6 +50,13 @@
 # a DYNAMIC site in workers mode raises a clean ValidationError (Phase 2); and with
 # PAW_CF_DEPLOY_MODE UNSET the legacy local/wfp selection is preserved (an injected
 # CF client still wins → put_worker; no env creds + no CF → local deployer).
+#
+# Updated 2026-06-25 (feat/sites-cf-dispatch-worker — published URL wiring):
+# coverage that a CF-mode publish with PAW_CF_SITES_DOMAIN set stamps the Site
+# doc's url as https://<site_id>.<domain> (and persists it), and that with the
+# domain UNSET the CF path leaves url="" without crashing (the worker is still
+# uploaded — the deploy succeeded — it just has no public URL until the operator
+# sets the domain + deploys the dispatch worker).
 from __future__ import annotations
 
 import pytest
@@ -182,7 +189,63 @@ async def test_publish_injected_cf_takes_real_branch_even_without_creds(
         _local_deploy=boom,
     )
     assert cf.put_calls == [site.script_name]
-    assert site.url == ""  # CF path leaves url empty in v1
+    assert site.url == ""  # CF path leaves url empty when PAW_CF_SITES_DOMAIN unset
+
+
+@pytest.mark.asyncio
+async def test_publish_cf_stamps_subdomain_url_when_sites_domain_set(beanie_test_db, monkeypatch):
+    """CF-DISPATCH: a published site is served at https://<site_id>.<domain> via the
+    WfP dispatch worker (a user worker in a dispatch namespace is not directly
+    URL-addressable). With PAW_CF_SITES_DOMAIN set, the CF branch stamps that
+    per-site subdomain URL on the Site doc after put_worker, and it persists."""
+    monkeypatch.setenv("PAW_CF_SITES_DOMAIN", "sites.example.com")
+    gen, cf = _FakeGenerator(), _FakeCF()
+    site = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk1",
+        ripple_spec={"type": "container"},
+        theme={},
+        name="x",
+        _generator=gen,
+        _cloudflare=cf,  # injected CF → the REAL deploy branch
+        _bundle_reader=lambda d: b"export default {}",
+    )
+    expected = f"https://{site.id}.sites.example.com"
+    # The deploy still uploaded the worker into the namespace.
+    assert cf.put_calls == [site.script_name]
+    # The URL is the per-site subdomain the dispatch worker resolves.
+    assert site.url == expected
+    # And it is persisted on the canonical Site doc (re-read from the DB).
+    from bson import ObjectId
+    from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+
+    reloaded = await _SiteDoc.find_one({"_id": ObjectId(site.script_name), "workspace": "ws1"})
+    assert reloaded is not None
+    assert reloaded.url == expected
+
+
+@pytest.mark.asyncio
+async def test_publish_cf_leaves_url_empty_when_sites_domain_unset(beanie_test_db, monkeypatch):
+    """With PAW_CF_SITES_DOMAIN UNSET, the CF branch must not crash and must leave
+    url="" — the worker is still uploaded (the deploy succeeded) but the site has no
+    public URL until the operator sets the domain + deploys the dispatch worker."""
+    monkeypatch.delenv("PAW_CF_SITES_DOMAIN", raising=False)
+    gen, cf = _FakeGenerator(), _FakeCF()
+    site = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk1",
+        ripple_spec={"type": "container"},
+        theme={},
+        name="x",
+        _generator=gen,
+        _cloudflare=cf,  # injected CF → the REAL deploy branch
+        _bundle_reader=lambda d: b"export default {}",
+    )
+    assert cf.put_calls == [site.script_name]  # the worker WAS uploaded
+    assert site.deployed is True  # the deploy succeeded
+    assert site.url == ""  # …but there is no public URL without the domain
 
 
 @pytest.mark.asyncio

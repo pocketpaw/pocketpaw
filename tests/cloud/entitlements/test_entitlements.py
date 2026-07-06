@@ -21,6 +21,10 @@
 #   {free, go, pro, pro_max, enterprise}. The business-tier assertions now target
 #   ``pro`` (its consumer-ladder successor: the tier that carries fabric +
 #   automations + knowledge_base). Fallback-to-free invariants are unchanged.
+# Updated 2026-06-30 (feat/billing-quota-enforcement, chunk 1): proves the resolver
+#   now also populates ``monthly_ceiling`` from the plan catalog — every known tier
+#   carries the catalog's ceiling (incl. enterprise=None uncapped), and an unknown
+#   / missing plan FAILS CLOSED to the Free ceiling (1000), never None/uncapped.
 
 from __future__ import annotations
 
@@ -63,10 +67,12 @@ async def test_pro_plan_resolves_pro_features_and_allotment(patch_plan):
     assert ent.plan == "pro"
     assert set(ent.features) == PLAN_FEATURES["pro"]
     assert ent.monthly_credit_allotment > 0
-    # The catalog's pro allotment is exactly what resolves.
+    # The catalog's pro allotment AND ceiling are exactly what resolves.
     from pocketpaw_ee.cloud.billing import plans
 
     assert ent.monthly_credit_allotment == plans.get_plan("pro").monthly_credit_allotment
+    assert ent.monthly_ceiling == plans.get_plan("pro").monthly_ceiling
+    assert ent.monthly_ceiling == 11_250
 
 
 @pytest.mark.parametrize("plan", ["free", "go", "pro", "pro_max", "enterprise"])
@@ -75,6 +81,18 @@ async def test_every_known_plan_resolves_its_own_features(patch_plan, plan):
     ent = await entitlements.resolve_entitlements(WS)
     assert ent.plan == plan
     assert set(ent.features) == PLAN_FEATURES[plan]
+
+
+@pytest.mark.parametrize("plan", ["free", "go", "pro", "pro_max", "enterprise"])
+async def test_every_known_plan_resolves_its_catalog_ceiling(patch_plan, plan):
+    """The resolver mirrors the catalog's monthly_ceiling for every known tier."""
+    from pocketpaw_ee.cloud.billing import plans
+
+    patch_plan(plan)
+    ent = await entitlements.resolve_entitlements(WS)
+    assert ent.monthly_ceiling == plans.get_plan(plan).monthly_ceiling
+    if plan == "enterprise":
+        assert ent.monthly_ceiling is None  # the one uncapped tier
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +107,8 @@ async def test_unknown_plan_falls_back_to_free(patch_plan):
     assert ent.plan == "free"
     assert set(ent.features) == PLAN_FEATURES["free"]
     assert ent.monthly_credit_allotment == 0
+    # FAIL-CLOSED: an unknown plan caps at the Free ceiling, never None/uncapped.
+    assert ent.monthly_ceiling == 1_000
 
 
 async def test_missing_workspace_falls_back_to_free(patch_plan):
@@ -97,6 +117,8 @@ async def test_missing_workspace_falls_back_to_free(patch_plan):
     ent = await entitlements.resolve_entitlements(WS)
     assert ent.plan == "free"
     assert ent.monthly_credit_allotment == 0
+    # FAIL-CLOSED: a missing workspace caps at the Free ceiling, never uncapped.
+    assert ent.monthly_ceiling == 1_000
     # Crucially, free must NOT carry any paid-tier feature.
     assert "fabric" not in ent.features
     assert "instinct" not in ent.features

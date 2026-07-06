@@ -1,4 +1,61 @@
 # ee/pocketpaw_ee/cloud/pockets/instinct_dispatch.py
+# Updated: 2026-06-28 (AW-7 — template gate deny-on-no-match) — `gate_action`
+# takes two new kwargs, `template_default_deny` (default False) and
+# `is_mutating` (default True), that close the TEMPLATE-level deny-by-default
+# hole. Before AW-7, a template BOUND to a pocket that declared NO rule
+# matching an action yielded `resolve_instinct`'s default EXECUTE verdict
+# (reason="auto", no matched_rules) → `next_step="proceed"` → the write fired.
+# Now, when `template_default_deny` is ON and the action `is_mutating`
+# (POST/PUT/PATCH/DELETE and NOT read_only — the executor computes this from
+# the parsed binding and passes it in), that no-rule-match EXECUTE is routed
+# to the human-pending path (`next_step="pending_approval"`) instead — the
+# same `_escalate_to_human` persistence the ESCALATE_APPROVAL verdict uses.
+# READS (read_only / GET / HEAD → `is_mutating=False`) still proceed ungated:
+# a read has nothing to govern. The flip is SCOPED to the no-rule-match
+# default ONLY — a rule that matched and said EXECUTE (or a `notify_only`
+# author floor → NOTIFY_AND_EXECUTE) is an explicit policy decision and is
+# NEVER overridden. When the flag is OFF (default) every path is byte-
+# identical to before. The per-workspace override and global config default
+# that feed `template_default_deny` are resolved in `pockets/service.py`
+# (`resolve_workspace_template_default_deny`) and threaded by the router,
+# mirroring `instinct_approval_level` exactly.
+#
+# Updated: 2026-06-30 (integration/szd-finish, C1 — fail-open visibility) — each
+# discovered rule dropped at the gate (parse failure at step 3 OR eval failure
+# at step 4) now emits a best-effort AuditEvent via the new
+# `_audit_discovered_rule_dropped` helper (category="instinct_discovered_rule",
+# severity WARNING) carrying workspace_id, pocket_id, rule id/title, the drop
+# reason (parse vs eval), and the exception summary. Previously a user-approved
+# protective rule going inert left only a server-side `logger.warning` — a
+# fail-open in the user's mental model. The audit write is wrapped so an audit
+# failure can never break the gate (mirrors `_audit_triage_decision`).
+#
+# Updated: 2026-06-30 (integration/szd-finish, B1 — gate DoS fix) — the
+# discovered-rule CEL probe in `_load_discovered_instinct_rules` now catches ANY
+# exception, not just `CelEvaluationError`. `evaluate_cel` calls
+# `celpy.json_to_cel` on each resolved value OUTSIDE its own try/except, so a
+# non-JSON-native row value (a `datetime`/`bytes`/`set` off a Fabric row) raised
+# a RAW `ValueError`/`TypeError` that escaped the probe → escaped `gate_action`
+# (the action_executor caller does not wrap it) → an HTTP 500 that bricked the
+# gate for the WHOLE workspace+pocket, including the template floor, until the
+# rule was archived. Broadened to `except Exception` (one bad rule dropped, rest
+# survive), mirroring the model_validate drop guard above. `CelEvaluationError`
+# import dropped (now unused).
+#
+# Updated: 2026-06-21 (feat/szd-finish-enforce, F6 — live enforcement of
+# approved workspace-discovered Instinct rules) — `gate_action` now, when the
+# DEFAULT-OFF `instinct_enforce_discovered_rules` flag is on, loads the
+# workspace's approved discovered rules (`rules.service.get_active_rules`),
+# pocket-scopes them, converts each to an OSS `InstinctRule`, drops any whose
+# CEL `when` fails to parse or errors on a guarded probe, and merges the clean
+# ones FIRST into a model_copy of the template before the UNCHANGED
+# `resolve_instinct` call. The template object is NEVER mutated. Fail-safe:
+# a `get_active_rules` read failure fails OPEN (proceed on the template
+# verdict, WARNING, no 404), and a per-rule CEL error drops THAT rule only —
+# a broken discovered rule is inert, never a silent block or 404. The pure
+# composer is untouched (it must stay import-linter-pure). When the flag is
+# off, `get_active_rules` is never called and `effective_template is template`.
+#
 # Updated: 2026-06-19 (feat/instinct-gate-integration, security-review FIX 3) —
 # `_find_existing_pending_id` now pushes the (action_name, row_id) match INTO
 # the approvals query (limit=1) instead of paging a default list and matching
@@ -56,7 +113,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -68,7 +125,13 @@ from pocketpaw.bundled_templates import (
     PocketTemplate,
     resolve_instinct,
 )
-from pocketpaw.bundled_templates.identifier_resolver import IdentifierResolver
+from pocketpaw.bundled_templates.cel_runtime import evaluate_cel
+from pocketpaw.bundled_templates.identifier_resolver import (
+    IdentifierResolver,
+    TemplateIdentifierResolver,
+)
+from pocketpaw.bundled_templates.schema import InstinctRulesDef
+from pocketpaw.config import get_settings
 from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.instinct_approvals import service as approvals_service
 from pocketpaw_ee.cloud.pockets import trust_ledger
@@ -79,6 +142,7 @@ from pocketpaw_ee.cloud.pockets.instinct_triage import (
     TriageProposal,
     classify_lane,
 )
+from pocketpaw_ee.cloud.rules.service import get_active_rules
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +280,53 @@ def _audit_triage_decision(
         logger.warning("instinct triage-decision audit-log write failed", exc_info=True)
 
 
+def _audit_discovered_rule_dropped(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    rule_id: str,
+    rule_title: str | None,
+    reason: Literal["parse", "eval"],
+    error_summary: str,
+) -> None:
+    """Audit a discovered rule that was dropped at the gate (C1 — fail-open
+    visibility).
+
+    A protective rule a user approved ("refunds over $500 need approval") can
+    go silently INERT if it fails to parse (step 3) or errors on the CEL probe
+    (step 4). Today that emits only a server-side ``logger.warning`` — invisible
+    to the workspace, a fail-open in the user's mental model. Emit a best-effort
+    audit event so every drop leaves a workspace-visible trail: the rule id +
+    title, whether it was a parse or eval drop, and the exception summary.
+
+    Best-effort by contract: an audit failure must NEVER break the gate, so the
+    whole call is wrapped (mirrors ``_audit_triage_decision`` and
+    ``action_executor._audit_action_run``). Severity WARNING — a user-approved
+    protective rule going inert is something the workspace should be able to see.
+    """
+    try:
+        from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+        get_audit_logger().log(
+            AuditEvent.create(
+                severity=AuditSeverity.WARNING,
+                actor="system:instinct-gate",
+                action="instinct.discovered_rule.dropped",
+                target=rule_id,
+                status="dropped",
+                category="instinct_discovered_rule",
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                rule_id=rule_id,
+                rule_title=rule_title,
+                drop_reason=reason,
+                error=error_summary,
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the gate
+        logger.warning("discovered-rule drop audit-log write failed", exc_info=True)
+
+
 def _escalate_body(
     *,
     pocket_id: str,
@@ -279,6 +390,150 @@ async def _find_existing_pending_id(
     return None
 
 
+async def _load_discovered_instinct_rules(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    template: PocketTemplate,
+    row_context: dict[str, Any],
+    workspace_context: dict[str, Any] | None,
+    resolver: IdentifierResolver | None,
+    now: datetime,
+) -> list[InstinctRule]:
+    """Load approved workspace-discovered rules, pocket-scope + guard them, and
+    return clean ``InstinctRule`` objects ready to merge into the template.
+
+    Fail-OPEN at every step — a broken discovered rule (or a store outage) is
+    inert, never a block, never a silent 404. The asymmetry with template rules
+    (which keep loud-fail) is deliberate: template rules are authored and
+    version-controlled; discovered rules are inferred and lower-trust, and can
+    only ever ADD a block/escalate, never relax the template floor.
+
+    1. ``get_active_rules`` read failure → log WARNING, return ``[]`` (fall
+       through to the pure template path).
+    2. Filter: keep a rule only if its ``scope.pocket_id`` is null
+       (workspace-wide) OR equals the current ``pocket_id``.
+    3. Convert each surviving wire dict to an ``InstinctRule`` via
+       ``model_validate`` (parses + validates the CEL ``when``). On a parse
+       failure drop THAT rule (WARNING), keep the rest.
+    4. Guarded CEL probe: run each converted rule's ``when`` through
+       ``evaluate_cel`` against the SAME merged context + resolver the composer
+       will use. On ANY eval error drop THAT rule only (WARNING with
+       workspace/rule id) so the composer's own eval is a safe re-run. The catch
+       is intentionally broad: ``evaluate_cel`` can raise a RAW (non-
+       ``CelEvaluationError``) ``ValueError`` / ``TypeError`` when a resolved
+       row value is not JSON-native, and that must drop the rule, not 500 the
+       whole gate.
+    """
+    try:
+        rows = await get_active_rules(workspace_id)
+    except Exception:  # noqa: BLE001 — fail-OPEN: a store outage never blocks
+        logger.warning(
+            "discovered-rule enforcement: get_active_rules read failed for "
+            "workspace=%s — falling through to the template-only path",
+            workspace_id,
+            exc_info=True,
+        )
+        return []
+
+    # Build the SAME merged context + resolver the composer uses, so the
+    # guarded probe is faithful to the real evaluation (row wins on collision).
+    merged_context: dict[str, Any] = {}
+    if workspace_context:
+        merged_context.update(workspace_context)
+    merged_context.update(row_context)
+    probe_resolver = resolver or TemplateIdentifierResolver(template.state)
+
+    clean: list[InstinctRule] = []
+    for row in rows:
+        rule_id = row.get("id", "<unknown>")
+        # Step 2 — pocket scope. ``None`` pocket_id = workspace-wide.
+        scope = row.get("scope") or {}
+        scope_pocket = scope.get("pocket_id")
+        if scope_pocket is not None and scope_pocket != pocket_id:
+            continue
+
+        # Step 3 — convert + validate the CEL ``when``.
+        try:
+            rule = InstinctRule.model_validate(
+                {"when": row.get("when"), "action": row.get("action")}
+            )
+        except Exception as exc:  # noqa: BLE001 — a malformed discovered rule is dropped
+            logger.warning(
+                "discovered-rule enforcement: dropping unparseable rule "
+                "workspace=%s rule=%s (when=%r action=%r)",
+                workspace_id,
+                rule_id,
+                row.get("when"),
+                row.get("action"),
+            )
+            _audit_discovered_rule_dropped(
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                rule_id=rule_id,
+                rule_title=row.get("name"),
+                reason="parse",
+                error_summary=f"{type(exc).__name__}: {exc}",
+            )
+            continue
+
+        # Step 4 — guarded CEL probe. A discovered rule that errors on eval is
+        # dropped here so it never reaches the composer's loud-fail raise path.
+        # Catch ANY exception, not just CelEvaluationError: ``evaluate_cel``
+        # calls ``celpy.json_to_cel`` on each resolved value OUTSIDE its own
+        # try/except, so a row-context value that is not JSON-native (a
+        # ``datetime`` / ``bytes`` / ``set`` off a Fabric row) raises a RAW
+        # ``ValueError`` / ``TypeError``. If the probe only caught
+        # CelEvaluationError that raw error would escape gate_action (the
+        # executor caller does not wrap it) → a 500 that bricks the gate for the
+        # whole workspace+pocket, including the template floor. Mirror the
+        # model_validate guard above: drop the one bad rule, keep going.
+        try:
+            evaluate_cel(rule.when, merged_context, probe_resolver, now=now)
+        except Exception as exc:  # noqa: BLE001 — a discovered rule that errors on eval is dropped
+            logger.warning(
+                "discovered-rule enforcement: dropping rule whose CEL failed to "
+                "evaluate — workspace=%s rule=%s when=%r: %s",
+                workspace_id,
+                rule_id,
+                rule.when,
+                exc,
+            )
+            _audit_discovered_rule_dropped(
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                rule_id=rule_id,
+                rule_title=row.get("name"),
+                reason="eval",
+                error_summary=f"{type(exc).__name__}: {exc}",
+            )
+            continue
+
+        clean.append(rule)
+
+    return clean
+
+
+def _merge_discovered_rules(
+    template: PocketTemplate, discovered: list[InstinctRule]
+) -> PocketTemplate:
+    """Return a shallow copy of ``template`` whose ``instinct_rules.rules`` are
+    the discovered rules FOLLOWED BY the template's own rules.
+
+    Discovered rules go FIRST so a discovered ``block`` wins step-1's first-match
+    short-circuit; for ``require_approval`` / ``notify`` order is immaterial.
+    The template object is NEVER mutated — ``model_copy(deep=False)`` plus a
+    freshly-copied ``InstinctRulesDef`` keeps the original intact for any other
+    reader (100% backward-compat).
+    """
+    base_def = template.instinct_rules
+    merged_def = InstinctRulesDef(
+        escalation=base_def.escalation if base_def else None,
+        rules=[*discovered, *(list(base_def.rules) if base_def else [])],
+    )
+    return template.model_copy(update={"instinct_rules": merged_def}, deep=False)
+
+
 async def gate_action(
     *,
     workspace_id: str,
@@ -294,6 +549,8 @@ async def gate_action(
     now: datetime | None = None,
     approval_level: ApprovalLevel | str | None = ApprovalLevel.ASK,
     dry_run_mode: bool = False,
+    template_default_deny: bool = False,
+    is_mutating: bool = True,
 ) -> InstinctGateResult:
     """Resolve the template-level Instinct verdict for one action+row.
 
@@ -331,6 +588,19 @@ async def gate_action(
     still blocked and a dormant workspace still escalates to a human even
     when dry-run is globally on.
 
+    ``template_default_deny`` + ``is_mutating`` (AW-7) close the TEMPLATE-level
+    deny-by-default hole. When a bound template declares NO rule matching this
+    action, ``resolve_instinct`` returns its default EXECUTE verdict
+    (``reason="auto"``, no matched rules). If ``template_default_deny`` is True
+    AND ``is_mutating`` is True, that no-rule-match EXECUTE is routed to the
+    human-pending path instead of proceeding — finishing deny-by-default at the
+    template layer. READS (``is_mutating=False`` — the executor sets this for a
+    ``read_only`` / GET / HEAD binding) always proceed: a read has nothing to
+    govern. The flip is scoped to the no-rule-match default ONLY — a rule that
+    matched and returned EXECUTE, or a ``notify_only`` author floor
+    (NOTIFY_AND_EXECUTE), is an explicit policy decision and is never
+    overridden. Default OFF → byte-identical to the prior gate.
+
     Errors:
         ``InstinctResolutionError`` from the composer (unknown action
         on the template, or a CEL eval failure on a rule) is mapped to
@@ -338,9 +608,31 @@ async def gate_action(
     """
     level = _coerce_approval_level(approval_level)
 
+    # F6 — merge approved workspace-discovered rules into the template before
+    # the (unchanged) composer call. DEFAULT-OFF: when the flag is off,
+    # `get_active_rules` is never called and `effective_template is template`,
+    # so the entire discovered branch is dead code on the default path.
+    effective_template = template
+    if get_settings().instinct_enforce_discovered_rules:
+        # Pin a stable `now` shared by the guarded probe and the composer so a
+        # time-sensitive CEL `when` evaluates identically in both.
+        if now is None:
+            now = datetime.now(UTC)
+        discovered = await _load_discovered_instinct_rules(
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            template=template,
+            row_context=row_context,
+            workspace_context=workspace_context,
+            resolver=resolver,
+            now=now,
+        )
+        if discovered:
+            effective_template = _merge_discovered_rules(template, discovered)
+
     try:
         decision = resolve_instinct(
-            template,
+            effective_template,
             action_name,
             row_context,
             workspace_context,
@@ -377,6 +669,44 @@ async def gate_action(
             park=park,
             level=level,
             dry_run_mode=dry_run_mode,
+        )
+
+    # AW-7 — TEMPLATE-level deny-on-no-match. The verdict is EXECUTE /
+    # NOTIFY_AND_EXECUTE (the BLOCK and ESCALATE_APPROVAL branches returned
+    # above). When the template declared NO rule that matched this action,
+    # `resolve_instinct` returns its default EXECUTE verdict — `reason="auto"`
+    # with no matched rules. That, plus `is_mutating`, is exactly the case
+    # deny-by-default must close: a write a bound template does not explicitly
+    # govern should park for a human, not fire silently.
+    #
+    # Scope is deliberately tight:
+    #   * verdict EXECUTE + reason "auto"  — the no-rule-match default ONLY. A
+    #     rule that matched and returned EXECUTE has a NON-"auto" reason; a
+    #     `notify_only` author floor returns NOTIFY_AND_EXECUTE. Both are
+    #     explicit policy decisions, never overridden here.
+    #   * is_mutating  — POST/PUT/PATCH/DELETE and NOT read_only (the executor
+    #     computes this from the parsed binding). A read (read_only / GET /
+    #     HEAD) has nothing to govern, so it always proceeds.
+    #   * template_default_deny  — the per-workspace/global opt-in. OFF (the
+    #     default) keeps every path byte-identical to the prior gate.
+    no_rule_matched = decision.verdict == "EXECUTE" and decision.reason == "auto"
+    if template_default_deny and is_mutating and no_rule_matched:
+        logger.info(
+            "instinct gate: template default-deny parks uncovered mutating "
+            "action=%s pocket=%s row=%s (no matching rule)",
+            action_name,
+            pocket_id,
+            row_id,
+        )
+        return await _escalate_to_human(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            action_name=action_name,
+            row_id=row_id,
+            row_context=row_context,
+            decision=decision,
+            park=park,
         )
 
     # EXECUTE / NOTIFY_AND_EXECUTE — proceed. Notify rules carry through.

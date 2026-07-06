@@ -166,6 +166,32 @@ Conversion essentials the page should carry:
   `api/submit` → Lead; it is track-agnostic and already wired.
 - Every CTA is an anchor (`#book`, `tel:`, `mailto:`).
 
+### Sourcing photography (real images, not placeholders)
+
+A marketing page needs real photography — a hero photo, section imagery. Do
+**not** invent image `src` paths (they render broken) and do **not** ship a
+photo-free wireframe when the page calls for imagery. Instead pull real,
+free stock photos:
+
+1. Call **`search_stock_images`** (MCP tool `mcp__pocketpaw_stock__search_stock_images`)
+   with a **generic, descriptive** query — `"modern dental office"`,
+   `"artisan bakery bread"` — not a hyper-specific one (`"dentist in Akron"`
+   returns weak matches). Pass `orientation` (`landscape` for heroes/banners,
+   `portrait`/`square` where the layout wants it) and a small `count`.
+2. It returns `{url, alt, credit, credit_url, provider}` per photo. **Embed the
+   `url` directly** as the `src` of a plain `<img>` (or a CSS
+   `background-image`). The URL is a provider CDN link that survives the static
+   prerender build — no upload step.
+3. **Always set `alt`** from the returned `alt`, and **render the `credit`**
+   line somewhere near the image or in the footer (e.g. a small muted
+   "Photos by … on Unsplash" line). This is required by the providers' terms.
+4. If `search_stock_images` returns an **empty list** (no provider key
+   configured, or no match), fall back gracefully to the copy-and-color
+   treatment — a tasteful gradient/solid hero — rather than a broken `<img>`.
+   Never fabricate a photo URL.
+
+One hero photo plus a couple of section images is plenty — don't over-request.
+
 ## STEP 2 — Assemble the `source` map (the §4.3 contract)
 
 `source` is a flat object: **`{ relative_path: file_contents }`**, paths

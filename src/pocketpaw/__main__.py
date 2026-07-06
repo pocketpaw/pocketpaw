@@ -1,6 +1,10 @@
 """PocketPaw entry point.
 
 Changes:
+  - 2026-07-02: Added `atlas build [--check]` subcommand (AT-4) — compiles
+                the atlas OS self-model artifact from authored entries +
+                connector/senses extraction. Early command; `--check` is
+                the CI freshness gate.
   - 2026-06-13: Added `pocket reconcile <id> [--apply]` subcommand
                 (P2.4 Template Reconcile). Thin CLI adapter — calls the
                 running dashboard's reconcile REST endpoints over loopback
@@ -128,6 +132,7 @@ _EARLY_COMMANDS = {
     "logs",
     "template",
     "pocket",
+    "atlas",
 }
 
 
@@ -227,6 +232,14 @@ def _handle_early_command(args) -> int | None:
             verify_key_path=getattr(args, "verify_key", None),
             no_prompt=getattr(args, "no_prompt", False),
             registry_path=getattr(args, "registry", None),
+        )
+
+    if cmd == "atlas":
+        from pocketpaw.cli.atlas import run_atlas_cmd
+
+        return run_atlas_cmd(
+            action=getattr(args, "subaction", None),
+            check=getattr(args, "check", False),
         )
 
     if cmd == "pocket":
@@ -378,6 +391,7 @@ Examples:
             "logs",
             "template",
             "pocket",
+            "atlas",
         ],
         help="Subcommand to run",
     )
@@ -459,6 +473,15 @@ Examples:
             "registered-tier surfaces errors)."
         ),
     )
+    # ── AT-4 atlas build flag ──
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help=(
+            "For `atlas build`: compile to memory and exit non-zero with a "
+            "diff summary if the checked-in artifact is stale (CI gate)"
+        ),
+    )
     # ── P2.4 pocket reconcile flags ──
     parser.add_argument(
         "--apply",
@@ -532,6 +555,9 @@ def _resolve_subargs(args) -> None:
         args.subaction = subargs[0]
         if len(subargs) > 1:
             args.query = subargs[1]
+    elif cmd == "atlas" and subargs:
+        # pocketpaw atlas build [--check]
+        args.subaction = subargs[0]
 
     if args.limit is None:
         defaults = {"errors": 20, "logs": 50, "sessions": 20, "memory": 10}

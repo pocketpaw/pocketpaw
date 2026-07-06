@@ -228,6 +228,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
     from pocketpaw_ee.cloud.daytona.router import router as daytona_router
     from pocketpaw_ee.cloud.deep_work_log.router import router as deep_work_log_router
+    from pocketpaw_ee.cloud.discovery.router import router as discovery_router
     from pocketpaw_ee.cloud.entitlements.router import router as entitlements_router
     from pocketpaw_ee.cloud.foresight.router import router as foresight_router
     from pocketpaw_ee.cloud.jobs.router import router as jobs_router
@@ -257,6 +258,11 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(runs_router, prefix="/api/v1")
     app.include_router(connectors_router, prefix="/api/v1")
+    # Discovery — zero-setup workspace-discovery TRIGGER
+    # (POST /cloud/discovery/run). Workspace-scoped (no path param); fires the
+    # orchestrator in the background and stages proposals as pending Instinct
+    # Actions. Mounted next to connectors since discovery samples them.
+    app.include_router(discovery_router, prefix="/api/v1")
     # Credit ledger (BC-1) — the workspace-scoped wallet read surface
     # (GET /credits/balance, GET /credits/history). Grant / debit are
     # in-process only (the billing subsystem calls the service directly).
@@ -298,6 +304,10 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(jobs_router, prefix="/api/v1")
     # Skills — per-backend API-skill install (POST /skills/api-doc).
     app.include_router(skills_router, prefix="/api/v1")
+    from pocketpaw_ee.cloud.media.router import router as media_router
+
+    # /studio generated media — serve + list (EE layer).
+    app.include_router(media_router, prefix="/api/v1")
     app.include_router(meetings_router, prefix="/api/v1")
     # Inbound Recall.ai webhook — no auth dependency (Svix-signed instead).
     app.include_router(meetings_webhooks_router, prefix="/api/v1")
@@ -341,6 +351,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.mission_control.router import router as mission_control_router
     from pocketpaw_ee.cloud.notifications.router import router as notifications_router
     from pocketpaw_ee.cloud.outcomes.router import router as outcomes_router
+    from pocketpaw_ee.cloud.push.router import router as push_router
     from pocketpaw_ee.cloud.tasks.router import router as tasks_router
     from pocketpaw_ee.cloud.uploads.router import router as uploads_router
     from pocketpaw_ee.fabric.router import router as fabric_router
@@ -353,6 +364,8 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(knowledge_router, prefix="/api/v1")
     app.include_router(uploads_router, prefix="/api/v1")
     app.include_router(notifications_router, prefix="/api/v1")
+    # Web Push — VAPID public key + subscribe/unsubscribe (pocketpaw#1391).
+    app.include_router(push_router, prefix="/api/v1")
     app.include_router(tasks_router, prefix="/api/v1")
     app.include_router(files_router, prefix="/api/v1")
     # file_versions (ART-1) — versioned file-write storage spine. Shares the
@@ -418,6 +431,16 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.belt.router import router as belt_console_router
 
     app.include_router(belt_console_router, prefix="/api/v1")
+
+    # Security control plane — the /api/v1/security/* proxy to shield, the
+    # same-box Go daemon that serves an egress-decision control API on a UNIX
+    # socket (feat/sec-5-security-proxy SEC-5). GET decisions/stats/config,
+    # PATCH config, POST decisions/{id}/resolve — every route OWNER-gated
+    # (security.manage). Degrades to a typed available:false (reads) / 409
+    # (writes) when shield is absent, so the /security page renders without it.
+    from pocketpaw_ee.cloud.security.router import router as security_router
+
+    app.include_router(security_router, prefix="/api/v1")
 
     # Belt MANDATES — the standing-JOB primitive (feat/belt-mandates). The
     # /belt/mandates surface: charter CRUD, patrol intake (feedback), sightings
@@ -792,6 +815,16 @@ def mount_cloud(app: FastAPI) -> None:
 
     register_meeting_notification_listeners()
     register_meeting_calendar_listeners()
+
+    # Push notifications fan-out (#1393) — v1 product events
+    # (agent.stream_end / instinct.approval.created / meeting.started) →
+    # ``dispatch.notify``, which forks WS-vs-Web-Push so a user with both the
+    # desktop app and a browser tab open is notified exactly once. Same
+    # constraint as the other bus subscribers: register AFTER init_realtime
+    # installed the singleton bus.
+    from pocketpaw_ee.cloud.push.listeners import register_push_event_listeners
+
+    register_push_event_listeners()
 
     # In-process daily-snapshot scheduler — opt-in via env var.
     #

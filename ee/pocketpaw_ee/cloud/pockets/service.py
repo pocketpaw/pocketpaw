@@ -4,6 +4,15 @@ Sole owner of writes to the ``Pocket`` Beanie document. Module-level
 ``async def`` API. The doc → domain mapping helpers (formerly in
 ``repositories.py``) live alongside the public API as private helpers.
 
+Updated: 2026-06-28 (AW-7 template gate deny-on-no-match) — added
+``resolve_workspace_template_default_deny`` — the effective TEMPLATE-level
+deny-by-default for a workspace (per-workspace ``instinct_template_default_deny``
+field → global config default → False). Mirrors
+``resolve_workspace_approval_level`` exactly: any read failure falls back to the
+global default (ultimately False), so a DB hiccup can never accidentally start
+parking writes. The cloud router reads it and threads it through ``run_action``
+→ ``gate_action``.
+
 Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — ``_check_domain_edit_access``
 now allows the synthetic ``system:workspace_job`` identity so a workspace job
 can merge its result back even on a private (non-workspace-visible) pocket.
@@ -1336,6 +1345,47 @@ async def resolve_workspace_approval_level(workspace_id: str) -> str:
         return global_default
     field = getattr(ws, "instinct_approval_level", None)
     if isinstance(field, str) and field:
+        return field
+    return global_default
+
+
+async def resolve_workspace_template_default_deny(workspace_id: str) -> bool:
+    """Return the effective TEMPLATE-level deny-by-default for a workspace (AW-7).
+
+    Resolution order (mirrors ``resolve_workspace_approval_level``):
+      1. The workspace document's ``instinct_template_default_deny`` field, when
+         set to a non-null bool — the PER-WORKSPACE opt-in.
+      2. Otherwise the GLOBAL config default
+         (``Settings.instinct_template_default_deny``, itself ``False``).
+
+    A global env var therefore changes the default only for workspaces that have
+    NOT set their own field; it can never silently flip a workspace that relies
+    on the default once that workspace pins its own value. Any read failure
+    falls back to the global default (and ultimately ``False``), so a DB hiccup
+    can never accidentally start parking a workspace's writes.
+
+    Returns a bare bool; ``gate_action`` reads it directly.
+    """
+    from pocketpaw.config import get_settings
+
+    try:
+        global_default = bool(get_settings().instinct_template_default_deny)
+    except Exception:  # noqa: BLE001 — config read failure → dormant (False)
+        global_default = False
+
+    if not workspace_id:
+        return global_default
+
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    try:
+        ws = await Workspace.get(PydanticObjectId(workspace_id))
+    except Exception:  # noqa: BLE001 — malformed id / read failure → global default
+        return global_default
+    if ws is None:
+        return global_default
+    field = getattr(ws, "instinct_template_default_deny", None)
+    if isinstance(field, bool):
         return field
     return global_default
 

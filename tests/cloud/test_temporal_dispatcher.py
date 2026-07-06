@@ -23,6 +23,17 @@
 #   * Eval failure: a bad CEL doesn't break the sweep — the failure
 #     is captured under ``errors`` and the sweep continues for the
 #     other rows.
+#
+# Updated: 2026-06-28 (AW-7 follow-up — security) — adds the TEMPLATE-level
+# deny-by-default coverage for the TEMPORAL path. AW-7's
+# ``instinct_template_default_deny`` flag was threaded through the router but
+# NOT this sweep path, so a scheduled MUTATING action with no matching rule
+# fired ungated even with the flag ON. New cases (using the REAL gate, only
+# the executor/creds/spec/flag-resolver stubbed) pin: flag ON + mutating + no
+# rule ⇒ PARK (escalated, executor never called, approval row persisted); flag
+# OFF ⇒ unchanged (fires); a read_only GET ⇒ never gated; and that the flag +
+# computed ``is_mutating`` actually REACH both gate points (the direct
+# ``gate_action`` and the ``run_action`` re-gate).
 
 from __future__ import annotations
 
@@ -539,3 +550,184 @@ async def test_template_none_is_no_op(monkeypatch) -> None:
     assert executor.calls == []
     persisted = await sweeps_service.load_last_seen("w1", "p1")
     assert persisted == {}
+
+
+# ---------------------------------------------------------------------------
+# AW-7 follow-up (security) — TEMPLATE-level deny-by-default on the TEMPORAL
+# sweep path. AW-7 added the per-workspace ``instinct_template_default_deny``
+# flag: ON ⇒ a template-bound pocket with NO matching rule for a MUTATING
+# action PARKS it instead of firing. The router threaded it; the temporal
+# sweep path did NOT, so a scheduled mutating action with no matching rule
+# fired ungated even with the flag ON — a hole in the exact feature meant to
+# close it. These tests pin that the temporal path now mirrors the router:
+# flag ON + mutating + no rule ⇒ PARK; flag OFF ⇒ unchanged; a READ is never
+# gated. They use the REAL ``gate_action`` (only the executor + creds + spec +
+# the flag resolver are stubbed) so the actual escalation logic fires
+# end-to-end — a stubbed gate would not prove the hole is closed.
+# ---------------------------------------------------------------------------
+
+
+def _patch_real_gate(
+    monkeypatch,
+    executor: _RecordingExecutor,
+    *,
+    default_deny: bool,
+    method: str = "POST",
+    read_only: bool = False,
+) -> None:
+    """Wire the dispatcher to the REAL gate but stub everything around it.
+
+    The executor is recorded (so we can assert it is/ isn't called), the creds
+    + spec are faked (no HTTP, no real pocket), and
+    ``resolve_workspace_template_default_deny`` returns ``default_deny`` so the
+    test drives the flag without touching a Workspace document. ``method`` /
+    ``read_only`` shape the single ``alert_overdue`` binding so the dispatcher's
+    ``is_mutating`` computation has real input.
+    """
+    from pocketpaw_ee.cloud.pockets import action_executor as real_executor
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    monkeypatch.setattr(real_executor, "run_action", executor.run_action)
+
+    async def _creds(_ws: str, _pid: str):
+        return (
+            "https://api.example.test",
+            "none",
+            None,
+            "",
+            [{"method": method, "path_pattern": "*"}],
+            None,
+        )
+
+    binding: dict[str, Any] = {
+        "kind": "write_binding",
+        "method": method,
+        "path": "/alerts",
+        "params": {},
+    }
+    if read_only:
+        binding["read_only"] = True
+
+    async def _spec(_ws: str, _pid: str):
+        return {"actions": {"alert_overdue": binding}}
+
+    async def _deny(_ws: str) -> bool:
+        return default_deny
+
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _creds)
+    monkeypatch.setattr(pockets_service, "get_pocket_ripple_spec", _spec)
+    monkeypatch.setattr(pockets_service, "resolve_workspace_template_default_deny", _deny)
+
+
+async def test_temporal_default_deny_parks_uncovered_mutating_action(
+    monkeypatch, recording_bus
+) -> None:
+    """THE HOLE, CLOSED. Flag ON + a temporal-triggered MUTATING action +
+    a bound template with NO matching rule ⇒ the action PARKS (escalated /
+    pending approval), it is NOT executed. Mirrors the router-path test
+    ``test_template_default_deny_parks_uncovered_mutating_action``."""
+    from pocketpaw_ee.cloud._core.realtime.events import InstinctApprovalCreated
+    from pocketpaw_ee.cloud.instinct_approvals import service as approvals_service
+    from pocketpaw_ee.cloud.pockets import temporal_dispatcher
+
+    executor = _RecordingExecutor()
+    # POST (mutating), flag ON. `auto` policy + no rules ⇒ resolve_instinct
+    # returns its default EXECUTE/reason="auto" — the no-rule-match case.
+    _patch_real_gate(monkeypatch, executor, default_deny=True, method="POST")
+
+    template = _template_with_temporal(instinct_policy="auto")  # no instinct_rules
+    result = await temporal_dispatcher.sweep_pocket(
+        "w1", "p1", template=template, rows=[{"id": "r1", "value": 42}]
+    )
+
+    # The mutating action PARKED — counted under escalated, NOT fired, and the
+    # executor was NEVER called (no ungated write).
+    assert result.escalated == 1
+    assert result.edges_fired == 0
+    assert result.blocked == 0
+    assert executor.calls == []
+
+    # A real human-pending approval row was persisted by the gate.
+    approvals = await approvals_service.list_approvals("w1", "system:temporal-sweeper", {})
+    assert len(approvals) == 1
+    assert approvals[0]["action_name"] == "alert_overdue"
+    assert approvals[0]["status"] == "pending"
+    created = [e for e in recording_bus.events if isinstance(e, InstinctApprovalCreated)]
+    assert len(created) == 1
+
+
+async def test_temporal_default_deny_off_proceeds_unchanged(monkeypatch) -> None:
+    """Flag OFF (the default) ⇒ the temporal mutating action fires exactly as
+    before — the executor runs, the edge counts under ``fired``. Byte-for-byte
+    unchanged behavior on the dormant path."""
+    from pocketpaw_ee.cloud.pockets import temporal_dispatcher
+
+    executor = _RecordingExecutor()
+    _patch_real_gate(monkeypatch, executor, default_deny=False, method="POST")
+
+    template = _template_with_temporal(instinct_policy="auto")
+    result = await temporal_dispatcher.sweep_pocket(
+        "w1", "p1", template=template, rows=[{"id": "r1", "value": 42}]
+    )
+
+    assert result.edges_fired == 1
+    assert result.escalated == 0
+    assert len(executor.calls) == 1
+    # The executor's re-gate also saw the flag OFF, so it did not park either.
+    assert executor.calls[0]["template_default_deny"] is False
+
+
+async def test_temporal_default_deny_does_not_gate_read_only(monkeypatch) -> None:
+    """Flag ON but the binding is a READ-ONLY GET ⇒ ``is_mutating`` is False, so
+    the deny-by-default flip never parks it — a read has nothing to govern. The
+    edge proceeds to the executor (counted under ``fired``)."""
+    from pocketpaw_ee.cloud.pockets import temporal_dispatcher
+
+    executor = _RecordingExecutor()
+    _patch_real_gate(monkeypatch, executor, default_deny=True, method="GET", read_only=True)
+
+    template = _template_with_temporal(instinct_policy="auto")
+    result = await temporal_dispatcher.sweep_pocket(
+        "w1", "p1", template=template, rows=[{"id": "r1", "value": 42}]
+    )
+
+    # A read is never gated by the template default-deny flip.
+    assert result.edges_fired == 1
+    assert result.escalated == 0
+    assert len(executor.calls) == 1
+
+
+async def test_temporal_threads_flag_and_is_mutating_into_gate(monkeypatch) -> None:
+    """Defense against the security review's 'double-gate' note: the flag AND
+    the computed ``is_mutating`` must actually REACH the direct ``gate_action``
+    call, and the flag must reach the ``run_action`` re-gate. A recording gate
+    captures the kwargs so we prove the values arrive (not just that the call
+    happens)."""
+    from pocketpaw_ee.cloud.pockets import temporal_dispatcher
+
+    gate = _RecordingGate(next_step="proceed")
+    executor = _RecordingExecutor()
+    _patch_dispatch(monkeypatch, gate, executor)
+
+    # Drive the flag ON via the resolver; the recorded gate proceeds regardless.
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    async def _deny(_ws: str) -> bool:
+        return True
+
+    monkeypatch.setattr(pockets_service, "resolve_workspace_template_default_deny", _deny)
+
+    template = _template_with_temporal(instinct_policy="auto")
+    await temporal_dispatcher.sweep_pocket(
+        "w1", "p1", template=template, rows=[{"id": "r1", "value": 42}]
+    )
+
+    # FIRST gate point — the direct gate_action call got BOTH values.
+    assert len(gate.calls) == 1
+    assert gate.calls[0]["template_default_deny"] is True
+    # POST binding from `_patch_dispatch`'s spec ⇒ mutating.
+    assert gate.calls[0]["is_mutating"] is True
+
+    # SECOND gate point — run_action got the flag so its re-gate honors it too.
+    assert len(executor.calls) == 1
+    assert executor.calls[0]["template_default_deny"] is True

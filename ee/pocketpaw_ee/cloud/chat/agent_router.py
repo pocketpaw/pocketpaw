@@ -5,6 +5,17 @@ message, submitting a ``Run`` to the configured executor, and tailing the
 run's Redis Stream so durability sits underneath the wire shape the
 frontend already speaks.
 
+Changes: 2026-06-30 (feat/billing-quota-enforcement, chunk 3) — the run-start
+credit gate now also enforces the MONTHLY QUOTA. Beside the existing BC-4
+``check_balance`` call (inside the same ``if get_settings().billing_enforced:``
+block, before ``create_run``/submit), ``post_agent_chat`` now also
+``await credits_service.check_quota(workspace_id)`` so a workspace that has spent
+up to its monthly ceiling gets a clean 402 ``credits.quota_exceeded`` with NO DB
+trace — the same universal cap the executor enforces in
+``run_core.execute_run``, mirrored here for the synchronous HTTP path.
+``check_balance`` is unchanged and stays FIRST (balance <= 0 is the secondary
+guard). Both are no-ops when the flag is OFF.
+
 Changes: 2026-06-25 (fix/worker-trusts-spec-workspace) — ``post_agent_chat``
 threads the authenticated ``workspace_id`` into ``resolve_scope_context`` via
 ``expected_workspace_id``, matching the run worker. The HTTP route already
@@ -163,19 +174,31 @@ async def post_agent_chat(
     except InvalidScope:
         raise CloudError(400, "scope.invalid", "Invalid scope") from None
 
-    # BC-4 run-start hard-block. Sit the credit gate at the SINGLE run-start
-    # chokepoint — BEFORE any DB write (no user message, no ChatRunDoc) and
-    # BEFORE the executor submit — so a blocked run leaves no trace and
-    # IN-FLIGHT runs (already past this point) are never killed. Flag-gated:
-    # OFF by default (OSS / self-host run no ledger), ON for the cloud via
-    # ``POCKETPAW_BILLING_ENFORCED``. ``check_balance`` raises
-    # ``InsufficientCredits`` (402, credits.insufficient), which the CloudError
-    # handler maps to the wire — we never raise HTTPException here. Imported
-    # locally to keep the credits package off this hot module's import graph.
+    # BC-4 run-start hard-block + chunk-3 monthly-quota fast-reject. Sit BOTH
+    # credit gates at the SINGLE run-start chokepoint — BEFORE any DB write (no
+    # user message, no ChatRunDoc) and BEFORE the executor submit — so a blocked
+    # run leaves no trace and IN-FLIGHT runs (already past this point) are never
+    # killed. Flag-gated: OFF by default (OSS / self-host run no ledger), ON for
+    # the cloud via ``POCKETPAW_BILLING_ENFORCED``. We never raise HTTPException
+    # here; both gates raise a ``CloudError`` the handler maps to the 402 wire.
+    # The credits package is imported locally to keep it off this hot module's
+    # import graph.
+    #
+    #   * ``check_balance`` (BC-4) — the wallet is empty (balance <= 0): raises
+    #     ``InsufficientCredits`` (402, credits.insufficient). The SECONDARY
+    #     guard; stays first and unchanged.
+    #   * ``check_quota`` (chunk 3) — the wallet may still hold credits but the
+    #     workspace has spent up to its monthly ceiling (plan cap + period
+    #     top-ups): raises ``QuotaExceeded`` (402, credits.quota_exceeded). This
+    #     is the universal monthly cap; the same assertion the run-start gate in
+    #     ``run_core.execute_run`` enforces, mirrored here so the synchronous
+    #     chat HTTP path returns a clean 402 with no DB trace instead of starting
+    #     a run that the executor would only reject afterward.
     if get_settings().billing_enforced:
         from pocketpaw_ee.cloud.credits import service as credits_service
 
         await credits_service.check_balance(workspace_id)
+        await credits_service.check_quota(workspace_id)
 
     transport = get_stream_transport()
     # Resolve the surface-aware context preamble AFTER scope is resolved

@@ -27,6 +27,7 @@ from beanie import PydanticObjectId
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     NotificationCleared,
+    NotificationDeleted,
     NotificationNew,
     NotificationRead,
 )
@@ -72,6 +73,7 @@ def _to_domain(doc: _NotificationDoc) -> Notification:
         id=str(doc.id),
         workspace_id=doc.workspace,
         recipient_id=doc.recipient,
+        actor_id=doc.actor,
         kind=doc.type,  # Beanie field is `type`; domain renames to `kind`
         title=doc.title,
         body=doc.body,
@@ -98,10 +100,12 @@ async def create(
     title: str,
     body: str = "",
     source: _NotificationSourceDoc | NotificationSource | None = None,
+    actor_id: str | None = None,
 ) -> Notification:
     doc = _NotificationDoc(
         workspace=workspace_id,
         recipient=recipient,
+        actor=actor_id,
         type=kind,
         title=title,
         body=body,
@@ -161,11 +165,22 @@ async def clear_all(user_id: str) -> int:
     return count
 
 
+async def delete_notification(notification_id: str, user_id: str) -> bool:
+    """Delete a single notification. Returns True if deleted, False if not found."""
+    doc = await _NotificationDoc.get(PydanticObjectId(notification_id))
+    if not doc or doc.recipient != user_id:
+        return False
+    await doc.delete()
+    await emit(NotificationDeleted(data={"id": notification_id, "user_id": user_id}))
+    return True
+
+
 __all__ = [
     "Notification",
     "NotificationSource",
     "count_unread",
     "create",
+    "delete_notification",
     "list_for_user",
     "list_for_user_dicts",
     "mark_read",

@@ -29,6 +29,11 @@
 # Updated: 2026-05-21 (PR #1164 review) — documented in
 #   ``agent_update_task`` that success_criteria / preconditions are
 #   intentionally not patchable (planner-set, not ad-hoc editable).
+# Updated: 2026-07-02 (feat/svl-5-cloud-verify) — ``_to_domain`` threads
+#   the new ``verify`` dict (Self-Verifying Loop state stamped by the
+#   cloud planner terminal, SVL-5) from the Beanie doc onto the domain
+#   Task so the DTO surfaces it read-only. Not patchable through any
+#   endpoint — the planner terminal is the sole writer.
 """Tasks entity — business logic service.
 
 Public API (all module-level ``async def``):
@@ -127,6 +132,7 @@ def _to_domain(doc: _TaskDoc) -> Task:
         blocked_by=tuple(getattr(doc, "blocked_by", None) or ()),
         success_criteria=tuple(getattr(doc, "success_criteria", None) or ()),
         preconditions=tuple(getattr(doc, "preconditions", None) or ()),
+        verify=dict(getattr(doc, "verify", None) or {}),
         due_at=doc.due_at,
         blocked_reason=doc.blocked_reason,
         created_at=getattr(doc, "createdAt", None),

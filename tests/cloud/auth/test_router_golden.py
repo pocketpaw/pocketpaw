@@ -69,12 +69,14 @@ async def test_get_me_returns_dto_shape(app_client) -> None:
         "emailVerified",
         "activeWorkspace",
         "workspaces",
+        "mfa_enabled",
     }
     assert body["id"] == str(user_doc.id)
     assert body["name"] == "Alice"
     assert body["emailVerified"] is True
     assert body["activeWorkspace"] == "w1"
     assert body["workspaces"] == [{"workspace": "w1", "role": "owner"}]
+    assert body["mfa_enabled"] is False
 
 
 async def test_patch_me_updates_full_name(app_client) -> None:

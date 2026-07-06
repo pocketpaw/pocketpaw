@@ -297,6 +297,19 @@ async def run_action_sequence(
             }
             break
 
+        # AW-7 note (SEC-3 deny-by-default consistency): the saga does NOT
+        # thread ``template=`` and runs with ``from_instinct=False``, so the
+        # template-level deny-on-no-match branch (which lives in
+        # ``gate_action`` and only runs when a template is present) is
+        # structurally UNREACHABLE here — no bulk/temporal-style plumbing is
+        # needed. Deny-by-default for an uncovered mutating forward write is
+        # still enforced one layer down: ``ActionBinding.requires_instinct``
+        # defaults True, so such a write PARKS at gate 7 (``instinct_pending``),
+        # ``_is_parked`` catches it, and the sequence rolls back. A binding that
+        # fires ungated is one the author explicitly set ``requires_instinct=
+        # False`` / ``instinct_exempt`` on — an auditable opt-out, not a
+        # no-rule-match fall-through — so it is consistent with the router and
+        # temporal paths, which also fire such a binding untemplated.
         result = await run_action(
             workspace_id=workspace_id,
             pocket_id=pocket_id,

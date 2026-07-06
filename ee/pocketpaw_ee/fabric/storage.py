@@ -8,6 +8,10 @@
 # sites if needed. Sibling to ``pocketpaw.fabric.store.FabricStore``
 # (OSS, async, holds the live ontology object data); the ``Workspace``
 # prefix flags the workspace-scoped, registry-only role.
+# Updated: 2026-07-02 (feat/atlas-fabric, AT-7) — added
+# ``list_entity_links()``: enumerate the declared links touching one
+# entity type (either end), so the atlas Fabric introspector can
+# describe a workspace's live schema. Read-only, additive.
 """SQLite-backed workspace-scoped Fabric registry store.
 
 The store is the write-side of the concrete ``FabricRegistry``
@@ -266,6 +270,26 @@ class WorkspaceFabricStore:
                 (workspace_id, name, from_type, to_type),
             )
             return cur.fetchone() is not None
+
+    def list_entity_links(self, workspace_id: str, entity_type: str) -> list[dict[str, str]]:
+        """Every declared link touching ``entity_type`` (either end) in
+        ``workspace_id``, as ``{"name", "from_type", "to_type"}`` dicts.
+
+        Ordered by (name, from_type, to_type) for stable callers. Added
+        for the atlas Fabric introspector (AT-7): the registry exposed
+        existence checks but no way to enumerate a type's links when
+        describing the workspace schema.
+        """
+        with self._connect() as conn:
+            cur = conn.execute(
+                "SELECT name, from_type, to_type FROM fabric_registry_links "
+                "WHERE workspace = ? AND (from_type = ? OR to_type = ?) "
+                "ORDER BY name, from_type, to_type",
+                (workspace_id, entity_type, entity_type),
+            )
+            return [
+                {"name": row[0], "from_type": row[1], "to_type": row[2]} for row in cur.fetchall()
+            ]
 
 
 __all__ = [

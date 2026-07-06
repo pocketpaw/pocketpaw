@@ -1,5 +1,16 @@
 """Workspace document — one per deployment/org.
 
+2026-06-28 (AW-7 template gate deny-on-no-match): added
+``Workspace.instinct_template_default_deny`` — the PER-WORKSPACE override for
+the TEMPLATE-level deny-by-default. ``None`` (the default) means "use the
+global config default" (``Settings.instinct_template_default_deny``, itself
+False). When set True, a template BOUND to a pocket that declares no rule
+matching a MUTATING action parks the write for a human instead of firing;
+reads stay ungated. Resolved exactly like ``instinct_approval_level`` (per-
+workspace field → global default) via
+``resolve_workspace_template_default_deny``; the cloud router reads it and
+threads it through ``run_action`` → ``gate_action``.
+
 2026-06-19 (layered/learning gate, T6): added
 ``Workspace.instinct_approval_level`` — the PER-WORKSPACE override for the
 layered Instinct gate's triager activation level ("ASK" | "TRIAGE" |
@@ -109,6 +120,13 @@ class Workspace(TimestampedDocument):
     # workspace's writes; nothing else changes the default for an existing
     # tenant (design MF-9 — global config cannot silently upgrade tenants).
     instinct_approval_level: str | None = None
+    # AW-7 — per-workspace override for the TEMPLATE-level deny-by-default.
+    # None = use the global config default (Settings.
+    # instinct_template_default_deny, False). True parks a MUTATING action a
+    # bound template declares no rule for (instead of firing); reads stay
+    # ungated. Same MF-9 contract as instinct_approval_level above — a global
+    # env var never silently flips an existing tenant.
+    instinct_template_default_deny: bool | None = None
 
     class Settings:
         name = "workspaces"

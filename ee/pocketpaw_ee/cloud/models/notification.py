@@ -22,6 +22,7 @@ class Notification(TimestampedDocument):
 
     workspace: Indexed(str)  # type: ignore[valid-type]
     recipient: Indexed(str)  # type: ignore[valid-type]
+    actor: str | None = None  # user id of the person who triggered this notification
     type: str  # notification type: mention, comment, reply, invite, agent_complete,
     # pocket_shared, meeting_scheduled, meeting_cancelled, meeting_started, meeting_reminder
     title: str

@@ -45,6 +45,11 @@
 #   ``execute()`` filters its doc read on ``enabled == True``, so a disabled
 #   row's credentials can never connect through the fallback: disable now
 #   revokes on every execute path, not just the durable seam.
+# Updated: 2026-06-28 (AW-2 connector multi-host egress allow-list) — the legacy
+#   one-shot fallback in ``execute()`` folds the row's ``allowed_hosts`` field
+#   into the config blob passed to ``adapter.connect`` so the per-workspace
+#   egress allow-list additions reach the adapter on that path too (the primary
+#   ensure_connected path folds them in ``state_provider.get``).
 # Module-level async API. Sole owner of writes to the
 # ``WorkspaceConnector`` Beanie document. Reads merge the static
 # registry catalog from src/pocketpaw/connectors/registry.py with the
@@ -970,6 +975,11 @@ async def execute(
             _WCDoc.enabled == True,  # noqa: E712 — Beanie expects ==
         )
         config = dict(doc.config) if doc else {}
+        # AW-2 — fold the per-workspace egress allow-list additions into the
+        # config blob so they reach connect() on this legacy fallback path too
+        # (the primary ensure_connected path folds them in state_provider.get).
+        if doc and getattr(doc, "allowed_hosts", None):
+            config["allowed_hosts"] = list(doc.allowed_hosts)
         pocket_key = body.pocket_id or workspace_id
         exec_adapter = adapter
         await exec_adapter.connect(pocket_key, config)

@@ -67,6 +67,16 @@ ensure_tenant_key(workspace) call. A proxy outage / mint failure is logged and
 swallowed (workspace creation NEVER fails on a provisioning error); the call is
 idempotent, so the billing-cutover sweep and any later workspace touch back-fill
 a key that didn't mint here. Mirrors the best-effort seed_default_agent step.
+2026-07-05 (fix/atlas-admin-security-hardening, FINDING A): privilege-escalation
+guard on ownership. ``update_member_role`` now refuses to GRANT the ``owner``
+role unless the ACTOR already holds owner (code ``owner_grant_requires_owner``),
+and ``remove_member`` refuses to REMOVE an owner-role member unless the actor
+holds owner (code ``owner_removal_requires_owner``). The admin-tool RBAC action
+(workspace.member.role_change / .remove) is only ADMIN-gated, so without the
+actor-role check an ADMIN could self-promote to owner or evict a sitting owner on
+approval. The guard lives in the service so every caller (admin tool, executor,
+route) inherits it; it mirrors the existing "an invite can never mint an owner"
+rule. The last-owner + cannot_demote/remove-doc-owner guards are unchanged.
 """
 
 from __future__ import annotations
@@ -697,6 +707,19 @@ async def update_member_role(
     doc = await _fetch_workspace(workspace_id)
     if doc is None:
         raise NotFound("workspace", workspace_id)
+    # FINDING A — privilege-escalation guard. Granting the ``owner`` role is
+    # OWNER-only: the caller's RBAC action (workspace.member.role_change) is gated
+    # at ADMIN, so without this an ADMIN could promote any member — themselves
+    # included — to owner and it would land on approval. Mirror how an invite can
+    # never mint an owner: only a sitting owner may create another. The check is
+    # in the service so every path (admin tool, executor, route) inherits it.
+    if role == "owner":
+        actor_role = await _get_member_role(workspace_id, actor_user_id)
+        if actor_role != "owner":
+            raise Forbidden(
+                "workspace.owner_grant_requires_owner",
+                "Only an owner can grant the owner role.",
+            )
     if doc.owner == target_user_id and role != "owner":
         raise Forbidden(
             "workspace.cannot_demote_owner",
@@ -787,6 +810,16 @@ async def remove_member(
     # Role-based last-owner guard (independent of doc.owner field).
     target_role = await _get_member_role(workspace_id, target_user_id)
     if target_role == "owner":
+        # FINDING A — evicting an owner is OWNER-only. Same escalation class as
+        # granting owner: an ADMIN (gated at workspace.member.role_change) must
+        # not be able to remove a sitting owner. Checked before the last-owner
+        # guard so an ADMIN gets the actor-role denial regardless of owner count.
+        actor_role = await _get_member_role(workspace_id, actor_user_id)
+        if actor_role != "owner":
+            raise Forbidden(
+                "workspace.owner_removal_requires_owner",
+                "Only an owner can remove an owner.",
+            )
         owner_count = await _count_owners(workspace_id)
         if owner_count <= 1:
             raise Forbidden(
@@ -1046,6 +1079,7 @@ async def create_invite(
             kind="invite",
             title=f"You were invited to join {doc.name}",
             body="",
+            actor_id=ctx.user_id,
             source=NotificationSource(
                 type="invite",
                 id=invite.id,  # the invite document id, not the token
@@ -1125,6 +1159,7 @@ async def bulk_create_invites(
                 kind="invite",
                 title=f"You were invited to join {doc.name}",
                 body="",
+                actor_id=ctx.user_id,
                 source=NotificationSource(
                     type="invite",
                     id=invite.id,

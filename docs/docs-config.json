@@ -255,6 +255,11 @@
             "icon": "lucide:repeat"
           },
           {
+            "label": "Agent Lifecycle",
+            "href": "/concepts/agent-lifecycle",
+            "icon": "lucide:power"
+          },
+          {
             "label": "Health Engine",
             "href": "/concepts/health-engine",
             "icon": "lucide:activity"

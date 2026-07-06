@@ -29,6 +29,11 @@
 # without coercion. The service derives ``status`` from the dates
 # relative to ``now`` (``upcoming`` vs ``active``); ``completed`` is set
 # by a separate workflow.
+# Updated: 2026-07-04 (fix/approval-resolution) — added ``status`` to
+# ``ListWorkItemsRequest`` so ``GET /mission-control/items?status=pending``
+# is honored (it was silently ignored, leaking terminal items into the
+# awaiting-approval feed). Accepts a ``WorkItemStatus`` value or the
+# ``"pending"`` alias for the awaiting-approval feed; ``None`` = all statuses.
 """Mission Control wire DTOs.
 
 The audit doc (``docs/internal/2026-05-mission-control-backend-audit.md``,
@@ -80,6 +85,14 @@ class ListWorkItemsRequest(BaseModel):
     project_id: str | None = Field(
         default=None,
         description="Filter by project id; empty string narrows to 'Unassigned'.",
+    )
+    status: str | None = Field(
+        default=None,
+        description=(
+            "Filter by WorkItem status. Accepts a WorkItemStatus value "
+            "(e.g. 'awaiting_approval', 'done') or the 'pending' alias for "
+            "the awaiting-approval feed. None returns every status."
+        ),
     )
     limit: int = Field(default=50, ge=1, le=500)
 

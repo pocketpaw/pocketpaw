@@ -16,6 +16,9 @@ class AgentEvent:
         - "thinking": Extended thinking content (Activity panel only)
         - "thinking_done": Thinking phase completed
         - "token_usage": Token usage metadata
+        - "session_id": Native SDK session id captured on turn 1 (SS-1) —
+          metadata carries ``session_id`` so the controller can persist it for a
+          later native ``resume``. Only emitted when a ``SessionHandle`` is threaded.
         - "error": Error message
         - "done": Agent finished processing
     """

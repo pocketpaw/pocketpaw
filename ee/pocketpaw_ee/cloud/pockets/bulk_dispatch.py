@@ -1,4 +1,17 @@
 # ee/pocketpaw_ee/cloud/pockets/bulk_dispatch.py
+# Updated: 2026-07-02 (AW-7 follow-up — security) — CLOSE THE BULK
+#   DENY-BY-DEFAULT HOLE. AW-7 threaded ``instinct_template_default_deny``
+#   through the router + temporal dispatcher, but the bulk fan-out still fired
+#   an uncovered MUTATING no-rule-match action ungated (the planner bucketed it
+#   into ``executions`` and ``_fire_executions`` fires those un-re-gated).
+#   ``dispatch_bulk`` now resolves the per-workspace / global flag via
+#   ``pockets_service.resolve_workspace_template_default_deny`` (fail-safe OFF)
+#   and computes ``is_mutating`` from the pocket's parsed rippleSpec binding via
+#   the new ``_is_mutating_binding`` helper (fail-safe mutating=True), then
+#   threads BOTH into ``plan_bulk_execution`` so the planner routes a
+#   no-rule-match mutating EXECUTE into the BATCH APPROVAL bucket instead of
+#   firing — semantics identical to the router + temporal paths. Reads still
+#   fire; flag OFF (the default) keeps the plan byte-identical.
 # Created: 2026-05-28 (feat/wave-3b-action-pipeline) — EE-side library
 # wrapper around the OSS ``plan_bulk_execution`` planner. Implements the
 # RFC 03 v2 §"Bulk action execution model" invariant: a ``kind: bulk``
@@ -101,6 +114,28 @@ def _action_binding_for(
     actions = spec.actions if isinstance(spec.actions, dict) else {}
     raw_action = actions.get(action_name)
     return raw_action if isinstance(raw_action, dict) else None
+
+
+def _is_mutating_binding(raw_action: dict[str, Any] | None) -> bool:
+    """Compute ``is_mutating`` for the AW-7 bulk deny-on-no-match check.
+
+    Mirrors ``action_executor`` exactly — ``method in {POST,PUT,PATCH,DELETE}
+    and not read_only`` — reading the same rippleSpec ``ActionBinding`` dict the
+    executor parses (``method`` / ``read_only`` live on the binding, NOT the
+    template's ``ActionDef``, so the OSS planner cannot compute this itself).
+
+    Conservative on a missing / non-dict binding: returns ``True`` (treat as
+    mutating). With the flag ON that parks the batch for a human rather than
+    firing it ungated — fail CLOSED, matching the temporal sweep's
+    ``_resolve_is_mutating`` and ``gate_action``'s ``is_mutating=True`` default.
+    A read (``read_only`` marker from AW-6, or a GET/HEAD verb) returns ``False``
+    and is never re-bucketed.
+    """
+    if not isinstance(raw_action, dict):
+        return True
+    method = str(raw_action.get("method") or "POST").upper()
+    read_only = bool(raw_action.get("read_only", False))
+    return method in ("POST", "PUT", "PATCH", "DELETE") and not read_only
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +264,31 @@ async def dispatch_bulk(
         raise NotFound("pocket", pocket_id)
 
     # ── 2. plan the fan-out via the pure OSS planner ───────────────
+    # AW-7 follow-up (security) — close the BULK deny-by-default hole. The bulk
+    # path runs the gate ONCE per row via the planner, so the AW-7 template
+    # default-deny flip has to live in the planner too (the router + temporal
+    # paths get it through ``gate_action``). We resolve the per-workspace /
+    # global flag here (the EE layer owns the Beanie read) and compute
+    # ``is_mutating`` from the pocket's parsed rippleSpec binding — ``method`` /
+    # ``read_only`` live on the binding, not the template's ``ActionDef``, so
+    # the pure planner cannot compute it. Both are threaded in; with the flag ON
+    # and a mutating action the bound template declares no rule for, the planner
+    # buckets the row into the batch approval instead of ``executions`` (which
+    # ``_fire_executions`` fires un-re-gated). Reads never re-bucket; flag OFF
+    # (the default) keeps the plan byte-identical.
+    #
+    # Fail-safe split mirrors the temporal dispatcher: a flag-read failure falls
+    # back to OFF (dormant — never accidentally parks a whole workspace), while
+    # ``_is_mutating_binding`` treats an unreadable binding as mutating so it
+    # parks rather than fires ungated.
+    try:
+        template_default_deny = await pockets_service.resolve_workspace_template_default_deny(
+            workspace_id
+        )
+    except Exception:  # noqa: BLE001 — a flag read failure falls back to OFF (dormant)
+        template_default_deny = False
+    is_mutating = _is_mutating_binding(_action_binding_for(pocket.get("rippleSpec"), action_name))
+
     try:
         plan = plan_bulk_execution(
             template,
@@ -236,6 +296,8 @@ async def dispatch_bulk(
             selected_rows,
             resolver=resolver,
             now=now,
+            template_default_deny=template_default_deny,
+            is_mutating=is_mutating,
         )
     except BulkExecutionError as exc:
         # Unknown action OR non-bulk action — both are typed pre-flight

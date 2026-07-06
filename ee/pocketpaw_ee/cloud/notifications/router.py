@@ -61,3 +61,16 @@ async def clear_all(
 ) -> dict:
     count = await notifications_service.clear_all(ctx.user_id)
     return {"cleared": count}
+
+
+@router.delete("/{notification_id}")
+async def delete_notification(
+    notification_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> dict:
+    ok = await notifications_service.delete_notification(notification_id, ctx.user_id)
+    if not ok:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return {"status": "deleted"}

@@ -16,6 +16,12 @@
 # Updated: 2026-05-21 (PR #1164 review) — bounded the CreateTaskRequest
 #   success_criteria / preconditions lists at max_length=20 so a
 #   hallucinating planner LLM can't write a runaway list.
+# Updated: 2026-07-02 (feat/svl-5-cloud-verify) — added read-only
+#   ``verify`` (dict, default empty) to TaskResponse + ``task_to_dto``:
+#   the Self-Verifying Loop state (verdict, feedback, requeue_count,
+#   escalation_reason) stamped by the cloud planner terminal (SVL-5).
+#   Deliberately absent from Create/Update requests — the planner
+#   terminal is the sole writer.
 """Tasks entity — request/response DTOs."""
 
 from __future__ import annotations
@@ -199,6 +205,10 @@ class TaskResponse(BaseModel):
     blocked_by: list[str] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
     preconditions: list[str] = Field(default_factory=list)
+    # Read-only Self-Verifying Loop state (SVL-5): verdict, feedback,
+    # requeue_count, escalation_reason. Stamped by the cloud planner
+    # terminal; no request DTO accepts it.
+    verify: dict[str, Any] = Field(default_factory=dict)
     due_at: str | None = None
     blocked_reason: str | None = None
     created_at: str | None = None
@@ -238,6 +248,7 @@ def task_to_dto(task: Task) -> TaskResponse:
         blocked_by=list(task.blocked_by),
         success_criteria=list(task.success_criteria),
         preconditions=list(task.preconditions),
+        verify=dict(task.verify),
         due_at=iso_utc(task.due_at),
         blocked_reason=task.blocked_reason,
         created_at=iso_utc(task.created_at),
