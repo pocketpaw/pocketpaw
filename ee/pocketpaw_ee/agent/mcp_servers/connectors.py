@@ -91,6 +91,8 @@ import json
 import logging
 from typing import Any
 
+from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
+
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "pocketpaw_connectors"
@@ -319,6 +321,8 @@ async def _connector_execute_handler(args: dict) -> dict:
     action = args.get("action")
     if not isinstance(action, str) or not action:
         return _error_response("action is required (string)")
+    # Decode a `params` payload the model serialized as a JSON string.
+    args = coerce_json_object_args(args, ("params",))
     params = args.get("params") or {}
     if not isinstance(params, dict):
         return _error_response("params must be an object (dict)")
@@ -620,6 +624,8 @@ async def _sense_execute_handler(args: dict) -> dict:
     action = args.get("action")
     if not isinstance(action, str) or not action:
         return _error_response("action is required (string)")
+    # Decode a `params` payload the model serialized as a JSON string.
+    args = coerce_json_object_args(args, ("params",))
     params = args.get("params") or {}
     if not isinstance(params, dict):
         return _error_response("params must be an object (dict)")

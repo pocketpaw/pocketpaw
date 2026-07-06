@@ -48,6 +48,14 @@ marketing-site brain's type="site" + pattern="landing" were stripped at
 the MCP boundary before reaching ``run_specialist``. Now they thread
 through to the persisted pocket (this is the claude_agent_sdk backend's
 create path).
+Changes: 2026-07-03 (fix/mcp-tool-json-string-args) — both handlers now
+run their object/array args through ``coerce_json_object_args`` before
+reading them. The chat agent sometimes serializes an object-typed arg as
+a JSON *string* (``hints='{"name":"x"}'``, ``ops='[...]'``); previously
+``PocketSpecialistHints(**raw_hints)`` crashed on a string and ``spec`` /
+``ops`` were silently dropped to ``None``, so the model burned a
+round-trip retrying ("the tool needs an actual object, not a stringified
+JSON"). ``hints`` construction is also hardened to guard a non-dict.
 """
 
 from __future__ import annotations
@@ -56,6 +64,7 @@ import json
 import logging
 from typing import Any
 
+from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
 from pocketpaw_ee.agent.pocket_specialist.runtime import (
     PocketSpecialistCreateInput,
     PocketSpecialistEditInput,
@@ -104,8 +113,13 @@ async def _create_handler(args: dict[str, Any]) -> dict[str, Any]:
             "is_error": True,
         }
 
+    # The chat agent sometimes serializes an object-typed arg as a JSON
+    # *string* (``hints='{"name":"x"}'``); decode it here so the first call
+    # succeeds instead of crashing ``**raw_hints`` / silently dropping ``spec``
+    # and forcing the model to retry.
+    args = coerce_json_object_args(args, ("hints", "spec", "backend_summary"))
     raw_hints = args.get("hints")
-    hints = PocketSpecialistHints(**raw_hints) if raw_hints else None
+    hints = PocketSpecialistHints(**raw_hints) if isinstance(raw_hints, dict) else None
     raw_spec = args.get("spec")
     raw_backend_summary = args.get("backend_summary")
     payload = PocketSpecialistCreateInput(
@@ -173,6 +187,10 @@ async def _edit_handler(args: dict[str, Any]) -> dict[str, Any]:
             "is_error": True,
         }
 
+    # Coerce object/array handoff args that may arrive as JSON strings — a
+    # stringified ``ops`` list would otherwise be dropped to ``None`` and the
+    # agent's computed edit would silently no-op.
+    args = coerce_json_object_args(args, ("pocket", "target_node_ids", "ops"))
     raw_ops = args.get("ops")
     payload = PocketSpecialistEditInput(
         pocket_id=args.get("pocket_id", ""),

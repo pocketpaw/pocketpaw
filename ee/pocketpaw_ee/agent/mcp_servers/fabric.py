@@ -58,6 +58,8 @@ import json
 import logging
 from typing import Any
 
+from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
+
 from ._audit import record_tool_call
 
 logger = logging.getLogger(__name__)
@@ -170,6 +172,9 @@ async def _fabric_query_handler(args: dict) -> dict:
         ok=True,
     )
 
+    # A `filters` map the model stringified into JSON is decoded here so the
+    # query runs on the first call instead of erroring back to the agent.
+    args = coerce_json_object_args(args, ("filters",))
     type_name = args.get("type_name")
     linked_to = args.get("linked_to")
     link_type = args.get("link_type")
