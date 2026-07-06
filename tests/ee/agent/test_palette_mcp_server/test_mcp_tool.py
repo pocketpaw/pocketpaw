@@ -90,7 +90,11 @@ class TestPaletteMcpServerRegistration:
         # The tool id must use the exact ``mcp__<server>__<tool>`` form so the
         # Claude Code allowlist machinery matches it.
         assert palette_mcp.EXTRACT_PALETTE_TOOL_ID == "mcp__pocketpaw_palette__extract_palette"
-        assert palette_mcp.PALETTE_TOOL_IDS == (palette_mcp.EXTRACT_PALETTE_TOOL_ID,)
+        # SC-7c added the custom-color tool; the allowlist now carries both ids.
+        assert palette_mcp.PALETTE_TOOL_IDS == (
+            palette_mcp.EXTRACT_PALETTE_TOOL_ID,
+            palette_mcp.SCALE_FROM_COLOR_TOOL_ID,
+        )
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk
@@ -273,3 +277,57 @@ class TestExtractPaletteHandler:
 
         assert out.get("is_error") is True
         assert "palette extraction failed" in out["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# scale_from_color — the custom-color path (SC-7c): a single brand hex → scale.
+# Pure math, no network.
+# ---------------------------------------------------------------------------
+
+_STEPS = ["50", "100", "200", "300", "400", "500", "600", "700", "800", "900"]
+
+
+async def test_scale_from_color_valid_hex_full_scale() -> None:
+    """A valid hex returns a full 50–900 scale under the default 'primary' role."""
+    env = await palette_mcp._scale_from_color_handler({"hex": "#6B21A8"})
+    assert "is_error" not in env
+    body = _decode_payload(env)
+    assert body["ok"] is True
+    assert body["role"] == "primary"
+    assert list(body["scale"].keys()) == _STEPS
+    assert all(v.startswith("#") and len(v) == 7 for v in body["scale"].values())
+
+
+async def test_scale_from_color_custom_role_label() -> None:
+    """An explicit role is echoed back on the scale."""
+    body = _decode_payload(
+        await palette_mcp._scale_from_color_handler({"hex": "#0A84FF", "role": "accent"})
+    )
+    assert body["role"] == "accent"
+    assert body["scale"]["500"].startswith("#")
+
+
+async def test_scale_from_color_shorthand_hex() -> None:
+    """#RGB shorthand is accepted (mirrors scale_from_base)."""
+    body = _decode_payload(await palette_mcp._scale_from_color_handler({"hex": "#f30"}))
+    assert body["ok"] is True
+    assert len(body["scale"]) == 10
+
+
+async def test_scale_from_color_bad_hex_soft_error() -> None:
+    """A malformed hex fails soft — an error envelope, never a raise."""
+    env = await palette_mcp._scale_from_color_handler({"hex": "not-a-color"})
+    assert env["is_error"] is True
+
+
+async def test_scale_from_color_missing_hex_soft_error() -> None:
+    """Empty/missing hex returns an error envelope."""
+    assert (await palette_mcp._scale_from_color_handler({}))["is_error"] is True
+    assert (await palette_mcp._scale_from_color_handler({"hex": "  "}))["is_error"] is True
+
+
+def test_scale_from_color_tool_id_published() -> None:
+    """The new tool id namespaces correctly and joins the allowlist tuple."""
+    assert palette_mcp.SCALE_FROM_COLOR_TOOL_ID == "mcp__pocketpaw_palette__scale_from_color"
+    assert palette_mcp.SCALE_FROM_COLOR_TOOL_ID in palette_mcp.PALETTE_TOOL_IDS
+    assert len(palette_mcp.PALETTE_TOOL_IDS) == 2

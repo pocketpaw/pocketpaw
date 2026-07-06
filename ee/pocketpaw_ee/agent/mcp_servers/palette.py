@@ -31,7 +31,15 @@
 # lightest→darkest). Fail-soft: an empty/non-http url, a download/HTTP error, or
 # bytes PIL can't open all return an ``_error_response`` and never raise into the
 # agent.
-"""Agent-side MCP surface for reference-image palette extraction (full scales)."""
+#
+# Updated: 2026-07-06 (feat/sites-crew-scale-from-color, SC-7c) — added a SECOND
+# tool ``scale_from_color`` for the custom-color path: it exposes the pure
+# ``scale_from_base`` helper directly, turning ONE brand hex the user supplied
+# into a full 50–900 scale (no image needed) so a user can override a design
+# system's palette from an exact color. Same fail-soft contract — a malformed hex
+# returns an ``_error_response``. Tool id namespaces as
+# ``mcp__pocketpaw_palette__scale_from_color``.
+"""Agent-side MCP surface for palette derivation (image extraction + custom hex)."""
 
 from __future__ import annotations
 
@@ -47,8 +55,9 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = "pocketpaw_palette"
 # Claude Code namespaces in-process MCP tools as ``mcp__<server>__<tool>``.
 EXTRACT_PALETTE_TOOL_ID = f"mcp__{SERVER_NAME}__extract_palette"
+SCALE_FROM_COLOR_TOOL_ID = f"mcp__{SERVER_NAME}__scale_from_color"
 
-PALETTE_TOOL_IDS = (EXTRACT_PALETTE_TOOL_ID,)
+PALETTE_TOOL_IDS = (EXTRACT_PALETTE_TOOL_ID, SCALE_FROM_COLOR_TOOL_ID)
 
 # Bound the image download so a slow/hanging host can't stall a site build.
 _TIMEOUT_SECONDS = 10.0
@@ -286,6 +295,31 @@ async def _extract_handler(args: dict) -> dict:
     return _success_response({"ok": True, "palette": palette})
 
 
+async def _scale_from_color_handler(args: dict) -> dict:
+    """MCP handler for ``palette__scale_from_color``.
+
+    The custom-color path: turn a single brand hex the user supplied into a full
+    50–900 scale (the same deterministic ladder ``extract_palette`` applies to
+    image-derived colors), so a user can override a design system's palette from
+    an exact color rather than a reference image. Optional ``role`` just labels
+    the returned scale (default ``"primary"``). Fail-soft: an empty or malformed
+    hex returns an ``_error_response`` and never raises into the agent.
+    """
+    raw = args.get("hex")
+    if not isinstance(raw, str) or not raw.strip():
+        return _error_response("scale_from_color requires a non-empty `hex` color.")
+    role = args.get("role")
+    role = role.strip() if isinstance(role, str) and role.strip() else "primary"
+
+    try:
+        scale = scale_from_base(raw)
+    except Exception as exc:  # noqa: BLE001 — malformed hex → soft error, never raise
+        logger.warning("palette: scale_from_color got an invalid hex %r", raw)
+        return _error_response(f"scale_from_color failed: invalid hex color {raw!r} ({exc}).")
+
+    return _success_response({"ok": True, "role": role, "scale": scale})
+
+
 def build_palette_server() -> tuple[str, Any] | None:
     """Build the in-process SDK MCP server for palette extraction, or return
     ``None`` if the Claude Agent SDK isn't installed. Matches the ``(name,
@@ -330,16 +364,52 @@ def build_palette_server() -> tuple[str, Any] | None:
     async def extract_palette_tool(args):  # type: ignore[no-untyped-def]
         return await _extract_handler(args)
 
+    @tool(
+        "scale_from_color",
+        (
+            "Expand ONE custom brand color into a full 50–900 tint/shade scale. "
+            "Use when the user gives an exact color (e.g. 'make the primary "
+            "#6B21A8' or 'match my brand navy') and you need real design tokens "
+            "for it — this is the custom-color path, complementary to "
+            "extract_palette (which derives colors from an image). Args: `hex` "
+            "(required — a #RRGGBB or #RGB color) and optional `role` (a label "
+            "like 'primary'/'accent', default 'primary'). Returns {ok, role, "
+            "scale:{'50':'#..', ..., '900':'#..'}} — 50 lightest, 500 the given "
+            "color, 900 darkest. Wire the scale into the design tokens (500 for "
+            "buttons, 50/100 for surfaces, 900 for text). An error means the hex "
+            "was malformed — ask the user for a valid color, do not retry blindly."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "hex": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The base color as #RRGGBB (or #RGB shorthand).",
+                },
+                "role": {
+                    "type": "string",
+                    "description": "Optional label for the scale (e.g. 'primary', 'accent').",
+                },
+            },
+            "required": ["hex"],
+            "additionalProperties": False,
+        },
+    )
+    async def scale_from_color_tool(args):  # type: ignore[no-untyped-def]
+        return await _scale_from_color_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[extract_palette_tool],
+        tools=[extract_palette_tool, scale_from_color_tool],
     )
     return SERVER_NAME, server
 
 
 __all__ = [
     "EXTRACT_PALETTE_TOOL_ID",
+    "SCALE_FROM_COLOR_TOOL_ID",
     "PALETTE_TOOL_IDS",
     "SERVER_NAME",
     "scale_from_base",
