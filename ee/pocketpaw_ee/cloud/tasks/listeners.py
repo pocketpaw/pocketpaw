@@ -78,6 +78,7 @@ async def notify_human_assignee(event: Event) -> None:
             kind="task_assigned",
             title=title,
             body=body,
+            actor_id=creator_id,
             source=None,
         )
     except Exception:

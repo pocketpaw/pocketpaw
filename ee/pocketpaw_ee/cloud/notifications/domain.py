@@ -48,6 +48,7 @@ class Notification:
     source: NotificationSource | None
     read: bool
     created_at: datetime
+    actor_id: str | None = None  # user id of the person who triggered this notification
     expires_at: datetime | None = None
 
 
