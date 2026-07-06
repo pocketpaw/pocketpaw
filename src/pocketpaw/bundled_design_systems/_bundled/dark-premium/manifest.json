@@ -1,0 +1,8 @@
+{
+  "slug": "dark-premium",
+  "name": "Obsidian",
+  "description": "A deep, dark, editorial-luxury system. Warm charcoal canvas, a champagne-gold primary and an emerald secondary, high-contrast serif display type, and glow plus deep shadow for depth.",
+  "aesthetic": ["dark", "premium", "luxury", "editorial", "elegant", "moody", "sophisticated"],
+  "industries": ["luxury", "hospitality", "fine-dining", "real-estate", "jewelry", "agency", "fintech-premium", "portfolio"],
+  "page_types": ["landing", "portfolio", "product", "about", "showcase", "coming-soon"]
+}

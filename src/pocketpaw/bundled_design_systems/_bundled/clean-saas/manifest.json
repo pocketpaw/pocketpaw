@@ -1,0 +1,8 @@
+{
+  "slug": "clean-saas",
+  "name": "Northwind",
+  "description": "A calm, cool-neutral SaaS system with one confident indigo accent — the trust-first look of a modern product landing page. Generous whitespace, restrained shadows, precise type.",
+  "aesthetic": ["clean", "modern", "professional", "trustworthy", "minimal", "cool"],
+  "industries": ["saas", "b2b-software", "fintech", "developer-tools", "startup", "analytics"],
+  "page_types": ["landing", "pricing", "product", "docs", "changelog", "waitlist"]
+}
