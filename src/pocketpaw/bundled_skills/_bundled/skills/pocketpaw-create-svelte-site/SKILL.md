@@ -76,6 +76,12 @@ the design skills to get there:
   type system, a considered palette, generous spacing, a hero with a
   bespoke visual — not a centered headline on a gradient. Avoid generic
   "AI landing page" aesthetics.
+- **Also apply the `design-taste-svelte` skill** while authoring the
+  components — it's the Svelte-specific, static-safe taste layer (layout
+  variance, materiality, CSS-first motion, and the anti-slop "AI tells"
+  list) that sits ON TOP of the chosen design system's tokens. It mirrors
+  the prerender resting-state rule below, so its taste never fights the
+  static render.
 - One **component per section**. The page is an ordered list of sections;
   each section owns its own copy, data, styles, and motion. This is the
   whole edit-model payoff: to refine the hero later you edit one file.

@@ -61,6 +61,10 @@
 # and assets. When the flag is OFF, the create branch returns
 # `_create_preamble(meta)` byte-for-byte (no behaviour change). The refine/chat
 # branches (keyed on `pocket_id`) are untouched.
+# Updated: 2026-07-06 (feat/sites-crew-taste, SC-TASTE) — the crew svelte
+# `build_step` now instructs the agent to author the components with the bundled
+# `design-taste-svelte` skill (premium, anti-slop, static-safe styling) on top of
+# the design system's tokens. Svelte-only: the ripple `build_step` is unchanged.
 
 from __future__ import annotations
 
@@ -247,7 +251,10 @@ def _crew_create_preamble(meta: SurfaceMeta) -> str:
             "BUILD via the `pocketpaw-create-svelte-site` skill — invoke it by "
             "intent (no slash command). It is the Svelte-track authoring brain: "
             "YOU write the premium hand-written SvelteKit components (Hero, "
-            "Pricing, Faq, …) at the design quality bar, THEME them with the "
+            "Pricing, Faq, …) at the design quality bar — authoring them with "
+            "the `design-taste-svelte` skill for premium, non-generic styling "
+            "(layout variance, materiality, CSS-first motion, anti-slop taste) "
+            "on top of the chosen design system's tokens — THEME them with the "
             "chosen design system's tokens + your asset URLs, and it persists "
             'the source pocket `type="site"` + `pattern="landing"` + '
             '`engine="svelte"` and publishes it. There is NO rippleSpec and NO '
