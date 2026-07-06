@@ -363,6 +363,99 @@ async def test_remove_member_allows_removing_one_of_many_owners(
 
 
 # ---------------------------------------------------------------------------
+# Owner-grant / owner-removal actor guard (FINDING A — privilege escalation)
+#
+# Granting OR removing the ``owner`` role requires the ACTOR to already hold
+# owner. Otherwise an ADMIN (gated at ``workspace.member.role_change``) could
+# promote any member — including themselves — to owner, or evict a sitting
+# owner. The actor-must-be-owner guard lives in the service so every caller
+# (the admin tool, the executor, a route) inherits it.
+# ---------------------------------------------------------------------------
+
+
+async def test_update_member_role_admin_cannot_grant_owner(owner) -> None:
+    """An ADMIN actor promoting a member to owner is Forbidden (escalation)."""
+    admin = await _seed_user(email="admin@x.c", full_name="Admin")
+    target = await _seed_user(email="target@x.c", full_name="Target")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    await workspace_service._add_member(ws.id, str(admin.id), role="admin")
+    await workspace_service._add_member(ws.id, str(target.id), role="member")
+
+    with pytest.raises(Forbidden) as exc:
+        await workspace_service.update_member_role(ws.id, str(target.id), "owner", str(admin.id))
+    assert exc.value.code == "workspace.owner_grant_requires_owner"
+    # The target was NOT promoted.
+    assert await workspace_service._get_member_role(ws.id, str(target.id)) == "member"
+
+
+async def test_update_member_role_admin_cannot_self_promote_to_owner(owner) -> None:
+    """An ADMIN cannot promote THEMSELVES to owner (the escalation-to-self case)."""
+    admin = await _seed_user(email="admin@x.c", full_name="Admin")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    await workspace_service._add_member(ws.id, str(admin.id), role="admin")
+
+    with pytest.raises(Forbidden) as exc:
+        await workspace_service.update_member_role(ws.id, str(admin.id), "owner", str(admin.id))
+    assert exc.value.code == "workspace.owner_grant_requires_owner"
+    assert await workspace_service._get_member_role(ws.id, str(admin.id)) == "admin"
+
+
+async def test_update_member_role_owner_can_grant_owner(
+    owner, recording_bus, resolver_mock
+) -> None:
+    """An OWNER actor CAN promote a member to owner (co-owner transfer)."""
+    target = await _seed_user(email="target@x.c", full_name="Target")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    await workspace_service._add_member(ws.id, str(target.id), role="member")
+
+    await workspace_service.update_member_role(ws.id, str(target.id), "owner", str(owner.id))
+
+    assert await workspace_service._get_member_role(ws.id, str(target.id)) == "owner"
+
+
+async def test_remove_member_admin_cannot_remove_owner(owner) -> None:
+    """An ADMIN actor removing a (non-doc-owner) owner is Forbidden.
+
+    Seeds a second owner so the last-owner guard is not what fires — the block
+    must come from the actor-not-owner check, proven by the error code.
+    """
+    admin = await _seed_user(email="admin@x.c", full_name="Admin")
+    co_owner = await _seed_user(email="co@x.c", full_name="Co")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    await workspace_service._add_member(ws.id, str(admin.id), role="admin")
+    await workspace_service._add_member(ws.id, str(co_owner.id), role="owner")
+
+    with pytest.raises(Forbidden) as exc:
+        await workspace_service.remove_member(ws.id, str(co_owner.id), str(admin.id))
+    assert exc.value.code == "workspace.owner_removal_requires_owner"
+    # co_owner is still a member with the owner role.
+    assert await workspace_service._get_member_role(ws.id, str(co_owner.id)) == "owner"
+
+
+async def test_remove_member_owner_can_remove_owner(
+    owner, recording_bus, captured_legacy_events, resolver_mock
+) -> None:
+    """An OWNER actor CAN remove another owner (still governed by last-owner)."""
+    co_owner = await _seed_user(email="co@x.c", full_name="Co")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    await workspace_service._add_member(ws.id, str(co_owner.id), role="owner")
+
+    await workspace_service.remove_member(ws.id, str(co_owner.id), str(owner.id))
+
+    assert await workspace_service._get_member_role(ws.id, str(co_owner.id)) is None
+
+
+# ---------------------------------------------------------------------------
 # Invites
 # ---------------------------------------------------------------------------
 

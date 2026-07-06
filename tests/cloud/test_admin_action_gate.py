@@ -1061,3 +1061,52 @@ async def test_production_path_reject_no_service_call_wa6(
     assert spy.calls == []
     final = await store.get_action(action_id)
     assert final.status == ActionStatus.REJECTED
+
+
+# ---------------------------------------------------------------------------
+# FINDING C — executor idempotency is check-then-act; serialize per action_id
+#
+# ``_already_executed`` reads status/outcome, THEN the executor does async work
+# (RBAC re-check, adapter, service call) before ``mark_executed`` back-writes.
+# Two concurrent invocations on ONE approved action can both pass the guard and
+# fire the whitelisted write twice. The fix serializes the executor per
+# action_id so the guard-to-mark window can't interleave: the service fires once.
+# ---------------------------------------------------------------------------
+
+
+async def test_executor_concurrent_invocations_fire_service_once(store, monkeypatch):
+    """Two concurrent execute() calls on ONE approved action → the whitelisted
+    service fires EXACTLY ONCE.
+
+    Without the per-action serialization both invocations read the idempotency
+    guard as 'not yet executed', both clear it, and both call the service — a
+    double role-change. The per-action_id lock (or the atomic claim) closes the
+    check-then-act window.
+    """
+    import asyncio
+
+    # A slow spy widens the guard-to-mark window: the second invocation enters
+    # while the first is still awaiting the service call, so an unserialized
+    # executor would double-fire.
+    class SlowSpy(SpyWorkspaceService):
+        async def update_member_role(self, workspace_id, target_user_id, role, actor_user_id):
+            await asyncio.sleep(0.05)
+            return await super().update_member_role(
+                workspace_id, target_user_id, role, actor_user_id
+            )
+
+    spy = SlowSpy()
+    _patch_service(monkeypatch, spy)
+    _allow_rbac(monkeypatch)
+
+    approved = await _propose_and_approve(store)
+    reloaded = await store.get_action(approved.id)
+
+    await asyncio.gather(
+        aa_executor.execute_approved_admin_action(approved),
+        aa_executor.execute_approved_admin_action(reloaded),
+    )
+
+    assert len(spy.calls) == 1, f"executor double-fired: {spy.calls!r}"
+    final = await store.get_action(approved.id)
+    assert final.status == ActionStatus.EXECUTED

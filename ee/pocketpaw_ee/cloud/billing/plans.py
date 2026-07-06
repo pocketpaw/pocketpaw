@@ -7,6 +7,10 @@
 #   * ``monthly_credit_allotment`` — credits granted per renewal (integer credits,
 #     1 credit == $0.01). Config-tunable constants live below; BC-7 will grant
 #     these on a subscription renewal.
+#   * ``monthly_ceiling`` — the per-plan monthly credit CAP (integer credits, or
+#     None = uncapped) that credit-quota enforcement caps spend against. Tunable
+#     ``_CEILING`` constants live below, mirroring ``_MONTHLY_CREDIT_ALLOTMENT``;
+#     later quota chunks consume this field.
 #   * ``dodo_product_id`` — the Dodo recurring-product id for the tier, or None
 #     until BC-7 / config populates it (optionally read from the
 #     ``POCKETPAW_DODO_PLAN_PRODUCTS`` mapping setting when configured).
@@ -28,6 +32,13 @@
 #   credits. ``monthly_credit_allotment`` stays in the catalog as a back-office
 #   field; it is NOT the headline the UI shows. Enterprise prices are None ("talk
 #   to us").
+# Updated 2026-06-30 (feat/billing-quota-enforcement, chunk 1) — ADDED a per-plan
+#   ``monthly_ceiling`` (the credit-quota cap later chunks enforce): a tunable
+#   ``_CEILING`` constants dict mirroring ``_MONTHLY_CREDIT_ALLOTMENT``, surfaced on
+#   ``PlanTier`` next to ``monthly_credit_allotment``. The cap is allotment × 1.5 for
+#   the paid usage tiers; Free is an explicit trial cap (1000 — its 0 allotment can't
+#   derive it) and Enterprise is uncapped (None). The ``_build`` default for an
+#   unknown key FAILS CLOSED to the Free ceiling, never None/uncapped.
 
 from __future__ import annotations
 
@@ -56,6 +67,34 @@ _MONTHLY_CREDIT_ALLOTMENT: dict[str, int] = {
     "pro": 7_500,
     "pro_max": 30_000,
     "enterprise": 1_000_000,
+}
+
+# ---------------------------------------------------------------------------
+# Tunable constants — the monthly credit CEILING per tier.
+# ---------------------------------------------------------------------------
+#
+# The per-plan cap (integer credits, 1 credit == $0.01, or None = uncapped) that
+# credit-quota enforcement caps a workspace's monthly spend against. Mirrors
+# ``_MONTHLY_CREDIT_ALLOTMENT`` above. The RULE for the paid usage tiers is
+# ``allotment × 1.5`` — headroom over the grant before the cap bites. Two
+# deliberate exceptions:
+#   * ``free`` is an EXPLICIT trial cap (1000) — its allotment is 0, so the ×1.5
+#     rule can't derive a usable ceiling; we set the trial cap directly. It is
+#     also the FAIL-CLOSED floor: an unknown/unresolvable plan caps here, never
+#     uncapped (see ``_build``).
+#   * ``enterprise`` is UNCAPPED (None) — custom contracts set their own limits.
+#
+#   free        =     1_000 credits  — explicit trial cap (allotment is 0)
+#   go          =     2_250 credits  — 1_500 × 1.5
+#   pro         =    11_250 credits  — 7_500 × 1.5
+#   pro_max     =    45_000 credits  — 30_000 × 1.5
+#   enterprise  =      None          — uncapped (custom)
+_CEILING: dict[str, int | None] = {
+    "free": 1_000,
+    "go": 2_250,
+    "pro": 11_250,
+    "pro_max": 45_000,
+    "enterprise": None,
 }
 
 # Order the catalog is listed in — the price ladder, cheapest first. Any tier in
@@ -142,8 +181,11 @@ class PlanTier:
     ``features`` is a copy of the tier's ``PLAN_FEATURES`` set (the source of
     truth), so a caller can read it without reaching into the policy module.
     ``monthly_credit_allotment`` is integer credits (1 credit == $0.01) granted
-    per renewal — a BACK-OFFICE field, NOT the headline. ``dodo_product_id`` is
-    the recurring-product id, or None until BC-7 / config populates it.
+    per renewal — a BACK-OFFICE field, NOT the headline. ``monthly_ceiling`` is
+    the per-plan monthly credit CAP (integer credits, or None = uncapped) that
+    credit-quota enforcement caps spend against (allotment × 1.5 for paid tiers;
+    Free is the explicit 1000 trial cap; Enterprise is None). ``dodo_product_id``
+    is the recurring-product id, or None until BC-7 / config populates it.
 
     The display + price fields are what the billing UI renders: ``display_name``
     ("Paw Pro"), ``usage_label`` (the ChatGPT/Claude-style "5x the usage" headline
@@ -154,6 +196,7 @@ class PlanTier:
 
     key: str
     monthly_credit_allotment: int
+    monthly_ceiling: int | None
     dodo_product_id: str | None
     features: frozenset[str]
     display_name: str
@@ -195,12 +238,15 @@ def _build(key: str) -> PlanTier:
     from ``_PLAN_DISPLAY`` (a missing row degrades to ``_DISPLAY_FALLBACK`` rather
     than NPE-ing). An unknown ``key`` yields an empty feature set and a 0
     allotment — but callers go through ``get_plan`` / ``list_plans``, which only
-    ever pass known keys.
+    ever pass known keys. ``monthly_ceiling`` FAILS CLOSED: an unknown key defaults
+    to the Free ceiling (the trial cap), never None/uncapped.
     """
     display = _PLAN_DISPLAY.get(key, _DISPLAY_FALLBACK)
     return PlanTier(
         key=key,
         monthly_credit_allotment=_MONTHLY_CREDIT_ALLOTMENT.get(key, 0),
+        # Fail closed: an unknown key caps at the Free ceiling, never uncapped.
+        monthly_ceiling=_CEILING.get(key, _CEILING["free"]),
         dodo_product_id=_dodo_product_for(key),
         features=frozenset(PLAN_FEATURES.get(key, set())),
         display_name=str(display["display_name"]),

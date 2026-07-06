@@ -6,6 +6,13 @@ to JSON responses.
 
 Re-exports remain accessible via `ee.cloud.shared.errors` (a shim) for
 the transition period; new code should import from this module.
+
+Changed 2026-06-30 (feat/billing-quota-enforcement, chunk 2): added
+`QuotaExceeded` (402, `credits.quota_exceeded`) — the monthly-credit-cap
+sibling of `InsufficientCredits`. Same 402 status (the client can't spend
+right now) but a distinct code so the UI can prompt a plan upgrade / top-up
+rather than a balance refill; it carries the effective `ceiling` and the
+`spent` figure that crossed it.
 """
 
 from __future__ import annotations
@@ -90,6 +97,29 @@ class InsufficientCredits(CloudError):
         )
 
 
+class QuotaExceeded(CloudError):
+    """Workspace hit its monthly credit ceiling for the period (402).
+
+    Distinct from ``InsufficientCredits`` (the wallet is empty): the wallet may
+    still hold credits, but the workspace has spent up to its plan's monthly cap
+    (the ``monthly_ceiling`` entitlement, extended by any purchased top-ups in the
+    period). Same 402 status as ``InsufficientCredits`` so the client treats both
+    as "can't spend right now", but a distinct machine code so the UI can prompt a
+    plan upgrade / top-up rather than just a balance refill. ``ceiling`` is the
+    EFFECTIVE cap (plan ceiling + period top-ups) and ``spent`` is the
+    month-to-date spend that met or crossed it.
+    """
+
+    def __init__(self, ceiling: int, spent: int) -> None:
+        self.ceiling = ceiling
+        self.spent = spent
+        super().__init__(
+            402,
+            "credits.quota_exceeded",
+            f"Monthly credit quota exceeded: spent {spent} of {ceiling} this month",
+        )
+
+
 class RateLimited(CloudError):
     """Rate limit exceeded (429)."""
 
@@ -124,6 +154,7 @@ __all__ = [
     "InsufficientCredits",
     "Internal",
     "NotFound",
+    "QuotaExceeded",
     "RateLimited",
     "SeatLimitError",
     "ValidationError",

@@ -109,6 +109,25 @@ class TestItemsEndpoint:
         assert [it["title"] for it in tray] == ["Pending"]
         assert [it["title"] for it in pawprints] == ["Approved"]
 
+    @pytest.mark.asyncio
+    async def test_invalid_section_returns_422_not_500(self, store: InstinctStore) -> None:
+        # An out-of-enum ``section`` used to raise a raw pydantic
+        # ValidationError when the router built ``ListWorkItemsRequest``,
+        # escaping as HTTP 500. It must degrade to a clean 422 instead.
+        with TestClient(_build_app()) as client:
+            resp = client.get("/api/v1/mission-control/items?section=bogus")
+        assert resp.status_code == 422
+        assert resp.json()["error"]["code"] == "mission_control.invalid_section"
+
+    @pytest.mark.asyncio
+    async def test_valid_sections_unaffected(self, store: InstinctStore) -> None:
+        # The four valid section values still return 200 after the guard.
+        await store.propose("p1", "Pending", "", "", _trigger())
+        with TestClient(_build_app()) as client:
+            for section in ("tray", "pawprints", "snags", "agents"):
+                resp = client.get(f"/api/v1/mission-control/items?section={section}")
+                assert resp.status_code == 200, section
+
 
 class TestBulkApproveEndpoint:
     @pytest.mark.asyncio

@@ -238,6 +238,144 @@ class TestDescribe:
 # ---------------------------------------------------------------------------
 
 
+class TestSearchReadEfficiency:
+    """FINDING B — search must not run the full N-describe read path.
+
+    ``search_entity_types`` scores on entity-type NAMES and PROPERTY names
+    only; it never uses a type's link count. The live EE adapter's
+    ``describe_entity_type`` opens three sqlite connections per type
+    (exists + properties + links), so a full describe per type is 3N
+    connections/queries per query — and the link count it pays for is
+    discarded. Search must fetch properties only.
+    """
+
+    def test_search_does_not_call_full_describe(self):
+        """Search prefers a properties-only read path over describe_entity_type,
+        so it never pays for the per-type link fetch it doesn't score on."""
+        calls = {"describe": 0, "properties": 0}
+
+        class CountingIntrospector:
+            def list_entity_types(self):
+                return ["Customer", "Competitor"]
+
+            def describe_entity_type(self, name):
+                calls["describe"] += 1
+                return _SCHEMA.get(name)
+
+            def list_entity_properties(self, name):
+                calls["properties"] += 1
+                return _SCHEMA.get(name, {}).get("properties", [])
+
+        cards = search_entity_types(CountingIntrospector(), "customer churn")
+        assert cards and cards[0]["id"] == "fabric:Customer"
+        assert calls["describe"] == 0, (
+            "search must not call the full describe_entity_type (it fetches "
+            f"unused links); describe called {calls['describe']}x"
+        )
+        assert calls["properties"] >= 1, "search must use the properties-only read path"
+
+    def test_search_card_summary_has_no_link_count(self):
+        """The thin search card must not carry a DB-derived link count — that
+        would force the link fetch just to print a number. describe still
+        carries links for the detail view."""
+        cards = search_entity_types(FakeIntrospector(), "customer churn")
+        assert cards and cards[0]["id"] == "fabric:Customer"
+        assert "links" not in cards[0]["summary"].lower(), (
+            f"search card summary should not report links, got: {cards[0]['summary']!r}"
+        )
+
+    def test_search_still_falls_back_when_no_properties_path(self):
+        """An introspector without ``list_entity_properties`` (older shape)
+        must still work — the describe path remains the fallback."""
+
+        class OnlyDescribe:
+            def list_entity_types(self):
+                return ["Customer"]
+
+            def describe_entity_type(self, name):
+                return _SCHEMA.get(name)
+
+        cards = search_entity_types(OnlyDescribe(), "churn risk")
+        assert any(c["id"] == "fabric:Customer" for c in cards)
+
+
+class TestEeAdapterReadPath:
+    """FINDING B — the EE adapter exposes a properties-only read path that
+    opens fewer connections than a full describe."""
+
+    def test_adapter_properties_only_skips_links(self, tmp_path):
+        pytest.importorskip("pocketpaw_ee")
+        from pocketpaw_ee.fabric import WorkspaceFabricRegistry, WorkspaceFabricStore
+
+        from pocketpaw.atlas.fabric import RegistryFabricIntrospector
+
+        store = WorkspaceFabricStore(tmp_path / "fabric_registry.db")
+        store.register_entity_type("ws-1", "Customer")
+        store.register_property("ws-1", "Customer", "email")
+        store.register_property("ws-1", "Customer", "churn_risk")
+
+        registry = WorkspaceFabricRegistry(store=store, workspace_id="ws-1")
+
+        # Spy on the registry via a counting proxy (the registry uses __slots__,
+        # so its methods can't be monkeypatched in place). The properties-only
+        # read path must NOT touch links or run an existence check.
+        calls = {"properties": 0, "links": 0, "exists": 0}
+
+        class CountingRegistry:
+            def get_entity_properties(self, name):
+                calls["properties"] += 1
+                return registry.get_entity_properties(name)
+
+            def list_entity_links(self, name):
+                calls["links"] += 1
+                return registry.list_entity_links(name)
+
+            def entity_type_exists(self, name):
+                calls["exists"] += 1
+                return registry.entity_type_exists(name)
+
+            def list_entity_types(self):
+                return registry.list_entity_types()
+
+        adapter = RegistryFabricIntrospector(CountingRegistry())
+        props = adapter.list_entity_properties("Customer")
+        assert sorted(props) == ["churn_risk", "email"]
+        assert calls["properties"] == 1, "properties-only read hits get_entity_properties once"
+        assert calls["links"] == 0, "properties-only read must not fetch links"
+        assert calls["exists"] == 0, "properties-only read must not run the existence check"
+
+
+class TestCamelSplit:
+    """FINDING D — the camel split must break consecutive-capital acronyms.
+
+    The old regex only broke lower→upper, so 'APIKey' / 'HTTPServer' /
+    'IOError' never split and 'api key' / 'http server' queries missed them.
+    """
+
+    def test_acronym_boundary_splits(self):
+        from pocketpaw.atlas.fabric import _CAMEL_RE
+
+        def split(text):
+            return _CAMEL_RE.sub(" ", text)
+
+        assert split("HTTPServer") == "HTTP Server"
+        assert split("APIKey") == "API Key"
+        assert split("IOError") == "IO Error"
+        # The existing lower->upper boundary still works.
+        assert split("CustomerAccount") == "Customer Account"
+        # A pure acronym with no trailing word stays intact.
+        assert split("HTTP") == "HTTP"
+
+    def test_acronym_type_name_matches_spaced_query(self):
+        introspector = FakeIntrospector(
+            {"APIKey": {"name": "APIKey", "properties": [], "links": []}}
+        )
+        cards = search_entity_types(introspector, "api key")
+        assert any(c["id"] == "fabric:APIKey" for c in cards), (
+            f"'api key' should match the APIKey entity type, got {[c['id'] for c in cards]}"
+        )
+
+
 class TestHelpersFailClosed:
     def test_search_helper_returns_empty_on_raise(self):
         assert search_entity_types(RaisingIntrospector(), "customer") == []

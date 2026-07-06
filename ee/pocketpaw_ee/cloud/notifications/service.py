@@ -72,6 +72,7 @@ def _to_domain(doc: _NotificationDoc) -> Notification:
         id=str(doc.id),
         workspace_id=doc.workspace,
         recipient_id=doc.recipient,
+        actor_id=doc.actor,
         kind=doc.type,  # Beanie field is `type`; domain renames to `kind`
         title=doc.title,
         body=doc.body,
@@ -98,10 +99,12 @@ async def create(
     title: str,
     body: str = "",
     source: _NotificationSourceDoc | NotificationSource | None = None,
+    actor_id: str | None = None,
 ) -> Notification:
     doc = _NotificationDoc(
         workspace=workspace_id,
         recipient=recipient,
+        actor=actor_id,
         type=kind,
         title=title,
         body=body,

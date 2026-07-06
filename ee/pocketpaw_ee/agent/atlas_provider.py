@@ -1,5 +1,19 @@
 # atlas_provider.py — role-aware atlas EntitlementProvider for the cloud chat
 #   agent (WA-3). Created: 2026-07-03 (feat/workspace-admin-tools).
+# Updated: 2026-07-05 (fix/atlas-admin-security-hardening, FINDING D) — prime()
+#   now RE-RESOLVES the caller's role every turn instead of once per provider
+#   instance. The provider rides the WARM ClaudeSDKClient, which is shared across
+#   users of a workspace/public/shared pocket (its cache key omits user_id). The
+#   old ``_primed`` idempotency cached the FIRST caller's role for the provider's
+#   lifetime, so a MEMBER querying atlas after an OWNER saw the OWNER's
+#   role:admin / role:owner capability cards (and a mid-session role change stayed
+#   frozen — the P3). prime() now drops ``_primed`` and resets ``_role_level`` to
+#   None up front (fail-closed) before re-resolving from the CURRENT identity
+#   ContextVars, so ``is_granted`` reflects the live caller. DISCOVERY-LAYER ONLY:
+#   the RBAC gate inside each admin tool already re-checks the live role, so this
+#   is a capability-DISCLOSURE leak (a member seeing cards they can't use), not an
+#   enforcement bypass — but a real leak worth fixing. Warm-client sharing is left
+#   untouched (the surgical option).
 #
 # The DISCOVERY layer for the workspace-admin tools — NOT the security gate.
 # The RBAC checks INSIDE each admin tool (workspace_admin.py) are the real lock
@@ -17,12 +31,13 @@
 #     every role-gated entry is hidden. Never raises.
 #   * ``connected_connector_names()`` — pure delegation to the wrapped default
 #     provider (reuse the connector-state seam; don't reimplement).
-#   * ``prime()`` — async. Resolves the caller's role ONCE (cached) via the same
-#     identity the admin tools use: ``current_user_id`` / ``current_workspace_id``
-#     ContextVars → load the ``User`` Beanie doc → ``resolve_workspace_role``.
-#     The sdk_mcp_atlas handler awaits this before the sync grant filter so the
-#     async DB load runs in the handler's own event loop (``is_granted`` stays
-#     sync, per the protocol). Priming is idempotent; a failure leaves the role
+#   * ``prime()`` — async. Resolves the caller's role EACH TURN (FINDING D — no
+#     longer cached for the provider's lifetime) via the same identity the admin
+#     tools use: ``current_user_id`` / ``current_workspace_id`` ContextVars → load
+#     the ``User`` Beanie doc → ``resolve_workspace_role``. The sdk_mcp_atlas
+#     handler awaits this before the sync grant filter so the async DB load runs
+#     in the handler's own event loop (``is_granted`` stays sync, per the
+#     protocol). It resets the cached level up front, so a failure leaves the role
 #     unresolved (fail-closed) and is swallowed by the caller.
 #
 # Wiring: core's ``atlas.overlay.build_role_aware_provider(scope_key)`` imports
@@ -55,8 +70,10 @@ class RoleAwareEntitlementProvider:
     availability + granting role-blind entries) and adds a role gate on top for
     entries carrying a ``role:<tier>`` marker. Bound to ONE ``ws:<id>`` scope at
     construction — per-run, never a process-global. The caller's role is
-    resolved from the per-stream identity ContextVars at ``prime()`` time and
-    cached for the sync ``is_granted`` calls that follow.
+    re-resolved from the per-stream identity ContextVars on EVERY ``prime()`` (once
+    per turn — FINDING D), then read by the sync ``is_granted`` calls that follow.
+    It is NOT cached for the provider's lifetime, because the provider can ride a
+    warm client shared across users.
     """
 
     def __init__(self, scope_key: str, registry: Any | None = None) -> None:
@@ -70,9 +87,13 @@ class RoleAwareEntitlementProvider:
         # Reuse the OSS default for connector availability + role-blind grants.
         self._default = DefaultEntitlementProvider(scope_key=scope_key, registry=registry)
         # Resolved caller role level (int from ROLE_LEVELS) or None = unresolved.
-        # ``_primed`` guards against re-resolving on every call within one query.
+        # FINDING D: re-resolved on EVERY prime() (once per turn), not cached for
+        # the provider's lifetime. The provider rides the WARM ClaudeSDKClient,
+        # which is shared across users of a workspace/public pocket (its cache key
+        # omits user_id), so a once-per-instance cache froze the FIRST caller's
+        # role and leaked their admin/owner cards to later callers. There is no
+        # ``_primed`` flag any more — prime() always reflects the CURRENT identity.
         self._role_level: int | None = None
-        self._primed = False
 
     # -- connector delegation ------------------------------------------------
 
@@ -84,18 +105,26 @@ class RoleAwareEntitlementProvider:
     # -- role resolution -----------------------------------------------------
 
     async def prime(self) -> None:
-        """Resolve the caller's workspace role once (cached), fail-closed.
+        """Resolve the CURRENT caller's workspace role, per turn, fail-closed.
 
         Uses the SAME identity the admin tools read: the per-stream
         ``current_user_id`` / ``current_workspace_id`` ContextVars, the ``User``
         Beanie doc, and ``resolve_workspace_role``. On ANY failure — no identity,
         user not found, not a member of this workspace, a scope/workspace
         mismatch, or a DB error — the role stays ``None`` (unresolved) so every
-        role-gated entry is hidden. Never raises. Idempotent within a run: once
-        primed it does not re-load (the atlas server is built per run/stream)."""
-        if self._primed:
-            return
-        self._primed = True  # mark first so a raise below still leaves us "primed but unresolved"
+        role-gated entry is hidden. Never raises.
+
+        FINDING D: this RE-RESOLVES on every call (the sdk_mcp_atlas handler awaits
+        it before each turn's grant filter), it is NOT cached for the provider's
+        lifetime. The provider rides the warm ClaudeSDKClient shared across users
+        of a workspace/public pocket, so a once-per-instance cache would freeze the
+        first caller's role and leak their admin/owner cards to a later member (and
+        would also freeze a mid-session role change). ``_role_level`` is reset to
+        ``None`` up front so a failed re-resolution can never leave a STALE role
+        behind — fail-closed on every turn."""
+        # Reset first: an unresolved (or newly-restricted) caller must never
+        # inherit the previous turn's role level.
+        self._role_level = None
         try:
             from pocketpaw_ee.cloud.chat.agent_service import (
                 current_user_id,

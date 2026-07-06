@@ -39,6 +39,20 @@ Changes:
   materializes a per-run skills dir that is cleaned at backend ``cleanup()``, not
   at the supervisor's per-leased-client teardown — a benign retention gap, no run
   correctness impact; the clean fix spans the WH-1/WH-2 surface.)
+- 2026-06-30 (feat/billing-quota-enforcement, chunk 3) — ``execute_run`` now
+  enforces the UNIVERSAL monthly-credit-quota gate at run-start. A new
+  ``_reject_if_over_credit_quota`` helper (the credit-spend sibling of the ART-3
+  ``_reject_if_over_jail_quota``) is called right AFTER the jail-quota gate —
+  after ``resolve_scope_context`` validates ``ctx.workspace_id`` and BEFORE the
+  prewarm / mark-running / agent spin-up. It is flag-gated on
+  ``get_settings().billing_enforced`` (a no-op otherwise — OSS / self-host),
+  calls ``credits.service.check_quota`` (the pure, flag-free assertion), and on
+  ``QuotaExceeded`` rejects the run the SAME clean way the jail-quota reject
+  does: a terminal ``error`` stream frame (``code=credits.quota_exceeded``) +
+  ``mark_terminal(failed)`` + an early return WITHOUT invoking the agent (no
+  model call — the no-overspend money guarantee). This is the universal cap that
+  covers the worker/executor path; the chat HTTP route ALSO fast-rejects in
+  ``agent_router`` so its synchronous caller gets a clean 402 with no DB trace.
 - 2026-06-30 (feat/session-supervisor SS-5) — ``_drive_agent_loop`` now drives
   every supervised agent turn through the ``SessionSupervisor`` + the durable
   ``(workspace, session, agent) -> cli_session_id`` mapping (SS-3
@@ -201,6 +215,7 @@ from pocketpaw.agents.pool import (  # type: ignore[import-untyped]
 from pocketpaw.agents.session_supervisor import (  # type: ignore[import-untyped]
     get_session_supervisor,
 )
+from pocketpaw.config import get_settings  # type: ignore[import-untyped]
 from pocketpaw_ee.cloud._core.realtime import xproc
 from pocketpaw_ee.cloud.agent_sessions import runtime_service
 from pocketpaw_ee.cloud.agent_sessions.store import MongoSessionStore
@@ -1442,6 +1457,61 @@ async def _reject_if_over_jail_quota(spec: RunSpec, ctx: ScopeContext, transport
     return True
 
 
+async def _reject_if_over_credit_quota(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
+    """Universal monthly-CREDIT-QUOTA gate, enforced at RUN-START (chunk 3).
+
+    The credit-spend sibling of ``_reject_if_over_jail_quota`` (ART-3): measure
+    the workspace's month-to-date spend against its effective monthly ceiling
+    ONCE here — before any model/agent work — and reject the run CLEANLY when it
+    has hit the cap, the SAME way the jail-quota reject does (a terminal ``error``
+    stream frame + a ``mark_terminal(failed)`` doc, then an early return — never
+    a model call). This is the universal gate: it covers EVERY run-start path
+    (the synchronous chat HTTP route also fast-rejects in ``agent_router`` so its
+    caller gets a clean 402 with no DB trace, but the worker/executor path only
+    passes through HERE, so this is the one that guarantees a queued/resumed run
+    can't spend past the ceiling).
+
+    Flag-gated: a no-op unless ``get_settings().billing_enforced`` is on (OSS /
+    self-host run no ledger). ``credits.service.check_quota`` is the pure,
+    flag-free assertion — it raises ``QuotaExceeded`` (402 ``credits.quota_exceeded``)
+    when month-to-date spend ``>=`` the effective ceiling, and is itself a no-op
+    for an uncapped (Enterprise) plan. We catch that exception here and translate
+    it into the clean terminal rejection. Returns ``True`` when the run was
+    rejected (the caller returns early), ``False`` to proceed. The credits package
+    is imported locally to keep it off this hot module's import graph (mirrors
+    the BC-4 chat-router gate).
+    """
+    if not get_settings().billing_enforced:
+        return False
+
+    from pocketpaw_ee.cloud._core.errors import QuotaExceeded
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    try:
+        await credits_service.check_quota(ctx.workspace_id)
+        return False
+    except QuotaExceeded as exc:
+        quota_error = str(exc)
+        logger.warning(
+            "run %s rejected — monthly credit quota exceeded: %s", spec.run_id, quota_error
+        )
+        try:
+            await transport.append_event(
+                spec.run_id, "error", {"code": exc.code, "message": quota_error}
+            )
+        except Exception:
+            logger.debug("quota error frame append failed for %s", spec.run_id, exc_info=True)
+        try:
+            await run_service.mark_terminal(spec.run_id, status="failed", error=quota_error)
+        except Exception:
+            logger.exception("mark_terminal(failed) failed for over-quota run %s", spec.run_id)
+        try:
+            await transport.set_ttl(spec.run_id, _stream_ttl())
+        except Exception:
+            logger.debug("quota stream ttl set failed for %s", spec.run_id, exc_info=True)
+        return True
+
+
 async def execute_run(spec: RunSpec) -> None:
     """Run the agent for ``spec`` and write every event to the transport.
 
@@ -1525,6 +1595,19 @@ async def execute_run(spec: RunSpec) -> None:
     # prewarm + mark-running + agent spin-up, so a tenant that filled its scratch
     # quota fails fast and cleanly instead of crashing the shared box mid-run.
     if await _reject_if_over_jail_quota(spec, ctx, transport):
+        return
+
+    # Chunk 3 — the UNIVERSAL monthly-credit-quota gate. ``ctx.workspace_id`` is
+    # validated/in-scope above (the ``scope.no_workspace`` guard), so check the
+    # workspace's month-to-date spend against its effective ceiling NOW — after
+    # scope resolution, BEFORE the prewarm + mark-running + any model/agent work.
+    # A workspace at/over its cap is rejected the SAME clean way the jail-quota
+    # reject above is (terminal ``error`` frame + ``mark_terminal(failed)``, then
+    # an early return WITHOUT running the agent — the no-overspend money
+    # guarantee). Flag-gated inside the helper: a no-op unless
+    # ``billing_enforced`` is on, so OSS / self-host is unaffected and IN-FLIGHT
+    # runs (already past this point) are never killed.
+    if await _reject_if_over_credit_quota(spec, ctx, transport):
         return
 
     # Mark this dispatch as a live cloud CHAT run for the per-tenant cwd jail's

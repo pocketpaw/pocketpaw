@@ -778,6 +778,34 @@ class CloudMediaMcpProvider:
         return list(MEDIA_TOOL_IDS)
 
 
+class CloudStockImagesMcpProvider:
+    """`pocketpaw.mcp_servers` — the stock-photo search in-process server
+    (``pocketpaw_stock``). Hosts ``search_stock_images`` only.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so the bundled
+    ``pocketpaw-create-svelte-site`` skill can source real photography for a
+    generated marketing site without an explicit opt-in — the same regime the
+    sites manager + media + deliver servers use. The cloud chat agent runs on
+    the claude_agent_sdk backend, which only sees in-process MCP servers (a
+    plain BaseTool is invisible to it), so stock search MUST be surfaced here.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.stock_images import build_stock_server
+
+            return build_stock_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the stock server is unavailable,
+            # same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.stock_images import STOCK_TOOL_IDS
+
+        return list(STOCK_TOOL_IDS)
+
+
 class CloudDeliverMcpProvider:
     """`pocketpaw.mcp_servers` — the artifact-delivery in-process server
     (``pocketpaw_deliver``). Hosts ``deliver_artifact`` only (ART-4).

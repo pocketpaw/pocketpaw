@@ -124,6 +124,16 @@ type-gated. The renderer re-sanitizes even though ``summarize_ripple_spec``
 now sanitizes at the source (the get_pocket ``_summary`` path) — it never
 trusts a hand-built dict. Capped lists render honest "+N more" markers
 from the summarizer's new ``*_omitted`` counters.
+Changes: 2026-06-18 (fix/session-history-workspace-scope) —
+``load_history_for_scope``'s pocket/session query now also filters by
+``workspace_id`` (from ``ctx.workspace_id``). Defense-in-depth: pocket/session
+ObjectIds are globally unique so ``session_key`` alone never collides today,
+but the query no longer RELIES on id-uniqueness for tenant isolation — the
+workspace boundary is now an explicit predicate, and the query lands on the
+``(workspace_id, session_key, createdAt)`` compound index. Mirrors the
+existing ``MongoMemoryStore.get_session_in_workspace`` pattern. Normal-path
+behavior (ordering, limit, ``session_key_for`` formula) is unchanged.
+
 Changes: 2026-06-25 (fix/worker-trusts-spec-workspace) — ``resolve_scope_context``
 and the three resolvers gained ``expected_workspace_id``: the authenticated,
 route-validated workspace the run worker threads from ``spec.workspace_id``.
@@ -1980,9 +1990,16 @@ async def load_history_for_scope(ctx: ScopeContext, *, limit: int = 50) -> list[
 
     try:
         if ctx.kind in (ScopeKind.POCKET, ScopeKind.SESSION):
+            # Scope by workspace_id too (defense-in-depth). Pocket/session
+            # ObjectIds are globally unique, so session_key alone never
+            # collides in practice — but pinning the workspace makes tenant
+            # isolation an explicit predicate rather than an implicit
+            # consequence of id-uniqueness, and hits the
+            # ``(workspace_id, session_key, createdAt)`` compound index.
             query: dict[str, Any] = {
                 "context_type": ctx.kind.value,
                 "session_key": session_key_for(ctx),
+                "workspace_id": ctx.workspace_id,
             }
         else:  # GROUP, DM — both land in a group row
             query = {
