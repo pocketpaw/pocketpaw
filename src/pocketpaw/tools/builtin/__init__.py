@@ -14,6 +14,19 @@
 #   - 2026-05-31: Added zero-config WeatherTool, WikiTool, CurrencyTool (no API key)
 #   - 2026-06-16: Added CodeModeTool — Programmatic Tool Calling v1 (read-only):
 #     the agent scripts N read-safe tool calls; only final stdout returns.
+#   - 2026-07-03: Added FL-3 Library verbs (EE) — TagFileTool, MoveFileTool,
+#     AnnotateFileTool, SearchLibraryTool — the single-file agent verbs that
+#     make /files agentic. Registered in _EE_TOOLS (guarded by ee/ availability).
+#   - 2026-07-03: Added FL-4 OrganizeFolderTool (EE) — the folder-batch executor
+#     that fans an FL-3 verb (annotate | tag) over every file in a folder as
+#     separate metered invocations, capped + partial-failure isolated.
+#   - 2026-07-03: Added FL-5 structural edit tools (EE, port of dewani12's #1193)
+#     — EditDocumentTool / EditSlidesTool / EditSpreadsheetTool. Each edits a
+#     Library file by id (Editor.js document / reveal.js deck / Univer workbook),
+#     applies structural block/deck/cell operations, and writes the result back
+#     through file_versions.service.update_file_content so every edit lands as a
+#     new revertable version. Registered in _EE_TOOLS at trust_level "medium"
+#     (mutating, matching the FL-3 verbs).
 
 import importlib as _importlib
 
@@ -100,6 +113,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
 
 # Enterprise tools (require ee/ module) — guarded so community installs don't break.
 try:
+    from pocketpaw.tools.builtin.edit_document import EditDocumentTool
+    from pocketpaw.tools.builtin.edit_slides import EditSlidesTool
+    from pocketpaw.tools.builtin.edit_spreadsheet import EditSpreadsheetTool
     from pocketpaw.tools.builtin.fabric_tools import (
         FabricCreateTool,
         FabricQueryTool,
@@ -111,6 +127,13 @@ try:
         InstinctPendingTool,
         InstinctProposeTool,
     )
+    from pocketpaw.tools.builtin.library_verbs import (
+        AnnotateFileTool,
+        MoveFileTool,
+        OrganizeFolderTool,
+        SearchLibraryTool,
+        TagFileTool,
+    )
 
     _EE_TOOLS: list[type] = [
         FabricQueryTool,
@@ -120,6 +143,18 @@ try:
         InstinctPendingTool,
         InstinctAuditTool,
         InstinctCorrectionsTool,
+        # FL-3 — agent Library verbs (tag / move / annotate / search).
+        TagFileTool,
+        MoveFileTool,
+        AnnotateFileTool,
+        SearchLibraryTool,
+        # FL-4 — folder-batch executor (fans an FL-3 verb over a folder).
+        OrganizeFolderTool,
+        # FL-5 — structural edit tools (port of dewani12's #1193). Each edits a
+        # Library file by id + writes a revertable FL-2 version.
+        EditDocumentTool,
+        EditSlidesTool,
+        EditSpreadsheetTool,
     ]
     _EE_NAMES = {cls.__name__: cls for cls in _EE_TOOLS}
 except ImportError:

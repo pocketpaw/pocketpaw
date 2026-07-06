@@ -27,6 +27,21 @@
 #   un-discriminated consumers keep working byte-for-byte and the
 #   coarse ``PocketUpdated`` realtime event remains the refetch fallback
 #   for clients that ignore ``kind`` entirely.
+# Changes: 2026-07-03 (FL-5, port of dewani12's #1193) — added the
+#   ``editor_blocks`` / ``spreadsheet_snapshot`` / ``slides_data`` transport
+#   carriers: when a chat is scoped to an open file editor, the client attaches
+#   the current Editor.js blocks / Univer snapshot / reveal.js deck so the agent
+#   can round-trip a structural edit. In #1193 the (now-removed) inline
+#   ``_run_agent_stream`` injected these into the agent's system prompt via
+#   ``build_*_prompt_context`` before running the agent inline. On current dev the
+#   chat run path is a ``RunSpec`` submitted to an out-of-process executor, so the
+#   router-time prompt injection has no counterpart yet — these fields are the
+#   minimal transport shim (they parse + round-trip on the request); threading
+#   them through ``RunSpec`` → executor → worker prompt assembly is a follow-up.
+#   The primary FL-5 editor round-trip today runs through the REST ai-edit +
+#   ``*-context`` routes on the file_versions router (which still use the inline
+#   ``pool.run`` path) and the registered ``EditDocumentTool`` family (which edit
+#   a Library file by id and write a revertable version).
 """Request and SSE-event payload schemas for the enterprise agent chat endpoint.
 
 The endpoint lives at ``POST /cloud/chat/{scope}/{scope_id}/agent`` and streams
@@ -89,6 +104,19 @@ class CloudAgentChatRequest(BaseModel):
     # / etc. Validated downstream by ``SurfaceMetaRequest``; unknown
     # fields are dropped. ``None`` is treated as an empty dict.
     surface_meta: dict[str, Any] | None = None
+    # FL-5 file-editor transport carriers (port of #1193). Set by the client when
+    # the chat is scoped to an open file editor so the agent can round-trip a
+    # structural edit. See the module docstring note: on current dev these carry
+    # on the request but are not yet threaded into the out-of-process run prompt
+    # (a follow-up); the working editor round-trip runs through the REST ai-edit
+    # routes and the registered edit_* tools.
+    #
+    # Editor.js blocks from an open document editor.
+    editor_blocks: list[dict[str, Any]] | None = None
+    # Univer workbook snapshot from an open spreadsheet editor.
+    spreadsheet_snapshot: dict[str, Any] | None = None
+    # reveal.js deck JSON from an open slides editor.
+    slides_data: dict[str, Any] | None = None
 
     @field_validator("intent")
     @classmethod
