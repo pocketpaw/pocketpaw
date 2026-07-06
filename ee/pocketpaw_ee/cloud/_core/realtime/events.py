@@ -569,6 +569,11 @@ class NotificationCleared(Event):
     EVENT_TYPE: ClassVar[str] = "notification.cleared"
 
 
+@dataclass
+class NotificationDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "notification.deleted"
+
+
 # Cycles — Mission Control time-boxed work windows.
 # The daily-snapshot job (``ee.cloud.cycles.snapshot_job``) emits
 # ``CycleSnapshotted`` after appending a new point to a cycle's daily
