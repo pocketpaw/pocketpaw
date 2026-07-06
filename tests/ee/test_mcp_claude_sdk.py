@@ -1,5 +1,10 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-07-06 (feat/paw-sites-stock-imagery) — ``_strip_builtin_servers``
+  now also drops ``pocketpaw_stock`` (search_stock_images: free Pexels +
+  Unsplash photo search for site imagery, registered always-on via the
+  ``stock`` mcp_servers entry point), so the external-config assertions stay
+  focused. Same regime as pocketpaw_media / pocketpaw_sites_manager.
 Updated: 2026-07-03 (integration/atlas AT-1) — ``_strip_builtin_servers`` now
   also drops ``pocketpaw_atlas`` (the new always-on capability-atlas server:
   atlas_search / atlas_describe, registered unconditionally in core
@@ -84,6 +89,7 @@ from pocketpaw_ee.agent.mcp_servers.planner import (
 from pocketpaw_ee.agent.mcp_servers.planner import SERVER_NAME as _PLANNER_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.pockets import SERVER_NAME as _POCKET_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.sites import SERVER_NAME as _SITES_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.stock_images import SERVER_NAME as _STOCK_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.tasks import SERVER_NAME as _TASKS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.workspace_admin import (
     SERVER_NAME as _WORKSPACE_ADMIN_MCP_SERVER_NAME,
@@ -129,6 +135,10 @@ def _strip_builtin_servers(result: dict) -> dict:
     # ``pocketpaw_media`` is always-on too — the bundled `studio` skill calls
     # image_generate / video_generate without an explicit opt-in.
     out.pop(_MEDIA_MCP_SERVER_NAME, None)
+    # ``pocketpaw_stock`` is always-on too — the svelte-site authoring skills
+    # call search_stock_images for site imagery without an explicit opt-in.
+    # Pure read (free Pexels + Unsplash photo search), no identity.
+    out.pop(_STOCK_MCP_SERVER_NAME, None)
     # ``pocketpaw_belt`` is always-on too — the bundled `belt` skill calls
     # belt_propose_change without an explicit opt-in. ``loom`` is settings-gated
     # (loom_model_path unset -> not registered) but stripped defensively: a
