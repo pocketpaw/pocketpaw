@@ -6,7 +6,7 @@
 #   * ``resolve_entitlements(workspace_id)`` — read the workspace's CURRENT plan
 #     (``workspace.service.get_workspace_plan``), look it up in the billing plan
 #     catalog (``billing.plans``), and return an ``Entitlements`` (plan +
-#     features + monthly credit allotment).
+#     features + monthly credit allotment + monthly credit ceiling).
 #
 # READ-ONLY: no writes, no emit (EE cloud rule 9 only fires on mutation; this
 # entity mutates nothing). Tenancy: ``get_workspace_plan`` resolves the plan from
@@ -16,11 +16,17 @@
 #
 # FALLBACK: a workspace with no plan, an unknown plan string, or a missing
 # workspace resolves to the ``free`` base tier (``plans.BASE_PLAN_KEY``) — never
-# a crash, never a silent upgrade to a paid tier. (Subscription EVENTS that
-# CHANGE the plan are BC-7's job; here entitlements derive from the existing
-# ``Workspace.plan`` field as it stands.)
+# a crash, never a silent upgrade to a paid tier. The Free tier carries the
+# explicit 1000 credit ceiling, so the fallback also fails closed on the quota cap
+# (never None/uncapped). (Subscription EVENTS that CHANGE the plan are BC-7's job;
+# here entitlements derive from the existing ``Workspace.plan`` field as it stands.)
 #
 # Created 2026-06-24 (integration/billing-credits, BC-6): new entity.
+# Updated 2026-06-30 (feat/billing-quota-enforcement, chunk 1): ``Entitlements``
+#   now also carries ``monthly_ceiling`` — populated from the resolved tier's
+#   ``monthly_ceiling`` exactly as ``monthly_credit_allotment`` is. The defensive
+#   base-floor branch sets the Free trial ceiling (1000), so every path fails
+#   closed and no path leaves the cap uncapped.
 
 from __future__ import annotations
 
@@ -61,6 +67,9 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
                 workspace_id=workspace_id,
                 plan=plan_catalog.BASE_PLAN_KEY,
                 monthly_credit_allotment=0,
+                # Fail closed: the Free trial cap, never None/uncapped — even when
+                # the catalog itself is somehow missing the base tier.
+                monthly_ceiling=1_000,
                 features=frozenset(),
             )
 
@@ -68,5 +77,6 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
         workspace_id=workspace_id,
         plan=tier.key,
         monthly_credit_allotment=tier.monthly_credit_allotment,
+        monthly_ceiling=tier.monthly_ceiling,
         features=tier.features,
     )

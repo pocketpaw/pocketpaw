@@ -25,10 +25,14 @@
 # carries hand-authored ``capability`` cards (the workspace-admin tools, one per
 # tool, each role-gated); COMPILED_KINDS widened to seven so the
 # seed-completeness check accepts them.
+# Updated: 2026-07-05 (fix/atlas-relevance-round2, Finding A) — new coverage for
+# the kind-priority bias: a real-store governance-paraphrase pin (Instinct #1,
+# not the /agents surface) and a synthetic-model ``TestKindPriorityBias`` proving
+# the primitive edges a same-overlap surface but a genuine margin still wins.
 
 import json
 
-from pocketpaw.atlas.model import ATLAS_SCHEMA_V1, AtlasModel
+from pocketpaw.atlas.model import ATLAS_SCHEMA_V1, AtlasEntry, AtlasModel
 from pocketpaw.atlas.store import _DATA_PATH, AtlasStore, get_atlas_store
 
 COMPILED_KINDS = (
@@ -69,6 +73,7 @@ EXPECTED_SURFACE_IDS = {
     "surface:settings",
     "surface:integrations",
     "surface:workspace-admin",
+    "surface:billing",
     "surface:knowledge",
     "surface:files",
     "surface:studio",
@@ -78,6 +83,7 @@ EXPECTED_SURFACE_IDS = {
     "surface:meetings",
     "surface:activity",
     "surface:audit",
+    "surface:security",
 }
 
 # primitive id → the home route its ``surface`` field must carry (AT-3
@@ -173,6 +179,75 @@ class TestSearch:
         sites_hits = [e for e in results if e.id in ("surface:sites", "primitive:sites")]
         assert sites_hits, f"expected a sites entry, got {[e.id for e in results]}"
         assert all(e.surface == "/sites" for e in sites_hits)
+
+    def test_governance_paraphrase_ranks_instinct_over_agents_surface(self):
+        """Finding A (round 2): governance paraphrases must land on the
+        governing Instinct primitive, not the /agents management LIST route."""
+        store = AtlasStore.load()
+        for query in ("gate the agent", "how do I approve what the agent does"):
+            top = [e.id for e in store.search(query, limit=3)]
+            assert top[0] == "primitive:instinct", f"{query!r}: expected Instinct #1, got {top}"
+
+
+class TestKindPriorityBias:
+    """The kind-priority bias (Finding A, round 2): a primitive is protected
+    against a same-overlap surface/capability, but a real margin still wins."""
+
+    def _model(self, entries: list[AtlasEntry]) -> AtlasStore:
+        return AtlasStore(AtlasModel(entries=entries))
+
+    def test_primitive_edges_surface_at_equal_overlap(self):
+        """Same single keyword hit on both a primitive and a surface: the
+        primitive must rank first (kind scale + tiebreak)."""
+        store = self._model(
+            [
+                AtlasEntry(
+                    id="primitive:p",
+                    kind="primitive",
+                    name="P",
+                    summary="s",
+                    narrative="n",
+                    keywords=["widget"],
+                ),
+                AtlasEntry(
+                    id="surface:s",
+                    kind="surface",
+                    name="S",
+                    summary="s",
+                    narrative="n",
+                    keywords=["widget"],
+                ),
+            ]
+        )
+        ranked = store.search("widget", limit=2)
+        assert ranked[0].id == "primitive:p"
+        assert ranked[1].id == "surface:s"
+
+    def test_real_margin_still_beats_the_primitive(self):
+        """A surface that genuinely out-scores the primitive (name hit vs a
+        single keyword hit) is NOT flipped — the bias is near-tie only."""
+        store = self._model(
+            [
+                AtlasEntry(
+                    id="primitive:p",
+                    kind="primitive",
+                    name="P",
+                    summary="s",
+                    narrative="n",
+                    keywords=["kanban"],
+                ),
+                AtlasEntry(
+                    id="surface:kanban",
+                    kind="surface",
+                    name="kanban",  # name hit >> a single keyword hit
+                    summary="s",
+                    narrative="n",
+                    keywords=[],
+                ),
+            ]
+        )
+        ranked = store.search("kanban", limit=2)
+        assert ranked[0].id == "surface:kanban"
 
 
 class TestDescribe:

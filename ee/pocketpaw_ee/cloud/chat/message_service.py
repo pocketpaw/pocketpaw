@@ -482,6 +482,7 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
                 kind="message",
                 title=title,
                 body=body.content[:200],
+                actor_id=user_id,
                 source=NotificationSource(
                     type="message",
                     id=domain_msg.id,
@@ -515,6 +516,7 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
             kind="mention",
             title=(f"You were mentioned in #{group_name}" if group_name else "You were mentioned"),
             body=body.content[:200],
+            actor_id=user_id,
             source=NotificationSource(
                 type="message",
                 id=domain_msg.id,
@@ -640,6 +642,7 @@ async def toggle_reaction(message_id: str, user_id: str, emoji: str) -> dict:
             kind="reaction",
             title=f"{emoji} on your message",
             body=(domain_msg.content or "")[:200],
+            actor_id=user_id,
             source=NotificationSource(
                 type="message",
                 id=domain_msg.id,

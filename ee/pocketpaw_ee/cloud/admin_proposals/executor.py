@@ -1,5 +1,18 @@
 # ee/cloud/admin_proposals/executor.py — apply an approved workspace-admin action.
 # Created: 2026-07-03 (feat/workspace-admin-tools, WA-2).
+# Updated: 2026-07-05 (fix/atlas-admin-security-hardening, FINDING C) — serialize
+#   the executor per action_id. The idempotency guard (``_already_executed``) was
+#   check-then-act: it read status/outcome, THEN the executor did async work (RBAC
+#   re-check, arg adaptation, the service call) before ``mark_executed``
+#   back-wrote the outcome. Two concurrent invocations on ONE approved action both
+#   passed the guard and fired the whitelisted write twice. ``execute_approved_
+#   admin_action`` now wraps its whole body in a per-action_id ``asyncio.Lock``
+#   (``_lock_for``) and, INSIDE the lock, re-fetches the Action fresh from the
+#   store before reading the guard — so the concurrent loser blocks, then reads
+#   the winner's committed EXECUTED/outcome and no-ops. Defense-in-depth atop the
+#   atomic ``store.approve`` claim (FINDING B, the main double-approve trigger);
+#   this closes the executor's own guard-to-mark window. In-process (one backend
+#   runs the executor).
 # Updated: 2026-07-03 (feat/workspace-admin-tools, WA-5) — extended the ``_DISPATCH``
 #   whitelist from the single ``workspace.member.role_change`` entry to the full set
 #   of ADMIN write actions the workspace_admin MCP server proposes:
@@ -104,6 +117,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -121,6 +135,36 @@ logger = logging.getLogger(__name__)
 
 # Max length of the outcome summary persisted onto the blob.
 _OUTCOME_SUMMARY_MAX = 500
+
+# FINDING C — per-action_id serialization. ``execute_approved_admin_action`` reads
+# the ``_already_executed`` idempotency guard, THEN does async work (RBAC re-check,
+# arg adaptation, the service call) before ``mark_executed`` back-writes the
+# outcome. Two concurrent invocations on the SAME approved action both pass the
+# guard and fire the whitelisted write twice (a doubled role change / member
+# removal / connector write, or two checkouts). Serializing per action_id closes
+# that guard-to-mark window: the loser blocks until the winner's outcome is
+# committed, then re-reads it as executed and no-ops. This is defense-in-depth on
+# top of the atomic ``store.approve`` claim (FINDING B, which removes the main
+# production double-approve trigger); the lock covers the executor's own window.
+#
+# In-process only (one backend runs the executor). Locks are minted lazily and
+# never evicted — an admin-action's id is a short-lived UUID and the volume is low
+# (human-gated writes), so the dict stays small; a global registry keyed by id is
+# simpler and safer than an evictable cache for this cardinality.
+_action_locks: dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(action_id: str) -> asyncio.Lock:
+    """Return the process-wide lock for ``action_id`` (minted on first use).
+
+    Lazily created on the running loop, mirroring the instinct store's
+    db_path-keyed audit lock. Keying on the id means two DIFFERENT actions never
+    contend — only concurrent invocations for the SAME action serialize."""
+    lock = _action_locks.get(action_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _action_locks[action_id] = lock
+    return lock
 
 
 @dataclass(frozen=True)
@@ -297,7 +341,9 @@ async def _call_revoke_invite(**kwargs: Any) -> Any:
 
 
 def _adapt_connector_manage(
-    args: dict[str, Any], workspace_id: str, proposer_user_id: str  # noqa: ARG001
+    args: dict[str, Any],
+    workspace_id: str,
+    proposer_user_id: str,  # noqa: ARG001
 ) -> dict[str, Any]:
     """STRICT, OP-AWARE adapter for the connector-manage fan-out.
 
@@ -759,7 +805,33 @@ async def execute_approved_admin_action(
     failed (with a clear outcome) on ANY of: whitelist miss, schema/args mismatch,
     execute-time RBAC denial, or service error. The Decision-Graph chain is closed
     exactly once.
+
+    FINDING C — the whole body runs under a per-action_id lock so two concurrent
+    invocations of THIS function on the same Action can never interleave between
+    the ``_already_executed`` guard and the ``mark_executed`` back-write. Inside
+    the lock the Action is re-fetched from the store, so the loser reads the
+    winner's committed EXECUTED/outcome and no-ops via the idempotency guard. A
+    missing id (never a real Action) skips the lock and runs the body — it will
+    fail the blob/tenancy guards harmlessly.
     """
+    action_id = str(getattr(action, "id", "") or "")
+    if not action_id:
+        await _execute_approved_admin_action_locked(action, human_event_id=human_event_id)
+        return
+    async with _lock_for(action_id):
+        await _execute_approved_admin_action_locked(action, human_event_id=human_event_id)
+
+
+async def _execute_approved_admin_action_locked(
+    action: Any,
+    *,
+    human_event_id: Any | None = None,
+) -> None:
+    """The body of ``execute_approved_admin_action``, run while holding the
+    per-action_id lock (FINDING C). For the idempotency guard it reads the
+    Action's FRESH persisted state from the store, so a concurrent loser sees the
+    winner's committed EXECUTED/outcome and no-ops. The schema/args-hash tamper
+    guards stay on the passed-in blob (a re-read would mask a mutated object)."""
     from pocketpaw.stores import get_instinct_store
 
     params = getattr(action, "parameters", None) or {}
@@ -779,6 +851,7 @@ async def execute_approved_admin_action(
     # tenant's file, not the shared ledger.
     store = get_instinct_store(workspace_id=workspace_id or None)
     proposer_user_id = str(blob.get("proposer_user_id") or "")
+    action_id = str(getattr(action, "id", "") or "")
     # The chain actor on the terminal is the proposer (the write's author).
     causation = _coerce_uuid(human_event_id)
 
@@ -863,8 +936,25 @@ async def execute_approved_admin_action(
         )
         return
 
-    # Idempotency — never double-fire the write on a re-invocation.
-    if _already_executed(action, blob):
+    # Idempotency — never double-fire the write on a re-invocation. FINDING C:
+    # read the guard against the action's CURRENT persisted state, not the
+    # passed-in (possibly stale) object. Under the per-action lock the concurrent
+    # loser reaches here only after the winner's ``mark_executed`` + outcome
+    # back-write committed, so the fresh copy reports EXECUTED / an outcome blob
+    # and we no-op. The fresh read is used ONLY for this idempotency check; the
+    # schema/args-hash tamper guards above deliberately stay on the passed-in blob
+    # (they detect a mutated in-flight object, which a re-read would mask).
+    guard_action = action
+    guard_blob = blob
+    if action_id:
+        fresh = await store.get_action(action_id)
+        if fresh is not None:
+            guard_action = fresh
+            fresh_params = getattr(fresh, "parameters", None) or {}
+            fresh_blob = fresh_params.get(ADMIN_ACTION_PARAM_KEY)
+            if isinstance(fresh_blob, dict):
+                guard_blob = fresh_blob
+    if _already_executed(guard_action, guard_blob):
         logger.info(
             "admin_action: action %s already executed (idempotency guard) — "
             "skipping the service call",

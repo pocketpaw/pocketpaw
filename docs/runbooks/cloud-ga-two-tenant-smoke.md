@@ -3,7 +3,11 @@
      The AUTOMATED proof is tests/cloud/test_ga_two_tenant_pentest.py (9 tests,
      no creds, signed-webhook sim). THIS runbook is the captain's LIVE acceptance
      pass on the real Coolify box with real Dodo checkouts. Grounded against the
-     shipped ISO-1..4 stack + the billing/credits/entitlements services. -->
+     shipped ISO-1..4 stack + the billing/credits/entitlements services.
+     Updated 2026-06-30 (feat/billing-quota-enforcement, chunk 4): step 3c now
+     leads with the POCKETPAW_BILLING_ENFORCED=1 deploy requirement (enforcement
+     is OFF by default) and adds the monthly-credit-ceiling 402 case
+     (credits.quota_exceeded) beside the existing balance 402; sign-off updated. -->
 
 # Cloud Paw-OS — Two-Tenant GA Smoke (live acceptance)
 
@@ -155,12 +159,29 @@ Any single leak here is a **GA blocker**.
 
 ### 3c. Entitlement + credit enforcement
 
+> **Enforcement is OFF by default — set `POCKETPAW_BILLING_ENFORCED=1`.**
+> The run-start credit gates (balance AND monthly-ceiling, below) only fire when
+> `billing_enforced` is on. It defaults to `false` so OSS / self-host (no ledger)
+> are unaffected, which means a subscription / PEE deployment that forgets this
+> flag enforces **nothing** — a Free workspace keeps running on every chat turn
+> and spends straight past its cap into a negative balance. Set it as a Coolify
+> RUNTIME var on the cloud box and recreate the app before running the steps
+> below, or they will all pass for the wrong reason. Per-plan ceilings come from
+> the catalog (`billing/plans.py` `_CEILING`; `enterprise` is uncapped), not from
+> this flag.
+
 - **Plan gate** — exercise a feature gated to a higher tier from the lower-tier
   tenant; it must be denied (the per-plan ABAC feature set, resolved from
   `Workspace.plan`).
 - **402 at zero** — drain one tenant's wallet (or use a fresh tenant with no
   allotment) and start a chat run; it must hard-block with a 402
   `credits.insufficient`. The OTHER tenant, with balance, is unaffected.
+- **402 at the monthly ceiling** — take a tenant whose month-to-date spend has
+  reached its plan's monthly credit ceiling (cap from the catalog + any top-ups
+  bought this period) while the wallet still holds credits, and start a chat run;
+  it must hard-block with a 402 `credits.quota_exceeded` — at both the chat HTTP
+  path and the worker/executor, BEFORE any model call. The OTHER tenant, under
+  its ceiling, is unaffected.
 
 ### 3d. Fail-closed spot check
 
@@ -180,10 +201,13 @@ GA is accepted when:
       `POCKETPAW_REQUIRE_WORKSPACE_SCOPE=1` and (if needed) the store migration run;
 - [ ] Dodo creds + per-tier products are live runtime vars and
       `GET /billing/plans` returns a product id for every tier;
+- [ ] `POCKETPAW_BILLING_ENFORCED=1` is a live runtime var (without it the credit
+      gates below enforce nothing — a Free workspace runs past its cap);
 - [ ] both tenants provisioned via a **real Dodo checkout** (plan stamped +
       credits granted);
 - [ ] **zero cross-leak** across Pockets, Fabric, Instinct, KB (3b);
-- [ ] entitlement gate + 402-at-zero enforced and tenant-isolated (3c);
+- [ ] entitlement gate + 402-at-zero + 402-at-ceiling enforced and
+      tenant-isolated (3c);
 - [ ] fail-closed confirmed (3d).
 
 When all boxes are checked, the offering is build-complete and smoke-passed for

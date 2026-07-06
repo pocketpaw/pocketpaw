@@ -29,6 +29,7 @@ class NotificationOut(BaseModel):
     source_room_id: str | None = None
     read: bool
     created_at: str | None
+    actor_id: str | None = None
 
 
 def notification_to_dto(n: Notification) -> NotificationOut:
@@ -46,6 +47,7 @@ def notification_to_dto(n: Notification) -> NotificationOut:
         source_room_id=n.source.room_id if n.source else None,
         read=n.read,
         created_at=iso_utc(n.created_at),
+        actor_id=n.actor_id,
     )
 
 

@@ -53,6 +53,16 @@ When `llm_provider` is `auto`, PocketPaw uses Anthropic if an API key is set, ot
 | `litellm_model` | `POCKETPAW_LITELLM_MODEL` | string | `""` | Model name (use LiteLLM-prefixed names in direct mode) |
 | `litellm_max_tokens` | `POCKETPAW_LITELLM_MAX_TOKENS` | integer | `0` | Max output tokens (0 = provider default) |
 
+## Billing & Credits
+
+Cloud / subscription (PEE) only. The credit ledger and these knobs are inert on OSS / self-host deployments (no wallet), so the defaults are safe everywhere.
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `billing_enforced` | `POCKETPAW_BILLING_ENFORCED` | bool | `false` | Run-start hard-block. When `true`, starting a chat run is rejected with HTTP 402 if the workspace balance is `<= 0` (`credits.insufficient`) **or** its month-to-date spend has hit the monthly credit ceiling (`credits.quota_exceeded`), at both the chat HTTP path and the worker/executor, before any model call. In-flight runs are never killed. **Subscription / PEE deployments must set this to `1`** — left at the default, a Free workspace runs past its cap into a negative balance (see the [cloud GA runbook](/runbooks/cloud-ga-two-tenant-smoke), step 3c). Per-plan ceilings come from the catalog (`billing/plans.py` `_CEILING`; `enterprise` is uncapped), not from this flag. |
+| `billing_markup` | `POCKETPAW_BILLING_MARKUP` | float | `2.5` | Flat markup applied to a run's real compute cost before it is billed to the wallet. Metered charge = `round(cost_usd * billing_markup / credit_usd)`. |
+| `credit_usd` | `POCKETPAW_CREDIT_USD` | float | `0.01` | USD value of one credit (1 credit == $0.01). Divides the marked-up compute cost to yield integer credits. |
+
 ## Tool Policy
 
 | Setting | Env Variable | Type | Default | Description |

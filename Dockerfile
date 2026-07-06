@@ -1,3 +1,11 @@
+# Changes:
+# 2026-06-16: Harden the runtime-stage CLI shims. Resolve the claude/codex bin
+#   entry from each package's package.json instead of hardcoding cli.js — newer
+#   claude-code releases ship bin/claude.exe, so the old symlink dangled and the
+#   Agent SDK reported "Claude Code CLI not found". Added a `claude --version`
+#   build-check so a bad shim fails the build, and seeded a minimal ~/.claude.json
+#   so `claude -p` runs non-interactively on a fresh container.
+
 # ---- Node.js stage ----
 # Copy Node.js from the official image instead of curl|bash from NodeSource
 FROM node:22.14.0-slim AS node
@@ -71,10 +79,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy Node.js + globally-installed CLI backends from the official node image
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+# Re-create the bin shims. claude-code / codex move their package `bin` entry
+# between releases (e.g. cli.js -> bin/claude.exe), so resolve the real entry
+# from each package.json instead of hardcoding a path that silently dangles.
+# A dangling `claude` shim makes the Agent SDK report "CLI not found"; the
+# `claude --version` at the end fails the build if the shim is wrong.
 RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
     ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx && \
-    ln -s /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js /usr/local/bin/claude && \
-    ln -s /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex
+    ln -sf "/usr/local/lib/node_modules/@anthropic-ai/claude-code/$(node -e "const b=require('/usr/local/lib/node_modules/@anthropic-ai/claude-code/package.json').bin;process.stdout.write(typeof b==='string'?b:b.claude)")" /usr/local/bin/claude && \
+    ln -sf "/usr/local/lib/node_modules/@openai/codex/$(node -e "const b=require('/usr/local/lib/node_modules/@openai/codex/package.json').bin;process.stdout.write(typeof b==='string'?b:b.codex)")" /usr/local/bin/codex && \
+    claude --version
 
 # Copy venv from builder
 COPY --from=builder /opt/venv /opt/venv
@@ -88,6 +102,13 @@ RUN groupadd --system pocketpaw && \
     useradd --system --gid pocketpaw --create-home pocketpaw && \
     mkdir -p /home/pocketpaw/.pocketpaw /home/pocketpaw/workspace && \
     chown -R pocketpaw:pocketpaw /home/pocketpaw
+
+# Seed a minimal Claude CLI config so the Agent SDK can invoke `claude`
+# non-interactively on a fresh container (the onboarding gate otherwise blocks
+# `claude -p`). OAuth credentials are NOT baked (secret + they expire) — they
+# ride a runtime-restored ~/.claude/.credentials.json per the deploy runbook.
+RUN echo '{"hasCompletedOnboarding":true}' > /home/pocketpaw/.claude.json && \
+    chown pocketpaw:pocketpaw /home/pocketpaw/.claude.json
 
 USER pocketpaw
 WORKDIR /home/pocketpaw

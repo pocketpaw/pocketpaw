@@ -125,6 +125,39 @@
 #       to ``WorkItemStatus.AWAITING_APPROVAL`` (the projection already maps
 #       ``ActionStatus.PENDING`` → that). ``status=None`` returns everything as
 #       before; ``status`` composes with the section/agent/pocket filters.
+# Updated: 2026-07-04 (fix/deep-work-feed-500-created-at-sort) — fixed a 500 on
+# the unfiltered Deep Work feed (``GET /items`` with no section). The final
+# ``items.sort`` compared ``(created_at, id)`` tuples across two projections
+# whose ``created_at`` types disagree: a Nudge carries ``Action.created_at`` —
+# a tz-NAIVE ``datetime`` — while a Task carries ``TaskResponse.created_at`` —
+# an ISO ``str`` (``iso_utc``). When both coexisted in one list, ``datetime <
+# str`` raised ``TypeError`` and the endpoint returned 500. Section-filtered
+# fetches (tray = nudges only, agents = tasks only) stayed homogeneous and
+# never crashed, so operators saw an EMPTY main feed but a populated in-flight
+# tab. Fixed at BOTH points: (1) ``_task_to_work_item`` now coerces
+# ``created_at`` / ``updated_at`` str→datetime, mirroring the existing
+# ``due_at`` coercion, so the projection is homogeneous; (2) the sort key is a
+# new module-level ``_sort_created_at`` that normalises ANY input — str, naive
+# datetime, aware datetime, or None — to a single tz-aware datetime, so the sort
+# can never raise regardless of caller (also fixes the naive-vs-aware case).
+# Sort semantics are unchanged (newest-first, ``id`` tiebreak); the fix restores
+# the full feed including completed/approved (Pawprints) items alongside pending.
+# Updated: 2026-07-05 (fix/mission-control-resolver-consistency) — two resolver
+# consistency fixes so the counters and the agent filter agree with the list:
+#   (A) ``agent_outcomes_summary`` now admits ``a.pocket_id == workspace_id`` in
+#       its in-window predicate, matching ``agent_list_work_items`` and
+#       ``_split_ids_by_tenancy``. Before, the summary filtered ``pocket_id in
+#       visible`` ONLY, so workspace-scoped nudges (every ``_admin_action`` /
+#       ``_external_action`` / connector proposal, whose ``pocket_id`` IS the
+#       workspace id) were DROPPED from the counters even though they list in
+#       Pawprints/Snags — the summary undercounted vs the list.
+#   (C) The ``?agent=`` filter in ``agent_list_work_items`` now matches BOTH the
+#       raw ``trigger.source`` id AND its resolved display name. The feed
+#       projects ``agent_name`` as the RESOLVED display name, but the filter
+#       compared ``body.agent`` to the raw ``trigger.source`` ObjectId hex only,
+#       so filtering by the visible name matched zero items. The collect →
+#       resolve-names → filter order was reordered so the display name is
+#       available when the filter runs (still ONE batched name-resolution query).
 """Mission Control façade service.
 
 Every function is module-level ``async def`` per ee/cloud rule #5. The
@@ -177,6 +210,7 @@ from pocketpaw_ee.api import get_instinct_store
 from pocketpaw_ee.cloud._core.context import RequestContext
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.activity.buffer import ActivityEvent, get_buffer
+from pocketpaw_ee.cloud.auth import service as auth_service
 from pocketpaw_ee.cloud.mission_control.domain import (
     AssigneeKind,
     WorkItem,
@@ -300,37 +334,18 @@ async def _resolve_actor_names(source_ids: set[str]) -> dict[str, str]:
     name so The Tray never renders the raw id.
 
     Built ONCE per ``agent_list_work_items`` call from the union of all
-    projected actions' sources — a single ``_UserDoc.find`` over the id
-    set, mirroring how ``_pocket_name_map`` resolves pocket names once
-    (and the ``ripple_sources`` / ``chat.group_service`` batch pattern).
+    projected actions' sources, mirroring how ``_pocket_name_map`` resolves
+    pocket names once. Routes through ``auth_service.resolve_display_names``
+    (a single ``User.find`` over the id set) rather than touching the Beanie
+    user model here — the façade layer must not read models directly (the
+    "Mission Control — no Beanie touches from façade layer" contract).
 
-    Name preference: ``full_name`` → ``email`` → the id. Never raises: a
-    non-ObjectId / malformed source is skipped (stays the id via the
-    caller's ``.get(source, source)`` fallback), and an id with no
-    matching user simply isn't in the returned map (same fallback). We
-    resolve names across the workspace's user set, not just members, so a
-    proposer who has since left still renders as a name.
+    Name preference (``full_name`` → ``email`` → the id) and the skip/
+    fallback behavior for a non-ObjectId source or an id with no matching
+    user both live in ``resolve_display_names``; the caller's
+    ``.get(source, source)`` fallback keeps unresolved ids as the raw id.
     """
-    from beanie import PydanticObjectId
-
-    from pocketpaw_ee.cloud.models.user import User as _UserDoc
-
-    object_ids: list[PydanticObjectId] = []
-    for sid in source_ids:
-        try:
-            object_ids.append(PydanticObjectId(sid))
-        except Exception:
-            # Non-ObjectId source (e.g. an agent name, or a sentinel like
-            # "external_action" / "admin_action") — leave it as the id.
-            logger.debug("mission_control: skipping non-ObjectId trigger source %r", sid)
-    if not object_ids:
-        return {}
-
-    users = await _UserDoc.find({"_id": {"$in": object_ids}}).to_list()
-    return {
-        str(u.id): ((u.full_name or "").strip() or (u.email or "").strip() or str(u.id))
-        for u in users
-    }
+    return await auth_service.resolve_display_names(source_ids)
 
 
 def _status_to_section_status(s: ActionStatus) -> tuple[WorkItemSection, WorkItemStatus]:
@@ -491,6 +506,24 @@ def _task_to_work_item(task: Any, workspace_id: str, pocket_name: str = "") -> W
             due_at = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
         except (ValueError, TypeError):
             due_at = None
+    # Same normalisation for created_at / updated_at. TaskResponse serialises
+    # both to ISO strings (``iso_utc``) while a domain Task keeps datetimes;
+    # the WorkItem model types them ``datetime | None``, and the unified feed
+    # sorts on ``created_at`` alongside Nudge WorkItems (whose created_at is a
+    # datetime). Leaving them as str crashes that sort with a TypeError when a
+    # Nudge and a Task coexist. Coerce here so the projection is homogeneous.
+    created_at = getattr(task, "created_at", None)
+    if isinstance(created_at, str):
+        try:
+            created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            created_at = None
+    updated_at = getattr(task, "updated_at", None)
+    if isinstance(updated_at, str):
+        try:
+            updated_at = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            updated_at = None
     return WorkItem(
         id=f"task:{task.id}",
         workspace_id=workspace_id,
@@ -509,11 +542,46 @@ def _task_to_work_item(task: Any, workspace_id: str, pocket_name: str = "") -> W
         source_id=task.id,
         priority=task.priority,
         due_at=due_at,
-        created_at=task.created_at,
-        updated_at=task.updated_at,
+        created_at=created_at,
+        updated_at=updated_at,
         fabric_refs=(),
         blocked_by=blocked_by,
     )
+
+
+# A tz-aware floor for WorkItems that have no ``created_at`` — they sort last
+# under newest-first ordering. Kept tz-aware so it never re-introduces the
+# naive-vs-aware comparison the sort key is designed to avoid.
+_CREATED_AT_FLOOR = datetime.min.replace(tzinfo=UTC)
+
+
+def _sort_created_at(it: WorkItem) -> datetime:
+    """Return a mutually-comparable, tz-aware ``created_at`` for sorting.
+
+    The unified feed mixes WorkItems projected from two sources with
+    inconsistent ``created_at`` shapes:
+      - Nudges carry ``Action.created_at`` — a tz-NAIVE ``datetime``
+        (``datetime.now`` default).
+      - Tasks carry ``TaskResponse.created_at`` — an ISO ``str`` (``iso_utc``).
+    Sorting ``(created_at, id)`` tuples across the two raised
+    ``TypeError: '<' not supported between 'datetime' and 'str'`` (and would
+    likewise fail on naive-vs-aware datetimes). ``_task_to_work_item`` already
+    coerces str→datetime, but this is the last line of defence: it normalises
+    ANY input — str, naive datetime, aware datetime, or None — to a single
+    tz-aware datetime so the sort key can never raise regardless of caller.
+    """
+    value = it.created_at
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return _CREATED_AT_FLOOR
+    if value is None:
+        return _CREATED_AT_FLOOR
+    if value.tzinfo is None:
+        # Attach UTC to a naive datetime so all keys are mutually comparable.
+        return value.replace(tzinfo=UTC)
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -559,24 +627,40 @@ async def agent_list_work_items(
     pending = await store.pending(pocket_id=body.pocket, workspace_id=workspace_id)
     resolved = await store.list_actions(pocket_id=body.pocket, limit=200, workspace_id=workspace_id)
 
-    actions: list[Action] = []
+    # Collect every tenancy-visible action FIRST, then resolve actor names,
+    # then apply the agent filter. The agent filter has to run after name
+    # resolution because the feed renders ``agent_name`` as the RESOLVED
+    # display name (not the raw ``trigger.source`` id), so ``?agent=<name>``
+    # must match the rendered value — see the agent-filter block below.
+    visible_actions: list[Action] = []
     seen: set[str] = set()
     for a in (*pending, *resolved):
         if a.id in seen:
             continue
         if a.pocket_id not in visible and a.pocket_id != workspace_id:
             continue
-        if body.agent and a.trigger.source != body.agent:
-            continue
         seen.add(a.id)
-        actions.append(a)
+        visible_actions.append(a)
     # Batch-resolve every trigger.source (the proposer user id on a gated
     # Nudge) to a display name ONCE — a single _UserDoc.find over the union
     # of source ids, mirroring how name_map resolves pockets once — so The
     # Tray renders a person, not a raw ObjectId hex.
     actor_name_map = await _resolve_actor_names(
-        {a.trigger.source for a in actions if a.trigger and a.trigger.source}
+        {a.trigger.source for a in visible_actions if a.trigger and a.trigger.source}
     )
+    # Agent filter — the feed projects ``agent_name`` as the RESOLVED display
+    # name, so filtering must accept EITHER the raw ``trigger.source`` id OR
+    # its resolved display name. Comparing only against the raw id (as before)
+    # matched ZERO items when the operator filtered by the visible name.
+    if body.agent:
+        actions = [
+            a
+            for a in visible_actions
+            if a.trigger.source == body.agent
+            or actor_name_map.get(a.trigger.source, a.trigger.source) == body.agent
+        ]
+    else:
+        actions = visible_actions
     items.extend(
         _action_to_work_item(
             a,
@@ -632,7 +716,11 @@ async def agent_list_work_items(
         target = _STATUS_FILTER_ALIASES.get(body.status, body.status)
         items = [it for it in items if it.status.value == target]
     # Stable order: newest first by created_at, falling back to id.
-    items.sort(key=lambda it: (it.created_at or datetime.min, it.id), reverse=True)
+    # ``_sort_created_at`` normalises every key to a tz-aware datetime so the
+    # tuple comparison can never raise on a mixed datetime/str or naive/aware
+    # feed (Nudge created_at is a naive datetime; Task created_at arrives as an
+    # ISO str). See the helper docstring for the full failure mode.
+    items.sort(key=lambda it: (_sort_created_at(it), it.id), reverse=True)
     return [work_item_to_response(it) for it in items[: body.limit]]
 
 
@@ -1127,7 +1215,16 @@ async def agent_outcomes_summary(
     in_window = [
         a
         for a in actions
-        if a.pocket_id in visible and (a.updated_at or a.created_at or datetime.min) >= cutoff
+        # Tenancy MUST match ``agent_list_work_items`` / ``_split_ids_by_tenancy``:
+        # admit an action if it's in a visible pocket OR it's workspace-scoped
+        # (``pocket_id == workspace_id`` — every ``_admin_action`` /
+        # ``_external_action`` / connector proposal). Without the second clause
+        # the summary DROPS workspace-scoped nudges that DO list in
+        # Pawprints/Snags, so the counters undercount vs the list. The store
+        # read is already tenant-scoped, so ``== workspace_id`` only ever
+        # matches the caller's own rows.
+        if (a.pocket_id in visible or a.pocket_id == workspace_id)
+        and (a.updated_at or a.created_at or datetime.min) >= cutoff
     ]
 
     counters: dict[str, int] = {s.value: 0 for s in ActionStatus}
