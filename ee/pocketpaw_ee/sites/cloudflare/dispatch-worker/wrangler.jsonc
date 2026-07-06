@@ -1,0 +1,23 @@
+{
+  // wrangler.jsonc — Paw Sites Workers-for-Platforms dispatch worker.
+  // Created 2026-06-25 (feat/sites-cf-dispatch-worker).
+  //
+  // The DISPATCHER binding resolves user workers in the `paw-sites` dispatch
+  // namespace (the same namespace cloudflare_client.put_worker uploads each
+  // published site into). The route is set at DEPLOY time (see README.md) because
+  // it embeds the real PAW_CF_SITES_DOMAIN + zone, which differ per environment —
+  // add a `routes` block here or pass `--route` on `wrangler deploy`.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "paw-sites-dispatch",
+  "main": "src/index.js",
+  "compatibility_date": "2026-06-01",
+  "dispatch_namespaces": [
+    {
+      "binding": "DISPATCHER",
+      "namespace": "paw-sites"
+    }
+  ]
+  // routes are set at deploy time (see README) — *.<PAW_CF_SITES_DOMAIN>/*
+  // e.g. add here once you substitute your real domain + zone:
+  // "routes": [{ "pattern": "*.sites.hzd.interacly.com/*", "zone_name": "interacly.com" }]
+}

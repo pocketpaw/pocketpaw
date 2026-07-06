@@ -142,6 +142,22 @@
 # can never raise regardless of caller (also fixes the naive-vs-aware case).
 # Sort semantics are unchanged (newest-first, ``id`` tiebreak); the fix restores
 # the full feed including completed/approved (Pawprints) items alongside pending.
+# Updated: 2026-07-05 (fix/mission-control-resolver-consistency) — two resolver
+# consistency fixes so the counters and the agent filter agree with the list:
+#   (A) ``agent_outcomes_summary`` now admits ``a.pocket_id == workspace_id`` in
+#       its in-window predicate, matching ``agent_list_work_items`` and
+#       ``_split_ids_by_tenancy``. Before, the summary filtered ``pocket_id in
+#       visible`` ONLY, so workspace-scoped nudges (every ``_admin_action`` /
+#       ``_external_action`` / connector proposal, whose ``pocket_id`` IS the
+#       workspace id) were DROPPED from the counters even though they list in
+#       Pawprints/Snags — the summary undercounted vs the list.
+#   (C) The ``?agent=`` filter in ``agent_list_work_items`` now matches BOTH the
+#       raw ``trigger.source`` id AND its resolved display name. The feed
+#       projects ``agent_name`` as the RESOLVED display name, but the filter
+#       compared ``body.agent`` to the raw ``trigger.source`` ObjectId hex only,
+#       so filtering by the visible name matched zero items. The collect →
+#       resolve-names → filter order was reordered so the display name is
+#       available when the filter runs (still ONE batched name-resolution query).
 """Mission Control façade service.
 
 Every function is module-level ``async def`` per ee/cloud rule #5. The
@@ -611,24 +627,40 @@ async def agent_list_work_items(
     pending = await store.pending(pocket_id=body.pocket, workspace_id=workspace_id)
     resolved = await store.list_actions(pocket_id=body.pocket, limit=200, workspace_id=workspace_id)
 
-    actions: list[Action] = []
+    # Collect every tenancy-visible action FIRST, then resolve actor names,
+    # then apply the agent filter. The agent filter has to run after name
+    # resolution because the feed renders ``agent_name`` as the RESOLVED
+    # display name (not the raw ``trigger.source`` id), so ``?agent=<name>``
+    # must match the rendered value — see the agent-filter block below.
+    visible_actions: list[Action] = []
     seen: set[str] = set()
     for a in (*pending, *resolved):
         if a.id in seen:
             continue
         if a.pocket_id not in visible and a.pocket_id != workspace_id:
             continue
-        if body.agent and a.trigger.source != body.agent:
-            continue
         seen.add(a.id)
-        actions.append(a)
+        visible_actions.append(a)
     # Batch-resolve every trigger.source (the proposer user id on a gated
     # Nudge) to a display name ONCE — a single _UserDoc.find over the union
     # of source ids, mirroring how name_map resolves pockets once — so The
     # Tray renders a person, not a raw ObjectId hex.
     actor_name_map = await _resolve_actor_names(
-        {a.trigger.source for a in actions if a.trigger and a.trigger.source}
+        {a.trigger.source for a in visible_actions if a.trigger and a.trigger.source}
     )
+    # Agent filter — the feed projects ``agent_name`` as the RESOLVED display
+    # name, so filtering must accept EITHER the raw ``trigger.source`` id OR
+    # its resolved display name. Comparing only against the raw id (as before)
+    # matched ZERO items when the operator filtered by the visible name.
+    if body.agent:
+        actions = [
+            a
+            for a in visible_actions
+            if a.trigger.source == body.agent
+            or actor_name_map.get(a.trigger.source, a.trigger.source) == body.agent
+        ]
+    else:
+        actions = visible_actions
     items.extend(
         _action_to_work_item(
             a,
@@ -1183,7 +1215,16 @@ async def agent_outcomes_summary(
     in_window = [
         a
         for a in actions
-        if a.pocket_id in visible and (a.updated_at or a.created_at or datetime.min) >= cutoff
+        # Tenancy MUST match ``agent_list_work_items`` / ``_split_ids_by_tenancy``:
+        # admit an action if it's in a visible pocket OR it's workspace-scoped
+        # (``pocket_id == workspace_id`` — every ``_admin_action`` /
+        # ``_external_action`` / connector proposal). Without the second clause
+        # the summary DROPS workspace-scoped nudges that DO list in
+        # Pawprints/Snags, so the counters undercount vs the list. The store
+        # read is already tenant-scoped, so ``== workspace_id`` only ever
+        # matches the caller's own rows.
+        if (a.pocket_id in visible or a.pocket_id == workspace_id)
+        and (a.updated_at or a.created_at or datetime.min) >= cutoff
     ]
 
     counters: dict[str, int] = {s.value: 0 for s in ActionStatus}

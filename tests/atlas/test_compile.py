@@ -17,12 +17,24 @@
 # connector-knowledge pin checks limit=10 because the ripple invoice widgets
 # legitimately occupy top name-weight slots (see the test docstring).
 # Widget/skill extraction itself is pinned in test_widgets_skills.py.
+# Updated: 2026-07-05 (fix/atlas-data-accuracy-and-relevance) — new
+# ``TestFactualClaimGuard``: the fidelity check only proves the artifact was
+# recompiled, not that a narrative is TRUE. Two false narratives had shipped
+# and misdirected users (a "no dedicated billing route" claim and a "~190
+# widgets" count); this guard flags negative route-existence claims and
+# hedged numeric counts in authored prose so they can't silently pass a
+# fidelity-only drift check. Surface count assertion bumped 21 → 23 for the
+# new /settings/billing and /security authored surfaces.
 
 import json
 import logging
+import os
+import re
+from pathlib import Path
 
 from pocketpaw.atlas.compile import (
     AUTHORED_FILES,
+    DEFAULT_CONNECTORS_DIR,
     check_artifact,
     compile_atlas,
     compile_atlas_bytes,
@@ -72,7 +84,7 @@ class TestAuthoredFiles:
         assert {e.kind for e in prims.entries} == {"primitive"}
         assert {e.kind for e in surfs.entries} == {"surface"}
         assert len(prims.entries) == 10
-        assert len(surfs.entries) == 21
+        assert len(surfs.entries) == 23
 
     def test_authored_entries_survive_compile_unchanged(self):
         """Every authored entry appears in the compiled model identical
@@ -80,6 +92,61 @@ class TestAuthoredFiles:
         compiled = {e.id: e for e in compile_atlas().entries}
         for entry in load_authored_entries():
             assert compiled[entry.id] == entry
+
+
+class TestFactualClaimGuard:
+    """Flag brittle factual / numeric claims in authored prose.
+
+    The fidelity check (`atlas build --check`) only proves the artifact was
+    recompiled from the sources — it cannot tell a TRUE narrative from a
+    FALSE one. Two false-narrative classes shipped and misdirected users
+    (fixed 2026-07-05): a negative existence claim ("there is no dedicated
+    billing route today") that went stale the moment /settings/billing
+    shipped, and a hedged widget count ("~190 widgets") that drifted from
+    the real 151. This guard catches both patterns so a stale factual claim
+    can't silently pass a fidelity-only drift check. It is deliberately
+    narrow — it flags the specific brittle shapes, not all prose — so it
+    stays low-noise.
+    """
+
+    # Negative existence claims about routes / surfaces / pages: these go
+    # stale exactly when the OS gains the thing they deny.
+    _NEGATIVE_EXISTENCE = re.compile(
+        r"\bno\s+(?:dedicated\s+)?[\w\s]{0,20}?(?:route|surface|page)\b", re.IGNORECASE
+    )
+    # Hedged / approximate counts ("~190 widgets", "about 150 widgets",
+    # "roughly 200 widgets"): an approximation invites silent drift. A
+    # verified exact count ("150+ widgets") is allowed.
+    _APPROX_COUNT = re.compile(
+        r"(?:[~≈]\s*|\b(?:about|around|roughly|approx(?:imately)?)\s+)\d{2,}\b",
+        re.IGNORECASE,
+    )
+
+    def test_no_negative_route_existence_claims(self):
+        offenders = []
+        for entry in load_authored_entries():
+            for field in ("summary", "narrative"):
+                text = getattr(entry, field)
+                if self._NEGATIVE_EXISTENCE.search(text):
+                    offenders.append(f"{entry.id}.{field}: {text}")
+        assert not offenders, (
+            "authored prose asserts a route/surface does NOT exist — these go "
+            "stale when the OS gains it (a false narrative misdirects users). "
+            "State what IS, not what is absent:\n" + "\n".join(offenders)
+        )
+
+    def test_no_hedged_numeric_claims(self):
+        offenders = []
+        for entry in load_authored_entries():
+            for field in ("summary", "narrative"):
+                text = getattr(entry, field)
+                if self._APPROX_COUNT.search(text):
+                    offenders.append(f"{entry.id}.{field}: {text}")
+        assert not offenders, (
+            "authored prose carries a hedged/approximate count (e.g. '~190 "
+            "widgets') — approximations drift silently past the fidelity-only "
+            "check. Use a verified exact count or an open-ended '150+':\n" + "\n".join(offenders)
+        )
 
 
 class TestConnectorExtraction:
@@ -118,7 +185,6 @@ class TestConnectorExtraction:
         )
 
     def test_every_repo_connector_yaml_has_an_entry(self):
-        from pathlib import Path
 
         import yaml
 
@@ -210,3 +276,90 @@ class TestDriftCheck:
         store = AtlasStore.load(path)
         assert store.describe("primitive:pocket") is not None
         assert store.describe("connector:stripe") is not None
+
+
+class TestNullDisplayName:
+    """FINDING A — a connector YAML with an explicit ``display_name: null``
+    parses cleanly but must not crash the whole compiler on ``.lower()``.
+
+    The module's own posture ("one bad file can't block the build") is
+    broken if a single well-formed-but-null field aborts the entire build
+    (and the CI drift gate) with AttributeError.
+    """
+
+    def test_connector_with_null_display_name_compiles(self, tmp_path):
+        (tmp_path / "quiet.yaml").write_text(
+            "name: quiet\n"
+            "display_name: null\n"
+            "type: generic\n"
+            "actions:\n"
+            "  - name: ping\n"
+            "    description: check liveness\n",
+            encoding="utf-8",
+        )
+        model = compile_atlas(connectors_dir=tmp_path)
+        entry = next(e for e in model.entries if e.id == "connector:quiet")
+        # Falls back to the connector name — never the string "None".
+        assert entry.name == "quiet"
+        assert "None" not in entry.summary
+        assert "None" not in entry.narrative
+        assert "quiet" in entry.keywords
+
+
+class TestConnectorsDirAnchoring:
+    """FINDING C — the default connectors dir must not be CWD-relative.
+
+    ``compile_atlas`` / ``write_artifact`` / ``check_artifact`` called with
+    defaults from any dir other than the repo root would otherwise read ZERO
+    connector YAMLs and silently drop every connector + sense entry;
+    ``write_artifact`` would then persist a truncated artifact.
+    """
+
+    def test_default_connectors_dir_is_absolute(self):
+        assert DEFAULT_CONNECTORS_DIR.is_absolute(), (
+            "DEFAULT_CONNECTORS_DIR must be anchored to a stable location, not CWD-relative"
+        )
+        assert DEFAULT_CONNECTORS_DIR.is_dir(), "the anchored connectors dir must exist"
+
+    def test_compile_from_other_cwd_still_finds_connectors(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        # A CWD-relative default would find nothing here.
+        assert not (Path(os.getcwd()) / "connectors").exists()
+        model = compile_atlas()
+        connectors = [e for e in model.entries if e.kind == "connector"]
+        senses = [e for e in model.entries if e.kind == "sense"]
+        assert connectors, "connectors must still be extracted from a different CWD"
+        assert senses, "senses must still be extracted from a different CWD"
+        assert any(e.id == "connector:stripe" for e in connectors)
+
+    def test_check_artifact_fresh_from_other_cwd(self, tmp_path, monkeypatch):
+        """The CI drift gate runs from repo root today; anchoring keeps it
+        correct even if invoked elsewhere — no truncated-artifact false
+        'stale' with everything dropped."""
+        monkeypatch.chdir(tmp_path)
+        fresh, summary = check_artifact()
+        assert fresh, summary
+
+
+class TestDuplicateIdDiff:
+    """FINDING E — the drift diff collapses duplicate-id entries.
+
+    ``check_artifact`` built its per-id map with a dict comprehension, so two
+    entries sharing an id silently collapse to one: CI still fails on bytes,
+    but the printed added/removed/changed lists misreport what actually
+    differs. Duplicate ids should be surfaced explicitly.
+    """
+
+    def test_duplicate_ids_reported(self, tmp_path):
+        path, _model = write_artifact(output_path=tmp_path / "atlas.json")
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        # Inject a duplicate of an existing id (authoring collision shape).
+        first = doc["entries"][0]
+        doc["entries"].append(dict(first))
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        fresh, summary = check_artifact(artifact_path=path)
+        assert not fresh
+        assert "duplicate" in summary.lower(), (
+            f"duplicate id must be surfaced in the diff summary, got:\n{summary}"
+        )
+        assert first["id"] in summary

@@ -37,11 +37,42 @@
 # unrelated intents. Stopwords carry no intent signal, so removing them can only
 # drop spurious matches — no entry is ever the right answer *because of* a
 # stopword. Weights and signatures unchanged.
+# Updated: 2026-07-05 (fix/atlas-data-accuracy-and-relevance) — two relevance
+# fixes for the "agent misdirects users about the OS" class:
+#   * five more instruction-filler stopwords ("up", "set", "get", "open",
+#     "show") join ``_STOPWORDS``. They hit entry NAMES with no intent signal —
+#     "set up memory" scored "set" against the approval-level card's name and
+#     "up" against widget:follow-up, burying primitive:soul. Same closed-class
+#     rationale as WA-3: dropping them can only remove spurious name hits.
+#   * an IDF-style NAME-weight damper (``_name_idf_weight``). Generic tokens
+#     that appear in MANY entry names ("workspace" in 8 names, "connector" in 5)
+#     handed every card a full 5.0 name hit, so a benign "manage workspace users"
+#     produced an 8-way tie that seed order broke — sometimes landing a
+#     destructive card (Delete the workspace) above a benign one. The damper
+#     scales ONLY the name-field hit by the token's smoothed inverse name
+#     document frequency, normalized so a token in a single name keeps the full
+#     ``_NAME_WEIGHT`` and a ubiquitous token is damped toward the keyword tier.
+#     Keyword / summary / narrative weights are untouched (those fields carry
+#     deliberate, per-entry intent vocabulary), so a discriminating keyword now
+#     out-scores a generic name collision. Signatures unchanged.
+# Updated: 2026-07-05 (fix/atlas-relevance-round2) — a kind-priority bias so a
+# governing primitive can't be outranked by a management SURFACE (or an admin
+# capability) at equal keyword overlap. Governance paraphrases ("gate the
+# agent", "sign-off", "approve what the agent does") were landing on the
+# /agents list route (surface:agents), dropping primitive:instinct below it.
+# Two small levers in ``search_scored``: (1) ``_KIND_SCALE`` multiplies every
+# non-primitive score by 0.96 (primitive = 1.0) — the largest damping that
+# leaves the eval strict-hit baseline untouched; (2) ``_KIND_TIEBREAK`` is a
+# deterministic secondary sort key (primitive first) so an exact tie resolves
+# toward the primitive, not seed order. Both are near-tie only — a match that
+# out-scores the primitive by a real margin still wins. Field weights and the
+# search_scored / search / describe signatures are unchanged.
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from pathlib import Path
 
@@ -124,6 +155,11 @@ _STOPWORDS = frozenset(
         "need",
         "please",
         "just",
+        "up",
+        "set",
+        "get",
+        "open",
+        "show",
     }
 )
 
@@ -133,6 +169,44 @@ _NAME_WEIGHT = 5.0
 _KEYWORD_WEIGHT = 3.0
 _SUMMARY_WEIGHT = 1.5
 _NARRATIVE_WEIGHT = 1.0
+
+# Floor for the IDF name-weight damper: even a token that appears in EVERY
+# entry name still contributes at least this fraction of ``_NAME_WEIGHT`` when
+# it hits a name, so the damper only re-ranks — it never zeroes a real match.
+# 0.6 keeps a fully-generic name hit (0.6 × 5.0 = 3.0) at the keyword tier, so
+# a discriminating keyword can tie/beat a generic name collision but a name hit
+# is never worth less than a keyword hit.
+_NAME_IDF_FLOOR = 0.6
+
+# Kind-priority bias (relevance fix, round 2). Governance paraphrases ("gate the
+# agent", "sign-off") kept steering to the /agents management LIST route
+# (kind='surface') or an admin capability card, dropping the GOVERNING primitive
+# (Instinct) below them at equal-ish overlap. Two complementary levers, both
+# small on purpose so they only re-rank near-ties and never overpower a real
+# margin:
+#   * ``_KIND_SCALE`` multiplies a non-primitive's score by 0.96 (primitive =
+#     1.0), so at the SAME keyword overlap the governing primitive edges out a
+#     surface / capability / connector. 0.96 was picked as the largest damping
+#     that leaves the intent→capability eval strict-hit baseline untouched
+#     (measured: 0.96 keeps 30/31; 0.95 and below start to regress genuine
+#     specific-kind answers like widget:kanban).
+#   * ``_KIND_TIEBREAK`` is a deterministic secondary sort key (primitive > sense
+#     > capability > connector > widget > skill > surface) so an EXACT numeric
+#     tie always resolves toward the primitive instead of falling to seed order.
+# Neither lever can flip a match that outscores the primitive by a real margin
+# (e.g. the owner-only approval-LEVEL capability still legitimately co-answers
+# "approval gate") — the primitive is protected on ties and near-ties only.
+_KIND_SCALE: dict[str, float] = {"primitive": 1.0}
+_KIND_SCALE_DEFAULT = 0.96
+_KIND_TIEBREAK: dict[str, int] = {
+    "primitive": 6,
+    "sense": 5,
+    "capability": 4,
+    "connector": 3,
+    "widget": 2,
+    "skill": 1,
+    "surface": 0,
+}
 
 
 def _tokenize(text: str) -> list[str]:
@@ -201,6 +275,41 @@ class AtlasStore:
             )
             for entry in model.entries
         ]
+        # Name-field IDF weights (relevance fix, 2026-07-05). A generic token
+        # that shows up in many entry NAMES ("workspace", "connector") carries
+        # little discriminating signal, yet each name hit scored the full
+        # ``_NAME_WEIGHT`` — so a benign query tied a swarm of cards and seed
+        # order (sometimes a destructive card) decided the winner. Precompute a
+        # per-name-token damper from the smoothed inverse name document
+        # frequency, normalized so a token in exactly one name keeps 1.0 and
+        # ubiquitous tokens drop toward ``_NAME_IDF_FLOOR``. Applied ONLY to the
+        # name field; keyword/summary/narrative weights are unchanged.
+        self._name_idf: dict[str, float] = self._compute_name_idf()
+
+    def _compute_name_idf(self) -> dict[str, float]:
+        """Map each name-field stem to a damper in ``[_NAME_IDF_FLOOR, 1.0]``.
+
+        Smoothed IDF over entry NAMES: ``log((N + 1) / (df + 1))``, normalized
+        against the df=1 value so a token appearing in a single name keeps the
+        full ``_NAME_WEIGHT`` and a token in many names is damped (floored so a
+        name hit is never worth less than a keyword hit).
+        """
+        n_entries = len(self._index)
+        name_df: dict[str, int] = {}
+        for _entry, name_t, _kw, _sm, _nr in self._index:
+            for token in name_t:
+                name_df[token] = name_df.get(token, 0) + 1
+
+        # df=1 is the reference (a name-unique token → full weight).
+        ref_idf = math.log((n_entries + 1) / (1 + 1)) if n_entries else 1.0
+        if ref_idf <= 0:  # degenerate tiny model — no damping
+            return {token: 1.0 for token in name_df}
+
+        weights: dict[str, float] = {}
+        for token, df in name_df.items():
+            idf = math.log((n_entries + 1) / (df + 1))
+            weights[token] = max(_NAME_IDF_FLOOR, min(1.0, idf / ref_idf))
+        return weights
 
     @classmethod
     def load(cls, path: Path | None = None) -> AtlasStore:
@@ -249,7 +358,11 @@ class AtlasStore:
             score = 0.0
             for token in tokens:
                 if token in name_t:
-                    score += _NAME_WEIGHT
+                    # Damp the name hit by the token's name-IDF (relevance fix,
+                    # 2026-07-05): a generic token in many names is worth less
+                    # than a name-unique one, so a discriminating keyword can
+                    # out-score a ubiquitous name collision.
+                    score += _NAME_WEIGHT * self._name_idf.get(token, 1.0)
                 elif token in keyword_t:
                     score += _KEYWORD_WEIGHT
                 elif token in summary_t:
@@ -257,9 +370,20 @@ class AtlasStore:
                 elif token in narrative_t:
                     score += _NARRATIVE_WEIGHT
             if score > 0:
+                # Kind-priority scale (relevance fix, round 2): a non-primitive
+                # is damped slightly so the governing primitive edges out a
+                # surface / capability at equal overlap. Small enough to leave a
+                # real margin untouched.
+                score *= _KIND_SCALE.get(entry.kind, _KIND_SCALE_DEFAULT)
                 scored.append((score, entry))
 
-        scored.sort(key=lambda pair: pair[0], reverse=True)
+        # Primary key: score (desc). Secondary: kind priority (desc) so an EXACT
+        # tie resolves toward the primitive instead of seed order — the
+        # ``atlas_search steered to /agents instead of Instinct`` class of miss.
+        scored.sort(
+            key=lambda pair: (pair[0], _KIND_TIEBREAK.get(pair[1].kind, 0)),
+            reverse=True,
+        )
         return scored if limit is None else scored[:limit]
 
     def describe(self, entry_id: str) -> AtlasEntry | None:

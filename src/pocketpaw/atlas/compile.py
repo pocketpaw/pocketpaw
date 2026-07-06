@@ -29,6 +29,22 @@
 #     installed skills change per install and are deliberately NOT baked
 #     into the artifact (their discovery stays with the system-prompt
 #     skills block).
+# Updated: 2026-07-05 (fix/atlas-compiler-robustness) — three robustness fixes,
+# all output-preserving (atlas.json bytes unchanged):
+#   * FINDING A: ``_connector_entry`` coerces ``display_name`` to a safe string
+#     (``display = defn.display_name or defn.name``) before ``.lower()`` / any
+#     f-string, so a connector YAML with explicit ``display_name: null`` no
+#     longer crashes the WHOLE compile (and CI drift gate) on AttributeError —
+#     honoring the module's "one bad file can't block the build" posture.
+#   * FINDING C: ``DEFAULT_CONNECTORS_DIR`` is anchored to the package location
+#     (``Path(__file__).parents[3] / "connectors"``) instead of a CWD-relative
+#     ``Path("connectors")``, so a default-arg compile / write / check from any
+#     dir still finds the connector YAMLs instead of silently dropping every
+#     connector + sense entry (and persisting a truncated artifact).
+#   * FINDING E: ``check_artifact`` detects duplicate entry ids explicitly
+#     (``_duplicate_ids``) before the id->entry map collapses them, so the drift
+#     summary can't misreport a same-id collision; ``compile_atlas`` also asserts
+#     id uniqueness so an authoring collision fails loudly at build time.
 
 from __future__ import annotations
 
@@ -57,11 +73,21 @@ AUTHORED_FILES = (
     _AUTHORED_DIR / "capabilities.json",
 )
 
-# Where connector YAML definitions live, relative to the repo root (the
-# same default dir ConnectorRegistry scans). The compiler reads ONLY the
-# repo dir — never ~/.pocketpaw/connectors — so the checked-in artifact
-# reflects the repo, not one developer's machine.
-DEFAULT_CONNECTORS_DIR = Path("connectors")
+# Where connector YAML definitions live: the repo's top-level ``connectors/``
+# dir (the same one ConnectorRegistry scans). The compiler reads ONLY the repo
+# dir — never ~/.pocketpaw/connectors — so the checked-in artifact reflects the
+# repo, not one developer's machine.
+#
+# Anchored to the package location, NOT the CWD. A bare ``Path("connectors")``
+# is CWD-relative, so ``compile_atlas`` / ``write_artifact`` / ``check_artifact``
+# called with defaults from any dir other than the repo root would read ZERO
+# YAMLs and silently drop every connector + sense entry (and write_artifact
+# would then persist a truncated artifact). ``compile.py`` lives at
+# ``src/pocketpaw/atlas/compile.py``, so ``parents[3]`` is the repo root. The
+# compiler is a source-checkout build tool (it never runs from an installed
+# wheel — it reads the repo's YAMLs), so ``__file__``-anchoring is safe here,
+# the same pattern ``store.py`` uses for the packaged data file.
+DEFAULT_CONNECTORS_DIR = Path(__file__).resolve().parents[3] / "connectors"
 
 # Every connector entry points users at the integrations surface.
 _INTEGRATIONS_ROUTE = "/settings/workspace/integrations"
@@ -101,6 +127,14 @@ def _connector_entry(defn: ConnectorDef) -> AtlasEntry:
     agent can discover e.g. that Stripe supports ``list_invoices`` without
     guessing from priors.
     """
+    # A YAML with an explicit ``display_name: null`` parses cleanly (the
+    # dataclass default only fills an ABSENT key, not a present null), so
+    # coerce to a safe string before any ``.lower()`` / f-string use —
+    # otherwise one such file would abort the WHOLE compile (and the CI drift
+    # gate) with AttributeError, contradicting "one bad file can't block the
+    # build". Fall back to the connector name.
+    display = defn.display_name or defn.name
+
     action_names: list[str] = []
     action_bits: list[str] = []
     for action in defn.actions:
@@ -117,21 +151,18 @@ def _connector_entry(defn: ConnectorDef) -> AtlasEntry:
 
     preview = ", ".join(action_names[:4])
     more = f", +{len(action_names) - 4} more" if len(action_names) > 4 else ""
-    summary = (
-        f"{defn.display_name} ({defn.type}) connector — "
-        f"{len(action_names)} actions: {preview}{more}."
-    )
+    summary = f"{display} ({defn.type}) connector — {len(action_names)} actions: {preview}{more}."
 
     narrative = (
-        f"The {defn.display_name} connector ({defn.type}) wires "
-        f"{defn.display_name} data into the workspace. "
+        f"The {display} connector ({defn.type}) wires "
+        f"{display} data into the workspace. "
         f"ACTIONS: {'; '.join(action_bits)}."
     )
     if defn.senses:
         narrative += f" Declared senses: {', '.join(defn.senses)}."
 
     keywords: list[str] = []
-    for word in [defn.name, defn.display_name.lower(), defn.type, *action_names] + [
+    for word in [defn.name, display.lower(), defn.type, *action_names] + [
         _sense_domain(s) for s in defn.senses
     ]:
         if word and word not in keywords:
@@ -140,7 +171,7 @@ def _connector_entry(defn: ConnectorDef) -> AtlasEntry:
     return AtlasEntry(
         id=f"connector:{defn.name}",
         kind="connector",
-        name=defn.display_name,
+        name=display,
         summary=summary,
         narrative=narrative,
         how=(
@@ -483,6 +514,14 @@ def compile_atlas(connectors_dir: Path | None = None) -> AtlasModel:
     entries.extend(_widget_entries())
     entries.extend(_skill_entries())
     entries.sort(key=lambda e: e.id)
+    # Fail loudly on an authoring collision: two sources minting the same id
+    # (e.g. a connector named the same as a widget) would otherwise ship a
+    # silently-deduped artifact whose drift diff can't explain itself. The
+    # extractors mint disjoint id namespaces today, so this only trips on a
+    # real regression.
+    dupes = _duplicate_ids([{"id": e.id} for e in entries])
+    if dupes:
+        raise ValueError(f"atlas compile: duplicate entry ids: {', '.join(dupes)}")
     return AtlasModel(generated=True, entries=entries)
 
 
@@ -509,6 +548,24 @@ def write_artifact(
     return path, model
 
 
+def _duplicate_ids(entries: list[dict]) -> list[str]:
+    """Ids that appear more than once in ``entries`` (sorted, unique).
+
+    An id->entry map silently collapses duplicates, so the diff summary must
+    detect them from the raw list length before mapping.
+    """
+    seen: set[str] = set()
+    dupes: set[str] = set()
+    for entry in entries:
+        eid = entry.get("id")
+        if not isinstance(eid, str):
+            continue
+        if eid in seen:
+            dupes.add(eid)
+        seen.add(eid)
+    return sorted(dupes)
+
+
 def check_artifact(
     artifact_path: Path | None = None, connectors_dir: Path | None = None
 ) -> tuple[bool, str]:
@@ -528,8 +585,20 @@ def check_artifact(
 
     lines = [f"artifact stale: {path}"]
     try:
-        actual_entries = {e["id"]: e for e in json.loads(actual)["entries"]}
-        expected_entries = {e["id"]: e for e in json.loads(expected)["entries"]}
+        actual_list = json.loads(actual)["entries"]
+        expected_list = json.loads(expected)["entries"]
+        # Surface duplicate ids explicitly BEFORE the id->entry map collapses
+        # them. The added/removed/changed diff below is keyed by id, so two
+        # entries sharing an id would otherwise vanish into one and misreport
+        # the drift — the artifact fails on bytes but the summary lies about
+        # why. A compiled artifact never carries duplicates (compile_atlas
+        # sorts unique-id entries), so any duplicate is an authoring/tamper
+        # collision worth naming.
+        dupes = _duplicate_ids(actual_list)
+        if dupes:
+            lines.append(f"  duplicate ids in artifact ({len(dupes)}): {', '.join(dupes[:10])}")
+        actual_entries = {e["id"]: e for e in actual_list}
+        expected_entries = {e["id"]: e for e in expected_list}
         added = sorted(set(expected_entries) - set(actual_entries))
         removed = sorted(set(actual_entries) - set(expected_entries))
         changed = sorted(
@@ -543,7 +612,7 @@ def check_artifact(
             lines.append(f"  entries to remove ({len(removed)}): {', '.join(removed[:10])}")
         if changed:
             lines.append(f"  entries changed ({len(changed)}): {', '.join(changed[:10])}")
-        if not (added or removed or changed):
+        if not (added or removed or changed or dupes):
             lines.append("  entry content identical — header/formatting drift only")
     except Exception:  # noqa: BLE001 — a corrupt artifact still reports stale
         lines.append("  (checked-in artifact is not parseable JSON)")
