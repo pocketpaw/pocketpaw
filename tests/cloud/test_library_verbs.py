@@ -264,12 +264,39 @@ async def test_annotate_writes_revertable_version(mongo_db, fake_storage):
 
 @pytest.mark.asyncio
 async def test_annotate_non_text_rejected(mongo_db, fake_storage):
-    await _seed_upload("w1", "img", mime="image/png", content="x", adapter=fake_storage)
+    # Genuinely non-editable: image mime AND a non-text extension (the
+    # editability gate is extension-aware now — a default .txt filename would
+    # make it editable, which is not what this test means to assert).
+    await _seed_upload(
+        "w1", "img", filename="photo.png", mime="image/png", content="x", adapter=fake_storage
+    )
 
     with _workspace("w1"):
         out = await AnnotateFileTool().execute("img", "caption")
 
     assert "cannot be annotated" in out.lower() or "not_editable" in out.lower()
+
+
+@pytest.mark.asyncio
+async def test_annotate_code_file_by_extension(mongo_db, fake_storage):
+    # CR-1: upload mimes are unreliable — a .go/.toml/.svg often arrives as
+    # application/octet-stream. The editability gate is extension-aware, so the
+    # file is editable (aligned with the frontend's Edit-tab affordance) instead
+    # of 422-ing on save.
+    await _seed_upload(
+        "w1",
+        "code",
+        filename="main.go",
+        mime="application/octet-stream",
+        content="package main",
+        adapter=fake_storage,
+    )
+    with _workspace("w1"):
+        out = await AnnotateFileTool().execute("code", "TODO: refactor")
+
+    assert "not_editable" not in out.lower() and "cannot be annotated" not in out.lower()
+    doc = await FileUpload.find_one({"file_id": "code", "workspace": "w1"})
+    assert doc.content_version == 2  # a revertable version was written
 
 
 @pytest.mark.asyncio

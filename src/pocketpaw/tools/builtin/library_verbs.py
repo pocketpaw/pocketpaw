@@ -469,6 +469,9 @@ class SearchLibraryTool(BaseTool):
 # clear over-cap message rather than a silent truncation. Only an admin scope
 # (``_current_is_admin``) may raise ``max_files`` above this via the param.
 _DEFAULT_MAX_FILES = 200
+# Absolute ceiling — even an admin scope cannot raise ``max_files`` above this,
+# so no single batch can fan an unbounded metered sweep (review F4).
+_ABSOLUTE_MAX_FILES = 2000
 
 
 class OrganizeFolderTool(BaseTool):
@@ -595,7 +598,8 @@ class OrganizeFolderTool(BaseTool):
                     f"max_files={requested} exceeds the default cap of "
                     f"{_DEFAULT_MAX_FILES}; only an admin scope may raise it."
                 )
-            effective_cap = requested
+            # Clamp even an admin's request to the absolute ceiling.
+            effective_cap = min(requested, _ABSOLUTE_MAX_FILES)
 
         # Enumerate the workspace's files, filter to this folder. iter_by_workspace
         # is workspace-pinned, so cross-workspace files can never enter the batch.

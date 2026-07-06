@@ -447,7 +447,7 @@ async def _load_upload_doc(file_id: str, workspace_id: str):
     except Exception:
         logger.debug(
             "could not load FileUpload row for file_id=%s (store unavailable); "
-            "proceeding without library metadata",
+            "returning None — the caller fail-closes and skips indexing",
             file_id,
         )
         return None

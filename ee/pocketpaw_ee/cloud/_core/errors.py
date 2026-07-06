@@ -173,6 +173,7 @@ __all__ = [
     "InsufficientCredits",
     "Internal",
     "NotFound",
+    "PreconditionFailed",
     "QuotaExceeded",
     "RateLimited",
     "SeatLimitError",

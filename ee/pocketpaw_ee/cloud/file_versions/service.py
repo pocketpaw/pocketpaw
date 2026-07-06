@@ -227,12 +227,45 @@ def _guess_mime(filename: str) -> str:
     return guessed or FALLBACK_EDIT_MIME
 
 
-def _is_editable(mime: str | None) -> bool:
-    if not mime:
-        return False
-    if mime.startswith("text/"):
+# Editable by FILENAME EXTENSION — mirrors the frontend's editorKind.ts
+# (CODE_EXTENSIONS + the markdown block extensions). Upload mimes are
+# unreliable (a .go/.py/.toml often arrives as application/octet-stream, .json
+# as text/plain, .csv as application/vnd.ms-excel), so the editability gate
+# keys on the extension too. This keeps the backend's "can save" set aligned
+# with the frontend's "shows the Edit tab" set — without it, the UI opens the
+# code editor for source/config files that then 422 on save.
+EDITABLE_EXTENSIONS = frozenset(
+    {
+        # markdown / block editor
+        "md", "markdown", "mdx",
+        # plain / config / data
+        "txt", "text", "log", "json", "jsonc", "json5", "csv", "tsv",
+        "yaml", "yml", "toml", "ini", "cfg", "conf", "env", "properties",
+        "xml", "xsl", "xslt", "xsd", "svg",
+        # web
+        "js", "mjs", "cjs", "ts", "mts", "cts", "jsx", "tsx",
+        "html", "htm", "css", "scss", "less", "vue", "svelte",
+        # languages
+        "py", "pyw", "pyi", "rb", "go", "rs", "java", "kt", "kts",
+        "c", "h", "cpp", "cxx", "cc", "hpp", "hxx", "php", "sql",
+        "sh", "bash", "zsh", "ps1", "bat", "swift", "scala", "lua", "r",
+        "graphql", "gql", "proto", "dockerfile", "makefile", "gradle",
+    }
+)
+
+
+def _is_editable(mime: str | None, filename: str | None = None) -> bool:
+    # Mime axis — reliable when the browser set a real text mime.
+    if mime and (mime.startswith("text/") or mime in EDITABLE_MIMES):
         return True
-    return mime in EDITABLE_MIMES
+    # Extension axis — upload mimes are unreliable, so mirror the frontend's
+    # extension-based decision (editorKind.ts) so the Edit tab the UI offers
+    # actually saves. See EDITABLE_EXTENSIONS.
+    if filename:
+        ext = Path(filename).suffix.lower().lstrip(".")
+        if ext in EDITABLE_EXTENSIONS:
+            return True
+    return False
 
 
 def _to_domain(doc: FileVersionDoc) -> FileVersion:
@@ -416,7 +449,7 @@ async def update_file_content(
     if not doc:
         raise NotFound("file", file_id)
 
-    if not _is_editable(doc.mime):
+    if not _is_editable(doc.mime, getattr(doc, "filename", None)):
         raise CloudError(
             422,
             "files.not_editable",
@@ -553,7 +586,7 @@ async def read_current_content(
     if not doc:
         raise NotFound("file", file_id)
 
-    if not _is_editable(doc.mime):
+    if not _is_editable(doc.mime, getattr(doc, "filename", None)):
         raise CloudError(
             422,
             "files.not_editable",
@@ -740,7 +773,7 @@ async def annotate_upload(
     if not doc:
         raise NotFound("file", file_id)
 
-    if not _is_editable(doc.mime):
+    if not _is_editable(doc.mime, getattr(doc, "filename", None)):
         raise CloudError(
             422,
             "files.not_editable",

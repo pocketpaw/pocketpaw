@@ -254,7 +254,7 @@ class MongoFileStore:
         query: list[Any] = [FileUpload.workspace == workspace]
         if not include_deleted:
             query.append(FileUpload.deleted_at == None)  # noqa: E711
-        cursor = FileUpload.find(*query).limit(limit)
+        cursor = FileUpload.find(*query).sort([("createdAt", -1)]).limit(limit)
         async for doc in cursor:
             created = doc.createdAt
             updated = getattr(doc, "updatedAt", None) or created
@@ -335,7 +335,7 @@ class MongoFileStore:
         ]
         if not include_deleted:
             query.append(FileUpload.deleted_at == None)  # noqa: E711
-        cursor = FileUpload.find(*query).limit(limit)
+        cursor = FileUpload.find(*query).sort([("createdAt", -1)]).limit(limit)
         async for doc in cursor:
             created = doc.createdAt
             updated = getattr(doc, "updatedAt", None) or created
