@@ -63,6 +63,14 @@ class _FakeAdapter:
             raise self._raises
 
 
+class _StubUploadDoc:
+    """Minimal FileUpload stand-in for the fail-closed hide gate (FL-11b)."""
+
+    def __init__(self, *, hide_from_ai: bool = False, tags: list[str] | None = None):
+        self.hide_from_ai = hide_from_ai
+        self.tags = tags or []
+
+
 def _patch_listener(
     monkeypatch,
     *,
@@ -70,9 +78,25 @@ def _patch_listener(
     storage_path: Path | None = None,
     adapter: _FakeAdapter | None = None,
     ingest: AsyncMock | None = None,
+    hide_from_ai: bool = False,
+    resolve_doc: bool = True,
 ):
-    """Wire the listener's collaborators with test doubles."""
+    """Wire the listener's collaborators with test doubles.
+
+    FL-11b: the listener now fails CLOSED — it needs a resolvable, non-hidden
+    FileUpload row or it skips indexing. By default we return a non-hidden stub
+    doc so the collaborator tests exercise the index path. ``hide_from_ai``
+    drives the hidden branch; ``resolve_doc=False`` returns ``None`` to exercise
+    the fail-closed (unresolvable row) branch.
+    """
     from pocketpaw_ee.cloud.uploads import listeners
+
+    async def _fake_load(_file_id, _workspace_id):
+        if not resolve_doc:
+            return None
+        return _StubUploadDoc(hide_from_ai=hide_from_ai)
+
+    monkeypatch.setattr(listeners, "_load_upload_doc", _fake_load)
 
     if chain is not None:
         monkeypatch.setattr(
@@ -460,3 +484,68 @@ async def test_register_upload_listeners_subscribes_to_file_ready():
         assert index_uploaded_file in handlers
     finally:
         bus_mod._bus = prev  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_hidden_file_skips_index_and_tags(monkeypatch, tmp_path):
+    """FL-11b: a file with hide_from_ai=True is never extracted or KB-indexed."""
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    chain = _FakeChain(ExtractionResult(text="secret", backend="local"))
+    ingest = AsyncMock(return_value={"id": "art-x"})
+    _patch_listener(
+        monkeypatch,
+        chain=chain,
+        storage_path=tmp_path / "hidden.pdf",
+        ingest=ingest,
+        hide_from_ai=True,
+    )
+
+    await index_uploaded_file(
+        FileReady(
+            data={
+                "workspace_id": "w1",
+                "file_id": "f-hidden",
+                "filename": "hidden.pdf",
+                "mime": "application/pdf",
+                "storage_key": "ws/w1/f-hidden.pdf",
+            }
+        )
+    )
+
+    # Neither extraction nor KB ingest run for a hidden file.
+    assert chain.calls == []
+    ingest.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_when_row_unresolvable(monkeypatch, tmp_path):
+    """FL-11b: if the library row can't be resolved, indexing is SKIPPED
+    (fail-closed) rather than proceeding — a hidden file must never leak into
+    the KB on a metadata lookup hiccup."""
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    chain = _FakeChain(ExtractionResult(text="unconfirmed", backend="local"))
+    ingest = AsyncMock(return_value={"id": "art-y"})
+    _patch_listener(
+        monkeypatch,
+        chain=chain,
+        storage_path=tmp_path / "x.pdf",
+        ingest=ingest,
+        resolve_doc=False,
+    )
+
+    await index_uploaded_file(
+        FileReady(
+            data={
+                "workspace_id": "w1",
+                "file_id": "f-unknown",
+                "filename": "x.pdf",
+                "mime": "application/pdf",
+                "storage_key": "ws/w1/f-unknown.pdf",
+            }
+        )
+    )
+
+    assert chain.calls == []
+    ingest.assert_not_awaited()
