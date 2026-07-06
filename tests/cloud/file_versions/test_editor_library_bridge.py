@@ -1,4 +1,4 @@
-# test_editor_library_bridge.py — FL-16 end-to-end bridge tests (real objects, no mocks at the seam).
+# test_editor_library_bridge.py — FL-16 end-to-end bridge tests (real objects, no mocks).
 # Created: 2026-07-03 (FL-16). Proves the cross-slice bug and its fix: the frontend
 #   editor opens a Library file with the file's OWN bare ``file_id`` (a uuid,
 #   FL-1) and saves via the FL-2 version path (``update_file_content`` /

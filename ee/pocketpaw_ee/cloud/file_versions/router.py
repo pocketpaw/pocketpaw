@@ -423,7 +423,10 @@ async def spreadsheet_ai_edit(
             elif event.type == "error":
                 return JSONResponse(
                     status_code=500,
-                    content={"detail": "spreadsheet_edit.agent_error", "message": str(event.content)},
+                    content={
+                        "detail": "spreadsheet_edit.agent_error",
+                        "message": str(event.content),
+                    },
                 )
             elif event.type == "done":
                 break

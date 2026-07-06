@@ -221,7 +221,6 @@ async def test_unknown_token_returns_404(beanie_upload_db, enable_flag, spy_serv
 
 async def test_deleted_file_returns_404(beanie_upload_db, enable_flag, spy_service):
     """Link minted, then the underlying file goes away -> NotFound -> 404."""
-    store = ShareLinkStore()
     # Mint a link for a file the spy service doesn't know about.
     link = ShareLink(file_id="ghost", workspace_id="w1", owner_id="owner1")
     await link.insert()

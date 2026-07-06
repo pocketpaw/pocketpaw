@@ -1,4 +1,7 @@
 # edit_spreadsheet.py — FL-5 structural spreadsheet editing (port of dewani12's #1193).
+# Ported prompt-context builder embeds long example-JSON strings (tool op
+# examples) that don't wrap without mangling the JSON — suppress line-length.
+# ruff: noqa: E501
 # Created: 2026-07-03 (FL-5, port of dewani12's origin/feature/files
 #   src/pocketpaw/tools/builtin/edit_spreadsheet.py). Credit: dewani12 authored the
 #   Univer workbook operation engine, the A1-notation parsers, the prompt-context
