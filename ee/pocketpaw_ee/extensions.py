@@ -806,6 +806,34 @@ class CloudStockImagesMcpProvider:
         return list(STOCK_TOOL_IDS)
 
 
+class CloudIconsMcpProvider:
+    """`pocketpaw.mcp_servers` — the icon-search in-process server
+    (``pocketpaw_icons``). Hosts ``search_icons`` only.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so the bundled
+    ``pocketpaw-create-svelte-site`` skill can source real open-source icons for
+    a generated marketing site without an explicit opt-in — the same regime the
+    stock-images + sites manager + media servers use. The cloud chat agent runs
+    on the claude_agent_sdk backend, which only sees in-process MCP servers (a
+    plain BaseTool is invisible to it), so icon search MUST be surfaced here.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.icons import build_icons_server
+
+            return build_icons_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the icons server is unavailable,
+            # same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS
+
+        return list(ICON_TOOL_IDS)
+
+
 class CloudDeliverMcpProvider:
     """`pocketpaw.mcp_servers` — the artifact-delivery in-process server
     (``pocketpaw_deliver``). Hosts ``deliver_artifact`` only (ART-4).

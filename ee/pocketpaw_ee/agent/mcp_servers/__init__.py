@@ -25,6 +25,8 @@ Server surfaces (module → server name → tools):
 * ``fabric.py`` → ``pocketpaw_fabric`` → ``fabric_query`` / ``fabric_stats``
   (READ-ONLY ontology access, workspace-scoped)
 * ``foresight.py`` → ``pocketpaw_foresight`` → scenario save/run
+* ``icons.py`` → ``pocketpaw_icons`` → ``search_icons`` (free open-source
+  icon/SVG search via Iconify for site iconography; pure read, no identity)
 * ``instinct.py`` → ``pocketpaw_instinct`` → ``instinct_pending`` /
   ``instinct_audit`` (READ-ONLY gate visibility, workspace-scoped; proposing
   goes through ``pocketpaw_external_actions``)
