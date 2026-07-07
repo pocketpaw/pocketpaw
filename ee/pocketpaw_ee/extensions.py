@@ -898,6 +898,37 @@ class CloudDesignSystemsMcpProvider:
         return list(DESIGN_SYSTEM_TOOL_IDS)
 
 
+class CloudAskMcpProvider:
+    """`pocketpaw.mcp_servers` — the interactive ``ask_user`` in-process server
+    (``pocketpaw_ask``). Hosts ``ask_user`` only.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``), same regime as the icons + palette
+    + stock-images + design-systems site-authoring servers. The cloud chat agent
+    runs on the claude_agent_sdk backend, which only sees in-process MCP servers
+    (the harness ``AskUserQuestion`` tool is NOT exposed to it), so an
+    interactive question tool MUST be surfaced here. It matters most on surfaces
+    where inline Ripple is OFF (e.g. /sites svelte-create): without it the agent
+    can only ask clarifying questions as plain text. run_core turns a call to
+    this tool into an ``ask_user_question`` stream frame the client renders as
+    clickable option chips.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.ask import build_ask_server
+
+            return build_ask_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the ask server is unavailable,
+            # same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.ask import ASK_TOOL_IDS
+
+        return list(ASK_TOOL_IDS)
+
+
 class CloudDeliverMcpProvider:
     """`pocketpaw.mcp_servers` — the artifact-delivery in-process server
     (``pocketpaw_deliver``). Hosts ``deliver_artifact`` only (ART-4).

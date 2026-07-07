@@ -195,6 +195,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
 
     logger = logging.getLogger(__name__)
     try:
+        from pocketpaw_ee.agent.mcp_servers.ask import ASK_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.design_systems import DESIGN_SYSTEM_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS
@@ -218,6 +219,9 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             | frozenset(ICON_TOOL_IDS)
             | frozenset(PALETTE_TOOL_IDS)
             | frozenset(DESIGN_SYSTEM_TOOL_IDS)
+            # ask_user: interactive question chips. Needed most on svelte-create
+            # (ripple OFF) where the agent otherwise can only ask in plain text.
+            | frozenset(ASK_TOOL_IDS)
         )
 
         return _McpToolIds(
