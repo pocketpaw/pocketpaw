@@ -77,6 +77,14 @@
 # live create/refine dispatch is UNCHANGED — `_frontend_preamble` is exercised by
 # tests now and wired into the flow later by the orchestration slice (SC-9) behind
 # a flag (SC-11); it is exported in `__all__` so that slice can import it.
+# Updated: 2026-07-04 (feat/sites-chat-mode, CHAT-BE) — the refine branch (keyed
+# on `pocket_id`) now forks on `meta.mode` ("build" default | "chat"), set by the
+# /sites/[siteId] Build/Chat toggle. `mode="chat"` routes to `_chat_preamble`, a
+# NO-MUTATION Q&A preamble: the user is asking a QUESTION about the existing site;
+# ANSWER helpfully but DO NOT call `pocket_specialist__edit`, do NOT modify or
+# republish the site, and do NOT create pockets. `mode="build"` (or unset) keeps
+# `_refine_preamble` byte-for-byte (today's mutate-and-republish behavior). The
+# create branch (no `pocket_id`) ignores `mode`.
 
 from __future__ import annotations
 
@@ -89,15 +97,20 @@ from pocketpaw_ee.sites_crew.models import DesignBrief
 async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
     """Render the /sites surface preamble.
 
-    Two modes, keyed on whether the meta carries a ``pocket_id``:
+    Modes, keyed on the meta:
 
     * **Create** (no ``pocket_id``) — the /sites gallery / describe-to-create
       rail. Build AND publish a brand-new marketing site.
-    * **Refine** (``pocket_id`` present) — the per-site chat at
-      ``/sites/[siteId]``. Refine the EXISTING published site by editing its
-      source pocket in place; never rebuild from scratch.
+    * **Chat** (``pocket_id`` present AND ``mode == "chat"``) — the per-site
+      chat with the Build/Chat toggle set to Chat. Answer QUESTIONS about the
+      existing site with NO mutation: never edit, republish, or create a pocket.
+    * **Refine / Build** (``pocket_id`` present, ``mode`` "build" or unset) —
+      the per-site chat at ``/sites/[siteId]``. Refine the EXISTING published
+      site by editing its source pocket in place; never rebuild from scratch.
     """
     if meta.pocket_id:
+        if meta.mode == "chat":
+            return _chat_preamble(meta)
         return _refine_preamble(meta)
     if _crew_enabled():
         return _crew_create_preamble(meta)
@@ -617,4 +630,42 @@ def _frontend_preamble(meta: SurfaceMeta, brief: DesignBrief) -> str:
     )
 
 
-__all__ = ["build_preamble", "_crew_create_preamble", "_frontend_preamble"]
+def _chat_preamble(meta: SurfaceMeta) -> str:
+    """The /sites/[siteId] CHAT preamble — answer questions, NEVER mutate.
+
+    The Build/Chat toggle is set to Chat: the user is on an existing site's
+    chat asking a QUESTION about it (what's on the page, what a section says,
+    how it's structured, why it looks a certain way). Answer helpfully, but this
+    is a read-only surface — do NOT edit the site, do NOT republish it, and do
+    NOT create a pocket. Mirrors the refine preamble's site/page vocabulary and
+    orientation, minus every mutation instruction.
+    """
+    route = meta.route_path or "/sites"
+    pocket_id = meta.pocket_id or ""
+    return (
+        f'<surface kind="sites" route="{route}" pocket="{pocket_id}" mode="chat" />\n'
+        "<sites-orientation>\n"
+        f"The user is CHATTING about an EXISTING published Paw Site (source pocket "
+        f"`{pocket_id}`) — a live standalone marketing website already deployed as "
+        "a static page on the edge. They are on its per-site chat with the "
+        "Build/Chat toggle set to CHAT, so they are asking a QUESTION about the "
+        "site, not requesting a change to it. It is a real marketing landing page "
+        "that reads top to bottom as a conversion funnel: nav, hero, services, "
+        "social proof, pricing, a call-to-action, a flat lead-capture form, "
+        "footer. Talk about it as a 'site' or 'page' — never a 'pocket'.\n"
+        "</sites-orientation>\n"
+        "<sites-procedure>\n"
+        "Treat the user's message as a QUESTION to ANSWER about the existing site "
+        "— explain what is on the page, what a section says, how it is structured, "
+        "or give advice — and answer clearly and concisely.\n"
+        "This is a READ-ONLY surface. Do NOT modify or edit the site, do NOT "
+        "call the pocket specialist edit/merge tool or any create tool, do NOT "
+        "re-publish the site, and do NOT create a new pocket or a new "
+        "site. If the user actually wants a CHANGE applied, tell them to switch "
+        "the toggle to BUILD — in Chat mode you only answer questions and never "
+        "touch the live page. Keep talking 'site' / 'page', never 'pocket'.\n"
+        "</sites-procedure>"
+    )
+
+
+__all__ = ["build_preamble", "_crew_create_preamble", "_frontend_preamble", "_chat_preamble"]
