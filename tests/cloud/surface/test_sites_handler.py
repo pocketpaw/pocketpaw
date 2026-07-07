@@ -46,6 +46,16 @@
 # escape hatch, and the correct engine skill (`pocketpaw-create-svelte-site` on
 # the svelte track, `pocketpaw-create-paw-site` otherwise). The flag is toggled
 # via monkeypatch of `pocketpaw.config.get_settings` (not process env).
+# Updated: 2026-07-06 (feat/sites-crew-frontend-brief, SC-2) — added the
+# `_frontend_preamble(meta, brief)` tests: it renders the Frontend stage's build
+# instructions FROM a structured `DesignBrief` (the crew baton). The new tests pin
+# (1) sitemap roles/headings + copy injection from a hand-authored brief, (2)
+# engine ROUTING (svelte → create_svelte_site & not the ripple landing tool;
+# ripple → create_landing_site & not create_svelte_site), (3) the static-site
+# (SSR) rules language survives for a landing brief, and (4) that `build_preamble`
+# is UNCHANGED for the live create/refine paths (compared byte-for-byte against
+# calling `_create_preamble`/`_refine_preamble` directly), proving the new helper
+# is additive and not silently wired into the dispatch.
 
 from __future__ import annotations
 
@@ -54,6 +64,14 @@ from types import SimpleNamespace
 import pytest
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
 from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
+from pocketpaw_ee.sites_crew.models import (
+    AssetRef,
+    Branding,
+    ColorScale,
+    DesignBrief,
+    DesignSystem,
+    Section,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -433,3 +451,155 @@ async def test_crew_flag_on_leaves_refine_untouched(
     assert 'mode="refine"' in out
     assert 'mode="crew"' not in out
     assert "phase 1" not in out.lower()
+
+
+# --- Frontend-consumes-brief (`_frontend_preamble`) — the crew baton, end to end ---
+#
+# `_frontend_preamble(meta, brief)` renders the Frontend stage's build
+# instructions FROM a structured DesignBrief instead of a raw user message. These
+# tests prove the baton flows in and correct, engine-routed build instructions
+# flow out. `_frontend_preamble` is SYNC; the tests call it directly inside async
+# bodies (the module-level asyncio marker applies to every test here).
+
+
+def _landing_brief(engine: str = "ripple") -> DesignBrief:
+    """A hand-authored DesignBrief fixture for a dentist landing page."""
+    return DesignBrief(
+        goal="Book more new-patient appointments for a family dental clinic",
+        audience="Local families searching for a nearby dentist",
+        engine=engine,  # type: ignore[arg-type]
+        pattern="landing",
+        sitemap=[
+            Section(id="nav", role="nav", heading="BrightSmile Dental"),
+            Section(id="hero", role="hero", heading="A Brighter Smile Starts Here"),
+            Section(id="services", role="services", heading="Our Services"),
+            Section(id="pricing", role="pricing", heading="Simple, Honest Pricing"),
+            Section(id="lead", role="lead_form", heading="Book Your Visit"),
+            Section(id="footer", role="footer"),
+        ],
+        branding=Branding(
+            design_system=DesignSystem(
+                name="BrightSmile",
+                colors={"primary": ColorScale(s500="#0ea5e9")},  # type: ignore[call-arg]
+                rationale="Calm, clinical, trustworthy — avoid loud reds and clutter.",
+                tokens_css=":root{--color-primary:#0ea5e9;}",
+            ),
+            voice="Warm, reassuring, plain-spoken — no dental jargon.",
+        ),
+        copy={
+            "hero": {
+                "headline": "A Brighter Smile Starts Here",
+                "subhead": "Gentle, modern dentistry for the whole family.",
+            },
+            "services": {"body": "Cleanings, whitening, implants, and emergency care."},
+        },
+        asset_manifest=[
+            AssetRef(
+                url="https://images.pexels.com/photos/1/dentist.jpg",
+                kind="image",
+                alt="Smiling dentist with a patient",
+            ),
+        ],
+    )
+
+
+async def test_frontend_preamble_renders_sitemap_and_copy_from_brief() -> None:
+    """Given a hand-authored brief, the preamble is non-empty and carries the
+    section roles/headings from the sitemap AND the copy from `brief.copy`."""
+    brief = _landing_brief()
+    preamble = sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), brief)
+
+    assert isinstance(preamble, str) and preamble.strip()
+    # Still the sites surface, framed as a site not a pocket.
+    assert '<surface kind="sites"' in preamble
+    assert "build a pocket" not in preamble.lower()
+
+    # Section roles + headings from the ordered sitemap are present.
+    assert "hero" in preamble
+    assert "services" in preamble
+    assert "A Brighter Smile Starts Here" in preamble
+    assert "Our Services" in preamble
+
+    # The copy blocks keyed by section id are injected verbatim.
+    assert "Gentle, modern dentistry for the whole family." in preamble
+    assert "Cleanings, whitening, implants, and emergency care." in preamble
+
+    # Sections are ordered: nav before hero before footer.
+    assert preamble.index("A Brighter Smile Starts Here") < preamble.index("Book Your Visit")
+
+    # The real asset URL from the manifest is used, not a placeholder.
+    assert "https://images.pexels.com/photos/1/dentist.jpg" in preamble
+
+    # Design system tokens + voice are threaded through.
+    assert "BrightSmile" in preamble
+    assert "tokens_css" in preamble
+    assert "avoid loud reds and clutter" in preamble
+    assert "no dental jargon" in preamble
+
+
+async def test_frontend_preamble_routes_svelte_to_create_svelte_site() -> None:
+    """engine="svelte" routes the build to `create_svelte_site` and must NOT
+    name the ripple landing tool."""
+    brief = _landing_brief(engine="svelte")
+    preamble = sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), brief)
+
+    assert 'engine="svelte"' in preamble
+    assert "create_svelte_site" in preamble
+    # The ripple landing tool must be absent on the svelte track.
+    assert "create_landing_site" not in preamble
+
+
+async def test_frontend_preamble_routes_ripple_to_landing_tool() -> None:
+    """engine="ripple" routes the build to the ripple create path
+    (`create_landing_site`) and must NOT name `create_svelte_site`."""
+    brief = _landing_brief(engine="ripple")
+    preamble = sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), brief)
+
+    assert 'engine="ripple"' in preamble
+    assert "create_landing_site" in preamble
+    # The svelte create tool must be absent on the ripple track.
+    assert "create_svelte_site" not in preamble
+
+
+async def test_frontend_preamble_preserves_ssr_rules_for_landing_brief() -> None:
+    """The static-site (SSR) rules language survives into the brief-driven
+    preamble — flat lead form (not form/newsletter), pricing-table tiers, and
+    anchor CTAs — so a brief-driven build can't reintroduce a static-site trap."""
+    brief = _landing_brief()
+    preamble = sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), brief)
+    lower = preamble.lower()
+
+    # Rule 1 — flat native lead form, never the form/newsletter widget.
+    assert "flat" in lower
+    assert "newsletter" in lower
+    # Rule 2 — pricing-table uses tiers.
+    assert "tiers" in lower
+    # Rule 3 — FAQ never accordion.
+    assert "accordion" in lower
+    # Rule 4 — CTAs are anchor href, never on_click.
+    assert "href" in lower
+    assert "on_click" in lower
+    # Animation Tier-0 only.
+    assert "tier-0" in lower or "tier 0" in lower
+
+
+async def test_build_preamble_unchanged_for_create_path() -> None:
+    """`_frontend_preamble` is ADDITIVE — the live create dispatch is unchanged.
+    A create meta (no pocket_id) still returns exactly `_create_preamble`'s
+    output, proving the new helper is not silently wired into the flow."""
+    meta = SurfaceMeta(route_path="/sites")
+    live = await sites_handler.build_preamble(WORKSPACE, USER, meta)
+
+    assert live == sites_handler._create_preamble(meta)
+    # And it is NOT the brief-driven preamble.
+    assert 'mode="frontend"' not in live
+
+
+async def test_build_preamble_unchanged_for_refine_path() -> None:
+    """A refine meta (with pocket_id) still returns exactly `_refine_preamble`'s
+    output — the additive brief helper does not touch the refine dispatch."""
+    meta = SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc")
+    live = await sites_handler.build_preamble(WORKSPACE, USER, meta)
+
+    assert live == sites_handler._refine_preamble(meta)
+    assert 'mode="frontend"' not in live

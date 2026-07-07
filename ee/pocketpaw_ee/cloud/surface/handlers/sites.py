@@ -65,10 +65,25 @@
 # `build_step` now instructs the agent to author the components with the bundled
 # `design-taste-svelte` skill (premium, anti-slop, static-safe styling) on top of
 # the design system's tokens. Svelte-only: the ripple `build_step` is unchanged.
+# Updated: 2026-07-06 (feat/sites-crew-frontend-brief, SC-2) — added
+# `_frontend_preamble(meta, brief)`, the ADDITIVE brief-driven twin of
+# `_create_preamble`. It renders the Frontend stage's build instructions FROM a
+# structured `DesignBrief` (the crew's baton): it walks the ordered `sitemap`,
+# injects the matching `copy` blocks + real `asset_manifest` imagery, threads the
+# branding design-system tokens/voice, and ROUTES by `brief.engine` ("svelte" →
+# `create_svelte_site`; "ripple" → `create_landing_site` / the pocket specialist,
+# noting `create_dynamic_site` for `pattern="dynamic"`). It preserves the same
+# static-site (SSR) rules the create/refine preambles enforce. `build_preamble`'s
+# live create/refine dispatch is UNCHANGED — `_frontend_preamble` is exercised by
+# tests now and wired into the flow later by the orchestration slice (SC-9) behind
+# a flag (SC-11); it is exported in `__all__` so that slice can import it.
 
 from __future__ import annotations
 
+from typing import Any
+
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
+from pocketpaw_ee.sites_crew.models import DesignBrief
 
 
 async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
@@ -431,4 +446,175 @@ def _refine_preamble(meta: SurfaceMeta) -> str:
     )
 
 
-__all__ = ["build_preamble", "_crew_create_preamble"]
+def _render_copy(block: Any) -> str:
+    """Flatten one section's copy block into an inline, LLM-readable string.
+
+    ``brief.copy[section_id]`` is free-form: usually a dict of copy fields
+    (``{"headline": ..., "subhead": ...}``), sometimes a plain string/list. Join
+    dict entries as ``key: value`` so the actual copy text lands in the preamble.
+    """
+    if isinstance(block, dict):
+        return "; ".join(f"{k}: {v}" for k, v in block.items())
+    if isinstance(block, (list, tuple)):
+        return "; ".join(str(item) for item in block)
+    return str(block)
+
+
+def _frontend_preamble(meta: SurfaceMeta, brief: DesignBrief) -> str:
+    """Render the Frontend stage's build instructions FROM a structured brief.
+
+    The crew's baton (``DesignBrief``) in → the build preamble out. This is the
+    additive, brief-driven twin of ``_create_preamble``: instead of orienting the
+    agent off a raw user message, it walks the brief's ordered ``sitemap``,
+    injects the matching ``copy`` blocks and ``asset_manifest`` imagery, threads
+    the branding design-system tokens/voice, and ROUTES by ``brief.engine``
+    (``"svelte"`` → ``create_svelte_site``; ``"ripple"`` → ``create_landing_site``
+    / the pocket specialist). It preserves the same static-site (SSR) rules the
+    create/refine preambles enforce so a brief-driven build can't reintroduce a
+    static-site trap.
+
+    NOTE: NOT wired into ``build_preamble`` — the live create/refine dispatch is
+    byte-for-byte unchanged. Exercised by tests now; the orchestration slice
+    (SC-9) wires it in behind a flag (SC-11).
+    """
+    route = meta.route_path or "/sites"
+    engine = brief.engine
+
+    # --- Ordered sitemap → build-in-order instructions, with copy injected. ---
+    section_lines: list[str] = []
+    for i, section in enumerate(brief.sitemap, start=1):
+        head = f"{i}. `{section.role}` section"
+        if section.heading:
+            head += f' — heading "{section.heading}"'
+        section_lines.append(head)
+        if section.notes:
+            section_lines.append(f"   - notes: {section.notes}")
+        copy_block = brief.copy.get(section.id)
+        if copy_block:
+            section_lines.append(f"   - copy: {_render_copy(copy_block)}")
+    sitemap_block = (
+        "\n".join(section_lines)
+        if section_lines
+        else "(the brief carries no explicit sitemap — build a standard "
+        "conversion funnel: nav → hero → services → proof → pricing → cta → "
+        "flat lead form → footer)"
+    )
+
+    # --- Real imagery from the asset manifest (never invent placeholder URLs). ---
+    if brief.asset_manifest:
+        asset_lines = "\n".join(
+            f"- {a.kind}: {a.url}" + (f' (alt: "{a.alt}")' if a.alt else "")
+            for a in brief.asset_manifest
+        )
+        assets_block = (
+            "Use these REAL asset URLs from the brief's manifest verbatim — never "
+            "invent placeholder image paths:\n" + asset_lines + "\n"
+        )
+    else:
+        assets_block = ""
+
+    # --- Design system + voice from the branding layer. ---
+    branding = brief.branding
+    design_block = ""
+    ds = branding.design_system
+    if ds is not None:
+        design_block += f"Theme the page with the brief's design system (`{ds.name}`). "
+        if ds.tokens_css:
+            design_block += (
+                "Apply its compiled `tokens_css` (CSS custom properties) as the "
+                "single source of truth for color, type, spacing, radius, and "
+                "elevation — never hard-code ad-hoc values. "
+            )
+        if ds.colors:
+            design_block += (
+                "Use its palette scales (the 50..900 steps per role color) for "
+                "every surface, text, and accent. "
+            )
+        if ds.rationale:
+            design_block += (
+                "Honor the design rationale — its mood, do's/don'ts, and "
+                f"anti-patterns: {ds.rationale} "
+            )
+    if branding.voice:
+        design_block += f'Match this brand voice throughout the copy: "{branding.voice}". '
+
+    # --- Route by engine. svelte → hand-written components; ripple → landing spec. ---
+    if engine == "svelte":
+        route_block = (
+            "BUILD ENGINE: svelte. Author this page as hand-written SvelteKit "
+            "components (the svelte track) — one component per section above, at "
+            "the premium design quality bar. There is NO rippleSpec and NO widget "
+            "catalog on this track: do not draft a rippleSpec, do not call the "
+            "pocket specialist. Assemble the components into the source map and "
+            "persist via `create_svelte_site` "
+            "(`mcp__pocketpaw_sites_manager__create_svelte_site`), which stamps "
+            'the source pocket `type="site"` + `pattern="landing"` + '
+            '`engine="svelte"`; then `mcp__pocketpaw_sites_manager__publish`. Do '
+            "NOT fall back to any ripple/landing create tool on this track."
+        )
+    else:
+        route_block = (
+            "BUILD ENGINE: ripple. Compose this page as a conversion-ordered "
+            "ripple landing spec via the pocket specialist / `create_landing_site` "
+            "(`mcp__pocketpaw_sites_manager__create_landing_site`), which stamps "
+            'the source pocket `type="site"` + `pattern="landing"`; then '
+            "`mcp__pocketpaw_sites_manager__publish` with the returned pocket_id."
+        )
+        if brief.pattern == "dynamic":
+            route_block += (
+                ' This brief is marked `pattern="dynamic"` (a live-data site): the '
+                "dynamic create path is `create_dynamic_site` "
+                "(`mcp__pocketpaw_sites_manager__create_dynamic_site`), but keep "
+                "the static landing build as the primary focus."
+            )
+
+    return (
+        f'<surface kind="sites" route="{route}" engine="{engine}" mode="frontend" />\n'
+        "<sites-orientation>\n"
+        "You are the FRONTEND stage of the site-authoring crew. Build a "
+        "publishable WEBSITE from the structured brief below — a real marketing "
+        "landing page that deploys as a standalone static page on the edge, NOT "
+        "an in-app pocket dashboard. It reads top to bottom as a conversion "
+        "funnel. Talk about it as a 'site' or 'page' — never a 'pocket'. The "
+        "pocket is only the source spec; it auto-publishes to a live URL. The "
+        "page renders STATICALLY (no JavaScript runs for the visitor), so every "
+        "section must work as plain HTML.\n"
+        "</sites-orientation>\n"
+        "<sites-brief>\n"
+        f"GOAL: {brief.goal}\n"
+        + (f"AUDIENCE: {brief.audience}\n" if brief.audience else "")
+        + "SITEMAP — build these sections IN THIS ORDER, using the copy provided:\n"
+        + sitemap_block
+        + "\n"
+        + assets_block
+        + (design_block + "\n" if design_block else "")
+        + "</sites-brief>\n"
+        "<sites-procedure>\n" + route_block + "\n"
+        "PRESERVE the landing structure and keep the static-site (SSR) rules "
+        "intact while you build:\n"
+        "1. Lead capture stays FLAT native `input`/`textarea`/"
+        '`button{type:"submit"}` with real field names (name, email, phone, '
+        "message) — NEVER the `form` or `newsletter` widget, which nests an "
+        "invalid `<form>` inside the site template's outer POST form and captures "
+        "zero leads.\n"
+        "2. `pricing-table` uses `tiers` (never `plans`/`columns`).\n"
+        "3. An FAQ is `heading` + `text` pairs — NEVER the `accordion` widget "
+        "(its panels only open with JS, so on a static site the answers never "
+        "expand).\n"
+        "4. Every CTA is an anchor `href` (or `tel:` / `mailto:`) — never an "
+        "`on_click` handler, which is a dead button with no client JS.\n"
+        "5. `hero` is the marketing Hero widget — never the dashboard `hero+grid` "
+        "(a page-header plus a KPI `stat` grid); no metric grid, no charts. This "
+        "is marketing, not analytics.\n"
+        "Any animation stays Tier-0 (CSS-only, static-safe) — `aurora`, "
+        "`marquee`, `border-beam`, `shimmer`, `text-effect`; never `reveal`, "
+        "`parallax`, or `spotlight` (they need client JS and hide content on a "
+        "static page).\n"
+        "After it publishes, relay any publish error — never claim a phantom "
+        "publish — and SHOW the live `url` plus a link to /sites. Keep talking "
+        "'site' / 'page', never 'pocket'.\n"
+        "</sites-procedure>"
+    )
+
+
+__all__ = ["build_preamble", "_crew_create_preamble", "_frontend_preamble"]
