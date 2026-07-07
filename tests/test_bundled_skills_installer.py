@@ -14,6 +14,10 @@
 # for the new pocketpaw-create-paw-site marketing brain: it ships in the
 # mirror AND the local plugin, and carries its load-bearing SSR guardrails
 # (flat lead form, tiers pricing, no accordion, anchor CTAs, marketing hero).
+# Updated: 2026-07-06 (feat/sites-crew-taste, SC-TASTE) — added coverage for the
+# new design-taste-svelte skill: it ships in the mirror, keeps its frontmatter,
+# the 3 dials, the static-prerender resting-state rule, MIT attribution, and is
+# Svelte-adapted (runes, no stray "use client" RSC directive).
 """Tests for ``pocketpaw.bundled_skills.installer.install_bundled_skills``.
 
 Each test installs into a tmp_path destination (no touching the user's
@@ -221,6 +225,40 @@ def test_create_paw_site_is_copy_only_deterministic_brain(tmp_path: Path) -> Non
     # Pricing uses tiers; CTAs navigate by anchor not on_click.
     assert "tiers" in body
     assert "on_click" in body
+
+
+def test_install_includes_design_taste_svelte(tmp_path: Path) -> None:
+    """The Svelte design-taste skill ships in the mirror. The crew svelte build
+    references it by name for premium, anti-slop styling — a dropped skill would
+    leave that reference dangling and every crew-built svelte site back on
+    generic "AI landing page" output."""
+    results = install_bundled_skills(destination_root=tmp_path)
+    assert any(r.name == "design-taste-svelte" for r in results)
+
+    skill_file = tmp_path / "design-taste-svelte" / "SKILL.md"
+    assert skill_file.is_file()
+    body = skill_file.read_text(encoding="utf-8")
+
+    # Frontmatter identity.
+    assert "name: design-taste-svelte" in body
+
+    # The three dials (the anti-slop calibration core) survive.
+    assert "DESIGN_VARIANCE" in body
+    assert "MOTION_INTENSITY" in body
+    assert "VISUAL_DENSITY" in body
+
+    # The static-prerender resting-state rule is reinforced (taste must not
+    # fight the prerender contract create-svelte-site enforces).
+    assert "onMount" in body
+    assert "resting" in body.lower()
+
+    # Attribution to the MIT source is retained.
+    assert "Leonxlnx/taste-skill" in body
+
+    # Svelte-adapted, not a stray React skill: runes named, no RSC directive
+    # presented as authoritative.
+    assert "$state" in body
+    assert '"use client"' not in body
 
 
 # ---------------------------------------------------------------------------
