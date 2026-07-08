@@ -1,5 +1,8 @@
-# ee/paw_print/decision_loop.py — Close the customer decision loop via Instinct.
-# Created: 2026-06-11 (gap2) — The missing back-half of the Paw Print loop.
+# ee/paw_bar/decision_loop.py — Close the customer decision loop via Instinct.
+# Updated: 2026-07-08 — Renamed widget "Paw Print" → "Paw Bar" (module paw_print→paw_bar,
+#   source/requested_by labels paw_print→paw_bar). The separate one-word audit feed
+#   (past-tense record) is a DIFFERENT feature, unaffected.
+# Created: 2026-06-11 (gap2) — The missing back-half of the Paw Bar loop.
 #   Before this module, an inbound widget/site event became a Fabric object and
 #   STOPPED: no proposal, no human approval, no decision delivered back to the
 #   customer. This module wires the closed loop:
@@ -15,17 +18,17 @@
 #         → the customer surface polls get_latest_decision and reads the answer.
 #
 # Why a separate module (mirrors cloud/pockets/instinct_bridge.py): the
-#   proposal/deliver functions sit between the OSS PawPrintStore and the OSS
+#   proposal/deliver functions sit between the OSS PawBarStore and the OSS
 #   InstinctStore. They are allowed to be impure (they call both stores), and
 #   keeping them out of the HTTP router lets the instinct router import the
 #   deliver hook directly without dragging in FastAPI.
 #
 # Tenancy: the proposal's ``_customer_reply`` blob carries ``workspace_id`` so
 #   the Instinct Action is workspace-scoped exactly like a parked pocket write.
-#   paw_print's widget model predates per-row tenancy and has no workspace_id
+#   paw_bar's widget model predates per-row tenancy and has no workspace_id
 #   column, so the workspace is resolved from the widget OWNER (the freelancer /
 #   operator who owns the widget IS the tenant boundary here). This is the same
-#   scoping key the paw_print store already indexes on. When the widget model
+#   scoping key the paw_bar store already indexes on. When the widget model
 #   grows a real workspace_id this resolver is the one line to change.
 #
 # Security: the blob carries NO secret — only the widget id, customer_ref,
@@ -40,7 +43,7 @@
 #   so an owner-less widget logs a warning and raises NO proposal rather than an
 #   all-tenant-visible one. The event + Fabric object still persist; the loop
 #   simply doesn't open until the owner is set. Chose the guard over a hard
-#   PawPrintWidget.owner field-validator because the owner may legitimately be
+#   PawBarWidget.owner field-validator because the owner may legitimately be
 #   assigned after the widget is created.
 
 from __future__ import annotations
@@ -64,11 +67,11 @@ _MAX_SUMMARY_CHARS = 280
 
 
 def resolve_workspace_id(widget: Any) -> str:
-    """Resolve the owning workspace for a Paw Print widget.
+    """Resolve the owning workspace for a Paw Bar widget.
 
     The widget model predates per-row tenancy and has no ``workspace_id``; the
     OWNER (the operator who created the widget) is the tenant boundary, and it is
-    the column the paw_print store already scopes on. A widget with a
+    the column the paw_bar store already scopes on. A widget with a
     colon-qualified owner (``user:maya``) keeps the full string — the instinct
     workspace assertion compares the blob's ``workspace_id`` to the caller's
     active workspace as an opaque string, so consistency, not format, is what
@@ -110,13 +113,13 @@ async def propose_customer_decision(
     *,
     widget: Any,
     event: Any,
-    paw_print_store: Any,
-    requested_by: str = "paw_print",
+    paw_bar_store: Any,
+    requested_by: str = "paw_bar",
 ) -> str | None:
     """Raise an Instinct proposal for one inbound customer event + park a row.
 
-    ``widget`` is the :class:`PawPrintWidget`; ``event`` is the accepted
-    :class:`PawPrintEvent`. Creates:
+    ``widget`` is the :class:`PawBarWidget`; ``event`` is the accepted
+    :class:`PawBarEvent`. Creates:
 
       1. An Instinct ``Action`` (category EXTERNAL) carrying a ``_customer_reply``
          blob with the event context + a default reply + the workspace scope. The
@@ -131,7 +134,7 @@ async def propose_customer_decision(
     """
     try:
         from pocketpaw.instinct.models import ActionCategory, ActionTrigger
-        from pocketpaw.paw_print.models import DecisionState, DecisionStatus
+        from pocketpaw.paw_bar.models import DecisionState, DecisionStatus
         from pocketpaw.stores import get_instinct_store
 
         widget_id = str(getattr(widget, "id", "") or "")
@@ -146,11 +149,11 @@ async def propose_customer_decision(
         # persisted) as the only record. The owner can be set later and a re-sent
         # event will then open the loop correctly. This is deliberately the
         # less-invasive of the two options in the review note — a hard
-        # field-validator on PawPrintWidget.owner would reject a widget whose
+        # field-validator on PawBarWidget.owner would reject a widget whose
         # owner is legitimately assigned after creation.
         if not workspace_id.strip():
             logger.warning(
-                "paw-print widget %s has no owner/workspace — SKIPPING the "
+                "paw-bar widget %s has no owner/workspace — SKIPPING the "
                 "decision proposal so it is not raised NULL-scoped and visible "
                 "to every tenant. Set the widget owner to open the loop.",
                 widget_id or "<unknown>",
@@ -173,7 +176,7 @@ async def propose_customer_decision(
 
         trigger = ActionTrigger(
             type="connector",
-            source=f"paw_print:{widget_id}",
+            source=f"paw_bar:{widget_id}",
             reason=f"customer '{event_type}' event awaiting a human decision",
         )
 
@@ -193,7 +196,7 @@ async def propose_customer_decision(
             "payload_summary": summary,
         }
 
-        # ISO note: paw-print's tenant key is the widget OWNER, which is a
+        # ISO note: paw-bar's tenant key is the widget OWNER, which is a
         # logical, possibly colon-qualified string (``user:maya``) used for the
         # in-row W4a ``workspace_id`` filter on ``store.propose`` below — NOT a
         # physical-store-path workspace id (those must pass the strict
@@ -228,10 +231,10 @@ async def propose_customer_decision(
             state=DecisionState.PENDING,
             reply="",
         )
-        await paw_print_store.create_decision(decision)
+        await paw_bar_store.create_decision(decision)
 
         logger.info(
-            "paw-print event on widget %s (customer %s) → Instinct proposal %s "
+            "paw-bar event on widget %s (customer %s) → Instinct proposal %s "
             "(workspace=%s) + parked PENDING decision",
             widget_id,
             customer_ref,
@@ -280,8 +283,8 @@ async def deliver_customer_decision(action: Any, *, declined: bool = False) -> N
     The row simply stays PENDING and a retry / sweep can re-resolve it later.
     """
     try:
-        from pocketpaw.paw_print.models import DecisionState
-        from pocketpaw.stores import get_paw_print_store
+        from pocketpaw.paw_bar.models import DecisionState
+        from pocketpaw.stores import get_paw_bar_store
 
         blob = customer_reply_blob(action)
         if blob is None:
@@ -316,7 +319,7 @@ async def deliver_customer_decision(action: Any, *, declined: bool = False) -> N
         # (unscoped) — matching how the proposal would have been raised.
         blob_workspace = str(blob.get("workspace_id") or "") or None
 
-        store = get_paw_print_store()
+        store = get_paw_bar_store()
         updated = await store.set_decision(
             action_id,
             state=state,

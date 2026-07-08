@@ -1,10 +1,12 @@
-# ee/paw_print/models.py — Pydantic models for the Paw Print widget layer.
+# ee/paw_bar/models.py — Pydantic models for the Paw Bar widget layer.
+# Updated: 2026-07-08 — Renamed widget "Paw Print" → "Paw Bar" (PawPrint*→PawBar* models).
+#   The separate one-word audit feed (past-tense record) is a DIFFERENT feature, untouched.
 # Created: 2026-04-13 (Move 3 PR-A) — Minimal, secure-by-design render vocabulary
 # (text / image / list / button / form / divider). No raw HTML, no script
-# injection paths. The widget.js bundle consumes PawPrintSpec; the backend
-# consumes PawPrintEvent on the ingest side.
-# Updated: 2026-06-10 (W0b security fix) — Added PawPrintWidgetPublic, a
-# token-free projection of PawPrintWidget used as the response model for
+# injection paths. The widget.js bundle consumes PawBarSpec; the backend
+# consumes PawBarEvent on the ingest side.
+# Updated: 2026-06-10 (W0b security fix) — Added PawBarWidgetPublic, a
+# token-free projection of PawBarWidget used as the response model for
 # list/read endpoints so the per-widget access_token never leaves the server
 # in those payloads. The token is now only returned by the explicit,
 # authenticated create + rotate-token paths.
@@ -46,21 +48,21 @@ def _gen_token() -> str:
 # ---------------------------------------------------------------------------
 
 
-class PawPrintAction(BaseModel):
+class PawBarAction(BaseModel):
     """An outbound event the widget should post when the block is activated."""
 
     event: str
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-class PawPrintListItem(BaseModel):
+class PawBarListItem(BaseModel):
     title: str
     meta: str = ""
-    action: PawPrintAction | None = None
+    action: PawBarAction | None = None
     disabled: bool = False
 
 
-class PawPrintFormField(BaseModel):
+class PawBarFormField(BaseModel):
     name: str
     label: str = ""
     type: Literal["text", "email", "number", "textarea"] = "text"
@@ -68,7 +70,7 @@ class PawPrintFormField(BaseModel):
     required: bool = False
 
 
-class PawPrintBlock(BaseModel):
+class PawBarBlock(BaseModel):
     """Minimal render primitive shared with the widget bundle.
 
     `type` drives how the bundle renders the block. Every block-specific field
@@ -88,37 +90,37 @@ class PawPrintBlock(BaseModel):
     alt: str = ""
 
     # list
-    items: list[PawPrintListItem] = Field(default_factory=list)
+    items: list[PawBarListItem] = Field(default_factory=list)
 
     # button
     label: str = ""
     href: str = ""
-    action: PawPrintAction | None = None
+    action: PawBarAction | None = None
 
     # form
-    fields: list[PawPrintFormField] = Field(default_factory=list)
+    fields: list[PawBarFormField] = Field(default_factory=list)
     submit_event: str = ""
 
     @field_validator("items")
     @classmethod
-    def _cap_list(cls, value: list[PawPrintListItem]) -> list[PawPrintListItem]:
+    def _cap_list(cls, value: list[PawBarListItem]) -> list[PawBarListItem]:
         if len(value) > _MAX_ITEMS_PER_LIST:
             raise ValueError(f"list block accepts at most {_MAX_ITEMS_PER_LIST} items")
         return value
 
 
-class PawPrintSpec(BaseModel):
+class PawBarSpec(BaseModel):
     """The payload the widget fetches and renders."""
 
     widget_id: str
     pocket_id: str
     layout: Literal["vertical", "horizontal", "grid"] = "vertical"
     theme: dict[str, str] = Field(default_factory=dict)
-    blocks: list[PawPrintBlock] = Field(default_factory=list)
+    blocks: list[PawBarBlock] = Field(default_factory=list)
 
     @field_validator("blocks")
     @classmethod
-    def _cap_blocks(cls, value: list[PawPrintBlock]) -> list[PawPrintBlock]:
+    def _cap_blocks(cls, value: list[PawBarBlock]) -> list[PawBarBlock]:
         if len(value) > _MAX_BLOCKS_PER_SPEC:
             raise ValueError(f"spec accepts at most {_MAX_BLOCKS_PER_SPEC} blocks")
         return value
@@ -129,7 +131,7 @@ class PawPrintSpec(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class PawPrintEventMapping(BaseModel):
+class PawBarEventMapping(BaseModel):
     """How an inbound widget event turns into a Fabric object.
 
     `creates` is the Fabric object type; `fields` values follow `{{ placeholder }}`
@@ -140,17 +142,17 @@ class PawPrintEventMapping(BaseModel):
     fields: dict[str, str] = Field(default_factory=dict)
 
 
-class PawPrintWidget(BaseModel):
+class PawBarWidget(BaseModel):
     id: str = Field(default_factory=lambda: _gen_id("pp"))
     pocket_id: str
     owner: str
     name: str = ""
-    spec: PawPrintSpec
+    spec: PawBarSpec
     allowed_domains: list[str] = Field(default_factory=list)
     access_token: str = Field(default_factory=_gen_token)
     rate_limit_per_min: int = 60
     per_customer_limit_per_min: int = 10
-    event_mapping: dict[str, PawPrintEventMapping] = Field(default_factory=dict)
+    event_mapping: dict[str, PawBarEventMapping] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
@@ -174,8 +176,8 @@ class PawPrintWidget(BaseModel):
         return value
 
 
-class PawPrintWidgetPublic(BaseModel):
-    """Token-free projection of :class:`PawPrintWidget`.
+class PawBarWidgetPublic(BaseModel):
+    """Token-free projection of :class:`PawBarWidget`.
 
     Used as the response model for list/read endpoints. It carries every
     widget field EXCEPT ``access_token`` — the per-widget owner credential
@@ -191,22 +193,22 @@ class PawPrintWidgetPublic(BaseModel):
     pocket_id: str
     owner: str
     name: str = ""
-    spec: PawPrintSpec
+    spec: PawBarSpec
     allowed_domains: list[str] = Field(default_factory=list)
     rate_limit_per_min: int
     per_customer_limit_per_min: int
-    event_mapping: dict[str, PawPrintEventMapping] = Field(default_factory=dict)
+    event_mapping: dict[str, PawBarEventMapping] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
 
     @classmethod
-    def from_widget(cls, widget: PawPrintWidget) -> PawPrintWidgetPublic:
+    def from_widget(cls, widget: PawBarWidget) -> PawBarWidgetPublic:
         data = widget.model_dump()
         data.pop("access_token", None)
         return cls(**data)
 
 
-class PawPrintEvent(BaseModel):
+class PawBarEvent(BaseModel):
     """One inbound signal from a rendered widget."""
 
     widget_id: str

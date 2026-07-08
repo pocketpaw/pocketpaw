@@ -368,7 +368,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.fabric.router import router as fabric_router
     from pocketpaw_ee.fleet.router import router as fleet_router
     from pocketpaw_ee.instinct.router import router as instinct_router
-    from pocketpaw_ee.paw_print.router import router as paw_print_router
+    from pocketpaw_ee.paw_bar.router import router as paw_bar_router
     from pocketpaw_ee.sites.router import router as sites_router
 
     app.include_router(kb_router, prefix="/api/v1")
@@ -573,15 +573,15 @@ def mount_cloud(app: FastAPI) -> None:
         return page.model_dump()
 
     app.include_router(_files_v2, prefix="/api/v1")
-    # paw_print lives outside ee/cloud/ but is mounted alongside the cloud
-    # routers so the admin UI (paw-enterprise /pockets/<id> Paw Print tab) can
-    # reach /api/v1/paw-print/* without a second app setup entry point.
-    app.include_router(paw_print_router, prefix="/api/v1")
+    # paw_bar lives outside ee/cloud/ but is mounted alongside the cloud
+    # routers so the admin UI (paw-enterprise /pockets/<id> Paw Bar tab) can
+    # reach /api/v1/paw-bar/* without a second app setup entry point.
+    app.include_router(paw_bar_router, prefix="/api/v1")
 
     # Fabric / Fleet / Instinct also live outside ee/cloud/ (pocketpaw_ee.
     # {fabric,fleet,instinct}). Their logic split into the OSS core in Phase 2,
     # but the HTTP routers stay enterprise — they depend on cloud auth — so the
-    # OSS core no longer mounts them. They ride along here, like paw_print
+    # OSS core no longer mounts them. They ride along here, like paw_bar
     # above, instead of through the core's mount_v1_routers().
     app.include_router(fabric_router, prefix="/api/v1")
     app.include_router(fleet_router, prefix="/api/v1")
