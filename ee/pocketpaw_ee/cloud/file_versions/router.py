@@ -33,6 +33,12 @@
 #   ``current_workspace_id`` deps (dewani's #1193 signature) rather than the
 #   ``request_context`` the core write routes use — they run the agent, which
 #   needs the identity, not a RequestContext.
+# Updated: 2026-07-08 (feat/billing-enforce-gate) — the three *-edit routes
+#   (ai-edit / spreadsheet-edit / slides-edit) now run the shared run-start
+#   BILLING gate (``credits.guards.assert_within_billing``) as their FIRST
+#   statement, before the local try/except and before ``pool.run``. An over-budget
+#   tenant (empty wallet or over monthly ceiling) gets a clean 402 with no model
+#   call; flag-gated no-op unless ``billing_enforced``.
 """FileVersions router — file-version write + history API."""
 
 from __future__ import annotations
@@ -229,6 +235,14 @@ async def ai_edit_file(
     ``edit_document`` MCP tool can access them, and runs the workspace's default
     agent. Returns the final blocks array to the frontend.
     """
+    # Run-start BILLING gate — raise BEFORE the try/except below so an over-budget
+    # tenant gets a clean 402 (mapped by _core.http) instead of the generic 500
+    # this handler's ``except Exception`` would otherwise return, and BEFORE any
+    # model call via ``pool.run``. Flag-gated no-op unless ``billing_enforced``.
+    from pocketpaw_ee.cloud.credits.guards import assert_within_billing
+
+    await assert_within_billing(workspace_id)
+
     try:
         doc = json.loads(body.content) if body.content and body.content.strip() else {}
         blocks: list[dict] = doc.get("blocks", []) if isinstance(doc, dict) else []
@@ -368,6 +382,12 @@ async def spreadsheet_ai_edit(
     workspace_id: str = Depends(current_workspace_id),
 ) -> JSONResponse:
     """Run an AI agent to edit spreadsheet content. Returns the final snapshot."""
+    # Run-start BILLING gate — raise BEFORE the try/except (clean 402, not a 500)
+    # and BEFORE any model call. Flag-gated no-op unless ``billing_enforced``.
+    from pocketpaw_ee.cloud.credits.guards import assert_within_billing
+
+    await assert_within_billing(workspace_id)
+
     try:
         snapshot = json.loads(body.content) if body.content and body.content.strip() else {}
         if not isinstance(snapshot, dict):
@@ -514,6 +534,12 @@ async def slides_ai_edit(
     workspace_id: str = Depends(current_workspace_id),
 ) -> JSONResponse:
     """Run an AI agent to edit slides content. Returns the final deck."""
+    # Run-start BILLING gate — raise BEFORE the try/except (clean 402, not a 500)
+    # and BEFORE any model call. Flag-gated no-op unless ``billing_enforced``.
+    from pocketpaw_ee.cloud.credits.guards import assert_within_billing
+
+    await assert_within_billing(workspace_id)
+
     deck: dict = body.content if isinstance(body.content, dict) else {}
     deck = json.loads(json.dumps(deck))
 
