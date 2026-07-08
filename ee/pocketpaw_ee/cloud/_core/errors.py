@@ -17,6 +17,13 @@ rather than a balance refill; it carries the effective `ceiling` and the
 FL-2 (file-version spine, port of dewani12's #1193) added
 ``PreconditionFailed`` (412) for stale ``If-Match`` optimistic-concurrency
 failures on the file-version write path.
+
+Changed 2026-07-08 (feat/billing-cancel-downgrade): added
+``NoActiveSubscription`` (402, ``billing.no_active_subscription``) — raised by
+the subscription-cancel path when a workspace has no ``active`` subscription to
+cancel (only historical / already-cancelled rows, or never subscribed). 402 (the
+same money-error family as ``InsufficientCredits`` / ``QuotaExceeded``) so the
+client renders a "not subscribed" state rather than a 404-style missing resource.
 """
 
 from __future__ import annotations
@@ -139,6 +146,24 @@ class QuotaExceeded(CloudError):
         )
 
 
+class NoActiveSubscription(CloudError):
+    """Workspace has no active recurring subscription to act on (402).
+
+    Raised by the cancel path when a workspace asks to cancel but has no ``active``
+    subscription row — only historical / already-cancelled rows, or it never
+    subscribed. 402 (the same family as ``InsufficientCredits`` / ``QuotaExceeded``,
+    "you can't do the money action right now") so the client prompts a
+    not-subscribed state rather than treating it as a 404-style missing resource.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            402,
+            "billing.no_active_subscription",
+            "No active subscription to cancel for this workspace",
+        )
+
+
 class RateLimited(CloudError):
     """Rate limit exceeded (429)."""
 
@@ -172,6 +197,7 @@ __all__ = [
     "Forbidden",
     "InsufficientCredits",
     "Internal",
+    "NoActiveSubscription",
     "NotFound",
     "PreconditionFailed",
     "QuotaExceeded",
