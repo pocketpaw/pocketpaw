@@ -85,6 +85,15 @@
 #     the publish path stashes the Dodo checkout link on so the router can surface
 #     it on ``SiteResponse.checkout_url`` for a paid publish. None for a free
 #     publish. Private so it never round-trips through the DB.
+#
+# Updated 2026-07-08 (DP0-1 — Dynamic Paw Sites Phase 0 provisioning state): added
+# ``provision_status`` (none | provisioning | provisioned | failed) alongside
+# ``d1_database_id``. It tracks where a dynamic site is in the durable D1 provision
+# job. The contract the job upholds: it persists ``d1_database_id`` IMMEDIATELY
+# after the D1 is created (status still ``provisioning``) so a retry reuses the same
+# D1 instead of orphaning a second one; status advances to ``provisioned`` only
+# after migrate + deploy succeed, and to ``failed`` on error. Defaults ``"none"`` so
+# every static site and every pre-DP0 row reads "not provisioning" — no migration.
 
 from __future__ import annotations
 
@@ -129,6 +138,13 @@ class Site(TimestampedDocument):
     # Stable across re-publishes (publish reuses the stored value) so the D1
     # binding target — and the data behind it — never moves under a live site.
     d1_database_id: str = ""
+    # DP0-1: where a dynamic site sits in the durable D1 provision job
+    # (none | provisioning | provisioned | failed). Contract: the job persists
+    # ``d1_database_id`` IMMEDIATELY after the D1 is created (status still
+    # ``provisioning``) so a retry REUSES the same D1 instead of orphaning a second
+    # one; status becomes ``provisioned`` only after migrate + deploy succeed, and
+    # ``failed`` on error. Defaults "none" for static sites and pre-DP0 rows.
+    provision_status: str = "none"
     # BC-9: per-site annual plan (the Webflow model — each published site has its
     # OWN recurring annual plan on a tier, distinct from the workspace plan).
     # ``plan_tier`` is the site-plan catalog key (basic | pro | business — see
