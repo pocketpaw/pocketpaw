@@ -464,7 +464,13 @@ source_modules = [
     "pocketpaw_ee.cloud.notifications.dto",
     "pocketpaw_ee.cloud.notifications.domain",
 ]
-forbidden_modules = ["pocketpaw_ee.cloud.models.notification"]
+# The external-delivery config doc (feat/external-alerting-delivery) is written
+# only by ``notifications.service`` and read by ``notifications.delivery`` — the
+# router/dto/domain façade must never touch either Beanie doc directly.
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.notification",
+    "pocketpaw_ee.cloud.models.notification_delivery",
+]
 
 [[tool.importlinter.contracts]]
 name = "FileVersions — Beanie writes only from service.py"
