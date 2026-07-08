@@ -1,9 +1,13 @@
-# ee/paw_print/store.py — Async SQLite store for Paw Print widgets and events.
-# Created: 2026-04-13 (Move 3 PR-A) — CRUD for PawPrintWidget + append-only
-# PawPrintEvent log. Token rotation invalidates any cached copies. Event ingest
+# ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
+# Updated: 2026-07-08 — Renamed widget "Paw Print" → "Paw Bar" (PawBarStore, tables
+#   paw_print_*→paw_bar_*, db paw_print.db→paw_bar.db). Hard-rename — widget has zero
+#   deployments, so no persisted rows to migrate. The separate one-word audit feed
+#   (the past-tense record, spelled as one word) is a DIFFERENT feature, unaffected.
+# Created: 2026-04-13 (Move 3 PR-A) — CRUD for PawBarWidget + append-only
+# PawBarEvent log. Token rotation invalidates any cached copies. Event ingest
 # + rate-limit logic lives in PR-B; this module only handles persistence.
 # Updated: 2026-06-11 (gap2 — close the customer decision loop) — Added the
-# paw_print_decisions table + upsert_decision / set_decision /
+# paw_bar_decisions table + upsert_decision / set_decision /
 # get_latest_decision. This is the delivery sink for the back-half of the loop:
 # an inbound event raises an Instinct proposal and parks a PENDING DecisionStatus
 # here; on human approval/rejection the EE approve hook flips it to
@@ -27,17 +31,17 @@ from typing import Any
 
 import aiosqlite
 
-from pocketpaw.paw_print.models import (
+from pocketpaw.paw_bar.models import (
     DecisionState,
     DecisionStatus,
-    PawPrintEvent,
-    PawPrintSpec,
-    PawPrintWidget,
+    PawBarEvent,
+    PawBarSpec,
+    PawBarWidget,
     _gen_token,
 )
 
 SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS paw_print_widgets (
+CREATE TABLE IF NOT EXISTS paw_bar_widgets (
     id TEXT PRIMARY KEY,
     pocket_id TEXT NOT NULL,
     owner TEXT NOT NULL,
@@ -52,7 +56,7 @@ CREATE TABLE IF NOT EXISTS paw_print_widgets (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS paw_print_events (
+CREATE TABLE IF NOT EXISTS paw_bar_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     widget_id TEXT NOT NULL,
     type TEXT NOT NULL,
@@ -64,7 +68,7 @@ CREATE TABLE IF NOT EXISTS paw_print_events (
 -- gap2: the customer-decision delivery sink. One row per inbound event that
 -- raised an Instinct proposal; the customer surface polls the latest row for
 -- (widget_id, customer_ref) to read the owner's decision.
-CREATE TABLE IF NOT EXISTS paw_print_decisions (
+CREATE TABLE IF NOT EXISTS paw_bar_decisions (
     id TEXT PRIMARY KEY,
     widget_id TEXT NOT NULL,
     customer_ref TEXT NOT NULL,
@@ -78,16 +82,16 @@ CREATE TABLE IF NOT EXISTS paw_print_decisions (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_pp_widgets_pocket ON paw_print_widgets(pocket_id);
-CREATE INDEX IF NOT EXISTS idx_pp_widgets_owner ON paw_print_widgets(owner);
+CREATE INDEX IF NOT EXISTS idx_pp_widgets_pocket ON paw_bar_widgets(pocket_id);
+CREATE INDEX IF NOT EXISTS idx_pp_widgets_owner ON paw_bar_widgets(owner);
 CREATE INDEX IF NOT EXISTS idx_pp_events_widget_ts
-    ON paw_print_events(widget_id, timestamp DESC);
+    ON paw_bar_events(widget_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_pp_events_customer
-    ON paw_print_events(widget_id, customer_ref);
+    ON paw_bar_events(widget_id, customer_ref);
 CREATE INDEX IF NOT EXISTS idx_pp_decisions_customer
-    ON paw_print_decisions(widget_id, customer_ref, created_at DESC);
+    ON paw_bar_decisions(widget_id, customer_ref, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_pp_decisions_action
-    ON paw_print_decisions(instinct_action_id);
+    ON paw_bar_decisions(instinct_action_id);
 """
 
 
@@ -105,7 +109,7 @@ def _decision_workspace_scope(workspace_id: str | None) -> tuple[str | None, lis
     return "(workspace_id = ? OR workspace_id = '' OR workspace_id IS NULL)", [workspace_id]
 
 
-class PawPrintStore:
+class PawBarStore:
     """Async SQLite store — same shape as InstinctStore so the wiring is familiar."""
 
     def __init__(self, db_path: str | Path) -> None:
@@ -125,11 +129,11 @@ class PawPrintStore:
 
     # ---------------- Widgets ----------------
 
-    async def create_widget(self, widget: PawPrintWidget) -> PawPrintWidget:
+    async def create_widget(self, widget: PawBarWidget) -> PawBarWidget:
         await self._ensure_schema()
         async with self._conn() as db:
             await db.execute(
-                "INSERT INTO paw_print_widgets"
+                "INSERT INTO paw_bar_widgets"
                 " (id, pocket_id, owner, name, spec, allowed_domains,"
                 " access_token, rate_limit_per_min, per_customer_limit_per_min,"
                 " event_mapping, created_at, updated_at)"
@@ -154,12 +158,12 @@ class PawPrintStore:
             await db.commit()
         return widget
 
-    async def get_widget(self, widget_id: str) -> PawPrintWidget | None:
+    async def get_widget(self, widget_id: str) -> PawBarWidget | None:
         await self._ensure_schema()
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT * FROM paw_print_widgets WHERE id = ?",
+                "SELECT * FROM paw_bar_widgets WHERE id = ?",
                 (widget_id,),
             ) as cur:
                 row = await cur.fetchone()
@@ -167,7 +171,7 @@ class PawPrintStore:
 
     async def list_widgets(
         self, pocket_id: str | None = None, owner: str | None = None, limit: int = 100
-    ) -> list[PawPrintWidget]:
+    ) -> list[PawBarWidget]:
         conditions: list[str] = []
         params: list[Any] = []
         if pocket_id:
@@ -183,25 +187,25 @@ class PawPrintStore:
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                f"SELECT * FROM paw_print_widgets {where} ORDER BY created_at DESC LIMIT ?",
+                f"SELECT * FROM paw_bar_widgets {where} ORDER BY created_at DESC LIMIT ?",
                 params,
             ) as cur:
                 return [self._row_to_widget(row) async for row in cur]
 
-    async def update_spec(self, widget_id: str, spec: PawPrintSpec) -> PawPrintWidget | None:
+    async def update_spec(self, widget_id: str, spec: PawBarSpec) -> PawBarWidget | None:
         existing = await self.get_widget(widget_id)
         if existing is None:
             return None
         await self._ensure_schema()
         async with self._conn() as db:
             await db.execute(
-                "UPDATE paw_print_widgets SET spec = ?, updated_at = ? WHERE id = ?",
+                "UPDATE paw_bar_widgets SET spec = ?, updated_at = ? WHERE id = ?",
                 (spec.model_dump_json(), datetime.now().isoformat(), widget_id),
             )
             await db.commit()
         return await self.get_widget(widget_id)
 
-    async def rotate_token(self, widget_id: str) -> PawPrintWidget | None:
+    async def rotate_token(self, widget_id: str) -> PawBarWidget | None:
         existing = await self.get_widget(widget_id)
         if existing is None:
             return None
@@ -209,7 +213,7 @@ class PawPrintStore:
         await self._ensure_schema()
         async with self._conn() as db:
             await db.execute(
-                "UPDATE paw_print_widgets SET access_token = ?, updated_at = ? WHERE id = ?",
+                "UPDATE paw_bar_widgets SET access_token = ?, updated_at = ? WHERE id = ?",
                 (new_token, datetime.now().isoformat(), widget_id),
             )
             await db.commit()
@@ -219,7 +223,7 @@ class PawPrintStore:
         await self._ensure_schema()
         async with self._conn() as db:
             cur = await db.execute(
-                "DELETE FROM paw_print_widgets WHERE id = ?",
+                "DELETE FROM paw_bar_widgets WHERE id = ?",
                 (widget_id,),
             )
             await db.commit()
@@ -227,11 +231,11 @@ class PawPrintStore:
 
     # ---------------- Events ----------------
 
-    async def record_event(self, event: PawPrintEvent) -> PawPrintEvent:
+    async def record_event(self, event: PawBarEvent) -> PawBarEvent:
         await self._ensure_schema()
         async with self._conn() as db:
             await db.execute(
-                "INSERT INTO paw_print_events"
+                "INSERT INTO paw_bar_events"
                 " (widget_id, type, payload, customer_ref, timestamp)"
                 " VALUES (?, ?, ?, ?, ?)",
                 (
@@ -245,13 +249,12 @@ class PawPrintStore:
             await db.commit()
         return event
 
-    async def recent_events(self, widget_id: str, limit: int = 100) -> list[PawPrintEvent]:
+    async def recent_events(self, widget_id: str, limit: int = 100) -> list[PawBarEvent]:
         await self._ensure_schema()
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT * FROM paw_print_events WHERE widget_id = ?"
-                " ORDER BY timestamp DESC LIMIT ?",
+                "SELECT * FROM paw_bar_events WHERE widget_id = ? ORDER BY timestamp DESC LIMIT ?",
                 (widget_id, limit),
             ) as cur:
                 return [self._row_to_event(row) async for row in cur]
@@ -271,7 +274,7 @@ class PawPrintStore:
             params.append(customer_ref)
         async with self._conn() as db:
             async with db.execute(
-                f"SELECT COUNT(*) FROM paw_print_events WHERE {' AND '.join(conditions)}",
+                f"SELECT COUNT(*) FROM paw_bar_events WHERE {' AND '.join(conditions)}",
                 params,
             ) as cur:
                 row = await cur.fetchone()
@@ -312,7 +315,7 @@ class PawPrintStore:
         await self._ensure_schema()
         async with self._conn() as db:
             await db.execute(
-                "INSERT INTO paw_print_decisions"
+                "INSERT INTO paw_bar_decisions"
                 " (id, widget_id, customer_ref, event_type, instinct_action_id,"
                 " workspace_id, state, reply, decided_by, created_at, updated_at)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -351,7 +354,7 @@ class PawPrintStore:
         ``None`` leaves the lookup unscoped (backward-compatible).
         """
         ws_cond, ws_params = _decision_workspace_scope(workspace_id)
-        sql = "SELECT * FROM paw_print_decisions WHERE instinct_action_id = ?"
+        sql = "SELECT * FROM paw_bar_decisions WHERE instinct_action_id = ?"
         params: list[Any] = [instinct_action_id]
         if ws_cond:
             sql += f" AND {ws_cond}"
@@ -389,7 +392,7 @@ class PawPrintStore:
             return None
         ws_cond, ws_params = _decision_workspace_scope(workspace_id)
         sql = (
-            "UPDATE paw_print_decisions"
+            "UPDATE paw_bar_decisions"
             " SET state = ?, reply = ?, decided_by = ?, updated_at = ?"
             " WHERE instinct_action_id = ?"
         )
@@ -421,7 +424,7 @@ class PawPrintStore:
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT * FROM paw_print_decisions"
+                "SELECT * FROM paw_bar_decisions"
                 " WHERE widget_id = ? AND customer_ref = ?"
                 " ORDER BY created_at DESC LIMIT 1",
                 (widget_id, customer_ref),
@@ -431,14 +434,14 @@ class PawPrintStore:
 
     # ---------------- Helpers ----------------
 
-    def _row_to_widget(self, row: Any) -> PawPrintWidget:
-        from pocketpaw.paw_print.models import PawPrintEventMapping
+    def _row_to_widget(self, row: Any) -> PawBarWidget:
+        from pocketpaw.paw_bar.models import PawBarEventMapping
 
         raw_domains = json.loads(row["allowed_domains"]) if row["allowed_domains"] else []
         raw_mapping = json.loads(row["event_mapping"]) if row["event_mapping"] else {}
-        mapping = {k: PawPrintEventMapping.model_validate(v) for k, v in raw_mapping.items()}
-        spec = PawPrintSpec.model_validate_json(row["spec"])
-        return PawPrintWidget(
+        mapping = {k: PawBarEventMapping.model_validate(v) for k, v in raw_mapping.items()}
+        spec = PawBarSpec.model_validate_json(row["spec"])
+        return PawBarWidget(
             id=row["id"],
             pocket_id=row["pocket_id"],
             owner=row["owner"],
@@ -453,8 +456,8 @@ class PawPrintStore:
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
 
-    def _row_to_event(self, row: Any) -> PawPrintEvent:
-        return PawPrintEvent(
+    def _row_to_event(self, row: Any) -> PawBarEvent:
+        return PawBarEvent(
             widget_id=row["widget_id"],
             type=row["type"],
             payload=json.loads(row["payload"]) if row["payload"] else {},

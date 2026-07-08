@@ -1,4 +1,4 @@
-# tests/cloud/test_paw_print_backend.py — PR-A: Paw Print models + store.
+# tests/cloud/test_paw_bar_backend.py — PR-A: Paw Bar models + store.
 # Created: 2026-04-13 — Covers validation caps, domain normalization, token
 # rotation, event persistence, and the rate-limit primitives used by PR-B.
 
@@ -9,34 +9,34 @@ from pathlib import Path
 
 import pytest
 
-from pocketpaw.paw_print.models import (
+from pocketpaw.paw_bar.models import (
     MAX_BLOCKS_PER_SPEC,
     MAX_DOMAINS_PER_WIDGET,
     MAX_ITEMS_PER_LIST,
-    PawPrintAction,
-    PawPrintBlock,
-    PawPrintEvent,
-    PawPrintEventMapping,
-    PawPrintListItem,
-    PawPrintSpec,
-    PawPrintWidget,
+    PawBarAction,
+    PawBarBlock,
+    PawBarEvent,
+    PawBarEventMapping,
+    PawBarListItem,
+    PawBarSpec,
+    PawBarWidget,
 )
-from pocketpaw.paw_print.store import PawPrintStore
+from pocketpaw.paw_bar.store import PawBarStore
 
 
-def _spec(widget_id: str = "pp_test") -> PawPrintSpec:
-    return PawPrintSpec(
+def _spec(widget_id: str = "pp_test") -> PawBarSpec:
+    return PawBarSpec(
         widget_id=widget_id,
         pocket_id="pocket-1",
         blocks=[
-            PawPrintBlock(type="text", content="Today's menu", style="heading"),
-            PawPrintBlock(
+            PawBarBlock(type="text", content="Today's menu", style="heading"),
+            PawBarBlock(
                 type="list",
                 items=[
-                    PawPrintListItem(
+                    PawBarListItem(
                         title="Oat Milk Latte",
                         meta="$5 — 34 in stock",
-                        action=PawPrintAction(event="order_click", payload={"item": "oat_latte"}),
+                        action=PawBarAction(event="order_click", payload={"item": "oat_latte"}),
                     ),
                 ],
             ),
@@ -44,7 +44,7 @@ def _spec(widget_id: str = "pp_test") -> PawPrintSpec:
     )
 
 
-def _widget(**overrides) -> PawPrintWidget:
+def _widget(**overrides) -> PawBarWidget:
     defaults = {
         "pocket_id": "pocket-1",
         "owner": "user:maya",
@@ -52,14 +52,14 @@ def _widget(**overrides) -> PawPrintWidget:
         "spec": _spec(),
         "allowed_domains": ["brewco.com"],
         "event_mapping": {
-            "order_click": PawPrintEventMapping(
+            "order_click": PawBarEventMapping(
                 creates="Order",
                 fields={"item": "{{ payload.item }}", "customer_ref": "{{ customer_ref }}"},
             ),
         },
     }
     defaults.update(overrides)
-    return PawPrintWidget(**defaults)
+    return PawBarWidget(**defaults)
 
 
 # ---------------------------------------------------------------------------
@@ -69,19 +69,19 @@ def _widget(**overrides) -> PawPrintWidget:
 
 class TestBlockCaps:
     def test_list_block_accepts_up_to_the_cap(self) -> None:
-        items = [PawPrintListItem(title=f"Item {i}") for i in range(MAX_ITEMS_PER_LIST)]
-        block = PawPrintBlock(type="list", items=items)
+        items = [PawBarListItem(title=f"Item {i}") for i in range(MAX_ITEMS_PER_LIST)]
+        block = PawBarBlock(type="list", items=items)
         assert len(block.items) == MAX_ITEMS_PER_LIST
 
     def test_list_block_rejects_past_the_cap(self) -> None:
-        items = [PawPrintListItem(title=f"Item {i}") for i in range(MAX_ITEMS_PER_LIST + 1)]
+        items = [PawBarListItem(title=f"Item {i}") for i in range(MAX_ITEMS_PER_LIST + 1)]
         with pytest.raises(ValueError, match="list block accepts at most"):
-            PawPrintBlock(type="list", items=items)
+            PawBarBlock(type="list", items=items)
 
     def test_spec_rejects_too_many_blocks(self) -> None:
-        blocks = [PawPrintBlock(type="divider") for _ in range(MAX_BLOCKS_PER_SPEC + 1)]
+        blocks = [PawBarBlock(type="divider") for _ in range(MAX_BLOCKS_PER_SPEC + 1)]
         with pytest.raises(ValueError, match="spec accepts at most"):
-            PawPrintSpec(widget_id="pp_x", pocket_id="p", blocks=blocks)
+            PawBarSpec(widget_id="pp_x", pocket_id="p", blocks=blocks)
 
 
 class TestWidgetValidation:
@@ -109,10 +109,10 @@ class TestWidgetValidation:
 class TestEventValidation:
     def test_empty_type_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="event type is required"):
-            PawPrintEvent(widget_id="pp_x", type="  ", customer_ref="abc")
+            PawBarEvent(widget_id="pp_x", type="  ", customer_ref="abc")
 
     def test_type_is_stripped(self) -> None:
-        event = PawPrintEvent(widget_id="pp_x", type=" order_click ", customer_ref="abc")
+        event = PawBarEvent(widget_id="pp_x", type=" order_click ", customer_ref="abc")
         assert event.type == "order_click"
 
 
@@ -122,13 +122,13 @@ class TestEventValidation:
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> PawPrintStore:
-    return PawPrintStore(tmp_path / "paw_print.db")
+def store(tmp_path: Path) -> PawBarStore:
+    return PawBarStore(tmp_path / "paw_bar.db")
 
 
 class TestWidgetCRUD:
     @pytest.mark.asyncio
-    async def test_create_and_fetch_widget(self, store: PawPrintStore) -> None:
+    async def test_create_and_fetch_widget(self, store: PawBarStore) -> None:
         widget = await store.create_widget(_widget())
         fetched = await store.get_widget(widget.id)
         assert fetched is not None
@@ -138,7 +138,7 @@ class TestWidgetCRUD:
         assert fetched.event_mapping["order_click"].creates == "Order"
 
     @pytest.mark.asyncio
-    async def test_list_filters_by_pocket_and_owner(self, store: PawPrintStore) -> None:
+    async def test_list_filters_by_pocket_and_owner(self, store: PawBarStore) -> None:
         await store.create_widget(_widget(pocket_id="pocket-1", owner="user:maya"))
         await store.create_widget(_widget(pocket_id="pocket-2", owner="user:priya"))
 
@@ -151,12 +151,12 @@ class TestWidgetCRUD:
         assert by_owner[0].owner == "user:priya"
 
     @pytest.mark.asyncio
-    async def test_update_spec_replaces_blocks(self, store: PawPrintStore) -> None:
+    async def test_update_spec_replaces_blocks(self, store: PawBarStore) -> None:
         widget = await store.create_widget(_widget())
-        new_spec = PawPrintSpec(
+        new_spec = PawBarSpec(
             widget_id=widget.id,
             pocket_id=widget.pocket_id,
-            blocks=[PawPrintBlock(type="text", content="Closed today")],
+            blocks=[PawBarBlock(type="text", content="Closed today")],
         )
         updated = await store.update_spec(widget.id, new_spec)
         assert updated is not None
@@ -164,7 +164,7 @@ class TestWidgetCRUD:
         assert updated.spec.blocks[0].content == "Closed today"
 
     @pytest.mark.asyncio
-    async def test_rotate_token_invalidates_old_token(self, store: PawPrintStore) -> None:
+    async def test_rotate_token_invalidates_old_token(self, store: PawBarStore) -> None:
         widget = await store.create_widget(_widget())
         original = widget.access_token
         rotated = await store.rotate_token(widget.id)
@@ -173,14 +173,14 @@ class TestWidgetCRUD:
         assert rotated.access_token.startswith("pp_tok_")
 
     @pytest.mark.asyncio
-    async def test_delete_widget_returns_true_then_false(self, store: PawPrintStore) -> None:
+    async def test_delete_widget_returns_true_then_false(self, store: PawBarStore) -> None:
         widget = await store.create_widget(_widget())
         assert await store.delete_widget(widget.id) is True
         assert await store.delete_widget(widget.id) is False
         assert await store.get_widget(widget.id) is None
 
     @pytest.mark.asyncio
-    async def test_update_missing_widget_returns_none(self, store: PawPrintStore) -> None:
+    async def test_update_missing_widget_returns_none(self, store: PawBarStore) -> None:
         result = await store.update_spec("does_not_exist", _spec())
         assert result is None
 
@@ -192,11 +192,11 @@ class TestWidgetCRUD:
 
 class TestEventStore:
     @pytest.mark.asyncio
-    async def test_events_are_listed_newest_first(self, store: PawPrintStore) -> None:
+    async def test_events_are_listed_newest_first(self, store: PawBarStore) -> None:
         widget = await store.create_widget(_widget())
         now = datetime.now()
         await store.record_event(
-            PawPrintEvent(
+            PawBarEvent(
                 widget_id=widget.id,
                 type="order_click",
                 customer_ref="cust_a",
@@ -204,7 +204,7 @@ class TestEventStore:
             ),
         )
         await store.record_event(
-            PawPrintEvent(
+            PawBarEvent(
                 widget_id=widget.id,
                 type="order_click",
                 customer_ref="cust_b",
@@ -217,11 +217,11 @@ class TestEventStore:
         assert events[1].customer_ref == "cust_a"
 
     @pytest.mark.asyncio
-    async def test_count_events_since_respects_window(self, store: PawPrintStore) -> None:
+    async def test_count_events_since_respects_window(self, store: PawBarStore) -> None:
         widget = await store.create_widget(_widget())
         now = datetime.now()
         await store.record_event(
-            PawPrintEvent(
+            PawBarEvent(
                 widget_id=widget.id,
                 type="order_click",
                 customer_ref="cust_a",
@@ -229,7 +229,7 @@ class TestEventStore:
             ),
         )
         await store.record_event(
-            PawPrintEvent(
+            PawBarEvent(
                 widget_id=widget.id,
                 type="order_click",
                 customer_ref="cust_a",
@@ -242,13 +242,13 @@ class TestEventStore:
 
     @pytest.mark.asyncio
     async def test_within_rate_limit_enforces_overall_and_per_customer(
-        self, store: PawPrintStore
+        self, store: PawBarStore
     ) -> None:
         widget = await store.create_widget(_widget())
         now = datetime.now()
         for i in range(3):
             await store.record_event(
-                PawPrintEvent(
+                PawBarEvent(
                     widget_id=widget.id,
                     type="order_click",
                     customer_ref="cust_a",
@@ -277,12 +277,12 @@ class TestEventStore:
         assert allowed_other is True
 
     @pytest.mark.asyncio
-    async def test_within_rate_limit_respects_overall_ceiling(self, store: PawPrintStore) -> None:
+    async def test_within_rate_limit_respects_overall_ceiling(self, store: PawBarStore) -> None:
         widget = await store.create_widget(_widget())
         now = datetime.now()
         for i in range(5):
             await store.record_event(
-                PawPrintEvent(
+                PawBarEvent(
                     widget_id=widget.id,
                     type="order_click",
                     customer_ref=f"cust_{i}",

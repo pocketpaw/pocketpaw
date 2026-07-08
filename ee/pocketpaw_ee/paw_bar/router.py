@@ -1,4 +1,8 @@
-# ee/paw_print/router.py — HTTP surface for the Paw Print widget layer.
+# ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-08 — Renamed widget "Paw Print" → "Paw Bar" (routes /paw-print→/paw-bar,
+#   header X-Paw-Print-Token→X-Paw-Bar-Token, tag PawPrint→PawBar, source_connector
+#   "paw_print"→"paw_bar"). Hard-rename — widget has zero deployments. The separate
+#   one-word audit feed (past-tense record) is a DIFFERENT feature, unaffected.
 # Created: 2026-04-13 (Move 3 PR-B) — Spec serving (public, CORS-gated),
 # widget CRUD (owner-authed via access_token), event ingest (rate-limited,
 # domain-enforced, injection-screened, Fabric-mapped). The widget.js bundle
@@ -16,7 +20,7 @@
 # dashboard caller via Depends(require_scope("admin")); previously these
 # routes had NO route-level auth, and the /api/v1/* mount is auth-OPTIONAL at
 # the middleware level, so an unauthenticated caller could reach them. (2) The
-# list and read responses now serialize PawPrintWidgetPublic, which omits
+# list and read responses now serialize PawBarWidgetPublic, which omits
 # access_token — the per-widget owner credential no longer leaves the server
 # in a list/read payload. The token is still returned by the explicit,
 # authenticated create + rotate-token paths so an owner can capture it once.
@@ -27,7 +31,7 @@
 # raises an Instinct proposal via decision_loop.propose_customer_decision and
 # parks a PENDING DecisionStatus row (best-effort — a loop failure never fails
 # the ingest response). Added a public, CORS-gated poll endpoint
-# (GET /paw-print/events/{widget_id}/decision/{customer_ref}) so the rendered
+# (GET /paw-bar/events/{widget_id}/decision/{customer_ref}) so the rendered
 # widget can read the owner's decision back out — the back-half of the loop. The
 # approve/reject delivery hook lives in the instinct router (it owns the human
 # decision); see decision_loop.deliver_customer_decision.
@@ -44,34 +48,34 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from pocketpaw.api.deps import require_scope
-from pocketpaw.paw_print.models import (
+from pocketpaw.paw_bar.models import (
     MAX_PAYLOAD_BYTES,
-    PawPrintEvent,
-    PawPrintEventMapping,
-    PawPrintSpec,
-    PawPrintWidget,
-    PawPrintWidgetPublic,
+    PawBarEvent,
+    PawBarEventMapping,
+    PawBarSpec,
+    PawBarWidget,
+    PawBarWidgetPublic,
 )
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["PawPrint"])
+router = APIRouter(tags=["PawBar"])
 
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}")
 
 
 def _store():
-    from pocketpaw_ee.api import get_paw_print_store
+    from pocketpaw_ee.api import get_paw_bar_store
 
-    return get_paw_print_store()
+    return get_paw_bar_store()
 
 
-def _require_owner_token(widget: PawPrintWidget, header_token: str | None) -> None:
+def _require_owner_token(widget: PawBarWidget, header_token: str | None) -> None:
     if not header_token or header_token != widget.access_token:
         raise HTTPException(status_code=401, detail="Invalid or missing access token")
 
 
-def _origin_allowed(widget: PawPrintWidget, origin: str | None) -> bool:
+def _origin_allowed(widget: PawBarWidget, origin: str | None) -> bool:
     """Match an inbound Origin header against the widget's allowed_domains.
 
     Empty `allowed_domains` disables the check — useful for local demos but
@@ -99,23 +103,23 @@ class CreateWidgetRequest(BaseModel):
     pocket_id: str
     owner: str
     name: str = ""
-    spec: PawPrintSpec
+    spec: PawBarSpec
     allowed_domains: list[str] = Field(default_factory=list)
     rate_limit_per_min: int = 60
     per_customer_limit_per_min: int = 10
-    event_mapping: dict[str, PawPrintEventMapping] = Field(default_factory=dict)
+    event_mapping: dict[str, PawBarEventMapping] = Field(default_factory=dict)
 
 
 class WidgetListResponse(BaseModel):
-    # PawPrintWidgetPublic (not PawPrintWidget) — list payloads must never
+    # PawBarWidgetPublic (not PawBarWidget) — list payloads must never
     # carry access_token (W0b).
-    widgets: list[PawPrintWidgetPublic]
+    widgets: list[PawBarWidgetPublic]
     total: int
 
 
 class EventIngestResponse(BaseModel):
     accepted: bool
-    event: PawPrintEvent | None = None
+    event: PawBarEvent | None = None
     fabric_object_id: str | None = None
     # gap2 — the Instinct proposal raised for this event (when the widget maps
     # the event type). The customer surface can poll the decision endpoint to
@@ -140,7 +144,7 @@ class DecisionStatusResponse(BaseModel):
 
 
 class EventsListResponse(BaseModel):
-    events: list[PawPrintEvent]
+    events: list[PawBarEvent]
     total: int
 
 
@@ -153,20 +157,20 @@ class EventsListResponse(BaseModel):
 # level. require_scope("admin") is fail-closed: it accepts a full-access
 # dashboard session (master/session-cookie/localhost) or an admin-scoped
 # API-key / OAuth token, and 403s everyone else (including unauthenticated
-# callers). The per-widget access_token (X-Paw-Print-Token) is a SECOND factor
+# callers). The per-widget access_token (X-Paw-Bar-Token) is a SECOND factor
 # on read/mutate of a specific widget — it is not a substitute for being a
 # signed-in dashboard user, which is why create/list need this guard.
 # ---------------------------------------------------------------------------
 
 
 @router.post(
-    "/paw-print/widgets",
-    response_model=PawPrintWidget,
+    "/paw-bar/widgets",
+    response_model=PawBarWidget,
     status_code=201,
     dependencies=[Depends(require_scope("admin"))],
 )
-async def create_widget(req: CreateWidgetRequest) -> PawPrintWidget:
-    widget = PawPrintWidget(
+async def create_widget(req: CreateWidgetRequest) -> PawBarWidget:
+    widget = PawBarWidget(
         pocket_id=req.pocket_id,
         owner=req.owner,
         name=req.name,
@@ -180,7 +184,7 @@ async def create_widget(req: CreateWidgetRequest) -> PawPrintWidget:
 
 
 @router.get(
-    "/paw-print/widgets",
+    "/paw-bar/widgets",
     response_model=WidgetListResponse,
     dependencies=[Depends(require_scope("admin"))],
 )
@@ -192,54 +196,54 @@ async def list_widgets(
     widgets = await _store().list_widgets(pocket_id=pocket_id, owner=owner, limit=limit)
     # Project to the token-free model — a list payload must never carry the
     # per-widget access_token (W0b).
-    public = [PawPrintWidgetPublic.from_widget(w) for w in widgets]
+    public = [PawBarWidgetPublic.from_widget(w) for w in widgets]
     return WidgetListResponse(widgets=public, total=len(public))
 
 
-@router.get("/paw-print/widgets/{widget_id}", response_model=PawPrintWidgetPublic)
+@router.get("/paw-bar/widgets/{widget_id}", response_model=PawBarWidgetPublic)
 async def get_widget(
     widget_id: str,
-    x_paw_print_token: str | None = Header(default=None, alias="X-Paw-Print-Token"),
-) -> PawPrintWidgetPublic:
+    x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
+) -> PawBarWidgetPublic:
     widget = await _store().get_widget(widget_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
-    _require_owner_token(widget, x_paw_print_token)
+    _require_owner_token(widget, x_paw_bar_token)
     # Read responses omit access_token — the caller already holds it (they had
     # to present it to pass _require_owner_token), so echoing it back only
     # widens the blast radius if a read response is logged/cached (W0b).
-    return PawPrintWidgetPublic.from_widget(widget)
+    return PawBarWidgetPublic.from_widget(widget)
 
 
 @router.patch(
-    "/paw-print/widgets/{widget_id}/spec",
-    response_model=PawPrintWidgetPublic,
+    "/paw-bar/widgets/{widget_id}/spec",
+    response_model=PawBarWidgetPublic,
     dependencies=[Depends(require_scope("admin"))],
 )
 async def update_spec(
     widget_id: str,
-    spec: PawPrintSpec,
-    x_paw_print_token: str | None = Header(default=None, alias="X-Paw-Print-Token"),
-) -> PawPrintWidgetPublic:
+    spec: PawBarSpec,
+    x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
+) -> PawBarWidgetPublic:
     widget = await _store().get_widget(widget_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
-    _require_owner_token(widget, x_paw_print_token)
+    _require_owner_token(widget, x_paw_bar_token)
     updated = await _store().update_spec(widget_id, spec)
     if updated is None:
         raise HTTPException(404, "Widget not found")
-    return PawPrintWidgetPublic.from_widget(updated)
+    return PawBarWidgetPublic.from_widget(updated)
 
 
 @router.post(
-    "/paw-print/widgets/{widget_id}/rotate-token",
-    response_model=PawPrintWidget,
+    "/paw-bar/widgets/{widget_id}/rotate-token",
+    response_model=PawBarWidget,
     dependencies=[Depends(require_scope("admin"))],
 )
 async def rotate_token(
     widget_id: str,
-    x_paw_print_token: str | None = Header(default=None, alias="X-Paw-Print-Token"),
-) -> PawPrintWidget:
+    x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
+) -> PawBarWidget:
     # Returns the FULL widget (with the new access_token) on purpose: this is
     # the explicit, authenticated reveal path so the owner can capture the
     # rotated secret. Still requires the old token AND an admin dashboard
@@ -247,7 +251,7 @@ async def rotate_token(
     widget = await _store().get_widget(widget_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
-    _require_owner_token(widget, x_paw_print_token)
+    _require_owner_token(widget, x_paw_bar_token)
     rotated = await _store().rotate_token(widget_id)
     if rotated is None:
         raise HTTPException(404, "Widget not found")
@@ -255,31 +259,31 @@ async def rotate_token(
 
 
 @router.delete(
-    "/paw-print/widgets/{widget_id}",
+    "/paw-bar/widgets/{widget_id}",
     status_code=204,
     dependencies=[Depends(require_scope("admin"))],
 )
 async def delete_widget(
     widget_id: str,
-    x_paw_print_token: str | None = Header(default=None, alias="X-Paw-Print-Token"),
+    x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
 ) -> None:
     widget = await _store().get_widget(widget_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
-    _require_owner_token(widget, x_paw_print_token)
+    _require_owner_token(widget, x_paw_bar_token)
     await _store().delete_widget(widget_id)
 
 
-@router.get("/paw-print/widgets/{widget_id}/events", response_model=EventsListResponse)
+@router.get("/paw-bar/widgets/{widget_id}/events", response_model=EventsListResponse)
 async def list_events(
     widget_id: str,
     limit: int = Query(100, ge=1, le=500),
-    x_paw_print_token: str | None = Header(default=None, alias="X-Paw-Print-Token"),
+    x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
 ) -> EventsListResponse:
     widget = await _store().get_widget(widget_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
-    _require_owner_token(widget, x_paw_print_token)
+    _require_owner_token(widget, x_paw_bar_token)
     events = await _store().recent_events(widget_id, limit=limit)
     return EventsListResponse(events=events, total=len(events))
 
@@ -289,7 +293,7 @@ async def list_events(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/paw-print/spec/{widget_id}")
+@router.get("/paw-bar/spec/{widget_id}")
 async def get_spec(
     widget_id: str,
     request: Request,
@@ -328,7 +332,7 @@ class IngestPayload(BaseModel):
     customer_ref: str
 
 
-@router.post("/paw-print/events/{widget_id}", response_model=EventIngestResponse)
+@router.post("/paw-bar/events/{widget_id}", response_model=EventIngestResponse)
 async def ingest_event(
     widget_id: str,
     body: IngestPayload,
@@ -362,7 +366,7 @@ async def ingest_event(
     if not _origin_allowed(widget, origin):
         raise HTTPException(403, "Origin not allowed for this widget")
 
-    event = PawPrintEvent(
+    event = PawBarEvent(
         widget_id=widget_id,
         type=body.type,
         payload=body.payload,
@@ -409,7 +413,7 @@ async def ingest_event(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/paw-print/events/{widget_id}/decision/{customer_ref}")
+@router.get("/paw-bar/events/{widget_id}/decision/{customer_ref}")
 async def get_decision(
     widget_id: str,
     customer_ref: str,
@@ -460,7 +464,7 @@ async def get_decision(
 # ---------------------------------------------------------------------------
 
 
-async def _screen_event_for_injection(event: PawPrintEvent) -> bool:
+async def _screen_event_for_injection(event: PawBarEvent) -> bool:
     """Screen the stringified event payload for prompt-injection content.
 
     Runs the heuristic :class:`InjectionScanner` (regex-based, no API key
@@ -489,14 +493,14 @@ async def _screen_event_for_injection(event: PawPrintEvent) -> bool:
 
     payload = json.dumps(event.payload, default=str)
     try:
-        scan = get_injection_scanner().scan(payload, source=f"paw_print:{event.widget_id}")
+        scan = get_injection_scanner().scan(payload, source=f"paw_bar:{event.widget_id}")
     except Exception:
         logger.debug("Injection scan raised; accepting event by default")
         return True
 
     if scan.threat_level == ThreatLevel.HIGH:
         logger.warning(
-            "Dropping paw-print event for widget %s — injection threat %s (patterns: %s)",
+            "Dropping paw-bar event for widget %s — injection threat %s (patterns: %s)",
             event.widget_id,
             scan.threat_level.value,
             ", ".join(scan.matched_patterns),
@@ -506,25 +510,25 @@ async def _screen_event_for_injection(event: PawPrintEvent) -> bool:
 
 
 async def _open_decision_loop(
-    widget: PawPrintWidget,
-    event: PawPrintEvent,
+    widget: PawBarWidget,
+    event: PawBarEvent,
     store: Any,
 ) -> str | None:
     """Raise an Instinct proposal for a mapped customer event (gap2).
 
     Thin wrapper over ``decision_loop.propose_customer_decision`` — keeps the
-    import lazy (the OSS paw_print store never reaches into the EE decision-loop
+    import lazy (the OSS paw_bar store never reaches into the EE decision-loop
     module) and the failure best-effort: any error is swallowed by the called
     function, and a defensive guard here ensures even an import failure can't
     break the ingest response. Returns the proposed Instinct action id, or None.
     """
     try:
-        from pocketpaw_ee.paw_print.decision_loop import propose_customer_decision
+        from pocketpaw_ee.paw_bar.decision_loop import propose_customer_decision
 
         return await propose_customer_decision(
             widget=widget,
             event=event,
-            paw_print_store=store,
+            paw_bar_store=store,
         )
     except Exception:
         logger.warning(
@@ -535,8 +539,8 @@ async def _open_decision_loop(
         return None
 
 
-async def _apply_event_mapping(widget: PawPrintWidget, event: PawPrintEvent) -> str | None:
-    """Turn a PawPrintEvent into a Fabric object when a mapping exists."""
+async def _apply_event_mapping(widget: PawBarWidget, event: PawBarEvent) -> str | None:
+    """Turn a PawBarEvent into a Fabric object when a mapping exists."""
     mapping = widget.event_mapping.get(event.type)
     if mapping is None:
         return None
@@ -547,7 +551,7 @@ async def _apply_event_mapping(widget: PawPrintWidget, event: PawPrintEvent) -> 
     except ImportError:
         return None
 
-    # ISO note: paw-print's tenant key is the widget OWNER, a logical, possibly
+    # ISO note: paw-bar's tenant key is the widget OWNER, a logical, possibly
     # colon-qualified string (``user:maya``) — NOT a physical-store-path
     # workspace id (a ``:`` fails the path-traversal allowlist). The Fabric
     # write is scoped by the object's ``source_*`` provenance + the store's own
@@ -563,13 +567,13 @@ async def _apply_event_mapping(widget: PawPrintWidget, event: PawPrintEvent) -> 
         obj = FabricObject(
             type_name=mapping.creates,
             properties=properties,
-            source_connector="paw_print",
+            source_connector="paw_bar",
             source_id=widget.id,
         )
         created = await fabric.create_object(obj)
         return getattr(created, "id", None)
     except Exception:
-        logger.exception("Failed to create Fabric object from paw-print event")
+        logger.exception("Failed to create Fabric object from paw-bar event")
         return None
 
 
