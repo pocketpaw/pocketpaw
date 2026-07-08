@@ -27,6 +27,12 @@
 # tracks, which masked it. This test pins the REAL svelte output shape so the
 # regression can't return.
 #
+# Updated 2026-07-08 (DP0-1 — per-tenant D1 id plumbing): build() now ALWAYS
+# threads an optional ``d1_database_id`` onto ``siteConfig.d1DatabaseId`` (default
+# "" for a static site), which the paw-sites generator bakes into the emitted
+# wrangler.toml ``database_id``. Two tests pin it: a supplied id lands on
+# ``siteConfig.d1DatabaseId``, and an omitted one defaults to "".
+#
 # Updated 2026-06-21 (feat/dsv-5-svelte-dynamic-brain): DSV-5 — a DYNAMIC svelte
 # pocket carries its live-data bindings (objects/sources/actions/auth) as SIBLING
 # keys on the same ``source`` envelope as the files. build() must SPLIT the
@@ -170,6 +176,50 @@ async def test_builder_origin_is_threaded_into_site_config() -> None:
     sent = runner.input_json
     assert sent is not None
     assert sent["siteConfig"]["builderOrigin"] == "https://app.paw.example"
+
+
+@pytest.mark.asyncio
+async def test_d1_database_id_is_threaded_into_site_config() -> None:
+    """DP0-1: build(d1_database_id=...) puts it on siteConfig.d1DatabaseId so the
+    paw-sites generator threads it into the emitted wrangler.toml database_id."""
+    runner = _CapturingRunner()
+    client = GeneratorClient(_runner=runner)
+    await client.build(
+        engine="svelte",
+        source=_SOURCE_MAP,
+        ripple_spec=None,
+        theme={},
+        site_id="site_sv",
+        title="Guestbook",
+        capture_api_base="https://api.paw.example",
+        capture_signed_key="pp_tok_x",
+        d1_database_id="abc123",
+    )
+    sent = runner.input_json
+    assert sent is not None
+    assert sent["siteConfig"]["d1DatabaseId"] == "abc123"
+
+
+@pytest.mark.asyncio
+async def test_d1_database_id_defaults_to_empty_when_omitted() -> None:
+    """A static site (no d1_database_id) still carries the key, defaulting to "" —
+    the prior empty value the generator bakes into wrangler.toml database_id."""
+    runner = _CapturingRunner()
+    client = GeneratorClient(_runner=runner)
+    await client.build(
+        engine="svelte",
+        source=_SOURCE_MAP,
+        ripple_spec=None,
+        theme={},
+        site_id="site_sv",
+        title="Tally",
+        capture_api_base="https://api.paw.example",
+        capture_signed_key="pp_tok_x",
+        # d1_database_id omitted
+    )
+    sent = runner.input_json
+    assert sent is not None
+    assert sent["siteConfig"]["d1DatabaseId"] == ""
 
 
 @pytest.mark.asyncio
