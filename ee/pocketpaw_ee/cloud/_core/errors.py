@@ -24,6 +24,13 @@ the subscription-cancel path when a workspace has no ``active`` subscription to
 cancel (only historical / already-cancelled rows, or never subscribed). 402 (the
 same money-error family as ``InsufficientCredits`` / ``QuotaExceeded``) so the
 client renders a "not subscribed" state rather than a 404-style missing resource.
+
+Changed 2026-07-08 (feat/billing-smb-caps): added ``PocketLimitError`` (402,
+``billing.pocket_limit``) and ``ConnectorLimitError`` (402,
+``billing.connector_limit``) — the pocket-create and connector-enable siblings of
+``SeatLimitError``. Same 402 money-adjacent family; distinct codes so the UI can
+prompt a plan upgrade. Both enforce at create/enable time only (never retroactive)
+and only when ``billing_enforced`` is on.
 """
 
 from __future__ import annotations
@@ -112,6 +119,34 @@ class SeatLimitError(CloudError):
         super().__init__(402, "billing.seat_limit", f"Seat limit of {seats} reached")
 
 
+class PocketLimitError(CloudError):
+    """Workspace hit its plan's pocket cap (402).
+
+    Sibling of ``SeatLimitError`` for the pocket-create seam: the workspace holds
+    its plan's ``max_pockets`` and a new create would exceed it. 402 (same
+    money-adjacent family) with a distinct ``billing.pocket_limit`` code so the UI
+    can prompt a plan upgrade. Enforced at CREATE time only — never removes an
+    existing pocket — and only when ``billing_enforced`` is on.
+    """
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(402, "billing.pocket_limit", f"Pocket limit of {limit} reached")
+
+
+class ConnectorLimitError(CloudError):
+    """Workspace hit its plan's connector cap (402).
+
+    Sibling of ``SeatLimitError`` for the connector-enable seam: the workspace
+    already has its plan's ``max_connectors`` enabled and enabling another would
+    exceed it. 402 with a distinct ``billing.connector_limit`` code so the UI can
+    prompt a plan upgrade. Enforced at ENABLE time only — never disables an
+    already-enabled connector — and only when ``billing_enforced`` is on.
+    """
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(402, "billing.connector_limit", f"Connector limit of {limit} reached")
+
+
 class InsufficientCredits(CloudError):
     """Credit wallet has too few credits for the requested debit (402)."""
 
@@ -194,11 +229,13 @@ __all__ = [
     "BadRequest",
     "CloudError",
     "ConflictError",
+    "ConnectorLimitError",
     "Forbidden",
     "InsufficientCredits",
     "Internal",
     "NoActiveSubscription",
     "NotFound",
+    "PocketLimitError",
     "PreconditionFailed",
     "QuotaExceeded",
     "RateLimited",

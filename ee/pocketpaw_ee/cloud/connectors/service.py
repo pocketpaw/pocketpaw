@@ -1,5 +1,13 @@
 # Connectors — workspace-scoped business logic.
 # Created: 2026-05-03 — PR-1 of Phase 1 connector consolidation.
+# Updated: 2026-07-08 (feat/billing-smb-caps) — added a per-plan CONNECTOR cap.
+#   ``enable_connector`` now raises ``ConnectorLimitError`` (402) when the workspace
+#   is already at/over its plan's ``max_connectors`` and the call would enable a NEW
+#   connector (a fresh row, or re-enabling a disabled one). The check
+#   (``_connector_cap_exceeded``) is GATED on ``billing_enforced`` (a no-op for OSS
+#   / self-host), never trips on an uncapped Enterprise plan, and is skipped for an
+#   idempotent re-enable of an already-enabled connector — enforcement is
+#   enable-time only, never retroactive.
 # Updated: 2026-06-07 (M3 connector→skill auto-authoring) — enable/disable of a
 #   POCKET-scoped connector now RE-DERIVES the pocket's surface_profile from ALL
 #   its enabled pocket-scoped connectors (``_rederive_pocket_surface_profile``)
@@ -71,7 +79,13 @@ from pathlib import Path
 from beanie.operators import And, Or
 
 from pocketpaw.connectors.protocol import ExecutionMode
-from pocketpaw_ee.cloud._core.errors import CloudError, Forbidden, NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import (
+    CloudError,
+    ConnectorLimitError,
+    Forbidden,
+    NotFound,
+    ValidationError,
+)
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     ConnectorConfigUpdated,
@@ -437,12 +451,51 @@ async def get_connector(
     )
 
 
+async def _connector_cap_exceeded(workspace_id: str) -> tuple[bool, int, int | None]:
+    """Would enabling one MORE connector exceed this workspace's plan cap?
+
+    Returns ``(exceeded, enabled_count, limit)``. feat/billing-smb-caps. GATED on
+    ``billing_enforced``: OSS / self-host tenants (billing off) always get
+    ``(False, 0, None)`` — no cap, no extra DB read. When enforced, resolves the
+    workspace's plan ``max_connectors`` and counts its currently-ENABLED connector
+    rows. An uncapped plan (Enterprise, ``max_connectors=None``) never trips. The
+    caller only invokes this when it is about to enable a connector that isn't
+    already enabled, so ``enabled_count >= limit`` is precisely "this new one would
+    exceed" — an already-enabled connector re-enabled idempotently is never blocked
+    (never retroactive). Imports are lazy to keep this module off the config /
+    entitlements import graph at load.
+    """
+    from pocketpaw.config import get_settings
+
+    if not get_settings().billing_enforced:
+        return (False, 0, None)
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = await entitlements_service.resolve_entitlements(workspace_id)
+    limit = ent.max_connectors
+    if limit is None:
+        return (False, 0, None)
+    enabled_count = await _WCDoc.find(
+        _WCDoc.workspace == workspace_id,
+        _WCDoc.enabled == True,  # noqa: E712 — Beanie expects ==
+    ).count()
+    return (enabled_count >= limit, enabled_count, limit)
+
+
 async def enable_connector(
     workspace_id: str,
     name: str,
     body: EnableConnectorRequest,
 ) -> ConnectorResponse:
-    """Enable a connector for this workspace, creating the row if needed."""
+    """Enable a connector for this workspace, creating the row if needed.
+
+    feat/billing-smb-caps: raises ``ConnectorLimitError`` (402) when the workspace
+    is already at/over its plan's ``max_connectors`` and this call would enable a
+    NEW connector (a fresh row, or re-enabling a disabled one). A no-op unless
+    ``billing_enforced``; an idempotent re-enable of an already-enabled connector is
+    never blocked (create-time only, never retroactive).
+    """
     body = EnableConnectorRequest.model_validate(body)
     available = {a.name: a for a in _available_from_registry()}
     if name not in available:
@@ -454,6 +507,22 @@ async def enable_connector(
         raise ValidationError("connector.scope_missing_user", "scope=user requires user_id")
 
     doc = await _WCDoc.find_one(_WCDoc.workspace == workspace_id, _WCDoc.name == name)
+    # Cap check only when this call would turn a connector ON that isn't already on
+    # (a brand-new row, or re-enabling a disabled one). An idempotent re-enable of
+    # an already-enabled connector must NEVER be blocked — that would retroactively
+    # strip access. Checked BEFORE the write.
+    if doc is None or not doc.enabled:
+        exceeded, enabled_count, limit = await _connector_cap_exceeded(workspace_id)
+        if exceeded:
+            logger.info(
+                "connector enable blocked by plan cap: workspace=%s has %d enabled "
+                "(limit %s), name=%s",
+                workspace_id,
+                enabled_count,
+                limit,
+                name,
+            )
+            raise ConnectorLimitError(limit)  # type: ignore[arg-type]  # int when exceeded
     if doc is None:
         doc = _WCDoc(
             workspace=workspace_id,

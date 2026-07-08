@@ -15,6 +15,11 @@
 #   ``monthly_ceiling: int | None`` next to ``monthly_credit_allotment`` — the
 #   per-plan monthly credit CAP (None = uncapped) the resolver populates from the
 #   plan catalog and later quota chunks enforce against.
+# Updated 2026-07-08 (feat/billing-smb-caps): added ``max_seats`` / ``max_pockets``
+#   / ``max_connectors`` (all ``int | None``, None = uncapped) beside
+#   ``monthly_ceiling`` — the SMB resource ceilings the resolver populates from the
+#   plan catalog and the seat / pocket-create / connector-enable gates enforce
+#   against at create time. Fail-closed to the Free value on the fallback path.
 
 from __future__ import annotations
 
@@ -33,11 +38,18 @@ class Entitlements:
     per renewal for the tier. ``monthly_ceiling`` is the per-plan monthly credit
     CAP (integer credits, or None = uncapped) credit-quota enforcement caps spend
     against; a workspace with no/unknown plan resolves to the Free ceiling (the
-    fail-closed trial cap), never None/uncapped.
+    fail-closed trial cap), never None/uncapped. ``max_seats`` / ``max_pockets`` /
+    ``max_connectors`` are the SMB resource ceilings (integer, or None = uncapped
+    for Enterprise) the seat / pocket-create / connector-enable gates enforce at
+    create time; a no/unknown-plan workspace resolves to the Free values
+    (fail-closed), never None/uncapped.
     """
 
     workspace_id: str
     plan: str
     monthly_credit_allotment: int
     monthly_ceiling: int | None
+    max_seats: int | None
+    max_pockets: int | None
+    max_connectors: int | None
     features: frozenset[str] = field(default_factory=frozenset)

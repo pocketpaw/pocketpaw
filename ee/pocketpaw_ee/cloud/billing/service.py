@@ -551,7 +551,9 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
 
     * ``subscription.active`` / ``subscription.renewed`` → grant the tier's
       monthly allotment ADDITIVELY (unused credits roll over) keyed on the
-      per-renewal ``event_id``; ``active`` ALSO upgrades ``Workspace.plan``.
+      per-renewal ``event_id``; ``active`` ALSO upgrades ``Workspace.plan`` and
+      resyncs the stored seat cap UP to the new plan (upgrade-only — a later
+      cancel reverts the plan but never strips seats).
     * ``subscription.cancelled`` → revert ``Workspace.plan`` to ``free`` WITHOUT
       clawing back any granted credits.
     * any other subscription.* delivery → acked, no action.
@@ -647,6 +649,31 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
     # subscription.active upgrades the entitlement to the subscribed tier.
     if event.type == _SUB_ACTIVE:
         await workspace_service.set_workspace_plan(event.workspace_id, tier.key)
+        # feat/billing-smb-caps: lift the stored seat cap to the new plan so an
+        # upgrade actually raises it. UPGRADE-ONLY (max(doc.seats, plan.max_seats))
+        # — a later cancel reverts the plan but never strips the seats. Best-effort:
+        # a resync hiccup must not fail the (already-applied) credit grant / plan
+        # move, and the seat gates also lift the ceiling live via the resolved plan.
+        try:
+            new_seats = await workspace_service.raise_seats_for_plan(
+                event.workspace_id, tier.key
+            )
+            if new_seats is not None:
+                logger.info(
+                    "billing.webhook: %s resynced seat cap to %d for workspace=%s plan=%s",
+                    event.type,
+                    new_seats,
+                    event.workspace_id,
+                    tier.key,
+                )
+        except Exception:
+            logger.exception(
+                "billing.webhook: seat-cap resync failed for workspace=%s plan=%s "
+                "(event_id=%s) — plan upgrade stands; seat gate still lifts live",
+                event.workspace_id,
+                tier.key,
+                event.event_id,
+            )
 
     # Track the subscription lifecycle (active for both active + renewed).
     await _upsert_subscription(event, status="active", plan_key=tier.key)
