@@ -1405,7 +1405,7 @@
       "narrative": "Instinct is the governance primitive: agents PROPOSE actions instead of executing them, and humans approve, reject, or edit each proposal at a gate. Every decision captures a reasoning trace. It is becoming a multi-lane triage router (auto / optimistic / escalate / dry-run + a trust ledger), with ASK as the default lane. Reach for it whenever an agent action needs governance — approvals, human review of agent writes, gated side effects. It pairs with Branch (which builds propose→review→merge on top of the gate) and Belt (where the human mans the Instinct gate on proposed diffs). NOT a biology term — Instinct is the approval pipeline.",
       "requires": [],
       "summary": "The decision pipeline: agents PROPOSE actions, humans approve/reject/edit at a gate; captures reasoning traces.",
-      "surface": "/paw-print"
+      "surface": "/decisions"
     },
     {
       "gist": "the 'app' primitive — one workspace container for agents, data, tools, connectors, and Instinct rules",
@@ -2003,6 +2003,28 @@
     {
       "gist": "",
       "how": "",
+      "id": "surface:decisions",
+      "keywords": [
+        "decisions",
+        "corrections",
+        "feed",
+        "governance",
+        "what happened",
+        "instinct",
+        "review decisions"
+      ],
+      "kind": "surface",
+      "name": "Decisions",
+      "narrative": "Decisions is the org-wide decision feed — recent Instinct corrections across the workspace, each rendered through a diff viewer. Point a user here to review what decisions agents and humans have been making. It is the decision-feed home of the Instinct primitive; the historical query layer is /decisions-graph.",
+      "requires": [
+        "primitive:instinct"
+      ],
+      "summary": "Org-wide decision feed: recent Instinct corrections across the workspace's pockets, with diff viewers.",
+      "surface": "/decisions"
+    },
+    {
+      "gist": "",
+      "how": "",
       "id": "surface:decisions-graph",
       "keywords": [
         "decision graph",
@@ -2015,7 +2037,7 @@
       ],
       "kind": "surface",
       "name": "Decision Graph",
-      "narrative": "Decision Graph lets an operator query the historical Decision projection visually — deep-linkable by decision id, depth, and mode. Point a user here to trace WHY a decision happened and what it connects to; for the live feed of recent decisions use /paw-print instead.",
+      "narrative": "Decision Graph lets an operator query the historical Decision projection visually — deep-linkable by decision id, depth, and mode. Point a user here to trace WHY a decision happened and what it connects to; for the live feed of recent decisions use /decisions instead.",
       "requires": [
         "primitive:instinct"
       ],
@@ -2168,28 +2190,6 @@
       "requires": [],
       "summary": "Operator + approvals surface at /deep-work: unified work feed with cycles, plan, activity, and analytics tabs, plus the approvals tray, filterable by project.",
       "surface": "/deep-work"
-    },
-    {
-      "gist": "",
-      "how": "",
-      "id": "surface:paw-print",
-      "keywords": [
-        "decisions",
-        "corrections",
-        "feed",
-        "governance",
-        "what happened",
-        "instinct",
-        "review decisions"
-      ],
-      "kind": "surface",
-      "name": "Paw Print",
-      "narrative": "Paw Print is the org-wide decision feed — recent Instinct corrections across the workspace, each rendered through a diff viewer. Point a user here to review what decisions agents and humans have been making. It is the decision-feed home of the Instinct primitive; the historical query layer is /decisions-graph.",
-      "requires": [
-        "primitive:instinct"
-      ],
-      "summary": "Org-wide decision feed: recent Instinct corrections across the workspace's pockets, with diff viewers.",
-      "surface": "/paw-print"
     },
     {
       "gist": "",
