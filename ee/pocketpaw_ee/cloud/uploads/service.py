@@ -46,6 +46,9 @@ from pocketpaw.uploads.service import (
     UploadService,
     _raise,
 )
+from pocketpaw.uploads.service import (
+    generate_thumbnail as _oss_generate_thumbnail,
+)
 from pocketpaw_ee.cloud.realtime.emit import emit
 from pocketpaw_ee.cloud.realtime.events import FileDeleted, FileReady
 from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
@@ -262,6 +265,36 @@ class EEUploadService:
             rec.storage_key, ttl_seconds, response_content_disposition=disposition
         )
         return rec, url
+
+    async def thumbnail(
+        self,
+        file_id: str,
+        requester_id: str,
+        workspace: str,
+        *,
+        width: int = 0,
+        height: int = 0,
+        quality: int = 80,
+        fmt: str = "webp",
+    ) -> tuple[FileRecord, str, AsyncIterator[bytes]]:
+        """Return ``(record, mime_type, chunk_iterator)`` for a resized thumbnail.
+
+        Workspace-scoped lookup + access check, then delegates to the shared
+        ``generate_thumbnail`` helper for the actual fetch + resize + cache.
+        """
+        rec = await self._meta.get_scoped(file_id, workspace=workspace)
+        if rec is None:
+            raise NotFound()
+        await self._assert_can_read(rec, requester_id, workspace)
+        return await _oss_generate_thumbnail(
+            self._adapter,
+            rec,
+            self._cfg.local_root,
+            width=width,
+            height=height,
+            quality=quality,
+            fmt=fmt,
+        )
 
     async def delete(
         self,
