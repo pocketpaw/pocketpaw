@@ -9,6 +9,14 @@
 #   a. load the Site + the pocket's rippleSpec; fail-closed tenancy re-check (the
 #      worker already re-checks, this is defense-in-depth) — no dynamic site/spec
 #      fails cleanly.
+#   Updated 2026-07-09 (fix/provision-cf-client-wedge) — building the CF client moved
+#   INSIDE the try. It reads the Cloudflare env and raises when unconfigured; raised
+#   outside the try it skipped ``mark_provision_failed`` and left the Site stuck in
+#   ``provision_status="provisioning"``, which the publish path's single-flight guard
+#   reads as "already in flight" — so every retry no-oped and the site could never be
+#   published again. Now an unconfigured Cloudflare fails the job cleanly and the site
+#   lands in ``failed``, which a re-publish resets and re-dispatches.
+#
 #   b. create_database GUARDED on Site.d1_database_id: reuse an already-stored id;
 #      else create it and persist the id IMMEDIATELY (status stays ``provisioning``)
 #      so a retry reuses the same D1 and never orphans a second one.
@@ -70,9 +78,15 @@ class ProvisionSiteJob:
             raise ProvisionError("no Site doc to provision — publish the site first")
 
         site_id = str(site.id)
-        cf = sites_service.provision_cf_client()
 
         try:
+            # Building the CF client READS the Cloudflare env and raises when it is
+            # unconfigured, so it belongs INSIDE the try: an escaping raise here would
+            # skip ``mark_provision_failed`` and strand the Site in ``provisioning``,
+            # where ``_provision_dynamic_site``'s single-flight guard no-ops every
+            # future publish (site permanently unpublishable).
+            cf = sites_service.provision_cf_client()
+
             # b. create_database GUARDED on the stored id. Reuse an existing D1;
             # else create one and persist the id IMMEDIATELY (status stays
             # ``provisioning``) so a retry reuses it — never orphan a second D1.
