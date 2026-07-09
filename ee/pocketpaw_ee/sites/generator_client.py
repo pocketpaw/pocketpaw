@@ -8,6 +8,16 @@
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-07-09 (fix/sites-gen-windows-process-kill): ``_kill_process_group``
+# was POSIX-only — it unconditionally called ``os.killpg(os.getpgid(pid), SIGKILL)``,
+# neither of which exists on Windows. On a Windows host a build TIMEOUT therefore
+# crashed inside ``_communicate_bounded``'s timeout handler with ``AttributeError:
+# module 'os' has no attribute 'killpg'``, masking the real ``_BuildTimeout`` and
+# escaping ``publish_pocket`` as an unhandled 500. ``_kill_process_group`` now
+# branches on ``sys.platform``: POSIX keeps the process-group SIGKILL; Windows calls
+# the new ``_kill_process_tree_windows`` (``taskkill /F /T`` to reap the leaked
+# workerd child TREE, best-effort ``proc.kill()`` fallback if taskkill is missing).
+#
 # Updated 2026-07-02 (harden apply_leaf_edits temp-file cleanup): ``apply_leaf_edits``
 # now assigns ``input_path = fh.name`` BEFORE ``json.dump`` inside the ``with`` and
 # wraps creation + write + exec in ONE guarded try/finally, so a serialization
@@ -194,6 +204,8 @@ import logging
 import os
 import shlex
 import signal
+import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -244,19 +256,49 @@ class _BuildTimeout(RuntimeError):
         super().__init__(f"{label} timed out after {timeout_s}s")
 
 
-def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
-    """SIGKILL the entire process GROUP of a launched subprocess so leaked workerd
-    CHILDREN die too, not just the parent.
+def _kill_process_tree_windows(proc: asyncio.subprocess.Process) -> None:
+    """Windows has no ``setsid`` process groups, so kill the whole child TREE with
+    ``taskkill /F /T`` — ``/T`` recurses into children, reaping the leaked workerd
+    child the bun parent never cleans up (the POSIX ``killpg`` equivalent). If
+    ``taskkill`` is missing or blocked, degrade to a best-effort parent kill so the
+    exception never escapes the timeout handler."""
+    pid = proc.pid
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=10,
+        )
+    except Exception:
+        # taskkill unavailable / blocked / timed out — best-effort parent kill.
+        with contextlib.suppress(Exception):
+            proc.kill()
 
-    The build subprocesses are launched with ``start_new_session=True``, so each is
-    its own process-group leader (pgid == pid). ``adapter-cloudflare``'s prerender
-    boots a workerd child that the bun parent never reaps; killing only the parent
-    would leave that child wedged. ``os.killpg(os.getpgid(pid), SIGKILL)`` takes out
-    the whole group. Guards ``ProcessLookupError`` (the proc/group already exited)
-    and ``PermissionError`` (can't signal — nothing we can do) so a best-effort kill
-    never raises into the build path."""
+
+def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    """Kill a launched build subprocess AND its leaked children so a wedged workerd
+    prerender dies too, not just the parent.
+
+    ``adapter-cloudflare``'s prerender boots a workerd child that the bun parent
+    never reaps; killing only the parent would leave that child wedged. The
+    mechanism is platform-specific:
+
+    * **POSIX** — the subprocesses are launched with ``start_new_session=True``, so
+      each leads its own process group (pgid == pid); ``os.killpg(os.getpgid(pid),
+      SIGKILL)`` takes out the whole group. Guards ``ProcessLookupError`` (already
+      exited) and ``PermissionError`` (can't signal) so the best-effort kill never
+      raises into the build path.
+    * **Windows** — ``start_new_session`` is a no-op, and ``os.killpg`` /
+      ``os.getpgid`` don't exist at all (referencing them raised ``AttributeError``
+      inside the timeout handler, masking ``_BuildTimeout`` and escaping publish as
+      an unhandled 500). Use ``taskkill /F /T`` to kill the child tree instead."""
     pid = proc.pid
     if pid is None:
+        return
+    if sys.platform == "win32":
+        _kill_process_tree_windows(proc)
         return
     try:
         os.killpg(os.getpgid(pid), signal.SIGKILL)
