@@ -30,6 +30,18 @@
 # fail-open in the user's mental model. The audit write is wrapped so an audit
 # failure can never break the gate (mirrors `_audit_triage_decision`).
 #
+# Updated: 2026-07-09 (feat/instinct-guardrail-rules — per-workspace enforcement)
+# — the `gate_action` enforcement decision is now resolved PER WORKSPACE via
+# `_enforcement_enabled(workspace_id)` instead of reading the global
+# `instinct_enforce_discovered_rules` flag directly. Resolution: a workspace's
+# `InstinctWorkspaceConfig` override (rules.service.get_enforcement_override)
+# wins when set (True/False), else the call falls back to the global flag. The
+# override read is FAIL-OPEN — a config/store read error yields "no enforcement"
+# (False), logs a WARNING, and never blocks the gate — preserving the same
+# fail-open rail `_load_discovered_instinct_rules` already applies to the
+# `get_active_rules` read. So one tenant can flip enforcement without a code
+# change, and a DB hiccup can never turn into a hard failure.
+#
 # Updated: 2026-06-30 (integration/szd-finish, B1 — gate DoS fix) — the
 # discovered-rule CEL probe in `_load_discovered_instinct_rules` now catches ANY
 # exception, not just `CelEvaluationError`. `evaluate_cel` calls
@@ -142,7 +154,7 @@ from pocketpaw_ee.cloud.pockets.instinct_triage import (
     TriageProposal,
     classify_lane,
 )
-from pocketpaw_ee.cloud.rules.service import get_active_rules
+from pocketpaw_ee.cloud.rules.service import get_active_rules, get_enforcement_override
 
 logger = logging.getLogger(__name__)
 
@@ -390,6 +402,35 @@ async def _find_existing_pending_id(
     return None
 
 
+async def _enforcement_enabled(workspace_id: str) -> bool:
+    """Resolve whether authored-rule enforcement is ON for ``workspace_id``.
+
+    The per-workspace ``InstinctWorkspaceConfig`` override wins when set
+    (``True``/``False``); otherwise the call falls back to the global
+    ``instinct_enforce_discovered_rules`` settings flag. The global read stays
+    HERE (not in the service) so the existing gate tests that flip the flag by
+    monkeypatching ``instinct_dispatch.get_settings`` keep working.
+
+    FAIL-OPEN: a config/store read error yields ``False`` (no enforcement), logs
+    a WARNING, and NEVER raises — a DB hiccup must never turn into a blocked gate
+    (the same rail ``_load_discovered_instinct_rules`` applies to the
+    ``get_active_rules`` read). Enforcement can only ever ADD a block/escalation,
+    so "no enforcement" is the safe direction when the override is unreadable.
+    """
+    global_flag = bool(get_settings().instinct_enforce_discovered_rules)
+    try:
+        override = await get_enforcement_override(workspace_id)
+    except Exception:  # noqa: BLE001 — fail-OPEN: a config read hiccup never blocks
+        logger.warning(
+            "discovered-rule enforcement: enforcement-config read failed for "
+            "workspace=%s — defaulting to NO enforcement (fail-open)",
+            workspace_id,
+            exc_info=True,
+        )
+        return False
+    return override if override is not None else global_flag
+
+
 async def _load_discovered_instinct_rules(
     *,
     workspace_id: str,
@@ -609,11 +650,15 @@ async def gate_action(
     level = _coerce_approval_level(approval_level)
 
     # F6 — merge approved workspace-discovered rules into the template before
-    # the (unchanged) composer call. DEFAULT-OFF: when the flag is off,
-    # `get_active_rules` is never called and `effective_template is template`,
-    # so the entire discovered branch is dead code on the default path.
+    # the (unchanged) composer call. Enforcement is resolved PER WORKSPACE
+    # (`_enforcement_enabled`): the workspace's `InstinctWorkspaceConfig` override
+    # wins, else the global `instinct_enforce_discovered_rules` flag. When
+    # enforcement is off, `get_active_rules` is never called and
+    # `effective_template is template`, so the discovered branch stays dead code
+    # on the off path. The resolver is fail-open — a config read error yields
+    # "no enforcement", never a block.
     effective_template = template
-    if get_settings().instinct_enforce_discovered_rules:
+    if await _enforcement_enabled(workspace_id):
         # Pin a stable `now` shared by the guarded probe and the composer so a
         # time-sensitive CEL `when` evaluates identically in both.
         if now is None:

@@ -7,6 +7,11 @@
 # ``rules.service.create_rule``: the editable ``RuleDraft`` plus ``owner_user_id``
 # (the approver). Tenancy is NOT in this DTO — it arrives as the service's explicit
 # ``workspace_id`` parameter, and the service asserts it matches ``draft.scope``.
+#
+# Updated: 2026-07-09 (feat/instinct-guardrail-rules) — added the per-workspace
+# enforcement-toggle DTOs (``SetEnforcementRequest`` / ``EnforcementResponse``)
+# the new ``rules.router`` PUT/GET ``/rules/enforcement`` endpoints use to read
+# and set the tri-state override on the global enforcement flag.
 
 from __future__ import annotations
 
@@ -34,6 +39,20 @@ class CreateRuleRequest(BaseModel):
 
     draft: RuleDraft
     owner_user_id: str
+
+
+class SetEnforcementRequest(BaseModel):
+    """Body for ``PUT /rules/enforcement`` → ``rules.service.set_enforcement``.
+
+    ``enabled`` is the TRI-STATE per-workspace override on the global
+    ``instinct_enforce_discovered_rules`` flag: ``True`` forces authored-rule
+    enforcement ON for this workspace, ``False`` forces it OFF, and ``None``
+    (the default) clears the override so the workspace inherits the global flag.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -71,4 +90,28 @@ class RuleResponse(BaseModel):
     updated_at: datetime | None = None
 
 
-__all__ = ["CreateRuleRequest", "RuleResponse", "RuleScopeResponse"]
+class EnforcementResponse(BaseModel):
+    """Wire shape for a workspace's authored-rule enforcement state.
+
+    ``enforce_discovered_rules`` is the EFFECTIVE value the live gate uses
+    (``override`` when set, else ``global_default``). ``override`` exposes the
+    raw tri-state per-workspace value (``None`` = inheriting) and
+    ``global_default`` the current global flag, so the admin UI can show both
+    "your setting" and "what the workspace inherits".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: str
+    enforce_discovered_rules: bool
+    override: bool | None = None
+    global_default: bool
+
+
+__all__ = [
+    "CreateRuleRequest",
+    "EnforcementResponse",
+    "RuleResponse",
+    "RuleScopeResponse",
+    "SetEnforcementRequest",
+]
