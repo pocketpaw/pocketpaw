@@ -228,6 +228,15 @@
 # gained an optional ``pattern`` arg; both DTOs default it to "" (empty-safe for a
 # pocket with no pattern or a missing/cross-tenant pocket).
 #
+# Updated 2026-07-09 (SR-9 — surface each site's ENGINE): the sibling of DS-1a.
+# list_for_workspace() and pocket_status() now also carry the source pocket's
+# authoring ``engine`` ("svelte" | "ripple") so the gallery can badge each card's
+# engine (Custom vs Ripple) without a per-site fetch. Resolved via the new
+# pockets_service.engines_for_pockets (one projected $in read, tenant-scoped),
+# mirroring patterns_for_pockets. _to_response gained an optional ``engine`` arg;
+# both DTOs default it to "" (empty-safe for a pocket that predates the engine
+# field or a missing/cross-tenant pocket).
+#
 # Updated 2026-06-19 (P2b-backend — "Last Deployed" + revert endpoint): publish()
 # now stamps the Site doc's ``deployed_at`` (UTC) ONLY when a non-preview deploy
 # succeeds (when ``deployed`` flips True) — the true "last shipped" marker, not a
@@ -1000,7 +1009,7 @@ async def _promote_pocket_draft_to_published(
         )
 
 
-def _to_response(doc: _SiteDoc, pattern: str = "") -> SiteResponse:
+def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResponse:
     deployed_at = getattr(doc, "deployed_at", None)
     return SiteResponse(
         id=str(doc.id),
@@ -1020,6 +1029,10 @@ def _to_response(doc: _SiteDoc, pattern: str = "") -> SiteResponse:
         # ...), resolved by the caller from Pocket.pattern (it lives on the pocket,
         # not the Site). "" when unset / unresolved so the gallery is empty-safe.
         pattern=pattern,
+        # SR-9: the source pocket's authoring engine ("svelte" | "ripple"),
+        # resolved by the caller from Pocket.engine (sibling of pattern above). ""
+        # when unresolved, so the gallery's engine badge is empty-safe.
+        engine=engine,
         # charge-first: the Dodo checkout link a PAID-tier publish returns, read
         # from the transient ``_checkout_url`` PrivateAttr (never persisted). None
         # for a free/live publish and for any list/status read (those docs are
@@ -3448,13 +3461,16 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     # no deployed site or the doc predates the field (a pre-P2b row).
     deployed_at = getattr(doc, "deployed_at", None) if doc is not None else None
 
-    # DS-1a: resolve the source pocket's authoring pattern so a by-pocket status
-    # read can badge a dynamic site too. ONE read, tenant-scoped; "" when the
-    # pocket has no pattern or could not be resolved (empty-safe).
+    # DS-1a/SR-9: resolve the source pocket's authoring pattern + engine so a
+    # by-pocket status read can badge a dynamic site AND its engine too. Each is
+    # ONE read, tenant-scoped; "" when the pocket has no value or could not be
+    # resolved (empty-safe).
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     patterns = await pockets_service.patterns_for_pockets(workspace_id, [pocket_id])
     pattern = patterns.get(pocket_id) or ""
+    engines = await pockets_service.engines_for_pockets(workspace_id, [pocket_id])
+    engine = engines.get(pocket_id) or ""
 
     return SiteStatusResponse(
         pocket_id=pocket_id,
@@ -3468,6 +3484,7 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         url=(doc.url or None) if doc is not None else None,
         deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
         pattern=pattern,
+        engine=engine,
     )
 
 
@@ -3620,15 +3637,24 @@ async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
         -_SiteDoc.createdAt
     )  # type: ignore[operator]
     docs = [doc async for doc in cursor]
-    # ONE cross-entity read for every card's pattern (no per-site fetch). The
-    # Pocket read stays in the pockets service (entity isolation) — this service
-    # never imports the Pocket model.
+    # ONE cross-entity read per field for every card's pattern + engine (no
+    # per-site fetch). The Pocket reads stay in the pockets service (entity
+    # isolation) — this service never imports the Pocket model. SR-9 adds the
+    # engine resolution alongside DS-1a's pattern; each is a single projected
+    # $in query keyed on the listed pockets.
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
-    patterns = await pockets_service.patterns_for_pockets(
-        workspace_id, [doc.pocket_id for doc in docs]
-    )
-    return [_to_response(doc, patterns.get(doc.pocket_id) or "") for doc in docs]
+    pocket_ids = [doc.pocket_id for doc in docs]
+    patterns = await pockets_service.patterns_for_pockets(workspace_id, pocket_ids)
+    engines = await pockets_service.engines_for_pockets(workspace_id, pocket_ids)
+    return [
+        _to_response(
+            doc,
+            patterns.get(doc.pocket_id) or "",
+            engines.get(doc.pocket_id) or "",
+        )
+        for doc in docs
+    ]
 
 
 async def site_pocket_ids(workspace_id: str) -> set[str]:
