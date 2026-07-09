@@ -1,4 +1,4 @@
-# tests/cloud/test_paw_print_decision_loop.py — gap2: the closed customer
+# tests/cloud/test_paw_bar_decision_loop.py — gap2: the closed customer
 # decision loop, end to end.
 # Created: 2026-06-11 (gap2) — Proves the loop the module promised but never
 # wired: a customer event raises a PENDING Instinct proposal + parked decision;
@@ -20,27 +20,27 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from pocketpaw_ee.paw_print.decision_loop import (
+from pocketpaw_ee.paw_bar.decision_loop import (
     deliver_customer_decision,
     propose_customer_decision,
 )
-from pocketpaw_ee.paw_print.router import router
+from pocketpaw_ee.paw_bar.router import router
 
 from pocketpaw.instinct.store import InstinctStore
-from pocketpaw.paw_print.models import (
-    PawPrintBlock,
-    PawPrintEvent,
-    PawPrintSpec,
-    PawPrintWidget,
+from pocketpaw.paw_bar.models import (
+    PawBarBlock,
+    PawBarEvent,
+    PawBarSpec,
+    PawBarWidget,
 )
-from pocketpaw.paw_print.store import PawPrintStore
+from pocketpaw.paw_bar.store import PawBarStore
 
 
-def _spec(widget_id: str = "pp_test", pocket_id: str = "pocket-1") -> PawPrintSpec:
-    return PawPrintSpec(
+def _spec(widget_id: str = "pp_test", pocket_id: str = "pocket-1") -> PawBarSpec:
+    return PawBarSpec(
         widget_id=widget_id,
         pocket_id=pocket_id,
-        blocks=[PawPrintBlock(type="text", content="Bright Smile Dental")],
+        blocks=[PawBarBlock(type="text", content="Bright Smile Dental")],
     )
 
 
@@ -66,16 +66,16 @@ def _widget_payload(**overrides: Any) -> dict[str, Any]:
 
 @pytest.fixture
 def stores(tmp_path: Path, monkeypatch):
-    """Wire isolated Instinct + PawPrint stores and patch the singletons.
+    """Wire isolated Instinct + PawBar stores and patch the singletons.
 
     The decision_loop functions lazy-import ``get_instinct_store`` /
-    ``get_paw_print_store`` from ``pocketpaw.stores``, so patching there reaches
+    ``get_paw_bar_store`` from ``pocketpaw.stores``, so patching there reaches
     both the ingest (propose) and the approve (deliver) sides.
     """
-    pp_store = PawPrintStore(tmp_path / "paw_print_loop.db")
+    pp_store = PawBarStore(tmp_path / "paw_bar_loop.db")
     instinct_store = InstinctStore(tmp_path / "instinct_loop.db")
     monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: instinct_store)
-    monkeypatch.setattr("pocketpaw.stores.get_paw_print_store", lambda: pp_store)
+    monkeypatch.setattr("pocketpaw.stores.get_paw_bar_store", lambda: pp_store)
     return pp_store, instinct_store
 
 
@@ -84,19 +84,19 @@ def client(stores, monkeypatch):
     pp_store, _ = stores
     app = FastAPI()
     app.include_router(router)
-    monkeypatch.setattr("pocketpaw_ee.paw_print.router._store", lambda *a, **k: pp_store)
+    monkeypatch.setattr("pocketpaw_ee.paw_bar.router._store", lambda *a, **k: pp_store)
     return TestClient(app)
 
 
 def _create_widget(client: TestClient, **overrides: Any) -> dict[str, Any]:
-    res = client.post("/paw-print/widgets", json=_widget_payload(**overrides))
+    res = client.post("/paw-bar/widgets", json=_widget_payload(**overrides))
     assert res.status_code == 201, res.text
     return res.json()
 
 
 def _ingest(client: TestClient, widget_id: str, customer_ref: str = "patient_42") -> dict[str, Any]:
     res = client.post(
-        f"/paw-print/events/{widget_id}",
+        f"/paw-bar/events/{widget_id}",
         json={
             "type": "appointment_request",
             "payload": {"when": "Tuesday 3pm"},
@@ -110,7 +110,7 @@ def _ingest(client: TestClient, widget_id: str, customer_ref: str = "patient_42"
 
 def _poll(client: TestClient, widget_id: str, customer_ref: str = "patient_42"):
     return client.get(
-        f"/paw-print/events/{widget_id}/decision/{customer_ref}",
+        f"/paw-bar/events/{widget_id}/decision/{customer_ref}",
         headers={"Origin": "https://brightsmiledental.com"},
     )
 
@@ -165,7 +165,7 @@ class TestOpenLoop:
         _, instinct_store = stores
         created = _create_widget(client)
         res = client.post(
-            f"/paw-print/events/{created['id']}",
+            f"/paw-bar/events/{created['id']}",
             json={"type": "page_view", "payload": {}, "customer_ref": "patient_42"},
             headers={"Origin": "https://brightsmiledental.com"},
         )
@@ -262,7 +262,7 @@ class TestRobustness:
         created = _create_widget(client)
         _ingest(client, created["id"])
         res = client.get(
-            f"/paw-print/events/{created['id']}/decision/patient_42",
+            f"/paw-bar/events/{created['id']}/decision/patient_42",
             headers={"Origin": "https://evil.example"},
         )
         assert res.status_code == 403
@@ -271,14 +271,14 @@ class TestRobustness:
         """If the Instinct store explodes, the loop swallows it — the ingest
         response is never broken by a decision-loop failure."""
         pp_store, _ = stores
-        widget = PawPrintWidget(
+        widget = PawBarWidget(
             pocket_id="pocket-1",
             owner="ws:bright-smile",
             name="W",
             spec=_spec(),
             event_mapping={},
         )
-        event = PawPrintEvent(
+        event = PawBarEvent(
             widget_id=widget.id,
             type="appointment_request",
             payload={},
@@ -289,9 +289,7 @@ class TestRobustness:
             raise RuntimeError("instinct store down")
 
         monkeypatch.setattr("pocketpaw.stores.get_instinct_store", _boom)
-        result = await propose_customer_decision(
-            widget=widget, event=event, paw_print_store=pp_store
-        )
+        result = await propose_customer_decision(widget=widget, event=event, paw_bar_store=pp_store)
         assert result is None
 
     async def test_deliver_no_parked_row_is_noop(self, stores) -> None:
@@ -333,14 +331,14 @@ class TestOwnerlessWidgetGuard:
         proposal there would NULL-scope it into every tenant's pending list, so
         the loop is skipped entirely — no proposal, no parked row."""
         pp_store, instinct_store = stores
-        widget = PawPrintWidget(
+        widget = PawBarWidget(
             pocket_id="pocket-1",
             owner="",  # no owner → empty workspace
             name="W",
             spec=_spec(),
             event_mapping={},
         )
-        event = PawPrintEvent(
+        event = PawBarEvent(
             widget_id=widget.id,
             type="appointment_request",
             payload={"when": "Tuesday 3pm"},
@@ -348,7 +346,7 @@ class TestOwnerlessWidgetGuard:
         )
 
         action_id = await propose_customer_decision(
-            widget=widget, event=event, paw_print_store=pp_store
+            widget=widget, event=event, paw_bar_store=pp_store
         )
         assert action_id is None, "an owner-less widget must not open the loop"
 
@@ -366,7 +364,7 @@ class TestOwnerlessWidgetGuard:
 
 class TestDecisionLookupScope:
     async def test_get_decision_by_action_is_scoped(self, stores) -> None:
-        from pocketpaw.paw_print.models import DecisionState, DecisionStatus
+        from pocketpaw.paw_bar.models import DecisionState, DecisionStatus
 
         pp_store, _ = stores
         await pp_store.create_decision(
@@ -386,7 +384,7 @@ class TestDecisionLookupScope:
         assert await pp_store.get_decision_by_action("act-1") is not None
 
     async def test_set_decision_is_scoped(self, stores) -> None:
-        from pocketpaw.paw_print.models import DecisionState, DecisionStatus
+        from pocketpaw.paw_bar.models import DecisionState, DecisionStatus
 
         pp_store, _ = stores
         await pp_store.create_decision(

@@ -158,7 +158,7 @@
 #   ``proposed_event_id`` (the chain-opening ``agent.proposed`` id) is the
 #   causation source, resolved via the generic ``_code_change_proposed_event_id``
 #   helper (it reads ``blob["proposed_event_id"]``, shared across the two kinds).
-#   Rebased over the paw-print ``_customer_reply`` delivery hooks (gap2) — the
+#   Rebased over the paw-bar ``_customer_reply`` delivery hooks (gap2) — the
 #   external-action branches sit BEFORE the customer-reply hooks in approve /
 #   reject (all blob kinds are mutually exclusive; customer-reply keeps its
 #   last-before-return placement and its no-bulk / no-assert design unchanged).
@@ -2396,13 +2396,13 @@ async def approve_action(
             logger.exception("admin-action execution after approval failed (non-fatal)")
 
     # gap2 — when the approved Action carries a ``_customer_reply`` blob (a
-    # paw-print customer event awaiting a decision), deliver the owner's reply
+    # paw-bar customer event awaiting a decision), deliver the owner's reply
     # back to the customer surface. Same best-effort, lazy-import,
     # never-break-the-approve-response shape as the hooks above. The operator's
     # (possibly edited) recommendation is the wording the customer reads, so the
     # edit path above feeds straight into the delivery.
     try:
-        from pocketpaw_ee.paw_print.decision_loop import (
+        from pocketpaw_ee.paw_bar.decision_loop import (
             customer_reply_blob,
             deliver_customer_decision,
         )
@@ -2760,7 +2760,7 @@ async def reject_action(
     # best-effort, lazy-import shape as the approve hook. The loop closes either
     # way: the customer always gets an answer, approve or reject.
     try:
-        from pocketpaw_ee.paw_print.decision_loop import (
+        from pocketpaw_ee.paw_bar.decision_loop import (
             customer_reply_blob,
             deliver_customer_decision,
         )
