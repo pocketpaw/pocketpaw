@@ -237,6 +237,13 @@ ACTIONS: dict[str, ActionRule] = {
     # diffs), mirroring connector.manage / skills.manage.
     "belt.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "belt.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Notifications external-delivery config (ee.cloud.notifications.router,
+    # feat/external-alerting-delivery). ADMIN because the config sets where the
+    # server POSTs on EVERY notification (a Slack / generic webhook URL) — it
+    # extends the workspace's egress surface, mirroring connector.manage /
+    # belt.manage. There is no separate read action: the config is admin-only to
+    # view too (it holds the webhook URLs), so GET reuses ``notifications.manage``.
+    "notifications.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Security — the shield control-plane proxy (ee.cloud.security.router,
     # SEC-5). OWNER-only, the most restrictive workspace tier (mirrors
     # workspace.delete / billing.manage / instinct.activate). shield fronts the

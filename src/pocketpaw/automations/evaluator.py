@@ -172,6 +172,12 @@ class AutomationEvaluator:
     async def _notify(self, rule: Rule) -> None:
         """Send notification only (no action proposal or execution)."""
         # TODO: Integrate with notification system (WebSocket, email, etc.)
+        # FOLLOW-UP (external alerting): the cloud external fan-out (Slack /
+        # generic webhook) lives in ee.cloud.notifications.delivery, but OSS core
+        # MUST NOT import EE (import-linter "OSS core may not import from EE").
+        # Reaching external sinks from here needs a structurally-different path —
+        # an event-bus indirection the EE layer subscribes, or an OSS-side sink
+        # impl — not a direct import. Tracked as a separate slice.
         logger.info("Notification for rule %s: %s fired", rule.name, rule.description)
 
 
