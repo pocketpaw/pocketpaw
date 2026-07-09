@@ -57,6 +57,16 @@
 # domain UNSET the CF path leaves url="" without crashing (the worker is still
 # uploaded — the deploy succeeded — it just has no public URL until the operator
 # sets the domain + deploys the dispatch worker).
+# Updated 2026-07-09 (DP0-4 — publish async split + single-flight): the DS-2
+# inline-dynamic-deploy tests are superseded — a dynamic publish no longer deploys
+# inline. New coverage: a dynamic publish enqueues the ``provision_site`` job once +
+# returns provision_status="provisioning"/deployed=False with the job id (via a
+# ``_RecordingDispatch`` stand-in for ``jobs.service.dispatch_job``, so no arq/Redis);
+# a second dynamic publish while provisioning is a single-flight no-op (no second
+# job); publish_pocket threads pattern="dynamic" through to the same enqueue; and a
+# dynamic publish enqueues regardless of PAW_CF_DEPLOY_MODE=workers (it returns before
+# the static deploy-mode fork). The STATIC publish tests are unchanged (regression
+# guarantee: static still deploys inline + passes no bindings).
 from __future__ import annotations
 
 import pytest
@@ -1085,31 +1095,71 @@ async def test_preview_pocket_falls_back_to_current_content_when_no_draft(beanie
 
 
 # ---------------------------------------------------------------------------
-# DS-2 — a DYNAMIC site (Pocket.pattern == "dynamic") is backed by a per-tenant
-# Cloudflare D1. Its deployed Worker therefore needs a D1 binding so the SSR
-# remote functions can reach that DB. publish() passes the d1 binding(s) to
-# put_worker ONLY when the site is dynamic; a static (landing/None) publish
-# passes NO bindings (the single-module path stays byte-for-byte unchanged).
+# DP0-4 — a DYNAMIC site (Pocket.pattern == "dynamic" / a spec carrying live
+# bindings) is backed by a per-tenant Cloudflare D1 that must be created, migrated,
+# and bound BEFORE the Worker can serve. So a dynamic publish no longer builds /
+# deploys inline — it ensures the Site doc in provision_status="provisioning" and
+# ENQUEUES the durable ``provision_site`` job (single-flight: a re-publish while
+# already provisioning does not enqueue a second job). A STATIC (landing/None)
+# publish is unchanged — it deploys inline and passes NO d1 bindings.
+#
+# These tests supersede the DS-2 inline-dynamic-deploy tests (the inline dynamic
+# deploy path was removed in DP0-4). ``_patch_dispatch`` swaps
+# ``jobs.service.dispatch_job`` for a recorder so no arq/Redis is touched.
 # ---------------------------------------------------------------------------
 
 
+class _RecordingDispatch:
+    """A stand-in for ``jobs.service.dispatch_job`` — records every call and
+    returns the same ``{ok, code, job_id}`` envelope the real dispatch returns,
+    so no arq pool / Redis is needed."""
+
+    def __init__(self, job_id: str = "job_123") -> None:
+        self.calls: list[dict] = []
+        self._job_id = job_id
+
+    async def __call__(
+        self, *, workspace_id, pocket_id, action, job_name, params, triggered_by
+    ) -> dict:
+        self.calls.append(
+            {
+                "workspace_id": workspace_id,
+                "pocket_id": pocket_id,
+                "action": action,
+                "job_name": job_name,
+                "params": params,
+                "triggered_by": triggered_by,
+            }
+        )
+        return {"ok": True, "code": "job_enqueued", "job_id": self._job_id}
+
+
+def _patch_dispatch(monkeypatch, job_id: str = "job_123") -> _RecordingDispatch:
+    rec = _RecordingDispatch(job_id=job_id)
+    monkeypatch.setattr("pocketpaw_ee.cloud.jobs.service.dispatch_job", rec)
+    return rec
+
+
+_DYNAMIC_SPEC = {
+    "type": "container",
+    "objects": [{"name": "signups", "fields": {"email": "text"}}],
+    "sources": [{"name": "all", "kind": "data", "object": "signups", "refresh": "pocket_open"}],
+}
+
+
 @pytest.mark.asyncio
-async def test_dynamic_publish_passes_d1_binding_to_put_worker(beanie_test_db):
-    """A pattern="dynamic" publish hands put_worker a d1 binding carrying the
-    binding name + the site's D1 database id, and persists that id on the Site
-    doc so a re-publish reuses it (and DS-3 can read the site's D1)."""
+async def test_dynamic_publish_enqueues_provision_job(beanie_test_db, monkeypatch):
+    """A dynamic publish does NOT deploy inline: it upserts the Site doc in
+    provision_status="provisioning" (deployed=False), enqueues ``provision_site``
+    exactly once, and returns the provisioning response carrying the job id."""
+    dispatch = _patch_dispatch(monkeypatch, job_id="job_abc")
     gen, cf = _FakeGenerator(), _FakeCF()
+
     site = await sites_service.publish(
         workspace_id="ws1",
         user_id="u1",
         pocket_id="pk_dyn",
-        ripple_spec={
-            "type": "container",
-            "objects": [{"name": "signups", "fields": {"email": "text"}}],
-            "sources": [
-                {"name": "all", "kind": "data", "object": "signups", "refresh": "pocket_open"}
-            ],
-        },
+        ripple_spec=_DYNAMIC_SPEC,
         theme={"primary": "#0A84FF"},
         name="Guestbook",
         pattern="dynamic",
@@ -1117,33 +1167,38 @@ async def test_dynamic_publish_passes_d1_binding_to_put_worker(beanie_test_db):
         _cloudflare=cf,
         _bundle_reader=lambda d: b"export default {}",
     )
-    assert site.deployed is True
-    # put_worker received exactly one call carrying a non-empty bindings list.
-    assert len(cf.put_bindings) == 1
-    bindings = cf.put_bindings[0]
-    assert bindings, "dynamic publish must pass bindings to put_worker"
-    d1 = [b for b in bindings if b.get("type") == "d1"]
-    assert len(d1) == 1
-    assert d1[0]["name"] == "DB"
-    assert d1[0]["id"], "d1 binding must carry the database id"
-    # The id is persisted on the Site doc (re-publish reuse + DS-3 read).
-    assert site.d1_database_id == d1[0]["id"]
+
+    # No inline deploy — the Worker is stood up by the job, not here.
+    assert site.deployed is False
+    assert site.provision_status == "provisioning"
+    assert cf.put_calls == [], "a dynamic publish must not deploy inline"
+    # Enqueued the provision job exactly once, with the right name + empty params.
+    assert len(dispatch.calls) == 1
+    call = dispatch.calls[0]
+    assert call["job_name"] == "provision_site"
+    assert call["pocket_id"] == "pk_dyn"
+    assert call["workspace_id"] == "ws1"
+    assert call["params"] == {}
+    # The provisioning response carries the enqueued job id (transient PrivateAttr,
+    # surfaced on SiteResponse).
+    assert site._provision_job_id == "job_abc"
+    resp = sites_service._to_response(site)
+    assert resp.provision_status == "provisioning"
+    assert resp.provision_job_id == "job_abc"
+    assert resp.deployed is False
 
 
 @pytest.mark.asyncio
-async def test_dynamic_publish_reuses_persisted_d1_id_on_republish(beanie_test_db):
-    """Re-publishing a dynamic pocket keeps the SAME D1 id (the binding target
-    must be stable across deploys — the data lives behind that id)."""
+async def test_dynamic_publish_single_flight(beanie_test_db, monkeypatch):
+    """A SECOND dynamic publish while the site is already provisioning is a no-op:
+    it does NOT enqueue a second job (single-flight guard)."""
+    dispatch = _patch_dispatch(monkeypatch)
     gen, cf = _FakeGenerator(), _FakeCF()
     kw = dict(
         workspace_id="ws1",
         user_id="u1",
         pocket_id="pk_dyn2",
-        ripple_spec={
-            "type": "container",
-            "objects": [{"name": "rows", "fields": {"x": "text"}}],
-            "actions": [{"name": "add", "object": "rows", "op": "insert"}],
-        },
+        ripple_spec=_DYNAMIC_SPEC,
         theme={"primary": "#000"},
         name="Board",
         pattern="dynamic",
@@ -1151,10 +1206,17 @@ async def test_dynamic_publish_reuses_persisted_d1_id_on_republish(beanie_test_d
         _cloudflare=cf,
         _bundle_reader=lambda d: b"export default {}",
     )
+
     first = await sites_service.publish(**kw)
     second = await sites_service.publish(**kw)
-    assert first.d1_database_id
-    assert first.d1_database_id == second.d1_database_id
+
+    # Exactly ONE job across both publishes — the second is a single-flight no-op.
+    assert len(dispatch.calls) == 1
+    assert first.provision_status == "provisioning"
+    assert second.provision_status == "provisioning"
+    # The single-flight no-op returns the in-progress response without a fresh job id.
+    assert second._provision_job_id is None
+    assert cf.put_calls == []
 
 
 @pytest.mark.asyncio
@@ -1180,11 +1242,14 @@ async def test_static_publish_passes_no_bindings(beanie_test_db):
 
 
 @pytest.mark.asyncio
-async def test_publish_pocket_threads_dynamic_pattern(beanie_test_db):
-    """publish_pocket reads pattern off the pocket wire dict and forwards it, so a
-    dynamic pocket published via the shared path gets the d1 binding."""
+async def test_publish_pocket_dynamic_enqueues_provision_job(beanie_test_db, monkeypatch):
+    """publish_pocket reads pattern="dynamic" off the pocket wire dict and forwards
+    it, so a dynamic pocket published via the shared path enqueues the provision job
+    (once) and returns provisioning — the charge-first + plan-stamp post-processing
+    leaves the provision state intact."""
     from unittest.mock import AsyncMock, patch
 
+    dispatch = _patch_dispatch(monkeypatch, job_id="job_pp")
     gen, cf = _FakeGenerator(), _FakeCF()
     wire = {
         "name": "Live Guestbook",
@@ -1208,9 +1273,14 @@ async def test_publish_pocket_threads_dynamic_pattern(beanie_test_db):
             _bundle_reader=lambda d: b"export default {}",
         )
 
-    assert site.d1_database_id
-    d1 = [b for b in (cf.put_bindings[0] or []) if b.get("type") == "d1"]
-    assert len(d1) == 1
+    assert len(dispatch.calls) == 1
+    assert dispatch.calls[0]["job_name"] == "provision_site"
+    assert site.provision_status == "provisioning"
+    assert site.deployed is False
+    # The plan-stamp post-processing (publish_pocket → _apply_site_plan) preserves the
+    # transient job id, so the router still surfaces it.
+    assert site._provision_job_id == "job_pp"
+    assert cf.put_calls == []
 
 
 # ── workers deploy mode (PAW_CF_DEPLOY_MODE=workers) ──────────────────────────
@@ -1255,12 +1325,12 @@ async def test_workers_mode_routes_static_publish_to_workers_deployer(beanie_tes
 
 
 @pytest.mark.asyncio
-async def test_workers_mode_dynamic_site_raises_validation_error(beanie_test_db, monkeypatch):
-    """A DYNAMIC site in workers mode is rejected with a clean ValidationError
-    (Phase 2 needs a per-tenant D1) rather than deploying a broken site. The
-    injected workers deployer must NOT be called."""
-    from pocketpaw_ee.cloud._core.errors import ValidationError
-
+async def test_workers_mode_dynamic_site_enqueues_not_deploys(beanie_test_db, monkeypatch):
+    """DP0-4: a DYNAMIC site enqueues the provision job REGARDLESS of the static
+    deploy-mode selection — it returns provisioning BEFORE the deploy-mode fork, so
+    PAW_CF_DEPLOY_MODE=workers is irrelevant: no ValidationError, no workers deploy,
+    no inline deploy. (The provision job always stands the D1 site up via WfP.)"""
+    dispatch = _patch_dispatch(monkeypatch)
     monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "workers")
     monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
 
@@ -1268,24 +1338,25 @@ async def test_workers_mode_dynamic_site_raises_validation_error(beanie_test_db,
         raise AssertionError("a dynamic site must not reach the workers deployer")
 
     gen = _FakeGenerator()
-    with pytest.raises(ValidationError) as exc:
-        await sites_service.publish(
-            workspace_id="ws1",
-            user_id="u1",
-            pocket_id="pk_w_dyn",
-            ripple_spec={
-                "type": "container",
-                "objects": [{"name": "rows", "fields": {"x": "text"}}],
-                "actions": [{"name": "add", "object": "rows", "op": "insert"}],
-            },
-            theme={},
-            name="Dynamic in Workers",
-            pattern="dynamic",
-            _generator=gen,
-            _bundle_reader=lambda d: b"unused",
-            _workers_deploy=must_not_run,
-        )
-    assert "workers" in str(exc.value).lower()
+    site = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk_w_dyn",
+        ripple_spec={
+            "type": "container",
+            "objects": [{"name": "rows", "fields": {"x": "text"}}],
+            "actions": [{"name": "add", "object": "rows", "op": "insert"}],
+        },
+        theme={},
+        name="Dynamic in Workers",
+        pattern="dynamic",
+        _generator=gen,
+        _bundle_reader=lambda d: b"unused",
+        _workers_deploy=must_not_run,
+    )
+    assert site.provision_status == "provisioning"
+    assert site.deployed is False
+    assert len(dispatch.calls) == 1
 
 
 @pytest.mark.asyncio

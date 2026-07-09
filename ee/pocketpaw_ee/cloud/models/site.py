@@ -94,6 +94,15 @@
 # D1 instead of orphaning a second one; status advances to ``provisioned`` only
 # after migrate + deploy succeed, and to ``failed`` on error. Defaults ``"none"`` so
 # every static site and every pre-DP0 row reads "not provisioning" — no migration.
+#
+# Updated 2026-07-09 (DP0-4 — publish async split + single-flight): added
+# ``_provision_job_id`` — a TRANSIENT pydantic PrivateAttr (NOT persisted to Mongo),
+# mirroring ``_checkout_url``. A DYNAMIC-site publish no longer deploys inline; it
+# ensures the Site doc in ``provision_status="provisioning"`` and enqueues the
+# durable ``provision_site`` job, stashing the enqueued job id here so the router
+# can surface it on ``SiteResponse.provision_job_id``. None for a static publish and
+# for any DB-loaded doc (the PrivateAttr defaults to None). Private so it never
+# round-trips through the DB.
 
 from __future__ import annotations
 
@@ -169,6 +178,11 @@ class Site(TimestampedDocument):
     # publish. The publish path stashes it here so the router can surface it on
     # ``SiteResponse.checkout_url``; a PrivateAttr so it never serializes to Mongo.
     _checkout_url: str | None = PrivateAttr(default=None)
+    # DP0-4: TRANSIENT (NOT persisted) id of the durable ``provision_site`` job a
+    # DYNAMIC-site publish enqueued. The publish path stashes it here so the router
+    # can surface it on ``SiteResponse.provision_job_id``; a PrivateAttr so it never
+    # serializes to Mongo. None for a static publish and any DB-loaded doc.
+    _provision_job_id: str | None = PrivateAttr(default=None)
     # PERF-2: a non-destructive tombstone for duplicate Site docs the pre-PERF-1
     # per-publish ObjectId minting left behind. The dedupe migration keeps ONE
     # canonical doc per (workspace, pocket_id) active and sets this True on the
