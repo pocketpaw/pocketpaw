@@ -24,6 +24,10 @@
 #   LiteLLM proxy — the contract SHAPE is unchanged (the frontend is untouched), but
 #   ``UsageModelStats.tokens`` is 0 from this source (the ledger carries no per-entry
 #   token count). The credit + request figures are accurate.
+# Updated 2026-07-08 (feat/billing-cancel-downgrade): added
+#   ``CancelSubscriptionResponse`` for ``POST /billing/cancel`` (no request body —
+#   the caller's workspace is the scope). Tiny ack; the plan revert is not reflected
+#   here (it lands on the ``subscription.cancelled`` webhook).
 
 from __future__ import annotations
 
@@ -67,6 +71,17 @@ class CreateSubscriptionResponse(BaseModel):
     """Hosted recurring-checkout url the caller redirects the buyer to."""
 
     checkout_url: str
+
+
+class CancelSubscriptionResponse(BaseModel):
+    """Ack for ``POST /billing/cancel`` — the gateway was told to stop billing.
+
+    ``ok`` is True once the gateway cancel was requested. The plan revert
+    (``Workspace.plan`` -> free) is NOT reflected here — it lands reactively when
+    Dodo posts the verified ``subscription.cancelled`` webhook.
+    """
+
+    ok: bool = True
 
 
 class WebhookAck(BaseModel):

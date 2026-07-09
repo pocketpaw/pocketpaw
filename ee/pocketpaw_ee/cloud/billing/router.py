@@ -40,6 +40,12 @@
 #   every metering mode. The route surface is unchanged (same path, auth, and
 #   ``start_date`` / ``end_date`` query params) — only the docstring wording below
 #   is updated to reflect the source.
+# Updated 2026-07-08 (feat/billing-cancel-downgrade): added POST /billing/cancel —
+#   cancel the caller's workspace's ACTIVE recurring subscription (no body;
+#   workspace-scoped via ``current_workspace_id``, same auth as topup / subscribe).
+#   Thin adapter over ``billing_service.cancel``; the plan revert lands reactively on
+#   the ``subscription.cancelled`` webhook, and a workspace with no active
+#   subscription gets 402 ``billing.no_active_subscription``.
 
 from __future__ import annotations
 
@@ -50,6 +56,7 @@ from pocketpaw_ee.cloud.billing import service as billing_service
 from pocketpaw_ee.cloud.billing import site_plans as site_plan_catalog
 from pocketpaw_ee.cloud.billing import usage as usage_service
 from pocketpaw_ee.cloud.billing.dto import (
+    CancelSubscriptionResponse,
     CreateSubscriptionRequest,
     CreateSubscriptionResponse,
     CreateTopupRequest,
@@ -197,3 +204,19 @@ async def create_subscription(
         origin=_request_origin(request),
     )
     return CreateSubscriptionResponse(checkout_url=result["checkout_url"])
+
+
+@router.post("/cancel", response_model=CancelSubscriptionResponse)
+async def cancel_subscription(
+    workspace_id: str = Depends(current_workspace_id),
+) -> CancelSubscriptionResponse:
+    """Cancel the caller's workspace's ACTIVE recurring subscription. No body.
+
+    Tells the gateway to stop billing the workspace's active subscription. The plan
+    revert (``Workspace.plan`` -> free) is NOT applied here — it lands reactively
+    when Dodo posts the verified ``subscription.cancelled`` webhook (mirroring how
+    /subscribe defers the upgrade to ``subscription.active``). Returns 402
+    ``billing.no_active_subscription`` when the workspace has no active subscription.
+    """
+    result = await billing_service.cancel(workspace_id=workspace_id)
+    return CancelSubscriptionResponse(ok=result["ok"])

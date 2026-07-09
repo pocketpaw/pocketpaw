@@ -27,6 +27,10 @@
 #   ``monthly_ceiling`` exactly as ``monthly_credit_allotment`` is. The defensive
 #   base-floor branch sets the Free trial ceiling (1000), so every path fails
 #   closed and no path leaves the cap uncapped.
+# Updated 2026-07-08 (feat/billing-smb-caps): ``Entitlements`` now also carries the
+#   three SMB caps (``max_seats`` / ``max_pockets`` / ``max_connectors``), populated
+#   from the resolved tier exactly as ``monthly_ceiling`` is. The defensive
+#   base-floor branch sets the Free values (5 / 200 / 50) so every path fails closed.
 
 from __future__ import annotations
 
@@ -70,6 +74,11 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
                 # Fail closed: the Free trial cap, never None/uncapped — even when
                 # the catalog itself is somehow missing the base tier.
                 monthly_ceiling=1_000,
+                # Fail closed on the SMB caps too: the Free values (max_seats == the
+                # Workspace.seats default so no workspace regresses), never uncapped.
+                max_seats=5,
+                max_pockets=200,
+                max_connectors=50,
                 features=frozenset(),
             )
 
@@ -78,5 +87,8 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
         plan=tier.key,
         monthly_credit_allotment=tier.monthly_credit_allotment,
         monthly_ceiling=tier.monthly_ceiling,
+        max_seats=tier.max_seats,
+        max_pockets=tier.max_pockets,
+        max_connectors=tier.max_connectors,
         features=tier.features,
     )

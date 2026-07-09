@@ -39,6 +39,18 @@
 #   the paid usage tiers; Free is an explicit trial cap (1000 — its 0 allotment can't
 #   derive it) and Enterprise is uncapped (None). The ``_build`` default for an
 #   unknown key FAILS CLOSED to the Free ceiling, never None/uncapped.
+# Updated 2026-07-08 (feat/billing-smb-caps) — ADDED three SMB resource ceilings the
+#   plan ladder now carries alongside ``monthly_ceiling``: ``max_seats`` (workspace
+#   members), ``max_pockets`` (pockets per workspace), and ``max_connectors``
+#   (enabled connectors per workspace). Each is a tunable dict (``_MAX_SEATS`` /
+#   ``_MAX_POCKETS`` / ``_MAX_CONNECTORS``) mirroring ``_CEILING`` in shape, surfaced
+#   on ``PlanTier`` as ``int | None`` (None = uncapped, Enterprise only). The values
+#   are GENEROUS PLACEHOLDERS — the real per-tier numbers are a captain pricing
+#   open-question; the machinery is tier-agnostic and these ceilings are roomy
+#   enough that an active tenant under them never notices, while still protecting
+#   the shared PEE box from runaway growth. Free ``max_seats`` is pinned at 5 (==
+#   the ``Workspace.seats`` default) so no existing workspace regresses. The
+#   ``_build`` default for an unknown key FAILS CLOSED to the Free value, never None.
 
 from __future__ import annotations
 
@@ -94,6 +106,51 @@ _CEILING: dict[str, int | None] = {
     "go": 2_250,
     "pro": 11_250,
     "pro_max": 45_000,
+    "enterprise": None,
+}
+
+# ---------------------------------------------------------------------------
+# Tunable constants — SMB resource ceilings per tier (feat/billing-smb-caps).
+# ---------------------------------------------------------------------------
+#
+# Three per-plan caps enforced at CREATE / INVITE / ENABLE time (never
+# retroactively): the max workspace SEATS, the max POCKETS a workspace may hold,
+# and the max ENABLED CONNECTORS. Same shape as ``_CEILING`` — an ``int`` ceiling,
+# or ``None`` for the one uncapped (Enterprise) tier. The ``_build`` default for an
+# unknown key FAILS CLOSED to the Free value (never None/uncapped).
+#
+# IMPORTANT: these are GENEROUS PLACEHOLDERS. The real per-tier numbers are a
+# captain pricing open-question; the enforcement machinery is deliberately
+# tier-agnostic so only these constants change when pricing lands. They are roomy
+# enough that an active tenant under the ceiling never notices, while still
+# protecting the shared PEE box from a single tenant's runaway growth.
+#
+# Free ``max_seats`` is pinned at 5 to EQUAL the ``Workspace.seats`` model default
+# — the seat gate enforces ``max(doc.seats, max_seats)`` so a free workspace sees
+# byte-for-byte the same limit it has today (no regression). The paid tiers step
+# up from there; Enterprise is uncapped (None) — negotiated contracts set their
+# own limits.
+_MAX_SEATS: dict[str, int | None] = {
+    "free": 5,
+    "go": 10,
+    "pro": 25,
+    "pro_max": 100,
+    "enterprise": None,
+}
+
+_MAX_POCKETS: dict[str, int | None] = {
+    "free": 200,
+    "go": 1_000,
+    "pro": 5_000,
+    "pro_max": 20_000,
+    "enterprise": None,
+}
+
+_MAX_CONNECTORS: dict[str, int | None] = {
+    "free": 50,
+    "go": 100,
+    "pro": 250,
+    "pro_max": 1_000,
     "enterprise": None,
 }
 
@@ -184,8 +241,13 @@ class PlanTier:
     per renewal — a BACK-OFFICE field, NOT the headline. ``monthly_ceiling`` is
     the per-plan monthly credit CAP (integer credits, or None = uncapped) that
     credit-quota enforcement caps spend against (allotment × 1.5 for paid tiers;
-    Free is the explicit 1000 trial cap; Enterprise is None). ``dodo_product_id``
-    is the recurring-product id, or None until BC-7 / config populates it.
+    Free is the explicit 1000 trial cap; Enterprise is None). ``max_seats`` /
+    ``max_pockets`` / ``max_connectors`` are the SMB resource ceilings enforced at
+    create/invite/enable time (integer, or None = uncapped for Enterprise);
+    Free's ``max_seats`` == the ``Workspace.seats`` default so no workspace
+    regresses. These are GENEROUS PLACEHOLDERS pending the captain's pricing call.
+    ``dodo_product_id`` is the recurring-product id, or None until BC-7 / config
+    populates it.
 
     The display + price fields are what the billing UI renders: ``display_name``
     ("Paw Pro"), ``usage_label`` (the ChatGPT/Claude-style "5x the usage" headline
@@ -197,6 +259,9 @@ class PlanTier:
     key: str
     monthly_credit_allotment: int
     monthly_ceiling: int | None
+    max_seats: int | None
+    max_pockets: int | None
+    max_connectors: int | None
     dodo_product_id: str | None
     features: frozenset[str]
     display_name: str
@@ -238,8 +303,10 @@ def _build(key: str) -> PlanTier:
     from ``_PLAN_DISPLAY`` (a missing row degrades to ``_DISPLAY_FALLBACK`` rather
     than NPE-ing). An unknown ``key`` yields an empty feature set and a 0
     allotment — but callers go through ``get_plan`` / ``list_plans``, which only
-    ever pass known keys. ``monthly_ceiling`` FAILS CLOSED: an unknown key defaults
-    to the Free ceiling (the trial cap), never None/uncapped.
+    ever pass known keys. ``monthly_ceiling`` and the three SMB caps
+    (``max_seats`` / ``max_pockets`` / ``max_connectors``) FAIL CLOSED: an unknown
+    key defaults to the Free value (the most restrictive tier), never
+    None/uncapped.
     """
     display = _PLAN_DISPLAY.get(key, _DISPLAY_FALLBACK)
     return PlanTier(
@@ -247,6 +314,11 @@ def _build(key: str) -> PlanTier:
         monthly_credit_allotment=_MONTHLY_CREDIT_ALLOTMENT.get(key, 0),
         # Fail closed: an unknown key caps at the Free ceiling, never uncapped.
         monthly_ceiling=_CEILING.get(key, _CEILING["free"]),
+        # Fail closed on every SMB cap too: an unknown key caps at the Free
+        # value (the most restrictive), never None/uncapped.
+        max_seats=_MAX_SEATS.get(key, _MAX_SEATS["free"]),
+        max_pockets=_MAX_POCKETS.get(key, _MAX_POCKETS["free"]),
+        max_connectors=_MAX_CONNECTORS.get(key, _MAX_CONNECTORS["free"]),
         dodo_product_id=_dodo_product_for(key),
         features=frozenset(PLAN_FEATURES.get(key, set())),
         display_name=str(display["display_name"]),

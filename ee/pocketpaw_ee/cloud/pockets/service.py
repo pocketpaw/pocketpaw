@@ -250,6 +250,16 @@ recompile is in play. The typed model is used INTERNALLY only — Beanie
 ``Pocket.rippleSpec`` and ``domain.Pocket.ripple_spec`` stay ``dict``, and
 every reader still receives a flat dict (executor dual-path readers deferred
 to a Phase 2 gated on PR #1472).
+Changes: 2026-07-08 (feat/billing-smb-caps) — added a per-plan POCKET cap. A new
+shared helper ``_pocket_cap_exceeded`` resolves the workspace's plan
+``max_pockets`` and counts its live pockets; it is GATED on ``billing_enforced``
+(a no-op for OSS / self-host) and never trips on an uncapped Enterprise plan.
+``create`` raises ``PocketLimitError`` (402) before any write when at/over the
+cap; ``create_from_ripple_spec`` (the agent auto-create path, which does NOT
+funnel through ``create``) returns ``None`` at/over the cap so the agent turn
+degrades gracefully. ``create_pocket_and_session`` funnels through ``create`` and
+is covered transitively. Enforcement is create-time only — an existing pocket is
+never removed.
 """
 
 from __future__ import annotations
@@ -267,6 +277,7 @@ from bson.errors import InvalidId
 from pydantic import ValidationError as PydanticValidationError
 
 from pocketpaw.bundled_templates.schema import RippleSpec
+from pocketpaw_ee.cloud._core.errors import PocketLimitError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     PocketCreated,
@@ -1395,6 +1406,37 @@ async def resolve_workspace_template_default_deny(workspace_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+async def _pocket_cap_exceeded(workspace_id: str) -> tuple[bool, int, int | None]:
+    """Would a new pocket exceed this workspace's plan cap? -> (exceeded, count, limit).
+
+    feat/billing-smb-caps. GATED on ``billing_enforced``: OSS / self-host tenants
+    (billing off) always get ``(False, 0, None)`` — no cap, no extra DB read — so a
+    self-hosted deployment behaves exactly as before. When enforced, resolves the
+    workspace's plan ``max_pockets`` and counts its live pockets. An uncapped plan
+    (Enterprise, ``max_pockets=None``) never trips. ``exceeded`` is ``count >=
+    limit`` — checked BEFORE the insert, so it blocks the create that WOULD push the
+    workspace over, never an existing pocket (create-time only, never retroactive).
+
+    Returns the tuple rather than raising so each caller responds in its native
+    shape: the HTTP ``create`` path raises ``PocketLimitError`` (402); the agent
+    auto-create path returns ``None``. Imports are lazy to keep this module off the
+    config / entitlements import graph at load.
+    """
+    from pocketpaw.config import get_settings
+
+    if not get_settings().billing_enforced:
+        return (False, 0, None)
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = await entitlements_service.resolve_entitlements(workspace_id)
+    limit = ent.max_pockets
+    if limit is None:
+        return (False, 0, None)
+    count = await _PocketDoc.find(_PocketDoc.workspace == workspace_id).count()
+    return (count >= limit, count, limit)
+
+
 async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> dict:
     """Create a pocket with optional agents, widgets, and rippleSpec.
 
@@ -1403,7 +1445,22 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     ``project.not_found`` otherwise. Pockets without a ``project_id``
     surface as "unassigned" in the Mission Control project picker, which
     is exactly the pre-projects-rollout shape.
+
+    feat/billing-smb-caps: raises ``PocketLimitError`` (402) BEFORE any write when
+    the workspace is at/over its plan's ``max_pockets`` — a no-op unless
+    ``billing_enforced``. Also covers ``create_pocket_and_session``, which funnels
+    through here.
     """
+    exceeded, count, limit = await _pocket_cap_exceeded(workspace_id)
+    if exceeded:
+        logger.info(
+            "pocket create blocked by plan cap: workspace=%s has %d pockets (limit %s)",
+            workspace_id,
+            count,
+            limit,
+        )
+        raise PocketLimitError(limit)  # type: ignore[arg-type]  # limit is int when exceeded
+
     from pocketpaw_ee.cloud.sessions import service as sessions_service
 
     normalized_spec = normalize_ripple_spec(body.ripple_spec) if body.ripple_spec else None
@@ -2153,8 +2210,25 @@ async def create_from_ripple_spec(
     ``pattern`` records the create-pocket layout pattern (``"landing"``
     for a marketing site). Optional; defaults to ``None`` so the
     pre-existing inline auto-create path is unchanged.
+
+    feat/billing-smb-caps: this path does NOT funnel through ``create``, so it
+    carries its OWN pocket-cap check. It returns ``None`` (not a 402) when at/over
+    the cap — consistent with the function's "return None on failure" contract, so
+    the agent turn degrades gracefully (no pocket attached) instead of surfacing a
+    raw 402 through the agent loop. A no-op unless ``billing_enforced``.
     """
     try:
+        exceeded, count, limit = await _pocket_cap_exceeded(workspace_id)
+        if exceeded:
+            logger.warning(
+                "Auto-create blocked by pocket cap: workspace=%s has %d pockets "
+                "(limit %s) — no pocket created",
+                workspace_id,
+                count,
+                limit,
+            )
+            return None
+
         normalized = normalize_ripple_spec(ripple_spec)
         if not normalized:
             return None
