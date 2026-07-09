@@ -21,11 +21,22 @@
 # time (defense-in-depth against a stored value that later became unsafe). Full
 # DNS-resolution hardening (like ``audit.webhooks._validate_url_safety``) is a
 # follow-up; this is the baseline.
+#
+# Updated 2026-07-09 (fix/ssrf-encoding-bypass): close the alternate-ENCODING
+# bypass. The old guard only ran ``ipaddress.ip_address(hostname)`` and treated a
+# parse FAILURE as "not an IP" — but that raises on encoded forms (decimal
+# ``2852039166`` == 169.254.169.254 metadata, ``0x7f000001`` / ``017700000001`` /
+# ``127.1`` == 127.0.0.1), so the guard returned True while ``getaddrinfo`` / httpx
+# still resolved them to metadata / loopback. ``_host_as_literal_ip`` now normalizes
+# the host (strict literal -> ``int(host, 0)`` -> ``socket.inet_aton``) before the
+# unsafe-IP check. DNS-name-resolution hardening (a host that RESOLVES to a private
+# IP) remains the documented follow-up — this needs no DNS control to exploit.
 
 from __future__ import annotations
 
 import ipaddress
 import logging
+import socket
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -70,6 +81,47 @@ def _ip_is_unsafe(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     )
 
 
+def _host_as_literal_ip(hostname: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Interpret ``hostname`` as an IP the way the OS resolver / httpx would, or None.
+
+    ``ipaddress.ip_address`` only accepts the strict dotted-quad (and IPv6) form,
+    so it MISSES the alternate encodings an SSRF payload uses — a decimal integer
+    (``2852039166`` == 169.254.169.254 cloud metadata), a hex/octal integer
+    (``0x7f000001`` / ``017700000001`` == 127.0.0.1), or a short-dotted form
+    (``127.1``). ``getaddrinfo`` / httpx DO resolve those to the loopback / metadata
+    address, so the guard must normalize them before deciding. We try, in order:
+
+      1. the strict literal (also the ONLY IPv6 path);
+      2. a bare integer via ``int(host, 0)`` (decimal / ``0x`` hex / ``0o`` octal);
+      3. ``socket.inet_aton`` — the liberal C parser ``getaddrinfo`` shares, which
+         covers ``a`` / ``a.b`` / ``a.b.c`` / ``a.b.c.d`` with decimal, leading-zero
+         octal, or ``0x`` hex parts (this is what catches ``127.1`` and the bare
+         leading-zero octal ``017700000001`` that ``int(host, 0)`` rejects).
+
+    Returns None for a genuine DNS hostname (``hooks.slack.com``) so it stays allowed;
+    hostnames that RESOLVE to a private IP are still not caught here (no DNS lookup in
+    the hot path) — that is the documented follow-up. This only closes the alternate-
+    ENCODING bypass, which needs no DNS control.
+    """
+    # 1. Strict literal (dotted-quad IPv4 or any IPv6).
+    try:
+        return ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    # 2. Bare integer form: decimal / 0x-hex / 0o-octal. ``int(host, 0)`` rejects a
+    #    bare leading-zero octal (e.g. "017700000001"); step 3 covers that.
+    try:
+        return ipaddress.IPv4Address(int(hostname, 0))
+    except (ValueError, OverflowError):
+        pass
+    # 3. inet_aton — liberal short-dotted / leading-zero-octal / hex parsing.
+    try:
+        packed = socket.inet_aton(hostname)
+    except OSError:
+        return None
+    return ipaddress.IPv4Address(packed)
+
+
 def is_safe_webhook_url(url: str | None) -> bool:
     """True when ``url`` is a plausible-safe external https webhook target.
 
@@ -90,10 +142,11 @@ def is_safe_webhook_url(url: str | None) -> bool:
     hostname = (parsed.hostname or "").lower()
     if not hostname or hostname in _FORBIDDEN_HOSTNAMES:
         return False
-    try:
-        literal_ip = ipaddress.ip_address(hostname)
-    except ValueError:
-        literal_ip = None
+    # Normalize the host to the IP the OS resolver would use BEFORE deciding — this
+    # catches the alternate-encoding SSRF bypasses (decimal/hex/octal integer,
+    # short-dotted) that a naive ``ipaddress.ip_address`` parse silently lets
+    # through while ``getaddrinfo`` / httpx resolve them to metadata / loopback.
+    literal_ip = _host_as_literal_ip(hostname)
     if literal_ip is not None and _ip_is_unsafe(literal_ip):
         return False
     return True

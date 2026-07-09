@@ -91,6 +91,16 @@
 #   the OLD subscription at the gateway (billing stops synchronously, so the two are
 #   never both billing). Webhook ``event_id`` idempotency is untouched. See the
 #   ``subscribe`` body for the native-``change_plan`` follow-up note.
+# Updated 2026-07-09 (fix/cancel-webhook-revert-guard): the ``subscription.cancelled``
+#   plan revert is no longer UNCONDITIONAL. Webhook delivery is unordered /
+#   at-least-once, so a ``cancelled(old_sub)`` retry can land AFTER ``active(new_sub)``
+#   during a plan switch and would previously downgrade a paying customer to free
+#   (nothing self-heals it — only ``subscription.active`` re-sets the plan). The
+#   handler now marks THIS sub cancelled first, then reverts to free ONLY when no
+#   OTHER active Subscription row still owns the workspace; a stale/out-of-order
+#   cancel is logged and skipped. Credits are still never clawed back. See the
+#   ``subscribe`` body for the STILL-OPEN downgrade lag-window (checkout→active
+#   webhook) that only the atomic Dodo ``change_plan`` closes.
 
 from __future__ import annotations
 
@@ -317,14 +327,32 @@ async def subscribe(
     # (BC-1's unique index), so a replayed active/renewed after a switch re-grants
     # nothing.
     #
-    # FOLLOW-UP (native change_plan): Dodo's SDK exposes an ATOMIC
+    # KNOWN LIMITATION — DOWNGRADE LAG WINDOW (not fixed here; needs change_plan).
+    # ``_active_subscription`` reads the LOCAL Subscription row, and only the
+    # ``subscription.active`` webhook writes ``status="active"``. Between checkout
+    # COMPLETION (buyer paid) and that ``active`` webhook LANDING, no local active
+    # row exists yet, so a fast SECOND switch in that window sees ``existing is None``,
+    # skips the cancel-then-create guard, and opens a SECOND parallel gateway
+    # subscription = double-charge — the exact defect this branch set out to fix.
+    #
+    # Why we do NOT close it by querying the gateway here: Dodo's
+    # ``subscriptions.list`` filters only by ``customer_id`` / ``product_id`` /
+    # ``status`` / dates — there is NO metadata filter, and we store no per-workspace
+    # Dodo ``customer_id`` (each ``create_subscription`` mints a fresh customer from
+    # the email). So "list THIS workspace's active subs at the gateway" would mean
+    # paging EVERY active subscription in the business and filtering client-side on
+    # ``metadata.workspace_id`` — fragile and unbounded. We deliberately do not add
+    # that under pressure.
+    #
+    # REAL FIX (follow-up): Dodo's SDK exposes an ATOMIC
     # ``subscriptions.change_plan`` (proration, no re-checkout, no drop-to-free
-    # window) that would remove the residual "buyer abandons the new checkout after
-    # the old is cancelled" gap. Wiring it is out of scope for this bug fix — it
-    # needs a new provider-port method, a ``subscription.plan_changed`` webhook
-    # handler (grant + plan + audit; the service acts on active/renewed/cancelled
-    # only today), and a /subscribe response-contract change (change_plan returns no
-    # checkout url). Tracked as a billing plan-change follow-up.
+    # window) that removes cancel-then-create ENTIRELY — no lag window, no second
+    # subscription, no "buyer abandons the new checkout after the old is cancelled"
+    # gap. Wiring it is a scoped change: a new provider-port method, a
+    # ``subscription.plan_changed`` webhook handler (grant + plan + audit; the
+    # service acts on active/renewed/cancelled only today), and a /subscribe
+    # response-contract change (change_plan returns no checkout url). Tracked as the
+    # billing plan-change follow-up; until it lands the lag window above remains.
     existing = await _active_subscription(workspace_id)
 
     checkout = await prov.create_subscription(
@@ -584,13 +612,35 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
         return {"ok": True, "granted": False}
 
     if event.type == _SUB_CANCELLED:
-        # Revert the entitlement to free. Do NOT claw back granted credits — the
-        # workspace keeps the rolled-over balance it already paid for.
-        ok = await workspace_service.set_workspace_plan(event.workspace_id, "free")
+        # Mark THIS subscription cancelled FIRST, then decide whether to revert the
+        # plan. Webhook delivery is unordered / at-least-once: during a plan switch a
+        # ``cancelled(old_sub)`` retry can land AFTER ``active(new_sub)``. Reverting
+        # to free UNCONDITIONALLY there would strand a paying customer on free
+        # entitlements — and nothing self-heals it (only subscription.active re-sets
+        # the plan; renewed does not). So flip this sub's row to cancelled, then ask
+        # whether any OTHER active subscription still owns the workspace:
+        #   * a newer active sub exists -> SKIP the revert (a stale cancel must not
+        #     downgrade the live plan);
+        #   * none -> revert to free (the normal cancel, and the common
+        #     cancel-then-active ordering still self-corrects because active arrives
+        #     later and re-sets the plan).
+        # Credits are NEVER clawed back either way.
         await _upsert_subscription(event, status="cancelled", plan_key="free")
+        still_active = await _active_subscription(event.workspace_id)
+        if still_active is not None:
+            logger.info(
+                "billing.webhook: subscription.cancelled for workspace=%s (event_id=%s) — "
+                "a newer active subscription=%s still owns the workspace; NOT reverting to "
+                "free (out-of-order/stale cancel)",
+                event.workspace_id,
+                event.event_id,
+                still_active.gateway_subscription_id,
+            )
+            return {"ok": True, "granted": False}
+        ok = await workspace_service.set_workspace_plan(event.workspace_id, "free")
         logger.info(
             "billing.webhook: subscription.cancelled for workspace=%s (event_id=%s) — "
-            "plan reverted to free=%s, credits NOT clawed back",
+            "no other active subscription; plan reverted to free=%s, credits NOT clawed back",
             event.workspace_id,
             event.event_id,
             ok,

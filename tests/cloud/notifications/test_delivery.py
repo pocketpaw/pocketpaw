@@ -239,3 +239,30 @@ async def test_set_config_empty_string_clears_sink() -> None:
 )
 def test_is_safe_webhook_url(url, safe) -> None:
     assert delivery_mod.is_safe_webhook_url(url) is safe
+
+
+# ---------------------------------------------------------------------------
+# SSRF encoding-bypass regression — the old guard only ran
+# ``ipaddress.ip_address(hostname)`` and treated its ValueError as "not an IP",
+# so alternate-encoding hosts (decimal / hex / octal integer, short-dotted)
+# sailed through as safe while getaddrinfo / httpx resolve them to metadata /
+# loopback. Each of these MUST now be rejected; a normal https host stays safe.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://2852039166/",  # decimal int == 169.254.169.254 (cloud metadata)
+        "https://2130706433/",  # decimal int == 127.0.0.1
+        "https://0x7f000001/",  # hex int == 127.0.0.1
+        "https://127.1/",  # short-dotted == 127.0.0.1
+        "https://017700000001/",  # leading-zero octal int == 127.0.0.1
+    ],
+)
+def test_is_safe_webhook_url_rejects_encoded_ssrf(url) -> None:
+    assert delivery_mod.is_safe_webhook_url(url) is False
+
+
+def test_is_safe_webhook_url_allows_normal_https_host() -> None:
+    assert delivery_mod.is_safe_webhook_url("https://hooks.slack.com/services/T0/B0/xxx") is True

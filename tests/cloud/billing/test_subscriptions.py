@@ -875,3 +875,77 @@ async def test_switch_then_new_active_webhook_is_idempotent(
     )
     assert second == {"ok": True, "granted": False}
     assert await credits.balance(ws) == before + go_allotment
+
+
+# ---------------------------------------------------------------------------
+# fix/cancel-webhook-revert-guard — the subscription.cancelled plan revert must
+# NOT be unconditional. Under unordered / at-least-once delivery a
+# ``cancelled(old_sub)`` retry can land AFTER ``active(new_sub)`` during a plan
+# switch; reverting to free there strands a paying customer on free entitlements
+# (nothing self-heals it — only subscription.active re-sets the plan). The fix
+# marks THIS sub cancelled first, then reverts to free ONLY when no OTHER active
+# subscription still owns the workspace.
+# ---------------------------------------------------------------------------
+
+
+async def test_cancelled_does_not_revert_when_newer_active_sub_exists(mongo_db):
+    """Reordered delivery: active(new) already landed (workspace on pro, a NEW active
+    Subscription row owns it) when a stale cancelled(old) retry arrives. The plan
+    must STAY pro — the stale cancel must not downgrade the live subscription."""
+    ws = await _make_workspace(plan="pro")
+    # The newer subscription's active row already owns the workspace (as if its
+    # subscription.active landed first in the reordered delivery).
+    await _seed_subscription(ws, subscription_id="sub_new_active", status="active", plan_key="pro")
+    assert (await entitlements.resolve_entitlements(ws)).plan == "pro"
+
+    # A stale cancelled retry for a DIFFERENT (older) subscription lands now.
+    cancel_body = _subscription_body(
+        event_type="subscription.cancelled", workspace_id=ws, subscription_id="sub_old_cancelled"
+    )
+    result = await billing.handle_webhook(
+        payload=cancel_body.encode(),
+        headers=_sign(cancel_body, msg_id="evt_stale_cancel"),
+        provider=_provider(),
+    )
+
+    assert result == {"ok": True, "granted": False}
+    # The plan is NOT reverted to free — the newer active sub still owns the workspace.
+    assert (await entitlements.resolve_entitlements(ws)).plan == "pro"
+    # The newer subscription's row is untouched (still active).
+    still = await Subscription.find_one(
+        Subscription.gateway == "dodo",
+        Subscription.gateway_subscription_id == "sub_new_active",
+    )
+    assert still is not None
+    assert still.status == "active"
+
+
+async def test_cancelled_reverts_to_free_when_no_other_active_sub(mongo_db):
+    """The normal cancel: the ONLY subscription is the one being cancelled, so no
+    other active sub remains — the plan reverts to free (credits untouched)."""
+    ws = await _make_workspace(plan="pro")
+    await _seed_subscription(ws, subscription_id=SUB_ID, status="active", plan_key="pro")
+    # Give the wallet a balance to prove cancellation never claws it back.
+    await credits.grant(workspace=ws, amount=500, cause="seed", idempotency_key="seed_cancel")
+    assert await credits.balance(ws) == 500
+
+    cancel_body = _subscription_body(
+        event_type="subscription.cancelled", workspace_id=ws, subscription_id=SUB_ID
+    )
+    result = await billing.handle_webhook(
+        payload=cancel_body.encode(),
+        headers=_sign(cancel_body, msg_id="evt_solo_cancel"),
+        provider=_provider(),
+    )
+
+    assert result == {"ok": True, "granted": False}
+    # No other active sub -> plan reverts to free.
+    assert (await entitlements.resolve_entitlements(ws)).plan == "free"
+    # Credits preserved (no clawback).
+    assert await credits.balance(ws) == 500
+    # The cancelled subscription's row reflects the cancelled status.
+    sub = await Subscription.find_one(
+        Subscription.gateway == "dodo", Subscription.gateway_subscription_id == SUB_ID
+    )
+    assert sub is not None
+    assert sub.status == "cancelled"
