@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -135,7 +136,14 @@ async def test_deploy_invokes_wrangler_with_deploy_in_project_dir(tmp_path, monk
 
     await workers_deploy.deploy_workers("507f1f77bcf86cd799439011", project)
 
-    assert captured["argv"] == ["bunx", "wrangler@4.101.0", "deploy"]
+    # On Windows the shared resolver rewrites `bunx` -> `bun x` (there is no bunx.exe
+    # for create_subprocess_exec to launch); POSIX keeps the real `bunx`.
+    expected = (
+        ["bun", "x", "wrangler@4.101.0", "deploy"]
+        if sys.platform == "win32"
+        else ["bunx", "wrangler@4.101.0", "deploy"]
+    )
+    assert captured["argv"] == expected
     assert captured["cwd"] == project
     # The CF creds wrangler reads itself ride through the env (full os.environ).
     assert captured["env"] is not None

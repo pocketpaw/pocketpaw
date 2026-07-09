@@ -26,30 +26,23 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import shlex
 
 from pocketpaw_ee.cloud._core.errors import Internal
+from pocketpaw_ee.sites._wrangler import wrangler_argv as _wrangler_argv
 from pocketpaw_ee.sites.generator_client import _BuildTimeout, _communicate_bounded
 from pocketpaw_ee.sites.workers_deploy import _sanitize
 
 logger = logging.getLogger(__name__)
 
-# The pinned wrangler invocation — same override seam as workers_deploy so the
-# deploy image can pin / swap the wrangler version without a code change
-# (PAW_CF_WRANGLER_CMD, ``shlex.split``, default ``bunx wrangler@4.101.0``).
-_DEFAULT_WRANGLER_CMD = "bunx wrangler@4.101.0"
+# The wrangler invocation (PAW_CF_WRANGLER_CMD, default `bunx wrangler@4.101.0`) is
+# resolved by the shared, Windows-safe helper (imported above as _wrangler_argv) — the
+# SAME seam workers_deploy uses, so migrate + deploy share one wrangler pin and one
+# `bunx`->`bun x` Windows rewrite. See _wrangler.py.
 
 # The migrate subprocess timeout. A legit ``d1 migrations apply`` is seconds; the
 # bound is a safety net so a wedged wrangler (e.g. a hung network pull) can't hang
 # the jobs worker unbounded. Override with PAW_CF_MIGRATE_TIMEOUT_SEC (int seconds).
 _DEFAULT_MIGRATE_TIMEOUT_SEC = 120
-
-
-def _wrangler_argv() -> list[str]:
-    """The wrangler invocation, tokenised. Default ``bunx wrangler@4.101.0``.
-    Override with PAW_CF_WRANGLER_CMD to pin a version or point at a baked binary —
-    the SAME seam workers_deploy uses, so migrate + deploy share one wrangler pin."""
-    return shlex.split(os.environ.get("PAW_CF_WRANGLER_CMD", _DEFAULT_WRANGLER_CMD))
 
 
 def _cf_env() -> dict[str, str]:
