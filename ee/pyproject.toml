@@ -512,6 +512,10 @@ source_modules = [
     "pocketpaw_ee.cloud.jobs.plugins",
     "pocketpaw_ee.cloud.jobs.worker",
     "pocketpaw_ee.cloud.jobs.builtin.score_applications",
+    # DP0-3 — the durable D1 provision job. Its Beanie Site reads/writes funnel
+    # through ``sites.service`` seams (it never imports the Site or WorkspaceJob
+    # doc directly).
+    "pocketpaw_ee.cloud.jobs.builtin.provision_site",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.workspace_job"]
 

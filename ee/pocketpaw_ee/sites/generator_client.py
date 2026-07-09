@@ -8,6 +8,17 @@
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-07-08 (DP0-1 — per-tenant D1 id plumbing for Dynamic Paw Sites
+# Phase 0): build()/_build_one() gained an optional ``d1_database_id: str = ""``
+# param that is ALWAYS written onto ``siteConfig.d1DatabaseId``. The paw-sites
+# generator already threads ``siteConfig.d1DatabaseId`` into the emitted
+# wrangler.toml ``database_id``, but this bridge never populated it, so today every
+# generated wrangler.toml ships ``database_id = ""``. This adds ONLY the
+# pass-through: a caller CAN now supply the per-tenant D1 id and it lands in
+# ``siteConfig.d1DatabaseId`` (default "" → the prior empty value, so a static site
+# is byte-unchanged). Wiring the real id from the provision job at the caller
+# (service.py) is a LATER task (DP0-3/DP0-4) — not done here.
+#
 # Updated 2026-07-09 (fix/sites-gen-windows-process-kill): ``_kill_process_group``
 # was POSIX-only — it unconditionally called ``os.killpg(os.getpgid(pid), SIGKILL)``,
 # neither of which exists on Windows. On a Windows host a build TIMEOUT therefore
@@ -787,6 +798,7 @@ class GeneratorClient:
         engine: str = "ripple",
         source: dict[str, Any] | None = None,
         builder_origin: str | None = None,
+        d1_database_id: str = "",
         pocket_id: str | None = None,
         smoke: bool = True,
         static_build: bool = True,
@@ -820,6 +832,13 @@ class GeneratorClient:
         is OMITTED from the payload when ``None`` so a normal (non-editable)
         publish keeps the exact prior wire bytes and the generator does not inject
         the bridge.
+
+        ``d1_database_id`` (DP0-1) is the per-tenant Cloudflare D1 id a DYNAMIC
+        site's data plane is bound to. It ALWAYS rides ``siteConfig.d1DatabaseId``
+        (default "" for a static site); the paw-sites generator threads that value
+        into the emitted wrangler.toml ``database_id`` so the deployed Worker binds
+        the right D1. This is only the pass-through — the real id is supplied by the
+        provision job at the caller in a later task (DP0-3/DP0-4).
 
         ``pocket_id`` (PERF-3) builds into a STABLE per-pocket working dir under
         build_home() (``<build_home>/<pocket_id>/``) so node_modules persists and
@@ -857,6 +876,7 @@ class GeneratorClient:
                 engine=engine,
                 source=source,
                 builder_origin=builder_origin,
+                d1_database_id=d1_database_id,
                 pocket_id=None,
                 smoke=smoke,
                 static_build=static_build,
@@ -872,6 +892,7 @@ class GeneratorClient:
                 engine=engine,
                 source=source,
                 builder_origin=builder_origin,
+                d1_database_id=d1_database_id,
                 pocket_id=pocket_id,
                 smoke=smoke,
                 static_build=static_build,
@@ -889,6 +910,7 @@ class GeneratorClient:
         engine: str,
         source: dict[str, Any] | None,
         builder_origin: str | None,
+        d1_database_id: str,
         pocket_id: str | None,
         smoke: bool,
         static_build: bool = True,
@@ -909,6 +931,12 @@ class GeneratorClient:
             "title": title,
             "captureApiBase": capture_api_base,
             "captureSignedKey": capture_signed_key,
+            # DP0-1: the per-tenant D1 id the generator threads into the emitted
+            # wrangler.toml ``database_id``. ALWAYS present (default "" for a static
+            # site — the prior empty value), so a caller CAN bind a dynamic site's
+            # data plane by supplying it. The real id comes from the provision job
+            # at the caller in a later task (DP0-3/DP0-4).
+            "d1DatabaseId": d1_database_id,
         }
         # SE-2b: only present when the site is being published as editable, so a
         # non-editable publish's payload is byte-identical to before this change.

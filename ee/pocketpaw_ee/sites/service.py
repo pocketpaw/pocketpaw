@@ -1,6 +1,22 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-07-09 (DP0-4 — publish async split + single-flight): ``_deploy_site_doc``
+# now FORKS on ``_is_dynamic`` BEFORE any build. A DYNAMIC site no longer builds /
+# deploys inline — it returns early into the new ``_provision_dynamic_site`` helper,
+# which ensures the canonical Site doc in ``provision_status="provisioning"``
+# (``deployed=False``, ``url=""``) and enqueues the durable ``provision_site`` job via
+# ``jobs.service.dispatch_job`` (``params={}``). SINGLE-FLIGHT: a re-publish while the
+# site is already ``provisioning`` does NOT enqueue a second job (a double-publish is a
+# no-op). The enqueued job id rides the returned doc on the transient
+# ``_provision_job_id`` PrivateAttr, which ``_to_response`` surfaces on
+# ``SiteResponse.provision_job_id`` alongside ``provision_status``. The STATIC path is
+# byte-for-byte the pre-DP0-4 inline build → deploy → upsert (regression guarantee).
+# Both publish entry points reach it through ``_deploy_site_doc`` (the free ``publish``
+# and the charge-first ``activate_site``), so both get the async behaviour; the return
+# is still a plain ``_SiteDoc`` so their post-processing (plan stamp / sub-active) is
+# unchanged.
+#
 # Updated 2026-07-02 (harden native-editing endpoints): (1) ``get_native_artifact``
 # now routes its arm build through ``_build_or_cloud_error`` (like the publish paths)
 # so a missing-toolchain / non-zero build / SmokeGateFailed becomes a clean
@@ -1009,6 +1025,11 @@ def _to_response(doc: _SiteDoc, pattern: str = "") -> SiteResponse:
         # for a free/live publish and for any list/status read (those docs are
         # loaded from Mongo, where the PrivateAttr defaults to None).
         checkout_url=getattr(doc, "_checkout_url", None),
+        # DP0-4: the dynamic-site provision state (persisted) + the id of the job a
+        # dynamic publish just enqueued (transient ``_provision_job_id`` PrivateAttr,
+        # None for a static publish / any DB-loaded doc / a single-flight no-op).
+        provision_status=getattr(doc, "provision_status", "none"),
+        provision_job_id=getattr(doc, "_provision_job_id", None),
     )
 
 
@@ -1308,7 +1329,29 @@ async def _deploy_site_doc(
     ``workers_deploy`` is the test-injection seam for the workers-mode deployer
     (mirrors ``local_deploy``/``cloudflare``); ``None`` uses the real
     ``workers_deploy.deploy_workers``.
+
+    DP0-4 — DYNAMIC split: a DYNAMIC site (``pattern == "dynamic"`` / a spec carrying
+    live bindings) is NOT built or deployed inline here. Its per-tenant D1 data plane
+    must be stood up by the durable ``provision_site`` job (create D1 → build with the
+    real id → migrate → deploy), so this returns EARLY into ``_provision_dynamic_site``
+    — which ensures the canonical Site doc in ``provision_status="provisioning"`` and
+    enqueues the job (single-flight: a re-publish while already provisioning does NOT
+    enqueue a second job). Only the STATIC path below runs the inline build → deploy →
+    upsert (byte-for-byte the pre-DP0-4 behaviour, the regression guarantee).
     """
+    # DP0-4: fork BEFORE any build. A dynamic site defers to the provision job; only
+    # a static site takes the inline build/deploy/upsert path unchanged below.
+    if _is_dynamic(pattern, ripple_spec):
+        return await _provision_dynamic_site(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            site_id=site_id,
+            signed_key=signed_key,
+            site_name=site_name,
+            builder_origin=builder_origin,
+        )
+
     gen = generator or GeneratorClient()
     # DEP-3: map a generator/install/smoke failure (missing toolchain, non-zero
     # build, SSR fail-gate) to a clean CloudError (sites.generator_failed → 5xx)
@@ -1479,6 +1522,105 @@ async def _deploy_site_doc(
     return doc
 
 
+async def _provision_dynamic_site(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    site_id: str,
+    signed_key: str,
+    site_name: str,
+    builder_origin: str | None,
+) -> _SiteDoc:
+    """DP0-4 — the DYNAMIC half of ``_deploy_site_doc``: stand the site up
+    ASYNCHRONOUSLY via the durable ``provision_site`` job instead of deploying inline.
+
+    A dynamic site is backed by a per-tenant Cloudflare D1 that must be created,
+    migrated, and bound BEFORE the Worker can serve — work the ``provision_site`` job
+    owns (create D1 → build with the real id → migrate → deploy → mark provisioned).
+    So rather than build/deploy here, this:
+
+      1. ENSURES the ONE canonical Site doc for ``(workspace, pocket_id)`` exists in
+         ``provision_status="provisioning"`` (``deployed=False``, ``url=""`` — the job
+         flips those on finalize), mirroring the fields the static upsert seeds on a
+         first publish (script_name / owner / signed_key / capture defaults).
+      2. SINGLE-FLIGHT: if the doc is ALREADY ``provisioning``, it does NOT enqueue a
+         second job — a double-publish is a no-op that returns the in-progress
+         provisioning response (without a fresh job id).
+      3. DISPATCHES the ``provision_site`` job (``params={}`` — the job re-reads the
+         pocket's spec itself; ``validate_job_params({})`` passes with no schema).
+
+    Returns the Site doc in ``provisioning`` state, carrying the enqueued job id on the
+    transient ``_provision_job_id`` PrivateAttr so ``_to_response`` surfaces it. Both
+    publish entry points (the free ``publish`` and the charge-first ``activate_site``)
+    reach this through ``_deploy_site_doc``, so both get the async behaviour; each does
+    its own post-processing on the returned doc (plan stamp / sub-active), which is a
+    plain ``_SiteDoc`` exactly as before — only ``deployed``/``provision_status`` differ.
+    """
+    oid = ObjectId(site_id)
+    doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+
+    # SINGLE-FLIGHT: a publish while the site is already provisioning must not enqueue
+    # a second job — return the in-progress provisioning response as a no-op. (We do
+    # not resolve the in-flight job id here; the caller can poll the site's status.)
+    if doc is not None and doc.provision_status == "provisioning":
+        doc._provision_job_id = None
+        return doc
+
+    # Ensure the canonical doc exists in ``provisioning`` state. leave ``deployed`` /
+    # ``url`` for the job to finalize; seed the same identity/capture fields the static
+    # upsert seeds so the site is coherent while it provisions.
+    if doc is None:
+        doc = _SiteDoc(
+            id=oid,
+            workspace=workspace_id,
+            pocket_id=pocket_id,
+            owner=user_id,
+            name=site_name,
+            script_name=site_id,
+            deployed=False,
+            url="",
+            signed_key=signed_key,
+            provision_status="provisioning",
+            builder_origin=builder_origin or "",
+            allowed_origins=_default_allowed_origins(),
+            event_mapping=_DEFAULT_EVENT_MAPPING,
+        )
+        await doc.insert()
+    else:
+        # Re-publish of a not-currently-provisioning dynamic site (e.g. a failed /
+        # provisioned one re-run): reset to ``provisioning`` and refresh the identity
+        # fields. Preserve the stored ``signed_key`` (the capture endpoint verifies
+        # against it) and any connected domain / allowlist. Clear any captured
+        # pending-deploy inputs — the charge-first webhook has already handed off to
+        # the job, so the snapshot is no longer needed.
+        doc.pocket_id = pocket_id
+        doc.owner = user_id
+        doc.name = site_name
+        doc.script_name = site_id
+        doc.deployed = False
+        doc.url = ""
+        doc.provision_status = "provisioning"
+        doc.pending_deploy_inputs = {}
+        await doc.save()
+
+    # DISPATCH the durable provision job. Lazy import keeps the sites service free of
+    # an eager jobs/arq import at module load (mirrors the billing/pockets lazy
+    # imports). ``params={}`` — the job re-reads the pocket spec; no params needed.
+    from pocketpaw_ee.cloud.jobs import service as jobs_service
+
+    result = await jobs_service.dispatch_job(
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        action="provision_site",
+        job_name="provision_site",
+        params={},
+        triggered_by=user_id,
+    )
+    doc._provision_job_id = result.get("job_id")
+    return doc
+
+
 async def _load(workspace_id: str, site_id: str) -> _SiteDoc:
     # Guard the cast: a malformed site_id is not a 500. bson raises InvalidId
     # (TypeError for non-str/bytes inputs); both mean "no such site".
@@ -1557,6 +1699,131 @@ async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | N
     # Prefer the newest doc that carries a real url (the freshest live build);
     # fall back to the newest doc overall when none has one.
     return next((d for d in docs if d.url), docs[0])
+
+
+# ---------------------------------------------------------------------------
+# DP0-3 — durable ``provision_site`` job seams.
+#
+# The provision job (ee/pocketpaw_ee/cloud/jobs/builtin/provision_site.py) takes a
+# dynamic site from spec to live: create D1 → build (with the real id baked in) →
+# apply migration → deploy the Worker → mark provisioned. The job orchestrates the
+# steps (migrate sits BETWEEN build and deploy), so these are granular seams — the
+# Site-doc Beanie reads/writes funnel through THIS module (the import-linter
+# boundary keeps the builtin job off the Beanie doc), and the build/deploy
+# mechanics reuse ``_deploy_site_doc``'s exact helpers rather than duplicating them.
+# ---------------------------------------------------------------------------
+
+
+def provision_cf_client() -> Any:
+    """The Cloudflare client the provision job uses (create_database / put_worker).
+
+    Thin public wrapper over ``_cf_client()`` so the builtin job builds the real CF
+    client the SAME way ``_deploy_site_doc`` does, and tests can monkeypatch this one
+    seam to inject a fake client without importing the client class."""
+    return _cf_client()
+
+
+def provision_d1_bindings(d1_database_id: str) -> list[dict]:
+    """The Worker D1 binding list a provisioned dynamic site deploys with — a single
+    ``{"type": "d1", "name": "DB", "id": <database_id>}`` (``_D1_BINDING_NAME``), the
+    exact shape ``_deploy_site_doc`` passes ``put_worker`` on the dynamic path."""
+    return [{"type": "d1", "name": _D1_BINDING_NAME, "id": d1_database_id}]
+
+
+def provision_site_url(site_id: str) -> str:
+    """The public URL a provisioned dynamic site resolves to — the per-site subdomain
+    ``https://<site_id>.<PAW_CF_SITES_DOMAIN>`` when the sites domain is configured,
+    else "" (the Worker is uploaded + reachable via the dispatch worker once the
+    operator sets the domain). Mirrors ``_deploy_site_doc``'s WfP URL logic."""
+    import os
+
+    domain = os.environ.get("PAW_CF_SITES_DOMAIN", "").strip()
+    return f"https://{site_id}.{domain}" if domain else ""
+
+
+async def load_provision_site(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
+    """The canonical Site doc the provision job operates on, or None. Resolves the
+    ONE canonical doc for (workspace, pocket_id) (``_canonical_site_doc``), so a
+    pre-PERF-1 pocket with legacy dupes still provisions the live one."""
+    return await _canonical_site_doc(workspace_id, pocket_id)
+
+
+async def persist_provision_d1_id(site: _SiteDoc, d1_database_id: str) -> None:
+    """Persist a freshly-created D1 id on the Site doc IMMEDIATELY (DP0-3 contract).
+
+    ``provision_status`` stays ``provisioning`` — only ``d1_database_id`` is stamped
+    — so a retry of the job REUSES this D1 instead of creating (and orphaning) a
+    second one. Called right after ``cf.create_database`` succeeds, before build /
+    migrate / deploy."""
+    site.d1_database_id = d1_database_id
+    site.provision_status = "provisioning"
+    await site.save()
+
+
+async def finalize_provisioned_site(site: _SiteDoc, *, url: str) -> None:
+    """Mark a Site doc fully provisioned after migrate + deploy succeed (DP0-3):
+    ``provision_status="provisioned"``, ``deployed=True``, stamp the live URL +
+    ``deployed_at``. The last write of the durable job's happy path."""
+    site.provision_status = "provisioned"
+    site.deployed = True
+    site.deployed_at = datetime.now(UTC)
+    site.url = url
+    await site.save()
+
+
+async def mark_provision_failed(site: _SiteDoc) -> None:
+    """Mark a Site doc's provision as failed (DP0-3). The ``d1_database_id`` already
+    persisted (``persist_provision_d1_id``) is LEFT in place so a retry reuses that
+    D1 — only ``provision_status`` flips to ``failed``."""
+    site.provision_status = "failed"
+    await site.save()
+
+
+async def build_provision_bundle(
+    *,
+    site: _SiteDoc,
+    ripple_spec: dict[str, Any] | None,
+    d1_database_id: str,
+    generator: GeneratorClient | None = None,
+) -> tuple[str, bytes]:
+    """Build a dynamic site with its REAL D1 id baked in; return ``(project_dir,
+    bundle)`` (DP0-3).
+
+    Reuses ``_deploy_site_doc``'s exact build assembly: it derives the theme from
+    the rippleSpec, runs the SSR-gated build through ``_build_or_cloud_error`` (so a
+    broken build maps to a clean CloudError, never an opaque 500), and reads the
+    Worker bundle via ``_default_bundle_reader``. ``d1_database_id`` rides
+    ``siteConfig.d1DatabaseId`` so the generator threads it into the emitted
+    wrangler.toml ``database_id`` — this is what makes the later ``wrangler d1
+    migrations apply`` and the Worker's D1 binding target the right database. The
+    caller applies migrations against ``project_dir`` (which carries wrangler.toml +
+    migrations/) BEFORE deploying ``bundle``. ``generator`` is the test-injection
+    seam; None uses a real ``GeneratorClient``."""
+    gen = generator or GeneratorClient()
+    theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
+    site_id = str(site.id)
+    build = await _build_or_cloud_error(
+        gen,
+        ripple_spec=ripple_spec,
+        theme=theme,
+        site_id=site_id,
+        title=site.name or "Untitled site",
+        capture_api_base=_capture_base(),
+        capture_signed_key=site.signed_key,
+        # A dynamic Paw Site is authored as a ripple site carrying live bindings
+        # (objects / sources / actions / auth) — the create-dynamic-site path.
+        engine="ripple",
+        source=None,
+        builder_origin=site.builder_origin or None,
+        # DP0-3: the REAL D1 uuid, baked into the emitted wrangler.toml.
+        d1_database_id=d1_database_id,
+        pocket_id=site.pocket_id,
+        # A live provision keeps the SSR fail-gate on — a broken site is rejected
+        # before it deploys (same as _deploy_site_doc).
+        smoke=True,
+    )
+    bundle = _default_bundle_reader(build.project_dir)
+    return build.project_dir, bundle
 
 
 async def add_domain(
