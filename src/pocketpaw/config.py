@@ -2125,6 +2125,19 @@ class Settings(BaseSettings):
         default=86400,
         description="TTL in seconds for cached Ripple manifest (default: 24h)",
     )
+    ripple_catalog_gate_require_manifest: bool = Field(
+        default=False,
+        description=(
+            "When True, the strict (agent-generation) catalog gate FAILS CLOSED "
+            "if the Ripple widget manifest can't be fetched — an unverifiable "
+            "spec is rejected instead of persisted. Defaults False (best-effort "
+            "skip, preserving current behavior) because ripple_manifest_url "
+            "defaults to the local ripple dev server, which is often down in "
+            "dev; enable it on cloud/prod where the manifest URL points at a "
+            "reliable CDN. Set via "
+            "POCKETPAW_RIPPLE_CATALOG_GATE_REQUIRE_MANIFEST."
+        ),
+    )
     ripple_embed_allowed_hosts: list[str] = Field(
         default_factory=lambda: [
             "youtube-nocookie.com",
