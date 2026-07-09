@@ -53,10 +53,10 @@ import json
 import logging
 import os
 import re
-import shlex
 from pathlib import Path
 
 from pocketpaw_ee.cloud._core.errors import Internal, ValidationError
+from pocketpaw_ee.sites._wrangler import wrangler_argv as _wrangler_argv
 
 logger = logging.getLogger(__name__)
 
@@ -79,18 +79,10 @@ _ASSETSIGNORE_LINES = ("_worker.js", "_routes.json", "_headers")
 _WORKER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 # The pinned wrangler invocation. Overridable (and ``shlex.split``) via
-# PAW_CF_WRANGLER_CMD — mirrors generator_client._gen_cmd_argv's PAW_SITES_GEN_CMD
-# so the deploy image can pin / swap the wrangler version without a code change.
-_DEFAULT_WRANGLER_CMD = "bunx wrangler@4.101.0"
-
-
-def _wrangler_argv() -> list[str]:
-    """The wrangler invocation, tokenised. Default ``bunx wrangler@4.101.0`` (pulls
-    + runs the pinned wrangler at publish time — needs network). Override with
-    PAW_CF_WRANGLER_CMD to pin a different version or point at a baked binary, e.g.
-    ``/opt/node_modules/.bin/wrangler``. Mirrors PAW_SITES_GEN_CMD's override seam.
-    """
-    return shlex.split(os.environ.get("PAW_CF_WRANGLER_CMD", _DEFAULT_WRANGLER_CMD))
+# The wrangler invocation (PAW_CF_WRANGLER_CMD, default `bunx wrangler@4.101.0`) is
+# resolved by the shared, Windows-safe helper (imported at top as _wrangler_argv) so
+# deploy + D1-migrate share one seam. See _wrangler.py for the `bunx`->`bun x` rewrite
+# that keeps it launchable on Windows.
 
 
 def _sanitize(raw: str) -> str:
