@@ -1,5 +1,12 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-07-03 (feat/files-share-links, FL-12b) — Mounts two share-link
+    routers: ``share_router`` (owner + license gated POST/DELETE
+    /files/{id}/share) and ``public_share_router`` (intentionally
+    unauthenticated GET /share/{token} — the token is the capability). The
+    public route mints its download URL through EEUploadService.presigned_get so
+    it inherits the forced-attachment protection for non-inline mimes. Both are
+    feature-flagged behind POCKETPAW_SHARE_LINKS_ENABLED (default off).
 Modified: 2026-06-24 (integration/billing-credits, BC-6) — Mounts the
     Entitlements resolver router (``GET /entitlements`` -> the caller workspace's
     plan + features + monthly credit allotment). The plan CATALOG read
@@ -354,15 +361,25 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.push.router import router as push_router
     from pocketpaw_ee.cloud.tasks.router import router as tasks_router
     from pocketpaw_ee.cloud.uploads.router import router as uploads_router
+    from pocketpaw_ee.cloud.uploads.share_router import (
+        public_share_router,
+        share_router,
+    )
     from pocketpaw_ee.fabric.router import router as fabric_router
     from pocketpaw_ee.fleet.router import router as fleet_router
     from pocketpaw_ee.instinct.router import router as instinct_router
-    from pocketpaw_ee.paw_print.router import router as paw_print_router
+    from pocketpaw_ee.paw_bar.router import router as paw_bar_router
     from pocketpaw_ee.sites.router import router as sites_router
 
     app.include_router(kb_router, prefix="/api/v1")
     app.include_router(knowledge_router, prefix="/api/v1")
     app.include_router(uploads_router, prefix="/api/v1")
+    # FL-12b public share links. ``share_router`` (POST/DELETE /files/{id}/share)
+    # is owner + license gated; ``public_share_router`` (GET /share/{token}) is
+    # DELIBERATELY unauthenticated — the token is the capability. Both are dark
+    # unless POCKETPAW_SHARE_LINKS_ENABLED=true.
+    app.include_router(share_router, prefix="/api/v1")
+    app.include_router(public_share_router, prefix="/api/v1")
     app.include_router(notifications_router, prefix="/api/v1")
     # Web Push — VAPID public key + subscribe/unsubscribe (pocketpaw#1391).
     app.include_router(push_router, prefix="/api/v1")
@@ -556,15 +573,15 @@ def mount_cloud(app: FastAPI) -> None:
         return page.model_dump()
 
     app.include_router(_files_v2, prefix="/api/v1")
-    # paw_print lives outside ee/cloud/ but is mounted alongside the cloud
-    # routers so the admin UI (paw-enterprise /pockets/<id> Paw Print tab) can
-    # reach /api/v1/paw-print/* without a second app setup entry point.
-    app.include_router(paw_print_router, prefix="/api/v1")
+    # paw_bar lives outside ee/cloud/ but is mounted alongside the cloud
+    # routers so the admin UI (paw-enterprise /pockets/<id> Paw Bar tab) can
+    # reach /api/v1/paw-bar/* without a second app setup entry point.
+    app.include_router(paw_bar_router, prefix="/api/v1")
 
     # Fabric / Fleet / Instinct also live outside ee/cloud/ (pocketpaw_ee.
     # {fabric,fleet,instinct}). Their logic split into the OSS core in Phase 2,
     # but the HTTP routers stay enterprise — they depend on cloud auth — so the
-    # OSS core no longer mounts them. They ride along here, like paw_print
+    # OSS core no longer mounts them. They ride along here, like paw_bar
     # above, instead of through the core's mount_v1_routers().
     app.include_router(fabric_router, prefix="/api/v1")
     app.include_router(fleet_router, prefix="/api/v1")

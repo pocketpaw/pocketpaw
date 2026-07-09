@@ -39,6 +39,14 @@ def _patch(monkeypatch, *, chain, storage_path: Path, ingest):
 
     monkeypatch.setattr(listeners, "_resolve_adapter", lambda: _Adapter())
 
+    # FL-11b: the listener fails CLOSED — it needs a resolvable, non-hidden
+    # FileUpload row or it skips indexing. Provide a non-hidden stub so these
+    # pocket-scope-routing tests reach the ingest path.
+    async def _load_doc(_file_id, _workspace_id):
+        return type("_Doc", (), {"hide_from_ai": False, "tags": []})()
+
+    monkeypatch.setattr(listeners, "_load_upload_doc", _load_doc)
+
     from pocketpaw_ee.cloud.agents import knowledge as kn
 
     monkeypatch.setattr(kn.KnowledgeService, "ingest_text_to_scope", ingest)

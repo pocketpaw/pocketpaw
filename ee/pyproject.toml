@@ -161,6 +161,13 @@ extraction = [
     "trafilatura",
     "python-docx>=1.1.0",
     "pytesseract>=0.3.10",
+    # PyMuPDF (fitz) rasterizes image-heavy PDF pages so the Gemini adapter can
+    # caption scanned/diagram pages (FL-15). Pure-wheel, no system poppler.
+    # Lazy-imported in gemini_flash.py, so it stays optional. Floor 1.24.0
+    # (released 2024, well past the workspace 7-day supply-chain min-age rule).
+    # Upper bound: MuPDF (native C) has recurring memory-corruption CVEs on
+    # malformed PDFs; cap the major so a 2.x doesn't auto-adopt (review F2).
+    "pymupdf>=1.24.0,<2.0",
 ]
 # Firestore→Fabric ingest worker (ee/pocketpaw_ee/cloud/fabric_ingest). The
 # reader lazy-imports google-cloud-firestore behind a Protocol, so it stays
@@ -468,6 +475,10 @@ source_modules = [
     "pocketpaw_ee.cloud.file_versions.router",
     "pocketpaw_ee.cloud.file_versions.dto",
     "pocketpaw_ee.cloud.file_versions.domain",
+    # FL-2 (port of #1193): slides/spreadsheet transport DTOs are Beanie-free
+    # too — only ``file_versions.service`` may touch FileVersionDoc.
+    "pocketpaw_ee.cloud.file_versions.slides_dto",
+    "pocketpaw_ee.cloud.file_versions.spreadsheet_dto",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.file_version"]
 
@@ -498,6 +509,10 @@ source_modules = [
     "pocketpaw_ee.cloud.jobs.plugins",
     "pocketpaw_ee.cloud.jobs.worker",
     "pocketpaw_ee.cloud.jobs.builtin.score_applications",
+    # DP0-3 — the durable D1 provision job. Its Beanie Site reads/writes funnel
+    # through ``sites.service`` seams (it never imports the Site or WorkspaceJob
+    # doc directly).
+    "pocketpaw_ee.cloud.jobs.builtin.provision_site",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.workspace_job"]
 

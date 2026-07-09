@@ -94,6 +94,13 @@
 # already-rendered {uid, op} edits and the endpoint returns one verdict per edit.
 # ``op`` rides as an open dict — its {kind:setText|setProp,...} shape is validated
 # downstream by the paw-sites apply-leaf-edit CLI, not at this DTO boundary.
+# Updated 2026-07-09 (DP0-4 — publish async split): ``SiteResponse`` gains
+# ``provision_status`` (none | provisioning | provisioned | failed) and
+# ``provision_job_id``. A DYNAMIC-site publish no longer deploys inline — it enqueues
+# the durable ``provision_site`` job and returns immediately with
+# ``provision_status="provisioning"`` / ``deployed=False`` and the enqueued job id;
+# the site goes live only when the job finalizes. Both default to "none" / None so a
+# static publish and every non-publish response stay backward-compatible.
 # Updated 2026-07-01 (NE-5b — native-artifact endpoint): added NativeArtifactResponse
 # ({pocket_id, body_html, css}) — the response of GET
 # /sites/by-pocket/{pocket_id}/native-artifact. ``body_html`` is the armed svelte
@@ -153,6 +160,16 @@ class SiteResponse(BaseModel):
     # the ``subscription.active`` webhook confirms payment. None for a free/base
     # publish (which deploys immediately) and for any non-publish response.
     checkout_url: str | None = None
+    # DP0-4: where a dynamic site sits in the durable D1 provision job
+    # (none | provisioning | provisioned | failed). A DYNAMIC-site publish does NOT
+    # deploy inline — it enqueues the ``provision_site`` job and returns immediately
+    # with ``provision_status="provisioning"`` (``deployed=False``); the site goes
+    # live only when the job finalizes. "none" for a static site (deploys inline).
+    provision_status: str = "none"
+    # DP0-4: the id of the ``provision_site`` job a dynamic publish enqueued, so the
+    # caller can poll the job. None for a static publish, and None on a single-flight
+    # no-op (a second publish while already provisioning does not enqueue a job).
+    provision_job_id: str | None = None
 
 
 class SitePreviewResponse(BaseModel):

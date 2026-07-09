@@ -8,6 +8,27 @@
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-07-08 (DP0-1 — per-tenant D1 id plumbing for Dynamic Paw Sites
+# Phase 0): build()/_build_one() gained an optional ``d1_database_id: str = ""``
+# param that is ALWAYS written onto ``siteConfig.d1DatabaseId``. The paw-sites
+# generator already threads ``siteConfig.d1DatabaseId`` into the emitted
+# wrangler.toml ``database_id``, but this bridge never populated it, so today every
+# generated wrangler.toml ships ``database_id = ""``. This adds ONLY the
+# pass-through: a caller CAN now supply the per-tenant D1 id and it lands in
+# ``siteConfig.d1DatabaseId`` (default "" → the prior empty value, so a static site
+# is byte-unchanged). Wiring the real id from the provision job at the caller
+# (service.py) is a LATER task (DP0-3/DP0-4) — not done here.
+#
+# Updated 2026-07-09 (fix/sites-gen-windows-process-kill): ``_kill_process_group``
+# was POSIX-only — it unconditionally called ``os.killpg(os.getpgid(pid), SIGKILL)``,
+# neither of which exists on Windows. On a Windows host a build TIMEOUT therefore
+# crashed inside ``_communicate_bounded``'s timeout handler with ``AttributeError:
+# module 'os' has no attribute 'killpg'``, masking the real ``_BuildTimeout`` and
+# escaping ``publish_pocket`` as an unhandled 500. ``_kill_process_group`` now
+# branches on ``sys.platform``: POSIX keeps the process-group SIGKILL; Windows calls
+# the new ``_kill_process_tree_windows`` (``taskkill /F /T`` to reap the leaked
+# workerd child TREE, best-effort ``proc.kill()`` fallback if taskkill is missing).
+#
 # Updated 2026-07-02 (harden apply_leaf_edits temp-file cleanup): ``apply_leaf_edits``
 # now assigns ``input_path = fh.name`` BEFORE ``json.dump`` inside the ``with`` and
 # wraps creation + write + exec in ONE guarded try/finally, so a serialization
@@ -194,6 +215,8 @@ import logging
 import os
 import shlex
 import signal
+import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -244,19 +267,49 @@ class _BuildTimeout(RuntimeError):
         super().__init__(f"{label} timed out after {timeout_s}s")
 
 
-def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
-    """SIGKILL the entire process GROUP of a launched subprocess so leaked workerd
-    CHILDREN die too, not just the parent.
+def _kill_process_tree_windows(proc: asyncio.subprocess.Process) -> None:
+    """Windows has no ``setsid`` process groups, so kill the whole child TREE with
+    ``taskkill /F /T`` — ``/T`` recurses into children, reaping the leaked workerd
+    child the bun parent never cleans up (the POSIX ``killpg`` equivalent). If
+    ``taskkill`` is missing or blocked, degrade to a best-effort parent kill so the
+    exception never escapes the timeout handler."""
+    pid = proc.pid
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=10,
+        )
+    except Exception:
+        # taskkill unavailable / blocked / timed out — best-effort parent kill.
+        with contextlib.suppress(Exception):
+            proc.kill()
 
-    The build subprocesses are launched with ``start_new_session=True``, so each is
-    its own process-group leader (pgid == pid). ``adapter-cloudflare``'s prerender
-    boots a workerd child that the bun parent never reaps; killing only the parent
-    would leave that child wedged. ``os.killpg(os.getpgid(pid), SIGKILL)`` takes out
-    the whole group. Guards ``ProcessLookupError`` (the proc/group already exited)
-    and ``PermissionError`` (can't signal — nothing we can do) so a best-effort kill
-    never raises into the build path."""
+
+def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    """Kill a launched build subprocess AND its leaked children so a wedged workerd
+    prerender dies too, not just the parent.
+
+    ``adapter-cloudflare``'s prerender boots a workerd child that the bun parent
+    never reaps; killing only the parent would leave that child wedged. The
+    mechanism is platform-specific:
+
+    * **POSIX** — the subprocesses are launched with ``start_new_session=True``, so
+      each leads its own process group (pgid == pid); ``os.killpg(os.getpgid(pid),
+      SIGKILL)`` takes out the whole group. Guards ``ProcessLookupError`` (already
+      exited) and ``PermissionError`` (can't signal) so the best-effort kill never
+      raises into the build path.
+    * **Windows** — ``start_new_session`` is a no-op, and ``os.killpg`` /
+      ``os.getpgid`` don't exist at all (referencing them raised ``AttributeError``
+      inside the timeout handler, masking ``_BuildTimeout`` and escaping publish as
+      an unhandled 500). Use ``taskkill /F /T`` to kill the child tree instead."""
     pid = proc.pid
     if pid is None:
+        return
+    if sys.platform == "win32":
+        _kill_process_tree_windows(proc)
         return
     try:
         os.killpg(os.getpgid(pid), signal.SIGKILL)
@@ -745,6 +798,7 @@ class GeneratorClient:
         engine: str = "ripple",
         source: dict[str, Any] | None = None,
         builder_origin: str | None = None,
+        d1_database_id: str = "",
         pocket_id: str | None = None,
         smoke: bool = True,
         static_build: bool = True,
@@ -778,6 +832,13 @@ class GeneratorClient:
         is OMITTED from the payload when ``None`` so a normal (non-editable)
         publish keeps the exact prior wire bytes and the generator does not inject
         the bridge.
+
+        ``d1_database_id`` (DP0-1) is the per-tenant Cloudflare D1 id a DYNAMIC
+        site's data plane is bound to. It ALWAYS rides ``siteConfig.d1DatabaseId``
+        (default "" for a static site); the paw-sites generator threads that value
+        into the emitted wrangler.toml ``database_id`` so the deployed Worker binds
+        the right D1. This is only the pass-through — the real id is supplied by the
+        provision job at the caller in a later task (DP0-3/DP0-4).
 
         ``pocket_id`` (PERF-3) builds into a STABLE per-pocket working dir under
         build_home() (``<build_home>/<pocket_id>/``) so node_modules persists and
@@ -815,6 +876,7 @@ class GeneratorClient:
                 engine=engine,
                 source=source,
                 builder_origin=builder_origin,
+                d1_database_id=d1_database_id,
                 pocket_id=None,
                 smoke=smoke,
                 static_build=static_build,
@@ -830,6 +892,7 @@ class GeneratorClient:
                 engine=engine,
                 source=source,
                 builder_origin=builder_origin,
+                d1_database_id=d1_database_id,
                 pocket_id=pocket_id,
                 smoke=smoke,
                 static_build=static_build,
@@ -847,6 +910,7 @@ class GeneratorClient:
         engine: str,
         source: dict[str, Any] | None,
         builder_origin: str | None,
+        d1_database_id: str,
         pocket_id: str | None,
         smoke: bool,
         static_build: bool = True,
@@ -867,6 +931,12 @@ class GeneratorClient:
             "title": title,
             "captureApiBase": capture_api_base,
             "captureSignedKey": capture_signed_key,
+            # DP0-1: the per-tenant D1 id the generator threads into the emitted
+            # wrangler.toml ``database_id``. ALWAYS present (default "" for a static
+            # site — the prior empty value), so a caller CAN bind a dynamic site's
+            # data plane by supplying it. The real id comes from the provision job
+            # at the caller in a later task (DP0-3/DP0-4).
+            "d1DatabaseId": d1_database_id,
         }
         # SE-2b: only present when the site is being published as editable, so a
         # non-editable publish's payload is byte-identical to before this change.

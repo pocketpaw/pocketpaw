@@ -1,16 +1,31 @@
 # gemini_flash.py — Gemini Flash extraction adapter.
 # Created: 2026-04-30 — Phase 1 of "Files as Knowledge" plan, Stage 1.A.
-# Cloud captioning sibling to LocalExtractor: rich descriptions for images,
-# per-page captions for sparse PDF pages. No replacement of pypdf — it
-# augments where pypdf returns near-empty text.
+# Updated: 2026-07-03 (FL-15) — implement the deferred image-heavy PDF path:
+#   sparse pages (pypdf text < _SPARSE_PAGE_THRESHOLD) are now RENDERED to a
+#   PNG via PyMuPDF (fitz, lazy-imported like the genai client) and captioned
+#   through the same Gemini call the image path uses. A per-PDF cost cap
+#   (_MAX_SPARSE_PAGES_CAPTIONED) bounds render+caption calls. Text-heavy
+#   pages stay pypdf-only (no Gemini call); the genai call was factored into a
+#   shared _caption_image_bytes helper reused by both the image and PDF paths.
 """GeminiFlashExtractor — google-genai SDK adapter.
 
 Captions images with `gemini-2.5-flash` (or whatever model is configured).
-For PDFs the strategy is hybrid: pypdf extracts text per page; pages with
-<200 chars of extracted text are marked image-heavy and *not* captioned in
-this stage (heavy PDF→image rendering deferred to a later PR — Stage 1.A
-ships without a new dep). When network is unavailable the chain falls
-through to LocalExtractor before this adapter is asked to run.
+For PDFs the strategy is hybrid: pypdf extracts text per page. Pages with
+>=200 chars of extracted text keep their pypdf text verbatim and are *not*
+sent to Gemini. Pages with <200 chars are treated as image-heavy: the page
+is rendered to a PNG with PyMuPDF and captioned via the same Gemini call the
+image path uses, so scanned/diagram pages become BM25-searchable instead of
+being silently skipped.
+
+A cost guard caps the number of sparse pages captioned per PDF at
+`_MAX_SPARSE_PAGES_CAPTIONED` — pages beyond the cap fall back to the old
+"image-heavy, no caption" marker so a huge scanned PDF can't fan out into an
+unbounded number of Gemini calls.
+
+Heavy deps (google-genai, PyMuPDF) are lazy-imported so the module still
+imports where they aren't installed (tests mock them). When network is
+unavailable the chain falls through to LocalExtractor before this adapter is
+asked to run.
 """
 
 from __future__ import annotations
@@ -28,8 +43,39 @@ CAPTION_PROMPT = (
 )
 
 # Below this character count per pypdf-extracted page we treat the page
-# as image-heavy and skip captioning. 200 is a heuristic; tune later.
+# as image-heavy and render+caption it. 200 is a heuristic; tune later.
 _SPARSE_PAGE_THRESHOLD = 200
+
+# Cost guard: cap how many sparse pages we render+caption per PDF. A scanned
+# 500-page document would otherwise fan out into 500 Gemini calls. Pages past
+# the cap keep the "image-heavy, no caption" marker.
+_MAX_SPARSE_PAGES_CAPTIONED = 20
+
+# DPI for rasterizing a sparse PDF page before captioning. 150 balances legible
+# text/diagrams against payload size.
+_RENDER_DPI = 150
+
+
+def _render_pdf_page_to_png(path: Path, page_index: int, *, dpi: int = _RENDER_DPI) -> bytes:
+    """Render a single PDF page (0-based) to PNG bytes via PyMuPDF (fitz).
+
+    Lazy-imported so the module imports without the dep installed; tests patch
+    this function or the `fitz` module to avoid a real render.
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError as exc:  # pragma: no cover - exercised via mock in tests
+        raise RuntimeError(
+            "PyMuPDF not installed — run: pip install 'pocketpaw-ee[extraction]'"
+        ) from exc
+
+    doc = fitz.open(str(path))
+    try:
+        page = doc.load_page(page_index)
+        pix = page.get_pixmap(dpi=dpi)
+        return pix.tobytes("png")
+    finally:
+        doc.close()
 
 
 class GeminiFlashExtractor:
@@ -55,20 +101,27 @@ class GeminiFlashExtractor:
             return await self._extract_pdf_with_captions(path)
         raise ValueError(f"unsupported mime: {mime}")
 
-    async def _extract_image(self, path: Path, mime: str) -> ExtractionResult:
+    async def _caption_image_bytes(self, data: bytes, mime: str) -> str:
+        """Send raw image bytes to Gemini and return the stripped caption.
+
+        Shared by the image path and the rendered-PDF-page path so both use an
+        identical request shape (model, prompt, inline Part).
+        """
         from google.genai import types
 
-        img = path.read_bytes()
         contents: list = [
             CAPTION_PROMPT,
-            types.Part.from_bytes(data=img, mime_type=mime),
+            types.Part.from_bytes(data=data, mime_type=mime),
         ]
         response = await asyncio.to_thread(
             self._client.models.generate_content,
             model=self._model,
             contents=contents,
         )
-        caption = (response.text or "").strip()
+        return (response.text or "").strip()
+
+    async def _extract_image(self, path: Path, mime: str) -> ExtractionResult:
+        caption = await self._caption_image_bytes(path.read_bytes(), mime)
         return ExtractionResult(
             text=caption,
             captions=[caption],
@@ -86,16 +139,35 @@ class GeminiFlashExtractor:
         sections: list[str] = []
         captions: list[str] = []
         sparse_pages: list[int] = []
+        captioned_pages: list[int] = []
 
         for idx, page in enumerate(reader.pages, start=1):
             page_text = (page.extract_text() or "").strip()
-            if len(page_text) < _SPARSE_PAGE_THRESHOLD:
-                # Stage 1.A doesn't ship a PDF-to-image renderer dependency.
-                # Mark the page so downstream search knows the gap exists.
-                sections.append(f"[page {idx}: image-heavy, no caption]")
-                sparse_pages.append(idx)
+            if len(page_text) >= _SPARSE_PAGE_THRESHOLD:
+                # Text-heavy page: keep pypdf text verbatim, no Gemini call.
+                sections.append(f"[page {idx}]\n{page_text}")
                 continue
-            sections.append(f"[page {idx}]\n{page_text}")
+
+            # Image-heavy page: render + caption, respecting the per-PDF cap.
+            sparse_pages.append(idx)
+            if len(captioned_pages) >= _MAX_SPARSE_PAGES_CAPTIONED:
+                # Cost guard tripped — mark the gap instead of captioning.
+                sections.append(f"[page {idx}: image-heavy, caption cap reached]")
+                continue
+
+            try:
+                png = await asyncio.to_thread(_render_pdf_page_to_png, path, idx - 1)
+                caption = await self._caption_image_bytes(png, "image/png")
+            except Exception:  # noqa: BLE001 - render/caption failure must not sink the PDF
+                sections.append(f"[page {idx}: image-heavy, caption failed]")
+                continue
+
+            if caption:
+                sections.append(f"[page {idx} — image caption]\n{caption}")
+                captions.append(caption)
+                captioned_pages.append(idx)
+            else:
+                sections.append(f"[page {idx}: image-heavy, empty caption]")
 
         text = "\n\n".join(sections)
         return ExtractionResult(
@@ -107,6 +179,8 @@ class GeminiFlashExtractor:
                 "model": self._model,
                 "page_count": len(reader.pages),
                 "sparse_pages": sparse_pages,
+                "captioned_pages": captioned_pages,
+                "max_captioned_pages": _MAX_SPARSE_PAGES_CAPTIONED,
             },
             backend=self.name,
         )

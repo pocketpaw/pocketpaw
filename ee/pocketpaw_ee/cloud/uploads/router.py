@@ -1,5 +1,22 @@
 """EE /uploads router — workspace-scoped upload endpoints.
 
+2026-07-03 (FL-11b "hide-from-AI purge"): ``PATCH /uploads/{file_id}`` now
+retroactively purges a file's KB content when ``hide_from_ai`` flips false→true
+AND the row tracks a kb-go article (``kb_article_id`` + ``kb_scope`` recorded on
+ingest by the FileReady listener). It calls
+``KnowledgeService.remove_article`` then clears the tracking so a later re-index
+re-tracks. Best-effort: a purge failure logs a warning but the hide flag still
+applies (a sweeper can re-purge); no article tracked → no purge; already-hidden
+or a PATCH that doesn't change the flag → no purge. The file stays
+browsable/downloadable — only the KB copy is removed.
+
+2026-07-03 (FL-1 "Library metadata"): ``PATCH /uploads/{file_id}`` now also
+accepts ``tags`` (list[str]), ``collections`` (list[str]) and ``hide_from_ai``
+(bool) so a file can carry library organization. Only the provided fields are
+touched; the existing ``filename`` / ``folder_path`` behaviour is unchanged.
+The write-side ACL (owner OR workspace admin) already gates the route, and the
+response echoes the current metadata so the FE can round-trip it.
+
 2026-04-19 (Cluster E sub-PR 3): added ``GET /uploads/{id}/download-url``
 as an explicitly-named alias for the existing ``/grant`` endpoint. The
 alias returns the same signed-URL-or-cookie-URL payload plus a
@@ -30,6 +47,7 @@ into it.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
@@ -41,6 +59,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Response,
     UploadFile,
     status,
@@ -61,6 +80,8 @@ from pocketpaw_ee.cloud.uploads.folder_store import FolderStore
 from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
 from pocketpaw_ee.cloud.uploads.paths import normalize_path, parent_of
 from pocketpaw_ee.cloud.uploads.service import EEUploadService
+
+logger = logging.getLogger(__name__)
 
 # Module-level singletons — one adapter + store per process
 _ROOT = Path.home() / ".pocketpaw" / "uploads"
@@ -341,6 +362,9 @@ async def patch_upload(
 
     new_filename = body.get("filename")
     new_folder = body.get("folder_path")
+    new_tags = body.get("tags")
+    new_collections = body.get("collections")
+    new_hide = body.get("hide_from_ai")
 
     if new_filename is not None:
         if not isinstance(new_filename, str) or not new_filename.strip():
@@ -358,13 +382,76 @@ async def patch_upload(
             raise HTTPException(status_code=400, detail="destination folder does not exist")
         doc.folder_path = norm
 
+    # FL-1 library metadata. Tags / collections must be lists of strings;
+    # hide_from_ai must be a bool. Omitted fields are left untouched.
+    if new_tags is not None:
+        if not isinstance(new_tags, list) or not all(isinstance(t, str) for t in new_tags):
+            raise HTTPException(status_code=400, detail="tags must be a list of strings")
+        doc.tags = new_tags
+
+    if new_collections is not None:
+        if not isinstance(new_collections, list) or not all(
+            isinstance(c, str) for c in new_collections
+        ):
+            raise HTTPException(status_code=400, detail="collections must be a list of strings")
+        doc.collections = new_collections
+
+    # FL-11b: detect a false→true hide transition so we can retroactively
+    # purge the file's KB article after the row is saved. Capture the pre-edit
+    # state + tracked article BEFORE mutating ``doc``.
+    was_hidden = bool(doc.hide_from_ai)
+    tracked_article_id = doc.kb_article_id
+    tracked_scope = doc.kb_scope
+
+    if new_hide is not None:
+        if not isinstance(new_hide, bool):
+            raise HTTPException(status_code=400, detail="hide_from_ai must be a boolean")
+        doc.hide_from_ai = new_hide
+
+    became_hidden = new_hide is True and not was_hidden
+
     await doc.save()
+
+    # FL-11b purge: a file that WAS indexed (has a tracked article) and is now
+    # being hidden gets its KB content removed so it stops being retrievable.
+    # Best-effort — a purge failure logs a warning but the hide flag stays
+    # applied (a retry/sweeper can re-purge). We do NOT purge when the file
+    # wasn't indexed (no tracked article) or was already hidden. On success we
+    # clear the tracking so a later re-index re-tracks the fresh article.
+    if became_hidden and tracked_article_id and tracked_scope:
+        from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
+
+        purged = await KnowledgeService.remove_article(tracked_scope, tracked_article_id)
+        if purged:
+            try:
+                await _META.set_kb_article(
+                    file_id, workspace=workspace, article_id=None, scope=None
+                )
+            except Exception:
+                logger.warning(
+                    "cleared-tracking write failed for file_id=%s after KB purge; "
+                    "re-index may re-purge harmlessly (idempotent delete)",
+                    file_id,
+                )
+        else:
+            logger.warning(
+                "KB purge failed for file_id=%s (article_id=%s scope=%s); hide "
+                "flag applied but content may still be retrievable until a "
+                "sweeper re-purges",
+                file_id,
+                tracked_article_id,
+                tracked_scope,
+            )
+
     return {
         "id": doc.file_id,
         "filename": doc.filename,
         "folder_path": doc.folder_path or "/",
         "mime": doc.mime,
         "size": doc.size,
+        "tags": list(doc.tags or []),
+        "collections": list(doc.collections or []),
+        "hide_from_ai": bool(doc.hide_from_ai),
     }
 
 
@@ -402,41 +489,45 @@ async def download_url(
 @router.get("/{file_id}/grant")
 async def grant(
     file_id: str,
+    w: int = Query(default=0, ge=0, le=2048, description="Thumbnail width"),
+    h: int = Query(default=0, ge=0, le=2048, description="Thumbnail height"),
+    q: int = Query(default=80, ge=1, le=100, description="Thumbnail quality"),
+    f: str = Query(default="webp", description="Thumbnail format: webp, jpeg, png"),
     workspace: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> dict:
     """Mint a short-lived download URL for ``file_id``.
 
-    Returns the storage adapter's presigned URL when available (S3 and
-    friends). Otherwise returns the authenticated cloud download URL —
-    the paw-enterprise browser attaches ``paw_auth`` cookies via
-    ``withCredentials`` so ``<img src>`` / ``<a href download>`` work
-    directly without a Bearer header.
+    When ``w`` or ``h`` is provided, returns a URL to a resized thumbnail
+    served through the ``GET /uploads/{id}`` endpoint. Thumbnail generation
+    is deferred to the first request (server-cached after that).
 
-    HMAC-signed ``?t=`` grants are intentionally NOT used here: the EE
-    download route at ``GET /uploads/{id}`` requires ``current_active_user``
-    (JWT), and the OSS dashboard auth middleware verifies HMAC with its
-    own master token, not EE's ``SECRET``. Embedding these URLs in
-    cookie-less contexts (mobile webviews, cross-origin embeds) requires
-    S3 presigning — use that adapter for production.
+    For full-size downloads, returns the S3 presigned URL when available.
+    For thumbnails, always returns a cookie-authed server URL.
     """
     import time
 
     from pocketpaw.uploads.signing import DEFAULT_TTL_SECONDS
 
+    has_thumb = w > 0 or h > 0
     try:
         _rec, presigned = await _SVC.presigned_get(file_id, user_id, workspace, DEFAULT_TTL_SECONDS)
     except NotFound as e:
         raise HTTPException(status_code=404, detail="not found") from e
 
-    if presigned:
+    has_presigned = presigned is not None
+
+    if has_thumb or not has_presigned:
+        thumb_qs = f"w={w}&h={h}&q={q}&f={f}" if has_thumb else ""
+        base = f"/api/v1/uploads/{file_id}"
+        sep = "?" if thumb_qs else ""
         return {
-            "url": presigned,
+            "url": f"{base}{sep}{thumb_qs}",
             "expires_at": int(time.time()) + DEFAULT_TTL_SECONDS,
         }
 
     return {
-        "url": f"/api/v1/uploads/{file_id}",
+        "url": presigned,
         "expires_at": int(time.time()) + DEFAULT_TTL_SECONDS,
     }
 
@@ -444,9 +535,44 @@ async def grant(
 @router.get("/{file_id}")
 async def download(
     file_id: str,
+    w: int = Query(default=0, ge=0, le=2048),
+    h: int = Query(default=0, ge=0, le=2048),
+    q: int = Query(default=80, ge=1, le=100),
+    f: str = Query(default="webp"),
     workspace: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> StreamingResponse:
+    """Stream a file or a resized thumbnail.
+
+    When ``w`` or ``h`` is > 0, returns a thumbnail in the requested format
+    (WebP by default). Otherwise returns the full original file.
+    """
+    has_thumb = w > 0 or h > 0
+
+    if has_thumb:
+        try:
+            rec, mime_type, it = await _SVC.thumbnail(
+                file_id,
+                user_id,
+                workspace,
+                width=w,
+                height=h,
+                quality=q,
+                fmt=f,
+            )
+        except NotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="thumbnail generation failed") from e
+        return StreamingResponse(
+            it,
+            media_type=mime_type,
+            headers={
+                "Cache-Control": "public, max-age=86400, immutable",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     try:
         rec, it = await _SVC.stream(file_id, user_id, workspace)
     except NotFound as e:
