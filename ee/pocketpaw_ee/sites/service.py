@@ -1559,6 +1559,131 @@ async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | N
     return next((d for d in docs if d.url), docs[0])
 
 
+# ---------------------------------------------------------------------------
+# DP0-3 — durable ``provision_site`` job seams.
+#
+# The provision job (ee/pocketpaw_ee/cloud/jobs/builtin/provision_site.py) takes a
+# dynamic site from spec to live: create D1 → build (with the real id baked in) →
+# apply migration → deploy the Worker → mark provisioned. The job orchestrates the
+# steps (migrate sits BETWEEN build and deploy), so these are granular seams — the
+# Site-doc Beanie reads/writes funnel through THIS module (the import-linter
+# boundary keeps the builtin job off the Beanie doc), and the build/deploy
+# mechanics reuse ``_deploy_site_doc``'s exact helpers rather than duplicating them.
+# ---------------------------------------------------------------------------
+
+
+def provision_cf_client() -> Any:
+    """The Cloudflare client the provision job uses (create_database / put_worker).
+
+    Thin public wrapper over ``_cf_client()`` so the builtin job builds the real CF
+    client the SAME way ``_deploy_site_doc`` does, and tests can monkeypatch this one
+    seam to inject a fake client without importing the client class."""
+    return _cf_client()
+
+
+def provision_d1_bindings(d1_database_id: str) -> list[dict]:
+    """The Worker D1 binding list a provisioned dynamic site deploys with — a single
+    ``{"type": "d1", "name": "DB", "id": <database_id>}`` (``_D1_BINDING_NAME``), the
+    exact shape ``_deploy_site_doc`` passes ``put_worker`` on the dynamic path."""
+    return [{"type": "d1", "name": _D1_BINDING_NAME, "id": d1_database_id}]
+
+
+def provision_site_url(site_id: str) -> str:
+    """The public URL a provisioned dynamic site resolves to — the per-site subdomain
+    ``https://<site_id>.<PAW_CF_SITES_DOMAIN>`` when the sites domain is configured,
+    else "" (the Worker is uploaded + reachable via the dispatch worker once the
+    operator sets the domain). Mirrors ``_deploy_site_doc``'s WfP URL logic."""
+    import os
+
+    domain = os.environ.get("PAW_CF_SITES_DOMAIN", "").strip()
+    return f"https://{site_id}.{domain}" if domain else ""
+
+
+async def load_provision_site(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
+    """The canonical Site doc the provision job operates on, or None. Resolves the
+    ONE canonical doc for (workspace, pocket_id) (``_canonical_site_doc``), so a
+    pre-PERF-1 pocket with legacy dupes still provisions the live one."""
+    return await _canonical_site_doc(workspace_id, pocket_id)
+
+
+async def persist_provision_d1_id(site: _SiteDoc, d1_database_id: str) -> None:
+    """Persist a freshly-created D1 id on the Site doc IMMEDIATELY (DP0-3 contract).
+
+    ``provision_status`` stays ``provisioning`` — only ``d1_database_id`` is stamped
+    — so a retry of the job REUSES this D1 instead of creating (and orphaning) a
+    second one. Called right after ``cf.create_database`` succeeds, before build /
+    migrate / deploy."""
+    site.d1_database_id = d1_database_id
+    site.provision_status = "provisioning"
+    await site.save()
+
+
+async def finalize_provisioned_site(site: _SiteDoc, *, url: str) -> None:
+    """Mark a Site doc fully provisioned after migrate + deploy succeed (DP0-3):
+    ``provision_status="provisioned"``, ``deployed=True``, stamp the live URL +
+    ``deployed_at``. The last write of the durable job's happy path."""
+    site.provision_status = "provisioned"
+    site.deployed = True
+    site.deployed_at = datetime.now(UTC)
+    site.url = url
+    await site.save()
+
+
+async def mark_provision_failed(site: _SiteDoc) -> None:
+    """Mark a Site doc's provision as failed (DP0-3). The ``d1_database_id`` already
+    persisted (``persist_provision_d1_id``) is LEFT in place so a retry reuses that
+    D1 — only ``provision_status`` flips to ``failed``."""
+    site.provision_status = "failed"
+    await site.save()
+
+
+async def build_provision_bundle(
+    *,
+    site: _SiteDoc,
+    ripple_spec: dict[str, Any] | None,
+    d1_database_id: str,
+    generator: GeneratorClient | None = None,
+) -> tuple[str, bytes]:
+    """Build a dynamic site with its REAL D1 id baked in; return ``(project_dir,
+    bundle)`` (DP0-3).
+
+    Reuses ``_deploy_site_doc``'s exact build assembly: it derives the theme from
+    the rippleSpec, runs the SSR-gated build through ``_build_or_cloud_error`` (so a
+    broken build maps to a clean CloudError, never an opaque 500), and reads the
+    Worker bundle via ``_default_bundle_reader``. ``d1_database_id`` rides
+    ``siteConfig.d1DatabaseId`` so the generator threads it into the emitted
+    wrangler.toml ``database_id`` — this is what makes the later ``wrangler d1
+    migrations apply`` and the Worker's D1 binding target the right database. The
+    caller applies migrations against ``project_dir`` (which carries wrangler.toml +
+    migrations/) BEFORE deploying ``bundle``. ``generator`` is the test-injection
+    seam; None uses a real ``GeneratorClient``."""
+    gen = generator or GeneratorClient()
+    theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
+    site_id = str(site.id)
+    build = await _build_or_cloud_error(
+        gen,
+        ripple_spec=ripple_spec,
+        theme=theme,
+        site_id=site_id,
+        title=site.name or "Untitled site",
+        capture_api_base=_capture_base(),
+        capture_signed_key=site.signed_key,
+        # A dynamic Paw Site is authored as a ripple site carrying live bindings
+        # (objects / sources / actions / auth) — the create-dynamic-site path.
+        engine="ripple",
+        source=None,
+        builder_origin=site.builder_origin or None,
+        # DP0-3: the REAL D1 uuid, baked into the emitted wrangler.toml.
+        d1_database_id=d1_database_id,
+        pocket_id=site.pocket_id,
+        # A live provision keeps the SSR fail-gate on — a broken site is rejected
+        # before it deploys (same as _deploy_site_doc).
+        smoke=True,
+    )
+    bundle = _default_bundle_reader(build.project_dir)
+    return build.project_dir, bundle
+
+
 async def add_domain(
     *,
     workspace_id: str,
