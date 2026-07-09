@@ -289,3 +289,69 @@ async def test_cf_client_construction_failure_marks_failed(
         "an unconfigured Cloudflare wedged the site in 'provisioning' — the "
         "single-flight guard will no-op every retry"
     )
+
+
+# ---------------------------------------------------------------------------
+# Deploy target follows PAW_CF_DEPLOY_MODE — a dynamic site must not require the
+# paid Workers-for-Platforms dispatch namespace.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_workers_mode_deploys_via_wrangler_not_put_worker(
+    seed: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In ``workers`` mode the job deploys to the free workers.dev tier.
+
+    ``put_worker`` uploads ONLY into a WfP dispatch namespace (a paid add-on), which
+    403s with CF error 10121 on an account without it. The job must instead hand the
+    built project to ``deploy_workers`` with the D1 id, and store the workers.dev URL
+    it returns."""
+    from pocketpaw_ee.cloud.models.site import Site
+    from pocketpaw_ee.sites import workers_deploy as workers_deploy_mod
+
+    ctx = await seed(d1_database_id="d1-existing-0007")
+    cf = _FakeCF()
+    _install_fakes(monkeypatch, cf=cf)
+    monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "workers")
+
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_deploy(site_id: str, project_dir: str, *, d1_database_id: str | None = None):
+        calls.append({"site_id": site_id, "d1": d1_database_id, "dir": project_dir})
+        return "https://paw-site-x.acct.workers.dev"
+
+    monkeypatch.setattr(workers_deploy_mod, "deploy_workers", _fake_deploy)
+
+    await ProvisionSiteJob()(
+        workspace_id=WS, pocket_id=ctx["pocket_id"], job_id="job-6", params={}
+    )
+
+    # Deployed through wrangler with the D1 bound — and never through the WfP upload.
+    assert len(calls) == 1
+    assert calls[0]["d1"] == "d1-existing-0007"
+    assert cf.put_calls == [], "workers mode must not touch the WfP dispatch namespace"
+
+    site = await Site.get(ctx["site_id"])
+    assert site is not None
+    assert site.provision_status == "provisioned"
+    assert site.deployed is True
+    assert site.url == "https://paw-site-x.acct.workers.dev"
+
+
+@pytest.mark.asyncio
+async def test_wfp_mode_still_uses_put_worker(
+    seed: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard: ``wfp`` mode keeps the pre-existing dispatch-namespace upload."""
+    ctx = await seed(d1_database_id="d1-existing-0008")
+    cf = _FakeCF()
+    _install_fakes(monkeypatch, cf=cf)
+    monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "wfp")
+
+    await ProvisionSiteJob()(
+        workspace_id=WS, pocket_id=ctx["pocket_id"], job_id="job-7", params={}
+    )
+
+    assert len(cf.put_calls) == 1
+    assert cf.put_calls[0]["bindings"] == [{"type": "d1", "name": "DB", "id": "d1-existing-0008"}]
