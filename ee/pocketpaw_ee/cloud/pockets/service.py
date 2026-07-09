@@ -2270,6 +2270,8 @@ async def update_widget(
         widget.data = body.data
     if body.assigned_agent is not None:
         widget.assignedAgent = body.assigned_agent
+    if body.span is not None:
+        widget.span = body.span
     await doc.save()
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)

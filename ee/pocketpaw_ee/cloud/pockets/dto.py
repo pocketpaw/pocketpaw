@@ -268,6 +268,7 @@ class UpdateWidgetRequest(BaseModel):
     name: str | None = None
     type: str | None = None
     icon: str | None = None
+    span: str | None = None
     config: dict | None = None
     props: dict | None = None
     data: Any = None
