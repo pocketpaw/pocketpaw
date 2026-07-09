@@ -31,11 +31,46 @@ DEFAULT_ALLOWED_MIMES: frozenset[str] = frozenset(
         "application/pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # .xlsx
-        # Text / code
+        # Text / data
         "text/plain",
         "text/markdown",
         "text/csv",
         "application/json",
+        # Code — Python
+        "text/x-python",
+        "text/x-python-script",
+        # Code — JavaScript / TypeScript
+        "text/javascript",
+        "application/javascript",
+        "text/typescript",
+        "application/typescript",
+        # Code — Web
+        "text/html",
+        "text/css",
+        # Code — Go
+        "text/x-go",
+        # Code — Rust
+        "text/x-rust",
+        # Code — Java
+        "text/x-java-source",
+        # Code — C / C++
+        "text/x-csrc",
+        "text/x-c++src",
+        "text/x-chdr",
+        # Code — Shell
+        "text/x-sh",
+        "application/x-sh",
+        # Code — Ruby
+        "text/x-ruby",
+        # Code — SQL
+        "text/x-sql",
+        "application/sql",
+        # Config / data formats
+        "text/yaml",
+        "application/x-yaml",
+        "text/xml",
+        "application/xml",
+        "application/toml",
     }
 )
 
@@ -62,6 +97,41 @@ _MIME_TO_EXT: dict[str, str] = {
     "text/markdown": ".md",
     "text/csv": ".csv",
     "application/json": ".json",
+    # Code — Python
+    "text/x-python": ".py",
+    "text/x-python-script": ".py",
+    # Code — JavaScript / TypeScript
+    "text/javascript": ".js",
+    "application/javascript": ".js",
+    "text/typescript": ".ts",
+    "application/typescript": ".ts",
+    # Code — Web
+    "text/html": ".html",
+    "text/css": ".css",
+    # Code — Go
+    "text/x-go": ".go",
+    # Code — Rust
+    "text/x-rust": ".rs",
+    # Code — Java
+    "text/x-java-source": ".java",
+    # Code — C / C++
+    "text/x-csrc": ".c",
+    "text/x-c++src": ".cpp",
+    "text/x-chdr": ".h",
+    # Code — Shell
+    "text/x-sh": ".sh",
+    "application/x-sh": ".sh",
+    # Code — Ruby
+    "text/x-ruby": ".rb",
+    # Code — SQL
+    "text/x-sql": ".sql",
+    "application/sql": ".sql",
+    # Config / data formats
+    "text/yaml": ".yaml",
+    "application/x-yaml": ".yaml",
+    "text/xml": ".xml",
+    "application/xml": ".xml",
+    "application/toml": ".toml",
 }
 
 
