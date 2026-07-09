@@ -14,7 +14,7 @@ from typing import Any
 
 import jwt as pyjwt
 from beanie import PydanticObjectId
-from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi_users.router.common import ErrorCode
@@ -521,10 +521,14 @@ async def upload_avatar(
 
 
 @router.get("/auth/avatar/{filename}")
-async def get_avatar(filename: str):
-    """Serve a user's avatar file."""
-    from fastapi.responses import FileResponse
-
+async def get_avatar(
+    filename: str,
+    w: int = Query(default=0, ge=0, le=2048, description="Thumbnail width"),
+    h: int = Query(default=0, ge=0, le=2048, description="Thumbnail height"),
+    q: int = Query(default=80, ge=1, le=100, description="Quality"),
+    f: str = Query(default="webp", description="Format: webp, jpeg, png"),
+):
+    """Serve a user's avatar file, optionally resized."""
     if "/" in filename or "\\" in filename or ".." in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
 
@@ -532,4 +536,80 @@ async def get_avatar(filename: str):
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Avatar not found")
 
-    return FileResponse(path)
+    has_thumb = w > 0 or h > 0
+    if not has_thumb:
+        from fastapi.responses import FileResponse
+
+        return FileResponse(path)
+
+    # Resize the local avatar file on-the-fly with Pillow.
+    import asyncio
+    import io
+    import os
+
+    from PIL import Image as PILImage
+
+    fmt_key = f.lower() if f.lower() in ("webp", "jpeg", "jpg", "png") else "webp"
+    _FMT_MAP = {
+        "webp": ("WEBP", "image/webp"),
+        "jpeg": ("JPEG", "image/jpeg"),
+        "jpg": ("JPEG", "image/jpeg"),
+        "png": ("PNG", "image/png"),
+    }
+    pil_fmt, out_mime = _FMT_MAP[fmt_key]
+
+    cache_dir = _AVATAR_DIR / "_thumbs"
+    cache_dir.mkdir(exist_ok=True)
+    cache_file = cache_dir / f"{filename}_{w}x{h}_q{q}.{fmt_key}"
+
+    # Cache hit — serve from disk.
+    if cache_file.exists():
+        try:
+            os.utime(cache_file, None)
+        except OSError:
+            pass
+        return FileResponse(
+            cache_file,
+            media_type=out_mime,
+            headers={"Cache-Control": "public, max-age=86400, immutable"},
+        )
+
+    def _resize() -> bytes:
+        img = PILImage.open(path)
+        if fmt_key in ("jpeg", "jpg", "webp"):
+            if img.mode in ("RGBA", "P", "LA"):
+                img = img.convert("RGB")
+        elif img.mode == "P":
+            img = img.convert("RGBA")
+        size = (w, h) if (w and h) else ((w, w) if w else (h, h))
+        img.thumbnail(size, PILImage.LANCZOS)
+        out = io.BytesIO()
+        kwargs: dict = {"format": pil_fmt}
+        if fmt_key != "png":
+            kwargs["quality"] = q
+        else:
+            kwargs["optimize"] = True
+        img.save(out, **kwargs)
+        return out.getvalue()
+
+    try:
+        thumb_bytes = await asyncio.to_thread(_resize)
+    except Exception:
+        # Fall back to original on resize failure.
+        from fastapi.responses import FileResponse
+
+        return FileResponse(path)
+
+    # Write-through cache (atomic).
+    tmp = cache_file.with_suffix(cache_file.suffix + ".tmp")
+    try:
+        tmp.write_bytes(thumb_bytes)
+        tmp.rename(cache_file)
+    except OSError:
+        pass
+
+    return Response(
+        content=thumb_bytes,
+        media_type=out_mime,
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
