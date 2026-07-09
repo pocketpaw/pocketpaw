@@ -257,3 +257,41 @@ async def test_tenancy_mismatch_fails_closed(
 
     assert cf.create_calls == []
     assert cf.put_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Building the CF client is itself a failure point — an unconfigured Cloudflare
+# must leave the Site doc "failed", never wedged in "provisioning".
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cf_client_construction_failure_marks_failed(
+    seed: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``provision_cf_client()`` raises when Cloudflare env is missing.
+
+    That raise must mark the Site ``failed`` like any other provision failure. If it
+    escapes uncaught the doc stays ``provisioning``, and ``_provision_dynamic_site``'s
+    single-flight guard then makes EVERY future publish a silent no-op — the site is
+    permanently unpublishable with no way back short of a manual DB edit."""
+    from pocketpaw_ee.cloud.models.site import Site
+
+    ctx = await seed(d1_database_id="")
+
+    def _unconfigured() -> Any:
+        raise ValueError("sites.cloudflare_unconfigured: Cloudflare is not configured")
+
+    monkeypatch.setattr(sites_service, "provision_cf_client", _unconfigured)
+
+    with pytest.raises(ValueError, match="cloudflare_unconfigured"):
+        await ProvisionSiteJob()(
+            workspace_id=WS, pocket_id=ctx["pocket_id"], job_id="job-5", params={}
+        )
+
+    site = await Site.get(ctx["site_id"])
+    assert site is not None
+    assert site.provision_status == "failed", (
+        "an unconfigured Cloudflare wedged the site in 'provisioning' — the "
+        "single-flight guard will no-op every retry"
+    )
