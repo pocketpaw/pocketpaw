@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi_users.router.common import ErrorCode
 from pydantic import BaseModel
+from starlette.responses import FileResponse
 
 from pocketpaw.security.rate_limiter import mfa_challenge_limiter
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
@@ -538,8 +539,6 @@ async def get_avatar(
 
     has_thumb = w > 0 or h > 0
     if not has_thumb:
-        from fastapi.responses import FileResponse
-
         return FileResponse(path)
 
     # Resize the local avatar file on-the-fly with Pillow.
@@ -596,8 +595,6 @@ async def get_avatar(
         thumb_bytes = await asyncio.to_thread(_resize)
     except Exception:
         # Fall back to original on resize failure.
-        from fastapi.responses import FileResponse
-
         return FileResponse(path)
 
     # Write-through cache (atomic).
