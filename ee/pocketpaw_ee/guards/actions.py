@@ -175,12 +175,17 @@ ACTIONS: dict[str, ActionRule] = {
     # authenticated caller could install into any workspace
     # (docs/plans/cluster-D-reality.md#106-112, P0 fix 2026-04-19).
     "fleet.install": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
-    # Fabric — ontology read/write.
-    # Both tiers are MEMBER so any workspace member can query and author objects.
-    # Type/schema management intentionally stays MEMBER for now; tighten to ADMIN
-    # once a Fabric admin tier is validated with clients.
+    # Fabric — ontology read/write + schema authoring.
+    # read/write are MEMBER so any workspace member can query objects and author
+    # object DATA (create/update objects, add links). SCHEMA authoring — defining
+    # object types, adding typed properties, declaring link types, and versioning
+    # a type (ontology-operator-ux, the /fabric/schema surface) — is the more
+    # privileged "operator" tier and is ADMIN: changing the ontology reshapes
+    # write-time enforcement for the whole workspace, so it sits above the member
+    # data tier (mirrors connector.manage / rules.manage / skills.manage).
     "fabric.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "fabric.write": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "fabric.admin": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Instinct — human-in-the-loop decision pipeline.
     # Propose and read are MEMBER (agents and analysts can propose + view actions).
     # Approve/reject and audit are ADMIN — governance actions with downstream
