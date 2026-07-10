@@ -62,7 +62,9 @@ class WorkspaceSettings(BaseModel):
     @classmethod
     def _validate_retention_days(cls, v: int | None) -> int | None:
         if v is not None and v < 1:
-            raise ValueError("retention_days must be a positive number of days, or null to keep forever")
+            raise ValueError(
+                "retention_days must be a positive number of days, or null to keep forever"
+            )
         return v
 
 
