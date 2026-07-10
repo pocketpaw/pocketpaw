@@ -143,6 +143,31 @@
 #   gets truncated instead of growing unbounded across 128+ cached tenants. The
 #   W4a in-row workspace_id WHERE-filter is UNCHANGED — physical file isolation
 #   is ADDITIVE defense-in-depth layered on top of it, never a replacement.
+# Updated: 2026-07-10 (ontology-operator-ux) — makes the ontology operable by a
+#   non-engineer, in three additive pieces:
+#     1. WRITE-TIME TYPE ENFORCEMENT. ``validate_object_properties()`` checks a
+#        provided property bag against the type's declared ``PropertyDef``s and
+#        raises ``FabricTypeError`` on a clash. ``create_object`` and
+#        ``update_object`` now call it (create validates the full bag; update
+#        validates only the provided delta). Enforcement is DECLARED-ONLY and
+#        LENIENT by design so it never breaks live connector / agent ingest: only
+#        declared properties are checked, a ``None`` / absent value is skipped
+#        (``required`` is NOT enforced at write time), unknown keys pass through,
+#        an empty schema is a no-op, and scalar checks accept the JSON-string form
+#        of a number/bool/date (a connector often ships "42"). A genuinely wrong
+#        value — "not-a-number" for a ``number`` field, a value outside a declared
+#        ``enum`` — is rejected.
+#     2. SCHEMA VERSIONING + NON-DESTRUCTIVE MIGRATION. ``fabric_object_types``
+#        gains a ``version INTEGER DEFAULT 1`` column (additive ALTER, swallow the
+#        duplicate-column error like the W4a/SZD-2 tenancy columns). ``update_type``
+#        bumps the version and migrates existing objects for a property RENAME (the
+#        key is moved on every object of the type) and an ADDITIVE add (a new
+#        property carrying a default is backfilled onto objects that lack it).
+#        DESTRUCTIVE removal is DEFERRED: a property dropped from the schema leaves
+#        its now-orphaned key untouched on existing objects (documented behaviour,
+#        asserted in tests).
+#     3. Both are OSS-side and framework-agnostic; ``FabricTypeError`` lives in
+#        models so the EE router (422) and OSS callers (ValueError) both consume it.
 
 
 from __future__ import annotations
@@ -159,6 +184,7 @@ from pocketpaw.fabric.models import (
     FabricObject,
     FabricQuery,
     FabricQueryResult,
+    FabricTypeError,
     ObjectType,
     PathHop,
     PropertyDef,
@@ -190,6 +216,10 @@ CREATE TABLE IF NOT EXISTS fabric_object_types (
     -- a scoped read still sees it (own rows + NULL). On a pre-SZD-2 DB this
     -- column is added by the ALTER migration in _ensure_schema, NOT here.
     workspace_id TEXT,
+    -- Schema version (ontology-operator-ux). 1 on define_type; bumped by
+    -- update_type on a non-destructive change (rename / additive add). On a
+    -- pre-version DB this column is added by the ALTER migration, NOT here.
+    version INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -370,6 +400,103 @@ def _build_filter_conditions(filters: dict[str, Any]) -> tuple[list[str], list[A
     return conditions, params
 
 
+def _looks_numeric(value: Any) -> bool:
+    """True if ``value`` is a real number or a string that parses as one.
+
+    A connector routinely ships a number as a string ("42", "3.14"), so a
+    tolerant check keeps write-time enforcement from breaking live ingest while
+    still rejecting genuine garbage ("not-a-number"). ``bool`` is excluded — it
+    is an ``int`` subclass in Python but is never a valid ``number`` value.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        try:
+            float(value.strip())
+            return True
+        except ValueError:
+            return False
+    return False
+
+
+def _property_value_ok(prop: PropertyDef, value: Any) -> bool:
+    """Return True if ``value`` satisfies ``prop``'s declared type (lenient).
+
+    Enforcement is deliberately tolerant so it never breaks live connector /
+    agent writes (see the module header). Rules per declared ``type``:
+
+    - ``number`` — a real number OR a numeric string (``_looks_numeric``).
+    - ``boolean`` — a ``bool``, ``0`` / ``1``, or a common truthy/falsy string.
+    - ``date`` — a string or a number (an ISO string or an epoch); a
+      ``dict`` / ``list`` / bare ``bool`` is rejected.
+    - ``enum`` — membership in ``enum_values`` (compared directly and as a
+      string) when that set is declared; no constraint when it is empty.
+    - ``string`` / anything unknown — any non-``None`` scalar-or-not is accepted
+      (string fields stay lenient; the meaningful checks are the ones above).
+
+    ``None`` is handled by the caller (skipped — absence is not a type clash).
+    """
+    declared = (prop.type or "string").strip().lower()
+    if declared == "number":
+        return _looks_numeric(value)
+    if declared == "boolean":
+        if isinstance(value, bool):
+            return True
+        if isinstance(value, int) and value in (0, 1):
+            return True
+        return isinstance(value, str) and value.strip().lower() in {
+            "true",
+            "false",
+            "1",
+            "0",
+            "yes",
+            "no",
+        }
+    if declared == "date":
+        return isinstance(value, str) or (
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+        )
+    if declared == "enum":
+        allowed = prop.enum_values or []
+        if not allowed:
+            return True
+        return value in allowed or str(value) in {str(a) for a in allowed}
+    # string / unknown declared type -> no strict constraint.
+    return True
+
+
+def validate_object_properties(obj_type: ObjectType | None, properties: dict[str, Any]) -> None:
+    """Enforce a property bag against a type's declared schema (ontology-operator-ux).
+
+    Raises :class:`FabricTypeError` on the FIRST declared property whose provided
+    value clashes with its ``PropertyDef.type`` / ``enum_values``. Declared-only
+    and lenient by design (see the module header and :func:`_property_value_ok`):
+
+    - ``obj_type is None`` or a type with NO declared properties -> no-op (every
+      pre-schema type and every ``properties=[]`` type keeps working unchanged).
+    - only keys that are BOTH declared AND present with a non-``None`` value are
+      checked; ``required`` is NOT enforced at write time, and unknown extra keys
+      pass through (the schema is open / additive).
+    """
+    if obj_type is None or not obj_type.properties:
+        return
+    declared = {p.name: p for p in obj_type.properties}
+    for key, value in properties.items():
+        prop = declared.get(key)
+        if prop is None or value is None:
+            continue
+        if not _property_value_ok(prop, value):
+            expected = prop.type
+            if prop.type == "enum" and prop.enum_values:
+                expected = f"enum{list(prop.enum_values)}"
+            raise FabricTypeError(
+                f"property {key!r} expected type {expected!r} "
+                f"but got {value!r} ({type(value).__name__})"
+            )
+
+
 class FabricStore:
     """Async SQLite store for Fabric ontology data."""
 
@@ -395,6 +522,16 @@ class FabricStore:
                     await db.execute(f"ALTER TABLE {_tbl} ADD COLUMN workspace_id TEXT")
                 except aiosqlite.OperationalError:
                     pass
+            # Additive migration (ontology-operator-ux): the schema-version column
+            # on a pre-existing fabric_object_types. Same swallow-the-duplicate
+            # pattern as the tenancy columns above — a pre-version row defaults to
+            # 1, matching the ObjectType model default.
+            try:
+                await db.execute(
+                    "ALTER TABLE fabric_object_types ADD COLUMN version INTEGER DEFAULT 1"
+                )
+            except aiosqlite.OperationalError:
+                pass
             # SZD-2: drop the pre-SZD-2 GLOBAL unique index on LOWER(name) if it
             # exists. It enforced one type name per WHOLE DB; under per-workspace
             # tenancy two tenants must be able to use the same name, so it would
@@ -593,8 +730,9 @@ class FabricStore:
         async with self._conn() as db:
             await db.execute(
                 "INSERT INTO fabric_object_types"
-                " (id, name, description, icon, color, properties_schema, workspace_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " (id, name, description, icon, color, properties_schema,"
+                " workspace_id, version)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     obj_type.id,
                     obj_type.name,
@@ -603,6 +741,7 @@ class FabricStore:
                     obj_type.color,
                     json.dumps([p.model_dump() for p in properties]),
                     workspace_id,
+                    obj_type.version,
                 ),
             )
             await db.commit()
@@ -706,6 +845,116 @@ class FabricStore:
             await db.execute("DELETE FROM fabric_object_types WHERE id = ?", (type_id,))
             await db.commit()
 
+    async def update_type(
+        self,
+        type_id: str,
+        *,
+        properties: list[PropertyDef] | None = None,
+        renames: dict[str, str] | None = None,
+        description: str | None = None,
+        icon: str | None = None,
+        color: str | None = None,
+        workspace_id: str | None = None,
+    ) -> ObjectType | None:
+        """Version + non-destructively migrate an object type (ontology-operator-ux).
+
+        The operator's "edit the schema" path. Bumps ``version`` and migrates the
+        type's existing objects for the two SAFE change kinds:
+
+        - **rename** — ``renames`` maps ``old_property_name -> new_property_name``.
+          The key is moved on the type's schema AND on every existing object of
+          the type (value preserved), so no object is orphaned by the rename.
+        - **additive add** — a ``PropertyDef`` present in the new ``properties``
+          that the type did not declare before. If it carries a non-``None``
+          ``default``, that default is backfilled onto every existing object that
+          lacks the key; otherwise the property is simply declared (existing
+          objects gain it lazily on their next write).
+
+        **Destructive removal is DEFERRED.** If ``properties`` omits a property the
+        type previously declared (and it is not the source of a rename), the
+        declaration is dropped but the now-orphaned key is LEFT UNTOUCHED on
+        existing objects — no data is scrubbed. This is the documented, intentional
+        behaviour for this build (a later task adds an explicit, opt-in purge).
+
+        Returns the updated :class:`ObjectType`, or ``None`` if ``type_id`` does
+        not resolve within ``workspace_id`` (a cross-tenant / unknown id). Passing
+        neither ``properties`` nor ``renames`` still bumps the version and applies
+        any metadata (``description`` / ``icon`` / ``color``) change.
+        """
+        existing = await self.get_type(type_id, workspace_id=workspace_id)
+        if existing is None:
+            return None
+        renames = {k: v for k, v in (renames or {}).items() if k != v}
+
+        # Resolve the NEW schema. Start from the caller's list (or keep the old
+        # one), then fold in renames so a rename is reflected even when the caller
+        # passes an unchanged property list.
+        new_props = list(properties) if properties is not None else list(existing.properties)
+        if renames:
+            for prop in new_props:
+                if prop.name in renames:
+                    prop.name = renames[prop.name]
+
+        old_names = {p.name for p in existing.properties}
+        # Additive properties carrying a default -> backfill onto existing objects.
+        additive_defaults = {
+            p.name: p.default
+            for p in new_props
+            if p.name not in old_names and p.name not in renames.values() and p.default is not None
+        }
+
+        new_version = (existing.version or 1) + 1
+        schema_json = json.dumps([p.model_dump() for p in new_props])
+        new_description = description if description is not None else existing.description
+        new_icon = icon if icon is not None else existing.icon
+        new_color = color if color is not None else existing.color
+
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            # 1. Migrate existing objects (rename keys + additive default backfill).
+            if renames or additive_defaults:
+                async with db.execute(
+                    "SELECT id, properties FROM fabric_objects WHERE type_id = ?",
+                    (type_id,),
+                ) as cur:
+                    rows = await cur.fetchall()
+                for row in rows:
+                    props = json.loads(row["properties"]) if row["properties"] else {}
+                    changed = False
+                    for old_name, new_name in renames.items():
+                        if old_name in props:
+                            props[new_name] = props.pop(old_name)
+                            changed = True
+                    for name, default in additive_defaults.items():
+                        if name not in props:
+                            props[name] = default
+                            changed = True
+                    if changed:
+                        await db.execute(
+                            "UPDATE fabric_objects SET properties = ?,"
+                            " updated_at = datetime('now') WHERE id = ?",
+                            (json.dumps(props), row["id"]),
+                        )
+            # 2. Persist the new schema + bumped version on the type row.
+            await db.execute(
+                "UPDATE fabric_object_types SET properties_schema = ?, version = ?,"
+                " description = ?, icon = ?, color = ?, updated_at = datetime('now')"
+                " WHERE id = ?",
+                (schema_json, new_version, new_description, new_icon, new_color, type_id),
+            )
+            await db.commit()
+        return ObjectType(
+            id=existing.id,
+            name=existing.name,
+            description=new_description,
+            icon=new_icon,
+            color=new_color,
+            properties=new_props,
+            workspace_id=existing.workspace_id,
+            version=new_version,
+        )
+
     # --- Objects ---
 
     async def create_object(
@@ -717,6 +966,11 @@ class FabricStore:
         workspace_id: str | None = None,
     ) -> FabricObject:
         obj_type = await self.get_type(type_id)
+        # Write-time type enforcement (ontology-operator-ux): reject a property
+        # whose value clashes with its declared PropertyDef. Declared-only and
+        # lenient (see validate_object_properties) so pre-schema / empty-schema
+        # types and live connector ingest are unaffected.
+        validate_object_properties(obj_type, properties)
         obj = FabricObject(
             type_id=type_id,
             type_name=obj_type.name if obj_type else "",
@@ -821,6 +1075,11 @@ class FabricStore:
         existing = await self.get_object(obj_id, workspace_id=workspace_id)
         if not existing:
             return None
+        # Write-time type enforcement (ontology-operator-ux): validate the PROVIDED
+        # delta against the type's declared schema. Only the incoming keys are
+        # checked (a merge-update touches only those); the type is loaded unscoped
+        # because the object read above already carries the tenancy guard.
+        validate_object_properties(await self.get_type(existing.type_id), properties)
         merged = {**existing.properties, **properties}
         ws_cond, ws_params = _workspace_scope(workspace_id)
         sql = "UPDATE fabric_objects SET properties = ?, updated_at = datetime('now') WHERE id = ?"
@@ -1320,6 +1579,9 @@ class FabricStore:
         # column (defensive — current callers all SELECT *).
         keys = row.keys() if hasattr(row, "keys") else ()
         workspace_id = row["workspace_id"] if "workspace_id" in keys else None
+        # version may be absent on a projection that predates the column; a NULL
+        # (pre-migration row) reads back as the model default of 1.
+        version = row["version"] if "version" in keys and row["version"] is not None else 1
         return ObjectType(
             id=row["id"],
             name=row["name"],
@@ -1328,6 +1590,7 @@ class FabricStore:
             color=row["color"] or "#0A84FF",
             properties=[PropertyDef(**p) for p in props_raw],
             workspace_id=workspace_id,
+            version=version,
         )
 
     def _row_to_object(self, row: Any) -> FabricObject:

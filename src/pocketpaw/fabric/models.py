@@ -28,6 +28,18 @@
 #   legacy/global type predating tenancy (or an OSS / single-tenant caller),
 #   which a scoped read still sees — exactly the NULL-as-legacy boundary the
 #   W4a object/link scoping already uses.
+# Updated: 2026-07-10 (ontology-operator-ux) — two additions that make the Fabric
+#   ontology operable by a non-engineer:
+#     1. ObjectType gains a ``version`` int (starts at 1). ``FabricStore.update_type``
+#        bumps it when the operator renames a property or adds one, so the schema
+#        carries a monotonic version the UI can surface. Additive ALTER migration on
+#        a pre-existing DB (see the store); a pre-version row reads back as 1.
+#     2. ``FabricTypeError`` (a ``ValueError`` subclass) — raised by the store's
+#        write-time property validation when a provided property value clashes with
+#        its declared ``PropertyDef.type`` / ``enum_values``. Framework-agnostic on
+#        purpose: the EE router maps it to a 422, agent-tool callers (which already
+#        catch ValueError) degrade to a readable message, and the OSS store never
+#        imports FastAPI.
 
 from __future__ import annotations
 
@@ -43,6 +55,19 @@ from pydantic import BaseModel, Field, field_validator
 # practice (the audit's hardest case is two); anything deeper is almost
 # certainly a mistake and is rejected up front with a clear error.
 MAX_HOPS = 5
+
+
+class FabricTypeError(ValueError):
+    """A write-time property value clashes with its declared type (ontology-operator-ux).
+
+    Raised by :func:`pocketpaw.fabric.store.validate_object_properties` when a
+    provided property value does not satisfy the ``PropertyDef`` declared for it
+    on the object's ``ObjectType`` (wrong scalar kind, or a value outside a
+    declared ``enum_values`` set). A ``ValueError`` subclass so the OSS store can
+    stay framework-agnostic: the EE Fabric router catches it and returns HTTP 422,
+    while agent-tool / connector callers that already guard ``ValueError`` fall
+    back to a readable message instead of a 500.
+    """
 
 
 def _gen_id(prefix: str) -> str:
@@ -79,6 +104,10 @@ class ObjectType(BaseModel):
     # legacy/global type written before per-type tenancy or by an OSS /
     # single-tenant caller; a scoped read still sees it (own rows + NULL).
     workspace_id: str | None = None
+    # Schema version (ontology-operator-ux). Starts at 1 on define_type and is
+    # bumped by FabricStore.update_type on a non-destructive schema change (a
+    # property rename or an additive add). A pre-version DB row reads back as 1.
+    version: int = 1
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
