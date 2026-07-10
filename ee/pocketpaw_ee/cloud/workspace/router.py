@@ -9,6 +9,10 @@ entities; the router maps to DTOs at the boundary.
 (``instinct.activate``) switch that activates the layered Instinct gate's
 triager for a workspace. Kept off the general PATCH route because a non-ASK
 level enables auto-approval of agent WRITE actions workspace-wide.
+2026-07-10 (compliance-starter): added ``GET`` + ``PUT
+/{workspace_id}/retention`` — read (member) / set (admin, ``workspace.update``)
+the per-workspace data-retention policy. The PUT writes only ``retention_days``
+without clobbering sibling settings.
 """
 
 from __future__ import annotations
@@ -44,10 +48,12 @@ from pocketpaw_ee.cloud.workspace.dto import (
     InviteOut,
     InvitePreviewResponse,
     MemberOut,
+    RetentionOut,
     RoutePermissionsOut,
     SetApprovalLevelRequest,
     SetMemberConnectorPermissionsRequest,
     SetMemberRoutePermissionsRequest,
+    SetRetentionRequest,
     SlugAvailabilityOut,
     UpdateDomainRequest,
     UpdateMemberRoleRequest,
@@ -177,6 +183,46 @@ async def delete_preview(
     seeing the preview implies you're the one who could pull the trigger.
     """
     return await workspace_service.get_delete_preview(workspace_id)
+
+
+# ---------------------------------------------------------------------------
+# Data retention (compliance-starter)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{workspace_id}/retention", response_model=RetentionOut)
+async def get_retention(
+    workspace_id: str,
+    ctx: RequestContext = Depends(request_context),
+    user: User = Depends(require_membership),
+) -> RetentionOut:
+    """Read the workspace's data-retention policy.
+
+    ``retention_days`` is ``None`` when the workspace keeps records forever.
+    Any member may read the policy (it's config, not data); setting it is
+    admin-gated on the PUT below.
+    """
+    days = await workspace_service.get_retention(ctx, workspace_id)
+    return RetentionOut(retention_days=days)
+
+
+@router.put("/{workspace_id}/retention", response_model=RetentionOut)
+async def set_retention(
+    workspace_id: str,
+    body: SetRetentionRequest,
+    ctx: RequestContext = Depends(request_context),
+    user: User = Depends(require_action("workspace.update")),
+) -> RetentionOut:
+    """Set the workspace's data-retention policy (admin — ``workspace.update``).
+
+    Writes ONLY ``settings.retention_days`` — sibling settings are preserved
+    (the service merges rather than full-replaces). ``retention_days`` null =
+    keep forever; a positive value is the age after which
+    ``enforce_retention`` purges audit records. Emits a ``workspace.retention_set``
+    audit row.
+    """
+    await workspace_service.set_retention(ctx, workspace_id, body.retention_days)
+    return RetentionOut(retention_days=body.retention_days)
 
 
 # ---------------------------------------------------------------------------

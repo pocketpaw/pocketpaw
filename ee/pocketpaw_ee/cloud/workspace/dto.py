@@ -17,6 +17,9 @@ and the ``Branding`` -> ``BrandingOut`` mapping in ``workspace_to_dto``.
 2026-06-19 (feat/instinct-gate-integration, security-review FIX 1): added
 ``SetApprovalLevelRequest`` — the closed-enum body for the OWNER-only route
 that activates the layered Instinct gate's triager for a workspace.
+2026-07-10 (compliance-starter): added ``SetRetentionRequest`` (positive-or-
+null ``retention_days``, ``extra="forbid"``) + ``RetentionOut`` for the
+dedicated per-workspace data-retention endpoint.
 """
 
 from __future__ import annotations
@@ -130,6 +133,31 @@ class SetApprovalLevelRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     level: Literal["ASK", "TRIAGE", "TRUSTED"]
+
+
+class SetRetentionRequest(BaseModel):
+    """PUT /workspaces/{id}/retention request (compliance-starter).
+
+    The dedicated, no-clobber writer for the per-workspace data-retention
+    policy. ``retention_days`` is ``None`` to keep records forever, or a
+    POSITIVE day count (``ge=1``) after which audit records are purged. A 0 /
+    negative value is a 422 at the route boundary; ``extra="forbid"`` rejects
+    stray fields so this can never smuggle another settings key onto the
+    document.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    retention_days: int | None = Field(default=None, ge=1)
+
+
+class RetentionOut(BaseModel):
+    """GET/PUT /workspaces/{id}/retention response — the current policy.
+
+    ``retention_days`` is ``None`` when the workspace keeps records forever.
+    """
+
+    retention_days: int | None = None
 
 
 class BulkInviteRequest(BaseModel):
@@ -493,9 +521,11 @@ __all__ = [
     "InviteOut",
     "InvitePreviewResponse",
     "MemberOut",
+    "RetentionOut",
     "RoutePermissionsOut",
     "SetMemberConnectorPermissionsRequest",
     "SetMemberRoutePermissionsRequest",
+    "SetRetentionRequest",
     "SlugAvailabilityOut",
     "UpdateDomainRequest",
     "UpdateMemberRoleRequest",

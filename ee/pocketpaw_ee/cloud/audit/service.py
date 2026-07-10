@@ -2,6 +2,11 @@
 # Created: 2026-05-17 — Read-only wrapper over pocketpaw.audit.store
 #   AuditStore.search_entries with mandatory workspace_id tenancy filter
 #   sourced from ctx.workspace_id. # no-event: read-only entity per Rule 9.
+# 2026-07-10 (compliance-starter): added ``purge_workspace_audit`` — the
+#   retention-enforcement seam. Deletes AuditEvent rows older than a cutoff
+#   for a single workspace (age- + tenant-scoped). Kept here because this
+#   module is the sole writer of the AuditEvent collection; the retention
+#   orchestrator in workspace.service calls it.
 from __future__ import annotations
 
 import json
@@ -209,6 +214,25 @@ async def record(
     _webhooks.schedule_delivery(doc)
 
 
+async def purge_workspace_audit(workspace_id: str, older_than: datetime) -> int:
+    """Delete audit rows older than ``older_than`` for ONE workspace.
+
+    The retention-enforcement seam (compliance-starter). Tenant-scoped by
+    ``workspace`` and age-scoped by ``at < older_than`` in a single Mongo
+    delete — a recent row, or another tenant's row of any age, is never
+    touched. Lives here because ``audit.service`` is the sole writer of the
+    ``AuditEvent`` collection (import-linter contract); the retention
+    orchestrator (``workspace.service.enforce_retention``) calls this rather
+    than reaching into the collection itself. Returns the deleted count.
+    """
+    result = await _AuditEventDoc.find(
+        {"workspace": workspace_id, "at": {"$lt": older_than}}
+    ).delete()
+    # motor/beanie DeleteResult exposes ``deleted_count``; guard for the
+    # mongomock shim which may return None on an empty match.
+    return int(getattr(result, "deleted_count", 0) or 0)
+
+
 async def list_events(workspace_id: str, query: AuditQueryRequest | dict) -> AuditPage:
     """Cursor-paginated audit-event list, newest first."""
     body = AuditQueryRequest.model_validate(query or {})
@@ -341,6 +365,7 @@ __all__ = [
     "agent_list_audit",
     "list_events",
     "list_events_response",
+    "purge_workspace_audit",
     "record",
     "stream_export_csv",
 ]
