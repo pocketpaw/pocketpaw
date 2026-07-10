@@ -12,6 +12,15 @@
 #   existing ObjectType by id (the EE Firestore→Fabric worker's per-workspace
 #   mapping) ride this same canonical upsert loop instead of hand-rolling a
 #   parallel one. Additive; name-based callers are unchanged.
+# Updated: 2026-07-10 (FST-3 — SHADOW mode at merge site 1) — ingest_records
+#   now threads source-truth provenance into the UPDATE path: update_object is
+#   called with writer_class="connector", source_kind="connector_run",
+#   source_connector=<this connector>, and the new optional ``run_id`` param
+#   (default None — every existing caller unchanged) as source_run_id. When
+#   fabric_source_truth_mode is shadow/enforce, statements recorded at merge
+#   site 1 therefore carry honest connector provenance end-to-end; in 'off'
+#   (default) the kwargs are inert and behavior is byte-for-byte. CREATE path
+#   untouched (FST-4's scope).
 # Updated: 2026-06-19 (SZD-2 — workspace-scope object TYPES) — ensure_type() now
 #   threads ``workspace_id`` into both the get_type_by_name() resolve and the
 #   define_type() create, so the type catalog stays per-tenant: a connector
@@ -169,6 +178,7 @@ async def ingest_records(
     records: Iterable[Mapping[str, Any]],
     mapping: FabricMapping,
     workspace_id: str | None = None,
+    run_id: str | None = None,
 ) -> IngestResult:
     """Map connector records into typed Fabric objects with provenance (idempotent).
 
@@ -180,6 +190,10 @@ async def ingest_records(
         workspace_id: W4a tenancy scope; threaded into both the dedup read and
             the create write so an ingest stays inside its tenant. ``None`` for
             single-tenant / OSS callers.
+        run_id: optional sync-run identity (FST-3). When set, the SourceRef the
+            shadow pass records for updated objects carries it, so statements
+            from different sync runs of the same connector are distinguishable.
+            ``None`` = "this connector, unattributed run".
 
     Returns:
         IngestResult with created / updated / skipped counts and the object ids.
@@ -189,6 +203,14 @@ async def ingest_records(
     store's merge-update); a new source_id CREATES one with provenance. Records
     lacking a usable source_id are skipped (counted) — without a stable key they
     cannot be deduplicated and would silently duplicate on every sync.
+
+    FST-3: the UPDATE path passes full source-truth provenance
+    (``writer_class="connector"``, a ``connector_run`` SourceRef with this
+    connector + run_id) into ``store.update_object``, so when
+    ``fabric_source_truth_mode`` is shadow/enforce the statements recorded at
+    merge site 1 carry honest connector provenance. In mode 'off' the kwargs
+    are inert. The CREATE path is untouched (statement coverage for creates is
+    FST-4's scope).
     """
     type_id = await ensure_type(store, mapping, workspace_id=workspace_id)
     result = IngestResult(type_name=mapping.type_name)
@@ -206,7 +228,15 @@ async def ingest_records(
             workspace_id=workspace_id,
         )
         if existing is not None:
-            updated = await store.update_object(existing.id, properties, workspace_id=workspace_id)
+            updated = await store.update_object(
+                existing.id,
+                properties,
+                workspace_id=workspace_id,
+                writer_class="connector",
+                source_kind="connector_run",
+                source_connector=connector,
+                source_run_id=run_id,
+            )
             result.updated += 1
             result.object_ids.append((updated or existing).id)
         else:

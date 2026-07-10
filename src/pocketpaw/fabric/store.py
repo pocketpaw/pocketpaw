@@ -167,6 +167,31 @@
 #   ``fabric_objects.properties`` dict remains the primary read path; nothing
 #   writes statements in production until ``fabric_source_truth_mode``
 #   (default "off") gains shadow/enforce semantics in later slices.
+# Updated: 2026-07-10 (FST-3 — SHADOW mode at merge site 1) — update_object()
+#   now records statements when ``fabric_source_truth_mode`` is shadow/enforce
+#   (enforce == shadow until FST-5). The mode is read ONCE per call; 'off'
+#   (default) is byte-for-byte the prior behavior — zero new queries/writes.
+#   The LWW cache write is UNCHANGED in every mode. New OPTIONAL keyword-only
+#   provenance kwargs on update_object (writer_class, source_kind,
+#   source_connector, source_run_id, source_document_uri, source_actor_id,
+#   source_session_id, observed_at — all default None, every existing caller
+#   keeps working); connectors/fabric_ingest.py threads its connector context
+#   through them. The shadow pass (_shadow_record_statements) implements: the
+#   opt-in discipline (untracked single-source properties write NO
+#   statements), auto-promotion (an untracked property hit by a SECOND
+#   distinct source with a materially different value seeds a statement from
+#   the current cache value with object-level provenance + touch-time
+#   observed_at backfill), provenance derivation for unattributed writes
+#   (object's source_connector → writer_class "connector", else "agent"),
+#   FST-2 resolution over the property's statements, and ONE grep-stable
+#   divergence log line per statement-producing property ("fabric shadow:
+#   object=... property=... lww=... resolver=... diverged=... disputed=...
+#   unresolvable=..." — the FST-8 harness contract). Shadow runs AFTER the
+#   cache commit and is exception-shielded: a shadow failure logs a warning,
+#   never breaks the primary write. Supporting fix: _row_to_object now parses
+#   created_at/updated_at from the row (previously dropped — the model
+#   defaulted them to read-time now()), so the promotion backfill uses the
+#   TRUE last-touch time.
 
 
 from __future__ import annotations
@@ -191,7 +216,29 @@ from pocketpaw.fabric.models import (
     Statement,
 )
 
+# FST-3: the shadow pass reuses the resolver's material-difference rule
+# (strings compared stripped, everything else plain ==) rather than
+# duplicating it here — one definition of "materially different" for the
+# whole source-truth chain. The name is module-private in resolver.py but
+# intra-package reuse is deliberate.
+from pocketpaw.fabric.resolver import _materially_different, resolve
+from pocketpaw.fabric.trust import default_trust_rules
+
 logger = logging.getLogger(__name__)
+
+
+def _source_truth_mode() -> str:
+    """The fabric_source_truth_mode setting: 'off' | 'shadow' | 'enforce'.
+
+    Read lazily (import inside the function) so importing the store never
+    pulls the full config module, and so tests can monkeypatch either this
+    helper or ``pocketpaw.config.get_settings``. Callers read it ONCE per
+    operation — 'off' must stay byte-for-byte free of new queries/writes.
+    """
+    from pocketpaw.config import get_settings
+
+    return get_settings().fabric_source_truth_mode
+
 
 # Hard cap on the working set during a multi-hop traversal. The per-hop query
 # binds one ``?`` per frontier id in a ``WHERE l.<col> IN (?, ?, …)`` list; left
@@ -938,6 +985,15 @@ class FabricStore:
         obj_id: str,
         properties: dict[str, Any],
         workspace_id: str | None = None,
+        *,
+        writer_class: str | None = None,
+        source_kind: str | None = None,
+        source_connector: str | None = None,
+        source_run_id: str | None = None,
+        source_document_uri: str | None = None,
+        source_actor_id: str | None = None,
+        source_session_id: str | None = None,
+        observed_at: datetime | None = None,
     ) -> FabricObject | None:
         """Merge-update one object's properties, optionally scoped to a tenant (W4a).
 
@@ -948,7 +1004,21 @@ class FabricStore:
         and the UPDATE. A cross-tenant ``obj_id`` returns ``None`` and writes
         nothing. ``None`` leaves the update unscoped (OSS / agent-tool callers),
         exactly as before.
+
+        FST-3 (source-truth shadow) — the new keyword-only kwargs are OPTIONAL
+        provenance for the write (all default ``None``; every pre-FST-3 caller
+        keeps working unchanged). They only matter when
+        ``fabric_source_truth_mode`` is ``shadow`` or ``enforce`` (enforce is
+        treated as shadow until FST-5): the write is then ALSO recorded as
+        statements per :meth:`_shadow_record_statements` (auto-promotion,
+        provenance derivation, divergence log — see its docstring for the exact
+        rules). The CACHE WRITE IS UNCHANGED in every mode: last-write-wins
+        merge into the flat properties dict, which remains the primary read
+        path. With mode ``off`` (the default) not a single new query or write
+        happens — the mode is read once per call and the whole shadow block is
+        skipped.
         """
+        mode = _source_truth_mode()  # read ONCE per call; "off" skips everything
         existing = await self.get_object(obj_id, workspace_id=workspace_id)
         if not existing:
             return None
@@ -963,7 +1033,205 @@ class FabricStore:
         async with self._conn() as db:
             await db.execute(sql, params)
             await db.commit()
+        if mode != "off":
+            # shadow | enforce (enforce == shadow until FST-5). Runs AFTER the
+            # cache write so the primary path's semantics and error behavior
+            # stay byte-identical; a shadow failure must never break the write.
+            try:
+                await self._shadow_record_statements(
+                    existing,
+                    properties,
+                    writer_class=writer_class,
+                    source_kind=source_kind,
+                    source_connector=source_connector,
+                    source_run_id=source_run_id,
+                    source_document_uri=source_document_uri,
+                    source_actor_id=source_actor_id,
+                    source_session_id=source_session_id,
+                    observed_at=observed_at,
+                    workspace_id=workspace_id,
+                )
+            except Exception:
+                logger.warning(
+                    "fabric shadow: statement pass failed for object=%s — cache write unaffected",
+                    obj_id,
+                    exc_info=True,
+                )
         return await self.get_object(obj_id, workspace_id=workspace_id)
+
+    async def _shadow_record_statements(
+        self,
+        existing: FabricObject,
+        incoming: dict[str, Any],
+        *,
+        writer_class: str | None,
+        source_kind: str | None,
+        source_connector: str | None,
+        source_run_id: str | None,
+        source_document_uri: str | None,
+        source_actor_id: str | None,
+        source_session_id: str | None,
+        observed_at: datetime | None,
+        workspace_id: str | None,
+    ) -> None:
+        """The FST-3 shadow pass: record an update's claims as statements.
+
+        Called from :meth:`update_object` (merge site 1) only when
+        ``fabric_source_truth_mode`` is shadow/enforce, AFTER the LWW cache
+        write. ``existing`` is the PRE-update snapshot (its properties and
+        ``updated_at`` are the old cache state).
+
+        Provenance derivation (when the caller passed no explicit kwargs):
+
+        - source kind, in order: explicit ``source_kind`` > ``source_connector``
+          → ``connector_run`` > ``source_actor_id`` → ``human_actor`` >
+          ``source_session_id`` → ``agent_session`` > ``source_document_uri``
+          → ``document`` > the object's own ``source_connector`` →
+          ``connector_run`` for that connector (the historical main caller of
+          update_object is the connector re-sync refreshing its own object) >
+          ``agent_session`` with no identity (the honest default for
+          unattributed legacy writes).
+        - writer_class: explicit > ``connector`` when the effective kind is
+          ``connector_run`` > ``human`` for ``human_actor`` > ``agent`` for
+          everything else.
+
+        Second-distinct-source rule (drives auto-promotion): the object-level
+        baseline is (``existing.source_connector``, its derived writer class —
+        ``connector`` when a connector is stamped, else ``agent``). The
+        incoming write is a SECOND source when its effective connector differs
+        from the baseline connector OR its effective writer class differs from
+        the baseline writer class. An unattributed write on a connector-owned
+        object derives to that same connector, so it is NOT a second source —
+        without provenance threading a second writer cannot be detected, which
+        is exactly why ingest/API callers pass the kwargs.
+
+        Per incoming property:
+
+        1. already tracked (has statements) → append the incoming statement.
+        2. untracked → PROMOTE only when (second distinct source) AND (the
+           property exists in the current cache — a brand-new key has no prior
+           claim to preserve) AND (the values materially differ): seed a
+           statement from the current cache value with the object-level
+           baseline provenance and touch-time backfill
+           (``observed_at = existing.updated_at or created_at`` — the best
+           available approximation of when the cache value was written), then
+           append the incoming statement. Otherwise the property stays
+           scalar/cheap: NO statements, NO log line (the opt-in discipline).
+        3. resolve the property's statements via the FST-2 trust ladder and
+           log ONE structured divergence line (the FST-8 harness contract —
+           grep-stable, single line, values JSON-encoded so they can never
+           wrap):
+
+           ``fabric shadow: object=<id> property=<p> lww=<cache-value>
+           resolver=<winner-value> diverged=<bool> disputed=<bool>
+           unresolvable=<bool>``
+
+        The cache is NEVER touched here — shadow only observes.
+        """
+        # --- Effective provenance of the incoming write ---
+        kind = source_kind
+        connector = source_connector
+        if kind is None:
+            if connector is not None:
+                kind = "connector_run"
+            elif source_actor_id is not None:
+                kind = "human_actor"
+            elif source_session_id is not None:
+                kind = "agent_session"
+            elif source_document_uri is not None:
+                kind = "document"
+            elif existing.source_connector:
+                kind = "connector_run"
+                connector = existing.source_connector
+            else:
+                kind = "agent_session"
+        eff_writer = writer_class
+        if eff_writer is None:
+            if kind == "connector_run":
+                eff_writer = "connector"
+            elif kind == "human_actor":
+                eff_writer = "human"
+            else:
+                eff_writer = "agent"
+
+        # --- Object-level baseline (who owns the current cache value) ---
+        baseline_connector = existing.source_connector
+        baseline_writer = "connector" if baseline_connector else "agent"
+
+        # --- Second-distinct-source rule ---
+        incoming_connector = connector if kind == "connector_run" else None
+        is_second_source = incoming_connector != baseline_connector or eff_writer != baseline_writer
+
+        # Sources are upserted lazily so a fully scalar update (nothing tracked,
+        # nothing promoted) writes NOTHING — not even a SourceRef row.
+        incoming_source: SourceRef | None = None
+        seed_source: SourceRef | None = None
+
+        for prop, value in incoming.items():
+            stmts = await self.get_statements(existing.id, prop, workspace_id=workspace_id)
+            if not stmts:
+                # Untracked property — promotion gate.
+                if not is_second_source:
+                    continue
+                if prop not in existing.properties:
+                    continue  # brand-new key: no prior claim to preserve
+                old_value = existing.properties[prop]
+                if not _materially_different(old_value, value):
+                    continue
+                if seed_source is None:
+                    seed_source = await self.upsert_source(
+                        "connector_run" if baseline_connector else "agent_session",
+                        connector=baseline_connector,
+                        workspace_id=workspace_id,
+                    )
+                seed = await self.append_statement(
+                    existing.id,
+                    prop,
+                    old_value,
+                    seed_source.id,
+                    baseline_writer,
+                    observed_at=existing.updated_at or existing.created_at,
+                    workspace_id=workspace_id,
+                )
+                stmts = [seed]
+            if incoming_source is None:
+                incoming_source = await self.upsert_source(
+                    kind,
+                    connector=connector,
+                    run_id=source_run_id,
+                    document_uri=source_document_uri,
+                    actor_id=source_actor_id,
+                    session_id=source_session_id,
+                    workspace_id=workspace_id,
+                )
+            stmts.append(
+                await self.append_statement(
+                    existing.id,
+                    prop,
+                    value,
+                    incoming_source.id,
+                    eff_writer,
+                    observed_at=observed_at,
+                    workspace_id=workspace_id,
+                )
+            )
+            resolution = resolve(
+                stmts,
+                default_trust_rules(),
+                object_type=existing.type_name or None,
+            )
+            # The LWW cache now holds the incoming value (last write wins).
+            logger.info(
+                "fabric shadow: object=%s property=%s lww=%s resolver=%s"
+                " diverged=%s disputed=%s unresolvable=%s",
+                existing.id,
+                prop,
+                json.dumps(value, default=str),
+                json.dumps(resolution.value, default=str),
+                _materially_different(value, resolution.value),
+                resolution.is_disputed,
+                resolution.unresolvable,
+            )
 
     async def remove_object(self, obj_id: str) -> None:
         await self._ensure_schema()
@@ -1656,6 +1924,17 @@ class FabricStore:
         )
 
     def _row_to_object(self, row: Any) -> FabricObject:
+        # FST-3: created_at/updated_at now come from the ROW (they were
+        # silently dropped before, so the model defaulted them to read-time
+        # ``now()``). The shadow pass needs the TRUE last-touch time for the
+        # auto-promotion backfill (observed_at of the seeded statement).
+        # SQLite's datetime('now') stamps are naive UTC "YYYY-MM-DD HH:MM:SS"
+        # strings; fromisoformat parses them as-is. Defensive: a NULL falls
+        # back to the model default rather than crashing the read.
+        timestamps: dict[str, Any] = {}
+        for ts_field in ("created_at", "updated_at"):
+            if ts_field in row.keys() and row[ts_field]:
+                timestamps[ts_field] = datetime.fromisoformat(row[ts_field])
         return FabricObject(
             id=row["id"],
             type_id=row["type_id"],
@@ -1663,6 +1942,7 @@ class FabricStore:
             properties=json.loads(row["properties"]) if row["properties"] else {},
             source_connector=row["source_connector"],
             source_id=row["source_id"],
+            **timestamps,
         )
 
     def _row_to_link(self, row: Any) -> FabricLink:
