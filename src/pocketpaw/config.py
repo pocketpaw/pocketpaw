@@ -1,6 +1,21 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-07-10 (feat/verify-mode-shadow): Added the three-position verify
+    rollout modes — ``deep_work_verify_mode`` and ``cloud_plan_verify_mode``
+    (Literal off|shadow|enforce, default 'off'; env
+    POCKETPAW_DEEP_WORK_VERIFY_MODE / POCKETPAW_CLOUD_PLAN_VERIFY_MODE) —
+    superseding the boolean kill-switches so a real tenant can run a SAFE
+    observe-only SHADOW phase (verdict + judge stamps + a
+    ``would_have=<done|requeued|escalated>`` telemetry line; task status
+    NEVER touched) before anyone risks ENFORCE. Resolved by
+    ``effective_deep_work_verify_mode()`` /
+    ``effective_cloud_plan_verify_mode()`` (mirrors
+    ``effective_spend_mode()``): a non-'off' mode wins outright; mode 'off'
+    + legacy bool True resolves to 'enforce' — NOT shadow — because the
+    bools' SHIPPED meaning is the full acting loop, and mapping them to
+    shadow would silently strip requeue/escalate from any deployment that
+    already set them. The legacy bools stay for back-compat.
   - 2026-07-02 (feat/judge-shadow-1168): Added the LLM-as-judge SHADOW settings
     (J-1, issue #1168) — ``deep_work_verify_judge_shadow_enabled`` (default
     False; when True AND deep_work_verify_loop_enabled is on, every completing
@@ -575,15 +590,45 @@ class Settings(BaseSettings):
     deep_work_verify_loop_enabled: bool = Field(
         default=False,
         description=(
-            "Kill-switch for the deep_work Self-Verifying Loop. When False "
-            "(default) deep_work tasks complete exactly as before — no outcome "
-            "verification, byte-for-byte today's behaviour. When True, every "
-            "task that completes successfully has its result checked against "
-            "the success_criteria captured at intake and the resulting "
-            "OutcomeVerdict is stamped on the task's metadata "
-            "(``verify_verdict``) and logged. The verdict is observe-only in "
-            "this slice (SVL-1): the task's status is NOT changed by the "
-            "verification — that is the requeue slice (SVL-2)."
+            "LEGACY back-compat bool for the deep_work Self-Verifying Loop — "
+            "superseded by the three-position "
+            "POCKETPAW_DEEP_WORK_VERIFY_MODE switch. Kept so an existing "
+            "deployment that set this bool keeps the behaviour it shipped "
+            "with: when the new mode is left at its 'off' default and this "
+            "bool is True, ``effective_deep_work_verify_mode()`` resolves to "
+            "'enforce' (the FULL acting loop — verify, requeue, escalate), "
+            "NOT 'shadow' — the bool's shipped meaning IS enforce, and "
+            "mapping it to shadow would silently weaken a deploy that "
+            "already relies on requeue/escalate. Ignored once the mode is "
+            "set to any non-'off' value. Set via "
+            "POCKETPAW_DEEP_WORK_VERIFY_LOOP_ENABLED."
+        ),
+    )
+    deep_work_verify_mode: Literal["off", "shadow", "enforce"] = Field(
+        default="off",
+        description=(
+            "Three-position rollout switch for the deep_work Self-Verifying "
+            "Loop (OSS Mission Control executor terminal). Supersedes the "
+            "deep_work_verify_loop_enabled bool so a tenant can run a SAFE "
+            "observe-only phase before verification is allowed to touch "
+            "task status:\n"
+            "  * 'off'     (default) — no verification; tasks complete "
+            "byte-for-byte as today.\n"
+            "  * 'shadow'  — the safe rollout rung. The deterministic "
+            "verdict is computed and stamped (``verify_verdict``, plus a "
+            "``verify_mode='shadow'`` marker and "
+            "``verify_would_have=<done|requeued|escalated>`` — what enforce "
+            "WOULD have decided), and the judge shadow still runs when its "
+            "flag is on; but the task ALWAYS completes DONE — no requeue, "
+            "no escalation, no ``verify_requeue_count``, no "
+            "``verify_feedback`` growth. Pure telemetry.\n"
+            "  * 'enforce' — the full loop: PARTIAL / NOT_SOLVED requeues "
+            "with feedback (bounded by deep_work_verify_max_requeues) then "
+            "escalates to BLOCKED — exactly the legacy bool's behaviour.\n"
+            "Precedence (``effective_deep_work_verify_mode()``): a non-'off' "
+            "mode wins outright; mode 'off' + legacy bool True resolves to "
+            "'enforce'; otherwise 'off'. Set via "
+            "POCKETPAW_DEEP_WORK_VERIFY_MODE."
         ),
     )
     deep_work_verify_max_requeues: int = Field(
@@ -645,18 +690,47 @@ class Settings(BaseSettings):
     cloud_plan_verify_loop_enabled: bool = Field(
         default=False,
         description=(
-            "Kill-switch for the Self-Verifying Loop at the CLOUD planner "
-            "terminal (ee/cloud plan-task execution — the paw-enterprise "
-            "product path). When False (default) plan tasks auto-complete "
-            "exactly as before — no outcome verification, byte-for-byte "
-            "today's behaviour. When True, every plan task that finishes its "
-            "agent run has its output checked against the cloud Task's "
-            "success_criteria and the OutcomeVerdict is stamped on the task "
-            "(``verify.verdict``). SOLVED / UNKNOWN complete exactly as "
-            "today; PARTIAL / NOT_SOLVED is requeued with the unmet criteria "
-            "fed back to the next attempt, bounded by "
-            "cloud_plan_verify_max_requeues, then failed with a stamped "
-            "``verify.escalation_reason``."
+            "LEGACY back-compat bool for the Self-Verifying Loop at the "
+            "CLOUD planner terminal — superseded by the three-position "
+            "POCKETPAW_CLOUD_PLAN_VERIFY_MODE switch. Kept so an existing "
+            "deployment that set this bool keeps the behaviour it shipped "
+            "with: when the new mode is left at its 'off' default and this "
+            "bool is True, ``effective_cloud_plan_verify_mode()`` resolves "
+            "to 'enforce' (the FULL acting loop — verify, requeue, "
+            "escalate), NOT 'shadow' — the bool's shipped meaning IS "
+            "enforce, and mapping it to shadow would silently weaken a "
+            "deploy that already relies on requeue/escalate. Ignored once "
+            "the mode is set to any non-'off' value. Set via "
+            "POCKETPAW_CLOUD_PLAN_VERIFY_LOOP_ENABLED."
+        ),
+    )
+    cloud_plan_verify_mode: Literal["off", "shadow", "enforce"] = Field(
+        default="off",
+        description=(
+            "Three-position rollout switch for the Self-Verifying Loop at "
+            "the CLOUD planner terminal (ee/cloud plan-task execution — the "
+            "paw-enterprise product path). Supersedes the "
+            "cloud_plan_verify_loop_enabled bool so a real tenant can run a "
+            "SAFE observe-only phase before verification is allowed to "
+            "touch task status:\n"
+            "  * 'off'     (default) — no verification; plan tasks "
+            "auto-complete byte-for-byte as today.\n"
+            "  * 'shadow'  — the safe rollout rung. The deterministic "
+            "verdict is computed and stamped on the task's ``verify`` dict "
+            "(``verify.verdict``, plus ``verify.mode='shadow'`` and "
+            "``verify.would_have=<done|requeued|escalated>`` — what enforce "
+            "WOULD have decided); the task ALWAYS completes done with every "
+            "DONE side-effect intact — no requeue, no escalation, no "
+            "``verify.requeue_count``, no ``verify.feedback`` growth. Pure "
+            "telemetry.\n"
+            "  * 'enforce' — the full loop: PARTIAL / NOT_SOLVED requeues "
+            "with feedback (bounded by cloud_plan_verify_max_requeues) then "
+            "fails with ``verify.escalation_reason`` — exactly the legacy "
+            "bool's behaviour.\n"
+            "Precedence (``effective_cloud_plan_verify_mode()``): a "
+            "non-'off' mode wins outright; mode 'off' + legacy bool True "
+            "resolves to 'enforce'; otherwise 'off'. Set via "
+            "POCKETPAW_CLOUD_PLAN_VERIFY_MODE."
         ),
     )
     cloud_plan_verify_max_requeues: int = Field(
@@ -2274,6 +2348,54 @@ class Settings(BaseSettings):
             return self.litellm_spend_mode
         if self.litellm_spend_ingest_enabled:
             return "shadow"
+        return "off"
+
+    def effective_deep_work_verify_mode(self) -> Literal["off", "shadow", "enforce"]:
+        """Resolve the deep_work verify-loop mode, honouring the legacy bool.
+
+        Mirrors the ``effective_spend_mode()`` shape: the three-position
+        ``deep_work_verify_mode`` switch supersedes the
+        ``deep_work_verify_loop_enabled`` bool. Resolution, in order:
+
+          1. An EXPLICIT ``POCKETPAW_DEEP_WORK_VERIFY_MODE`` (any non-'off'
+             value) wins outright — ``shadow`` and ``enforce`` are taken as
+             set.
+          2. Mode unset / 'off' + the legacy bool True → ``enforce``.
+          3. Mode unset / 'off' + the legacy bool False/unset → ``off``.
+
+        WHY the legacy bool maps to ``enforce`` and never ``shadow`` (the
+        DELIBERATE opposite of the spend-mode precedent): the verify bool's
+        SHIPPED meaning is the full acting loop — requeue on PARTIAL /
+        NOT_SOLVED, escalate to BLOCKED on budget / no-progress. A
+        deployment that set the bool opted into that enforcement; resolving
+        it to 'shadow' would silently strip requeue/escalate from that
+        deployment on upgrade — a behaviour downgrade with no operator
+        decision. (The spend bool mapped to the safe MIDDLE position
+        because 'live' moves money and the bool's legacy path had no
+        periodic caller; here the bool's legacy behaviour IS the strong
+        position, so back-compat preserves it.)
+        """
+        if self.deep_work_verify_mode != "off":
+            return self.deep_work_verify_mode
+        if self.deep_work_verify_loop_enabled:
+            return "enforce"
+        return "off"
+
+    def effective_cloud_plan_verify_mode(self) -> Literal["off", "shadow", "enforce"]:
+        """Resolve the CLOUD planner verify-loop mode, honouring the legacy bool.
+
+        Identical shape to ``effective_deep_work_verify_mode()`` at the
+        ee/cloud planner terminal: an explicit non-'off'
+        ``POCKETPAW_CLOUD_PLAN_VERIFY_MODE`` wins outright; mode 'off' +
+        legacy ``cloud_plan_verify_loop_enabled`` True → ``enforce`` (NOT
+        shadow — the bool's shipped meaning is the acting loop, see the
+        deep_work resolver's docstring for the full rationale); otherwise
+        ``off``.
+        """
+        if self.cloud_plan_verify_mode != "off":
+            return self.cloud_plan_verify_mode
+        if self.cloud_plan_verify_loop_enabled:
+            return "enforce"
         return "off"
 
     def save(self) -> None:
