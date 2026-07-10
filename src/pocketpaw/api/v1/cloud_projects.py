@@ -23,7 +23,6 @@ import re
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
@@ -53,7 +52,6 @@ class CreateCloudProjectRequest(BaseModel):
     """Request body for creating a new cloud project."""
 
     project_name: str
-    provision_workspace: bool = False
 
 
 class CreateCloudProjectResponse(BaseModel):
@@ -65,8 +63,7 @@ class CreateCloudProjectResponse(BaseModel):
     local_path: str
     workspace_id: str
     user_id: str
-    sandbox_id: str = ""
-    sandbox_state: str = ""
+    vm_project_path: str = ""
 
 
 class CloneGitRepoRequest(BaseModel):
@@ -74,7 +71,6 @@ class CloneGitRepoRequest(BaseModel):
 
     repo_url: str
     include_git: bool = False
-    provision_workspace: bool = False
 
 
 async def _empty_stream() -> AsyncIterator[bytes]:
@@ -231,89 +227,100 @@ async def _upload_directory(local_dir: str, project_key: str, include_git: bool 
                 ) from exc
 
 
-# ── Optional Daytona workspace provisioning ─────────────────────────────────
+# ── Workspace VM project subdirectory helpers (NEW) ────────────────────────
 
 
-async def _maybe_provision_workspace(
-    workspace_id: str,
-    user_id: str,
-    project_name: str,
-) -> tuple[str, str]:
-    """If Daytona is configured, provision a sandbox for the project.
+async def _ensure_vm_project_dir(workspace_id: str, project_name: str) -> str:
+    """Create a project subdirectory inside the workspace VM.
 
-    Returns ``(sandbox_id, sandbox_state)`` or ``("", "")`` when Daytona
-    is not available.
+    Returns the VM path (e.g. ``/workspace/my-project``) or empty string
+    if the VM is not available.
+
+    Handles the race where the VM is still provisioning when the project
+    is created — waits up to 60 s for the VM to reach "started" state.
     """
     try:
-        from pocketpaw_ee.cloud.daytona.client import get_daytona_client
-        from pocketpaw_ee.cloud.daytona.config import daytona_enabled
+        from pocketpaw_ee.cloud.daytona.store import (
+            get_workspace_vm_config,
+            get_workspace_vm_sandbox_id,
+        )
 
-        if not daytona_enabled():
-            return ("", "")
+        sandbox_id = get_workspace_vm_sandbox_id(workspace_id)
+        if not sandbox_id:
+            logger.debug("_ensure_vm_project_dir: no VM for workspace %s", workspace_id)
+            return ""
+
+        from pocketpaw_ee.cloud.daytona.client import get_daytona_client
 
         client = get_daytona_client()
         if client is None:
-            return ("", "")
+            return ""
 
-        sandbox_name = f"paw-{project_name}-{workspace_id[:8]}"
-        info = await client.create_sandbox(name=sandbox_name)
+        # Wait for the VM to be started before creating directories.
+        try:
+            info = await client.get_sandbox_by_id(sandbox_id)
+            if info.state != "started":
+                logger.info(
+                    "_ensure_vm_project_dir: VM %s is %s — waiting for started",
+                    sandbox_id,
+                    info.state,
+                )
+                await client.wait_for_sandbox(sandbox_id, target_state="started", timeout=60)
+        except Exception as exc:
+            logger.warning("_ensure_vm_project_dir: could not ensure VM is started: %s", exc)
+            return ""
 
-        # Record the mapping.
-        from pocketpaw_ee.cloud.daytona.store import set_sandbox_id
+        config = get_workspace_vm_config(workspace_id)
+        root = config.get("root_dir", "/workspace")
+        vm_path = f"{root}/{project_name}"
 
-        set_sandbox_id(
-            f"projects/{workspace_id}/{user_id}/{project_name}/",
-            info.id,
-            sandbox_name,
-        )
-
-        # Kick off background sync (S3 → sandbox after sandbox starts).
-        import asyncio
-
-        asyncio.create_task(
-            _background_sync_after_provision(client, info.id, workspace_id, user_id, project_name)
-        )
-
-        return (info.id, info.state)
+        await client.create_folder(sandbox_id, vm_path)
+        logger.info("Created VM project dir %s in sandbox %s", vm_path, sandbox_id)
+        return vm_path
     except Exception as exc:
-        logger.warning("Auto-provision workspace failed (non-fatal): %s", exc)
-        return ("", "")
+        logger.warning("Failed to create VM project dir (non-fatal): %s", exc)
+        return ""
 
 
-async def _background_sync_after_provision(
-    client: Any,
-    sandbox_id: str,
+async def _clone_into_vm(
     workspace_id: str,
-    user_id: str,
     project_name: str,
+    repo_url: str,
 ) -> None:
-    """Wait for sandbox to start, then sync project files into it."""
-    project_key = f"projects/{workspace_id}/{user_id}/{project_name}/"
+    """Clone a git repo into the workspace VM project subdirectory."""
     try:
-        await client.wait_for_sandbox(sandbox_id, target_state="started", timeout=120)
-        project_dir = await client.get_project_dir(sandbox_id)
-
-        from pocketpaw_ee.cloud.daytona.config import daytona_enabled
-
-        if daytona_enabled():
-            # Re-import the sync function from router module.
-            # Router uses the EE storage adapter; we use the same one.
-            from pocketpaw_ee.cloud.daytona.router import (
-                _sync_directory_from_s3_to_sandbox,
-            )
-
-            await _sync_directory_from_s3_to_sandbox(client, sandbox_id, project_key, project_dir)
-
-        from pocketpaw_ee.cloud.daytona.store import update_sync_timestamp
-
-        update_sync_timestamp(project_key)
-        logger.info(
-            "Auto-provision complete: sandbox=%s project=%s",
-            sandbox_id,
-            project_key,
+        from pocketpaw_ee.cloud.daytona.store import (
+            get_workspace_vm_config,
+            get_workspace_vm_sandbox_id,
         )
+
+        sandbox_id = get_workspace_vm_sandbox_id(workspace_id)
+        if not sandbox_id:
+            return
+
+        from pocketpaw_ee.cloud.daytona.client import get_daytona_client
+
+        client = get_daytona_client()
+        if client is None:
+            return
+
+        config = get_workspace_vm_config(workspace_id)
+        root = config.get("root_dir", "/workspace")
+        vm_path = f"{root}/{project_name}"
+
+        # First delete the empty dir created by _ensure_vm_project_dir
+        try:
+            await client.delete_file(sandbox_id, vm_path, recursive=True)
+        except Exception:
+            pass
+
+        await client.git_clone(sandbox_id, repo_url, vm_path)
+        logger.info("Cloned %s into VM at %s (sandbox=%s)", repo_url, vm_path, sandbox_id)
     except Exception as exc:
-        logger.warning("Background sync after provision failed: %s", exc)
+        logger.warning("Failed to clone into VM (non-fatal): %s", exc)
+
+
+# ── Optional Daytona workspace provisioning (LEGACY) ───────────────────────
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -380,11 +387,8 @@ async def create_cloud_project(
 
     filesystem_path = await _project_filesystem_path(workspace_id, user_id, name)
 
-    # Optionally provision a Daytona sandbox.
-    sandbox_id = ""
-    sandbox_state = ""
-    if req.provision_workspace:
-        sandbox_id, sandbox_state = await _maybe_provision_workspace(workspace_id, user_id, name)
+    # Create project subdirectory in workspace VM (if available).
+    vm_project_path = await _ensure_vm_project_dir(workspace_id, name)
 
     return CreateCloudProjectResponse(
         ok=True,
@@ -393,8 +397,7 @@ async def create_cloud_project(
         local_path=filesystem_path,
         workspace_id=workspace_id,
         user_id=user_id,
-        sandbox_id=sandbox_id,
-        sandbox_state=sandbox_state,
+        vm_project_path=vm_project_path,
     )
 
 
@@ -490,13 +493,12 @@ async def clone_git_repo(
 
     filesystem_path = await _project_filesystem_path(workspace_id, user_id, project_name)
 
-    # Optionally provision a Daytona sandbox.
-    sandbox_id = ""
-    sandbox_state = ""
-    if req.provision_workspace:
-        sandbox_id, sandbox_state = await _maybe_provision_workspace(
-            workspace_id, user_id, project_name
-        )
+    # Create project subdirectory + clone into workspace VM (if available).
+    vm_project_path = await _ensure_vm_project_dir(workspace_id, project_name)
+    if vm_project_path:
+        import asyncio as _asyncio
+
+        _asyncio.create_task(_clone_into_vm(workspace_id, project_name, url))
 
     return CreateCloudProjectResponse(
         ok=True,
@@ -505,8 +507,7 @@ async def clone_git_repo(
         local_path=filesystem_path,
         workspace_id=workspace_id,
         user_id=user_id,
-        sandbox_id=sandbox_id,
-        sandbox_state=sandbox_state,
+        vm_project_path=vm_project_path,
     )
 
 

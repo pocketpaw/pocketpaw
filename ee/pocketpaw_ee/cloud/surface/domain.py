@@ -167,10 +167,16 @@ class SurfaceMeta:
     # filesystem representation (pure S3 adapter). The agent knows files
     # aren't directly on disk and must use the cloud project REST API or
     # a synced Daytona sandbox.
+    #
+    # ``workspace_vm`` is ``"true"`` when the project is running inside
+    # a shared workspace VM (Daytona sandbox). The agent uses Daytona MCP
+    # tools exclusively — all file I/O and command execution routes through
+    # the sandbox.
     current_dir: str | None = None
     project_name: str | None = None
     storage_root: str | None = None
     is_cloud_storage: str | None = None
+    workspace_vm: str | None = None
 
 
 @dataclass(frozen=True)

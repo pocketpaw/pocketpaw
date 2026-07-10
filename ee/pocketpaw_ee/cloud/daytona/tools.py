@@ -38,48 +38,63 @@ logger = logging.getLogger(__name__)
 
 
 def _strip_project_prefix(path: str, ctx: Any) -> str:
-    """Strip the local storage prefix from *path* to get the relative path
-    inside the sandbox.
+    """Resolve the effective sandbox-relative path from a tool argument *path*.
 
-    Handles both S3 key prefixes and local-disk paths:
+    Workspace VM (NEW):
+      When the context has ``workspace_root`` (non-empty), paths are relative
+      to the project subdirectory inside the VM:
+        ``/workspace/my-app/src/main.py`` → ``src/main.py``
+        ``src/main.py``                  → ``src/main.py``  (already relative)
+
+    Legacy per-project sandbox:
       ``projects/{ws}/{uid}/{name}/src/main.py`` → ``src/main.py``
       ``~/.pocketpaw/uploads/projects/{ws}/{uid}/{name}/src/main.py`` → ``src/main.py``
 
-    When no known prefix matches, returns the path as-is (relative to the
-    sandbox project dir).
+    When no known prefix matches, returns the path as-is.
     """
-    # Clean the path — expanduser, resolve symlinks, normalize.
     clean = path.strip()
 
-    # Try to extract the relative path by matching the project_key prefix.
-    # The S3 key prefix is like "projects/{ws}/{uid}/{name}/"
-    project_key = ctx.project_key  # e.g. "projects/ws123/user456/my-app/"
-    if project_key in clean:
-        idx = clean.index(project_key) + len(project_key)
-        rel = clean[idx:].lstrip("/")
-        if rel:
-            return rel
-        return "."  # the project root itself
+    # ── Workspace VM mode: strip workspace root + project prefix ──
+    ws_root = getattr(ctx, "workspace_root", "") or ""
+    if ws_root and ctx.project_name:
+        # Absolute sandbox path: /workspace/my-app/src/main.py
+        project_prefix = f"{ws_root}/{ctx.project_name}/"
+        if clean.startswith(project_prefix):
+            rel = clean[len(project_prefix) :].lstrip("/")
+            return rel or "."
+        # Also strip bare workspace_root/my-app if present
+        bare_prefix = f"{ws_root}/{ctx.project_name}"
+        if clean.startswith(bare_prefix + "/"):
+            rel = clean[len(bare_prefix) + 1 :].lstrip("/")
+            return rel or "."
 
-    # Try the full local path prefix.
-    # The local path is like "~/.pocketpaw/uploads/projects/{ws}/{uid}/{name}/"
-    local_prefix = (Path.home() / ".pocketpaw" / "uploads" / project_key).as_posix()
-    if local_prefix in clean:
-        idx = clean.index(local_prefix) + len(local_prefix)
-        rel = clean[idx:].lstrip("/")
-        if rel:
-            return rel
-        return "."
+    # ── Legacy mode: strip S3 project_key prefix ──
+    project_key = getattr(ctx, "project_key", "") or ""
+    if project_key:
+        if project_key in clean:
+            idx = clean.index(project_key) + len(project_key)
+            rel = clean[idx:].lstrip("/")
+            if rel:
+                return rel
+            return "."
 
-    # If clean starts with ~/ or /home/ or the project name, try heuristic.
-    path_obj = Path(clean)
+        local_prefix = (Path.home() / ".pocketpaw" / "uploads" / project_key).as_posix()
+        if local_prefix in clean:
+            idx = clean.index(local_prefix) + len(local_prefix)
+            rel = clean[idx:].lstrip("/")
+            if rel:
+                return rel
+            return "."
+
+    # ── Heuristic: project name in path ──
     if ctx.project_name and ctx.project_name in clean:
         idx = clean.index(ctx.project_name) + len(ctx.project_name)
         rel = clean[idx:].lstrip("/")
         if rel:
             return rel
 
-    # Fallback: return the basename (assumed to be a file in project root).
+    # Fallback: return the basename.
+    path_obj = Path(clean)
     return path_obj.name
 
 
@@ -500,11 +515,14 @@ class DaytonaShellTool(BaseTool):
         if not is_safe:
             return self._error(f"Command blocked by Guardian: {reason}")
 
+        # Use work_dir so commands run in the project subdirectory when scoped.
+        cwd = ctx.work_dir or ctx.project_dir
+
         try:
             result = await ctx.client.execute_command(
                 ctx.sandbox_id,
                 command,
-                cwd=ctx.project_dir,
+                cwd=cwd,
                 timeout=self.timeout,
             )
             output = result.result or ""
@@ -610,9 +628,12 @@ class DaytonaRunPythonTool(BaseTool):
         if not is_safe:
             return self._error(f"Code blocked by Guardian: {reason}")
 
+        # Use work_dir for temp script placement and execution cwd.
+        cwd = ctx.work_dir or ctx.project_dir
+
         # Write code to a temp file in the sandbox and execute it.
         script_name = f"_paw_run_{uuid.uuid4().hex}.py"
-        remote_script = f"{ctx.project_dir}/{script_name}"
+        remote_script = f"{cwd}/{script_name}"
 
         try:
             # Upload the script.
@@ -622,7 +643,7 @@ class DaytonaRunPythonTool(BaseTool):
             result = await ctx.client.execute_command(
                 ctx.sandbox_id,
                 f"python3 {script_name}",
-                cwd=ctx.project_dir,
+                cwd=cwd,
                 timeout=timeout,
             )
 
@@ -697,9 +718,7 @@ class DaytonaSyncToS3Tool(BaseTool):
 
     @property
     def description(self) -> str:
-        return (
-            "Sync all files from the Daytona sandbox back to S3 storage."
-        )
+        return "Sync all files from the Daytona sandbox back to S3 storage."
 
     @property
     def parameters(self) -> dict[str, Any]:

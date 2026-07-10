@@ -89,9 +89,11 @@ async def _require_ctx() -> Any:
     ctx = await _resolve_ctx()
     if ctx is None:
         raise ValueError(
-            "No Daytona sandbox is active. "
-            "Provision a sandbox via POST /api/v1/cloud/projects/<name>/workspace "
-            "before using Daytona tools, or use local file/shell tools instead."
+            "No workspace VM is active. "
+            "The workspace VM auto-provisions on first access — "
+            "open /code and select a project, or provision manually via "
+            "POST /api/v1/workspace/vm/provision. "
+            "If no VM is available, use local file/shell tools instead."
         )
     return ctx
 
@@ -102,10 +104,24 @@ async def _require_ctx() -> Any:
 
 
 def _sandbox_path(ctx: Any, path: str) -> str:
-    """Map a local or S3-key path to its sandbox equivalent."""
+    """Map a local or S3-key path to its absolute sandbox equivalent.
+
+    Workspace VM (NEW):
+      When workspace_root is set, paths are resolved relative to the
+      project subdirectory: ``{workspace_root}/{project_name}/{rel_path}``.
+
+    Legacy:
+      ``{project_dir}/{rel_path}``
+    """
     from pocketpaw_ee.cloud.daytona.tools import _strip_project_prefix
 
     rel = _strip_project_prefix(path, ctx)
+
+    ws_root = getattr(ctx, "workspace_root", "") or ""
+    if ws_root and ctx.project_name:
+        # Workspace VM: path under the project subdirectory
+        return f"{ws_root}/{ctx.project_name}/{rel}".replace("//", "/")
+
     return f"{ctx.project_dir}/{rel}".replace("//", "/")
 
 
@@ -225,12 +241,13 @@ async def _shell_handler(args: dict) -> dict:
         return _error_response("command is required")
 
     ctx = await _require_ctx()
+    cwd = ctx.work_dir if hasattr(ctx, "work_dir") and ctx.work_dir else ctx.project_dir
 
     try:
         result = await ctx.client.execute_command(
             ctx.sandbox_id,
             command,
-            cwd=ctx.project_dir,
+            cwd=cwd,
             timeout=args.get("timeout", 120),
         )
         output = result.result or ""
@@ -249,11 +266,12 @@ async def _run_python_handler(args: dict) -> dict:
 
     timeout = int(args.get("timeout", 120))
     ctx = await _require_ctx()
+    cwd = ctx.work_dir if hasattr(ctx, "work_dir") and ctx.work_dir else ctx.project_dir
 
     import uuid
 
     script_name = f"_paw_mcp_run_{uuid.uuid4().hex}.py"
-    remote_script = f"{ctx.project_dir}/{script_name}"
+    remote_script = f"{cwd}/{script_name}"
 
     try:
         await ctx.client.upload_bytes(ctx.sandbox_id, code.encode("utf-8"), remote_script)
@@ -261,7 +279,7 @@ async def _run_python_handler(args: dict) -> dict:
         result = await ctx.client.execute_command(
             ctx.sandbox_id,
             f"python3 {script_name}",
-            cwd=ctx.project_dir,
+            cwd=cwd,
             timeout=timeout,
         )
 
@@ -329,11 +347,12 @@ async def _start_server_handler(args: dict) -> dict:
         return _error_response("command is required")
 
     ctx = await _require_ctx()
+    cwd = ctx.work_dir if hasattr(ctx, "work_dir") and ctx.work_dir else ctx.project_dir
 
     try:
         # Write the server command to a temp script and run it via nohup.
         # This avoids quoting issues with the shell command.
-        script = f"#!/bin/sh\ncd {ctx.project_dir}\n{command}\n"
+        script = f"#!/bin/sh\ncd {cwd}\n{command}\n"
         await ctx.client.upload_bytes(
             ctx.sandbox_id,
             script.encode("utf-8"),
@@ -342,13 +361,13 @@ async def _start_server_handler(args: dict) -> dict:
         await ctx.client.execute_command(
             ctx.sandbox_id,
             "chmod +x /tmp/_paw_start_server.sh",
-            cwd=ctx.project_dir,
+            cwd=cwd,
             timeout=10,
         )
         await ctx.client.execute_command(
             ctx.sandbox_id,
             "nohup /tmp/_paw_start_server.sh > /tmp/server.log 2>&1 &",
-            cwd=ctx.project_dir,
+            cwd=cwd,
             timeout=30,
         )
 
@@ -362,7 +381,7 @@ async def _start_server_handler(args: dict) -> dict:
         check = await ctx.client.execute_command(
             ctx.sandbox_id,
             f"ss -tlnp | grep -q ':{port} ' && echo 'running' || echo 'not_running'",
-            cwd=ctx.project_dir,
+            cwd=cwd,
             timeout=10,
         )
         status = check.result.strip() if check.result else "unknown"
@@ -557,8 +576,7 @@ def build_daytona_server() -> tuple[str, Any] | None:
 
     @tool(
         "sync_to_s3",
-        "Sync all files from the Daytona sandbox back to S3 storage. "
-        "No arguments needed.",
+        "Sync all files from the Daytona sandbox back to S3 storage. No arguments needed.",
         {
             "type": "object",
             "properties": {},
