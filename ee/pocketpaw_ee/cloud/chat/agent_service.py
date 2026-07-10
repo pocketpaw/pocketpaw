@@ -493,6 +493,13 @@ class ScopeContext:
     # array as "this pocket is an empty shell"). ``None`` when the chat
     # isn't anchored to a pocket — no block, behavior unchanged.
     pocket_summary: dict[str, Any] | None = None
+    # CS-13 — the per-send model override the client's composer picker chose for
+    # THIS turn. ``execute_run`` copies it off ``RunSpec.model_override`` onto the
+    # ctx it rebuilds; ``_drive_agent_loop`` forwards it into ``AgentPool.run`` only
+    # when set, where the Claude SDK backend makes it win over smart-routing /
+    # ``claude_sdk_model``. ``None`` (older clients / no picker) leaves the backend's
+    # own selection untouched — byte-identical to today.
+    model_override: str | None = None
 
 
 # ---------------------------------------------------------------------------

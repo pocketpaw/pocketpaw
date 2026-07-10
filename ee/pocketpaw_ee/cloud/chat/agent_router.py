@@ -264,6 +264,10 @@ async def post_agent_chat(
         # request's ctx and is dropped when the run is submitted.
         surface=body.surface,
         surface_meta=body.surface_meta or {},
+        # CS-13 — carry the per-send model override to the executor. Validated on
+        # the request body; ``None`` for every older client leaves model selection
+        # to the backend.
+        model_override=body.model,
     )
     # create_run is idempotent on (workspace, client_message_id) — when a doc
     # already exists, re-use its run_id so the executor + SSE stream both

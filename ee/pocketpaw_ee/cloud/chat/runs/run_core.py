@@ -1,6 +1,12 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-07-08 (CS-13, feat/per-send-model-override) — ``execute_run`` copies
+  ``spec.model_override`` onto the rebuilt ``ctx`` and ``_drive_agent_loop``
+  forwards it into ``pool.run`` as ``model_override`` ONLY when set (the same
+  withhold-when-empty idiom as the surface kwargs). It reaches the Claude SDK
+  backend, where it wins over smart-routing / ``claude_sdk_model``. ``None``
+  (older clients / no picker) is byte-identical to today.
 - 2026-06-28 (feat/aiam-agent-revoke, AW-4) — ``_drive_agent_loop`` catches
   ``AgentDisabled`` from ``pool.get`` explicitly and yields a clean
   ``agent.unavailable`` error instead of letting it fall through to the generic
@@ -1077,6 +1083,13 @@ async def _drive_agent_loop(
         # narrower signature safe.
         if surface_skills:
             run_kwargs["skill_names"] = surface_skills
+        # CS-13 — per-send model override. Same withhold-when-empty idiom as the
+        # kwargs above: only the Claude SDK backend accepts ``model_override``
+        # (the 7 other backends keep the narrower signature), so it is forwarded
+        # ONLY when the client actually chose a model for this turn. ``None`` =
+        # legacy path, byte-identical to today.
+        if ctx.model_override:
+            run_kwargs["model_override"] = ctx.model_override
         # --- Supervised native-resume wiring (feat/session-supervisor SS-5) -----
         # Flag-gated (default OFF). When ON, route this turn through the
         # SessionSupervisor: recover any prior native ``cli_session_id`` from the
@@ -1547,6 +1560,11 @@ async def execute_run(spec: RunSpec) -> None:
             "Could not resolve a workspace for this run's scope",
         )
     ctx.intent = spec.intent
+    # CS-13 — carry the per-send model override onto the rebuilt ctx. Like
+    # ``intent``, the executor builds a fresh ctx from the spec, so the client's
+    # model choice reaches ``_drive_agent_loop`` only via this copy. ``None`` (older
+    # clients) leaves the backend's own model selection untouched.
+    ctx.model_override = spec.model_override
 
     # Mirror agent_router._ensure_scope_session so _drive_agent_loop's
     # title-gen guard (`if not history and ctx.session_id`) actually fires
