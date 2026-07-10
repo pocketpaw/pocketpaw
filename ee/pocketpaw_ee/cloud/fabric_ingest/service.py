@@ -34,6 +34,17 @@
 #   conflict between sources, so the source-truth chain has nothing to
 #   arbitrate there. Proven by
 #   tests/cloud/fabric_ingest/test_fabric_ingest_enforce.py.
+# Updated: 2026-07-10 (FST-6 — the conflict lifecycle: post-ingest stewardship
+#   sweep) — run_ingest_sweep now ends with a best-effort per-workspace call to
+#   fabric_conflicts.sweep_conflicts_to_proposals: every workspace the ingest
+#   touched gets its open un-rankable conflicts staged as Instinct stewardship
+#   proposals. THIS is the FST-6 sweep wiring (the lightest honest trigger):
+#   conflicts are born at the merge sites this worker drives, so after-ingest
+#   is the natural beat — and because FabricIngestScheduler already ticks
+#   run_ingest_sweep every 5 minutes, the same hook doubles as the periodic
+#   sweep with no new scheduler class. Exception-shielded (a conflict-sweep
+#   failure never fails the ingest summary) and mode-gated inside the sweep
+#   itself (fabric_source_truth_mode 'off' → zero reads, zero proposals).
 #
 # What this does
 # --------------
@@ -364,6 +375,32 @@ async def run_ingest_sweep(
         errors,
         workspace_id or "ALL",
     )
+
+    # FST-6 — after the ingest batches land, stage each touched workspace's
+    # un-rankable conflicts as Instinct stewardship proposals. Best-effort per
+    # workspace (a conflict-sweep failure never fails the ingest summary);
+    # mode-gated inside the sweep (off → zero reads); lazy import so the
+    # ingest worker carries no module-top dependency on the gate package.
+    for ws in sorted({s["workspace_id"] for s in sources}):
+        try:
+            from pocketpaw_ee.cloud.fabric_conflicts import sweep_conflicts_to_proposals
+
+            filed = await sweep_conflicts_to_proposals(ws)
+            if filed:
+                logger.info(
+                    "fabric_ingest: post-ingest conflict sweep filed %d stewardship "
+                    "proposal(s) for workspace %s",
+                    len(filed),
+                    ws,
+                )
+        except Exception:  # noqa: BLE001 — the conflict sweep is best-effort
+            logger.warning(
+                "fabric_ingest: post-ingest conflict sweep failed for workspace %s "
+                "(non-fatal)",
+                ws,
+                exc_info=True,
+            )
+
     return {"sources": len(sources), "ok": ok, "errors": errors}
 
 

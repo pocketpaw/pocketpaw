@@ -251,6 +251,38 @@
 #   Site-3 note: the EE mirror's update path goes through update_object, so
 #   enforce flows through automatically (proven in
 #   tests/cloud/fabric_ingest/test_fabric_ingest_enforce.py).
+# Updated: 2026-07-10 (FST-6 — the conflict lifecycle: PIN / IGNORE steward
+#   verbs) — four changes; 'off' and 'shadow' cache behavior is untouched:
+#   1. pin_statement() / unpin_statement() / ignore_statement(): the steward
+#      verbs (siblings of change/correct — the operations FST-6's Instinct
+#      stewardship executor calls). PIN sets ``pinned=True`` on ONE existing,
+#      non-deprecated statement (the resolver's pinned short-circuit then
+#      makes it win outright — the durable "this one wins"); UNPIN retracts
+#      the flag; IGNORE deprecates the statement with rank_reason=<reason>
+#      (struck from resolution entirely — the steward's "this claim is
+#      bogus"). All three return the NEW Resolution and are mode-respecting
+#      on the cache exactly like CHANGE/CORRECT (enforce writes the new
+#      resolver winner; shadow/off leave the cache alone). PIN does NOT
+#      auto-unpin other pins: two pins on one property is a curation conflict
+#      the resolver deliberately flags as disputed. No auto-promotion here —
+#      the verbs target an EXISTING statement id, so an untracked property
+#      (no statements) has nothing to pin/ignore.
+#   2. The FST-5 "ONLY two writes" doctrine widens to THREE narrow curation
+#      UPDATEs on statement rows: valid_to (CHANGE), rank+rank_reason
+#      (CORRECT / IGNORE), and now pinned (PIN/UNPIN via
+#      _set_statement_pinned). Value and provenance columns are still never
+#      rewritten.
+#   3. list_statement_keys() + get_source(): two small read helpers.
+#      list_statement_keys returns the DISTINCT (object_id, property) pairs
+#      that HAVE statements (W4a-scoped) — the cheap scan surface
+#      fabric/conflicts.py recomputes open conflicts from (only objects WITH
+#      statements are ever visited; the statements ARE the conflict state, no
+#      conflicts table). get_source reads one SourceRef by id so the EE
+#      stewardship proposal can show a human WHERE each competing value came
+#      from.
+#   4. The enforce cache write is factored into _write_winner_to_cache()
+#      (byte-identical behavior) so _curate_property and the steward verbs
+#      share ONE definition of "the resolver owns the cache".
 
 
 from __future__ import annotations
@@ -1714,27 +1746,209 @@ class FabricStore:
             refreshed, default_trust_rules(), object_type=existing.type_name or None
         )
 
-        if mode == "enforce" and resolution.winner_statement is not None:
-            # The resolver owns the cache in enforce (FST-5): one targeted
-            # write of the property's new winner, merged onto the FRESH cache
-            # state so concurrent-property updates aren't clobbered.
-            fresh = await self.get_object(object_id, workspace_id=workspace_id)
-            base = fresh.properties if fresh is not None else existing.properties
-            merged = {**base, property: resolution.value}
-            ws_cond, ws_params = _workspace_scope(workspace_id)
-            sql = (
-                "UPDATE fabric_objects SET properties = ?,"
-                " updated_at = datetime('now') WHERE id = ?"
+        if mode == "enforce":
+            await self._write_winner_to_cache(
+                object_id, property, resolution, workspace_id=workspace_id, existing=existing
             )
-            params: list[Any] = [json.dumps(merged), object_id]
-            if ws_cond:
-                sql += f" AND {ws_cond}"
-                params.extend(ws_params)
-            async with self._conn() as db:
-                await db.execute(sql, params)
-                await db.commit()
 
         return resolution
+
+    async def _write_winner_to_cache(
+        self,
+        object_id: str,
+        property: str,
+        resolution: Resolution,
+        *,
+        workspace_id: str | None,
+        existing: FabricObject,
+    ) -> None:
+        """Write one property's resolver winner into the flat cache (enforce).
+
+        The resolver owns the cache in enforce (FST-5): one targeted write of
+        the property's new winner, merged onto the FRESH cache state so
+        concurrent-property updates aren't clobbered. A Resolution with no
+        winner (e.g. every statement deprecated) writes NOTHING — the cache
+        keeps its last value rather than losing the key. Shared by the
+        curation verbs (CHANGE/CORRECT) and the steward verbs
+        (PIN/UNPIN/IGNORE); callers gate on mode — this helper never reads it.
+        """
+        if resolution.winner_statement is None:
+            return
+        fresh = await self.get_object(object_id, workspace_id=workspace_id)
+        base = fresh.properties if fresh is not None else existing.properties
+        merged = {**base, property: resolution.value}
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        sql = "UPDATE fabric_objects SET properties = ?, updated_at = datetime('now') WHERE id = ?"
+        params: list[Any] = [json.dumps(merged), object_id]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
+        async with self._conn() as db:
+            await db.execute(sql, params)
+            await db.commit()
+
+    async def pin_statement(
+        self,
+        object_id: str,
+        property: str,
+        statement_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> Resolution:
+        """PIN one statement: the durable steward "this one wins" (FST-6).
+
+        Sets ``pinned=True`` on the identified statement. The resolver's
+        pinned short-circuit (FST-2) then makes it win outright — above every
+        ladder tier, immune to newer rival observations — which is why the
+        conflict-lifecycle executor maps an approved stewardship choice to
+        PIN rather than IGNORE-the-rival: a pin also settles FUTURE rivals,
+        and the losing statements stay intact for audit.
+
+        The statement must exist for exactly this ``(object_id, property)``
+        (within the caller's workspace scope) and must be non-deprecated —
+        a deprecated statement never reaches resolution, so pinning it would
+        be a silent no-op lie; both violations raise ``ValueError``. Pinning
+        an already-pinned statement is idempotent. PIN does NOT auto-unpin
+        other pins: multiple pins are a curation conflict the resolver
+        deliberately surfaces as ``is_disputed``.
+
+        Returns the NEW :class:`Resolution`. Cache behavior is
+        mode-respecting like the FST-5 verbs: enforce writes the new resolver
+        winner into the flat properties dict; shadow/off leave the cache
+        alone.
+        """
+        return await self._steward_statement(
+            object_id, property, statement_id, verb="pin", reason=None, workspace_id=workspace_id
+        )
+
+    async def unpin_statement(
+        self,
+        object_id: str,
+        property: str,
+        statement_id: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> Resolution:
+        """UNPIN one statement: retract a steward pin (FST-6).
+
+        Sets ``pinned=False``; resolution falls back to the trust ladder.
+        The statement must exist for exactly this ``(object_id, property)``
+        (ValueError otherwise). Unpinning a statement that isn't pinned is
+        idempotent, and rank is not checked — retracting a flag is always a
+        safe act. Returns the NEW :class:`Resolution`; cache behavior is
+        mode-respecting (see :meth:`pin_statement`).
+        """
+        return await self._steward_statement(
+            object_id, property, statement_id, verb="unpin", reason=None, workspace_id=workspace_id
+        )
+
+    async def ignore_statement(
+        self,
+        object_id: str,
+        property: str,
+        statement_id: str,
+        *,
+        reason: str = "steward_ignored",
+        workspace_id: str | None = None,
+    ) -> Resolution:
+        """IGNORE one statement: the steward's "this claim is bogus" (FST-6).
+
+        Deprecates the identified statement with ``rank_reason=reason`` —
+        the same narrow curation write CORRECT applies to a wrong winner,
+        but aimed at ANY statement (typically a losing rival) and without
+        appending a replacement value. A deprecated statement never wins,
+        never loses, never disputes: it is struck from resolution entirely
+        while remaining in the table for audit.
+
+        The statement must exist for exactly this ``(object_id, property)``
+        (within the caller's workspace scope) — ValueError otherwise.
+        Ignoring an already-deprecated statement just refreshes the reason.
+        Returns the NEW :class:`Resolution`; cache behavior is
+        mode-respecting (see :meth:`pin_statement`). Note: deprecating the
+        ONLY live statement leaves a winner-less Resolution and the cache
+        untouched — reads never lose a value to a steward strike.
+        """
+        return await self._steward_statement(
+            object_id,
+            property,
+            statement_id,
+            verb="ignore",
+            reason=reason,
+            workspace_id=workspace_id,
+        )
+
+    async def _steward_statement(
+        self,
+        object_id: str,
+        property: str,
+        statement_id: str,
+        *,
+        verb: str,
+        reason: str | None,
+        workspace_id: str | None,
+    ) -> Resolution:
+        """Shared core of :meth:`pin_statement` / :meth:`unpin_statement` /
+        :meth:`ignore_statement`.
+
+        Unlike ``_curate_property`` there is NO auto-promotion: the steward
+        verbs target an EXISTING statement id, and an untracked property has
+        no statements to target. Raises ``ValueError`` when the object or the
+        statement doesn't exist (or is outside the caller's workspace scope),
+        or when PIN targets a deprecated statement — the FST-6 executor needs
+        clean failures, not silent no-ops.
+        """
+        mode = _source_truth_mode()  # read ONCE; decides only the cache write
+        existing = await self.get_object(object_id, workspace_id=workspace_id)
+        if existing is None:
+            raise ValueError(f"fabric object not found: {object_id!r}")
+
+        stmts = await self.get_statements(object_id, property, workspace_id=workspace_id)
+        target = next((s for s in stmts if s.id == statement_id), None)
+        if target is None:
+            raise ValueError(
+                f"statement {statement_id!r} not found for"
+                f" ({object_id!r}, {property!r}) in the caller's workspace scope"
+            )
+
+        if verb == "pin":
+            if target.rank == "deprecated":
+                raise ValueError(
+                    f"cannot pin deprecated statement {statement_id!r} — a deprecated"
+                    " statement never reaches resolution; un-ignore it via a new"
+                    " curation write first"
+                )
+            await self._set_statement_pinned(statement_id, True)
+        elif verb == "unpin":
+            await self._set_statement_pinned(statement_id, False)
+        else:  # ignore
+            await self._deprecate_statement(statement_id, reason)
+
+        refreshed = await self.get_statements(object_id, property, workspace_id=workspace_id)
+        resolution = resolve(
+            refreshed, default_trust_rules(), object_type=existing.type_name or None
+        )
+
+        if mode == "enforce":
+            await self._write_winner_to_cache(
+                object_id, property, resolution, workspace_id=workspace_id, existing=existing
+            )
+
+        return resolution
+
+    async def _set_statement_pinned(self, statement_id: str, pinned: bool) -> None:
+        """Set the ``pinned`` flag on one statement (the PIN/UNPIN verbs).
+
+        The THIRD narrow curation write permitted on statement rows (see the
+        FST-6 module-header note; valid_to and rank/rank_reason are the other
+        two). Value/provenance columns are never rewritten.
+        """
+        await self._ensure_schema()
+        async with self._conn() as db:
+            await db.execute(
+                "UPDATE fabric_statements SET pinned = ? WHERE id = ?",
+                (1 if pinned else 0, statement_id),
+            )
+            await db.commit()
 
     async def _close_statement_validity(self, statement_id: str, closed_at: datetime) -> None:
         """Set ``valid_to`` on one statement (the CHANGE verb's close).
@@ -2064,6 +2278,64 @@ class FabricStore:
             async with db.execute(sql, params) as cur:
                 rows = await cur.fetchall()
         return [self._row_to_statement(r) for r in rows]
+
+    async def list_statement_keys(
+        self,
+        *,
+        workspace_id: str | None = None,
+        object_id: str | None = None,
+    ) -> list[tuple[str, str]]:
+        """DISTINCT ``(object_id, property)`` pairs that HAVE statements (FST-6).
+
+        The cheap scan surface the conflict lifecycle recomputes open
+        conflicts from: only objects WITH statements (the opted-in / promoted
+        minority) are ever visited, so the scan cost tracks the tracked set,
+        not the whole fabric. ``workspace_id`` applies the standard W4a read
+        scope (own rows + legacy NULL); ``object_id`` narrows to one object.
+        Ordered by ``(object_id, property)`` for a deterministic walk.
+        """
+        conditions: list[str] = []
+        params: list[Any] = []
+        if object_id is not None:
+            conditions.append("object_id = ?")
+            params.append(object_id)
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        if ws_cond:
+            conditions.append(ws_cond)
+            params.extend(ws_params)
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = (
+            "SELECT DISTINCT object_id, property FROM fabric_statements"
+            f"{where} ORDER BY object_id, property"
+        )
+        await self._ensure_schema()
+        async with self._conn() as db:
+            async with db.execute(sql, params) as cur:
+                rows = await cur.fetchall()
+        return [(str(r[0]), str(r[1])) for r in rows]
+
+    async def get_source(
+        self, source_ref_id: str, workspace_id: str | None = None
+    ) -> SourceRef | None:
+        """Read one SourceRef by id (FST-6).
+
+        The provenance lookup behind the stewardship proposal payload: a
+        human arbitrating a conflict sees WHERE each competing value came
+        from (connector run / document / actor / session). ``workspace_id``
+        applies the standard W4a read scope (own rows + legacy NULL).
+        """
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        sql = "SELECT * FROM fabric_sources WHERE id = ?"
+        params: list[Any] = [source_ref_id]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, params) as cur:
+                row = await cur.fetchone()
+        return self._row_to_source(row) if row else None
 
     async def get_linked_objects(
         self, obj_id: str, link_type: str | None = None, workspace_id: str | None = None
