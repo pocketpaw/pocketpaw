@@ -1,6 +1,14 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-07-10 (FST-1 — Fabric source-truth schema): Added
+    ``fabric_source_truth_mode`` (Literal off|shadow|enforce, default 'off';
+    POCKETPAW_FABRIC_SOURCE_TRUTH_MODE) — the three-position rollout switch for
+    the Fabric source-truth chain, mirroring the ``litellm_spend_mode``
+    pattern. INERT in FST-1: no code path reads it yet; only the
+    fabric_statements/fabric_sources schema + append-only store CRUD exist.
+    'off' is byte-for-byte today's behavior (the flat properties dict is the
+    only read path); shadow/enforce semantics land in later FST slices.
   - 2026-07-02 (feat/judge-shadow-1168): Added the LLM-as-judge SHADOW settings
     (J-1, issue #1168) — ``deep_work_verify_judge_shadow_enabled`` (default
     False; when True AND deep_work_verify_loop_enabled is on, every completing
@@ -1912,6 +1920,25 @@ class Settings(BaseSettings):
             "resolved before flipping to 'live'. 1 credit == $0.01, so the default "
             "10 ≈ $0.10 of tolerated per-tenant-per-window drift (rounding noise). "
             "Set via POCKETPAW_LITELLM_RECONCILE_GAP_THRESHOLD_CREDITS."
+        ),
+    )
+    fabric_source_truth_mode: Literal["off", "shadow", "enforce"] = Field(
+        default="off",
+        description=(
+            "Rollout mode for the Fabric source-truth chain (FST). Three-position "
+            "switch, mirroring litellm_spend_mode:\n"
+            "  * 'off'     (default) — byte-for-byte today: nothing reads or writes "
+            "the fabric_statements / fabric_sources provenance tables; the flat "
+            "FabricObject.properties dict is the only read path.\n"
+            "  * 'shadow'  — RESERVED (semantics land in a later FST slice): "
+            "statement writes mirror alongside the flat properties dict, which "
+            "keeps serving every read.\n"
+            "  * 'enforce' — RESERVED (semantics land in a later FST slice): "
+            "resolved statements become authoritative for reads.\n"
+            "As of FST-1 the flag is INERT — no code path consumes it yet; only "
+            "the schema and append-only store CRUD exist. The flat properties "
+            "dict remains the primary read path in every mode. Set via "
+            "POCKETPAW_FABRIC_SOURCE_TRUTH_MODE."
         ),
     )
     site_pending_alert_hours: float = Field(

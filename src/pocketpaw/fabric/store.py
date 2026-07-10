@@ -143,12 +143,37 @@
 #   gets truncated instead of growing unbounded across 128+ cached tenants. The
 #   W4a in-row workspace_id WHERE-filter is UNCHANGED — physical file isolation
 #   is ADDITIVE defense-in-depth layered on top of it, never a replacement.
+# Updated: 2026-07-10 (FST-1 — Fabric source-truth schema) — two NEW tables,
+#   ``fabric_statements`` + ``fabric_sources``, with append-only CRUD:
+#   ``append_statement()`` / ``get_statements()`` / ``upsert_source()``. A
+#   statement is one observed (object, property, value) claim with provenance
+#   (writer_class, a SourceRef FK, bitemporal observed/recorded/valid_from/
+#   valid_to, a curation rank); a source row is deduplicated on its identity
+#   tuple (kind + connector/run_id/document_uri/actor_id/session_id +
+#   workspace_id) both by an upsert-time lookup and a DB-level expression
+#   UNIQUE index (race guard, NULLs normalized via IFNULL so absent fields
+#   dedup too). Both tables carry the W4a ``workspace_id`` (schema-freeze
+#   ruling): ``append_statement`` stamps it, ``get_statements`` applies the
+#   standard ``_workspace_scope`` read scope (own rows + legacy NULL), and on
+#   sources it is PART of the dedup identity — the same source identity in two
+#   workspaces is two rows (tenancy isolation beats dedup). The tables ride
+#   SCHEMA_SQL's CREATE TABLE IF NOT EXISTS, so the migration is idempotent on
+#   an existing fabric.db (brand-new tables; the W4a ALTER loop additionally
+#   covers them so a DB from an early FST-1 build without workspace_id is
+#   healed, and that build's identity index is dropped for the
+#   workspace-aware ``idx_sources_identity_ws``). Statements are APPEND-ONLY:
+#   no update/delete verbs (rank changes come later as curation writes). NO
+#   existing read or write path is touched — the flat
+#   ``fabric_objects.properties`` dict remains the primary read path; nothing
+#   writes statements in production until ``fabric_source_truth_mode``
+#   (default "off") gains shadow/enforce semantics in later slices.
 
 
 from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -162,6 +187,8 @@ from pocketpaw.fabric.models import (
     ObjectType,
     PathHop,
     PropertyDef,
+    SourceRef,
+    Statement,
 )
 
 logger = logging.getLogger(__name__)
@@ -220,11 +247,65 @@ CREATE TABLE IF NOT EXISTS fabric_links (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Source-truth provenance (FST-1). Two NEW tables. On a pre-FST fabric.db
+-- this CREATE TABLE IF NOT EXISTS creates them whole; a DB created by an
+-- early FST-1 build (before the schema-freeze review added workspace_id) is
+-- healed by the same ALTER loop the W4a columns use (see _ensure_schema).
+-- Nothing in the existing read/write path touches them; they are inert until
+-- fabric_source_truth_mode gains shadow/enforce semantics in later slices.
+CREATE TABLE IF NOT EXISTS fabric_sources (
+    id TEXT PRIMARY KEY,
+    -- 'connector_run' | 'document' | 'human_actor' | 'agent_session'
+    kind TEXT NOT NULL,
+    -- Identity fields (union across kinds; NULL = absent, still part of the
+    -- dedup identity — see _SOURCES_IDENTITY_UNIQUE_INDEX_SQL).
+    connector TEXT,
+    run_id TEXT,
+    document_uri TEXT,
+    actor_id TEXT,
+    session_id TEXT,
+    retrieved_at TEXT,
+    -- Tenancy (W4a semantics): the owning workspace. NULL = OSS /
+    -- single-tenant caller. PART OF THE DEDUP IDENTITY — the same source
+    -- identity in two workspaces is two rows (tenancy isolation beats dedup).
+    -- On an early-FST-1 DB this column is added by the ALTER migration in
+    -- _ensure_schema, NOT here.
+    workspace_id TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS fabric_statements (
+    id TEXT PRIMARY KEY,
+    object_id TEXT NOT NULL REFERENCES fabric_objects(id),
+    property TEXT NOT NULL,
+    -- JSON-encoded value (any JSON type, incl. null).
+    value TEXT NOT NULL DEFAULT 'null',
+    source_ref_id TEXT NOT NULL REFERENCES fabric_sources(id),
+    -- 'human' | 'connector' | 'mirror' | 'agent' | 'inferred'
+    writer_class TEXT NOT NULL,
+    -- Bitemporal fields, ISO-8601 TEXT (same affinity as every other
+    -- timestamp column in this schema).
+    observed_at TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    valid_from TEXT NOT NULL,
+    valid_to TEXT,
+    -- Curation: 'preferred' | 'normal' | 'deprecated'; pinned = human-fixed.
+    rank TEXT NOT NULL DEFAULT 'normal',
+    rank_reason TEXT,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    -- Tenancy (W4a): same workspace semantics as fabric_objects. Stamped on
+    -- append; scoped reads see own rows + legacy NULL. Same ALTER-migration
+    -- note as fabric_sources.workspace_id above.
+    workspace_id TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_objects_type ON fabric_objects(type_id);
 CREATE INDEX IF NOT EXISTS idx_objects_source ON fabric_objects(source_connector, source_id);
 CREATE INDEX IF NOT EXISTS idx_links_from ON fabric_links(from_object_id);
 CREATE INDEX IF NOT EXISTS idx_links_to ON fabric_links(to_object_id);
 CREATE INDEX IF NOT EXISTS idx_links_type ON fabric_links(link_type);
+CREATE INDEX IF NOT EXISTS idx_statements_object ON fabric_statements(object_id);
+CREATE INDEX IF NOT EXISTS idx_statements_object_property ON fabric_statements(object_id, property);
 """
 
 # Tenancy indexes are created AFTER the ALTER migration (see _ensure_schema),
@@ -240,6 +321,38 @@ _WORKSPACE_INDEX_SQL = (
     # list_types / stats reads. The UNIQUE (workspace_id, LOWER(name)) index is
     # created separately (_TYPE_NAME_UNIQUE_INDEX_SQL) after the de-dup pass.
     "CREATE INDEX IF NOT EXISTS idx_object_types_workspace ON fabric_object_types(workspace_id)",
+    # FST-1: same W4a pairing for the source-truth tables — the plain
+    # workspace index rides ALONGSIDE the (object_id, property) read index in
+    # SCHEMA_SQL, exactly like idx_objects_workspace pairs with
+    # idx_objects_type/idx_objects_source.
+    "CREATE INDEX IF NOT EXISTS idx_statements_workspace ON fabric_statements(workspace_id)",
+    "CREATE INDEX IF NOT EXISTS idx_sources_workspace ON fabric_sources(workspace_id)",
+)
+
+# Race guard for upsert_source: one row per source identity PER WORKSPACE.
+# Created AFTER the ALTER migration (same "no such column" hazard as
+# _WORKSPACE_INDEX_SQL: an early-FST-1 DB has the tables but not the
+# workspace_id column until the ALTER runs). SQLite treats NULLs as DISTINCT
+# in a UNIQUE index, so every nullable identity field — INCLUDING
+# workspace_id — is normalized through IFNULL(..., '') : two rows that both
+# omit run_id ARE the same identity, and two OSS (NULL-workspace) upserts of
+# the same source dedup to one row, while the same identity in two different
+# workspaces stays two rows (tenancy isolation beats dedup). upsert_source
+# does a lookup-first anyway; this index only closes the concurrent-insert
+# race the same way the type-name index does. The early-FST-1 index of the
+# same shape MINUS workspace_id is dropped first (it would collapse two
+# tenants' rows into one) — mirror of _OLD_GLOBAL_TYPE_NAME_INDEX.
+_OLD_SOURCES_IDENTITY_INDEX = "idx_sources_identity"
+_SOURCES_IDENTITY_UNIQUE_INDEX_SQL = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_identity_ws ON fabric_sources("
+    " kind,"
+    " IFNULL(connector, ''),"
+    " IFNULL(run_id, ''),"
+    " IFNULL(document_uri, ''),"
+    " IFNULL(actor_id, ''),"
+    " IFNULL(session_id, ''),"
+    " IFNULL(workspace_id, '')"
+    ")"
 )
 
 # A UNIQUE index on (workspace_id, case-folded type name) closes a concurrent
@@ -382,15 +495,24 @@ class FabricStore:
             return
         async with aiosqlite.connect(self._db_path) as db:
             await db.executescript(SCHEMA_SQL)
-            # Additive migration (W4a + SZD-2): tenancy columns on a pre-existing
-            # DB. CREATE TABLE IF NOT EXISTS won't add a column to a table that
-            # already exists, so ALTER and swallow the duplicate-column error
-            # that fires on every subsequent boot — same pattern as the W2b
-            # instinct hash-chain / assignee migrations. Pre-existing rows keep
-            # NULL workspace_id (legacy/global; see the module header). SZD-2
-            # extends the same ALTER to fabric_object_types so the type catalog
-            # is per-tenant too.
-            for _tbl in ("fabric_objects", "fabric_links", "fabric_object_types"):
+            # Additive migration (W4a + SZD-2 + FST-1): tenancy columns on a
+            # pre-existing DB. CREATE TABLE IF NOT EXISTS won't add a column to
+            # a table that already exists, so ALTER and swallow the
+            # duplicate-column error that fires on every subsequent boot — same
+            # pattern as the W2b instinct hash-chain / assignee migrations.
+            # Pre-existing rows keep NULL workspace_id (legacy/global; see the
+            # module header). SZD-2 extends the same ALTER to
+            # fabric_object_types; FST-1 extends it to fabric_statements /
+            # fabric_sources (a no-op on any DB whose tables were created by
+            # this SCHEMA_SQL — it only heals a DB from an early FST-1 build
+            # that predates the schema-freeze workspace_id ruling).
+            for _tbl in (
+                "fabric_objects",
+                "fabric_links",
+                "fabric_object_types",
+                "fabric_statements",
+                "fabric_sources",
+            ):
                 try:
                     await db.execute(f"ALTER TABLE {_tbl} ADD COLUMN workspace_id TEXT")
                 except aiosqlite.OperationalError:
@@ -407,6 +529,15 @@ class FabricStore:
             # above). Doing this inside SCHEMA_SQL would fail on a pre-W4a DB.
             for _idx in _WORKSPACE_INDEX_SQL:
                 await db.execute(_idx)
+            # FST-1: the per-workspace source-identity UNIQUE index. Drop the
+            # early-FST-1 identity index (no workspace in its key — it would
+            # collapse two tenants' identical source identities into one row)
+            # before creating the workspace-aware replacement; both steps are
+            # no-ops on a fresh / already-migrated DB. Created here, after the
+            # ALTER, for the same "no such column" reason as
+            # _WORKSPACE_INDEX_SQL.
+            await db.execute(f"DROP INDEX IF EXISTS {_OLD_SOURCES_IDENTITY_INDEX}")
+            await db.execute(_SOURCES_IDENTITY_UNIQUE_INDEX_SQL)
             # SZD-2 backfill: attribute a NULL-workspace type to a tenant ONLY
             # when every object of that type unambiguously shares one workspace.
             # A type whose objects span tenants (or that has no objects, or whose
@@ -938,6 +1069,200 @@ class FabricStore:
             await db.execute("DELETE FROM fabric_links WHERE id = ?", (link_id,))
             await db.commit()
 
+    # --- Statements & Sources (FST-1 — source-truth provenance) ---
+
+    async def upsert_source(
+        self,
+        kind: str,
+        *,
+        connector: str | None = None,
+        run_id: str | None = None,
+        document_uri: str | None = None,
+        actor_id: str | None = None,
+        session_id: str | None = None,
+        retrieved_at: datetime | None = None,
+        workspace_id: str | None = None,
+    ) -> SourceRef:
+        """Return the SourceRef for this source identity, creating it if new.
+
+        Dedup key is the identity tuple ``(kind, connector, run_id,
+        document_uri, actor_id, session_id, workspace_id)`` — a second call
+        with the same identity returns the SAME row (``retrieved_at`` is
+        provenance metadata, not identity; an existing row is returned as-is,
+        never mutated). ``workspace_id`` IS part of the identity, unlike the
+        other fabric tables' W4a read-scope treatment: the same source seen
+        from two workspaces yields two rows, so tenant provenance never
+        rendezvouses on a shared row (tenancy isolation beats dedup);
+        ``None`` = the OSS / single-tenant identity. A concurrent
+        double-insert is closed by the ``idx_sources_identity_ws`` expression
+        UNIQUE index: the loser's INSERT raises and resolves to a re-read of
+        the winner's row.
+        """
+        identity_sql = (
+            "SELECT * FROM fabric_sources WHERE kind = ?"
+            " AND connector IS ? AND run_id IS ? AND document_uri IS ?"
+            " AND actor_id IS ? AND session_id IS ? AND workspace_id IS ?"
+        )
+        identity_params = (
+            kind,
+            connector,
+            run_id,
+            document_uri,
+            actor_id,
+            session_id,
+            workspace_id,
+        )
+        source = SourceRef(
+            kind=kind,  # type: ignore[arg-type]  # Literal validated by pydantic
+            connector=connector,
+            run_id=run_id,
+            document_uri=document_uri,
+            actor_id=actor_id,
+            session_id=session_id,
+            retrieved_at=retrieved_at,
+            workspace_id=workspace_id,
+        )
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(identity_sql, identity_params) as cur:
+                row = await cur.fetchone()
+            if row:
+                return self._row_to_source(row)
+            try:
+                await db.execute(
+                    "INSERT INTO fabric_sources"
+                    " (id, kind, connector, run_id, document_uri, actor_id,"
+                    " session_id, retrieved_at, workspace_id)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        source.id,
+                        source.kind,
+                        connector,
+                        run_id,
+                        document_uri,
+                        actor_id,
+                        session_id,
+                        retrieved_at.isoformat() if retrieved_at else None,
+                        workspace_id,
+                    ),
+                )
+                await db.commit()
+            except aiosqlite.IntegrityError:
+                # Concurrent upsert won the race — return its row.
+                async with db.execute(identity_sql, identity_params) as cur:
+                    row = await cur.fetchone()
+                if row:
+                    return self._row_to_source(row)
+                raise
+        return source
+
+    async def append_statement(
+        self,
+        object_id: str,
+        property: str,
+        value: Any,
+        source_ref_id: str,
+        writer_class: str,
+        *,
+        observed_at: datetime | None = None,
+        valid_from: datetime | None = None,
+        valid_to: datetime | None = None,
+        rank: str = "normal",
+        rank_reason: str | None = None,
+        pinned: bool = False,
+        workspace_id: str | None = None,
+    ) -> Statement:
+        """Append ONE observed (object, property, value) claim with provenance.
+
+        APPEND-ONLY: statements are never updated or deleted (this store
+        exposes no verbs for either; rank changes land in a later slice as new
+        curation writes). ``recorded_at`` is stamped here; ``observed_at``
+        defaults to now (a live observation) and ``valid_from`` defaults to
+        ``observed_at``. ``value`` is JSON-encoded — any JSON-serializable
+        value round-trips, including ``None``. ``workspace_id`` stamps the
+        owning tenant on the row (W4a write semantics, same as
+        :meth:`create_object`); ``None`` = OSS / single-tenant caller.
+
+        Does NOT touch the object's flat ``properties`` dict — that dict
+        remains the primary read path; nothing consumes statements until
+        ``fabric_source_truth_mode`` gains shadow/enforce semantics.
+        """
+        stmt = Statement(
+            object_id=object_id,
+            property=property,
+            value=value,
+            source_ref_id=source_ref_id,
+            writer_class=writer_class,  # type: ignore[arg-type]  # Literal validated by pydantic
+            rank=rank,  # type: ignore[arg-type]  # Literal validated by pydantic
+            rank_reason=rank_reason,
+            pinned=pinned,
+            workspace_id=workspace_id,
+        )
+        if observed_at is not None:
+            stmt.observed_at = observed_at
+        stmt.valid_from = valid_from if valid_from is not None else stmt.observed_at
+        stmt.valid_to = valid_to
+        await self._ensure_schema()
+        async with self._conn() as db:
+            await db.execute(
+                "INSERT INTO fabric_statements"
+                " (id, object_id, property, value, source_ref_id, writer_class,"
+                " observed_at, recorded_at, valid_from, valid_to, rank,"
+                " rank_reason, pinned, workspace_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    stmt.id,
+                    stmt.object_id,
+                    stmt.property,
+                    json.dumps(stmt.value),
+                    stmt.source_ref_id,
+                    stmt.writer_class,
+                    stmt.observed_at.isoformat(),
+                    stmt.recorded_at.isoformat(),
+                    stmt.valid_from.isoformat(),
+                    stmt.valid_to.isoformat() if stmt.valid_to else None,
+                    stmt.rank,
+                    stmt.rank_reason,
+                    1 if stmt.pinned else 0,
+                    workspace_id,
+                ),
+            )
+            await db.commit()
+        return stmt
+
+    async def get_statements(
+        self,
+        object_id: str,
+        property: str | None = None,
+        workspace_id: str | None = None,
+    ) -> list[Statement]:
+        """All statements for one object, optionally narrowed to one property.
+
+        Ordered by ``recorded_at`` (then id, for a stable order within the
+        same timestamp) — oldest first, so a resolver reading the full history
+        replays claims in the order the store learned them. ``workspace_id``
+        applies the standard W4a read scope (own rows + legacy NULL rows, via
+        ``_workspace_scope`` — same as :meth:`get_object`); ``None`` leaves
+        the read unscoped (OSS / single-tenant callers).
+        """
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        sql = "SELECT * FROM fabric_statements WHERE object_id = ?"
+        params: list[Any] = [object_id]
+        if property is not None:
+            sql += " AND property = ?"
+            params.append(property)
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
+        sql += " ORDER BY recorded_at, id"
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, params) as cur:
+                rows = await cur.fetchall()
+        return [self._row_to_statement(r) for r in rows]
+
     async def get_linked_objects(
         self, obj_id: str, link_type: str | None = None, workspace_id: str | None = None
     ) -> list[FabricObject]:
@@ -1347,4 +1672,37 @@ class FabricStore:
             to_object_id=row["to_object_id"],
             link_type=row["link_type"],
             properties=json.loads(row["properties"]) if row["properties"] else {},
+        )
+
+    def _row_to_source(self, row: Any) -> SourceRef:
+        return SourceRef(
+            id=row["id"],
+            kind=row["kind"],
+            connector=row["connector"],
+            run_id=row["run_id"],
+            document_uri=row["document_uri"],
+            actor_id=row["actor_id"],
+            session_id=row["session_id"],
+            retrieved_at=(
+                datetime.fromisoformat(row["retrieved_at"]) if row["retrieved_at"] else None
+            ),
+            workspace_id=row["workspace_id"],
+        )
+
+    def _row_to_statement(self, row: Any) -> Statement:
+        return Statement(
+            id=row["id"],
+            object_id=row["object_id"],
+            property=row["property"],
+            value=json.loads(row["value"]) if row["value"] is not None else None,
+            source_ref_id=row["source_ref_id"],
+            writer_class=row["writer_class"],
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+            recorded_at=datetime.fromisoformat(row["recorded_at"]),
+            valid_from=datetime.fromisoformat(row["valid_from"]),
+            valid_to=(datetime.fromisoformat(row["valid_to"]) if row["valid_to"] else None),
+            rank=row["rank"],
+            rank_reason=row["rank_reason"],
+            pinned=bool(row["pinned"]),
+            workspace_id=row["workspace_id"],
         )
