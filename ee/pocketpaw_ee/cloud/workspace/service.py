@@ -82,6 +82,15 @@ actor-role check an ADMIN could self-promote to owner or evict a sitting owner o
 approval. The guard lives in the service so every caller (admin tool, executor,
 route) inherits it; it mirrors the existing "an invite can never mint an owner"
 rule. The last-owner + cannot_demote/remove-doc-owner guards are unchanged.
+2026-07-10 (compliance-starter): retention setting is now real. update()'s
+settings write MERGES via ``_merge_settings`` instead of the destructive
+``WorkspaceSettings(**body.settings)`` full-replace (a partial patch no longer
+wipes sibling settings — recon-flagged bug). Added ``get_retention`` /
+``set_retention`` (the clean, no-clobber compliance read/write for
+``settings.retention_days``, owner/admin-gated at the route) and
+``enforce_retention`` (again-callable purge of audit rows older than the
+policy cutoff; delegates the delete to ``audit.service.purge_workspace_audit``
+so the AuditEvent-write contract stays in the audit module).
 2026-07-08 (feat/billing-smb-caps): the three seat gates (create_invite,
 bulk_create_invites, accept_invite) now source their ceiling from the workspace's
 RESOLVED PLAN, not the flat ``doc.seats`` alone. ``_effective_seat_limit`` returns
@@ -102,6 +111,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from beanie import PydanticObjectId
+from pydantic import ValidationError as PydanticValidationError
 from pymongo.errors import DuplicateKeyError
 
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
@@ -476,7 +486,7 @@ async def update(
     if body.name is not None:
         doc.name = body.name
     if body.settings is not None:
-        doc.settings = WorkspaceSettings(**body.settings)
+        doc.settings = _merge_settings(doc.settings, body.settings)
     if body.branding is not None:
         await _apply_branding_patch(doc, workspace_id, body.branding)
     await doc.save()
@@ -495,6 +505,125 @@ async def update(
 
     count = await _count_members(workspace_id)
     return _workspace_to_domain(doc, member_count=count)
+
+
+def _merge_settings(current: WorkspaceSettings, patch: dict) -> WorkspaceSettings:
+    """MERGE a partial settings dict onto the existing settings.
+
+    The old code did ``WorkspaceSettings(**body.settings)`` — a destructive
+    FULL-REPLACE that silently reset every field the caller didn't send (a
+    ``{"retention_days": 30}`` patch wiped ``default_agent`` and
+    ``allow_invites`` back to their defaults). Mirrors ``_apply_branding_patch``:
+    dump the current settings, overlay only the keys the patch carries, and
+    re-validate through the model (so ``retention_days`` bounds are enforced
+    on this path too). A bad value raises ``ValidationError`` (422) rather than
+    persisting junk.
+    """
+    merged = current.model_dump()
+    merged.update(patch)
+    try:
+        return WorkspaceSettings(**merged)
+    except PydanticValidationError as exc:
+        raise ValidationError("workspace.invalid_settings", str(exc)) from exc
+
+
+async def get_retention(ctx: RequestContext, workspace_id: str) -> int | None:
+    """Read a workspace's data-retention policy (``retention_days``).
+
+    ``None`` means "keep forever". Membership is enforced at the route layer;
+    this is a plain read of the workspace document the service owns.
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+    return doc.settings.retention_days
+
+
+async def set_retention(
+    ctx: RequestContext,
+    workspace_id: str,
+    retention_days: int | None,
+) -> Workspace:
+    """Set a workspace's data-retention policy without clobbering siblings.
+
+    Writes ONLY ``settings.retention_days`` — the other settings fields are
+    carried through the merge untouched. ``retention_days`` is re-validated
+    through ``WorkspaceSettings`` (positive-or-null) so a direct service
+    caller gets the same guarantee the route DTO enforces. ``None`` clears the
+    policy (keep forever). Emits a workspace audit row so the compliance
+    change is attributable.
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+
+    old = doc.settings.retention_days
+    doc.settings = _merge_settings(doc.settings, {"retention_days": retention_days})
+    await doc.save()
+
+    await audit_service.record(
+        workspace_id,
+        ctx.user_id,
+        "workspace.retention_set",
+        target_type="workspace",
+        target_id=workspace_id,
+        metadata={"old_retention_days": old, "new_retention_days": retention_days},
+    )
+
+    count = await _count_members(workspace_id)
+    return _workspace_to_domain(doc, member_count=count)
+
+
+async def enforce_retention(workspace_id: str) -> dict:
+    """Purge records older than the workspace's ``retention_days`` policy.
+
+    Idempotent / again-callable: it deletes everything older than
+    ``now - retention_days`` for THIS workspace, so running it twice is safe
+    and running it late just catches up. A ``None`` policy (keep forever) is a
+    no-op. The audit-event store is the retention target — it is the durable,
+    workspace-scoped compliance record store (the decision journal is a
+    projection rebuilt from the immutable journal, so purging it would not
+    stick; the soul journal itself is the event source-of-truth and is out of
+    scope for a per-workspace age purge). Notifications + journal purge are
+    tracked as a FOLLOW-UP.
+
+    FOLLOW-UP (scheduler wiring): nothing calls this on a cadence yet. It is
+    intentionally a pure, side-effect-scoped function so a periodic sweep can
+    iterate workspaces with a non-null ``retention_days`` and call it — the
+    natural home is a cloud background loop registered at ``mount_cloud`` /
+    the temporal scheduler (``ee/pocketpaw_ee/cloud/temporal_sweeps``). Until
+    that lands, an admin can trigger a purge by re-saving the retention policy
+    and calling this from an ops shell.
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+
+    retention_days = doc.settings.retention_days
+    if retention_days is None:
+        return {
+            "workspace_id": workspace_id,
+            "retention_days": None,
+            "audit_deleted": 0,
+            "skipped": "no_retention_policy",
+        }
+
+    cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+    audit_deleted = await audit_service.purge_workspace_audit(workspace_id, cutoff)
+
+    logger.info(
+        "retention: purged %d audit rows older than %s for workspace %s (retention_days=%d)",
+        audit_deleted,
+        cutoff.isoformat(),
+        workspace_id,
+        retention_days,
+    )
+    return {
+        "workspace_id": workspace_id,
+        "retention_days": retention_days,
+        "cutoff": cutoff.isoformat(),
+        "audit_deleted": audit_deleted,
+    }
 
 
 def _audit_approval_level_change(
