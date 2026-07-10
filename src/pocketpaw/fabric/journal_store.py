@@ -18,11 +18,19 @@
 # projection applies the event immediately so the next read sees the change without
 # a full rebuild. On process start, bootstrap() replays from genesis to warm the
 # projection; operators who persist a cursor can skip ahead.
+#
+# Updated: 2026-07-10 (FST-4 — SHADOW mode at merge site 2) — optional
+# ``statement_store`` on the constructor wires the default projection to the
+# SQLite FabricStore's shadow machinery; update() drains the projection's
+# staged shadow observations after every live write (await flush_shadow()),
+# and the public flush_shadow() lets replay consumers drain after a sync
+# bootstrap(). Without a statement_store nothing changes — the flush is a
+# no-op and the projection never reads the mode flag.
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from soul_protocol.engine.journal import Journal
@@ -38,6 +46,11 @@ from pocketpaw.fabric.events import (
 )
 from pocketpaw.fabric.models import FabricObject, FabricQuery, FabricQueryResult
 from pocketpaw.fabric.projection import FabricProjection
+
+if TYPE_CHECKING:
+    # Typing only (FST-4) — the statement_store kwarg is forwarded to the
+    # projection; this module never touches the SQLite store at runtime.
+    from pocketpaw.fabric.store import FabricStore
 
 _SYSTEM_ACTOR_ID = "system:fabric"
 
@@ -65,9 +78,13 @@ class FabricJournalStore:
         *,
         projection: FabricProjection | None = None,
         default_actor: Actor | None = None,
+        statement_store: FabricStore | None = None,
     ) -> None:
+        # FST-4: ``statement_store`` wires the DEFAULT projection's shadow
+        # treatment (merge site 2). When the caller passes an explicit
+        # ``projection`` it owns that wiring itself and this kwarg is unused.
         self._journal = journal
-        self._projection = projection or FabricProjection()
+        self._projection = projection or FabricProjection(statement_store=statement_store)
         self._default_actor = default_actor or Actor(
             kind="system",
             id=_SYSTEM_ACTOR_ID,
@@ -80,9 +97,25 @@ class FabricJournalStore:
         """Warm the projection from the journal. Returns the number of
         events applied. Call once at process start; callers that persist
         a cursor can pass ``since_seq`` to skip already-applied events.
+
+        FST-4: with a statement_store-wired projection in shadow/enforce
+        mode, the replay STAGES shadow observations but cannot record them
+        (bootstrap is sync) — follow up with ``await flush_shadow()``.
+        Skipping the flush only delays it: the next live update() drains the
+        queue, and the store's event-id dedupe keeps any ordering honest.
         """
 
         return self._projection.rebuild(self._journal, since_seq=since_seq)
+
+    async def flush_shadow(self) -> int:
+        """Drain the projection's staged shadow observations (FST-4) —
+        the async companion to the sync :meth:`bootstrap`. Returns how many
+        journal events had their statements recorded. Safe to call anytime:
+        already-recorded events are deduped by id, an unwired projection
+        returns 0.
+        """
+
+        return await self._projection.flush_shadow()
 
     @property
     def projection(self) -> FabricProjection:
@@ -171,6 +204,10 @@ class FabricJournalStore:
         )
         self._journal.append(entry)
         self._projection.apply(entry)
+        # FST-4: drain the shadow observation this update may have staged so
+        # statements land as part of the write call, matching site 1's
+        # semantics. No statement_store wired (or mode off) → no-op.
+        await self._projection.flush_shadow()
         return self._lookup(object_id)
 
     async def archive(

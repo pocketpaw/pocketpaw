@@ -11,6 +11,17 @@
 #   pinned via the mapping's new optional type_id). Behavior note inherited
 #   from the canonical loop: a mapped field absent from a document projects as
 #   None (the mirror reflects the source) rather than being skipped.
+# Updated: 2026-07-10 (FST-4 — SHADOW mode at merge site 3) — the mirror now
+#   threads its TRUE provenance through ingest_records' new keyword params:
+#   writer_class="mirror" (a Firestore mirror is not a primary connector —
+#   the trust ladder ranks connector > mirror), source_document_uri = the
+#   full Firestore doc path (per-record, via the existing _DOC_PATH_KEY
+#   sentinel), and observed_at = the best available SOURCE time per doc
+#   (via the new _OBSERVED_AT_KEY sentinel — see _doc_observed_at for the
+#   per-field audit: cursor_field value first, snapshot update_time second,
+#   ingest-time default when neither parses). Only the shadow statements are
+#   affected; with fabric_source_truth_mode 'off' (default) the kwargs are
+#   inert and the mirror's writes are byte-for-byte unchanged.
 #
 # What this does
 # --------------
@@ -81,6 +92,10 @@ _SOURCE_CONNECTOR = "firestore"
 # extracts the source id from a record key, so we graft it on under a name no
 # real Firestore field would use (and which would be overwritten if one did).
 _DOC_PATH_KEY = "__firestore_doc_path__"
+# Sentinel record key carrying the per-doc SOURCE timestamp (FST-4) into the
+# OSS mapper's observed_at threading — same grafting trick as _DOC_PATH_KEY.
+# Holds a datetime or None (None → the statement defaults to ingest time).
+_OBSERVED_AT_KEY = "__fabric_observed_at__"
 
 # Per-collection page cap so one huge collection can't wedge a sweep tick.
 _MAX_DOCS_PER_RUN = 1000
@@ -416,6 +431,41 @@ def _doc_cursor(doc: dict[str, Any], cursor_field: str) -> str:
     return str(raw)
 
 
+def _doc_observed_at(doc: dict[str, Any], cursor_field: str) -> datetime | None:
+    """The best available SOURCE timestamp for one Firestore doc (FST-4).
+
+    Audit of what the worker actually knows per document (nothing else is on
+    the wire — the reader returns ``{path, data, update_time}`` only):
+
+    1. ``data[cursor_field]`` — the mapping's configured cursor field,
+       conventionally the document's own updated-at. The REAL source time
+       when present; may be a Firestore timestamp (google's
+       DatetimeWithNanoseconds subclasses datetime) or an RFC3339/ISO
+       string. Best choice when it parses.
+    2. ``update_time`` — the Firestore snapshot's server update time,
+       rendered RFC3339 by the reader. Not field-precise (any write to the
+       doc bumps it) but still a true source-side time; the fallback.
+    3. Neither parses → ``None``: the statement falls back to ingest time
+       (append_statement's observed_at default) — the honest floor, never a
+       fabricated timestamp.
+
+    There is NO per-field timestamp in Firestore, so one doc-level time
+    covers every property the doc updates.
+    """
+    data = doc.get("data") or {}
+    candidates = (data.get(cursor_field) if cursor_field else None, doc.get("update_time"))
+    for raw in candidates:
+        if raw is None or raw == "":
+            continue
+        if isinstance(raw, datetime):
+            return raw
+        try:
+            return datetime.fromisoformat(str(raw))
+        except ValueError:
+            continue
+    return None
+
+
 async def _mirror_docs(
     store: StoreLike,
     workspace_id: str,
@@ -442,13 +492,26 @@ async def _mirror_docs(
     otherwise — legacy NULL-workspace rows are globally visible),
     ``source_connector="firestore"``, and ``source_id`` = the full doc path.
     Returns the number of objects created + updated.
+
+    FST-4 (merge site 3): shadow-statement provenance rides the same call —
+    ``writer_class="mirror"`` (the mirror is not a primary connector), the
+    doc path doubles as the per-record ``source_document_uri`` (so each
+    statement's SourceRef names the exact Firestore collection/doc), and the
+    best available source time per doc (see ``_doc_observed_at``) becomes
+    ``observed_at``. All of it is inert when fabric_source_truth_mode is
+    'off'.
     """
     # Lazy import — keeps EE module import light and consistent with the other
     # OSS imports in this module (_default_store).
     from pocketpaw.connectors.fabric_ingest import FabricMapping, ingest_records
 
     records = [
-        {**(doc.get("data") or {}), _DOC_PATH_KEY: str(doc.get("path") or "")} for doc in docs
+        {
+            **(doc.get("data") or {}),
+            _DOC_PATH_KEY: str(doc.get("path") or ""),
+            _OBSERVED_AT_KEY: _doc_observed_at(doc, mapping.cursor_field),
+        }
+        for doc in docs
     ]
     oss_mapping = FabricMapping(
         type_name=mapping.object_type_id,  # label only; type_id pins the type
@@ -462,6 +525,9 @@ async def _mirror_docs(
         records,
         oss_mapping,
         workspace_id=workspace_id,
+        writer_class="mirror",
+        document_uri_field=_DOC_PATH_KEY,
+        observed_at_field=_OBSERVED_AT_KEY,
     )
     return summary.total
 

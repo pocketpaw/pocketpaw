@@ -192,6 +192,25 @@
 #   created_at/updated_at from the row (previously dropped — the model
 #   defaulted them to read-time now()), so the promotion backfill uses the
 #   TRUE last-touch time.
+# Updated: 2026-07-10 (FST-4 — SHADOW mode at merge sites 2 + 3) — two changes
+#   that let the remaining write paths ride the SAME shadow machinery instead
+#   of duplicating it:
+#   1. shadow_record_event_update(): a public, journal-event-keyed entry into
+#      the FST-3 shadow pass for the projection replay path (merge site 2 —
+#      fabric/projection.py stages observations, this method records them).
+#      Replay idempotence rides the NEW ``fabric_shadow_events`` table: the
+#      event id is claimed with INSERT OR IGNORE BEFORE the statement pass, so
+#      replaying the same journal N times (or two replayers racing) records a
+#      given event's statements AT MOST ONCE. Mode 'off' returns early — not
+#      even the marker row is written.
+#   2. _writer_family(): the second-distinct-source rule now compares writer
+#      FAMILIES, collapsing "connector" and "mirror" into one machine-sync
+#      family. Site 3 (the EE Firestore mirror) writes as writer_class
+#      "mirror" on objects whose baseline derives to "connector"; without the
+#      family rule every mirror self-refresh would look like a second source
+#      and promote every changed property, gutting the opt-in discipline. No
+#      behavior change for pre-FST-4 cohorts: "mirror" never reached this
+#      comparison before this slice.
 
 
 from __future__ import annotations
@@ -238,6 +257,26 @@ def _source_truth_mode() -> str:
     from pocketpaw.config import get_settings
 
     return get_settings().fabric_source_truth_mode
+
+
+def _writer_family(writer_class: str) -> str:
+    """Collapse writer classes into families for the second-distinct-source
+    comparison (FST-4).
+
+    "connector" and "mirror" are ONE machine-sync family: the EE Firestore
+    mirror (writer_class "mirror") refreshing an object whose baseline
+    derives to "connector" for the SAME connector is the object's owning
+    sync, not a second writer. Without this, every mirror self-refresh would
+    auto-promote every materially changed property — the opt-in discipline
+    ("single-source objects stay scalar/cheap") would be dead for mirrored
+    data. Every other class ("human", "agent", "inferred") is its own
+    family, so human-vs-connector and agent-vs-connector still count as
+    second sources exactly as FST-3 defined. NOTE: this only affects the
+    promotion GATE — the statement itself still records the true
+    writer_class ("mirror"), and the trust ladder still ranks connector >
+    mirror at resolve time.
+    """
+    return "sync" if writer_class in ("connector", "mirror") else writer_class
 
 
 # Hard cap on the working set during a multi-hop traversal. The per-hop query
@@ -344,6 +383,18 @@ CREATE TABLE IF NOT EXISTS fabric_statements (
     -- append; scoped reads see own rows + legacy NULL. Same ALTER-migration
     -- note as fabric_sources.workspace_id above.
     workspace_id TEXT
+);
+
+-- Journal-replay dedupe for the shadow pass (FST-4, merge site 2). One row per
+-- journal event whose update has been shadow-recorded. The event id (the
+-- journal EventEntry's UUID — stable across replays) is claimed with INSERT OR
+-- IGNORE BEFORE the statement pass runs, so replaying the same journal twice
+-- records a given event's statements at most once. No workspace column: event
+-- ids are globally unique, and the statements themselves carry workspace_id.
+CREATE TABLE IF NOT EXISTS fabric_shadow_events (
+    event_id TEXT PRIMARY KEY,
+    object_id TEXT,
+    recorded_at TEXT DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_objects_type ON fabric_objects(type_id);
@@ -1099,8 +1150,11 @@ class FabricStore:
         baseline is (``existing.source_connector``, its derived writer class —
         ``connector`` when a connector is stamped, else ``agent``). The
         incoming write is a SECOND source when its effective connector differs
-        from the baseline connector OR its effective writer class differs from
-        the baseline writer class. An unattributed write on a connector-owned
+        from the baseline connector OR its effective writer FAMILY differs
+        from the baseline writer family (FST-4: "connector" and "mirror" are
+        one machine-sync family — see :func:`_writer_family` — so the EE
+        mirror refreshing its own object is not a second source, while a
+        human or agent write still is). An unattributed write on a connector-owned
         object derives to that same connector, so it is NOT a second source —
         without provenance threading a second writer cannot be detected, which
         is exactly why ingest/API callers pass the kwargs.
@@ -1158,9 +1212,14 @@ class FabricStore:
         baseline_connector = existing.source_connector
         baseline_writer = "connector" if baseline_connector else "agent"
 
-        # --- Second-distinct-source rule ---
+        # --- Second-distinct-source rule (FST-4: compare writer FAMILIES,
+        # not raw classes, so a "mirror" write from the object's own
+        # connector is the owning sync refreshing itself, not a second
+        # source — see _writer_family) ---
         incoming_connector = connector if kind == "connector_run" else None
-        is_second_source = incoming_connector != baseline_connector or eff_writer != baseline_writer
+        is_second_source = incoming_connector != baseline_connector or _writer_family(
+            eff_writer
+        ) != _writer_family(baseline_writer)
 
         # Sources are upserted lazily so a fully scalar update (nothing tracked,
         # nothing promoted) writes NOTHING — not even a SourceRef row.
@@ -1232,6 +1291,77 @@ class FabricStore:
                 resolution.is_disputed,
                 resolution.unresolvable,
             )
+
+    async def shadow_record_event_update(
+        self,
+        existing: FabricObject,
+        incoming: dict[str, Any],
+        *,
+        event_id: str,
+        writer_class: str | None = None,
+        source_kind: str | None = None,
+        source_connector: str | None = None,
+        source_run_id: str | None = None,
+        source_document_uri: str | None = None,
+        source_actor_id: str | None = None,
+        source_session_id: str | None = None,
+        observed_at: datetime | None = None,
+        workspace_id: str | None = None,
+    ) -> bool:
+        """Journal-event-keyed entry into the FST-3 shadow pass (merge site 2).
+
+        The projection replay path (fabric/projection.py::_apply_updated)
+        merges in memory — it never goes through :meth:`update_object` — so it
+        stages observations and records them through THIS method, reusing
+        :meth:`_shadow_record_statements` verbatim (same promotion gate,
+        provenance derivation, divergence line) instead of duplicating it.
+
+        THE REPLAY-DEDUPE RULE: one shadow pass per journal event id. The
+        ``event_id`` (the journal EventEntry's UUID — stable across replays)
+        is claimed in ``fabric_shadow_events`` with INSERT OR IGNORE *before*
+        the statement pass; if the row already existed the event was recorded
+        by a previous replay (or a concurrent replayer won the race) and this
+        call returns ``False`` without writing anything. Claiming FIRST makes
+        the pass at-most-once: a failure after the claim drops that event's
+        shadow pass (consistent with FST-3's failure-shield, which also drops
+        a failed pass) rather than risking double-appended statements on
+        retry — "replaying the same journal twice never double-appends" is
+        the contract this method exists to keep.
+
+        Mode ``off`` returns ``False`` immediately — not even the marker row
+        is written (the off-mode byte-for-byte guarantee). Exceptions
+        propagate to the caller: the projection's flush shields per
+        observation, mirroring where FST-3 put the shield for site 1.
+
+        Returns ``True`` when the event's statements were recorded by this
+        call.
+        """
+        mode = _source_truth_mode()  # read ONCE per call; "off" writes NOTHING
+        if mode == "off":
+            return False
+        await self._ensure_schema()
+        async with self._conn() as db:
+            cur = await db.execute(
+                "INSERT OR IGNORE INTO fabric_shadow_events (event_id, object_id) VALUES (?, ?)",
+                (event_id, existing.id),
+            )
+            await db.commit()
+            if cur.rowcount == 0:
+                return False  # already recorded — replay/idempotency dedupe
+        await self._shadow_record_statements(
+            existing,
+            incoming,
+            writer_class=writer_class,
+            source_kind=source_kind,
+            source_connector=source_connector,
+            source_run_id=source_run_id,
+            source_document_uri=source_document_uri,
+            source_actor_id=source_actor_id,
+            source_session_id=source_session_id,
+            observed_at=observed_at,
+            workspace_id=workspace_id,
+        )
+        return True
 
     async def remove_object(self, obj_id: str) -> None:
         await self._ensure_schema()

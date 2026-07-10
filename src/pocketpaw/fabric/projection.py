@@ -16,13 +16,32 @@
 #   - query(...): return a FabricQueryResult scoped to the caller
 # No persistence layer, no caching beyond the in-memory dict. Reopen a journal,
 # rebuild(), and you're back in sync — same guarantee as a good CQRS read model.
+#
+# Updated: 2026-07-10 (FST-4 — SHADOW mode at merge site 2) — the
+# ``merged = {**existing.obj.properties, **patch}`` fold in _apply_updated is
+# the journal-replay merge site. The projection writes IN MEMORY (it never
+# calls store.update_object), so it cannot thread provenance kwargs the way
+# site 1 does; instead, when an optional ``statement_store`` is wired and
+# ``fabric_source_truth_mode`` is shadow/enforce, _apply_updated STAGES a
+# shadow observation (pre-merge snapshot + patch + the event's identity,
+# actor, and ts) and the async ``flush_shadow()`` records it through
+# ``FabricStore.shadow_record_event_update`` — the SAME FST-3 machinery as
+# site 1, never a duplicate. apply() stays sync (staging is a list append);
+# the async boundary (FabricJournalStore.update, or an explicit flush after a
+# bootstrap replay) drains the queue. Provenance maps from the journal actor:
+# user → human/human_actor, agent → agent/agent_session (correlation_id, else
+# actor id), system/root → the store's derivation default. observed_at is the
+# event's ts, so a replayed event yields the same claims the live write did;
+# double-apply is deduped on the event id (see shadow_record_event_update).
+# Default construction (no statement_store) is byte-for-byte the prior
+# behavior — the mode flag is never even read.
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from soul_protocol.engine.journal import Journal
 from soul_protocol.spec.journal import EventEntry
@@ -35,6 +54,12 @@ from pocketpaw.fabric.events import (
 )
 from pocketpaw.fabric.models import FabricObject, FabricQuery, FabricQueryResult
 from pocketpaw.fabric.policy import filter_visible
+
+if TYPE_CHECKING:
+    # Import for typing only — the runtime dependency is lazy (see
+    # _apply_updated / flush_shadow) so a store-less projection never pays
+    # for the SQLite store stack.
+    from pocketpaw.fabric.store import FabricStore
 
 logger = logging.getLogger(__name__)
 
@@ -68,16 +93,72 @@ class _ProjectedObject:
         return payload
 
 
+@dataclass
+class _ShadowObservation:
+    """One staged shadow pass for a ``fabric.object.updated`` event (FST-4).
+
+    Captured synchronously in _apply_updated (which cannot await) and drained
+    by :meth:`FabricProjection.flush_shadow`. ``existing`` is the PRE-merge
+    FabricObject snapshot — _apply_updated rebinds ``row.obj`` to a fresh
+    model_copy, so the staged instance is never mutated afterwards.
+    """
+
+    event_id: str
+    existing: FabricObject
+    patch: dict[str, Any]
+    actor_kind: str
+    actor_id: str
+    correlation_id: str | None
+    ts: datetime
+
+
+def _journal_provenance(obs: _ShadowObservation) -> dict[str, str]:
+    """Map a journal event's actor onto site-1 provenance kwargs (FST-4).
+
+    - ``user`` actor → writer_class "human", a ``human_actor`` source carrying
+      the actor id;
+    - ``agent`` actor → writer_class "agent", an ``agent_session`` source
+      whose session identity is the event's correlation_id (the session/flow
+      per the journal spec), falling back to the actor id when the event
+      stands alone;
+    - ``system`` / ``root`` actors → NO kwargs: these are subsystem writes
+      (e.g. the journal store's default ``system:fabric``), i.e. exactly the
+      "unattributed" case, so the store's documented derivation default
+      applies (the object's own connector when it has one, else an
+      unattributed agent session).
+    """
+    if obs.actor_kind == "user":
+        return {
+            "writer_class": "human",
+            "source_kind": "human_actor",
+            "source_actor_id": obs.actor_id,
+        }
+    if obs.actor_kind == "agent":
+        return {
+            "writer_class": "agent",
+            "source_kind": "agent_session",
+            "source_session_id": obs.correlation_id or obs.actor_id,
+        }
+    return {}
+
+
 class FabricProjection:
     """Rebuilds and maintains a current-state view of Fabric objects from
     the org journal. One instance per process is the usual pattern; the
     projection is cheap to rebuild (O(events)) so operators can drop and
     rebuild at will if they suspect drift.
+
+    FST-4: pass ``statement_store`` to give the replay merge site the shadow
+    treatment — updates then stage observations (in shadow/enforce mode only)
+    that :meth:`flush_shadow` records through the store's FST-3 machinery.
+    Without it (the default) nothing changes: no staging, no mode read.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, statement_store: FabricStore | None = None) -> None:
         self._objects: dict[str, _ProjectedObject] = {}
         self._cursor: int = 0
+        self._statement_store = statement_store
+        self._pending_shadow: list[_ShadowObservation] = []
 
     # -- Build / rebuild ----------------------------------------------------
 
@@ -95,6 +176,11 @@ class FabricProjection:
         if since_seq == 0:
             self._objects.clear()
             self._cursor = 0
+            # A true reset also drops staged-but-unflushed shadow work: the
+            # replay will re-stage the same events, and the store's event-id
+            # dedupe makes a double-stage harmless anyway — this just keeps
+            # the queue from holding duplicates across back-to-back rebuilds.
+            self._pending_shadow.clear()
 
         applied = 0
         for entry in journal.replay_from(since_seq):
@@ -179,6 +265,32 @@ class FabricProjection:
             return
 
         patch = dict(payload.get("properties") or {})
+
+        # FST-4 (merge site 2): stage the shadow observation BEFORE the merge
+        # rebinds existing.obj, so the staged snapshot is the pre-update cache
+        # state (what the seed statement must preserve). Gate order matters:
+        # the statement_store check comes first so a store-less projection
+        # never reads the mode; in mode 'off' nothing is staged and the fold
+        # below is byte-for-byte the pre-FST-4 behavior. The import is lazy so
+        # tests can monkeypatch pocketpaw.fabric.store._source_truth_mode.
+        if self._statement_store is not None:
+            from pocketpaw.fabric.store import _source_truth_mode
+
+            if _source_truth_mode() != "off":
+                self._pending_shadow.append(
+                    _ShadowObservation(
+                        event_id=str(entry.id),
+                        existing=existing.obj,
+                        patch=dict(patch),
+                        actor_kind=entry.actor.kind,
+                        actor_id=entry.actor.id,
+                        correlation_id=(
+                            str(entry.correlation_id) if entry.correlation_id else None
+                        ),
+                        ts=_as_datetime(entry.ts),
+                    )
+                )
+
         merged = {**existing.obj.properties, **patch}
         existing.obj = existing.obj.model_copy(
             update={"properties": merged, "updated_at": _as_datetime(entry.ts)},
@@ -194,6 +306,49 @@ class FabricProjection:
             return
         existing.archived = True
         existing.last_seq = seq
+
+    # -- Shadow flush (FST-4) -------------------------------------------------
+
+    async def flush_shadow(self) -> int:
+        """Record every staged shadow observation through the statement
+        store's FST-3 machinery; returns how many events were recorded.
+
+        Called from the async boundary: FabricJournalStore.update() drains
+        after every live write, and replay consumers (bootstrap) call it
+        explicitly once the sync rebuild finishes. Replaying the same journal
+        twice cannot double-append — the store dedupes on the event id (see
+        FabricStore.shadow_record_event_update) — so a redundant flush is a
+        cheap no-op per already-recorded event.
+
+        Failure-shielded per observation, mirroring FST-3's shield at site 1:
+        a failing event logs a warning and is dropped; the projection state
+        and the remaining observations are unaffected.
+        """
+        if self._statement_store is None or not self._pending_shadow:
+            return 0
+        pending, self._pending_shadow = self._pending_shadow, []
+        recorded = 0
+        for obs in pending:
+            try:
+                done = await self._statement_store.shadow_record_event_update(
+                    obs.existing,
+                    obs.patch,
+                    event_id=obs.event_id,
+                    observed_at=obs.ts,
+                    **_journal_provenance(obs),
+                )
+            except Exception:
+                logger.warning(
+                    "fabric shadow: statement pass failed for event=%s object=%s"
+                    " — projection unaffected",
+                    obs.event_id,
+                    obs.existing.id,
+                    exc_info=True,
+                )
+                continue
+            if done:
+                recorded += 1
+        return recorded
 
     # -- Query --------------------------------------------------------------
 

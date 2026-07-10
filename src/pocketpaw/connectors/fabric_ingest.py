@@ -21,6 +21,27 @@
 #   site 1 therefore carry honest connector provenance end-to-end; in 'off'
 #   (default) the kwargs are inert and behavior is byte-for-byte. CREATE path
 #   untouched (FST-4's scope).
+# Updated: 2026-07-10 (FST-4 — SHADOW mode at merge site 3) — three OPTIONAL
+#   keyword-only params so the EE Firestore→Fabric mirror worker can thread
+#   its true provenance through this same loop (defaults keep every FST-3
+#   caller byte-identical):
+#     * ``writer_class`` (default "connector") — the mirror passes "mirror"
+#       (a Firestore mirror is not a primary connector; the trust ladder
+#       ranks connector > mirror);
+#     * ``document_uri_field`` — a record key whose value becomes the
+#       per-record ``source_document_uri`` (the mirror passes its doc-path
+#       sentinel, so each statement's SourceRef identifies the exact
+#       Firestore collection/doc);
+#     * ``observed_at_field`` — a record key holding a datetime that becomes
+#       the per-record ``observed_at`` (the mirror grafts the best available
+#       source time; non-datetime values are ignored → ingest-time default).
+#   CREATE-path decision (FST-4, settled): creates get NO statement hook.
+#   Promotion-time seeding already preserves the create-time claim — when a
+#   second source later updates a property, the seed statement is built from
+#   the current cache value with the OBJECT-level provenance (its
+#   source_connector) and touch-time observed_at, so the create-then-update
+#   flow yields both claims and a visible conflict without any create hook
+#   (proven by tests/test_fabric_shadow_create_path.py).
 # Updated: 2026-06-19 (SZD-2 — workspace-scope object TYPES) — ensure_type() now
 #   threads ``workspace_id`` into both the get_type_by_name() resolve and the
 #   define_type() create, so the type catalog stays per-tenant: a connector
@@ -69,6 +90,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from pocketpaw.fabric.models import PropertyDef
@@ -179,6 +201,10 @@ async def ingest_records(
     mapping: FabricMapping,
     workspace_id: str | None = None,
     run_id: str | None = None,
+    *,
+    writer_class: str = "connector",
+    document_uri_field: str | None = None,
+    observed_at_field: str | None = None,
 ) -> IngestResult:
     """Map connector records into typed Fabric objects with provenance (idempotent).
 
@@ -194,6 +220,20 @@ async def ingest_records(
             shadow pass records for updated objects carries it, so statements
             from different sync runs of the same connector are distinguishable.
             ``None`` = "this connector, unattributed run".
+        writer_class: the writer class stamped on shadow statements from the
+            UPDATE path (FST-4). Default "connector" — byte-identical to
+            FST-3 for every real connector. The EE Firestore mirror passes
+            "mirror": a mirror is not a primary connector, and the trust
+            ladder ranks it below one.
+        document_uri_field: optional record key whose value becomes the
+            per-record ``source_document_uri`` (FST-4). Gives each statement's
+            SourceRef a document-precise identity (the mirror passes its
+            doc-path sentinel key). Empty/absent values → no document URI.
+        observed_at_field: optional record key holding a ``datetime`` that
+            becomes the per-record ``observed_at`` (FST-4) — when the SOURCE
+            says the value was true, not when we ingested it. Values that are
+            not datetimes are ignored (the statement then defaults to
+            ingest time).
 
     Returns:
         IngestResult with created / updated / skipped counts and the object ids.
@@ -205,12 +245,20 @@ async def ingest_records(
     cannot be deduplicated and would silently duplicate on every sync.
 
     FST-3: the UPDATE path passes full source-truth provenance
-    (``writer_class="connector"``, a ``connector_run`` SourceRef with this
-    connector + run_id) into ``store.update_object``, so when
-    ``fabric_source_truth_mode`` is shadow/enforce the statements recorded at
-    merge site 1 carry honest connector provenance. In mode 'off' the kwargs
-    are inert. The CREATE path is untouched (statement coverage for creates is
-    FST-4's scope).
+    (``writer_class`` + a ``connector_run`` SourceRef with this connector,
+    run_id, and optionally a per-record document URI + observed_at) into
+    ``store.update_object``, so when ``fabric_source_truth_mode`` is
+    shadow/enforce the statements recorded at merge site 1 carry honest
+    provenance. In mode 'off' the kwargs are inert.
+
+    CREATE path (FST-4 decision): creates append NO statements, by design.
+    A create doesn't merge — there is no prior claim to preserve and no
+    conflict to observe. The create-time claim is NOT lost: if a second
+    source later updates a tracked-able property, the FST-3 promotion gate
+    seeds a statement from the current cache value with the object's own
+    provenance (source_connector) and touch-time observed_at, so the
+    create-then-update flow surfaces both claims. Proven by
+    tests/test_fabric_shadow_create_path.py — do not add a create hook.
     """
     type_id = await ensure_type(store, mapping, workspace_id=workspace_id)
     result = IngestResult(type_name=mapping.type_name)
@@ -228,14 +276,29 @@ async def ingest_records(
             workspace_id=workspace_id,
         )
         if existing is not None:
+            # FST-4: per-record provenance. The document URI (when a field is
+            # declared) pins the SourceRef to the exact upstream document;
+            # observed_at (when a field is declared AND holds a datetime)
+            # carries the source's own timestamp instead of ingest time.
+            source_document_uri: str | None = None
+            if document_uri_field is not None:
+                raw_uri = record.get(document_uri_field)
+                source_document_uri = str(raw_uri) if raw_uri else None
+            observed_at: datetime | None = None
+            if observed_at_field is not None:
+                raw_observed = record.get(observed_at_field)
+                if isinstance(raw_observed, datetime):
+                    observed_at = raw_observed
             updated = await store.update_object(
                 existing.id,
                 properties,
                 workspace_id=workspace_id,
-                writer_class="connector",
+                writer_class=writer_class,
                 source_kind="connector_run",
                 source_connector=connector,
                 source_run_id=run_id,
+                source_document_uri=source_document_uri,
+                observed_at=observed_at,
             )
             result.updated += 1
             result.object_ids.append((updated or existing).id)
