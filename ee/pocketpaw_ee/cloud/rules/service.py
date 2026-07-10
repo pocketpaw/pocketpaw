@@ -1,26 +1,37 @@
-# Rules — service (the sole owner of InstinctRuleDoc writes).
+# Rules — service (the sole owner of InstinctRuleDoc + InstinctWorkspaceConfig writes).
 # Created: 2026-06-20 (S2-R1 / feat/szd-slice2-discovery). The R3 ``_instinct_rule``
 # gate executor calls ``create_rule`` at approve time; ``get_active_rules`` is the
 # slice-2 read seam (slice-3 wires it into live gate dispatch). Follows the ee/cloud
 # 4-file rules: module-level ``async def``, validate-at-entry, tenant filter on every
 # read, emit on every write, errors via CloudError.
 #
-# no-router: rules have NO direct HTTP surface this slice. A rule is born ONLY by
-#   approving an ``_instinct_rule`` gate proposal (S2-R3 executor → this service);
-#   it is never POSTed by a client. The read seam ``get_active_rules`` is consumed
-#   in-process by the (slice-3) gate dispatcher, not over HTTP. A read router can be
-#   added later if a workspace rule-list endpoint is needed; omitted by design now.
+# Updated: 2026-07-09 (feat/instinct-guardrail-rules). The rules entity now HAS a thin
+# HTTP router (``rules/router.py``) over ``create_rule`` / ``get_active_rules`` /
+# ``archive_rule`` so a UI-authored governed rule is manageable over HTTP (the
+# original "no-router" note is retired). This module also gains the per-workspace
+# ENFORCEMENT toggle: ``get_enforcement_override`` (the fail-open resolver seam the
+# live gate consults), ``get_enforcement`` (read) and ``set_enforcement`` (upsert)
+# over the ``InstinctWorkspaceConfig`` doc — a tri-state override on the global
+# ``instinct_enforce_discovered_rules`` flag so one tenant can flip enforcement
+# without a code change. The gate's fail-OPEN-on-read-error rail is unchanged.
 
 from __future__ import annotations
 
 from typing import Any
 
+from pocketpaw.config import get_settings
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import RuleArchived, RuleCreated
 from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
+from pocketpaw_ee.cloud.models.instinct_workspace_config import InstinctWorkspaceConfig
 from pocketpaw_ee.cloud.rules.domain import Rule
-from pocketpaw_ee.cloud.rules.dto import CreateRuleRequest, RuleResponse, RuleScopeResponse
+from pocketpaw_ee.cloud.rules.dto import (
+    CreateRuleRequest,
+    EnforcementResponse,
+    RuleResponse,
+    RuleScopeResponse,
+)
 
 # ---------------------------------------------------------------------------
 # Private mapping helpers — Beanie doc ↔ domain ↔ wire dict
@@ -164,4 +175,76 @@ def _as_object_id(rule_id: str) -> Any:
         raise ValidationError("rule.invalid_id", f"invalid rule id: {rule_id}") from exc
 
 
-__all__ = ["archive_rule", "create_rule", "get_active_rules"]
+# ---------------------------------------------------------------------------
+# Per-workspace enforcement toggle — the tri-state override on the global
+# ``instinct_enforce_discovered_rules`` flag, over ``InstinctWorkspaceConfig``.
+# ---------------------------------------------------------------------------
+
+
+async def get_enforcement_override(workspace_id: str) -> bool | None:
+    """Return the workspace's raw enforcement override, or ``None`` if unset.
+
+    ``True``/``False`` is an explicit per-workspace override; ``None`` means the
+    workspace has no override and inherits the global flag. This is the pure read
+    seam the live gate consults — it RAISES on a store read error so the CALLER
+    owns the fail-OPEN decision (the gate must never turn a read hiccup into a
+    block; see ``instinct_dispatch._enforcement_enabled``).
+    """
+    doc = await InstinctWorkspaceConfig.find_one(
+        InstinctWorkspaceConfig.workspace == workspace_id,
+    )
+    return None if doc is None else doc.enforce_discovered_rules
+
+
+async def get_enforcement(workspace_id: str) -> dict:
+    """Return the workspace's effective enforcement state as a wire dict.
+
+    ``enforce_discovered_rules`` is the EFFECTIVE value (``override`` when set,
+    else the global flag); ``override`` is the raw tri-state; ``global_default``
+    is the current global flag. Read-only — never writes a doc.
+    """
+    override = await get_enforcement_override(workspace_id)
+    global_default = bool(get_settings().instinct_enforce_discovered_rules)
+    return EnforcementResponse(
+        workspace_id=workspace_id,
+        enforce_discovered_rules=override if override is not None else global_default,
+        override=override,
+        global_default=global_default,
+    ).model_dump(mode="json")
+
+
+async def set_enforcement(workspace_id: str, user_id: str, enabled: bool | None) -> dict:
+    """Upsert the workspace's enforcement override, returning the effective state.
+
+    ``enabled=True`` forces enforcement ON, ``False`` forces it OFF, and ``None``
+    clears the override (the workspace re-inherits the global flag). The doc
+    itself survives a reset — a "previously overridden, now cleared" workspace
+    keeps an audit-relevant ``updatedAt``. ``workspace`` is unique-indexed, so
+    the find-then-insert/save upsert is O(1); a concurrent-insert race would
+    surface as a DuplicateKeyError (admin-only write path — treated as a 5xx, no
+    retry loop, mirroring ``foresight.service.set_threshold``).
+    """
+    doc = await InstinctWorkspaceConfig.find_one(
+        InstinctWorkspaceConfig.workspace == workspace_id,
+    )
+    if doc is None:
+        doc = InstinctWorkspaceConfig(
+            workspace=workspace_id,
+            enforce_discovered_rules=enabled,
+        )
+        await doc.insert()
+    else:
+        doc.enforce_discovered_rules = enabled
+        await doc.save()
+
+    return await get_enforcement(workspace_id)
+
+
+__all__ = [
+    "archive_rule",
+    "create_rule",
+    "get_active_rules",
+    "get_enforcement",
+    "get_enforcement_override",
+    "set_enforcement",
+]

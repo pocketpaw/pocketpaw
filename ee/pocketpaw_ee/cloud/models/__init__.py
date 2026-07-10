@@ -91,6 +91,12 @@ Updated: 2026-06-20 (feat/szd-slice2-discovery, S2-R1) — added ``InstinctRuleD
 the imports, ``__all__``, and ``get_all_documents()`` so the ``instinct_rules``
 collection is wired into ``init_beanie`` and the ``beanie_test_db`` fixture. Only
 ``ee.cloud.rules.service`` imports the doc class directly (import-linter "Rules").
+Updated: 2026-07-09 (feat/instinct-guardrail-rules) — added
+``InstinctWorkspaceConfig`` (the per-workspace tri-state override on the global
+``instinct_enforce_discovered_rules`` flag) to the imports, ``__all__``, and
+``get_all_documents()`` so the ``instinct_workspace_configs`` collection is wired
+into ``init_beanie``. Only ``ee.cloud.rules.service`` writes it (import-linter
+"Rules").
 """
 
 from __future__ import annotations
@@ -132,6 +138,7 @@ from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
+from pocketpaw_ee.cloud.models.instinct_workspace_config import InstinctWorkspaceConfig
 from pocketpaw_ee.cloud.models.invite import Invite
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
@@ -281,6 +288,7 @@ __all__ = [
     "GroupAgent",
     "InstinctApproval",
     "InstinctRuleDoc",
+    "InstinctWorkspaceConfig",
     "Invite",
     "Lead",
     "LeadSource",
@@ -387,6 +395,9 @@ def get_all_documents():
         # Discovered governed rules (SZD slice-2). Only ``ee.cloud.rules.service``
         # writes it.
         InstinctRuleDoc,
+        # Per-workspace Instinct enforcement override (feat/instinct-guardrail-rules).
+        # Only ``ee.cloud.rules.service`` writes it.
+        InstinctWorkspaceConfig,
         Message,
         ReadState,
         RequestLog,

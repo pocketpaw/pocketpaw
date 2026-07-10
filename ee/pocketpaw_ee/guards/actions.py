@@ -196,6 +196,14 @@ ACTIONS: dict[str, ActionRule] = {
     # tier (mirrors workspace.delete / billing.manage): a mere admin must not
     # be able to disable the human-in-the-loop for everyone.
     "instinct.activate": ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
+    # Governed rules — the UI-authored guardrail surface (ee.cloud.rules.router:
+    # create / list / archive a rule + the per-workspace enforcement toggle).
+    # ADMIN, mirroring the other governance write surfaces (instinct.approve /
+    # audit.read): authoring a rule and flipping enforcement change workspace-wide
+    # governance and can only ADD blocks/escalations (never relax the template
+    # floor), so an admin bar — not the OWNER-only bar reserved for
+    # instinct.activate (which turns OFF the human-in-the-loop) — is correct.
+    "rules.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Connector — workspace-level connector lifecycle.
     # execute is MEMBER so any team member can run actions against enabled connectors.
     # manage (enable/disable/config) is ADMIN because it changes workspace-wide state

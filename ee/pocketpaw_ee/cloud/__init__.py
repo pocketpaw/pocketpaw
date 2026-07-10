@@ -249,6 +249,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.pockets.router import router as pockets_router
     from pocketpaw_ee.cloud.projects.router import router as projects_router
     from pocketpaw_ee.cloud.request_log.router import router as request_log_router
+    from pocketpaw_ee.cloud.rules.router import router as rules_router
     from pocketpaw_ee.cloud.sessions.router import router as sessions_router
     from pocketpaw_ee.cloud.skills.router import router as skills_router
     from pocketpaw_ee.cloud.workspace.router import router as workspace_router
@@ -297,6 +298,13 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(planner_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
     app.include_router(cycles_router, prefix="/api/v1")
+    # Governed Instinct rules (feat/instinct-guardrail-rules) — the UI-authored
+    # guardrail surface: create / list / archive a governed rule + the
+    # per-workspace authored-rule enforcement toggle (GET/PUT /rules/enforcement).
+    # Admin-gated (rules.manage); the enforcement it toggles is the shipped gate
+    # path in ee.cloud.pockets.instinct_dispatch — this router adds no new
+    # enforcement logic.
+    app.include_router(rules_router, prefix="/api/v1")
     # Foresight — RFC 08 scenario-run surface (POST /foresight/scenarios,
     # GET /foresight/runs[/{id}]). Mounted alongside cycles so the
     # Mission Control rail can launch / inspect simulation runs from the
