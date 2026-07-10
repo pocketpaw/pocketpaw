@@ -211,6 +211,46 @@
 #      and promote every changed property, gutting the opt-in discipline. No
 #      behavior change for pre-FST-4 cohorts: "mirror" never reached this
 #      comparison before this slice.
+# Updated: 2026-07-10 (FST-5 — ENFORCE mode: the resolver owns the cache) —
+#   three changes; 'off' and 'shadow' are byte-for-byte the FST-3/4 behavior:
+#   1. update_object() in ENFORCE runs the statement pass BEFORE the cache
+#      commit and, for every TRACKED property (one that has statements after
+#      the pass — pre-tracked or just promoted), writes the RESOLVER'S WINNER
+#      into the flat properties dict instead of the blind LWW value.
+#      Untracked properties keep LWW (no statements → nothing to resolve).
+#      Write-once: the final dict is computed first, then committed in ONE
+#      UPDATE — never LWW-then-overwrite. The divergence line still logs with
+#      the same grep-stable shape; in enforce ``lww=`` is what LWW WOULD have
+#      kept and ``resolver=`` is what the cache now holds. A statement-pass
+#      failure in enforce falls back to plain LWW for that write (log + keep
+#      writing — the cache write must never break), mirroring FST-3's shield.
+#      _shadow_record_statements now RETURNS {property: Resolution} for the
+#      statement-producing properties so enforce reuses the pass's own
+#      resolutions instead of resolving twice; shadow ignores the return.
+#   2. change_property() / correct_property(): the curation verbs (the seams
+#      FST-6's PIN/IGNORE executor calls). CHANGE closes the current winner
+#      statement's valid_to and appends the new value as rank="preferred"
+#      (open validity); CORRECT marks the current winner deprecated with
+#      rank_reason and appends the corrected value as rank="normal". Both
+#      auto-promote an untracked property first (seed the current cache value
+#      with FST-3's baseline provenance + touch-time observed_at) so history
+#      is preserved, and both return the NEW Resolution. Cache behavior is
+#      mode-respecting: enforce writes the new resolver winner into the
+#      cache; shadow/off leave the cache alone (the verbs are statement-layer
+#      operations in every mode). These verbs are the ONLY two writes that
+#      touch existing statement rows — narrow curation UPDATEs on
+#      valid_to / rank+rank_reason only (the append-only doctrine's
+#      documented "later curation writes"); value and provenance columns are
+#      never rewritten.
+#   3. The FST-3 provenance derivation is factored into _derive_provenance()
+#      (byte-identical rules) so the verbs and the shadow pass share ONE
+#      definition instead of two drifting copies.
+#   Site-2 note (settled in fabric/projection.py): the PROJECTION stays
+#   event-faithful in enforce — it folds what the journal says; enforce
+#   ownership applies at THIS store's cache layer (the primary read path).
+#   Site-3 note: the EE mirror's update path goes through update_object, so
+#   enforce flows through automatically (proven in
+#   tests/cloud/fabric_ingest/test_fabric_ingest_enforce.py).
 
 
 from __future__ import annotations
@@ -240,7 +280,7 @@ from pocketpaw.fabric.models import (
 # duplicating it here — one definition of "materially different" for the
 # whole source-truth chain. The name is module-private in resolver.py but
 # intra-package reuse is deliberate.
-from pocketpaw.fabric.resolver import _materially_different, resolve
+from pocketpaw.fabric.resolver import Resolution, _materially_different, resolve
 from pocketpaw.fabric.trust import default_trust_rules
 
 logger = logging.getLogger(__name__)
@@ -1059,21 +1099,64 @@ class FabricStore:
         FST-3 (source-truth shadow) — the new keyword-only kwargs are OPTIONAL
         provenance for the write (all default ``None``; every pre-FST-3 caller
         keeps working unchanged). They only matter when
-        ``fabric_source_truth_mode`` is ``shadow`` or ``enforce`` (enforce is
-        treated as shadow until FST-5): the write is then ALSO recorded as
-        statements per :meth:`_shadow_record_statements` (auto-promotion,
-        provenance derivation, divergence log — see its docstring for the exact
-        rules). The CACHE WRITE IS UNCHANGED in every mode: last-write-wins
-        merge into the flat properties dict, which remains the primary read
-        path. With mode ``off`` (the default) not a single new query or write
-        happens — the mode is read once per call and the whole shadow block is
-        skipped.
+        ``fabric_source_truth_mode`` is ``shadow`` or ``enforce``: the write is
+        then ALSO recorded as statements per
+        :meth:`_shadow_record_statements` (auto-promotion, provenance
+        derivation, divergence log — see its docstring for the exact rules).
+        With mode ``off`` (the default) not a single new query or write
+        happens — the mode is read once per call and the whole statement block
+        is skipped.
+
+        Cache semantics per mode (FST-5):
+
+        - ``off`` / ``shadow`` — UNCHANGED: last-write-wins merge into the
+          flat properties dict, which remains the primary read path. In
+          shadow the statement pass runs AFTER the cache commit and only
+          observes.
+        - ``enforce`` — the RESOLVER OWNS THE CACHE for tracked properties.
+          The statement pass runs FIRST; every property that has statements
+          after the pass (already tracked, or promoted by it) lands in the
+          cache as the resolver's winner instead of the blind LWW value.
+          Untracked properties keep LWW (no statements → nothing to
+          resolve). Write-once: the final dict is computed, then committed in
+          ONE UPDATE. A statement-pass failure falls back to plain LWW for
+          this write (warning logged) — the cache write must never break.
         """
         mode = _source_truth_mode()  # read ONCE per call; "off" skips everything
         existing = await self.get_object(obj_id, workspace_id=workspace_id)
         if not existing:
             return None
         merged = {**existing.properties, **properties}
+        if mode == "enforce":
+            # FST-5: statement pass BEFORE the commit so the resolver's winner
+            # for each tracked property can be folded into the ONE cache
+            # write. Failure-shielded like shadow: a broken pass degrades this
+            # write to plain LWW rather than blocking it.
+            try:
+                resolutions = await self._shadow_record_statements(
+                    existing,
+                    properties,
+                    writer_class=writer_class,
+                    source_kind=source_kind,
+                    source_connector=source_connector,
+                    source_run_id=source_run_id,
+                    source_document_uri=source_document_uri,
+                    source_actor_id=source_actor_id,
+                    source_session_id=source_session_id,
+                    observed_at=observed_at,
+                    workspace_id=workspace_id,
+                )
+            except Exception:
+                logger.warning(
+                    "fabric enforce: statement pass failed for object=%s"
+                    " — falling back to LWW for this write",
+                    obj_id,
+                    exc_info=True,
+                )
+                resolutions = {}
+            for prop, resolution in resolutions.items():
+                if resolution.winner_statement is not None:
+                    merged[prop] = resolution.value
         ws_cond, ws_params = _workspace_scope(workspace_id)
         sql = "UPDATE fabric_objects SET properties = ?, updated_at = datetime('now') WHERE id = ?"
         params: list[Any] = [json.dumps(merged), obj_id]
@@ -1084,10 +1167,10 @@ class FabricStore:
         async with self._conn() as db:
             await db.execute(sql, params)
             await db.commit()
-        if mode != "off":
-            # shadow | enforce (enforce == shadow until FST-5). Runs AFTER the
-            # cache write so the primary path's semantics and error behavior
-            # stay byte-identical; a shadow failure must never break the write.
+        if mode == "shadow":
+            # Shadow runs AFTER the cache write so the primary path's
+            # semantics and error behavior stay byte-identical (FST-3); a
+            # shadow failure must never break the write.
             try:
                 await self._shadow_record_statements(
                     existing,
@@ -1110,6 +1193,58 @@ class FabricStore:
                 )
         return await self.get_object(obj_id, workspace_id=workspace_id)
 
+    @staticmethod
+    def _derive_provenance(
+        existing: FabricObject,
+        *,
+        writer_class: str | None,
+        source_kind: str | None,
+        source_connector: str | None,
+        source_actor_id: str | None,
+        source_session_id: str | None,
+        source_document_uri: str | None,
+    ) -> tuple[str, str | None, str]:
+        """Effective ``(kind, connector, writer_class)`` of one write (FST-3).
+
+        The single definition of the provenance derivation rules, shared by
+        the statement pass and the FST-5 curation verbs (byte-identical to
+        the inline FST-3 logic this was factored from):
+
+        - kind, in order: explicit ``source_kind`` > ``source_connector`` →
+          ``connector_run`` > ``source_actor_id`` → ``human_actor`` >
+          ``source_session_id`` → ``agent_session`` > ``source_document_uri``
+          → ``document`` > the object's own ``source_connector`` →
+          ``connector_run`` for that connector > ``agent_session`` with no
+          identity (the honest default for unattributed writes).
+        - writer_class: explicit > ``connector`` for ``connector_run`` >
+          ``human`` for ``human_actor`` > ``agent`` for everything else.
+        """
+        kind = source_kind
+        connector = source_connector
+        if kind is None:
+            if connector is not None:
+                kind = "connector_run"
+            elif source_actor_id is not None:
+                kind = "human_actor"
+            elif source_session_id is not None:
+                kind = "agent_session"
+            elif source_document_uri is not None:
+                kind = "document"
+            elif existing.source_connector:
+                kind = "connector_run"
+                connector = existing.source_connector
+            else:
+                kind = "agent_session"
+        eff_writer = writer_class
+        if eff_writer is None:
+            if kind == "connector_run":
+                eff_writer = "connector"
+            elif kind == "human_actor":
+                eff_writer = "human"
+            else:
+                eff_writer = "agent"
+        return kind, connector, eff_writer
+
     async def _shadow_record_statements(
         self,
         existing: FabricObject,
@@ -1124,13 +1259,18 @@ class FabricStore:
         source_session_id: str | None,
         observed_at: datetime | None,
         workspace_id: str | None,
-    ) -> None:
-        """The FST-3 shadow pass: record an update's claims as statements.
+    ) -> dict[str, Resolution]:
+        """The FST-3 statement pass: record an update's claims as statements.
 
         Called from :meth:`update_object` (merge site 1) only when
-        ``fabric_source_truth_mode`` is shadow/enforce, AFTER the LWW cache
-        write. ``existing`` is the PRE-update snapshot (its properties and
+        ``fabric_source_truth_mode`` is shadow/enforce — AFTER the LWW cache
+        write in shadow, BEFORE the cache commit in enforce (FST-5, so the
+        caller can fold each Resolution into the one cache write).
+        ``existing`` is the PRE-update snapshot (its properties and
         ``updated_at`` are the old cache state).
+
+        Returns ``{property: Resolution}`` for every statement-producing
+        (tracked) property — the enforce path consumes it; shadow ignores it.
 
         Provenance derivation (when the caller passed no explicit kwargs):
 
@@ -1176,37 +1316,30 @@ class FabricStore:
            grep-stable, single line, values JSON-encoded so they can never
            wrap):
 
-           ``fabric shadow: object=<id> property=<p> lww=<cache-value>
+           ``fabric shadow: object=<id> property=<p> lww=<lww-value>
            resolver=<winner-value> diverged=<bool> disputed=<bool>
            unresolvable=<bool>``
 
-        The cache is NEVER touched here — shadow only observes.
+           The line's shape is mode-independent. In shadow ``lww`` is what
+           the cache holds and ``resolver`` is what it WOULD hold; in
+           enforce (FST-5) ``lww`` is what LWW would have kept and
+           ``resolver`` is what the cache now holds — ``diverged=True``
+           means the resolver overrode the incoming write.
+
+        The cache is NEVER touched here — the CALLER owns the cache write
+        (LWW in off/shadow; the returned resolutions in enforce).
         """
-        # --- Effective provenance of the incoming write ---
-        kind = source_kind
-        connector = source_connector
-        if kind is None:
-            if connector is not None:
-                kind = "connector_run"
-            elif source_actor_id is not None:
-                kind = "human_actor"
-            elif source_session_id is not None:
-                kind = "agent_session"
-            elif source_document_uri is not None:
-                kind = "document"
-            elif existing.source_connector:
-                kind = "connector_run"
-                connector = existing.source_connector
-            else:
-                kind = "agent_session"
-        eff_writer = writer_class
-        if eff_writer is None:
-            if kind == "connector_run":
-                eff_writer = "connector"
-            elif kind == "human_actor":
-                eff_writer = "human"
-            else:
-                eff_writer = "agent"
+        # --- Effective provenance of the incoming write (FST-3 rules,
+        # shared with the FST-5 curation verbs via _derive_provenance) ---
+        kind, connector, eff_writer = self._derive_provenance(
+            existing,
+            writer_class=writer_class,
+            source_kind=source_kind,
+            source_connector=source_connector,
+            source_actor_id=source_actor_id,
+            source_session_id=source_session_id,
+            source_document_uri=source_document_uri,
+        )
 
         # --- Object-level baseline (who owns the current cache value) ---
         baseline_connector = existing.source_connector
@@ -1225,6 +1358,7 @@ class FabricStore:
         # nothing promoted) writes NOTHING — not even a SourceRef row.
         incoming_source: SourceRef | None = None
         seed_source: SourceRef | None = None
+        resolutions: dict[str, Resolution] = {}
 
         for prop, value in incoming.items():
             stmts = await self.get_statements(existing.id, prop, workspace_id=workspace_id)
@@ -1279,7 +1413,10 @@ class FabricStore:
                 default_trust_rules(),
                 object_type=existing.type_name or None,
             )
-            # The LWW cache now holds the incoming value (last write wins).
+            # ``lww`` is the incoming value — what the cache holds in shadow
+            # and what LWW WOULD have kept in enforce (where the caller
+            # writes ``resolver`` into the cache instead). Same line either
+            # way: the FST-8 harness contract.
             logger.info(
                 "fabric shadow: object=%s property=%s lww=%s resolver=%s"
                 " diverged=%s disputed=%s unresolvable=%s",
@@ -1291,6 +1428,8 @@ class FabricStore:
                 resolution.is_disputed,
                 resolution.unresolvable,
             )
+            resolutions[prop] = resolution
+        return resolutions
 
     async def shadow_record_event_update(
         self,
@@ -1362,6 +1501,271 @@ class FabricStore:
             workspace_id=workspace_id,
         )
         return True
+
+    # --- Curation verbs (FST-5 — CHANGE / CORRECT) ---
+
+    async def change_property(
+        self,
+        object_id: str,
+        property: str,
+        new_value: Any,
+        *,
+        writer_class: str | None = None,
+        source_kind: str | None = None,
+        source_connector: str | None = None,
+        source_run_id: str | None = None,
+        source_document_uri: str | None = None,
+        source_actor_id: str | None = None,
+        source_session_id: str | None = None,
+        observed_at: datetime | None = None,
+        workspace_id: str | None = None,
+    ) -> Resolution:
+        """CHANGE one property's value as an explicit curation act (FST-5).
+
+        Semantics: close the CURRENT WINNER statement's validity
+        (``valid_to = now`` — it becomes superseded history, still auditable)
+        and append ``new_value`` as a ``rank="preferred"``, open-validity
+        statement carrying the caller's provenance (same optional kwargs and
+        derivation rules as :meth:`update_object` — callers SHOULD pass
+        provenance; unattributed calls inherit the object's baseline).
+
+        The property must be TRACKED. On an untracked property the verb
+        first PROMOTES it (seeds the current cache value with the object's
+        baseline provenance + touch-time ``observed_at``, exactly FST-3's
+        promotion seed) so the pre-change history is preserved, THEN applies.
+        A property absent from both statements and the cache has no prior
+        claim — the new statement is simply appended.
+
+        Returns the NEW :class:`Resolution` over the property's statements.
+        The new preferred statement wins within its writer tier; a
+        higher-tier statement or a pin still outranks it — the resolver owns
+        the outcome, by design. Cache behavior is mode-respecting: in
+        ``enforce`` the flat properties dict is updated to the new winner; in
+        ``shadow``/``off`` the cache is untouched (the verb is a
+        statement-layer operation in every mode).
+
+        This is one of the seams FST-6's PIN/IGNORE executor calls.
+        """
+        return await self._curate_property(
+            object_id,
+            property,
+            new_value,
+            verb="change",
+            reason=None,
+            writer_class=writer_class,
+            source_kind=source_kind,
+            source_connector=source_connector,
+            source_run_id=source_run_id,
+            source_document_uri=source_document_uri,
+            source_actor_id=source_actor_id,
+            source_session_id=source_session_id,
+            observed_at=observed_at,
+            workspace_id=workspace_id,
+        )
+
+    async def correct_property(
+        self,
+        object_id: str,
+        property: str,
+        new_value: Any,
+        *,
+        reason: str,
+        writer_class: str | None = None,
+        source_kind: str | None = None,
+        source_connector: str | None = None,
+        source_run_id: str | None = None,
+        source_document_uri: str | None = None,
+        source_actor_id: str | None = None,
+        source_session_id: str | None = None,
+        observed_at: datetime | None = None,
+        workspace_id: str | None = None,
+    ) -> Resolution:
+        """CORRECT one property's value: the current winner was WRONG (FST-5).
+
+        Semantics: mark the CURRENT WINNER statement ``rank="deprecated"``
+        with ``rank_reason=reason`` (a deprecated statement never wins, never
+        loses, never disputes — it is struck from resolution entirely, unlike
+        CHANGE's closed-but-candidate history) and append ``new_value`` as a
+        ``rank="normal"``, open-validity statement with the caller's
+        provenance.
+
+        Tracking, promotion, provenance derivation, the returned NEW
+        :class:`Resolution`, and the mode-respecting cache behavior (enforce
+        writes the new winner; shadow/off leave the cache alone) all match
+        :meth:`change_property` — see its docstring.
+
+        This is one of the seams FST-6's PIN/IGNORE executor calls.
+        """
+        return await self._curate_property(
+            object_id,
+            property,
+            new_value,
+            verb="correct",
+            reason=reason,
+            writer_class=writer_class,
+            source_kind=source_kind,
+            source_connector=source_connector,
+            source_run_id=source_run_id,
+            source_document_uri=source_document_uri,
+            source_actor_id=source_actor_id,
+            source_session_id=source_session_id,
+            observed_at=observed_at,
+            workspace_id=workspace_id,
+        )
+
+    async def _curate_property(
+        self,
+        object_id: str,
+        property: str,
+        new_value: Any,
+        *,
+        verb: str,
+        reason: str | None,
+        writer_class: str | None,
+        source_kind: str | None,
+        source_connector: str | None,
+        source_run_id: str | None,
+        source_document_uri: str | None,
+        source_actor_id: str | None,
+        source_session_id: str | None,
+        observed_at: datetime | None,
+        workspace_id: str | None,
+    ) -> Resolution:
+        """Shared core of :meth:`change_property` / :meth:`correct_property`.
+
+        ``verb`` is ``"change"`` (close the winner's validity, append
+        preferred) or ``"correct"`` (deprecate the winner with ``reason``,
+        append normal). Raises ``ValueError`` when the object doesn't exist
+        (or is outside the caller's workspace scope) — the FST-6 executor
+        needs a clean failure, not a silent no-op.
+        """
+        mode = _source_truth_mode()  # read ONCE; decides only the cache write
+        existing = await self.get_object(object_id, workspace_id=workspace_id)
+        if existing is None:
+            raise ValueError(f"fabric object not found: {object_id!r}")
+
+        stmts = await self.get_statements(object_id, property, workspace_id=workspace_id)
+        if not stmts and property in existing.properties:
+            # Auto-promotion (FST-3 seeding, unconditional here — the verb is
+            # explicit curation, so preserving the pre-verb claim IS the
+            # point): seed the current cache value with the object-level
+            # baseline provenance and touch-time observed_at.
+            baseline_connector = existing.source_connector
+            baseline_writer = "connector" if baseline_connector else "agent"
+            seed_source = await self.upsert_source(
+                "connector_run" if baseline_connector else "agent_session",
+                connector=baseline_connector,
+                workspace_id=workspace_id,
+            )
+            seed = await self.append_statement(
+                object_id,
+                property,
+                existing.properties[property],
+                seed_source.id,
+                baseline_writer,
+                observed_at=existing.updated_at or existing.created_at,
+                workspace_id=workspace_id,
+            )
+            stmts = [seed]
+
+        current = resolve(stmts, default_trust_rules(), object_type=existing.type_name or None)
+        winner = current.winner_statement
+        if winner is not None:
+            if verb == "change":
+                # Close the winner's validity — only if still open; a closed
+                # winner is already superseded history and its interval must
+                # not be rewritten.
+                if winner.valid_to is None:
+                    await self._close_statement_validity(winner.id, datetime.now())
+            else:
+                await self._deprecate_statement(winner.id, reason)
+
+        kind, connector, eff_writer = self._derive_provenance(
+            existing,
+            writer_class=writer_class,
+            source_kind=source_kind,
+            source_connector=source_connector,
+            source_actor_id=source_actor_id,
+            source_session_id=source_session_id,
+            source_document_uri=source_document_uri,
+        )
+        new_source = await self.upsert_source(
+            kind,
+            connector=connector,
+            run_id=source_run_id,
+            document_uri=source_document_uri,
+            actor_id=source_actor_id,
+            session_id=source_session_id,
+            workspace_id=workspace_id,
+        )
+        await self.append_statement(
+            object_id,
+            property,
+            new_value,
+            new_source.id,
+            eff_writer,
+            observed_at=observed_at,
+            rank="preferred" if verb == "change" else "normal",
+            workspace_id=workspace_id,
+        )
+
+        refreshed = await self.get_statements(object_id, property, workspace_id=workspace_id)
+        resolution = resolve(
+            refreshed, default_trust_rules(), object_type=existing.type_name or None
+        )
+
+        if mode == "enforce" and resolution.winner_statement is not None:
+            # The resolver owns the cache in enforce (FST-5): one targeted
+            # write of the property's new winner, merged onto the FRESH cache
+            # state so concurrent-property updates aren't clobbered.
+            fresh = await self.get_object(object_id, workspace_id=workspace_id)
+            base = fresh.properties if fresh is not None else existing.properties
+            merged = {**base, property: resolution.value}
+            ws_cond, ws_params = _workspace_scope(workspace_id)
+            sql = (
+                "UPDATE fabric_objects SET properties = ?,"
+                " updated_at = datetime('now') WHERE id = ?"
+            )
+            params: list[Any] = [json.dumps(merged), object_id]
+            if ws_cond:
+                sql += f" AND {ws_cond}"
+                params.extend(ws_params)
+            async with self._conn() as db:
+                await db.execute(sql, params)
+                await db.commit()
+
+        return resolution
+
+    async def _close_statement_validity(self, statement_id: str, closed_at: datetime) -> None:
+        """Set ``valid_to`` on one statement (the CHANGE verb's close).
+
+        One of the TWO narrow curation writes permitted on statement rows
+        (see the FST-5 module-header note) — the append-only doctrine's
+        documented "later curation writes". Value/provenance columns are
+        never rewritten.
+        """
+        await self._ensure_schema()
+        async with self._conn() as db:
+            await db.execute(
+                "UPDATE fabric_statements SET valid_to = ? WHERE id = ?",
+                (closed_at.isoformat(), statement_id),
+            )
+            await db.commit()
+
+    async def _deprecate_statement(self, statement_id: str, reason: str | None) -> None:
+        """Mark one statement ``rank="deprecated"`` (the CORRECT verb's strike).
+
+        The second of the TWO narrow curation writes permitted on statement
+        rows (see the FST-5 module-header note). ``rank_reason`` records why;
+        value/provenance columns are never rewritten.
+        """
+        await self._ensure_schema()
+        async with self._conn() as db:
+            await db.execute(
+                "UPDATE fabric_statements SET rank = 'deprecated', rank_reason = ? WHERE id = ?",
+                (reason, statement_id),
+            )
+            await db.commit()
 
     async def remove_object(self, obj_id: str) -> None:
         await self._ensure_schema()

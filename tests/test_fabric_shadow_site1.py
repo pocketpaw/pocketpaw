@@ -415,13 +415,19 @@ async def test_ingest_records_threads_provenance_through_update(
 
 
 # ---------------------------------------------------------------------------
-# enforce == shadow (until FST-5); shadow failures never break the write
+# enforce records statements like shadow; shadow failures never break the write
 # ---------------------------------------------------------------------------
 
 
-async def test_enforce_mode_behaves_as_shadow(
+async def test_enforce_mode_records_statements_like_shadow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Enforce rides the SAME statement pass as shadow (seed + incoming both
+    land). FST-5 note: this test's pre-FST-5 form asserted "cache still LWW"
+    (enforce == shadow until FST-5); the resolver now owns the cache in
+    enforce, so the connector-tier seed (120) beats the agent write (150).
+    Full enforce cache semantics live in tests/test_fabric_enforce_site1.py.
+    """
     store, obj_id, db_path = await _crm_object(tmp_path)
     _set_mode(monkeypatch, "enforce")
 
@@ -429,7 +435,7 @@ async def test_enforce_mode_behaves_as_shadow(
 
     assert len(await store.get_statements(obj_id, "arr")) == 2
     obj = await store.get_object(obj_id)
-    assert obj is not None and obj.properties["arr"] == 150  # cache still LWW
+    assert obj is not None and obj.properties["arr"] == 120  # resolver-owned cache
 
 
 async def test_shadow_failure_never_breaks_cache_write(

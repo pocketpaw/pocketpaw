@@ -42,6 +42,12 @@
 #   source_connector) and touch-time observed_at, so the create-then-update
 #   flow yields both claims and a visible conflict without any create hook
 #   (proven by tests/test_fabric_shadow_create_path.py).
+# Updated: 2026-07-10 (FST-5 — ENFORCE at merge site 3, no code change) — the
+#   re-ingest UPDATE path already goes through store.update_object with full
+#   provenance (FST-3/4 above), so enforce mode flows through this module
+#   AUTOMATICALLY: for a TRACKED property the store commits the resolver's
+#   winner instead of the blind LWW value; untracked properties keep LWW.
+#   Proven by tests/cloud/fabric_ingest/test_fabric_ingest_enforce.py.
 # Updated: 2026-06-19 (SZD-2 — workspace-scope object TYPES) — ensure_type() now
 #   threads ``workspace_id`` into both the get_type_by_name() resolve and the
 #   define_type() create, so the type catalog stays per-tenant: a connector

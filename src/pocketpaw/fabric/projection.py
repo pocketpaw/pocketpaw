@@ -35,6 +35,34 @@
 # double-apply is deduped on the event id (see shadow_record_event_update).
 # Default construction (no statement_store) is byte-for-byte the prior
 # behavior — the mode flag is never even read.
+#
+# Updated: 2026-07-10 (FST-5 — ENFORCE decision for merge site 2, READ THIS):
+# in enforce mode THE PROJECTION STAYS EVENT-FAITHFUL — it folds exactly what
+# the journal says (plain LWW merge), and enforce ownership of values applies
+# at the STORE CACHE layer only (fabric/store.py — the flat properties dict,
+# which is the primary read path per the FST constraints). Consequence: an
+# object served from this projection can show a journal-folded LWW value that
+# the resolver has overruled in the store cache. That divergence is KNOWN and
+# DELIBERATE, and it is exactly what the shadow machinery's divergence line
+# records per event — nobody has to discover it by accident. Why event-faithful
+# won over write-back (the rejected option (a) — flush_shadow() also rewriting
+# the projection's entry with the resolver's winner):
+#   1. The projection's core guarantee is "rebuild() from the journal and
+#      you're back in sync" — a deterministic CQRS fold of the journal alone.
+#      Write-back makes projection state a function of (journal + statements
+#      DB + flush timing); worse, shadow_record_event_update dedupes replayed
+#      events, so after a rebuild the flush records nothing and the write-back
+#      would NOT re-apply — live state and rebuilt state would silently
+#      disagree, breaking the one invariant this class exists to keep.
+#   2. The flat properties dict on the SQLite store is the read path the FST
+#      chain governs; the journal-store path keeps the journal itself as its
+#      system of record. Resolver-vs-journal disagreement there belongs to the
+#      statement layer (statements + divergence log), not to a mutated fold.
+#   3. The CHANGE/CORRECT verbs and FST-6's PIN/IGNORE executor act on the
+#      store layer — a curated value reaches journal consumers the same way
+#      every other correction does: as a new journal event.
+# Proven by tests/test_fabric_enforce_site2.py: the store cache holds the
+# resolved value while this projection's fold (event-faithfully) differs.
 
 from __future__ import annotations
 

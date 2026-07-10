@@ -22,6 +22,18 @@
 #   ingest-time default when neither parses). Only the shadow statements are
 #   affected; with fabric_source_truth_mode 'off' (default) the kwargs are
 #   inert and the mirror's writes are byte-for-byte unchanged.
+# Updated: 2026-07-10 (FST-5 — ENFORCE at merge site 3, no code change) —
+#   enforce flows through this worker automatically because the update path
+#   delegates to store.update_object (via ingest_records): tracked properties
+#   land in the cache as the resolver's winner, untracked keep LWW. Ruling on
+#   the field-map collapse in _mirror_docs (two Firestore fields mapping to
+#   ONE property → the LAST mapping wins inside the dict comprehension): it
+#   STAYS as-is. The collapse happens BEFORE the store write and is
+#   WITHIN-SOURCE — one document from one source deciding which of its own
+#   fields feeds a property is a mapping-configuration concern, not a trust
+#   conflict between sources, so the source-truth chain has nothing to
+#   arbitrate there. Proven by
+#   tests/cloud/fabric_ingest/test_fabric_ingest_enforce.py.
 #
 # What this does
 # --------------
