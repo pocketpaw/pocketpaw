@@ -2572,6 +2572,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
             _announced_tools: set[str] = set()
             _event_count = 0
             _saw_result = False  # Track if ResultMessage was consumed
+            # The model that actually answered (from AssistantMessage.model) —
+            # feeds token_usage's ``model`` when the CLI auto-selected.
+            _last_seen_model: str | None = None
             # feat/session-supervisor SS-1: emit the native session id at most
             # once per run (from the SDK's turn-1 init/system message). Gated on
             # an opted-in ``session_handle`` so the legacy stream is byte-identical.
@@ -2684,6 +2687,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
                     # ========== AssistantMessage - main content ==========
                     if self._AssistantMessage and isinstance(event, self._AssistantMessage):
+                        # Remember the model that actually answered — when the
+                        # CLI auto-selects (no explicit model option), this is
+                        # the only truthful source for token_usage's ``model``.
+                        _msg_model = getattr(event, "model", None)
+                        if isinstance(_msg_model, str) and _msg_model:
+                            _last_seen_model = _msg_model
                         if not _streamed_via_events:
                             text = self._extract_text_from_message(event)
                             if text:
@@ -2746,7 +2755,22 @@ class ClaudeSDKBackend(BaseAgentBackend):
                         total_cost = getattr(event, "total_cost_usd", None)
                         usage = getattr(event, "usage", None) or {}
                         if isinstance(usage, dict) and (usage or total_cost):
-                            _model_name = options_kwargs.get("model", "claude")
+                            # Report the model that ACTUALLY ran, not the
+                            # request option: prefer the ResultMessage's
+                            # modelUsage keys (the CLI's own accounting),
+                            # then the last AssistantMessage's model, then
+                            # the explicit option. The old hard fallback
+                            # "claude" hid the auto-selected model from the
+                            # UI's response-meta line.
+                            _model_usage = getattr(event, "modelUsage", None) or getattr(
+                                event, "model_usage", None
+                            )
+                            if isinstance(_model_usage, dict) and _model_usage:
+                                _model_name = next(iter(_model_usage.keys()))
+                            else:
+                                _model_name = (
+                                    _last_seen_model or options_kwargs.get("model") or "claude"
+                                )
                             # MCG-11 — read prompt-cache effectiveness off the
                             # SDK usage via the universal helper so the margin
                             # from the byte-stable cached prefix (site/pocket-gen)
