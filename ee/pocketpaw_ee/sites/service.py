@@ -1,6 +1,19 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-07-10 (HE-2 — canonical engine module): the engine content-selection
+# checks now route through ``sites.engines`` predicates instead of inline
+# ``== "svelte"`` string equality. ``is_source_engine(engine)`` replaces the
+# "source vs rippleSpec" content switch (publish/activate promote, preview/audit
+# fallback, dynamic-envelope), and ``content_key(engine)`` replaces the literal
+# ``"source" | "rippleSpec"`` key pick. PURE refactor, zero behaviour change for the
+# existing ripple/svelte engines. The three svelte NATIVE-EDITING guards
+# (``apply_leaf_edits`` ~2595, native shadow-render ~2697, ``edit_svelte_component``
+# ~2823) deliberately KEEP the ``!= "svelte"`` literal — their bodies are svelte-only
+# (component-path splice, ``.svelte-kit/cloudflare`` read, DSV-5 source split), so
+# guard and body must widen together; HE-9 widens ``apply_leaf_edits`` when the html
+# editing lane lands.
+#
 # Updated 2026-07-09 (DP0-4 — publish async split + single-flight): ``_deploy_site_doc``
 # now FORKS on ``_is_dynamic`` BEFORE any build. A DYNAMIC site no longer builds /
 # deploys inline — it returns early into the new ``_provision_dynamic_site`` helper,
@@ -533,6 +546,7 @@ from pocketpaw_ee.sites.dto import (
     SiteResponse,
     SiteStatusResponse,
 )
+from pocketpaw_ee.sites.engines import content_key, is_source_engine
 from pocketpaw_ee.sites.generator_client import GeneratorClient
 
 logger = logging.getLogger(__name__)
@@ -1259,7 +1273,7 @@ async def publish(
     # not-live while the published tag stands). The snapshot for the promote is the
     # engine's content: the rippleSpec for a ripple site, the {path: contents}
     # source map for a svelte site.
-    version_content: dict[str, Any] = (source if engine == "svelte" else ripple_spec) or {}
+    version_content: dict[str, Any] = (source if is_source_engine(engine) else ripple_spec) or {}
     await _promote_pocket_draft_to_published(
         pocket_id=pocket_id,
         workspace_id=workspace_id,
@@ -2435,7 +2449,9 @@ async def activate_site(
     # record, mirroring the live publish path (best-effort; versioning never gates
     # the deploy/activation).
     version_content: dict[str, Any] = (
-        inputs.get("source") if (inputs.get("engine") == "svelte") else inputs.get("ripple_spec")
+        inputs.get("source")
+        if is_source_engine(inputs.get("engine"))
+        else inputs.get("ripple_spec")
     ) or {}
     await _promote_pocket_draft_to_published(
         pocket_id=pocket_id,
@@ -2592,6 +2608,10 @@ async def apply_leaf_edits(
     # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
     # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
     pocket = await pockets_service.get(pocket_id, user_id)
+    # KEPT svelte-specific (not is_source_engine): the body below runs the DSV-5
+    # ``_split_svelte_source`` split and the SvelteKit leaf-edit CLI, both svelte-only.
+    # HE-9 widens THIS guard to html (via is_source_engine) in the same change that
+    # teaches the CLI the html editing lane, so guard and body widen together.
     if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
         raise ValidationError(
             "pocket.not_svelte_site",
@@ -2694,6 +2714,9 @@ async def get_native_artifact(
     # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
     # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
     pocket = await pockets_service.get(pocket_id, user_id)
+    # KEPT svelte-specific (not is_source_engine): this shadow-renders the SvelteKit
+    # ARMED build by reading ``.svelte-kit/cloudflare/index.html``. An html site's
+    # served artifact IS its source, so it never uses this SvelteKit render path.
     if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
         raise ValidationError(
             "pocket.not_svelte_site",
@@ -2820,6 +2843,9 @@ async def edit_svelte_component(
         # A missing component path is a NotFound (same contract as the full-rewrite
         # path, where set_svelte_source_file raises it) — not a silent create.
         pocket = await pockets_service.get(pocket_id, user_id)
+        # KEPT svelte-specific (not is_source_engine): edits a single named SvelteKit
+        # component by ``component_path`` and persists via ``set_svelte_source_file``.
+        # html has no per-component model — it edits by uid splice (HE-9), not here.
         if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(
             pocket.get("source"), dict
         ):
@@ -2978,7 +3004,7 @@ async def _ensure_pocket_draft(*, workspace_id: str, user_id: str, pocket_id: st
             return
         pocket = await pockets_service.get(pocket_id, user_id)
         engine = pocket.get("engine") or "ripple"
-        if engine == "svelte":
+        if is_source_engine(engine):
             content = pocket.get("source") if isinstance(pocket.get("source"), dict) else {}
         else:
             content = pocket.get("rippleSpec") if isinstance(pocket.get("rippleSpec"), dict) else {}
@@ -3033,7 +3059,7 @@ async def preview_pocket(
 
     # The pocket's CURRENT content for the engine — the fallback when the Branch
     # primitive has no draft row for this pocket yet.
-    if engine == "svelte":
+    if is_source_engine(engine):
         source = pocket.get("source")
         current = source if isinstance(source, dict) else None
     else:
@@ -3142,7 +3168,7 @@ async def audit_pocket(
 
     # The pocket's CURRENT content for the engine — the fallback when the Branch
     # primitive has no draft row for this pocket yet (mirrors preview_pocket).
-    if engine == "svelte":
+    if is_source_engine(engine):
         source = pocket.get("source")
         current: dict[str, Any] | None = source if isinstance(source, dict) else None
     else:
@@ -3205,7 +3231,7 @@ def _dynamic_content_envelope(pocket: dict[str, Any]) -> dict[str, Any]:
     engine-agnostic ``_is_dynamic`` / ``_dynamic_objects`` helpers can read the
     bindings off it without caring which engine produced it."""
     engine = pocket.get("engine") or "ripple"
-    key = "source" if engine == "svelte" else "rippleSpec"
+    key = content_key(engine)
     content = pocket.get(key)
     return content if isinstance(content, dict) else {}
 
