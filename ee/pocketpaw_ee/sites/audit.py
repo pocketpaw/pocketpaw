@@ -20,12 +20,21 @@
 # The judgment tier (copy quality / SEO wording via a small LLM pass) is DEFERRED
 # — see the TODO near the bottom. The deterministic checks stand alone and must
 # never depend on or be gated by a live model.
+#
+# Updated 2026-07-10 (HE-2 — canonical engine module): the "does this engine carry a
+# hand-written {path: contents} markup map?" checks (the source-map document scan,
+# the markup-shape a11y pass, the heading-structure pass) now route through
+# ``is_source_engine(engine)`` instead of ``== "svelte"``. These are markup-engine
+# capabilities, not svelte-brand facts — the ripple branch (a flattened rippleSpec
+# blob) is unchanged. Pure refactor, zero behaviour change for ripple/svelte.
 
 from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+from pocketpaw_ee.sites.engines import is_source_engine
 
 
 # ── Finding model ──────────────────────────────────────────────────────────────
@@ -67,7 +76,7 @@ def _documents(engine: str, content: Any) -> list[tuple[str, str]]:
       text-level checks (links, copy) can still scan. Markup-shape checks (img
       alt, h1 count) are svelte-only — a ripple site has no hand-written markup.
     """
-    if engine == "svelte" and isinstance(content, dict):
+    if is_source_engine(engine) and isinstance(content, dict):
         docs: list[tuple[str, str]] = []
         for path, body in content.items():
             if isinstance(path, str) and path.lower().endswith(_SCANNABLE_EXT):
@@ -429,14 +438,15 @@ def audit_pocket_site(*, engine: str, content: Any) -> list[dict[str, Any]]:
     counter: dict[str, int] = {}
     findings: list[Finding] = []
 
-    # Per-document checks (markup-shape a11y + links).
+    # Per-document checks (markup-shape a11y + links). a11y only applies to engines
+    # with hand-written markup (source-map engines); a ripple site has none.
     for file, html in docs:
-        if engine == "svelte":
+        if is_source_engine(engine):
             findings.extend(_check_a11y(file, html, counter))
         findings.extend(_check_links(file, html, counter))
 
-    # Page-wide checks (heading structure is svelte-only; SEO spans the shell).
-    if engine == "svelte":
+    # Page-wide checks (heading structure needs hand-written markup; SEO spans the shell).
+    if is_source_engine(engine):
         findings.extend(_check_h1(docs, counter))
     findings.extend(_check_seo(docs, counter))
 
