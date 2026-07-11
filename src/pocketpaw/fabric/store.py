@@ -174,6 +174,20 @@
 #   unscoped, so multi-tenant callers (the EE DELETE /fabric/links route and
 #   the fabric MCP link-delete tool) resolve the link through this scoped read
 #   first and refuse a cross-tenant id.
+# Updated: 2026-07-11 (self-serve-analysis S1) — transparent-analysis read engine
+#   on ``query``: when a FabricQuery carries ``group_by``/``aggregate`` (and the
+#   POCKETPAW_FABRIC_ANALYST flag is ON — otherwise FabricAnalystDisabledError,
+#   fail-loud), the query runs as a SQL GROUP BY over the ALREADY workspace-scoped
+#   + filtered set (scope-then-aggregate: the same WHERE the plain path builds,
+#   extracted into ``_flat_query_conditions``, is applied BEFORE grouping so a
+#   cross-workspace object can never enter a group total). Supports
+#   count/sum/avg/min/max (numeric folds CAST to REAL like the numeric filters),
+#   optional RangeBucket bucketing of a numeric group key (a fully-parameterized
+#   CASE chain), and value/key sort. The result carries ``aggregates``
+#   ({key, value} rows, paginated by limit/offset) plus human-readable ``steps``
+#   (QueryPlanStep — the ReasoningTrace contract). Plain queries are untouched
+#   (same SQL, no steps); aggregation composes with filters/linked_to but not
+#   ``path`` (rejected at the model).
 
 
 from __future__ import annotations
@@ -186,6 +200,7 @@ from typing import Any
 import aiosqlite
 
 from pocketpaw.fabric.models import (
+    FabricAnalystDisabledError,
     FabricLink,
     FabricObject,
     FabricQuery,
@@ -194,6 +209,7 @@ from pocketpaw.fabric.models import (
     ObjectType,
     PathHop,
     PropertyDef,
+    QueryPlanStep,
 )
 
 logger = logging.getLogger(__name__)
@@ -404,6 +420,197 @@ def _build_filter_conditions(filters: dict[str, Any]) -> tuple[list[str], list[A
                 conditions.append(f"json_extract(o.properties, ?) {sql_op} ?")
                 params.extend([path, value])
     return conditions, params
+
+
+def _flat_query_conditions(q: FabricQuery, workspace_id: str | None) -> tuple[list[str], list[Any]]:
+    """Build the flat (non-path) WHERE fragments + params for a FabricQuery.
+
+    Extracted from ``FabricStore.query`` (self-serve-analysis S1) so the plain
+    fetch path and the aggregation path share ONE condition builder — the
+    scope-then-aggregate invariant holds by construction, not by parallel
+    maintenance. Covers type constraint, single-hop ``linked_to``/``link_type``,
+    property filters (``_build_filter_conditions``), and the W4a tenancy scope
+    (``_workspace_scope``). Every value is a bound ``?`` parameter.
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+
+    if q.type_id:
+        conditions.append("o.type_id = ?")
+        params.append(q.type_id)
+    elif q.type_name:
+        conditions.append("LOWER(o.type_name) = LOWER(?)")
+        params.append(q.type_name)
+
+    if q.linked_to:
+        if q.link_type:
+            link_cond = (
+                "o.id IN ("
+                "SELECT to_object_id FROM fabric_links"
+                " WHERE from_object_id = ? AND link_type = ? "
+                "UNION "
+                "SELECT from_object_id FROM fabric_links"
+                " WHERE to_object_id = ? AND link_type = ?"
+                ")"
+            )
+            conditions.append(link_cond)
+            params.extend([q.linked_to, q.link_type, q.linked_to, q.link_type])
+        else:
+            link_cond = (
+                "o.id IN ("
+                "SELECT to_object_id FROM fabric_links WHERE from_object_id = ? "
+                "UNION "
+                "SELECT from_object_id FROM fabric_links WHERE to_object_id = ?"
+                ")"
+            )
+            conditions.append(link_cond)
+            params.extend([q.linked_to, q.linked_to])
+
+    # Property filters against the JSON properties bag. Kept as a localized
+    # block (see _build_filter_conditions) so concurrent work on this method
+    # — e.g. workspace_id scoping — merges without touching this logic.
+    if q.filters:
+        filter_conditions, filter_params = _build_filter_conditions(q.filters)
+        conditions.extend(filter_conditions)
+        params.extend(filter_params)
+
+    # Tenancy scope (W4a) — an ADDITIONAL condition ANDed alongside the W0d
+    # property filters above, never a replacement for them. Restricts the
+    # result set to the caller's workspace plus legacy NULL-workspace rows.
+    ws_cond, ws_params = _workspace_scope(workspace_id, column="o.workspace_id")
+    if ws_cond:
+        conditions.append(ws_cond)
+        params.extend(ws_params)
+
+    return conditions, params
+
+
+# Aggregate function whitelist (self-serve-analysis S1): FabricQuery.aggregate
+# -> the SQL function name. Mirrors _FILTER_OPS — user input selects FROM this
+# fixed map and never reaches the SQL text itself.
+_AGG_FN_SQL: dict[str, str] = {
+    "sum": "SUM",
+    "avg": "AVG",
+    "min": "MIN",
+    "max": "MAX",
+}
+
+# Sort whitelist for the aggregate output rows. ``val``/``grp`` are the fixed
+# SELECT aliases; the default (sort=None) is value descending — "biggest group
+# first", the order an analyst reads.
+_AGG_SORT_SQL: dict[str, str] = {
+    "value_desc": "val DESC",
+    "value_asc": "val ASC",
+    "key_asc": "grp ASC",
+    "key_desc": "grp DESC",
+}
+
+
+def _group_key_expr(q: FabricQuery) -> tuple[str, list[Any]]:
+    """SQL expression + bound params for the GROUP BY key (S1).
+
+    Plain grouping extracts the raw JSON property value. With ``q.ranges`` the
+    numeric value (CAST to REAL, same affinity rule as numeric filters) is
+    bucketed by a CASE chain — bounds AND labels are bound ``?`` params, and a
+    value matching no bucket (or a missing property, which CASTs to NULL) falls
+    to ELSE NULL and is dropped by the caller's HAVING.
+    """
+    path = f"$.{q.group_by}"
+    if not q.ranges:
+        return "json_extract(o.properties, ?)", [path]
+
+    cast = "CAST(json_extract(o.properties, ?) AS REAL)"
+    whens: list[str] = []
+    params: list[Any] = []
+    for bucket in q.ranges:
+        conds: list[str] = []
+        # A NULL property must never match an open-ended bucket by accident:
+        # NULL comparisons yield NULL (not-matched) in SQLite, so the bound
+        # checks alone are safe — no explicit IS NOT NULL needed.
+        if bucket.min is not None:
+            conds.append(f"{cast} >= ?")
+            params.extend([path, bucket.min])
+        if bucket.max is not None:
+            conds.append(f"{cast} < ?")
+            params.extend([path, bucket.max])
+        whens.append(f"WHEN {' AND '.join(conds)} THEN ?")
+        params.append(bucket.resolved_label())
+    return f"CASE {' '.join(whens)} ELSE NULL END", params
+
+
+def _aggregate_expr(q: FabricQuery) -> tuple[str, list[Any]]:
+    """SQL expression + bound params for the aggregate value (S1).
+
+    ``count`` counts the rows in each group; the numeric folds read
+    ``aggregate_field`` CAST to REAL so "sum of price" adds numbers even when a
+    connector stored them as JSON strings (the same affinity rule the numeric
+    filter operators use). The function name comes from ``_AGG_FN_SQL``.
+    """
+    if q.aggregate == "count":
+        return "COUNT(*)", []
+    fn = _AGG_FN_SQL[q.aggregate or ""]
+    return f"{fn}(CAST(json_extract(o.properties, ?) AS REAL))", [f"$.{q.aggregate_field}"]
+
+
+def _describe_filters(filters: dict[str, Any]) -> str:
+    """Human-readable one-line summary of a FabricQuery.filters bag (S1 steps)."""
+    parts: list[str] = []
+    for key, raw_val in filters.items():
+        if isinstance(raw_val, dict):
+            for op, value in raw_val.items():
+                parts.append(f"{key} {op} {value}")
+        else:
+            parts.append(f"{key} = {raw_val}")
+    return " and ".join(parts)
+
+
+def _build_plan_steps(q: FabricQuery, *, total: int, group_count: int) -> list[QueryPlanStep]:
+    """The human-readable reasoning trace for an aggregation run (S1).
+
+    Emits the ``{title, detail?, status?}`` QueryPlanStep contract ripple's
+    ReasoningTrace consumes: what was filtered/scanned (with the matched-object
+    count), how it was grouped (property or range buckets), and what was
+    computed. Every step is ``status="done"`` — the read engine reports a
+    finished run; "thinking" is for streaming surfaces.
+    """
+    type_label = q.type_name or q.type_id or "objects"
+    steps: list[QueryPlanStep] = []
+    if q.filters:
+        steps.append(
+            QueryPlanStep(
+                title=f"Filtered {type_label} where {_describe_filters(q.filters)}",
+                detail=f"{total} matching objects",
+                status="done",
+            )
+        )
+    else:
+        steps.append(
+            QueryPlanStep(
+                title=f"Scanned {type_label}",
+                detail=f"{total} objects",
+                status="done",
+            )
+        )
+    groups_label = f"{group_count} group{'s' if group_count != 1 else ''}"
+    grouped_detail = (
+        f"{len(q.ranges)} value range{'s' if len(q.ranges) != 1 else ''}"
+        if q.ranges
+        else groups_label
+    )
+    steps.append(
+        QueryPlanStep(title=f"Grouped by {q.group_by}", detail=grouped_detail, status="done")
+    )
+    computed = f"Computed {q.aggregate}"
+    if q.aggregate_field:
+        computed += f" of {q.aggregate_field}"
+    steps.append(
+        QueryPlanStep(
+            title=computed,
+            detail=f"{groups_label} from {total} objects",
+            status="done",
+        )
+    )
+    return steps
 
 
 def _looks_numeric(value: Any) -> bool:
@@ -1310,57 +1517,13 @@ class FabricStore:
         await self._ensure_schema()
         if q.path:
             return await self._query_path(q, workspace_id)
+        if q.group_by:
+            # Self-serve-analysis S1: aggregation runs over the SAME flat
+            # scoped+filtered WHERE the plain path builds (scope-then-aggregate).
+            # Flag-gated inside — a dark feature rejects fail-loud.
+            return await self._query_aggregate(q, workspace_id)
 
-        conditions: list[str] = []
-        params: list[Any] = []
-
-        if q.type_id:
-            conditions.append("o.type_id = ?")
-            params.append(q.type_id)
-        elif q.type_name:
-            conditions.append("LOWER(o.type_name) = LOWER(?)")
-            params.append(q.type_name)
-
-        if q.linked_to:
-            if q.link_type:
-                link_cond = (
-                    "o.id IN ("
-                    "SELECT to_object_id FROM fabric_links"
-                    " WHERE from_object_id = ? AND link_type = ? "
-                    "UNION "
-                    "SELECT from_object_id FROM fabric_links"
-                    " WHERE to_object_id = ? AND link_type = ?"
-                    ")"
-                )
-                conditions.append(link_cond)
-                params.extend([q.linked_to, q.link_type, q.linked_to, q.link_type])
-            else:
-                link_cond = (
-                    "o.id IN ("
-                    "SELECT to_object_id FROM fabric_links WHERE from_object_id = ? "
-                    "UNION "
-                    "SELECT from_object_id FROM fabric_links WHERE to_object_id = ?"
-                    ")"
-                )
-                conditions.append(link_cond)
-                params.extend([q.linked_to, q.linked_to])
-
-        # Property filters against the JSON properties bag. Kept as a localized
-        # block (see _build_filter_conditions) so concurrent work on this method
-        # — e.g. workspace_id scoping — merges without touching this logic.
-        if q.filters:
-            filter_conditions, filter_params = _build_filter_conditions(q.filters)
-            conditions.extend(filter_conditions)
-            params.extend(filter_params)
-
-        # Tenancy scope (W4a) — an ADDITIONAL condition ANDed alongside the W0d
-        # property filters above, never a replacement for them. Restricts the
-        # result set to the caller's workspace plus legacy NULL-workspace rows.
-        ws_cond, ws_params = _workspace_scope(workspace_id, column="o.workspace_id")
-        if ws_cond:
-            conditions.append(ws_cond)
-            params.extend(ws_params)
-
+        conditions, params = _flat_query_conditions(q, workspace_id)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
         await self._ensure_schema()
@@ -1382,6 +1545,76 @@ class FabricStore:
                 objects = [self._row_to_object(row) async for row in cur]
 
         return FabricQueryResult(objects=objects, total=total)
+
+    async def _query_aggregate(self, q: FabricQuery, workspace_id: str | None) -> FabricQueryResult:
+        """Run a flag-gated SQL GROUP BY aggregation (self-serve-analysis S1).
+
+        Contract:
+
+        - GATE: requires the ``fabric_analyst`` settings flag
+          (POCKETPAW_FABRIC_ANALYST). Off -> :class:`FabricAnalystDisabledError`
+          (fail-loud; the EE router maps it to 422 ``fabric.analyst_disabled``).
+        - SCOPE-THEN-AGGREGATE: the WHERE is built by the same
+          ``_flat_query_conditions`` the plain path uses — tenancy scope (W4a)
+          and property filters constrain the row set BEFORE grouping, so a
+          cross-workspace object can never be counted into a group.
+        - GROUPING: plain ``group_by`` groups on the raw JSON property value;
+          with ``q.ranges`` a fully-parameterized CASE chain buckets the
+          numeric value (min inclusive, max exclusive; labels are bound
+          params). Rows whose group key resolves to NULL (missing property, or
+          a value outside every bucket) are dropped via HAVING.
+        - AGGREGATE: ``count`` = COUNT(*); sum/avg/min/max fold
+          ``aggregate_field`` CAST to REAL (same numeric affinity rule as the
+          numeric filter operators). Function names come from a fixed internal
+          map — user input never reaches the SQL text; property names ride as
+          bound ``$.name`` json_extract path params.
+        - OUTPUT: ``aggregates`` = one ``{"key", "value"}`` dict per group,
+          ordered by ``q.sort`` (default: value descending) and paginated by
+          ``limit``/``offset``; ``objects`` is empty (this is an analysis read,
+          not a fetch); ``total`` = scoped+filtered object count; ``steps`` =
+          the human-readable reasoning trace (:class:`QueryPlanStep`).
+        """
+        from pocketpaw.config import get_settings
+
+        if not get_settings().fabric_analyst:
+            raise FabricAnalystDisabledError(
+                "Fabric self-serve analysis is disabled: aggregation queries "
+                "(group_by/aggregate) require the POCKETPAW_FABRIC_ANALYST "
+                "flag. Plain queries remain available."
+            )
+
+        # The model validator guarantees: group_by set, aggregate normalized
+        # (count default), aggregate_field present iff sum/avg/min/max, no path.
+        assert q.group_by is not None and q.aggregate is not None
+
+        conditions, params = _flat_query_conditions(q, workspace_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        group_expr, group_params = _group_key_expr(q)
+        agg_expr, agg_params = _aggregate_expr(q)
+        order_sql = _AGG_SORT_SQL[q.sort or "value_desc"]
+
+        sql = (
+            f"SELECT {group_expr} AS grp, {agg_expr} AS val"
+            f" FROM fabric_objects o {where}"
+            " GROUP BY grp HAVING grp IS NOT NULL"
+            f" ORDER BY {order_sql} LIMIT ? OFFSET ?"
+        )
+
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT COUNT(*) as cnt FROM fabric_objects o {where}", params
+            ) as cur:
+                row = await cur.fetchone()
+                total = row["cnt"] if row else 0
+            async with db.execute(
+                sql, [*group_params, *agg_params, *params, q.limit, q.offset]
+            ) as cur:
+                aggregates = [{"key": r["grp"], "value": r["val"]} async for r in cur]
+
+        steps = _build_plan_steps(q, total=total, group_count=len(aggregates))
+        return FabricQueryResult(objects=[], total=total, aggregates=aggregates, steps=steps)
 
     async def _query_path(self, q: FabricQuery, workspace_id: str | None) -> FabricQueryResult:
         """Walk ``q.path`` server-side and return the terminal-hop objects.
