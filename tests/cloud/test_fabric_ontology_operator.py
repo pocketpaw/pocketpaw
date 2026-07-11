@@ -13,6 +13,10 @@
 #      migrates existing objects, an additive property with a default is
 #      backfilled, and a property dropped from the schema leaves its orphaned key
 #      on existing objects (the documented deferred-removal behaviour).
+# Updated: 2026-07-11 (feat/paw-cli, C2) — added DELETE /fabric/links/{id}
+#      coverage: a member deletes their own link (204, then 404 on the gone id),
+#      and a link stamped with another workspace 404s AND survives (the in-row
+#      scope guard behind the scoped get_link).
 #
 # The store-level tests drive the real FabricStore against a tmp SQLite file; the
 # HTTP tests wire the real EE router + real RBAC (fabric.read/write/admin) with an
@@ -464,3 +468,63 @@ class TestWriteTimeEnforcementOverHTTP:
             json={"from_id": a["id"], "to_id": b["id"], "link_type": "anything_goes"},
         )
         assert resp.status_code == 201, resp.text
+
+
+# ---------------------------------------------------------------------------
+# HTTP: DELETE /fabric/links/{id} (feat/paw-cli, C2 — link CRUD completion)
+# ---------------------------------------------------------------------------
+
+
+class TestLinkDelete:
+    def test_member_deletes_own_link_then_404(self, member_client: TestClient) -> None:
+        # Members hold fabric.write — the same tier that creates links.
+        t = member_client.post(
+            "/api/v1/fabric/types", json={"name": "Node", "properties": []}
+        ).json()
+        a = member_client.post(
+            "/api/v1/fabric/objects", json={"type_id": t["id"], "properties": {}}
+        ).json()
+        b = member_client.post(
+            "/api/v1/fabric/objects", json={"type_id": t["id"], "properties": {}}
+        ).json()
+        lnk = member_client.post(
+            "/api/v1/fabric/links",
+            json={"from_id": a["id"], "to_id": b["id"], "link_type": "knows"},
+        ).json()
+
+        resp = member_client.delete(f"/api/v1/fabric/links/{lnk['id']}")
+        assert resp.status_code == 204, resp.text
+
+        listing = member_client.get("/api/v1/fabric/links")
+        assert listing.json()["total"] == 0
+
+        # Idempotence boundary: the id is gone now — 404, not a second delete.
+        again = member_client.delete(f"/api/v1/fabric/links/{lnk['id']}")
+        assert again.status_code == 404
+
+    def test_cross_tenant_link_404s_and_survives(
+        self, member_client: TestClient
+    ) -> None:
+        # A link stamped with ANOTHER workspace inside the same store file must
+        # 404 (no existence leak) and must NOT be deleted — the in-row scope
+        # guard, independent of the physical per-workspace file split.
+        import asyncio
+
+        import pocketpaw.stores as stores
+
+        store = stores.get_fabric_store(workspace_id="ws-test")
+
+        async def _seed() -> str:
+            t = await store.define_type(name="Alien", properties=[], workspace_id="other-ws")
+            a = await store.create_object(t.id, {}, workspace_id="other-ws")
+            b = await store.create_object(t.id, {}, workspace_id="other-ws")
+            lnk = await store.link(a.id, b.id, "knows", workspace_id="other-ws")
+            return lnk.id
+
+        link_id = asyncio.run(_seed())
+
+        resp = member_client.delete(f"/api/v1/fabric/links/{link_id}")
+        assert resp.status_code == 404
+
+        survived = asyncio.run(store.get_link(link_id))  # unscoped read
+        assert survived is not None
