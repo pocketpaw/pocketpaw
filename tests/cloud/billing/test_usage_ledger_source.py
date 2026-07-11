@@ -17,6 +17,10 @@
 # Created 2026-06-29 (fix/billing-usage-ledger-source): RED anchor for
 # re-sourcing get_workspace_usage from the credit ledger instead of the LiteLLM
 # proxy daily-activity.
+# Updated 2026-07-11 (feat/llm-cost-attribution): ``_seed_spend`` gained a
+# ``tokens`` param (stamps ``ref.total_tokens``) and a case proves the usage graph
+# surfaces REAL per-model token volume end-to-end (token-bearing debits summed, a
+# legacy debit adding 0) instead of the former hardcoded 0.
 
 from __future__ import annotations
 
@@ -39,14 +43,19 @@ async def _seed_spend(
     credits: int,
     idem: str,
     cause: str = "compute_spend",
+    tokens: int | None = None,
 ) -> None:
     """Insert one APPLIED debit ledger entry stamped on a controlled date.
 
     Mirrors what ``metering.service.bill_run`` writes: a negative ``amount_delta``
-    under ``cause`` with the run's ``model`` in ``ref``. Inserts first (the Insert
-    event forces createdAt=now), then back-dates ``createdAt`` via the raw
-    collection so the (day, model) bucketing can be asserted.
+    under ``cause`` with the run's ``model`` (and ``total_tokens`` when given) in
+    ``ref``. Inserts first (the Insert event forces createdAt=now), then back-dates
+    ``createdAt`` via the raw collection so the (day, model) bucketing can be
+    asserted.
     """
+    ref: dict = {"model": model}
+    if tokens is not None:
+        ref["total_tokens"] = tokens
     entry = CreditLedgerEntry(
         workspace=ws,
         kind="spend",
@@ -55,7 +64,7 @@ async def _seed_spend(
         applied=True,
         conditional=False,
         cause=cause,
-        ref={"model": model},
+        ref=ref,
         idempotency_key=idem,
     )
     await entry.insert()
@@ -114,6 +123,25 @@ async def test_usage_includes_litellm_spend_cause_after_cutover(mongo_db):
 
     assert result.models == [SONNET]
     assert result.total_credits == 20  # 8 (compute_spend) + 12 (litellm_spend)
+
+
+async def test_usage_surfaces_real_token_volume(mongo_db):
+    """Per-model ``tokens`` reflects the real volume the ledger now carries (summed
+    from each debit's ``ref.total_tokens``), no longer a hardcoded 0."""
+    assert await provisioning.get_tenant_key(WS) is None
+
+    # Two token-bearing runs for the same (day, model) + one legacy run (no
+    # total_tokens) whose credits still count but adds 0 tokens.
+    await _seed_spend(WS, day=(2026, 6, 1), model=SONNET, credits=10, idem="run:r1", tokens=1500)
+    await _seed_spend(WS, day=(2026, 6, 1), model=SONNET, credits=5, idem="run:r2", tokens=500)
+    await _seed_spend(WS, day=(2026, 6, 1), model=SONNET, credits=2, idem="run:r3")  # legacy
+
+    result = await usage.get_workspace_usage(WS, start_date="2026-06-01", end_date="2026-06-01")
+
+    stats = result.buckets[0].by_model[SONNET]
+    assert stats.tokens == 2000  # 1500 + 500 + 0 (legacy)
+    assert stats.credits == 17  # 10 + 5 + 2 — credits unaffected by tokens
+    assert stats.requests == 3
 
 
 async def test_usage_excludes_non_spend_causes(mongo_db):

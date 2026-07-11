@@ -46,6 +46,14 @@
 # Updated 2026-06-24 (B3 review fix): ``bill_run`` no longer does
 # ``run_doc.billed=True; run_doc.save()`` directly (a foreign cross-entity write).
 # It now delegates the flag write to ``chat.runs.service.mark_billed(run_id)``.
+# Updated 2026-07-11 (feat/llm-cost-attribution): ``bill_run`` now records the run's
+# ``total_tokens`` on the debit ``ref`` (alongside cost/source/model). The token
+# volume is a REAL per-run figure the backend reports onto ``ChatRunDoc.usage`` in
+# every metering mode (it is NOT the blocked LiteLLM SpendLogs path), so persisting
+# it lets the ledger-sourced usage graph surface real token volume instead of a
+# hardcoded 0 — the follow-up the usage-graph module header named. Purely additive
+# ledger metadata: no change to the debited amount, the idempotency key, or the
+# exactly-once guard; legacy entries with no ``ref.total_tokens`` simply read 0.
 
 from __future__ import annotations
 
@@ -72,6 +80,27 @@ def _int(value: Any) -> int:
     except (TypeError, ValueError):
         return 0
     return n if n > 0 else 0
+
+
+def _total_tokens(usage: dict[str, Any] | None) -> int:
+    """Total tokens a run consumed, from its ``usage`` dict.
+
+    This is the REAL per-run token volume the backend reports onto
+    ``ChatRunDoc.usage`` (via the ``token_usage`` event) in EVERY metering mode —
+    NOT the blocked LiteLLM SpendLogs path. Prefers an explicit ``total_tokens``
+    the backend supplied; otherwise sums the components (input + output + cached —
+    cached_input are real tokens, so they count, matching the runtime
+    usage_tracker's own total). Returns 0 for empty / malformed usage.
+    """
+    usage = usage or {}
+    explicit = _int(usage.get("total_tokens"))
+    if explicit > 0:
+        return explicit
+    return (
+        _int(usage.get("input_tokens"))
+        + _int(usage.get("output_tokens"))
+        + _int(usage.get("cached_input_tokens"))
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +199,10 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
     card = rate_card if rate_card is not None else load_rate_card()
     cost = resolve_cost(run_doc.usage)
     credits = card.to_credits(cost.cost_usd)
+    # Real per-run token volume (see ``_total_tokens``) — stamped on the debit ref
+    # so the ledger-sourced usage graph can surface it. Mode-agnostic; never the
+    # blocked LiteLLM path.
+    tokens = _total_tokens(run_doc.usage)
 
     workspace = run_doc.workspace
     run_id = run_doc.run_id
@@ -185,6 +218,7 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
                 "cost_usd": cost.cost_usd,
                 "cost_source": cost.source,
                 "model": cost.model,
+                "total_tokens": tokens,
             },
             allow_negative=True,
         )
