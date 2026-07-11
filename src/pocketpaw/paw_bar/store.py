@@ -1,4 +1,11 @@
 # ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
+# Updated: 2026-07-11 (W4a tenancy seam) — paw_bar_widgets gains an in-row
+#   workspace_id column + index and a _widget_workspace_scope helper (verbatim
+#   clone of _decision_workspace_scope: legacy ''/NULL rows always match, None
+#   means unscoped). get/list/update_spec/rotate_token/delete_widget take an
+#   optional workspace_id and scope both reads and mutations to that tenant —
+#   another tenant's widget id resolves to None / mutates nothing. Hard schema
+#   change, no migration: the widget has zero deployments.
 # Updated: 2026-07-08 — Renamed widget "Paw Print" → "Paw Bar" (PawBarStore, tables
 #   paw_print_*→paw_bar_*, db paw_print.db→paw_bar.db). Hard-rename — widget has zero
 #   deployments, so no persisted rows to migrate. The separate one-word audit feed
@@ -45,6 +52,7 @@ CREATE TABLE IF NOT EXISTS paw_bar_widgets (
     id TEXT PRIMARY KEY,
     pocket_id TEXT NOT NULL,
     owner TEXT NOT NULL,
+    workspace_id TEXT DEFAULT '',
     name TEXT DEFAULT '',
     spec TEXT NOT NULL,
     allowed_domains TEXT DEFAULT '[]',
@@ -84,6 +92,7 @@ CREATE TABLE IF NOT EXISTS paw_bar_decisions (
 
 CREATE INDEX IF NOT EXISTS idx_pp_widgets_pocket ON paw_bar_widgets(pocket_id);
 CREATE INDEX IF NOT EXISTS idx_pp_widgets_owner ON paw_bar_widgets(owner);
+CREATE INDEX IF NOT EXISTS idx_pp_widgets_workspace ON paw_bar_widgets(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_pp_events_widget_ts
     ON paw_bar_events(widget_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_pp_events_customer
@@ -103,6 +112,21 @@ def _decision_workspace_scope(workspace_id: str | None) -> tuple[str | None, lis
     SQL NULL when no workspace was set, so a legacy/global row is matched on
     ``= ''`` as well as ``IS NULL``. Returns ``(None, [])`` when ``workspace_id``
     is ``None`` — no scoping, fully backward-compatible.
+    """
+    if workspace_id is None:
+        return None, []
+    return "(workspace_id = ? OR workspace_id = '' OR workspace_id IS NULL)", [workspace_id]
+
+
+def _widget_workspace_scope(workspace_id: str | None) -> tuple[str | None, list[Any]]:
+    """Build the tenancy WHERE fragment + bound params for a scoped widget read.
+
+    Verbatim clone of :func:`_decision_workspace_scope` for the widgets table
+    (W4a — in-row tenancy). Widget rows store ``workspace_id`` as an EMPTY
+    STRING (the model default) rather than SQL NULL when no workspace was set,
+    so a legacy/global row is matched on ``= ''`` as well as ``IS NULL``.
+    Returns ``(None, [])`` when ``workspace_id`` is ``None`` — no scoping,
+    fully backward-compatible.
     """
     if workspace_id is None:
         return None, []
@@ -134,14 +158,15 @@ class PawBarStore:
         async with self._conn() as db:
             await db.execute(
                 "INSERT INTO paw_bar_widgets"
-                " (id, pocket_id, owner, name, spec, allowed_domains,"
+                " (id, pocket_id, owner, workspace_id, name, spec, allowed_domains,"
                 " access_token, rate_limit_per_min, per_customer_limit_per_min,"
                 " event_mapping, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     widget.id,
                     widget.pocket_id,
                     widget.owner,
+                    widget.workspace_id,
                     widget.name,
                     widget.spec.model_dump_json(),
                     json.dumps(widget.allowed_domains),
@@ -158,19 +183,28 @@ class PawBarStore:
             await db.commit()
         return widget
 
-    async def get_widget(self, widget_id: str) -> PawBarWidget | None:
+    async def get_widget(
+        self, widget_id: str, workspace_id: str | None = None
+    ) -> PawBarWidget | None:
+        ws_cond, ws_params = _widget_workspace_scope(workspace_id)
+        sql = "SELECT * FROM paw_bar_widgets WHERE id = ?"
+        params: list[Any] = [widget_id]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
         await self._ensure_schema()
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT * FROM paw_bar_widgets WHERE id = ?",
-                (widget_id,),
-            ) as cur:
+            async with db.execute(sql, params) as cur:
                 row = await cur.fetchone()
                 return self._row_to_widget(row) if row else None
 
     async def list_widgets(
-        self, pocket_id: str | None = None, owner: str | None = None, limit: int = 100
+        self,
+        pocket_id: str | None = None,
+        owner: str | None = None,
+        limit: int = 100,
+        workspace_id: str | None = None,
     ) -> list[PawBarWidget]:
         conditions: list[str] = []
         params: list[Any] = []
@@ -180,6 +214,10 @@ class PawBarStore:
         if owner:
             conditions.append("owner = ?")
             params.append(owner)
+        ws_cond, ws_params = _widget_workspace_scope(workspace_id)
+        if ws_cond:
+            conditions.append(ws_cond)
+            params.extend(ws_params)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
 
@@ -192,40 +230,53 @@ class PawBarStore:
             ) as cur:
                 return [self._row_to_widget(row) async for row in cur]
 
-    async def update_spec(self, widget_id: str, spec: PawBarSpec) -> PawBarWidget | None:
-        existing = await self.get_widget(widget_id)
+    async def update_spec(
+        self, widget_id: str, spec: PawBarSpec, workspace_id: str | None = None
+    ) -> PawBarWidget | None:
+        existing = await self.get_widget(widget_id, workspace_id=workspace_id)
         if existing is None:
             return None
+        ws_cond, ws_params = _widget_workspace_scope(workspace_id)
+        sql = "UPDATE paw_bar_widgets SET spec = ?, updated_at = ? WHERE id = ?"
+        params: list[Any] = [spec.model_dump_json(), datetime.now().isoformat(), widget_id]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
         await self._ensure_schema()
         async with self._conn() as db:
-            await db.execute(
-                "UPDATE paw_bar_widgets SET spec = ?, updated_at = ? WHERE id = ?",
-                (spec.model_dump_json(), datetime.now().isoformat(), widget_id),
-            )
+            await db.execute(sql, params)
             await db.commit()
-        return await self.get_widget(widget_id)
+        return await self.get_widget(widget_id, workspace_id=workspace_id)
 
-    async def rotate_token(self, widget_id: str) -> PawBarWidget | None:
-        existing = await self.get_widget(widget_id)
+    async def rotate_token(
+        self, widget_id: str, workspace_id: str | None = None
+    ) -> PawBarWidget | None:
+        existing = await self.get_widget(widget_id, workspace_id=workspace_id)
         if existing is None:
             return None
         new_token = _gen_token()
+        ws_cond, ws_params = _widget_workspace_scope(workspace_id)
+        sql = "UPDATE paw_bar_widgets SET access_token = ?, updated_at = ? WHERE id = ?"
+        params: list[Any] = [new_token, datetime.now().isoformat(), widget_id]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
         await self._ensure_schema()
         async with self._conn() as db:
-            await db.execute(
-                "UPDATE paw_bar_widgets SET access_token = ?, updated_at = ? WHERE id = ?",
-                (new_token, datetime.now().isoformat(), widget_id),
-            )
+            await db.execute(sql, params)
             await db.commit()
-        return await self.get_widget(widget_id)
+        return await self.get_widget(widget_id, workspace_id=workspace_id)
 
-    async def delete_widget(self, widget_id: str) -> bool:
+    async def delete_widget(self, widget_id: str, workspace_id: str | None = None) -> bool:
+        ws_cond, ws_params = _widget_workspace_scope(workspace_id)
+        sql = "DELETE FROM paw_bar_widgets WHERE id = ?"
+        params: list[Any] = [widget_id]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
         await self._ensure_schema()
         async with self._conn() as db:
-            cur = await db.execute(
-                "DELETE FROM paw_bar_widgets WHERE id = ?",
-                (widget_id,),
-            )
+            cur = await db.execute(sql, params)
             await db.commit()
             return (cur.rowcount or 0) > 0
 
@@ -445,6 +496,7 @@ class PawBarStore:
             id=row["id"],
             pocket_id=row["pocket_id"],
             owner=row["owner"],
+            workspace_id=row["workspace_id"] or "",
             name=row["name"] or "",
             spec=spec,
             allowed_domains=raw_domains,
