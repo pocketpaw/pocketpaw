@@ -1,6 +1,21 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-07-11 (FST-8 — divergence report + docs): Refreshed the
+    ``fabric_source_truth_mode`` Field description — shadow/enforce semantics
+    SHIPPED in FST-3..7 (the FST-1 "RESERVED / INERT" wording was stale):
+    shadow records statements + divergence lines while the cache stays LWW,
+    enforce hands the cache to the trust-ladder resolver, and the flip to
+    enforce is gated by ``python -m pocketpaw.fabric.divergence_report``.
+    Description text only — no behavioral change.
+  - 2026-07-10 (FST-1 — Fabric source-truth schema): Added
+    ``fabric_source_truth_mode`` (Literal off|shadow|enforce, default 'off';
+    POCKETPAW_FABRIC_SOURCE_TRUTH_MODE) — the three-position rollout switch for
+    the Fabric source-truth chain, mirroring the ``litellm_spend_mode``
+    pattern. INERT in FST-1: no code path reads it yet; only the
+    fabric_statements/fabric_sources schema + append-only store CRUD exist.
+    'off' is byte-for-byte today's behavior (the flat properties dict is the
+    only read path); shadow/enforce semantics land in later FST slices.
   - 2026-07-02 (feat/judge-shadow-1168): Added the LLM-as-judge SHADOW settings
     (J-1, issue #1168) — ``deep_work_verify_judge_shadow_enabled`` (default
     False; when True AND deep_work_verify_loop_enabled is on, every completing
@@ -1912,6 +1927,31 @@ class Settings(BaseSettings):
             "resolved before flipping to 'live'. 1 credit == $0.01, so the default "
             "10 ≈ $0.10 of tolerated per-tenant-per-window drift (rounding noise). "
             "Set via POCKETPAW_LITELLM_RECONCILE_GAP_THRESHOLD_CREDITS."
+        ),
+    )
+    fabric_source_truth_mode: Literal["off", "shadow", "enforce"] = Field(
+        default="off",
+        description=(
+            "Rollout mode for the Fabric source-truth chain (FST). Three-position "
+            "switch, mirroring litellm_spend_mode:\n"
+            "  * 'off'     (default) — byte-for-byte pre-FST behavior: pure "
+            "last-writer-wins; nothing reads or writes the fabric_statements / "
+            "fabric_sources provenance tables; the flat FabricObject.properties "
+            "dict is the only read path.\n"
+            "  * 'shadow'  — provenance statements are recorded at every merge "
+            "site and one grep-stable divergence line is logged per "
+            "statement-producing property; the cache still takes the LWW value "
+            "(the trust-ladder resolver runs advisory-only) and keeps serving "
+            "every read.\n"
+            "  * 'enforce' — the resolver's winner owns the cache: a lower-trust "
+            "write no longer lands in the flat properties dict; the losing claim "
+            "is recorded as a statement, not dropped.\n"
+            "Flipping back to 'off' is always safe: reads serve the last-resolved "
+            "cache, LWW resumes, statement history stays on disk. Gate the flip "
+            "to 'enforce' with the FST-8 divergence report (python -m "
+            "pocketpaw.fabric.divergence_report <logfile>) — target ZERO "
+            "unexplained divergences. Set via "
+            "POCKETPAW_FABRIC_SOURCE_TRUTH_MODE."
         ),
     )
     site_pending_alert_hours: float = Field(

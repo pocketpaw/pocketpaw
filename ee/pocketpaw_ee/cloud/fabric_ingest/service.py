@@ -11,6 +11,40 @@
 #   pinned via the mapping's new optional type_id). Behavior note inherited
 #   from the canonical loop: a mapped field absent from a document projects as
 #   None (the mirror reflects the source) rather than being skipped.
+# Updated: 2026-07-10 (FST-4 — SHADOW mode at merge site 3) — the mirror now
+#   threads its TRUE provenance through ingest_records' new keyword params:
+#   writer_class="mirror" (a Firestore mirror is not a primary connector —
+#   the trust ladder ranks connector > mirror), source_document_uri = the
+#   full Firestore doc path (per-record, via the existing _DOC_PATH_KEY
+#   sentinel), and observed_at = the best available SOURCE time per doc
+#   (via the new _OBSERVED_AT_KEY sentinel — see _doc_observed_at for the
+#   per-field audit: cursor_field value first, snapshot update_time second,
+#   ingest-time default when neither parses). Only the shadow statements are
+#   affected; with fabric_source_truth_mode 'off' (default) the kwargs are
+#   inert and the mirror's writes are byte-for-byte unchanged.
+# Updated: 2026-07-10 (FST-5 — ENFORCE at merge site 3, no code change) —
+#   enforce flows through this worker automatically because the update path
+#   delegates to store.update_object (via ingest_records): tracked properties
+#   land in the cache as the resolver's winner, untracked keep LWW. Ruling on
+#   the field-map collapse in _mirror_docs (two Firestore fields mapping to
+#   ONE property → the LAST mapping wins inside the dict comprehension): it
+#   STAYS as-is. The collapse happens BEFORE the store write and is
+#   WITHIN-SOURCE — one document from one source deciding which of its own
+#   fields feeds a property is a mapping-configuration concern, not a trust
+#   conflict between sources, so the source-truth chain has nothing to
+#   arbitrate there. Proven by
+#   tests/cloud/fabric_ingest/test_fabric_ingest_enforce.py.
+# Updated: 2026-07-10 (FST-6 — the conflict lifecycle: post-ingest stewardship
+#   sweep) — run_ingest_sweep now ends with a best-effort per-workspace call to
+#   fabric_conflicts.sweep_conflicts_to_proposals: every workspace the ingest
+#   touched gets its open un-rankable conflicts staged as Instinct stewardship
+#   proposals. THIS is the FST-6 sweep wiring (the lightest honest trigger):
+#   conflicts are born at the merge sites this worker drives, so after-ingest
+#   is the natural beat — and because FabricIngestScheduler already ticks
+#   run_ingest_sweep every 5 minutes, the same hook doubles as the periodic
+#   sweep with no new scheduler class. Exception-shielded (a conflict-sweep
+#   failure never fails the ingest summary) and mode-gated inside the sweep
+#   itself (fabric_source_truth_mode 'off' → zero reads, zero proposals).
 #
 # What this does
 # --------------
@@ -81,6 +115,10 @@ _SOURCE_CONNECTOR = "firestore"
 # extracts the source id from a record key, so we graft it on under a name no
 # real Firestore field would use (and which would be overwritten if one did).
 _DOC_PATH_KEY = "__firestore_doc_path__"
+# Sentinel record key carrying the per-doc SOURCE timestamp (FST-4) into the
+# OSS mapper's observed_at threading — same grafting trick as _DOC_PATH_KEY.
+# Holds a datetime or None (None → the statement defaults to ingest time).
+_OBSERVED_AT_KEY = "__fabric_observed_at__"
 
 # Per-collection page cap so one huge collection can't wedge a sweep tick.
 _MAX_DOCS_PER_RUN = 1000
@@ -337,6 +375,32 @@ async def run_ingest_sweep(
         errors,
         workspace_id or "ALL",
     )
+
+    # FST-6 — after the ingest batches land, stage each touched workspace's
+    # un-rankable conflicts as Instinct stewardship proposals. Best-effort per
+    # workspace (a conflict-sweep failure never fails the ingest summary);
+    # mode-gated inside the sweep (off → zero reads); lazy import so the
+    # ingest worker carries no module-top dependency on the gate package.
+    for ws in sorted({s["workspace_id"] for s in sources}):
+        try:
+            from pocketpaw_ee.cloud.fabric_conflicts import sweep_conflicts_to_proposals
+
+            filed = await sweep_conflicts_to_proposals(ws)
+            if filed:
+                logger.info(
+                    "fabric_ingest: post-ingest conflict sweep filed %d stewardship "
+                    "proposal(s) for workspace %s",
+                    len(filed),
+                    ws,
+                )
+        except Exception:  # noqa: BLE001 — the conflict sweep is best-effort
+            logger.warning(
+                "fabric_ingest: post-ingest conflict sweep failed for workspace %s "
+                "(non-fatal)",
+                ws,
+                exc_info=True,
+            )
+
     return {"sources": len(sources), "ok": ok, "errors": errors}
 
 
@@ -416,6 +480,41 @@ def _doc_cursor(doc: dict[str, Any], cursor_field: str) -> str:
     return str(raw)
 
 
+def _doc_observed_at(doc: dict[str, Any], cursor_field: str) -> datetime | None:
+    """The best available SOURCE timestamp for one Firestore doc (FST-4).
+
+    Audit of what the worker actually knows per document (nothing else is on
+    the wire — the reader returns ``{path, data, update_time}`` only):
+
+    1. ``data[cursor_field]`` — the mapping's configured cursor field,
+       conventionally the document's own updated-at. The REAL source time
+       when present; may be a Firestore timestamp (google's
+       DatetimeWithNanoseconds subclasses datetime) or an RFC3339/ISO
+       string. Best choice when it parses.
+    2. ``update_time`` — the Firestore snapshot's server update time,
+       rendered RFC3339 by the reader. Not field-precise (any write to the
+       doc bumps it) but still a true source-side time; the fallback.
+    3. Neither parses → ``None``: the statement falls back to ingest time
+       (append_statement's observed_at default) — the honest floor, never a
+       fabricated timestamp.
+
+    There is NO per-field timestamp in Firestore, so one doc-level time
+    covers every property the doc updates.
+    """
+    data = doc.get("data") or {}
+    candidates = (data.get(cursor_field) if cursor_field else None, doc.get("update_time"))
+    for raw in candidates:
+        if raw is None or raw == "":
+            continue
+        if isinstance(raw, datetime):
+            return raw
+        try:
+            return datetime.fromisoformat(str(raw))
+        except ValueError:
+            continue
+    return None
+
+
 async def _mirror_docs(
     store: StoreLike,
     workspace_id: str,
@@ -442,13 +541,26 @@ async def _mirror_docs(
     otherwise — legacy NULL-workspace rows are globally visible),
     ``source_connector="firestore"``, and ``source_id`` = the full doc path.
     Returns the number of objects created + updated.
+
+    FST-4 (merge site 3): shadow-statement provenance rides the same call —
+    ``writer_class="mirror"`` (the mirror is not a primary connector), the
+    doc path doubles as the per-record ``source_document_uri`` (so each
+    statement's SourceRef names the exact Firestore collection/doc), and the
+    best available source time per doc (see ``_doc_observed_at``) becomes
+    ``observed_at``. All of it is inert when fabric_source_truth_mode is
+    'off'.
     """
     # Lazy import — keeps EE module import light and consistent with the other
     # OSS imports in this module (_default_store).
     from pocketpaw.connectors.fabric_ingest import FabricMapping, ingest_records
 
     records = [
-        {**(doc.get("data") or {}), _DOC_PATH_KEY: str(doc.get("path") or "")} for doc in docs
+        {
+            **(doc.get("data") or {}),
+            _DOC_PATH_KEY: str(doc.get("path") or ""),
+            _OBSERVED_AT_KEY: _doc_observed_at(doc, mapping.cursor_field),
+        }
+        for doc in docs
     ]
     oss_mapping = FabricMapping(
         type_name=mapping.object_type_id,  # label only; type_id pins the type
@@ -462,6 +574,9 @@ async def _mirror_docs(
         records,
         oss_mapping,
         workspace_id=workspace_id,
+        writer_class="mirror",
+        document_uri_field=_DOC_PATH_KEY,
+        observed_at_field=_OBSERVED_AT_KEY,
     )
     return summary.total
 
