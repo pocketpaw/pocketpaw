@@ -168,6 +168,12 @@
 #        asserted in tests).
 #     3. Both are OSS-side and framework-agnostic; ``FabricTypeError`` lives in
 #        models so the EE router (422) and OSS callers (ValueError) both consume it.
+# Updated: 2026-07-11 (feat/paw-cli, C2) — added ``get_link(link_id,
+#   workspace_id=None)``, a scoped single-link read mirroring ``get_object``.
+#   It exists as the tenancy guard for deletes: ``unlink`` is deliberately
+#   unscoped, so multi-tenant callers (the EE DELETE /fabric/links route and
+#   the fabric MCP link-delete tool) resolve the link through this scoped read
+#   first and refuse a cross-tenant id.
 
 
 from __future__ import annotations
@@ -1190,6 +1196,29 @@ class FabricStore:
                 links = [self._row_to_link(row) async for row in cur]
 
         return links, total
+
+    async def get_link(self, link_id: str, workspace_id: str | None = None) -> FabricLink | None:
+        """Fetch one link by id, optionally scoped to ``workspace_id`` (W4a).
+
+        The scoped read is the tenancy guard for deletes: :meth:`unlink` is
+        deliberately unscoped (single-tenant OSS callers), so a multi-tenant
+        caller (the EE router / MCP tools) resolves the link THROUGH this scoped
+        read first — a cross-tenant ``link_id`` returns ``None`` (legacy
+        NULL-workspace links stay visible, matching :meth:`list_links`).
+        """
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        sql = "SELECT * FROM fabric_links WHERE id = ?"
+        params: list[Any] = [link_id]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
+
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, params) as cur:
+                row = await cur.fetchone()
+        return self._row_to_link(row) if row else None
 
     async def unlink(self, link_id: str) -> None:
         await self._ensure_schema()

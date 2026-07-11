@@ -94,6 +94,12 @@ from or weaken them. It returns ``None`` for the legacy (no-workspace) path, lea
 the OSS factory's shared singleton in place. This activates the entry-point end to
 end and gives EE the single hook to later swap in a cloud-backed store without
 touching core.
+
+Updated: 2026-07-11 (feat/paw-cli, C2) — ``CloudFabricMcpProvider`` is no longer
+read-only: the ``pocketpaw_fabric`` server grew three ontology modification
+tools (``fabric_link_create`` / ``fabric_link_delete`` at MEMBER tier,
+``fabric_type_update`` RBAC-gated on ``fabric.admin``), mirroring the REST
+routes. ``tool_ids()`` picks them up automatically via ``FABRIC_TOOL_IDS``.
 """
 
 from __future__ import annotations
@@ -971,14 +977,17 @@ class CloudWorkspaceAdminMcpProvider:
 
 
 class CloudFabricMcpProvider:
-    """`pocketpaw.mcp_servers` — read-only Fabric ontology access in-process
-    server (``pocketpaw_fabric``). Hosts ``fabric_query`` + ``fabric_stats``.
+    """`pocketpaw.mcp_servers` — Fabric ontology access in-process server
+    (``pocketpaw_fabric``). Hosts the reads ``fabric_query`` + ``fabric_stats``
+    and, since feat/paw-cli C2, the modification tools ``fabric_link_create``
+    / ``fabric_link_delete`` (MEMBER tier — mirroring the fabric.write REST
+    routes) and ``fabric_type_update`` (RBAC-gated on ``fabric.admin``,
+    mirroring the ADMIN schema routes).
 
     On the claude_agent_sdk backend, registry tools (BaseTool) never reach the
     agent — only MCP servers do — so this server is the cloud chat agent's only
-    path to the Fabric ontology. Both tools are READ-ONLY and workspace-scoped
-    via the chat ContextVars; ontology writes from this backend should arrive
-    as gated proposals, never ambient writes.
+    path to the Fabric ontology. All tools are workspace-scoped via the chat
+    ContextVars and every write is audited via record_tool_call.
 
     Ambient (NOT in ``OPT_IN_MCP_SERVERS``) — surfaces scope access via their
     profile allowlist, the same regime the sibling belt / external-actions /
