@@ -222,7 +222,6 @@ from pocketpaw.agents.pool import (  # type: ignore[import-untyped]
 from pocketpaw.agents.session_supervisor import (  # type: ignore[import-untyped]
     get_session_supervisor,
 )
-from pocketpaw.config import get_settings  # type: ignore[import-untyped]
 from pocketpaw_ee.cloud._core.realtime import xproc
 from pocketpaw_ee.cloud.agent_sessions import runtime_service
 from pocketpaw_ee.cloud.agent_sessions.store import MongoSessionStore
