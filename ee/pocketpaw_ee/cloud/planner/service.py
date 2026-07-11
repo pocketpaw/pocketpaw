@@ -29,6 +29,21 @@
 #   ``preconditions`` from each OSS TaskSpec onto the cloud Task it
 #   creates, so completion-time verification (pocketpaw#1162) can read
 #   machine-checkable criteria off the materialized Task.
+# Updated: 2026-07-10 (feat/verify-mode-shadow) — three-position
+#   ``verify_mode`` at the cloud terminal: ``_run_one`` now resolves
+#   ``effective_cloud_plan_verify_mode()`` ONCE (off | shadow | enforce;
+#   the legacy ``cloud_plan_verify_loop_enabled`` bool resolves to ENFORCE
+#   for back-compat) and passes it to ``_verify_plan_task_outcome``. off ⇒
+#   byte-for-byte today's default. shadow ⇒ the verdict is stamped on
+#   ``Task.verify['verdict']`` plus ``verify['mode']='shadow'`` and
+#   ``verify['would_have']=<done|requeued|escalated>`` (what enforce WOULD
+#   have decided, computed READ-ONLY — no requeue_count bump, no feedback
+#   growth, no status change) with a ``verify shadow mode: would_have=...``
+#   log line; the helper returns "done" so every DONE side-effect (output
+#   file, artifact upload, auto-complete) runs exactly as today. enforce ⇒
+#   the prior flag-on behaviour, unchanged. The rejected-attempt feedback
+#   block in the run instructions renders ONLY in enforce — shadow must not
+#   alter the run itself.
 # Updated: 2026-07-02 (feat/svl-5-cloud-verify) — Self-Verifying Loop at
 #   the CLOUD planner terminal (SVL-5), behind
 #   ``cloud_plan_verify_loop_enabled`` (default False ⇒ byte-for-byte
@@ -1281,6 +1296,11 @@ async def _execute_ready_plan_tasks(
 
     # Run all concurrently
     async def _run_one(tid, aid, d):
+        # Resolve the three-position verify mode ONCE per run (off | shadow
+        # | enforce — the legacy cloud_plan_verify_loop_enabled bool resolves
+        # to 'enforce' via effective_cloud_plan_verify_mode()). Everything
+        # verify-related below keys off this single resolution.
+        verify_mode = get_settings().effective_cloud_plan_verify_mode()
         instr = "You are executing a task from a project plan.\\n\\n"
         instr += "## Task: " + d.title + "\\n\\n"
         instr += d.summary + "\\n\\n"
@@ -1293,9 +1313,12 @@ async def _execute_ready_plan_tasks(
         # first — so the re-dispatched agent sees exactly what to fix
         # rather than a bare "try again". Mirrors the OSS executor's
         # ``_build_task_prompt`` "Why the last attempt was rejected"
-        # block. Flag-gated so a disabled loop renders today's
-        # instructions byte-for-byte even if old feedback is on the doc.
-        if get_settings().cloud_plan_verify_loop_enabled:
+        # block. ENFORCE-only: off renders today's instructions
+        # byte-for-byte even if old feedback is on the doc, and shadow
+        # must be observe-only — it never writes feedback itself, and
+        # rendering leftovers from a prior enforce phase would change the
+        # run in a mode that promises zero behavioural delta.
+        if verify_mode == "enforce":
             feedback = (getattr(d, "verify", None) or {}).get("feedback") or []
             if feedback:
                 instr += "\\n## Why the last attempt was rejected\\n"
@@ -1339,20 +1362,23 @@ async def _execute_ready_plan_tasks(
 
             # SVL-5 (Self-Verifying Loop, cloud planner terminal): judge
             # the run's output against the Task's success_criteria BEFORE
-            # any DONE side-effect fires. "done" = SOLVED / UNKNOWN (or
-            # flag off) — fall through to today's completion path
-            # untouched. "requeued" / "escalated" = the verify helper
-            # already moved the task (back to ``proposed`` / to
-            # ``failed``) and stamped why; a rejected attempt must NOT
-            # save its output file, upload artifacts, or auto-complete —
-            # returning here is what enforces that invariant.
+            # any DONE side-effect fires. "done" = SOLVED / UNKNOWN, mode
+            # off, or SHADOW mode (which stamps the verdict + would_have
+            # and always passes through) — fall through to today's
+            # completion path untouched. "requeued" / "escalated"
+            # (enforce only) = the verify helper already moved the task
+            # (back to ``proposed`` / to ``failed``) and stamped why; a
+            # rejected attempt must NOT save its output file, upload
+            # artifacts, or auto-complete — returning here is what
+            # enforces that invariant.
             resolution = "done"
-            if get_settings().cloud_plan_verify_loop_enabled:
+            if verify_mode != "off":
                 resolution = await _verify_plan_task_outcome(
                     workspace_id=workspace_id,
                     project_id=project_id,
                     task_id=tid,
                     full_output=full_output,
+                    mode=verify_mode,
                 )
             if resolution != "done":
                 return resolution
@@ -1501,14 +1527,29 @@ async def _verify_plan_task_outcome(
     project_id: str,
     task_id: str,
     full_output: str,
+    mode: str = "enforce",
 ) -> str:
     """SVL-5 verify hook — judge a finished plan-task run before completion.
 
-    Called from ``_run_one`` only when ``cloud_plan_verify_loop_enabled``
-    is on, after the agent run produced ``full_output`` and BEFORE any
-    DONE side-effect. The verifier is the OSS
-    ``DeterministicVerdictProvider`` — external to the agent that
-    produced the output. Returns the resolution the caller must honour:
+    Called from ``_run_one`` only when the resolved
+    ``effective_cloud_plan_verify_mode()`` is non-'off', after the agent
+    run produced ``full_output`` and BEFORE any DONE side-effect. The
+    verifier is the OSS ``DeterministicVerdictProvider`` — external to the
+    agent that produced the output.
+
+    ``mode`` is the caller's resolved verify mode:
+
+      - ``"shadow"`` — observe-only rollout rung. The verdict is stamped
+        on ``verify['verdict']`` together with ``verify['mode']='shadow'``
+        and ``verify['would_have']=<done|requeued|escalated>`` (what
+        enforce WOULD have decided, computed READ-ONLY — no
+        ``requeue_count`` bump, no ``feedback`` growth, no status change),
+        a ``verify shadow mode: would_have=...`` line is logged, and the
+        helper ALWAYS returns ``"done"`` so every DONE side-effect runs
+        exactly as today.
+      - ``"enforce"`` — the full loop below.
+
+    Returns the resolution the caller must honour:
 
       - ``"done"`` — SOLVED / UNKNOWN (or the task doc vanished): a
         passing or uncheckable result is NEVER requeued or mutated. The
@@ -1558,6 +1599,16 @@ async def _verify_plan_task_outcome(
 
     if verdict.status not in (OutcomeStatus.PARTIAL, OutcomeStatus.NOT_SOLVED):
         # SOLVED / UNKNOWN — stamp the verdict and pass through.
+        if mode == "shadow":
+            # Shadow telemetry covers every completion, not just the
+            # failing ones: enforce would have passed this through too.
+            verify_state["mode"] = "shadow"
+            verify_state["would_have"] = "done"
+            logger.info(
+                "verify shadow mode: would_have=done verdict=%s task=%s",
+                verdict.status.value,
+                task_id,
+            )
         doc.verify = verify_state
         await doc.save()
         # no-event: the TaskResolved emitted by _auto_complete_task
@@ -1581,6 +1632,36 @@ async def _verify_plan_task_outcome(
         current = frozenset(cr.criterion for cr in unmet)
         prev = frozenset(item["criterion"] for item in prior_feedback[-1].get("unmet_criteria", []))
         no_progress = current == prev or len(current) >= len(prev)
+
+    if mode == "shadow":
+        # SHADOW: record what enforce WOULD have decided (no-progress vs
+        # budget vs requeue — computed read-only above) WITHOUT mutating
+        # anything the loop acts through: no status change, no
+        # requeue_count bump, no feedback growth. Returning "done" lets
+        # every DONE side-effect run exactly as today — the would_have
+        # stamp + log line are the rollout telemetry a tenant reads
+        # before daring enforce.
+        if no_progress:
+            would_have = "escalated"
+            would_reason = "no_progress"
+        elif n < max_requeues:
+            would_have = "requeued"
+            would_reason = ""
+        else:
+            would_have = "escalated"
+            would_reason = "budget_exhausted"
+        verify_state["mode"] = "shadow"
+        verify_state["would_have"] = would_have
+        doc.verify = verify_state
+        await doc.save()
+        logger.info(
+            "verify shadow mode: would_have=%s%s verdict=%s task=%s",
+            would_have,
+            f" reason={would_reason}" if would_reason else "",
+            verdict.status.value,
+            task_id,
+        )
+        return "done"
 
     if not no_progress and n < max_requeues:
         # REQUEUE: append this attempt's rejections to the CUMULATIVE
