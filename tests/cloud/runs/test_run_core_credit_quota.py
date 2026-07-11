@@ -113,15 +113,14 @@ def _wire_common(monkeypatch, transport, *, enforced: bool) -> dict[str, bool]:
 
     monkeypatch.setattr(run_core, "_reject_if_over_jail_quota", _no_jail_reject)
     # Point the flag at a stub carrying the desired posture. The billing flag is
-    # now read inside the shared guard, so patch THAT module's get_settings
-    # (run_core's is also patched for any of its own reads under the same stub).
+    # read inside the shared guard, so patch THAT module's get_settings —
+    # run_core no longer imports it (the orphaned import was dropped).
     from types import SimpleNamespace
 
     from pocketpaw_ee.cloud.credits import guards
 
     stub_settings = SimpleNamespace(billing_enforced=enforced)
     monkeypatch.setattr(guards, "get_settings", lambda: stub_settings)
-    monkeypatch.setattr(run_core, "get_settings", lambda: stub_settings)
 
     # The shared gate now runs check_balance BEFORE check_quota. Default it to a
     # no-op so the quota-focused cases below stay isolated (the balance-reject
