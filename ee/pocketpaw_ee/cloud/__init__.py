@@ -226,6 +226,9 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.audit.router import router as audit_router
     from pocketpaw_ee.cloud.audit.router import workspace_router as audit_workspace_router
     from pocketpaw_ee.cloud.auth.router import router as auth_router
+    from pocketpaw_ee.cloud.automations_status.router import (
+        router as automations_status_router,
+    )
     from pocketpaw_ee.cloud.billing.router import router as billing_router
     from pocketpaw_ee.cloud.billing.webhooks import router as billing_webhooks_router
     from pocketpaw_ee.cloud.chat.router import router as chat_router
@@ -305,6 +308,7 @@ def mount_cloud(app: FastAPI) -> None:
     # path in ee.cloud.pockets.instinct_dispatch — this router adds no new
     # enforcement logic.
     app.include_router(rules_router, prefix="/api/v1")
+    app.include_router(automations_status_router, prefix="/api/v1")
     # Foresight — RFC 08 scenario-run surface (POST /foresight/scenarios,
     # GET /foresight/runs[/{id}]). Mounted alongside cycles so the
     # Mission Control rail can launch / inspect simulation runs from the

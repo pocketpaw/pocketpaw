@@ -461,6 +461,21 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
+name = "AutomationsStatus — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # feat/external-alerting-c2c3 (C3) — only ``automations_status.service`` owns
+    # the WorkspaceAutomationConfig Beanie writes; dto/domain/router go through it.
+    # The router is thin — it maps HTTP to service calls and must not import a
+    # Beanie doc directly.
+    "pocketpaw_ee.cloud.automations_status.dto",
+    "pocketpaw_ee.cloud.automations_status.domain",
+    "pocketpaw_ee.cloud.automations_status.router",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.workspace_automation_config"]
+
+[[tool.importlinter.contracts]]
 name = "Notifications — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"

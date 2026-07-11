@@ -97,6 +97,11 @@ Updated: 2026-07-09 (feat/instinct-guardrail-rules) — added
 ``get_all_documents()`` so the ``instinct_workspace_configs`` collection is wired
 into ``init_beanie``. Only ``ee.cloud.rules.service`` writes it (import-linter
 "Rules").
+Updated: 2026-07-11 (feat/external-alerting-c2c3) — added
+``WorkspaceAutomationConfig`` (the per-workspace opt-out for the always-on
+background sweeps) to the imports, ``__all__``, and ``get_all_documents()`` so the
+``workspace_automation_configs`` collection is wired into ``init_beanie``. Only
+``ee.cloud.automations_status.service`` writes it (import-linter "AutomationsStatus").
 """
 
 from __future__ import annotations
@@ -174,6 +179,7 @@ from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 from pocketpaw_ee.cloud.models.vapid_keypair import VapidKeypair
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
+from pocketpaw_ee.cloud.models.workspace_automation_config import WorkspaceAutomationConfig
 from pocketpaw_ee.cloud.models.workspace_job import WorkspaceJobDoc
 
 # Lazy import to avoid circular imports
@@ -289,6 +295,7 @@ __all__ = [
     "InstinctApproval",
     "InstinctRuleDoc",
     "InstinctWorkspaceConfig",
+    "WorkspaceAutomationConfig",
     "Invite",
     "Lead",
     "LeadSource",
@@ -398,6 +405,9 @@ def get_all_documents():
         # Per-workspace Instinct enforcement override (feat/instinct-guardrail-rules).
         # Only ``ee.cloud.rules.service`` writes it.
         InstinctWorkspaceConfig,
+        # Per-workspace automation opt-out (feat/external-alerting-c2c3). Only
+        # ``ee.cloud.automations_status.service`` writes it.
+        WorkspaceAutomationConfig,
         Message,
         ReadState,
         RequestLog,

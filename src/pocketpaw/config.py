@@ -1,6 +1,12 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-07-11 (feat/external-alerting-c2c3): Added ``automation_evaluator_autostart``
+    (default True, env POCKETPAW_AUTOMATION_EVALUATOR_AUTOSTART) — the OSS
+    always-on automation switch. When on (default), the background
+    AutomationEvaluator starts at dashboard boot so threshold rules fire without
+    a manual POST /automations/evaluator/start. A new default-ON flag is safe: a
+    fresh install with no enabled rules just sleeps.
   - 2026-07-02 (feat/judge-shadow-1168): Added the LLM-as-judge SHADOW settings
     (J-1, issue #1168) — ``deep_work_verify_judge_shadow_enabled`` (default
     False; when True AND deep_work_verify_loop_enabled is on, every completing
@@ -1706,6 +1712,17 @@ class Settings(BaseSettings):
             "the live gate. Off by default — the template-rule path is unchanged "
             "and the whole discovered branch is dead code on the default path. "
             "Set via POCKETPAW_INSTINCT_ENFORCE_DISCOVERED_RULES."
+        ),
+    )
+    automation_evaluator_autostart: bool = Field(
+        default=True,
+        description=(
+            "When true (the default), the background AutomationEvaluator starts at "
+            "dashboard boot so threshold/data-change rules fire without a manual "
+            "POST /automations/evaluator/start. This is the OSS always-on automation "
+            "switch — a new flag defaulting ON is safe because a fresh install with no "
+            "enabled rules does nothing but sleep. Set POCKETPAW_AUTOMATION_EVALUATOR_"
+            "AUTOSTART=false to keep the evaluator dormant until started via the router."
         ),
     )
 
