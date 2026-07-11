@@ -1,4 +1,16 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-11 (W4a spec revisions) — POST /paw-bar/widgets/{id}/spec/
+#   rollback (admin + owner-token, workspace-scoped like update_spec) restores
+#   the latest archived spec revision; 409 when no revision exists.
+# Updated: 2026-07-11 (W4a tenancy seam) — (1) Admin CRUD (create / list /
+#   update-spec / rotate-token / delete) now threads the caller's active
+#   workspace via Depends(current_workspace_id): create stamps the row, the
+#   rest scope lookups + mutations so a cross-tenant widget id 404s and never
+#   mutates. (2) Public-path fix (the cross-tenant Fabric leak): ingest stays
+#   token-only but derives the tenant from the widget ROW —
+#   _apply_event_mapping now calls get_fabric_store(workspace_id=
+#   widget.workspace_id or None) instead of the bare shared store; legacy
+#   unstamped rows ('' → None) keep the old single-tenant behavior.
 # Updated: 2026-07-08 — Renamed widget "Paw Print" → "Paw Bar" (routes /paw-print→/paw-bar,
 #   header X-Paw-Print-Token→X-Paw-Bar-Token, tag PawPrint→PawBar, source_connector
 #   "paw_print"→"paw_bar"). Hard-rename — widget has zero deployments. The separate
@@ -56,6 +68,7 @@ from pocketpaw.paw_bar.models import (
     PawBarWidget,
     PawBarWidgetPublic,
 )
+from pocketpaw_ee.cloud._core.deps import current_workspace_id
 
 logger = logging.getLogger(__name__)
 
@@ -169,10 +182,16 @@ class EventsListResponse(BaseModel):
     status_code=201,
     dependencies=[Depends(require_scope("admin"))],
 )
-async def create_widget(req: CreateWidgetRequest) -> PawBarWidget:
+async def create_widget(
+    req: CreateWidgetRequest,
+    workspace_id: str = Depends(current_workspace_id),
+) -> PawBarWidget:
+    # W4a — the row is stamped with the caller's ACTIVE workspace, never a
+    # client-supplied value: tenancy is derived server-side from the session.
     widget = PawBarWidget(
         pocket_id=req.pocket_id,
         owner=req.owner,
+        workspace_id=workspace_id,
         name=req.name,
         spec=req.spec,
         allowed_domains=req.allowed_domains,
@@ -192,8 +211,11 @@ async def list_widgets(
     pocket_id: str | None = Query(None),
     owner: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> WidgetListResponse:
-    widgets = await _store().list_widgets(pocket_id=pocket_id, owner=owner, limit=limit)
+    widgets = await _store().list_widgets(
+        pocket_id=pocket_id, owner=owner, limit=limit, workspace_id=workspace_id
+    )
     # Project to the token-free model — a list payload must never carry the
     # per-widget access_token (W0b).
     public = [PawBarWidgetPublic.from_widget(w) for w in widgets]
@@ -224,15 +246,46 @@ async def update_spec(
     widget_id: str,
     spec: PawBarSpec,
     x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> PawBarWidgetPublic:
-    widget = await _store().get_widget(widget_id)
+    # W4a — the lookup is workspace-scoped: another tenant's widget id resolves
+    # to None → 404, before the token even gets compared. Never mutates.
+    widget = await _store().get_widget(widget_id, workspace_id=workspace_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
     _require_owner_token(widget, x_paw_bar_token)
-    updated = await _store().update_spec(widget_id, spec)
+    updated = await _store().update_spec(widget_id, spec, workspace_id=workspace_id)
     if updated is None:
         raise HTTPException(404, "Widget not found")
     return PawBarWidgetPublic.from_widget(updated)
+
+
+@router.post(
+    "/paw-bar/widgets/{widget_id}/spec/rollback",
+    response_model=PawBarWidgetPublic,
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def rollback_spec(
+    widget_id: str,
+    x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
+    workspace_id: str = Depends(current_workspace_id),
+) -> PawBarWidgetPublic:
+    """Restore the latest archived spec revision (W4a).
+
+    Every ``update_spec`` archives the prior spec as a monotonic revision;
+    this endpoint restores the most recent one. The restore is itself an
+    update that archives the current spec, so a rollback is reversible.
+    Auth mirrors ``update_spec``: admin session + per-widget owner token,
+    with the lookup workspace-scoped (cross-tenant id → 404).
+    """
+    widget = await _store().get_widget(widget_id, workspace_id=workspace_id)
+    if widget is None:
+        raise HTTPException(404, "Widget not found")
+    _require_owner_token(widget, x_paw_bar_token)
+    restored = await _store().rollback_spec(widget_id, workspace_id=workspace_id)
+    if restored is None:
+        raise HTTPException(409, "No spec revision to roll back to")
+    return PawBarWidgetPublic.from_widget(restored)
 
 
 @router.post(
@@ -243,16 +296,18 @@ async def update_spec(
 async def rotate_token(
     widget_id: str,
     x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> PawBarWidget:
     # Returns the FULL widget (with the new access_token) on purpose: this is
     # the explicit, authenticated reveal path so the owner can capture the
     # rotated secret. Still requires the old token AND an admin dashboard
-    # session (W0b).
-    widget = await _store().get_widget(widget_id)
+    # session (W0b). W4a — lookup + rotate are workspace-scoped (cross-tenant
+    # id → 404, nothing rotates).
+    widget = await _store().get_widget(widget_id, workspace_id=workspace_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
     _require_owner_token(widget, x_paw_bar_token)
-    rotated = await _store().rotate_token(widget_id)
+    rotated = await _store().rotate_token(widget_id, workspace_id=workspace_id)
     if rotated is None:
         raise HTTPException(404, "Widget not found")
     return rotated
@@ -266,12 +321,15 @@ async def rotate_token(
 async def delete_widget(
     widget_id: str,
     x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> None:
-    widget = await _store().get_widget(widget_id)
+    # W4a — scoped lookup + scoped DELETE: a cross-tenant widget id 404s and
+    # the row is never touched.
+    widget = await _store().get_widget(widget_id, workspace_id=workspace_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
     _require_owner_token(widget, x_paw_bar_token)
-    await _store().delete_widget(widget_id)
+    await _store().delete_widget(widget_id, workspace_id=workspace_id)
 
 
 @router.get("/paw-bar/widgets/{widget_id}/events", response_model=EventsListResponse)
@@ -551,13 +609,14 @@ async def _apply_event_mapping(widget: PawBarWidget, event: PawBarEvent) -> str 
     except ImportError:
         return None
 
-    # ISO note: paw-bar's tenant key is the widget OWNER, a logical, possibly
-    # colon-qualified string (``user:maya``) — NOT a physical-store-path
-    # workspace id (a ``:`` fails the path-traversal allowlist). The Fabric
-    # write is scoped by the object's ``source_*`` provenance + the store's own
-    # in-row guard, not by a per-owner store file, so this keeps the BARE store
-    # rather than threading the owner into the factory (which would ValueError).
-    fabric = get_fabric_store()
+    # W4a tenancy — the public ingest path is token-only (no session), so the
+    # tenant is derived from the widget ROW: the workspace_id stamped at
+    # create time by the admin route. That is a REAL workspace id (unlike the
+    # logical, possibly colon-qualified ``owner`` — ``user:maya`` — which fails
+    # the store factory's path allowlist and must never be used as a store
+    # key). ``or None`` preserves legacy/single-tenant behavior: an unstamped
+    # ('' ) row keeps writing to the shared default store exactly as before.
+    fabric = get_fabric_store(workspace_id=widget.workspace_id or None)
     if fabric is None:
         return None
 

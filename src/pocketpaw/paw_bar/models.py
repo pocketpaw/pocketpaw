@@ -1,4 +1,7 @@
 # ee/paw_bar/models.py — Pydantic models for the Paw Bar widget layer.
+# Updated: 2026-07-11 (W4a tenancy seam) — PawBarWidget + PawBarWidgetPublic
+#   gain `workspace_id: str = ""` (in-row tenancy, same model as DecisionStatus).
+#   Empty string = legacy/single-tenant row; the store's scoped reads match it.
 # Updated: 2026-07-08 — Renamed widget "Paw Print" → "Paw Bar" (PawPrint*→PawBar* models).
 #   The separate one-word audit feed (past-tense record) is a DIFFERENT feature, untouched.
 # Created: 2026-04-13 (Move 3 PR-A) — Minimal, secure-by-design render vocabulary
@@ -146,6 +149,9 @@ class PawBarWidget(BaseModel):
     id: str = Field(default_factory=lambda: _gen_id("pp"))
     pocket_id: str
     owner: str
+    # W4a in-row tenancy — the owning workspace. Empty string means a
+    # legacy/single-tenant row (matched by every scoped read, like decisions).
+    workspace_id: str = ""
     name: str = ""
     spec: PawBarSpec
     allowed_domains: list[str] = Field(default_factory=list)
@@ -192,6 +198,7 @@ class PawBarWidgetPublic(BaseModel):
     id: str
     pocket_id: str
     owner: str
+    workspace_id: str = ""
     name: str = ""
     spec: PawBarSpec
     allowed_domains: list[str] = Field(default_factory=list)
