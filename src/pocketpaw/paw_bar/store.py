@@ -1,4 +1,9 @@
 # ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
+# Updated: 2026-07-11 (W4a spec revisions) — new paw_bar_spec_revisions table:
+#   update_spec archives the PRIOR spec with a monotonic per-widget revision
+#   number (same transaction as the update); latest_spec_revision reads the
+#   newest one; rollback_spec restores it via update_spec (so the rollback is
+#   itself archived + reversible) and honors the same workspace scoping.
 # Updated: 2026-07-11 (W4a tenancy seam) — paw_bar_widgets gains an in-row
 #   workspace_id column + index and a _widget_workspace_scope helper (verbatim
 #   clone of _decision_workspace_scope: legacy ''/NULL rows always match, None
@@ -90,6 +95,17 @@ CREATE TABLE IF NOT EXISTS paw_bar_decisions (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- W4a spec revisions: every update_spec archives the PRIOR spec here with a
+-- monotonic per-widget revision number; rollback restores the latest one
+-- (itself an update that archives the current spec).
+CREATE TABLE IF NOT EXISTS paw_bar_spec_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    widget_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    spec TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_pp_widgets_pocket ON paw_bar_widgets(pocket_id);
 CREATE INDEX IF NOT EXISTS idx_pp_widgets_owner ON paw_bar_widgets(owner);
 CREATE INDEX IF NOT EXISTS idx_pp_widgets_workspace ON paw_bar_widgets(workspace_id);
@@ -101,6 +117,8 @@ CREATE INDEX IF NOT EXISTS idx_pp_decisions_customer
     ON paw_bar_decisions(widget_id, customer_ref, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_pp_decisions_action
     ON paw_bar_decisions(instinct_action_id);
+CREATE INDEX IF NOT EXISTS idx_pp_spec_revisions_widget
+    ON paw_bar_spec_revisions(widget_id, revision DESC);
 """
 
 
@@ -244,9 +262,55 @@ class PawBarStore:
             params.extend(ws_params)
         await self._ensure_schema()
         async with self._conn() as db:
+            # Archive the PRIOR spec (monotonic per-widget revision) in the
+            # same transaction as the update, so every update_spec leaves a
+            # rollback point behind.
+            async with db.execute(
+                "SELECT COALESCE(MAX(revision), 0) FROM paw_bar_spec_revisions WHERE widget_id = ?",
+                (widget_id,),
+            ) as cur:
+                row = await cur.fetchone()
+                next_revision = (row[0] if row else 0) + 1
+            await db.execute(
+                "INSERT INTO paw_bar_spec_revisions (widget_id, revision, spec) VALUES (?, ?, ?)",
+                (widget_id, next_revision, existing.spec.model_dump_json()),
+            )
             await db.execute(sql, params)
             await db.commit()
         return await self.get_widget(widget_id, workspace_id=workspace_id)
+
+    async def latest_spec_revision(self, widget_id: str) -> tuple[int, PawBarSpec] | None:
+        """Return the most recent archived spec revision, or None when none exist."""
+        await self._ensure_schema()
+        async with self._conn() as db:
+            async with db.execute(
+                "SELECT revision, spec FROM paw_bar_spec_revisions"
+                " WHERE widget_id = ? ORDER BY revision DESC LIMIT 1",
+                (widget_id,),
+            ) as cur:
+                row = await cur.fetchone()
+                if row is None:
+                    return None
+                return row[0], PawBarSpec.model_validate_json(row[1])
+
+    async def rollback_spec(
+        self, widget_id: str, workspace_id: str | None = None
+    ) -> PawBarWidget | None:
+        """Restore the latest archived spec revision (W4a).
+
+        The restore is itself an ``update_spec`` — the CURRENT spec is archived
+        as a new revision before being replaced, so a rollback is always
+        auditable and itself reversible. Returns ``None`` when the widget does
+        not exist in the caller's workspace scope OR when no revision exists.
+        """
+        widget = await self.get_widget(widget_id, workspace_id=workspace_id)
+        if widget is None:
+            return None
+        latest = await self.latest_spec_revision(widget_id)
+        if latest is None:
+            return None
+        _, archived_spec = latest
+        return await self.update_spec(widget_id, archived_spec, workspace_id=workspace_id)
 
     async def rotate_token(
         self, widget_id: str, workspace_id: str | None = None

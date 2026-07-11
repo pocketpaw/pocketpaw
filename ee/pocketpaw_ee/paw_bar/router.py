@@ -1,4 +1,7 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-11 (W4a spec revisions) — POST /paw-bar/widgets/{id}/spec/
+#   rollback (admin + owner-token, workspace-scoped like update_spec) restores
+#   the latest archived spec revision; 409 when no revision exists.
 # Updated: 2026-07-11 (W4a tenancy seam) — (1) Admin CRUD (create / list /
 #   update-spec / rotate-token / delete) now threads the caller's active
 #   workspace via Depends(current_workspace_id): create stamps the row, the
@@ -256,6 +259,34 @@ async def update_spec(
     if updated is None:
         raise HTTPException(404, "Widget not found")
     return PawBarWidgetPublic.from_widget(updated)
+
+
+@router.post(
+    "/paw-bar/widgets/{widget_id}/spec/rollback",
+    response_model=PawBarWidgetPublic,
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def rollback_spec(
+    widget_id: str,
+    x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
+    workspace_id: str = Depends(current_workspace_id),
+) -> PawBarWidgetPublic:
+    """Restore the latest archived spec revision (W4a).
+
+    Every ``update_spec`` archives the prior spec as a monotonic revision;
+    this endpoint restores the most recent one. The restore is itself an
+    update that archives the current spec, so a rollback is reversible.
+    Auth mirrors ``update_spec``: admin session + per-widget owner token,
+    with the lookup workspace-scoped (cross-tenant id → 404).
+    """
+    widget = await _store().get_widget(widget_id, workspace_id=workspace_id)
+    if widget is None:
+        raise HTTPException(404, "Widget not found")
+    _require_owner_token(widget, x_paw_bar_token)
+    restored = await _store().rollback_spec(widget_id, workspace_id=workspace_id)
+    if restored is None:
+        raise HTTPException(409, "No spec revision to roll back to")
+    return PawBarWidgetPublic.from_widget(restored)
 
 
 @router.post(
