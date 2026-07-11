@@ -369,3 +369,60 @@ async def test_build_deliver_server_gated_on_cloud(monkeypatch: pytest.MonkeyPat
     built = deliver.build_deliver_server()
     assert built is not None
     assert built[0] == "pocketpaw_deliver"
+
+
+async def test_successful_delivery_records_to_collector(beanie_db) -> None:
+    """ART-1: a successful ``deliver_artifact`` records one meta on the per-run
+    collector in the frozen contract shape ({file_id, name, mime, size}) — the
+    fact ``run_core`` drains into an ``artifact`` attachment + SSE event."""
+    from pocketpaw_ee.agent.mcp_servers.deliver import _deliver_handler
+    from pocketpaw_ee.cloud.chat.agent_service import collect_delivered_artifacts
+
+    tokens = _bind("wsA", "uA", "sessA")
+    try:
+        (_agent_cwd() / "index.html").write_text("<html>hi</html>")
+        with collect_delivered_artifacts() as delivered:
+            resp = await _deliver_handler({"path": "index.html"})
+    finally:
+        _detach(tokens)
+
+    body = _body(resp)
+    assert body["ok"] is True
+    assert len(delivered) == 1
+    meta = delivered[0]
+    assert set(meta) == {"file_id", "name", "mime", "size"}
+    assert meta["name"] == "index.html"
+    assert meta["mime"] == "text/html"
+    assert meta["file_id"] == body["file_id"]
+    assert meta["size"] == body["size"]
+
+
+async def test_failed_delivery_records_nothing(beanie_db) -> None:
+    """ART-1 criterion 3: a failed delivery (missing file) records nothing."""
+    from pocketpaw_ee.agent.mcp_servers.deliver import _deliver_handler
+    from pocketpaw_ee.cloud.chat.agent_service import collect_delivered_artifacts
+
+    tokens = _bind("wsA", "uA", "sessA")
+    try:
+        with collect_delivered_artifacts() as delivered:
+            resp = await _deliver_handler({"path": "does-not-exist.txt"})
+    finally:
+        _detach(tokens)
+
+    assert resp.get("is_error") is True
+    assert delivered == []
+
+
+async def test_delivery_outside_run_is_noop(beanie_db) -> None:
+    """No collector bound (a deliver outside a chat run) => recording is a
+    silent no-op, delivery still succeeds."""
+    from pocketpaw_ee.agent.mcp_servers.deliver import _deliver_handler
+
+    tokens = _bind("wsA", "uA", "sessA")
+    try:
+        (_agent_cwd() / "report.txt").write_text("hello")
+        resp = await _deliver_handler({"path": "report.txt"})
+    finally:
+        _detach(tokens)
+
+    assert _body(resp)["ok"] is True

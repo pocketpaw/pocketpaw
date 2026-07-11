@@ -232,6 +232,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     attach_sse_event_sink,
     build_behavior_instructions,
     build_knowledge_context,
+    collect_delivered_artifacts,
     detach_agent_identity,
     detach_sse_event_sink,
     mark_cloud_chat_run,
@@ -1641,7 +1642,13 @@ async def execute_run(spec: RunSpec) -> None:
     # trips the guard. Reset in the context manager's finally so it never leaks
     # past this run. The post-loop persist below resolves no cwd, so it sits
     # outside the marked region.
-    with mark_cloud_chat_run():
+    # ``collect_delivered_artifacts`` binds a fresh per-run collector list HERE,
+    # in execute_run's own task context and BEFORE the prewarm/SDK ``create_task``
+    # calls that copy it — so the ``deliver_artifact`` tool (running in a
+    # descendant SDK task) appends onto the SAME list this task drains at persist
+    # time. The ``as`` target stays in scope after the block, so the post-loop
+    # persist below can still read it once the ContextVar is reset.
+    with mark_cloud_chat_run(), collect_delivered_artifacts() as delivered_artifacts:
         # PREWARM (feat/claude-sdk-prewarm): kick off warming the agent's CLI
         # subprocess for this session NOW — concurrently with the remaining pre-turn
         # work below (mark-running, typing broadcast, and inside _drive_agent_loop:
@@ -1787,6 +1794,15 @@ async def execute_run(spec: RunSpec) -> None:
         attachments.append({"type": "ripple", "meta": ripple_spec})
         full_text = remaining_text
         await transport.append_event(spec.run_id, "ripple", {"spec": ripple_spec})
+
+    # ART-1: drain the per-run delivered-artifact collector. Each successful
+    # ``deliver_artifact`` call appended one ``{file_id, name, mime, size}`` meta;
+    # persist one ``{type:"artifact", meta}`` attachment apiece (alongside any
+    # ripple attachment — appended, never clobbering it) and emit one ``artifact``
+    # SSE event per delivery, in delivery order, mirroring the ripple event.
+    for meta in delivered_artifacts:
+        attachments.append({"type": "artifact", "meta": meta})
+        await transport.append_event(spec.run_id, "artifact", meta)
 
     assistant_id = await _persist_and_complete(spec, ctx, full_text, attachments, usage=usage)
     await transport.append_event(
