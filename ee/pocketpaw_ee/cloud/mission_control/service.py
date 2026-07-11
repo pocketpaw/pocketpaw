@@ -1913,6 +1913,22 @@ async def agent_analytics(ctx: RequestContext, window: str = "7d") -> AnalyticsR
         for pid, count in sorted(pocket_map.items(), key=lambda x: -x[1])
     ]
 
+    # Outcome-verdict rollup (evals slice): bucket Task.verify["verdict"]["status"]
+    # (OutcomeStatus: solved/partial/not_solved/unknown; verify == {} when the
+    # verify loop is off or the task predates it → no verdict). solved_rate is
+    # solved / CHECKABLE (unknown excluded and reported separately, so low
+    # criteria coverage is visible instead of hiding inside a fake 100%);
+    # None = no checkable verdicts in the window (UI renders "—", not "0%").
+    verdict_counts = {"solved": 0, "partial": 0, "not_solved": 0, "unknown": 0}
+    for d in docs:
+        status = ((d.verify or {}).get("verdict") or {}).get("status")
+        if status in verdict_counts:
+            verdict_counts[status] += 1
+    checkable = (
+        verdict_counts["solved"] + verdict_counts["partial"] + verdict_counts["not_solved"]
+    )
+    solved_rate = round(verdict_counts["solved"] / checkable * 100, 1) if checkable else None
+
     return AnalyticsResponse(
         shipped=total_shipped,
         approval_rate=approval_rate,
@@ -1922,6 +1938,11 @@ async def agent_analytics(ctx: RequestContext, window: str = "7d") -> AnalyticsR
         per_day=per_day,
         by_agent=by_agent,
         by_pocket=by_pocket,
+        solved_rate=solved_rate,
+        solved_count=verdict_counts["solved"],
+        partial_count=verdict_counts["partial"],
+        not_solved_count=verdict_counts["not_solved"],
+        unknown_count=verdict_counts["unknown"],
     )
 
 
