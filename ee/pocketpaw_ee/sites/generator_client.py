@@ -8,6 +8,27 @@
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-07-10 (HE-3 — html publish skips the Node build): build()/_build_one()
+# now branch the STAGE-2 payload AND the build chain on the engine's CAPABILITY, via
+# ``needs_node_build(engine)`` / ``is_source_engine(engine)`` from the canonical
+# engines.py (HE-2) — NOT by overloading ``smoke`` / ``static_build``. Overloading a
+# flag across this layer seam is exactly what caused the 2026-06-19 edit-overlay bug
+# (see that entry below); PRD Decision 6 guardrail #1 makes the new, third predicate
+# binding. Two additions, both html-only; ripple + svelte are byte-for-byte unchanged:
+#   * INPUT: html is a source-map engine, so it sends its raw {path: contents} static
+#     tree on ``input.source`` and OMITS ``rippleSpec`` (no binding split — dynamic
+#     html is a non-goal). The svelte ``if engine == "svelte"`` branch and the ripple
+#     ``else`` are untouched; html rides a new ``elif is_source_engine(engine)``.
+#   * BUILD: when ``needs_node_build(engine)`` is False (html), _build_one runs
+#     ``generate`` then RETURNS — skipping ``_rewrite_ripple_dep`` / ``_ripple_motion_dep``
+#     (an html site has no package.json), ``bun install``, ``bun run build``
+#     (build_static), AND the workerd SSR smoke gate. The workerd gate is replaced,
+#     for html only, by ``_html_static_smoke`` — a stdlib-only static check (parse the
+#     emitted index.html + resolve internal links) that raises the SAME
+#     ``SmokeGateFailed`` on a malformed/broken page, so the caller's rollback path is
+#     unchanged and a bad page never deploys. ripple + svelte (needs_node_build True)
+#     take the existing generate → install → build_static → gate chain unchanged.
+#
 # Updated 2026-07-09 (fix/sites-svelte-kit-ebusy-windows): every RE-publish of a
 # site 500'd on Windows with SmokeGateFailed: "build failed (exit 1)". Root cause:
 # PERF-3 reuses a per-pocket build dir to cache node_modules, so the prior build's
@@ -228,6 +249,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -235,8 +257,12 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import unquote
+
+from pocketpaw_ee.sites.engines import is_source_engine, needs_node_build, static_output_rel
 
 logger = logging.getLogger(__name__)
 
@@ -538,6 +564,150 @@ async def _clear_stale_svelte_kit(project_dir: str) -> None:
 
 class SmokeGateFailed(RuntimeError):
     """Raised when the workerd smoke render fails — the site is not deployed."""
+
+
+# --------------------------------------------------------------------------- #
+# HE-3 — the html static smoke check (the html-path replacement for the workerd
+# SSR gate). ripple/svelte fail-gate a LIVE publish on a workerd SSR render (see
+# ``_WORKERD_SSR_MARKERS``); an html site has NO SSR and NO workerd, so that gate
+# is inapplicable — not skipped, replaced. This lightweight static check parses the
+# emitted index.html with the STDLIB parser (no new dependency) and confirms every
+# internal link / local asset ref resolves to a file in the output tree. It raises
+# the SAME ``SmokeGateFailed`` the workerd gate raises, so the publish caller's
+# existing rollback-on-SmokeGateFailed path is unchanged and a malformed page NEVER
+# reaches deploy (it fails closed). It is a clearly-named function, gated in
+# _build_one on the EXPLICIT ``needs_node_build(engine)`` predicate — never folded
+# into an overloaded ``smoke`` / ``static_build`` flag.
+# --------------------------------------------------------------------------- #
+
+_HTML_SMOKE_ENTRY = "index.html"
+
+# HTML void elements have no end tag: a ``</...>`` for one is never "unbalanced", and
+# one left "open" is not a structural error. Everything else pushes/pops the tag
+# stack in _HtmlSmokeParser. Matches HE-1's byte-preserving generator (unclosed
+# ``<br>`` is a valid authored input and must pass the smoke check).
+_HTML_VOID_ELEMENTS: frozenset[str] = frozenset(
+    {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    }
+)
+
+# A href/src value carrying a URL scheme (http:, https:, mailto:, tel:, data:,
+# javascript:, ...) is EXTERNAL / non-file and is never resolved to a local file.
+_URL_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
+
+
+class _HtmlSmokeParser(HTMLParser):
+    """Collects href/src refs and detects gross structural malformation while
+    parsing the emitted ``index.html`` with the stdlib parser (no dependency).
+
+    * ``local_refs`` — every href/src attribute value seen (filtered to local files
+      by :func:`_local_ref_path` at check time).
+    * ``saw_element`` — whether ANY element start tag was seen; a file with none is
+      not a servable HTML document (a truncated/garbage input fails here).
+    * ``stray_end_tag`` — an end tag that closes no open element (an extra/unbalanced
+      ``</div>``): a genuine malformation a well-formed page never contains. Void and
+      explicitly self-closing tags never push, so they can't trigger a false
+      positive. This is the parse-side "malformed fails closed" teeth; the local-link
+      resolution check is the other.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.local_refs: list[str] = []
+        self.saw_element = False
+        self.stray_end_tag = False
+        self._open: list[str] = []
+
+    def _collect(self, attrs: list[tuple[str, str | None]]) -> None:
+        for name, value in attrs:
+            if name in ("href", "src") and value:
+                self.local_refs.append(value)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.saw_element = True
+        self._collect(attrs)
+        if tag not in _HTML_VOID_ELEMENTS:
+            self._open.append(tag)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # An explicit self-closing tag (``<foo/>``) opens nothing.
+        self.saw_element = True
+        self._collect(attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _HTML_VOID_ELEMENTS:
+            return
+        if tag in self._open:
+            # Pop down to the matching open tag (tolerates optional-close nesting).
+            while self._open and self._open.pop() != tag:
+                continue
+        else:
+            self.stray_end_tag = True
+
+
+def _local_ref_path(ref: str) -> str | None:
+    """Return the local file path a href/src points at, or ``None`` when the ref is
+    not a local file we should verify.
+
+    ``None`` (skip) for: an in-page anchor (``#...``), a protocol-relative URL
+    (``//host``), any scheme-bearing URL (http/https/mailto/tel/data/javascript), an
+    empty value, or a same-document ``?query`` / ``#frag``. The query string and
+    fragment are stripped and the path is percent-decoded; a leading ``/``
+    (site-absolute) is resolved against the deploy root by the caller."""
+    value = ref.strip()
+    if not value or value.startswith("#"):
+        return None
+    if value.startswith("//"):  # protocol-relative → external
+        return None
+    if _URL_SCHEME_RE.match(value):  # http:, https:, mailto:, tel:, data:, ...
+        return None
+    path = value.split("#", 1)[0].split("?", 1)[0]
+    if not path:  # was a pure ?query / #frag → same document, nothing to resolve
+        return None
+    return unquote(path)
+
+
+def _html_static_smoke(static_dir: Path, *, entry: str = _HTML_SMOKE_ENTRY) -> None:
+    """The html-path smoke check (HE-3). Fails closed with ``SmokeGateFailed``.
+
+    Asserts the emitted static tree is coherent enough to serve: the entry
+    ``index.html`` exists and parses, contains at least one element, has no
+    unbalanced/stray end tag, and every internal link / local asset ref
+    (``href`` / ``src`` with a relative or site-absolute local path) resolves to a
+    file that exists under ``static_dir``. External refs (http/https/mailto/tel/data),
+    protocol-relative URLs, and in-page anchors are ignored. Any failure raises
+    ``SmokeGateFailed`` — the same class the workerd gate raises — so the caller's
+    rollback path is unchanged and a broken page never deploys."""
+    root = static_dir.resolve()
+    entry_path = root / entry
+    if not entry_path.is_file():
+        raise SmokeGateFailed(f"html smoke: no {entry} in the generated static tree ({root})")
+    markup = entry_path.read_text(encoding="utf-8", errors="replace")
+    parser = _HtmlSmokeParser()
+    try:
+        parser.feed(markup)
+        parser.close()
+    except Exception as exc:  # noqa: BLE001 — any parse error = an unservable page
+        raise SmokeGateFailed(f"html smoke: {entry} did not parse: {exc}") from exc
+    if not parser.saw_element:
+        raise SmokeGateFailed(f"html smoke: {entry} contains no HTML elements")
+    if parser.stray_end_tag:
+        raise SmokeGateFailed(f"html smoke: {entry} has an unbalanced/stray end tag")
+    for ref in parser.local_refs:
+        path = _local_ref_path(ref)
+        if path is None:
+            continue
+        target = (root / path.lstrip("/")).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise SmokeGateFailed(
+                f"html smoke: link/asset escapes the site root: {ref!r}"
+            ) from None
+        if not target.exists():
+            raise SmokeGateFailed(f"html smoke: internal link/asset does not resolve: {ref!r}")
 
 
 @dataclass(frozen=True)
@@ -1049,10 +1219,38 @@ class GeneratorClient:
             files, bindings = _split_svelte_source(source)
             input_json["source"] = files
             input_json.update(bindings)
+        elif is_source_engine(engine):
+            # HE-3/HE-1: html is a source-map engine too — it sends its raw
+            # ``{path: contents}`` static tree on ``input.source`` and OMITS
+            # ``rippleSpec`` (a hand-authored html site has no rippleSpec). Unlike
+            # svelte there is NO binding split: dynamic (live-data) html is a
+            # non-goal, so an html source map carries only files. ripple (not a
+            # source engine) is untouched by this branch and still sends rippleSpec
+            # below, so its wire bytes — and svelte's — are unchanged.
+            input_json["source"] = source or {}
         else:
             input_json["rippleSpec"] = ripple_spec
         gen = await self._runner.generate(input_json, out_dir)
         project_dir = gen["projectDir"]
+        # HE-3: an html publish's last-mile output IS the authored source (HE-1 makes
+        # the generator emit a raw static tree), so there is NOTHING to install, no
+        # Vite/SvelteKit ``bun run build``, and no workerd SSR render. Skip all three
+        # and run the lightweight html static smoke instead. The skip is gated on the
+        # EXPLICIT ``needs_node_build(engine)`` predicate (engines.py, HE-2) — NEVER by
+        # overloading ``smoke`` / ``static_build``. Those two flags gate the workerd SSR
+        # fail-check and the ``bun run build`` step respectively; overloading either to
+        # ALSO mean "skip the node build" is the exact layer-seam flag conflation that
+        # caused the edit-overlay bug (this file's 2026-06-19 entry; PRD Decision 6,
+        # guardrail #1). ``needs_node_build`` is a THIRD, independent concept. Because
+        # this returns BEFORE ``_rewrite_ripple_dep`` / the install / ``build_static``
+        # below, NONE of them run on the html path — and neither ``_rewrite_ripple_dep``
+        # nor ``_ripple_motion_dep`` ever touch an html site (it has no package.json to
+        # rewrite). ripple + svelte (``needs_node_build`` True) fall through to the
+        # unchanged generate → install → build_static → gate chain.
+        if not needs_node_build(engine):
+            static_dir = Path(project_dir, static_output_rel(engine))
+            _html_static_smoke(static_dir)
+            return BuildResult(project_dir=project_dir, ripple_version=gen.get("rippleVersion"))
         # Make the generated project's deps resolvable BEFORE install (and before
         # the dep-hash is computed, so the rewrite is part of the fingerprint).
         # The template pins an unpublished @ripple-ui/svelte; the rewrite swaps it
