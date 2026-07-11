@@ -198,15 +198,35 @@ async def run_one_pass() -> int:
         logger.exception("refresh-scheduler: failed to list interval-source pockets")
         return 0
 
+    # Per-workspace opt-out (feat/external-alerting-c2c3): pockets in a workspace
+    # that turned its background sweeps off are skipped. One deduped check per
+    # unique workspace; fails OPEN so a config-read hiccup keeps the default.
+    from pocketpaw_ee.cloud.automations_status.service import (
+        filter_sweep_enabled_workspaces,
+    )
+
+    enabled_ws = await filter_sweep_enabled_workspaces(
+        {ws for p in pockets if (ws := p.get("workspace_id"))}
+    )
+
+    visited = 0
     for pocket in pockets:
+        if pocket.get("workspace_id") not in enabled_ws:
+            logger.debug(
+                "refresh-scheduler: workspace=%s opted out — skipping pocket %s",
+                pocket.get("workspace_id"),
+                pocket.get("pocket_id"),
+            )
+            continue
         try:
             await _refresh_one_pocket(pocket)
+            visited += 1
         except Exception:
             logger.exception(
                 "refresh-scheduler: pass failed for pocket %s",
                 pocket.get("pocket_id"),
             )
-    return len(pockets)
+    return visited
 
 
 async def _loop() -> None:

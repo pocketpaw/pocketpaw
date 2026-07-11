@@ -3,6 +3,12 @@
 # machine-readable `code` emitted on denial. Tests iterate ACTIONS to
 # guarantee every guarded operation is covered.
 #
+# Updated: 2026-07-11 (feat/external-alerting-c2c3) — registered
+# ``automations.read`` (MEMBER) and ``automations.manage`` (ADMIN) for the
+# always-on automation status surface (ee.cloud.automations_status.router): view
+# the sweep registry / rules / per-workspace enable state, and flip the
+# per-workspace opt-out.
+#
 # Updated: 2026-04-19 (fix/fleet-install-auth-guard) — registered
 # ``fleet.install`` at ``WorkspaceRole.ADMIN`` with deny code
 # ``workspace.insufficient_role``. This lets the fleet router call
@@ -209,6 +215,13 @@ ACTIONS: dict[str, ActionRule] = {
     # floor), so an admin bar — not the OWNER-only bar reserved for
     # instinct.activate (which turns OFF the human-in-the-loop) — is correct.
     "rules.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Automations status — the always-on automation surface (external-alerting C3).
+    # read is MEMBER (any team member can view which sweeps/rules are running and
+    # the per-workspace enable state). manage is ADMIN because flipping the
+    # per-workspace opt-out turns the always-on background sweeps ON/OFF for the
+    # whole workspace (mirrors rules.manage / connector.manage).
+    "automations.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "automations.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Connector — workspace-level connector lifecycle.
     # execute is MEMBER so any team member can run actions against enabled connectors.
     # manage (enable/disable/config) is ADMIN because it changes workspace-wide state

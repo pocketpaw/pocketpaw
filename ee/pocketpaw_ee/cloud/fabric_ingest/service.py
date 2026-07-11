@@ -1,5 +1,9 @@
 # service.py — Generic Firestore→Fabric ingestion worker.
 # Created: 2026-06-11 — generic Firestore→Fabric ingestion worker.
+# Updated: 2026-07-11 (feat/external-alerting-c2c3) — ``run_ingest_sweep`` now
+#   filters sources by the per-workspace automation opt-out
+#   (``automations_status.service.filter_sweep_enabled_workspaces``): a tenant
+#   that turned its background sweeps off is skipped. Fails OPEN.
 # Updated: 2026-06-11 (rebase onto dev) — the per-document upsert now delegates
 #   to the OSS connector→Fabric mapper (pocketpaw.connectors.fabric_ingest
 #   .ingest_records, landed on dev in the Calendar ingestion PR #1418) instead
@@ -302,6 +306,18 @@ async def run_ingest_sweep(
     fn = ingest_fn or ingest_collection
 
     sources = await list_ingest_sources(workspace_id=workspace_id)
+    if not sources:
+        return {"sources": 0, "ok": 0, "errors": 0}
+
+    # Per-workspace opt-out (feat/external-alerting-c2c3): drop sources whose
+    # workspace turned its background sweeps off. One deduped check per unique
+    # workspace; fails OPEN so a config-read hiccup keeps the always-on default.
+    from pocketpaw_ee.cloud.automations_status.service import (
+        filter_sweep_enabled_workspaces,
+    )
+
+    enabled_ws = await filter_sweep_enabled_workspaces({s["workspace_id"] for s in sources})
+    sources = [s for s in sources if s["workspace_id"] in enabled_ws]
     if not sources:
         return {"sources": 0, "ok": 0, "errors": 0}
 

@@ -5,6 +5,10 @@
 # trigger, detects rising edges (false → true per-row predicate), and
 # dispatches the trigger's action via the Wave 3a gate when an edge
 # fires.
+# Updated: 2026-07-11 (feat/external-alerting-c2c3) — the per-pocket sweep now
+# honors the per-workspace automation opt-out
+# (``automations_status.service.filter_sweep_enabled_workspaces``): pockets in a
+# workspace that turned its background sweeps off are skipped. Fails OPEN.
 #
 # Design (mirrors ``cycles/scheduler.py`` and
 # ``pockets/refresh_scheduler.py``):
@@ -171,11 +175,29 @@ async def run_one_pass() -> int:
         logger.exception("temporal-scheduler: failed to list pockets")
         return 0
 
+    # Per-workspace opt-out (feat/external-alerting-c2c3): pre-compute the
+    # enabled-workspace set so a tenant that turned its background sweeps off is
+    # skipped. One deduped check per unique workspace; fails OPEN.
+    from pocketpaw_ee.cloud.automations_status.service import (
+        filter_sweep_enabled_workspaces,
+    )
+
+    enabled_ws = await filter_sweep_enabled_workspaces(
+        {ws for p in pockets if (ws := p.get("workspace_id"))}
+    )
+
     visited = 0
     for pocket in pockets:
         pocket_id = pocket.get("pocket_id")
         workspace_id = pocket.get("workspace_id")
         if not pocket_id or not workspace_id:
+            continue
+        if workspace_id not in enabled_ws:
+            logger.debug(
+                "temporal-scheduler: workspace=%s opted out — skipping pocket=%s",
+                workspace_id,
+                pocket_id,
+            )
             continue
         try:
             template, rows = await _resolve_pocket_template_and_rows(workspace_id, pocket_id)
