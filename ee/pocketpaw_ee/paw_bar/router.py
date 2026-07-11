@@ -1,4 +1,13 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-11 (W4a tenancy seam) — (1) Admin CRUD (create / list /
+#   update-spec / rotate-token / delete) now threads the caller's active
+#   workspace via Depends(current_workspace_id): create stamps the row, the
+#   rest scope lookups + mutations so a cross-tenant widget id 404s and never
+#   mutates. (2) Public-path fix (the cross-tenant Fabric leak): ingest stays
+#   token-only but derives the tenant from the widget ROW —
+#   _apply_event_mapping now calls get_fabric_store(workspace_id=
+#   widget.workspace_id or None) instead of the bare shared store; legacy
+#   unstamped rows ('' → None) keep the old single-tenant behavior.
 # Updated: 2026-07-08 — Renamed widget "Paw Print" → "Paw Bar" (routes /paw-print→/paw-bar,
 #   header X-Paw-Print-Token→X-Paw-Bar-Token, tag PawPrint→PawBar, source_connector
 #   "paw_print"→"paw_bar"). Hard-rename — widget has zero deployments. The separate
@@ -570,13 +579,14 @@ async def _apply_event_mapping(widget: PawBarWidget, event: PawBarEvent) -> str 
     except ImportError:
         return None
 
-    # ISO note: paw-bar's tenant key is the widget OWNER, a logical, possibly
-    # colon-qualified string (``user:maya``) — NOT a physical-store-path
-    # workspace id (a ``:`` fails the path-traversal allowlist). The Fabric
-    # write is scoped by the object's ``source_*`` provenance + the store's own
-    # in-row guard, not by a per-owner store file, so this keeps the BARE store
-    # rather than threading the owner into the factory (which would ValueError).
-    fabric = get_fabric_store()
+    # W4a tenancy — the public ingest path is token-only (no session), so the
+    # tenant is derived from the widget ROW: the workspace_id stamped at
+    # create time by the admin route. That is a REAL workspace id (unlike the
+    # logical, possibly colon-qualified ``owner`` — ``user:maya`` — which fails
+    # the store factory's path allowlist and must never be used as a store
+    # key). ``or None`` preserves legacy/single-tenant behavior: an unstamped
+    # ('' ) row keeps writing to the shared default store exactly as before.
+    fabric = get_fabric_store(workspace_id=widget.workspace_id or None)
     if fabric is None:
         return None
 
