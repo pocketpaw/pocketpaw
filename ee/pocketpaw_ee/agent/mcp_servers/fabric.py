@@ -1,6 +1,12 @@
 # fabric.py — in-process MCP server exposing read-only Fabric ontology access
 # to the claude_agent_sdk cloud chat backend. Created: 2026-06-11
 # (feat/fabric-instinct-mcp-providers).
+# Updated: 2026-07-11 (FST-7 — provenance on reads) — fabric_query gained an
+#   opt-in ``include_provenance`` arg (default false; response shape unchanged
+#   without it): attaches per-property trust detail for statement-tracked
+#   properties via store.get_object_provenance — disputed/unresolvable flags,
+#   freshness tri-state, and the winning value's writer + source. Best-effort
+#   per object; a provenance failure never breaks the query.
 # Updated: 2026-06-11 (fix/fabric-stats-workspace-scope) — fabric_stats now
 # passes the resolved workspace into the store's scoped stats()/list_types(),
 # closing the live cross-tenant type-name leak the original instance-wide
@@ -180,6 +186,10 @@ async def _fabric_query_handler(args: dict) -> dict:
     link_type = args.get("link_type")
     filters = args.get("filters")
     limit = args.get("limit", 20)
+    # FST-7: opt-in provenance — default False so the default response shape
+    # (and its byte budget) is unchanged; the agent asks for it when trust
+    # matters ("where did this figure come from / is it disputed / stale?").
+    include_provenance = bool(args.get("include_provenance", False))
 
     for field_name, value in (
         ("type_name", type_name),
@@ -231,6 +241,20 @@ async def _fabric_query_handler(args: dict) -> dict:
         logger.debug("fabric_query trace emission skipped", exc_info=True)
 
     objects = [_serialize_object(o) for o in result.objects]
+
+    # FST-7: attach per-property provenance (disputed / unresolvable /
+    # freshness / winner source) for statement-TRACKED properties only —
+    # untracked properties don't appear (single-source, nothing to explain).
+    # Best-effort per object: a provenance failure never breaks the query.
+    if include_provenance:
+        for entry in objects:
+            try:
+                entry["provenance"] = await store.get_object_provenance(
+                    entry["id"], workspace_id=workspace_id
+                )
+            except Exception:  # noqa: BLE001 — additive surface, never fatal
+                logger.debug("fabric_query provenance skipped for %s", entry["id"], exc_info=True)
+
     objects, truncated = _cap_objects(objects)
 
     return _success_response(
@@ -312,9 +336,15 @@ def build_fabric_server() -> tuple[str, Any] | None:
             "search), `linked_to` (find objects linked to this object id), "
             "`link_type` (filter links by type), `filters` (property filters — "
             'a scalar for equality or an operator map like {"rent": {">": '
-            "1000}}), `limit` (max results, default 20, cap 50). Returns "
+            "1000}}), `limit` (max results, default 20, cap 50), "
+            "`include_provenance` (bool, default false — adds per-property "
+            "trust detail for multi-source properties: disputed/unresolvable "
+            "flags, freshness fresh|aging|stale, and the winning value's "
+            "writer + source; use it when asked where a figure came from or "
+            "whether it can be trusted). Returns "
             "{total, returned, truncated, objects:[{id, type_name, properties, "
-            "source_connector, source_id}]}. An error means relay the reason."
+            "source_connector, source_id, provenance?}]}. An error means relay "
+            "the reason."
         ),
         {
             "type": "object",
@@ -341,6 +371,13 @@ def build_fabric_server() -> tuple[str, Any] | None:
                 "limit": {
                     "type": "integer",
                     "description": "Max results (default 20, cap 50).",
+                },
+                "include_provenance": {
+                    "type": "boolean",
+                    "description": (
+                        "Attach per-property trust detail (disputed, freshness, "
+                        "winning source) for multi-source properties. Default false."
+                    ),
                 },
             },
             "additionalProperties": False,

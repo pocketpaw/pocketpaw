@@ -34,7 +34,8 @@ STORE_LOGGER = "pocketpaw.fabric.store"
 
 DIVERGENCE_RE = re.compile(
     r"^fabric shadow: object=\S+ property=\S+ lww=.+ resolver=.+"
-    r" diverged=(True|False) disputed=(True|False) unresolvable=(True|False)$"
+    r" diverged=(True|False) disputed=(True|False) unresolvable=(True|False)"
+    r" freshness=(fresh|aging|stale|none)$"
 )
 
 
@@ -177,7 +178,7 @@ async def test_enforce_divergence_line_logs_lww_vs_written(
     lines = _shadow_lines(caplog)
     assert lines == [
         f"fabric shadow: object={obj_id} property=arr lww=150 resolver=120"
-        " diverged=True disputed=True unresolvable=False"
+        " diverged=True disputed=True unresolvable=False freshness=fresh"
     ]
     assert DIVERGENCE_RE.fullmatch(lines[0])
     # And "resolver" really is what the cache holds now (enforce semantics).
@@ -272,7 +273,7 @@ class TestSzdProof:
         lines = _shadow_lines(caplog)
         assert lines == [
             f'fabric shadow: object={obj_id} property=industry lww="crypto"'
-            ' resolver="fintech" diverged=True disputed=True unresolvable=False'
+            ' resolver="fintech" diverged=True disputed=True unresolvable=False freshness=fresh'
         ]
 
     async def test_reversed_order_connector_fact_still_wins_cache(

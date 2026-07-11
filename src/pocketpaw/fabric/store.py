@@ -1,5 +1,13 @@
 # Fabric store — async SQLite operations for the ontology layer.
 # Created: 2026-03-28 — CRUD for object types, objects, and links.
+# Updated: 2026-07-11 (FST-7 — freshness) — the merge-site statement pass now
+#   threads an aware-UTC ``now`` into resolve() (within-family staleness
+#   demotion live in shadow AND enforce); the divergence line gained a
+#   trailing `` freshness=<fresh|aging|stale|none>`` token (additive — field
+#   order unchanged, the FST-8 grep contract holds); NEW opt-in read surface
+#   ``get_object_provenance(object_id)`` — per TRACKED property: disputed /
+#   unresolvable / freshness / statement count / winner writer+source summary
+#   (a sibling method, the default read path pays nothing).
 # Updated: 2026-04-19 (Cluster C / PR3) — Added list_links() for the new
 #   GET /api/v1/fabric/links endpoint that the Links sub-tab in
 #   PocketDataPanel now consumes instead of its hardcoded placeholder.
@@ -289,7 +297,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -1392,6 +1400,13 @@ class FabricStore:
         seed_source: SourceRef | None = None
         resolutions: dict[str, Resolution] = {}
 
+        # FST-7 — the store's clock convention: ONE aware-UTC read per pass
+        # (datetime.now(UTC)), threaded into resolve() so shadow AND enforce
+        # apply within-family staleness demotion live. Statement stamps are
+        # UTC-normalized at the comparison boundary (naive = UTC — see
+        # trust._as_utc); stored data is never rewritten.
+        now = datetime.now(UTC)
+
         for prop, value in incoming.items():
             stmts = await self.get_statements(existing.id, prop, workspace_id=workspace_id)
             if not stmts:
@@ -1444,6 +1459,7 @@ class FabricStore:
                 stmts,
                 default_trust_rules(),
                 object_type=existing.type_name or None,
+                now=now,
             )
             # ``lww`` is the incoming value — what the cache holds in shadow
             # and what LWW WOULD have kept in enforce (where the caller
@@ -1451,7 +1467,7 @@ class FabricStore:
             # way: the FST-8 harness contract.
             logger.info(
                 "fabric shadow: object=%s property=%s lww=%s resolver=%s"
-                " diverged=%s disputed=%s unresolvable=%s",
+                " diverged=%s disputed=%s unresolvable=%s freshness=%s",
                 existing.id,
                 prop,
                 json.dumps(value, default=str),
@@ -1459,6 +1475,7 @@ class FabricStore:
                 _materially_different(value, resolution.value),
                 resolution.is_disputed,
                 resolution.unresolvable,
+                resolution.winner_freshness or "none",
             )
             resolutions[prop] = resolution
         return resolutions
@@ -2336,6 +2353,66 @@ class FabricStore:
             async with db.execute(sql, params) as cur:
                 row = await cur.fetchone()
         return self._row_to_source(row) if row else None
+
+    async def get_object_provenance(
+        self, object_id: str, *, workspace_id: str | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """Opt-in provenance read surface (FST-7).
+
+        Per statement-TRACKED property of one object:
+        ``{property: {disputed, unresolvable, freshness, statements, winner}}``
+        where ``winner`` carries the resolving statement's writer_class /
+        observed_at / rank / pinned plus a compact source summary. Untracked
+        properties (the scalar majority) do not appear — absence means
+        "single-source, nothing to explain". A SIBLING method rather than a
+        ``get_object`` flag so the default read path pays nothing; the
+        agent-facing ``fabric_query`` MCP tool and the future "disputed
+        facts" view are the consumers. Freshness/dispute state is computed
+        live (statements + resolve() with the store clock), never persisted.
+        """
+        keys = await self.list_statement_keys(workspace_id=workspace_id, object_id=object_id)
+        if not keys:
+            return {}
+        obj = await self.get_object(object_id, workspace_id=workspace_id)
+        object_type = (obj.type_name or None) if obj else None
+        now = datetime.now(UTC)
+        rules = default_trust_rules()
+        out: dict[str, dict[str, Any]] = {}
+        for _oid, prop in keys:
+            stmts = await self.get_statements(object_id, prop, workspace_id=workspace_id)
+            if not stmts:
+                continue
+            resolution = resolve(stmts, rules, object_type=object_type, now=now)
+            winner = resolution.winner_statement
+            winner_info: dict[str, Any] | None = None
+            if winner is not None:
+                src = await self.get_source(winner.source_ref_id, workspace_id=workspace_id)
+                winner_info = {
+                    "writer_class": winner.writer_class,
+                    "observed_at": winner.observed_at.isoformat(),
+                    "rank": winner.rank,
+                    "pinned": winner.pinned,
+                    "source": (
+                        {
+                            "kind": src.kind,
+                            "connector": src.connector,
+                            "run_id": src.run_id,
+                            "document_uri": src.document_uri,
+                            "actor_id": src.actor_id,
+                            "session_id": src.session_id,
+                        }
+                        if src
+                        else None
+                    ),
+                }
+            out[prop] = {
+                "disputed": resolution.is_disputed,
+                "unresolvable": resolution.unresolvable,
+                "freshness": resolution.winner_freshness,
+                "statements": len(stmts),
+                "winner": winner_info,
+            }
+        return out
 
     async def get_linked_objects(
         self, obj_id: str, link_type: str | None = None, workspace_id: str | None = None

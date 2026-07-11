@@ -161,7 +161,7 @@ async def test_journal_update_by_user_actor_records_both_claims(
     lines = _shadow_lines(caplog)
     assert lines == [
         f"fabric shadow: object={obj.id} property=arr lww=150 resolver=150"
-        " diverged=False disputed=True unresolvable=False"
+        " diverged=False disputed=True unresolvable=False freshness=fresh"
     ]
 
 

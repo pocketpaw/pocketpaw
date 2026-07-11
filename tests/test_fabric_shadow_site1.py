@@ -44,9 +44,13 @@ from pocketpaw.fabric.store import FabricStore, _source_truth_mode
 STORE_LOGGER = "pocketpaw.fabric.store"
 
 # The FST-8 harness contract: one line, grep-stable, values JSON-encoded.
+# FST-7 extended the line ADDITIVELY with a trailing ` freshness=<tri-state>`
+# (existing field order untouched) — the one deliberate format evolution this
+# guard exists to gate; updated with it, like the FST-5 enforce placeholder.
 DIVERGENCE_RE = re.compile(
     r"^fabric shadow: object=\S+ property=\S+ lww=.+ resolver=.+"
-    r" diverged=(True|False) disputed=(True|False) unresolvable=(True|False)$"
+    r" diverged=(True|False) disputed=(True|False) unresolvable=(True|False)"
+    r" freshness=(fresh|aging|stale|none)$"
 )
 
 
@@ -210,7 +214,7 @@ async def test_shadow_two_writers_promotes_logs_and_keeps_lww_cache(
     lines = _shadow_lines(caplog)
     assert lines == [
         f"fabric shadow: object={obj_id} property=arr lww=150 resolver=120"
-        " diverged=True disputed=True unresolvable=False"
+        " diverged=True disputed=True unresolvable=False freshness=fresh"
     ]
     assert DIVERGENCE_RE.fullmatch(lines[0])
     assert "\n" not in lines[0]
@@ -335,7 +339,7 @@ async def test_shadow_tracked_property_appends_and_reconverges(
     # The fresh connector write wins the ladder → resolver agrees with LWW.
     assert lines == [
         f"fabric shadow: object={obj_id} property=arr lww=200 resolver=200"
-        " diverged=False disputed=True unresolvable=False"
+        " diverged=False disputed=True unresolvable=False freshness=fresh"
     ]
 
 
