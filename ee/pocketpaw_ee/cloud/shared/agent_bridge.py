@@ -583,7 +583,10 @@ async def _run_agent_response(
         details = f": {error_summary}" if error_summary else ""
         full_text = f"[Agent encountered an error and could not produce a full response{details}]"
 
-    if not full_text.strip():
+    # ART-1: an empty reply that nonetheless DELIVERED artifacts must not be
+    # dropped — the files landed in blob storage, so fall through to persist a
+    # message carrying the ``{type:"artifact"}`` attachments (empty text is fine).
+    if not full_text.strip() and not delivered_artifacts:
         return None
 
     # Check for ripple spec in response

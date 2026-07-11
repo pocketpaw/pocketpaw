@@ -927,3 +927,39 @@ async def test_execute_run_no_delivery_emits_no_artifact_event(monkeypatch):
     assert not any(e.event == "artifact" for e in events)
     assert all(a["type"] != "artifact" for a in attachments)
     assert [e.event for e in events][-1] == "stream_end"
+
+
+def _recording_only_events(metas: list[dict]):
+    """A fake ``_iter_agent_events`` that records each meta (as a successful
+    ``deliver_artifact`` would) but yields NO text — the empty-reply case that
+    used to early-return and silently drop the delivered artifacts."""
+
+    async def _gen(spec, ctx):
+        from pocketpaw_ee.cloud.chat.agent_service import record_delivered_artifact
+
+        for meta in metas:
+            record_delivered_artifact(meta)
+        if False:  # pragma: no cover — makes this an async generator with no yields
+            yield None
+
+    return _gen
+
+
+async def test_execute_run_persists_artifacts_when_reply_text_empty(monkeypatch):
+    """ART-1 regression: a non-cancelled run that delivered an artifact but
+    produced NO closing text must still persist the ``{type:"artifact"}``
+    attachment and emit the ``artifact`` event — the file already landed in blob
+    storage, so the empty-text early return must not drop it."""
+    meta = {"file_id": "f9", "name": "export.csv", "mime": "text/csv", "size": 42}
+    events, attachments = await _run_and_capture(monkeypatch, _recording_only_events([meta]))
+
+    # The artifact event fired despite the empty reply...
+    artifact_events = [e for e in events if e.event == "artifact"]
+    assert len(artifact_events) == 1
+    assert artifact_events[0].data == meta
+    # ...and the assistant message was persisted carrying the attachment.
+    assert attachments == [{"type": "artifact", "meta": meta}]
+    # stream_end carries a real assistant_message_id (persist ran, not the
+    # empty-text early return whose stream_end has assistant_message_id=None).
+    stream_end = [e for e in events if e.event == "stream_end"][-1]
+    assert stream_end.data["assistant_message_id"] == "assistant-msg-1"

@@ -1,6 +1,15 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-07-11 (ART-1) — ``execute_run`` binds a per-run delivered-artifact
+  collector (``collect_delivered_artifacts``) around the run and, at persist
+  time, drains it into one ``{type:"artifact", meta}`` attachment on the
+  assistant message plus one ``artifact`` SSE event apiece (in delivery order,
+  mirroring the ripple event). A non-cancelled run that delivered artifacts but
+  produced no closing text no longer early-returns — it routes through the
+  persist path so the attachments + events are never dropped (the files already
+  landed in blob storage). ``deliver_artifact`` (``mcp_servers/deliver.py``)
+  feeds the collector via ``record_delivered_artifact`` on each success.
 - 2026-07-08 (CS-13, feat/per-send-model-override) — ``execute_run`` copies
   ``spec.model_override`` onto the rebuilt ``ctx`` and ``_drive_agent_loop``
   forwards it into ``pool.run`` as ``model_override`` ONLY when set (the same
@@ -1755,10 +1764,16 @@ async def execute_run(spec: RunSpec) -> None:
         await transport.set_ttl(spec.run_id, _stream_ttl())
         return
 
-    if cancelled or not full_text.strip():
+    if cancelled or (not full_text.strip() and not delivered_artifacts):
         # Empty-text non-cancelled runs still complete cleanly — without this,
         # the doc would sit in ``running`` until the 10-minute sweeper marked
         # it ``interrupted``, surfacing a phantom active_run to the frontend.
+        # ART-1 exception: a non-cancelled run that DELIVERED artifacts but
+        # produced no closing text must NOT early-return — the files landed in
+        # blob storage, so it falls through to the persist path below to record
+        # the ``{type:"artifact"}`` attachments + emit their SSE events (empty
+        # message text is fine). A cancelled run keeps the early return regardless
+        # (no assistant message on a cancel).
         try:
             if cancelled:
                 await run_service.mark_terminal(
