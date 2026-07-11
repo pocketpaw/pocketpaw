@@ -1,6 +1,12 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-07-11 (self-serve-analysis S1): Added ``fabric_analyst`` (default False,
+    env POCKETPAW_FABRIC_ANALYST) — gates the Fabric transparent-analysis read
+    engine (SQL GROUP BY aggregation + reasoning steps on FabricStore.query /
+    POST /fabric/query). Off (default): an aggregation query is rejected
+    fail-loud with FabricAnalystDisabledError -> HTTP 422
+    fabric.analyst_disabled; plain queries are unaffected either way.
   - 2026-07-11 (feat/external-alerting-c2c3): Added ``automation_evaluator_autostart``
     (default True, env POCKETPAW_AUTOMATION_EVALUATOR_AUTOSTART) — the OSS
     always-on automation switch. When on (default), the background
@@ -1842,6 +1848,23 @@ class Settings(BaseSettings):
             "killed. Default False so OSS / self-host deployments (which run no "
             "credit ledger) are unaffected; the cloud / subscription (PEE) "
             "deployments turn it on via POCKETPAW_BILLING_ENFORCED."
+        ),
+    )
+
+    # Self-serve analysis (S1 — transparent-analysis read engine). Gates the
+    # Fabric aggregation surface (FabricQuery.group_by/aggregate) end-to-end at
+    # the store, so neither the EE /fabric/query route nor agent-tool callers
+    # can aggregate while the feature is dark.
+    fabric_analyst: bool = Field(
+        default=False,
+        description=(
+            "Enable the Fabric self-serve-analysis read engine (S1): SQL "
+            "GROUP BY aggregation + human-readable reasoning steps on "
+            "FabricStore.query / POST /fabric/query. When False (the default) a "
+            "query carrying group_by/aggregate is rejected with a clear "
+            "FabricAnalystDisabledError (HTTP 422, code fabric.analyst_disabled) "
+            "— fail-loud, never silent degrade; plain queries are unaffected "
+            "either way. Set via POCKETPAW_FABRIC_ANALYST."
         ),
     )
 
