@@ -1,5 +1,15 @@
 # End-to-end tests for the Deep Work interactive intake mode (issue #1161).
 # Created: 2026-05-21 (feat/deep-work-intake)
+# Updated: 2026-07-10 (feat/verify-mode-shadow) — added TestVerifyShadowMode:
+#   the three-position ``deep_work_verify_mode`` rollout switch. shadow: a
+#   FAILING task still lands DONE with its deliverable saved, the verdict +
+#   ``verify_would_have`` + ``verify_mode='shadow'`` stamped, and NO
+#   ``verify_requeue_count`` / ``verify_feedback`` written; the judge shadow
+#   keeps working under shadow mode. mode='enforce' alone (bool off) drives
+#   the full requeue loop; the legacy bool alone still ENFORCES
+#   (back-compat — it must never silently weaken to shadow); mode='off'
+#   stays byte-for-byte inert. The pre-existing TestVerify* classes set only
+#   the legacy bool, so their continued passing is the enforce==today proof.
 # Updated: 2026-07-02 (feat/judge-shadow-1168) — added TestJudgeShadow (J-1,
 #   #1168): with BOTH flags on, a deterministic FAIL + judge PASS still
 #   requeues the task (the judge NEVER rescues a failing result), the judge
@@ -1322,3 +1332,218 @@ class TestJudgeShadow:
         assert done.metadata["verify_judge_verdict"]["status"] == "solved"
         assert "verify judge shadow: deterministic=solved judge=solved" in caplog.text
         assert "agree=True" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# verify_mode: the three-position rollout switch (off | shadow | enforce)
+# ---------------------------------------------------------------------------
+
+
+def _settings_with_verify_mode(
+    mode: str,
+    *,
+    legacy_bool: bool = False,
+    max_requeues: int = 2,
+    judge_enabled: bool = False,
+):
+    """A Settings copy with the three-position mode + the legacy bool forced."""
+    return get_settings().model_copy(
+        update={
+            "deep_work_verify_mode": mode,
+            "deep_work_verify_loop_enabled": legacy_bool,
+            "deep_work_verify_max_requeues": max_requeues,
+            "deep_work_verify_judge_shadow_enabled": judge_enabled,
+        }
+    )
+
+
+class TestVerifyShadowMode:
+    """The shadow rung: verdicts + would_have telemetry are stamped but task
+    status is NEVER touched — a failing task still completes DONE with its
+    deliverable intact. The legacy bool alone still means ENFORCE."""
+
+    async def _make_agent_and_task(self):
+        from pocketpaw.mission_control import get_mission_control_manager
+
+        manager = get_mission_control_manager()
+        agent = await manager.create_agent(
+            name="FinanceBot",
+            role="Finance Assistant",
+            description="Chases overdue invoices",
+            backend="claude_agent_sdk",
+        )
+        task = await manager.create_task(
+            title="Pull the list of overdue invoices",
+            description="Query accounting for invoices 30+ days overdue",
+            priority=TaskPriority.HIGH,
+        )
+        task.metadata["success_criteria"] = list(_SUCCESS_CRITERIA)
+        await manager.save_task(task)
+        await manager.assign_task(task.id, [agent.id])
+        return manager, agent, task
+
+    async def _run_once(self, executor, task_id, agent_id, mock_router, settings):
+        with (
+            patch(
+                "pocketpaw.mission_control.executor.AgentRouter",
+                return_value=mock_router,
+            ),
+            patch(
+                "pocketpaw.mission_control.executor.get_settings",
+                return_value=settings,
+            ),
+            patch("pocketpaw.mission_control.executor.get_message_bus") as mock_bus,
+        ):
+            mock_bus.return_value.publish_system = AsyncMock()
+            return await executor.execute_task(task_id, agent_id)
+
+    @pytest.mark.asyncio
+    async def test_shadow_failing_task_lands_done_with_would_have(self, svl_singletons, caplog):
+        """The heart of the rollout rung: a FAILING task in shadow mode still
+        completes DONE with the deliverable saved, carries the verdict +
+        would_have + shadow marker, and grows NO requeue counter / feedback
+        — status and should_retry are never touched."""
+        from pocketpaw.mission_control import ActivityType
+
+        manager, agent, task = await self._make_agent_and_task()
+        executor = get_mc_task_executor()
+        settings = _settings_with_verify_mode("shadow")
+        router = _svl_failing_router()  # output fails BOTH criteria
+
+        with caplog.at_level(logging.INFO, logger="pocketpaw.mission_control.executor"):
+            result = await self._run_once(executor, task.id, agent.id, router, settings)
+        assert result["status"] == "completed"
+
+        done = await manager.get_task(task.id)
+        # The task landed DONE despite failing verify — shadow never acts.
+        assert done.status == TaskStatus.DONE
+        assert done.output == _FAILING_OUTPUT
+        # Verdict + shadow telemetry stamped.
+        assert done.metadata["verify_verdict"]["status"] == "not_solved"
+        assert done.metadata["verify_mode"] == "shadow"
+        assert done.metadata["verify_would_have"] == "requeued"
+        # NO enforce-side state was written.
+        assert "verify_requeue_count" not in done.metadata
+        assert "verify_feedback" not in done.metadata
+        assert "verify_escalation_reason" not in done.metadata
+        # The would_have telemetry line fired.
+        assert "verify shadow mode: would_have=requeued" in caplog.text
+
+        # DONE side-effects ran exactly as a normal completion: the
+        # completion activity logged and the output saved as a deliverable.
+        feed = await manager.get_activity_feed(limit=100)
+        completed = [
+            a for a in feed if a.task_id == task.id and a.type == ActivityType.TASK_COMPLETED
+        ]
+        assert completed, "shadow mode must not suppress the TASK_COMPLETED activity"
+        docs = await manager.get_task_documents(task.id)
+        assert docs, "shadow mode must not suppress the deliverable save"
+
+    @pytest.mark.asyncio
+    async def test_shadow_solved_task_stamps_would_have_done(self, svl_singletons):
+        """SOLVED under shadow: would_have=done — telemetry covers every
+        completion, not just the failing ones."""
+        manager, agent, task = await self._make_agent_and_task()
+        executor = get_mc_task_executor()
+        settings = _settings_with_verify_mode("shadow")
+        router = _svl_mock_router()  # passing output
+
+        await self._run_once(executor, task.id, agent.id, router, settings)
+
+        done = await manager.get_task(task.id)
+        assert done.status == TaskStatus.DONE
+        assert done.metadata["verify_verdict"]["status"] == "solved"
+        assert done.metadata["verify_mode"] == "shadow"
+        assert done.metadata["verify_would_have"] == "done"
+        assert "verify_requeue_count" not in done.metadata
+
+    @pytest.mark.asyncio
+    async def test_shadow_keeps_the_judge_shadow_running(self, svl_singletons):
+        """The judge shadow works as-is under shadow mode: its verdict is
+        stamped while the task still completes DONE."""
+        manager, agent, task = await self._make_agent_and_task()
+        executor = get_mc_task_executor()
+        settings = _settings_with_verify_mode("shadow", judge_enabled=True)
+
+        fake_llm = _FakeJudgeLlm(response=_JUDGE_ALL_MET)
+        judge_cls = MagicMock(return_value=LlmJudgeVerdictProvider(llm=fake_llm))
+        router = _svl_failing_router()
+
+        with (
+            patch(
+                "pocketpaw.mission_control.executor.AgentRouter",
+                return_value=router,
+            ),
+            patch(
+                "pocketpaw.mission_control.executor.get_settings",
+                return_value=settings,
+            ),
+            patch(
+                "pocketpaw.mission_control.executor.LlmJudgeVerdictProvider",
+                judge_cls,
+            ),
+            patch("pocketpaw.mission_control.executor.get_message_bus") as mock_bus,
+        ):
+            mock_bus.return_value.publish_system = AsyncMock()
+            await executor.execute_task(task.id, agent.id)
+
+        done = await manager.get_task(task.id)
+        assert done.status == TaskStatus.DONE  # shadow never requeues
+        assert done.metadata["verify_verdict"]["status"] == "not_solved"
+        assert done.metadata["verify_judge_verdict"]["status"] == "solved"
+        assert len(fake_llm.prompts) == 1
+
+    @pytest.mark.asyncio
+    async def test_legacy_bool_alone_still_enforces(self, svl_singletons):
+        """BACK-COMPAT: mode left at 'off' + the legacy bool True must run the
+        FULL loop (the bool's shipped meaning) — a failing task requeues, it
+        does not silently complete in shadow."""
+        manager, agent, task = await self._make_agent_and_task()
+        executor = get_mc_task_executor()
+        settings = _settings_with_verify_mode("off", legacy_bool=True)
+        router = _svl_failing_router()
+
+        await self._run_once(executor, task.id, agent.id, router, settings)
+
+        reloaded = await manager.get_task(task.id)
+        assert reloaded.status == TaskStatus.ASSIGNED, (
+            "legacy bool True must keep enforcing — never weaken to shadow"
+        )
+        assert reloaded.metadata["verify_requeue_count"] == 1
+        assert "verify_mode" not in reloaded.metadata
+        assert "verify_would_have" not in reloaded.metadata
+
+    @pytest.mark.asyncio
+    async def test_mode_enforce_without_bool_drives_the_loop(self, svl_singletons):
+        """mode='enforce' alone (legacy bool off) drives exactly today's
+        flag-on behaviour — the new switch fully supersedes the bool."""
+        manager, agent, task = await self._make_agent_and_task()
+        executor = get_mc_task_executor()
+        settings = _settings_with_verify_mode("enforce", legacy_bool=False)
+        router = _svl_failing_router()
+
+        await self._run_once(executor, task.id, agent.id, router, settings)
+
+        reloaded = await manager.get_task(task.id)
+        assert reloaded.status == TaskStatus.ASSIGNED
+        assert reloaded.metadata["verify_requeue_count"] == 1
+        assert len(reloaded.metadata["verify_feedback"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_mode_off_default_is_byte_for_byte_inert(self, svl_singletons):
+        """mode='off' + bool False (the shipped default): no verdict, no
+        shadow stamps, no requeue — exactly today's default path."""
+        manager, agent, task = await self._make_agent_and_task()
+        executor = get_mc_task_executor()
+        settings = _settings_with_verify_mode("off", legacy_bool=False)
+        router = _svl_failing_router()
+
+        result = await self._run_once(executor, task.id, agent.id, router, settings)
+        assert result["status"] == "completed"
+
+        done = await manager.get_task(task.id)
+        assert done.status == TaskStatus.DONE
+        assert "verify_verdict" not in done.metadata
+        assert "verify_mode" not in done.metadata
+        assert "verify_would_have" not in done.metadata
+        assert "verify_requeue_count" not in done.metadata

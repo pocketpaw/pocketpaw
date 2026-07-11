@@ -1,5 +1,26 @@
 # ee/instinct/router.py — FastAPI router for the Instinct decision pipeline API.
 # Created: 2026-03-28 — Propose, approve/reject, list pending, query audit.
+# Updated: 2026-07-10 (FST-6 — _fabric_conflict proposal type) — wired the
+#   conflict-stewardship gate kind into the FOUR-path dispatch.
+#   ``_fabric_conflict_blob`` + ``_assert_fabric_conflict_workspace`` are the
+#   peers of the existing blob accessors + tenancy guards. The blob
+#   (``Action.parameters._fabric_conflict``) carries the un-rankable Fabric
+#   conflict's subject (top-level ``workspace_id`` / ``object_id`` /
+#   ``property`` — immutable), the read-only ``choices`` (competing values +
+#   provenance), and the ONE editable sub-dict
+#   ``resolution.chosen_statement_id`` (defaults to the policy winner; the
+#   approve-with-edits path may re-point it at a staged rival). On APPROVE the
+#   router emits ``human.corrected`` then fires
+#   ``fabric_conflicts.executor.execute_approved_fabric_conflict`` (which
+#   validates the choice against the staged set and PINs it via the OSS
+#   steward verb ``FabricStore.pin_statement`` on the workspace-scoped store,
+#   and OWNS the chain close). On REJECT the router emits ``human.corrected``
+#   + ``decision.completed(rejected)`` itself (the executor never runs — NO
+#   statement changes; the policy's provisional winner stands). The
+#   ``_assert_fabric_conflict_workspace`` 403 runs in ALL FOUR locations
+#   (approve / bulk-approve / reject / bulk-reject) BEFORE any mutation. Same
+#   exactly-one-terminal discipline as the instinct-rule gate (the precedent
+#   this kind mirrors); the other 9 kinds are unchanged.
 # Updated: 2026-07-03 (feat/workspace-admin-tools, WA-2 — _admin_action proposal
 #   type) — added the 8th gated proposal kind: a gated workspace-admin write.
 #   ``_admin_action_blob`` + ``_assert_admin_action_workspace`` are the peers of
@@ -974,6 +995,47 @@ def _assert_instinct_rule_workspace(action: Any, current_workspace: str) -> None
         )
 
 
+def _fabric_conflict_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_fabric_conflict`` blob on an Action, or ``None``.
+
+    The blob is the conflict-stewardship payload ``ee.cloud.fabric_conflicts.
+    propose`` stores under ``Action.parameters._fabric_conflict`` (FST-6): the
+    un-rankable conflict's subject (``workspace_id`` / ``object_id`` /
+    ``property`` as SEPARATE top-level fields), the read-only ``choices``, and
+    the editable ``resolution.chosen_statement_id``. A peer gated proposal
+    kind — the approve path dispatches the apply-on-approve executor (which
+    PINs the chosen statement) on its presence, exactly as it dispatches the
+    instinct-rule executor on ``_instinct_rule``. Anything that is not a dict
+    is treated as "no fabric conflict".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_fabric_conflict")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_fabric_conflict_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting a conflict stewardship from another workspace.
+
+    Mirror of ``_assert_instinct_rule_workspace`` for the ``_fabric_conflict``
+    blob (FST-6). Approving pins a statement in the tenant's Fabric, so the
+    cross-workspace gate is mandatory on BOTH the approve and reject side
+    (asymmetric tenant scope is no tenant scope — pocketpaw#1183 / #1250).
+    Tenancy lives on the blob's top-level ``workspace_id`` (NEVER inside the
+    editable ``resolution``). A non-conflict Action (no blob) is unaffected.
+    """
+    blob = _fabric_conflict_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    if blob_workspace and blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This fabric conflict belongs to a different workspace",
+        )
+
+
 def _assert_pocket_write_workspace(action: Any, current_workspace: str) -> None:
     """Reject approving a parked pocket write from another workspace.
 
@@ -1353,6 +1415,7 @@ async def bulk_approve_actions(
             _assert_fabric_objects_workspace(action, workspace_id)
             _assert_pocket_create_workspace(action, workspace_id)
             _assert_instinct_rule_workspace(action, workspace_id)
+            _assert_fabric_conflict_workspace(action, workspace_id)
             _assert_belt_plan_workspace(action, workspace_id)
             _assert_artifact_change_workspace(action, workspace_id)
             _assert_admin_action_workspace(action, workspace_id)
@@ -1541,6 +1604,40 @@ async def bulk_approve_actions(
                 )
             continue
 
+        # FST-6 — a bulk-approved ``_fabric_conflict`` Action PINs its chosen
+        # statement (the staged default — bulk-approve has no edit surface, so
+        # disposition is always ``accepted`` and the choice is the policy
+        # winner). Mirrors the instinct-rule branch above: per-item
+        # ``human.corrected(accepted)``, the ``agent.proposed`` event id as
+        # causation, then the executor (which owns the chain close). Matched
+        # BEFORE the pocket-write fallthrough and ``continue``d so the kinds
+        # never cross.
+        fabric_conflict_blob = _fabric_conflict_blob(action)
+        if fabric_conflict_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=fabric_conflict_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(fabric_conflict_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.fabric_conflicts import (
+                    executor as fabric_conflict_executor,
+                )
+
+                await fabric_conflict_executor.execute_approved_fabric_conflict(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve fabric-conflict execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
         # MANDATES — a bulk-approved ``_belt_plan`` Action fires the plan
         # executor, exactly like the single-approve hook (disposition is always
         # ``accepted`` — bulk-approve has no edit surface). The executor owns
@@ -1708,6 +1805,7 @@ async def bulk_reject_actions(
             _assert_fabric_objects_workspace(action, workspace_id)
             _assert_pocket_create_workspace(action, workspace_id)
             _assert_instinct_rule_workspace(action, workspace_id)
+            _assert_fabric_conflict_workspace(action, workspace_id)
             _assert_belt_plan_workspace(action, workspace_id)
             _assert_artifact_change_workspace(action, workspace_id)
             _assert_admin_action_workspace(action, workspace_id)
@@ -1874,6 +1972,32 @@ async def bulk_reject_actions(
             )
             continue
 
+        # FST-6 — a bulk-rejected ``_fabric_conflict`` Action closes its chain
+        # HERE (the executor never runs on reject — the router owns the close).
+        # NO statement changes: the policy's provisional winner stands. Mirrors
+        # the instinct-rule reject branch. Matched AFTER the earlier kinds and
+        # ``continue``d so the kinds never cross.
+        fabric_conflict_blob = _fabric_conflict_blob(action)
+        if fabric_conflict_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=fabric_conflict_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(fabric_conflict_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=fabric_conflict_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            continue
+
         # MANDATES — a bulk-rejected ``_belt_plan`` Action closes its chain
         # here (the plan executor never runs on reject), mirroring the
         # code-change branch above.
@@ -2014,6 +2138,11 @@ async def approve_action(
     # top-level fields, not a pocket. Approving it creates an active governed rule
     # in the tenant's workspace, so the cross-workspace gate is mandatory here.
     _assert_instinct_rule_workspace(before, workspace_id)
+    # FST-6 — same tenancy gate for a conflict-stewardship Action — its
+    # ``_fabric_conflict`` blob carries the workspace on a SEPARATE top-level
+    # field. Approving it PINs a statement in the tenant's Fabric, so the
+    # cross-workspace gate is mandatory here.
+    _assert_fabric_conflict_workspace(before, workspace_id)
     # Same tenancy gate for a mandate shift-plan Action (belt_plan) — its
     # ``_belt_plan`` blob carries the workspace.
     _assert_belt_plan_workspace(before, workspace_id)
@@ -2306,6 +2435,38 @@ async def approve_action(
         except Exception:
             logger.exception("instinct-rule execution after approval failed (non-fatal)")
 
+    # FST-6 — when the approved Action carries a ``_fabric_conflict`` blob,
+    # PIN the chosen statement via the OSS steward verb (workspace-scoped
+    # Fabric store). Same best-effort, lazy-import, never-break-the-approve-
+    # response shape as the instinct-rule hook above; the executor records
+    # success / failure on the Action itself. The router owns the
+    # ``human.corrected`` emit (disposition ``edited`` when the approver
+    # adjusted the choice via the edit surface); the EXECUTOR owns the chain
+    # CLOSE — no ``decision.completed`` here, no double terminal.
+    fabric_conflict_blob = _fabric_conflict_blob(approved)
+    if fabric_conflict_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=fabric_conflict_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(fabric_conflict_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.fabric_conflicts import (
+                executor as fabric_conflict_executor,
+            )
+
+            await fabric_conflict_executor.execute_approved_fabric_conflict(
+                approved, human_event_id=human_event_id
+            )
+        except Exception:
+            logger.exception("fabric-conflict execution after approval failed (non-fatal)")
+
     # MANDATES — when the approved Action carries a ``_belt_plan`` blob (the
     # mandate foreman's shift plan), dispatch the plan executor. Same shape as
     # the code-change hook: the router owns the ``human.corrected`` emit, the
@@ -2489,6 +2650,11 @@ async def reject_action(
     # asymmetric tenant scope is no tenant scope: a cross-workspace reject must
     # 403 before any mutation, exactly like the approve side.
     _assert_instinct_rule_workspace(before, workspace_id)
+    # FST-6 — same tenancy gate for a conflict-stewardship Action on the REJECT
+    # side. Asymmetric tenant scope is no tenant scope: a cross-workspace reject
+    # (which would dismiss another tenant's conflict) must 403 before any
+    # mutation, exactly like the approve side.
+    _assert_fabric_conflict_workspace(before, workspace_id)
     # Same tenancy gate for a mandate shift-plan Action (belt_plan) — its
     # ``_belt_plan`` blob carries the workspace.
     _assert_belt_plan_workspace(before, workspace_id)
@@ -2663,6 +2829,32 @@ async def reject_action(
         )
         _emit_decision_completed_rejected(
             blob=instinct_rule_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
+
+    # FST-6 — a rejected ``_fabric_conflict`` Action closes its chain HERE
+    # (the executor never runs on reject — the router owns the close,
+    # mirroring the instinct-rule reject path). NO statement changes: the
+    # policy's provisional winner simply stands, and the sweep's
+    # reject-memory (the blob's ``conflict_signature``) keeps the same
+    # conflict from being re-staged until it materially changes.
+    fabric_conflict_blob = _fabric_conflict_blob(action)
+    if fabric_conflict_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=fabric_conflict_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(fabric_conflict_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=fabric_conflict_blob,
             action=action,
             user_id=rejector_id,
             workspace_id=workspace_id,

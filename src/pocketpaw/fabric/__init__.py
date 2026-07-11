@@ -8,7 +8,12 @@
 # The legacy SQLite FabricStore still ships here for types + links; object lifecycle
 # + scope-filtered queries are the journal path. See ee/fabric/journal_store.py for
 # the rationale (Wave 3 / Org Architecture RFC, Phase 3; supersedes #938).
+# Updated: 2026-07-10 (FST-6 — conflict lifecycle) — exported the open-conflict
+# surface (ConflictRecord, detect_open_conflicts): the un-rankable残り the trust
+# ladder cannot order, recomputed from statements (no conflicts table). The EE
+# stewardship sweep and a future "disputed facts" view read it from here.
 
+from pocketpaw.fabric.conflicts import ConflictRecord, detect_open_conflicts
 from pocketpaw.fabric.events import (
     ACTION_OBJECT_ARCHIVED,
     ACTION_OBJECT_CREATED,
@@ -40,6 +45,9 @@ from pocketpaw.fabric.store import FabricStore
 __all__ = [
     # Legacy SQLite store — still the home for types + links.
     "FabricStore",
+    # Open-conflict surface (FST-6) — recomputed from statements.
+    "ConflictRecord",
+    "detect_open_conflicts",
     # Journal-backed object lifecycle (Wave 3).
     "FabricJournalStore",
     "FabricProjection",

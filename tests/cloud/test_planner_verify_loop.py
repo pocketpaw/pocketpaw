@@ -1,3 +1,12 @@
+# Updated: 2026-07-10 (feat/verify-mode-shadow) — three-position
+#   ``cloud_plan_verify_mode``: added shadow-mode tests (a failing task
+#   still lands ``done`` with the output-file/artifact side-effects intact,
+#   ``verify.verdict`` + ``verify.mode='shadow'`` + ``verify.would_have``
+#   stamped, NO ``requeue_count`` / ``feedback`` written; SOLVED stamps
+#   would_have=done) and a mode='enforce'-without-the-bool test. The
+#   pre-existing tests set ONLY the legacy bool (``enabled=True``), so their
+#   continued passing IS the back-compat proof that the bool still resolves
+#   to enforce through ``effective_cloud_plan_verify_mode()``.
 # Created: 2026-07-02 (feat/svl-5-cloud-verify) — SVL-5: the Self-Verifying
 #   Loop at the CLOUD planner terminal. Drives the real
 #   ``_execute_ready_plan_tasks`` → ``_run_one`` → ``_verify_plan_task_outcome``
@@ -66,11 +75,14 @@ class _FakePool:
         return _gen()
 
 
-def _settings(enabled: bool, max_requeues: int = 2):
-    """A Settings copy with the SVL-5 flag and requeue budget forced."""
+def _settings(enabled: bool, max_requeues: int = 2, mode: str = "off"):
+    """A Settings copy with the legacy bool, the three-position mode, and
+    the requeue budget forced. ``mode`` defaults to 'off' so the legacy
+    tests exercise the bool→enforce back-compat resolution."""
     return get_settings().model_copy(
         update={
             "cloud_plan_verify_loop_enabled": enabled,
+            "cloud_plan_verify_mode": mode,
             "cloud_plan_verify_max_requeues": max_requeues,
         }
     )
@@ -93,7 +105,7 @@ async def _make_plan_task(criteria: list[str]) -> str:
     return str(doc.id)
 
 
-async def _drive(pool: _FakePool, *, enabled: bool, max_requeues: int = 2):
+async def _drive(pool: _FakePool, *, enabled: bool, max_requeues: int = 2, mode: str = "off"):
     """Run the real dispatch path with the pool, settings, and DONE
     side-effects (output-file save + artifact scan) patched. Returns the
     two side-effect mocks so tests assert fired / not-fired."""
@@ -103,7 +115,7 @@ async def _drive(pool: _FakePool, *, enabled: bool, max_requeues: int = 2):
         patch("pocketpaw.agents.pool.get_agent_pool", return_value=pool),
         patch(
             "pocketpaw.config.get_settings",
-            return_value=_settings(enabled, max_requeues),
+            return_value=_settings(enabled, max_requeues, mode),
         ),
         patch.object(planner_service, "_save_task_output_file", save_mock),
         patch.object(planner_service, "_scan_and_upload_agent_files", scan_mock),
@@ -275,3 +287,81 @@ async def test_flag_off_no_verdict_no_requeue(recording_bus) -> None:
     assert save_mock.await_count == 1
     assert scan_mock.await_count == 1
     assert len(_resolved_done_events(recording_bus)) == 1
+
+
+# ---------------------------------------------------------------------------
+# verify_mode: the three-position rollout switch (off | shadow | enforce)
+# ---------------------------------------------------------------------------
+
+
+async def test_shadow_failing_task_completes_with_would_have_stamped(recording_bus) -> None:
+    """The shadow rung: a FAILING output still lands ``done`` after ONE run
+    — no requeue, no escalation — with every DONE side-effect intact, the
+    verdict + would_have + shadow marker stamped on ``verify``, and no
+    ``requeue_count`` / ``feedback`` ever written."""
+
+    tid = await _make_plan_task([_C_ALPHA])
+    pool = _FakePool(["This mentions bravo."])  # fails the alpha criterion
+
+    save_mock, scan_mock = await _drive(pool, enabled=False, mode="shadow")
+
+    doc = await TaskDoc.get(tid)
+    assert len(pool.calls) == 1  # shadow never re-dispatches
+    assert doc.status == "done"
+    assert doc.verify["verdict"]["status"] == "not_solved"
+    assert doc.verify["mode"] == "shadow"
+    assert doc.verify["would_have"] == "requeued"
+    # NO enforce-side state was written.
+    assert "requeue_count" not in doc.verify
+    assert "feedback" not in doc.verify
+    assert "escalation_reason" not in doc.verify
+    # DONE side-effects fired exactly as a normal completion.
+    assert save_mock.await_count == 1
+    assert scan_mock.await_count == 1
+    assert len(_resolved_done_events(recording_bus)) == 1
+
+
+async def test_shadow_solved_stamps_would_have_done(recording_bus) -> None:
+    """SOLVED under shadow: would_have=done — the telemetry covers every
+    completion, and the task completes exactly as today."""
+
+    tid = await _make_plan_task([_C_ALPHA])
+    pool = _FakePool(["The summary mentions alpha clearly."])
+
+    save_mock, _ = await _drive(pool, enabled=False, mode="shadow")
+
+    doc = await TaskDoc.get(tid)
+    assert len(pool.calls) == 1
+    assert doc.status == "done"
+    assert doc.verify["verdict"]["status"] == "solved"
+    assert doc.verify["mode"] == "shadow"
+    assert doc.verify["would_have"] == "done"
+    assert save_mock.await_count == 1
+    assert len(_resolved_done_events(recording_bus)) == 1
+
+
+async def test_mode_enforce_without_bool_drives_the_loop(recording_bus) -> None:
+    """mode='enforce' alone (legacy bool off) drives exactly the flag-on
+    behaviour — identical failing set twice escalates no_progress, no DONE
+    side-effect fires. The new switch fully supersedes the bool."""
+
+    tid = await _make_plan_task([_C_ALPHA])
+    pool = _FakePool(
+        [
+            "This mentions bravo.",  # unmet: alpha
+            "Still mentions bravo.",  # unmet: alpha — identical set
+        ]
+    )
+
+    save_mock, scan_mock = await _drive(pool, enabled=False, mode="enforce", max_requeues=2)
+
+    doc = await TaskDoc.get(tid)
+    assert len(pool.calls) == 2
+    assert doc.status == "failed"
+    assert doc.verify["escalation_reason"] == "no_progress"
+    assert doc.verify["requeue_count"] == 1
+    assert "mode" not in doc.verify  # the shadow marker is shadow-only
+    assert "would_have" not in doc.verify
+    assert save_mock.await_count == 0
+    assert scan_mock.await_count == 0
+    assert _resolved_done_events(recording_bus) == []
