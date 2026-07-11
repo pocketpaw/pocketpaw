@@ -75,6 +75,14 @@
 #   (``fabric.write``), completing link CRUD over HTTP. The delete resolves the
 #   link through the store's new scoped ``get_link`` first — a cross-tenant or
 #   unknown id 404s (no existence leak), because ``unlink`` itself is unscoped.
+# Updated: 2026-07-11 (self-serve-analysis S1) — ``POST /fabric/query`` now
+#   surfaces the store's flag-gated aggregation path: a query carrying
+#   ``group_by``/``aggregate`` returns ``aggregates`` ({key, value} rows) plus
+#   ``steps`` (the {title, detail, status} QueryPlanStep reasoning trace) via
+#   the extended FabricQueryResult response model; with POCKETPAW_FABRIC_ANALYST
+#   off the store's FabricAnalystDisabledError maps to 422
+#   ``fabric.analyst_disabled``. Plain queries are unchanged on the wire
+#   (aggregates/steps serialize as null).
 
 from __future__ import annotations
 
@@ -85,6 +93,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from pocketpaw.fabric.models import (
+    FabricAnalystDisabledError,
     FabricLink,
     FabricObject,
     FabricQuery,
@@ -373,8 +382,21 @@ async def query_fabric(
     q: FabricQuery,
     workspace_id: str = Depends(current_workspace_id),
 ):
-    """Run an arbitrary FabricQuery, scoped to the caller's workspace (W4a)."""
-    return await _store(workspace_id).query(q, workspace_id=workspace_id)
+    """Run an arbitrary FabricQuery, scoped to the caller's workspace (W4a).
+
+    Self-serve-analysis S1: a query carrying ``group_by``/``aggregate`` runs the
+    flag-gated aggregation path and the response additionally carries
+    ``aggregates`` ({key, value} rows) and ``steps`` — the reasoning trace in
+    the exact ``{title, detail, status}`` QueryPlanStep wire shape ripple's
+    ReasoningTrace consumes. With POCKETPAW_FABRIC_ANALYST off the store
+    rejects the aggregation fail-loud and this handler maps it to 422
+    ``fabric.analyst_disabled``. Plain queries are byte-compatible with the
+    pre-S1 response (aggregates/steps null).
+    """
+    try:
+        return await _store(workspace_id).query(q, workspace_id=workspace_id)
+    except FabricAnalystDisabledError as exc:
+        raise ValidationError("fabric.analyst_disabled", str(exc)) from exc
 
 
 @router.post(
