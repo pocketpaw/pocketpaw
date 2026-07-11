@@ -588,8 +588,20 @@ _HTML_SMOKE_ENTRY = "index.html"
 # ``<br>`` is a valid authored input and must pass the smoke check).
 _HTML_VOID_ELEMENTS: frozenset[str] = frozenset(
     {
-        "area", "base", "br", "col", "embed", "hr", "img", "input",
-        "link", "meta", "param", "source", "track", "wbr",
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
     }
 )
 

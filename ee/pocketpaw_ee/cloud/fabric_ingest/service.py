@@ -395,8 +395,7 @@ async def run_ingest_sweep(
                 )
         except Exception:  # noqa: BLE001 — the conflict sweep is best-effort
             logger.warning(
-                "fabric_ingest: post-ingest conflict sweep failed for workspace %s "
-                "(non-fatal)",
+                "fabric_ingest: post-ingest conflict sweep failed for workspace %s (non-fatal)",
                 ws,
                 exc_info=True,
             )
