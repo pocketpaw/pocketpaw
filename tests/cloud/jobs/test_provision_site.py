@@ -63,9 +63,7 @@ async def seed(mongo_db: Any):
     from pocketpaw_ee.cloud.models.pocket import Pocket
     from pocketpaw_ee.cloud.models.site import Site
 
-    async def _seed(
-        *, workspace: str = WS, d1_database_id: str = ""
-    ) -> dict[str, Any]:
+    async def _seed(*, workspace: str = WS, d1_database_id: str = "") -> dict[str, Any]:
         spec = {
             "theme": {"mode": "light"},
             "objects": [{"name": "entries", "fields": [{"name": "msg"}]}],
@@ -224,9 +222,7 @@ async def test_success_marks_provisioned_and_deployed(
     assert rec["migrate"] == [(ctx["site_id"], "/fake/project/dir")]
     assert cf.put_calls[0]["script_name"] == ctx["site_id"]
     assert cf.put_calls[0]["bundle"] == b"worker-bundle-bytes"
-    assert cf.put_calls[0]["bindings"] == [
-        {"type": "d1", "name": "DB", "id": "d1-fresh-uuid-0002"}
-    ]
+    assert cf.put_calls[0]["bindings"] == [{"type": "d1", "name": "DB", "id": "d1-fresh-uuid-0002"}]
 
     site = await Site.get(ctx["site_id"])
     assert site is not None
@@ -242,9 +238,7 @@ async def test_success_marks_provisioned_and_deployed(
 
 
 @pytest.mark.asyncio
-async def test_tenancy_mismatch_fails_closed(
-    seed: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_tenancy_mismatch_fails_closed(seed: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     ctx = await seed(workspace=OTHER_WS, d1_database_id="")
     cf = _FakeCF()
     _install_fakes(monkeypatch, cf=cf)
