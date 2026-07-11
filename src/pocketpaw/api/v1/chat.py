@@ -6,6 +6,10 @@
 # Updated: 2026-04-22 — Thread cloud user + active_workspace from the
 #   authenticated request into ``InboundMessage.metadata`` so agent-created
 #   pockets land under the caller, not the first user in the DB.
+# Updated: 2026-07-11 (ART-OSS) — ``_APISessionBridge`` forwards the AgentLoop's
+#   ``artifact`` SystemEvent as an ``artifact`` SSE event ({file_id,name,mime,
+#   size}) so OSS/local mode renders artifact cards live, matching the cloud
+#   run's ``append_event(run_id,"artifact",meta)`` contract.
 #
 # Enables external clients to send messages and receive responses via HTTP.
 # SSE streaming reuses the entire AgentLoop pipeline via _APISessionBridge.
@@ -212,6 +216,22 @@ class _APISessionBridge:
                     {
                         "event": "pocket_mutation",
                         "data": {"mutation": data.get("mutation", {})},
+                    }
+                )
+            elif evt.event_type == "artifact":
+                # OSS/local-mode artifact parity: forward the frozen
+                # {file_id,name,mime,size} meta as an ``artifact`` SSE event so the
+                # client renders the artifact card+viewer live, exactly as the
+                # cloud run emits via ``transport.append_event(run_id,"artifact")``.
+                await self.queue.put(
+                    {
+                        "event": "artifact",
+                        "data": {
+                            "file_id": data.get("file_id", ""),
+                            "name": data.get("name", ""),
+                            "mime": data.get("mime", ""),
+                            "size": data.get("size", 0),
+                        },
                     }
                 )
             elif evt.event_type == "session_titled":

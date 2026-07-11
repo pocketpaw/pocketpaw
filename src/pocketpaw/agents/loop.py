@@ -11,6 +11,15 @@ Updated: feat/pocketpaw-cognitive-engine
   and passes it to SoulManager.initialize() so the soul's cognition pipeline
   (sentiment, significance, fact extraction, reflection) uses the same LLM
   as the conversation rather than falling back to heuristics.
+
+Updated: 2026-07-11 (ART-OSS) — OSS/local-mode artifact parity. At persist time
+_process_message_inner uploads every produced file (media_paths minus the
+auto-TTS voice replies) into the shared uploads store via
+``uploads.artifact_delivery.upload_local_artifact``, emits one ``artifact``
+SystemEvent apiece ({file_id,name,mime,size}) ahead of ``stream_end``, and
+persists a matching ``{type:"artifact", meta}`` attachment on the assistant
+message (persisting even on an artifact-only, empty-text turn). Mirrors the cloud
+run_core collector-drain contract so the client's card+viewer works in local mode.
 """
 
 import asyncio
@@ -1561,6 +1570,40 @@ class AgentLoop:
             # Deduplicate while preserving order
             seen: set[str] = set()
             media_paths = [p for p in media_paths if not (p in seen or seen.add(p))]
+
+            # Artifact parity (OSS/local mode). Every file the agent produced this
+            # turn — media_paths minus the auto-TTS voice replies, which render as
+            # an inline audio reply, not an artifact card — is landed in the shared
+            # uploads store and surfaced through the SAME frozen contract the cloud
+            # path uses: one ``{file_id,name,mime,size}`` ``artifact`` event apiece
+            # (emitted before ``stream_end`` so the client renders the card live)
+            # plus a matching ``{type:"artifact", meta}`` attachment persisted on
+            # the assistant message so the card+viewer also survive a history
+            # reload. Cloud lands the file inside ``deliver_artifact`` and drains a
+            # per-run collector; OSS has no deliver MCP under the default backend,
+            # so the AgentLoop is the one place that sees every produced file across
+            # every backend (media tags + the generated-path fallback).
+            artifact_metas: list[dict[str, Any]] = []
+            if not cancelled and media_paths:
+                voice_set = set(voice_media_paths)
+                for art_path in media_paths:
+                    if art_path in voice_set:
+                        continue
+                    meta = await self._deliver_oss_artifact(art_path)
+                    if meta is None:
+                        continue
+                    artifact_metas.append(meta)
+                    await self.bus.publish_system(
+                        SystemEvent(
+                            event_type="artifact",
+                            data={
+                                **meta,
+                                "session_key": session_key,
+                                "trace_id": trace_id,
+                            },
+                        )
+                    )
+
             metadata_out: dict[str, Any] = {"trace_id": trace_id}
             if voice_media_paths:
                 metadata_out["voice_media_paths"] = voice_media_paths
@@ -1582,18 +1625,36 @@ class AgentLoop:
                 full_response = _strip_tts_links(full_response)
             if cancelled and full_response:
                 full_response += "\n\n[Response interrupted]"
-            if full_response:
+            # Persist when there's assistant text OR at least one delivered
+            # artifact — an artifact-only turn (the agent handed back a file with
+            # no prose) still needs its ``{type:"artifact"}`` attachment on the
+            # stored message so the card survives a reload (mirrors run_core's
+            # ``not full_text.strip() and not delivered_artifacts`` guard).
+            if full_response or artifact_metas:
                 stored_response = full_response
-                if self.settings.pii_scan_enabled and self.settings.pii_scan_memory:
+                if (
+                    full_response
+                    and self.settings.pii_scan_enabled
+                    and self.settings.pii_scan_memory
+                ):
                     from pocketpaw.security.pii import get_pii_scanner
 
                     pii_result = get_pii_scanner().scan(full_response, source="assistant_response")
                     if pii_result.has_pii:
                         stored_response = pii_result.sanitized_text
+                assistant_metadata: dict[str, Any] = {}
+                if artifact_metas:
+                    assistant_metadata["attachments"] = [
+                        {"type": "artifact", "meta": m} for m in artifact_metas
+                    ]
                 await self.memory.add_to_session(
-                    session_key=session_key, role="assistant", content=stored_response
+                    session_key=session_key,
+                    role="assistant",
+                    content=stored_response,
+                    metadata=assistant_metadata or None,
                 )
 
+            if full_response:
                 # 6. Auto-learn: extract facts from conversation (non-blocking)
                 # Skip auto-learn on cancelled responses — partial data is unreliable.
                 # Also skip when soul is active — soul.observe() + reflect() handles
@@ -1722,6 +1783,17 @@ class AgentLoop:
                     )
                 except Exception:
                     pass
+
+    async def _deliver_oss_artifact(self, path: str) -> dict[str, Any] | None:
+        """Land a locally-produced file in the shared uploads store for OSS/local
+        artifact parity, returning ``{file_id, name, mime, size}`` or ``None``.
+
+        Thin seam over ``uploads.artifact_delivery.upload_local_artifact`` so the
+        AgentLoop can mock it in tests and so the (best-effort) call site stays a
+        one-liner. Never raises — the helper swallows its own failures."""
+        from pocketpaw.uploads.artifact_delivery import upload_local_artifact
+
+        return await upload_local_artifact(path)
 
     async def _send_response(self, original: InboundMessage, content: str) -> None:
         """Helper to send a simple text response."""
