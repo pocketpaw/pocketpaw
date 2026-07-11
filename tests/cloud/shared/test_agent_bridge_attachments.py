@@ -278,3 +278,80 @@ async def test_run_agent_response_applies_response_label_prefix() -> None:
     assert result.startswith("Final response:\n\n")
     assert "Synthesized answer body" in result
     assert created["content"].startswith("Final response:\n\n")
+
+
+@pytest.mark.asyncio
+async def test_run_agent_response_persists_artifact_when_text_empty():
+    """ART-1 regression: an empty reply that DELIVERED an artifact must still
+    persist a message carrying the {type:"artifact"} attachment. Before the fix,
+    ``if not full_text.strip(): return None`` dropped it even though the file
+    landed in blob storage."""
+    from pocketpaw_ee.cloud.chat.agent_service import record_delivered_artifact
+    from pocketpaw_ee.cloud.shared import agent_bridge
+
+    instance = SimpleNamespace(agent_name="Test Agent")
+    pool = MagicMock()
+    pool.get = AsyncMock(return_value=instance)
+    pool.observe = AsyncMock()
+
+    meta = {"file_id": "f7", "name": "out.pdf", "mime": "application/pdf", "size": 88}
+
+    async def fake_run(*_args, **_kwargs):
+        # A successful deliver_artifact mid-run records the fact...
+        record_delivered_artifact(meta)
+        # ...but the agent produced no closing text.
+        yield _done_event()
+
+    pool.run = fake_run
+
+    from pocketpaw_ee.cloud.models.message import Message as _RealMessage
+
+    to_list_mock = AsyncMock(return_value=[])
+    limit_mock = MagicMock()
+    limit_mock.to_list = to_list_mock
+    sort_mock = MagicMock()
+    sort_mock.limit = MagicMock(return_value=limit_mock)
+    find_mock = MagicMock()
+    find_mock.sort = MagicMock(return_value=sort_mock)
+
+    created = {}
+
+    async def fake_create_agent_message(*, group_id, agent_id, content, attachments=None):
+        created["content"] = content
+        created["attachments"] = attachments
+        return SimpleNamespace(id="msg-art")
+
+    with (
+        patch("pocketpaw_ee.cloud.shared.agent_bridge.emit", new=AsyncMock()),
+        patch.multiple(
+            _RealMessage,
+            create=True,
+            group=MagicMock(),
+            deleted=MagicMock(),
+            createdAt=MagicMock(),
+        ),
+        patch.object(_RealMessage, "find", MagicMock(return_value=find_mock)),
+        patch("pocketpaw.agents.pool.get_agent_pool", return_value=pool),
+        patch(
+            "pocketpaw_ee.cloud.chat.message_service.create_agent_message",
+            new=AsyncMock(side_effect=fake_create_agent_message),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.search_context",
+            new=AsyncMock(return_value=""),
+        ),
+    ):
+        result = await agent_bridge._run_agent_response(
+            agent_id="agent-1",
+            group_id="group-1",
+            workspace_id="ws-1",
+            user_message="make me a pdf",
+            group_members=["user-1"],
+            attachments=None,
+        )
+
+    # The message was persisted (NOT dropped) carrying the artifact attachment,
+    # even though the reply text was empty.
+    assert created["attachments"] == [{"type": "artifact", "meta": meta}]
+    assert created["content"] == ""
+    assert result is not None
