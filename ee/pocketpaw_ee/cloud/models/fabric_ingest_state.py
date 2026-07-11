@@ -1,5 +1,14 @@
 # FabricIngestState + FabricIngestConfig Beanie documents — Firestore→Fabric ingest.
 # Created: 2026-06-11 — generic Firestore→Fabric ingestion worker.
+# Updated: 2026-07-11 (feat/real-pipeline-s1) — FabricFieldMapping gains an
+#   additive, back-compat source discriminator: ``source_kind``
+#   ("firestore" | "connector", default "firestore") and an optional
+#   ``connector_id``. A "connector" mapping routes the run through the OSS
+#   connector→Fabric ingestor registry instead of the Firestore reader.
+#   ``collection`` stays the routing key for BOTH kinds (for connector
+#   mappings it holds the connector name), so list_ingest_sources and
+#   _load_mapping keep keying on ``mapping.collection`` unchanged;
+#   ``connector_id`` defaults to ``collection`` when unset.
 #
 # Two collections back the generic ingestion worker:
 #
@@ -29,6 +38,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from beanie import Indexed
 from pydantic import BaseModel, Field
@@ -53,6 +63,15 @@ class FabricFieldMapping(BaseModel):
       snapshot's ``update_time``.
     * ``link_rules`` — optional relationship rules; each links the mirrored
       object to another object resolved by the value of ``via_field``.
+    * ``source_kind`` — where records come from: ``"firestore"`` (the default,
+      the original reader path — back-compat: every stored mapping without the
+      field parses as firestore) or ``"connector"`` (records pulled through
+      the OSS connector→Fabric ingestor registry).
+    * ``connector_id`` — for ``source_kind="connector"``: the registry key of
+      the ingesting connector (e.g. ``"gcalendar"``). ``None`` defaults to
+      ``collection``, which by convention HOLDS the connector name for
+      connector mappings so the (workspace, collection) routing key stays the
+      single source-id everywhere (sweep enumeration, state rows, run-now).
     """
 
     collection: str = Field(min_length=1)
@@ -60,6 +79,8 @@ class FabricFieldMapping(BaseModel):
     field_map: dict[str, str] = Field(default_factory=dict)
     cursor_field: str = ""
     link_rules: list[FabricLinkRule] = Field(default_factory=list)
+    source_kind: Literal["firestore", "connector"] = "firestore"
+    connector_id: str | None = None
 
 
 class FabricLinkRule(BaseModel):

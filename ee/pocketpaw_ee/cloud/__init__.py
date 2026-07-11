@@ -1,5 +1,10 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-07-11 (feat/real-pipeline-s1) — Mounts the fabric_ingest
+    transform-surface router (``/fabric/ingest/mappings`` CRUD +
+    ``/fabric/ingest/run`` run-now) next to the fabric router under
+    ``/api/v1``. Same gates as fabric: license + plan feature at the router,
+    fabric.read/fabric.write per route.
 Modified: 2026-07-03 (feat/files-share-links, FL-12b) — Mounts two share-link
     routers: ``share_router`` (owner + license gated POST/DELETE
     /files/{id}/share) and ``public_share_router`` (intentionally
@@ -362,6 +367,7 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(pockets_journal_stream_router, prefix="/api/v1")
 
     from pocketpaw_ee.cloud.decisions.router import router as decisions_router
+    from pocketpaw_ee.cloud.fabric_ingest.router import router as fabric_ingest_router
     from pocketpaw_ee.cloud.instinct_approvals.router import router as instinct_approvals_router
     from pocketpaw_ee.cloud.kb.router import router as kb_router
     from pocketpaw_ee.cloud.leads.router import router as leads_router
@@ -596,6 +602,10 @@ def mount_cloud(app: FastAPI) -> None:
     # OSS core no longer mounts them. They ride along here, like paw_bar
     # above, instead of through the core's mount_v1_routers().
     app.include_router(fabric_router, prefix="/api/v1")
+    # Transform surface (feat/real-pipeline-s1): author/list/run-now the
+    # workspace's connector→Fabric ingest mappings. Rides next to fabric —
+    # same license + plan gates, fabric.read/write per route.
+    app.include_router(fabric_ingest_router, prefix="/api/v1")
     app.include_router(fleet_router, prefix="/api/v1")
     app.include_router(instinct_router, prefix="/api/v1")
 

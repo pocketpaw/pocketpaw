@@ -65,6 +65,13 @@ svelte source via the apply-leaf-edit CLI and persist as a Branch draft, no
 rebuild — dynamic-source split + input-keyspace confinement) and GET
 /sites/by-pocket/{id}/native-artifact (serve the armed build's body_html + css
 for shadow render — per-GET arm-build cost, path-traversal-guarded CSS reader).
+
+Updated: 2026-07-11 (feat/real-pipeline-s1) — documented the Fabric — Transform
+Mappings section: GET/POST/DELETE /fabric/ingest/mappings (author the
+workspace's source→Fabric mappings, now with a "connector" source_kind that
+dispatches through the OSS FABRIC_INGESTORS registry — gcalendar first) and
+POST /fabric/ingest/run (run one mapping immediately; misconfiguration reports
+status="error" in the body, never a 5xx).
 -->
 
 # Cloud REST API Reference
@@ -1189,3 +1196,74 @@ Errors:
 | 404 | `pocket.not_found` | Unknown pocket id. |
 | 403 | `pocket.access_denied` | The caller lacks access to the pocket. |
 | 500 | `sites.generator_failed` | The arm build failed (missing toolchain, non-zero build, or smoke-gate failure). |
+
+## Fabric — Transform Mappings (source→Fabric ingest)
+
+The transform surface over the per-workspace `FabricIngestConfig`: which
+sources land as typed Fabric objects, and how. A mapping's `source_kind`
+picks the pipeline:
+
+- `"firestore"` (default) — the original reader path: mirror a Firestore
+  collection, keyed on the doc path, with a real high-water cursor.
+- `"connector"` — pull records through the OSS connector→Fabric ingestor
+  registry (`pocketpaw.connectors.fabric_ingest.FABRIC_INGESTORS`;
+  `gcalendar` is the first registered adopter). By convention `collection`
+  holds the connector name (it stays the routing key everywhere);
+  `connector_id` overrides it when they differ. The run resolves the
+  workspace's **enabled** `WorkspaceConnector` row and calls the ingestor
+  with that row's `user_id`, so a user-scoped connector reads with that
+  member's OAuth token bucket (`null` = the shared/workspace bucket).
+
+All routes are license + plan-feature `fabric` gated (business tier and up).
+Reads require `fabric.read`, mutations (author, delete, run-now) require
+`fabric.write`; the workspace is always the caller's active workspace — it
+never travels in a request body.
+
+### `GET /fabric/ingest/mappings`
+
+Returns `{"mappings": [...]}` — the caller's workspace's authored mappings
+(empty list when nothing is configured yet). Shown regardless of the config's
+`enabled` flag so a paused pipeline is still visible.
+
+### `POST /fabric/ingest/mappings`
+
+Author one mapping — create-or-replace, keyed on `collection` (201). Body:
+
+```json
+{
+  "collection": "gcalendar",
+  "object_type_id": "ot-calendar-event",
+  "source_kind": "connector",
+  "connector_id": null,
+  "field_map": {},
+  "cursor_field": "",
+  "link_rules": []
+}
+```
+
+A malformed mapping (blank `collection` / `object_type_id`, blank field-map
+entries) is rejected with 422 before anything is stored.
+
+### `DELETE /fabric/ingest/mappings?collection=<key>`
+
+Remove the mapping keyed on `collection` (204; 404 when it doesn't exist).
+The key rides a query param, not a path segment — Firestore collection paths
+can contain `/`.
+
+### `POST /fabric/ingest/run`
+
+Run one mapping's ingest immediately. Body: `{"collection": "<key>"}`.
+Returns the ingest result envelope:
+
+```json
+{
+  "workspace_id": "…", "source_id": "gcalendar", "status": "ok",
+  "mode": "backfill", "objects": 3, "cursor": "", "errors": []
+}
+```
+
+Misconfiguration — no mapping for the key, connector not connected or
+disabled, no ingestor registered under the connector id — reports
+`status: "error"` with the reason in `errors` (HTTP 200, matching the
+background sweep's never-raise, per-source isolation contract). Re-runs are
+idempotent: objects upsert by `(source_connector, source_id)`.

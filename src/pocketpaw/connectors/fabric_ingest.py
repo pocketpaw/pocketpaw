@@ -12,6 +12,15 @@
 #   existing ObjectType by id (the EE Firestore→Fabric worker's per-workspace
 #   mapping) ride this same canonical upsert loop instead of hand-rolling a
 #   parallel one. Additive; name-based callers are unchanged.
+# Updated: 2026-07-11 (feat/real-pipeline-s1) — added the connector→Fabric
+#   INGESTOR REGISTRY: ``IngestorFn`` (the ``(store, *, workspace_id, user_id)
+#   -> IngestResult`` contract), the ``FABRIC_INGESTORS`` dict, and
+#   ``get_fabric_ingestor()`` which lazily seeds the built-ins (gcalendar's
+#   existing ``ingest_to_fabric``) on first lookup. The seed is LAZY because
+#   adapters/gcalendar.py imports FabricMapping/ingest_records from THIS
+#   module — an eager top-level import back into the adapter would be
+#   circular. Registry lives OSS; the EE fabric_ingest service lazy-imports
+#   it (no OSS→EE edge).
 # Updated: 2026-06-19 (SZD-2 — workspace-scope object TYPES) — ensure_type() now
 #   threads ``workspace_id`` into both the get_type_by_name() resolve and the
 #   define_type() create, so the type catalog stays per-tenant: a connector
@@ -58,7 +67,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -68,6 +77,41 @@ from pocketpaw.fabric.store import FabricStore
 # A field projection value is either a record key (str) or a callable that
 # derives the value from the whole record (for normalization / joins).
 FieldSource = str | Callable[[Mapping[str, Any]], Any]
+
+# The connector→Fabric ingestor contract: pull this connector's records and
+# land them as typed Fabric objects in ``store``, scoped to ``workspace_id``
+# and reading with ``user_id``'s per-user OAuth token bucket (``None`` = the
+# shared/workspace bucket). Concretely ``(store, *, workspace_id, user_id)
+# -> IngestResult`` — extra keyword defaults (e.g. gcalendar's ``days_ahead``)
+# are allowed but callers pass only the contract kwargs.
+IngestorFn = Callable[..., Awaitable["IngestResult"]]
+
+# Registry of connector-name → ingestor. Built-ins are seeded LAZILY by
+# ``get_fabric_ingestor`` (adapters import FabricMapping/ingest_records from
+# this module, so an eager import back into an adapter would be circular).
+# Third-party/OSS callers may register additional ingestors directly.
+FABRIC_INGESTORS: dict[str, IngestorFn] = {}
+
+
+def _seed_builtin_ingestors() -> None:
+    """Populate ``FABRIC_INGESTORS`` with the built-in adapters (idempotent).
+
+    ``setdefault`` so a test double or an explicit registration installed
+    before the first lookup is never clobbered.
+    """
+    from pocketpaw.connectors.adapters.gcalendar import GoogleCalendarConnector
+
+    FABRIC_INGESTORS.setdefault("gcalendar", GoogleCalendarConnector().ingest_to_fabric)
+
+
+def get_fabric_ingestor(connector_id: str) -> IngestorFn | None:
+    """Resolve the registered ingestor for ``connector_id`` (or ``None``).
+
+    Seeds the built-ins on first use — the one lookup path callers (the EE
+    fabric_ingest dispatch) should go through instead of reading the dict raw.
+    """
+    _seed_builtin_ingestors()
+    return FABRIC_INGESTORS.get(connector_id)
 
 
 @dataclass(frozen=True)
