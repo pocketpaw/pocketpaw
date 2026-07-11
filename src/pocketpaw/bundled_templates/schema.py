@@ -38,6 +38,13 @@
 # and every reader still receives a flat dict (executor dual-path readers are
 # deferred to a #1472-gated Phase 2). All compile_template passthrough keys are
 # explicit typed fields so no ``.get("agents")`` reader silently breaks.
+# Modified: 2026-07-11 (feat/guardrail-c2-composer, instinct-guardrail-ux
+# Criterion 2) — added ``LlmStep`` + ``LlmStepPipeline``: the typed spec for
+# the fixed 3-step LLM pipeline composer (extract → classify → recommend).
+# A validator enforces the fixed order, 1-3 steps, each kind at most once,
+# and that every ``input_from`` reference resolves to "input" or an EARLIER
+# step. The executor lives in ``bundled_templates.step_composer``; the agent
+# invokes it via ``tools.builtin.step_pipeline_tool``.
 """Pydantic v2 model for the RFC 03 v2 Pocket Template Schema.
 
 This module is the **schema chokepoint** — every bundled template, every
@@ -299,6 +306,63 @@ class AgentDef(BaseModel):
     tools: list[str] = Field(default_factory=list)
     skill_refs: list[str] = Field(default_factory=list)
     soul_snippet: str | None = None
+
+
+_LLM_STEP_ORDER: tuple[str, ...] = ("extract", "classify", "recommend")
+
+
+class LlmStep(BaseModel):
+    """One step of the fixed 3-step LLM pipeline (extract → classify → recommend).
+
+    ``instruction`` is the human-authored prompt for the step. ``input_from``
+    names where the step's input comes from: ``"input"`` (the pipeline's initial
+    input) or an EARLIER step's kind; ``None`` = the previous step's output
+    (or the initial input for the first step). ``fields`` (extract only) names
+    the fields to pull; ``labels`` (classify only) is the closed label set.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    step: Literal["extract", "classify", "recommend"]
+    instruction: str
+    input_from: str | None = None
+    fields: list[str] | None = None
+    labels: list[str] | None = None
+
+
+class LlmStepPipeline(BaseModel):
+    """The fixed-order LLM pipeline a non-technical author composes.
+
+    Deterministic Python owns structure and sequencing (the ``start_flow``
+    discipline); the model is invoked once per step by the executor
+    (``bundled_templates.step_composer``). The validator enforces: 1-3 steps,
+    each kind at most once, the canonical order preserved, and every
+    ``input_from`` resolving to ``"input"`` or an earlier step's kind.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    steps: list[LlmStep]
+
+    @model_validator(mode="after")
+    def _fixed_order(self) -> LlmStepPipeline:
+        if not 1 <= len(self.steps) <= 3:
+            raise ValueError("pipeline.steps must contain 1-3 steps")
+        kinds = [s.step for s in self.steps]
+        if len(set(kinds)) != len(kinds):
+            raise ValueError("pipeline.steps must not repeat a step kind")
+        order = [_LLM_STEP_ORDER.index(k) for k in kinds]
+        if order != sorted(order):
+            raise ValueError("pipeline.steps must follow extract -> classify -> recommend order")
+        seen: set[str] = {"input"}
+        for s in self.steps:
+            if s.input_from is not None and s.input_from not in seen:
+                raise ValueError(
+                    f"steps[{kinds.index(s.step)}].input_from={s.input_from!r} must be"
+                    " 'input' or an earlier step's kind"
+                )
+            seen.add(s.step)
+        return self
 
 
 class TriggerDef(BaseModel):
