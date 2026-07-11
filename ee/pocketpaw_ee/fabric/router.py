@@ -71,6 +71,10 @@
 #        -> no enforcement (backward compatible).
 #     3. ``create_object`` now surfaces the OSS store's ``FabricTypeError`` (a
 #        declared-property type clash) as a 422 instead of a 500.
+# Updated: 2026-07-11 (feat/paw-cli, C2) — added ``DELETE /fabric/links/{id}``
+#   (``fabric.write``), completing link CRUD over HTTP. The delete resolves the
+#   link through the store's new scoped ``get_link`` first — a cross-tenant or
+#   unknown id 404s (no existence leak), because ``unlink`` itself is unscoped.
 
 from __future__ import annotations
 
@@ -398,6 +402,29 @@ async def create_link(
         properties=req.properties,
         workspace_id=workspace_id,
     )
+
+
+@router.delete(
+    "/fabric/links/{link_id}",
+    status_code=204,
+    dependencies=[Depends(require_action_any_workspace("fabric.write"))],
+)
+async def delete_link(
+    link_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+) -> None:
+    """Delete one link, scoped to the caller's workspace (feat/paw-cli, C2).
+
+    ``FabricStore.unlink`` is unscoped by design (OSS single-tenant callers),
+    so the tenancy guard lives HERE: the link is resolved through the scoped
+    ``get_link`` first, and a cross-tenant or unknown id gets a 404 — never a
+    cross-workspace delete, and no existence leak for other tenants' ids.
+    """
+    store = _store(workspace_id)
+    link = await store.get_link(link_id, workspace_id=workspace_id)
+    if link is None:
+        raise HTTPException(404, "Link not found")
+    await store.unlink(link_id)
 
 
 @router.get(

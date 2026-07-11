@@ -273,3 +273,21 @@ pocketpaw update
 | `--workspace ID` | Workspace id (for `pocket reconcile`; or `POCKETPAW_WORKSPACE_ID`) |
 | `--user ID` | User id (for `pocket reconcile`; or `POCKETPAW_USER_ID`) |
 | `--version` | Show version |
+
+## The `paw` Command
+
+Alongside `pocketpaw`, the package installs `paw` — a companion CLI for the project-resident soul (`init`, `ask`, `chat`, `status`, `doctor`) plus remote reads against a running PocketPaw server:
+
+```bash
+# Ontology reads over HTTP (works against any running PocketPaw server)
+paw fabric stats                          # ontology counts for your workspace
+paw fabric types                          # object types you can see
+paw fabric query --type-name Customer     # run a Fabric query
+
+# Point it at a server + credential (flags or env)
+paw fabric stats --base-url https://cloud.example.com --api-key paw_xxxx
+export PAW_BASE_URL=https://cloud.example.com
+export PAW_API_KEY=paw_xxxx
+```
+
+The `--api-key` value is a bearer credential — a `paw_...` API key or a login JWT. Output is JSON, so the commands pipe cleanly into `jq`. For programmatic access from Python, the same route contracts are wrapped by `pocketpaw.paw.client.PawClient`.
