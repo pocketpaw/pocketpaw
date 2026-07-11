@@ -1,6 +1,13 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-07-11 (FST-8 — divergence report + docs): Refreshed the
+    ``fabric_source_truth_mode`` Field description — shadow/enforce semantics
+    SHIPPED in FST-3..7 (the FST-1 "RESERVED / INERT" wording was stale):
+    shadow records statements + divergence lines while the cache stays LWW,
+    enforce hands the cache to the trust-ladder resolver, and the flip to
+    enforce is gated by ``python -m pocketpaw.fabric.divergence_report``.
+    Description text only — no behavioral change.
   - 2026-07-10 (FST-1 — Fabric source-truth schema): Added
     ``fabric_source_truth_mode`` (Literal off|shadow|enforce, default 'off';
     POCKETPAW_FABRIC_SOURCE_TRUTH_MODE) — the three-position rollout switch for
@@ -1927,17 +1934,23 @@ class Settings(BaseSettings):
         description=(
             "Rollout mode for the Fabric source-truth chain (FST). Three-position "
             "switch, mirroring litellm_spend_mode:\n"
-            "  * 'off'     (default) — byte-for-byte today: nothing reads or writes "
-            "the fabric_statements / fabric_sources provenance tables; the flat "
-            "FabricObject.properties dict is the only read path.\n"
-            "  * 'shadow'  — RESERVED (semantics land in a later FST slice): "
-            "statement writes mirror alongside the flat properties dict, which "
-            "keeps serving every read.\n"
-            "  * 'enforce' — RESERVED (semantics land in a later FST slice): "
-            "resolved statements become authoritative for reads.\n"
-            "As of FST-1 the flag is INERT — no code path consumes it yet; only "
-            "the schema and append-only store CRUD exist. The flat properties "
-            "dict remains the primary read path in every mode. Set via "
+            "  * 'off'     (default) — byte-for-byte pre-FST behavior: pure "
+            "last-writer-wins; nothing reads or writes the fabric_statements / "
+            "fabric_sources provenance tables; the flat FabricObject.properties "
+            "dict is the only read path.\n"
+            "  * 'shadow'  — provenance statements are recorded at every merge "
+            "site and one grep-stable divergence line is logged per "
+            "statement-producing property; the cache still takes the LWW value "
+            "(the trust-ladder resolver runs advisory-only) and keeps serving "
+            "every read.\n"
+            "  * 'enforce' — the resolver's winner owns the cache: a lower-trust "
+            "write no longer lands in the flat properties dict; the losing claim "
+            "is recorded as a statement, not dropped.\n"
+            "Flipping back to 'off' is always safe: reads serve the last-resolved "
+            "cache, LWW resumes, statement history stays on disk. Gate the flip "
+            "to 'enforce' with the FST-8 divergence report (python -m "
+            "pocketpaw.fabric.divergence_report <logfile>) — target ZERO "
+            "unexplained divergences. Set via "
             "POCKETPAW_FABRIC_SOURCE_TRUTH_MODE."
         ),
     )
