@@ -69,14 +69,18 @@ async def upload_local_artifact(path: str) -> dict[str, Any] | None:
     the AgentLoop calls this per produced file at persist time and a failure for
     one artifact must not abort the turn.
     """
-    from fastapi import UploadFile
-
-    from pocketpaw.uploads.config import DEFAULT_ALLOWED_MIMES, UploadSettings
-    from pocketpaw.uploads.factory import build_adapter
-    from pocketpaw.uploads.file_store import JSONLFileStore
-    from pocketpaw.uploads.service import UploadService
-
     try:
+        # Imports live inside the try so an import failure (a missing optional
+        # dep, a partial install) is caught by the best-effort guard below rather
+        # than escaping into the AgentLoop's main turn try — this helper's
+        # contract is that it never raises.
+        from fastapi import UploadFile
+
+        from pocketpaw.uploads.config import DEFAULT_ALLOWED_MIMES, UploadSettings
+        from pocketpaw.uploads.factory import build_adapter
+        from pocketpaw.uploads.file_store import JSONLFileStore
+        from pocketpaw.uploads.service import UploadService
+
         file_path = Path(path).expanduser()
         if not file_path.is_file():
             return None

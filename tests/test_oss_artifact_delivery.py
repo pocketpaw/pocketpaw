@@ -1,5 +1,5 @@
 # Tests for OSS/local-mode artifact parity (ART-OSS).
-# Covers three seams of the new pipeline:
+# Covers four seams of the new pipeline:
 #   1. uploads.artifact_delivery.upload_local_artifact — a produced local file
 #      lands in the shared uploads store and returns {file_id,name,mime,size},
 #      with the relaxed mime gate accepting a non-default type and best-effort
@@ -9,6 +9,9 @@
 #      message, INCLUDING an artifact-only (empty-text) turn.
 #   3. _APISessionBridge — an ``artifact`` SystemEvent is forwarded as an
 #      ``artifact`` SSE event carrying just the frozen meta.
+#   4. MemoryManager.get_session_history — persisted attachments are lifted to a
+#      TOP-LEVEL ``attachments`` key (the shape the client reads on reload), so a
+#      delivered card survives a refresh; plain messages return an empty list.
 
 from __future__ import annotations
 
@@ -286,3 +289,46 @@ class TestBridgeArtifactEvent:
             assert bridge.queue.empty()
         finally:
             await bridge.stop()
+
+
+# ── 4. history reload surfaces attachments top-level ─────────────────────────
+class TestHistoryReloadSurfacesAttachments:
+    """The client reads message.attachments TOP-LEVEL (same as cloud). The OSS
+    /sessions/{id}/history route returns get_session_history verbatim, so the
+    lift must happen there or a delivered card vanishes on reload."""
+
+    @pytest.mark.asyncio
+    async def test_artifact_attachment_lifted_to_top_level(self, tmp_path):
+        from pocketpaw.memory.manager import MemoryManager
+
+        mgr = MemoryManager(base_path=tmp_path)
+        sk = "websocket:reload1"
+        meta = {"file_id": "fid", "name": "report.pdf", "mime": "application/pdf", "size": 5}
+        await mgr.add_to_session(
+            session_key=sk,
+            role="assistant",
+            content="",
+            metadata={"attachments": [{"type": "artifact", "meta": meta}]},
+        )
+
+        history = await mgr.get_session_history(sk)
+
+        assert len(history) == 1
+        assert history[0]["role"] == "assistant"
+        assert history[0]["content"] == ""
+        # Top-level, NOT buried under a metadata key — this is what the client maps.
+        assert history[0]["attachments"] == [{"type": "artifact", "meta": meta}]
+
+    @pytest.mark.asyncio
+    async def test_plain_message_returns_empty_attachments(self, tmp_path):
+        from pocketpaw.memory.manager import MemoryManager
+
+        mgr = MemoryManager(base_path=tmp_path)
+        sk = "websocket:reload2"
+        await mgr.add_to_session(session_key=sk, role="user", content="hi there")
+
+        history = await mgr.get_session_history(sk)
+
+        assert history[0]["content"] == "hi there"
+        # Always-present empty list mirrors the cloud shape (no undefined at the client).
+        assert history[0]["attachments"] == []
