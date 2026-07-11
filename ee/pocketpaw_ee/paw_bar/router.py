@@ -59,8 +59,6 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from pocketpaw_ee.cloud._core.deps import current_workspace_id
-
 from pocketpaw.api.deps import require_scope
 from pocketpaw.paw_bar.models import (
     MAX_PAYLOAD_BYTES,
@@ -70,6 +68,7 @@ from pocketpaw.paw_bar.models import (
     PawBarWidget,
     PawBarWidgetPublic,
 )
+from pocketpaw_ee.cloud._core.deps import current_workspace_id
 
 logger = logging.getLogger(__name__)
 

@@ -13,6 +13,10 @@
 # the list and read responses must NOT contain access_token. Note the
 # existing CRUD tests above run under the conftest's _TESTING_FULL_ACCESS
 # bypass, so they exercise the post-auth route logic without a real session.
+# Updated: 2026-07-11 (W4a tenancy seam) — Test apps now pin the cloud
+# current_workspace_id dep via _override_workspace (the admin CRUD routes
+# thread it); added workspace-stamp-on-create + spec rollback endpoint tests
+# (round-trip, 409 when no revision, owner-token required).
 
 from __future__ import annotations
 
@@ -150,6 +154,42 @@ class TestWidgetCRUDEndpoints:
             headers={"X-Paw-Bar-Token": created["access_token"]},
         )
         assert authed.status_code == 200
+
+    def test_created_widget_is_stamped_with_caller_workspace(self, client: TestClient) -> None:
+        # W4a — the admin route stamps the session workspace (the fixture pins
+        # current_workspace_id to "w-test"); the row's tenancy is server-derived.
+        created = client.post("/paw-bar/widgets", json=_widget_payload()).json()
+        assert created["workspace_id"] == "w-test"
+
+    def test_spec_rollback_round_trip(self, client: TestClient) -> None:
+        # W4a spec revisions — update archives the prior spec; rollback restores it.
+        created = client.post("/paw-bar/widgets", json=_widget_payload()).json()
+        token = {"X-Paw-Bar-Token": created["access_token"]}
+
+        new_spec = _spec(widget_id=created["id"]).model_dump()
+        new_spec["blocks"] = [{"type": "text", "content": "Closed today"}]
+        updated = client.patch(
+            f"/paw-bar/widgets/{created['id']}/spec", json=new_spec, headers=token
+        )
+        assert updated.status_code == 200
+        assert updated.json()["spec"]["blocks"][0]["content"] == "Closed today"
+
+        rolled = client.post(f"/paw-bar/widgets/{created['id']}/spec/rollback", headers=token)
+        assert rolled.status_code == 200
+        assert rolled.json()["spec"]["blocks"][0]["content"] == "Hi from Brew & Co"
+
+    def test_spec_rollback_without_revisions_is_409(self, client: TestClient) -> None:
+        created = client.post("/paw-bar/widgets", json=_widget_payload()).json()
+        res = client.post(
+            f"/paw-bar/widgets/{created['id']}/spec/rollback",
+            headers={"X-Paw-Bar-Token": created["access_token"]},
+        )
+        assert res.status_code == 409
+
+    def test_spec_rollback_requires_owner_token(self, client: TestClient) -> None:
+        created = client.post("/paw-bar/widgets", json=_widget_payload()).json()
+        res = client.post(f"/paw-bar/widgets/{created['id']}/spec/rollback")
+        assert res.status_code == 401
 
 
 # ---------------------------------------------------------------------------
