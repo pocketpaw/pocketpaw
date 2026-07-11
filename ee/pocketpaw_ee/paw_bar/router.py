@@ -47,6 +47,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from pocketpaw_ee.cloud._core.deps import current_workspace_id
+
 from pocketpaw.api.deps import require_scope
 from pocketpaw.paw_bar.models import (
     MAX_PAYLOAD_BYTES,
@@ -169,10 +171,16 @@ class EventsListResponse(BaseModel):
     status_code=201,
     dependencies=[Depends(require_scope("admin"))],
 )
-async def create_widget(req: CreateWidgetRequest) -> PawBarWidget:
+async def create_widget(
+    req: CreateWidgetRequest,
+    workspace_id: str = Depends(current_workspace_id),
+) -> PawBarWidget:
+    # W4a — the row is stamped with the caller's ACTIVE workspace, never a
+    # client-supplied value: tenancy is derived server-side from the session.
     widget = PawBarWidget(
         pocket_id=req.pocket_id,
         owner=req.owner,
+        workspace_id=workspace_id,
         name=req.name,
         spec=req.spec,
         allowed_domains=req.allowed_domains,
@@ -192,8 +200,11 @@ async def list_widgets(
     pocket_id: str | None = Query(None),
     owner: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> WidgetListResponse:
-    widgets = await _store().list_widgets(pocket_id=pocket_id, owner=owner, limit=limit)
+    widgets = await _store().list_widgets(
+        pocket_id=pocket_id, owner=owner, limit=limit, workspace_id=workspace_id
+    )
     # Project to the token-free model — a list payload must never carry the
     # per-widget access_token (W0b).
     public = [PawBarWidgetPublic.from_widget(w) for w in widgets]
@@ -224,12 +235,15 @@ async def update_spec(
     widget_id: str,
     spec: PawBarSpec,
     x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> PawBarWidgetPublic:
-    widget = await _store().get_widget(widget_id)
+    # W4a — the lookup is workspace-scoped: another tenant's widget id resolves
+    # to None → 404, before the token even gets compared. Never mutates.
+    widget = await _store().get_widget(widget_id, workspace_id=workspace_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
     _require_owner_token(widget, x_paw_bar_token)
-    updated = await _store().update_spec(widget_id, spec)
+    updated = await _store().update_spec(widget_id, spec, workspace_id=workspace_id)
     if updated is None:
         raise HTTPException(404, "Widget not found")
     return PawBarWidgetPublic.from_widget(updated)
@@ -243,16 +257,18 @@ async def update_spec(
 async def rotate_token(
     widget_id: str,
     x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> PawBarWidget:
     # Returns the FULL widget (with the new access_token) on purpose: this is
     # the explicit, authenticated reveal path so the owner can capture the
     # rotated secret. Still requires the old token AND an admin dashboard
-    # session (W0b).
-    widget = await _store().get_widget(widget_id)
+    # session (W0b). W4a — lookup + rotate are workspace-scoped (cross-tenant
+    # id → 404, nothing rotates).
+    widget = await _store().get_widget(widget_id, workspace_id=workspace_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
     _require_owner_token(widget, x_paw_bar_token)
-    rotated = await _store().rotate_token(widget_id)
+    rotated = await _store().rotate_token(widget_id, workspace_id=workspace_id)
     if rotated is None:
         raise HTTPException(404, "Widget not found")
     return rotated
@@ -266,12 +282,15 @@ async def rotate_token(
 async def delete_widget(
     widget_id: str,
     x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> None:
-    widget = await _store().get_widget(widget_id)
+    # W4a — scoped lookup + scoped DELETE: a cross-tenant widget id 404s and
+    # the row is never touched.
+    widget = await _store().get_widget(widget_id, workspace_id=workspace_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
     _require_owner_token(widget, x_paw_bar_token)
-    await _store().delete_widget(widget_id)
+    await _store().delete_widget(widget_id, workspace_id=workspace_id)
 
 
 @router.get("/paw-bar/widgets/{widget_id}/events", response_model=EventsListResponse)

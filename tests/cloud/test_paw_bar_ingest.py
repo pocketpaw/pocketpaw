@@ -62,10 +62,24 @@ def _widget_payload(**overrides: Any) -> dict[str, Any]:
     return payload
 
 
+def _override_workspace(app: FastAPI, workspace_id: str = "w-test") -> None:
+    """Pin current_workspace_id for a bare test app (W4a).
+
+    The admin CRUD routes resolve the caller's active workspace through the
+    cloud session dep; these router-level tests mount the router on a bare
+    FastAPI app with no auth stack, so the dep is overridden the same way
+    tests/cloud/conftest.py does for other cloud routers.
+    """
+    from pocketpaw_ee.cloud._core.deps import current_workspace_id
+
+    app.dependency_overrides[current_workspace_id] = lambda: workspace_id
+
+
 @pytest.fixture
 def app_with_store(tmp_path: Path):
     app = FastAPI()
     app.include_router(router)
+    _override_workspace(app)
     store = PawBarStore(tmp_path / "paw_bar_router.db")
     with patch("pocketpaw_ee.paw_bar.router._store", return_value=store):
         yield app, store
@@ -445,6 +459,7 @@ def _build_authed_app(store: PawBarStore, **state_kwargs):
         return await call_next(request)
 
     app.include_router(router)
+    _override_workspace(app)
     return app
 
 
