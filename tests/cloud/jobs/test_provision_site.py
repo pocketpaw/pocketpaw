@@ -323,9 +323,7 @@ async def test_workers_mode_deploys_via_wrangler_not_put_worker(
 
     monkeypatch.setattr(workers_deploy_mod, "deploy_workers", _fake_deploy)
 
-    await ProvisionSiteJob()(
-        workspace_id=WS, pocket_id=ctx["pocket_id"], job_id="job-6", params={}
-    )
+    await ProvisionSiteJob()(workspace_id=WS, pocket_id=ctx["pocket_id"], job_id="job-6", params={})
 
     # Deployed through wrangler with the D1 bound — and never through the WfP upload.
     assert len(calls) == 1
@@ -340,18 +338,14 @@ async def test_workers_mode_deploys_via_wrangler_not_put_worker(
 
 
 @pytest.mark.asyncio
-async def test_wfp_mode_still_uses_put_worker(
-    seed: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_wfp_mode_still_uses_put_worker(seed: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """Regression guard: ``wfp`` mode keeps the pre-existing dispatch-namespace upload."""
     ctx = await seed(d1_database_id="d1-existing-0008")
     cf = _FakeCF()
     _install_fakes(monkeypatch, cf=cf)
     monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "wfp")
 
-    await ProvisionSiteJob()(
-        workspace_id=WS, pocket_id=ctx["pocket_id"], job_id="job-7", params={}
-    )
+    await ProvisionSiteJob()(workspace_id=WS, pocket_id=ctx["pocket_id"], job_id="job-7", params={})
 
     assert len(cf.put_calls) == 1
     assert cf.put_calls[0]["bindings"] == [{"type": "d1", "name": "DB", "id": "d1-existing-0008"}]
