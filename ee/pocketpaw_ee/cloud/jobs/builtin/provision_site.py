@@ -17,6 +17,14 @@
 #   published again. Now an unconfigured Cloudflare fails the job cleanly and the site
 #   lands in ``failed``, which a re-publish resets and re-dispatches.
 #
+#   Updated 2026-07-09 (feat/dynamic-workers-deploy) — step (e) now deploys through
+#   ``sites_service.provision_deploy``, which honours PAW_CF_DEPLOY_MODE, instead of
+#   calling ``cf.put_worker`` directly. put_worker ONLY uploads into a
+#   Workers-for-Platforms dispatch namespace — a paid add-on — so on an account
+#   without WfP every dynamic publish died on ``Cloudflare API 403`` (CF 10121) no
+#   matter what deploy mode was configured. ``workers`` mode now deploys the same
+#   built worker to the free workers.dev tier with the D1 bound as ``DB``.
+#
 #   b. create_database GUARDED on Site.d1_database_id: reuse an already-stored id;
 #      else create it and persist the id IMMEDIATELY (status stays ``provisioning``)
 #      so a retry reuses the same D1 and never orphans a second one.
@@ -108,18 +116,21 @@ class ProvisionSiteJob:
             # baked-in database_id from the toml — no --database-id flag).
             await d1_migrate.apply_migrations(site_id, project_dir)
 
-            # e. Deploy the Worker with its D1 binding (same as _deploy_site_doc's
-            # dynamic bind).
-            await cf.put_worker(
-                script_name=site_id,
+            # e. Deploy the Worker with its D1 binding, to whichever target
+            # PAW_CF_DEPLOY_MODE names. ``workers`` mode binds the D1 through
+            # wrangler on the free tier; ``wfp`` keeps the dispatch-namespace
+            # put_worker. The seam owns the choice AND returns the live URL, since
+            # the two targets resolve URLs differently.
+            url = await sites_service.provision_deploy(
+                site_id=site_id,
+                project_dir=project_dir,
                 bundle=bundle,
-                bindings=sites_service.provision_d1_bindings(d1_database_id),
+                d1_database_id=d1_database_id,
+                cloudflare=cf,
             )
 
             # f. Mark the Site doc provisioned + live.
-            await sites_service.finalize_provisioned_site(
-                site, url=sites_service.provision_site_url(site_id)
-            )
+            await sites_service.finalize_provisioned_site(site, url=url)
         except Exception:
             # Any failure in b–f: mark failed (the d1 id, if created, is already
             # persisted so a retry reuses it) and re-raise so the worker marks the

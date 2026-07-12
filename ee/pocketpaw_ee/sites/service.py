@@ -1757,6 +1757,53 @@ def provision_d1_bindings(d1_database_id: str) -> list[dict]:
     return [{"type": "d1", "name": _D1_BINDING_NAME, "id": d1_database_id}]
 
 
+async def provision_deploy(
+    *,
+    site_id: str,
+    project_dir: str,
+    bundle: bytes,
+    d1_database_id: str,
+    cloudflare: Any = None,
+) -> str:
+    """Deploy a PROVISIONED dynamic site to whichever target ``_deploy_mode()`` names,
+    and return its public URL. The one seam the provision job deploys through.
+
+    Before this existed the job always called ``cf.put_worker``, which only uploads
+    into a Workers-for-Platforms dispatch namespace. WfP is a PAID add-on, so an
+    account without it got a bare ``Cloudflare API 403`` (CF error 10121) and NO
+    dynamic site could ever publish — regardless of PAW_CF_DEPLOY_MODE, which the job
+    never consulted. Honouring the mode here gives dynamic sites the same free
+    workers.dev target static sites already use:
+
+      * ``workers`` → ``workers_deploy.deploy_workers`` with the D1 bound as ``DB``.
+        Free tier, no dispatch namespace. Returns the real workers.dev URL.
+      * ``wfp`` / UNSET → the pre-existing ``put_worker`` upload (unchanged), whose
+        URL comes from ``provision_site_url``.
+
+    ``local`` is not a dynamic target (nothing serves the D1 binding locally), so it
+    degrades to ``workers`` rather than deploying a site that cannot reach its own
+    database."""
+    mode = _deploy_mode()
+    if mode == "local":
+        logger.info("sites.provision: local mode has no dynamic target — using workers mode")
+        mode = "workers"
+
+    if mode == "workers":
+        from pocketpaw_ee.sites import workers_deploy as workers_deploy_mod
+
+        return await workers_deploy_mod.deploy_workers(
+            site_id, project_dir, d1_database_id=d1_database_id
+        )
+
+    cf = cloudflare or _cf_client()
+    await cf.put_worker(
+        script_name=site_id,
+        bundle=bundle,
+        bindings=provision_d1_bindings(d1_database_id),
+    )
+    return provision_site_url(site_id)
+
+
 def provision_site_url(site_id: str) -> str:
     """The public URL a provisioned dynamic site resolves to — the per-site subdomain
     ``https://<site_id>.<PAW_CF_SITES_DOMAIN>`` when the sites domain is configured,

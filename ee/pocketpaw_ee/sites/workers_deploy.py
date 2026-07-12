@@ -98,6 +98,16 @@ def _sanitize(raw: str) -> str:
     return s or "site"
 
 
+# The D1 binding name a dynamic site's remote functions read (``platform.env.DB``).
+# Must match the WfP path's binding so the SAME built worker runs on either target.
+_D1_BINDING_NAME = "DB"
+
+# We write our own config, but a DYNAMIC project dir ALSO carries the generator's
+# wrangler.toml (name + d1 + queue producers, aimed at the WfP upload). Two configs
+# in one dir is ambiguous, so every wrangler invocation names ours explicitly.
+_CONFIG_FILENAME = "wrangler.jsonc"
+
+
 def _worker_name(site_id: str) -> str:
     """The worker / workers.dev subdomain name for a site: ``paw-site-<site_id>``,
     sanitized so it always matches ``^[a-z0-9][a-z0-9-]*$`` (CF rejects underscores
@@ -106,16 +116,26 @@ def _worker_name(site_id: str) -> str:
     return f"paw-site-{_sanitize(site_id)}"
 
 
-def _wrangler_jsonc(name: str) -> str:
-    """The clean STATIC-site wrangler config (the proven recipe). ``main`` points at
-    the worker entry adapter-cloudflare emits INSIDE the asset dir, and
-    ``assets.directory`` points at that SAME dir (the ``.assetsignore`` we write
-    keeps wrangler from uploading the worker entry as an asset). ``workers_dev:
+def _wrangler_jsonc(name: str, d1_database_id: str | None = None) -> str:
+    """The clean wrangler config for a workers.dev deploy (the proven recipe).
+    ``main`` points at the worker entry adapter-cloudflare emits INSIDE the asset
+    dir, and ``assets.directory`` points at that SAME dir (the ``.assetsignore`` we
+    write keeps wrangler from uploading the worker entry as an asset). ``workers_dev:
     true`` publishes to the free ``<name>.<subdomain>.workers.dev`` URL;
-    ``nodejs_compat`` is what the SvelteKit worker needs at runtime. Deliberately
-    minimal — NO D1 / Queue bindings (those are the dynamic-site Phase-2 path, and
-    the generator's own wrangler.toml that carries them is NOT reused here)."""
-    config = {
+    ``nodejs_compat`` is what the SvelteKit worker needs at runtime.
+
+    ``d1_database_id`` (DYNAMIC sites) adds the single ``DB`` D1 binding — the same
+    binding WfP's ``put_worker`` passes — so a dynamic site's remote functions reach
+    their per-tenant database on the FREE tier, with no dispatch namespace.
+
+    Deliberately still NO Queue bindings. The generator's own wrangler.toml declares
+    ``LEADS_QUEUE`` / ``WRITEBACK_QUEUE`` producers, but Cloudflare Queues is a paid
+    feature and those queues are not created on this path — declaring a producer for
+    a nonexistent queue fails the deploy outright. Both consumers already degrade
+    gracefully on a missing binding (``api/submit`` forwards straight to the capture
+    API; ``writeback.ts`` warns and skips), so omitting them costs durability
+    buffering, never a dropped lead."""
+    config: dict[str, object] = {
         "name": name,
         "main": f"{_CF_OUTPUT_REL}/_worker.js",
         "compatibility_date": "2024-09-23",
@@ -123,6 +143,10 @@ def _wrangler_jsonc(name: str) -> str:
         "workers_dev": True,
         "assets": {"binding": "ASSETS", "directory": _CF_OUTPUT_REL},
     }
+    if d1_database_id:
+        config["d1_databases"] = [
+            {"binding": _D1_BINDING_NAME, "database_name": name, "database_id": d1_database_id}
+        ]
     return json.dumps(config, indent=2) + "\n"
 
 
@@ -151,11 +175,12 @@ def _parse_deploy_url(stdout: str, *, name: str) -> str:
     return ""
 
 
-def _write_deploy_files(project_dir: str, name: str) -> None:
+def _write_deploy_files(project_dir: str, name: str, d1_database_id: str | None = None) -> None:
     """Write the two files the recipe needs into the project: the REQUIRED
     ``.svelte-kit/cloudflare/.assetsignore`` (exact three lines) and the clean
-    static ``wrangler.jsonc`` at the project root. Both are overwritten on a
-    re-publish so a stale config can never linger."""
+    ``wrangler.jsonc`` at the project root. Both are overwritten on a re-publish so
+    a stale config can never linger. ``d1_database_id`` adds the dynamic site's D1
+    binding to the emitted config."""
     out_dir = Path(project_dir, _CF_OUTPUT_REL)
     if not out_dir.is_dir():
         # The static output must exist before this runs — generator.build() emits it.
@@ -165,7 +190,7 @@ def _write_deploy_files(project_dir: str, name: str) -> None:
             "The static build output is missing — the site must be built before a workers deploy.",
         )
     (out_dir / ".assetsignore").write_text("\n".join(_ASSETSIGNORE_LINES) + "\n")
-    Path(project_dir, "wrangler.jsonc").write_text(_wrangler_jsonc(name))
+    Path(project_dir, _CONFIG_FILENAME).write_text(_wrangler_jsonc(name, d1_database_id))
 
 
 def _cf_env() -> dict[str, str]:
@@ -176,8 +201,10 @@ def _cf_env() -> dict[str, str]:
     return dict(os.environ)
 
 
-async def deploy_workers(site_id: str, project_dir: str) -> str:
-    """Deploy a STATIC Paw Site as a regular Worker on the free workers.dev tier.
+async def deploy_workers(
+    site_id: str, project_dir: str, *, d1_database_id: str | None = None
+) -> str:
+    """Deploy a Paw Site as a regular Worker on the free workers.dev tier.
 
     Writes the proven recipe files (``.assetsignore`` + ``wrangler.jsonc``) into the
     already-built project, then runs ``wrangler deploy`` (PAW_CF_WRANGLER_CMD, default
@@ -185,24 +212,28 @@ async def deploy_workers(site_id: str, project_dir: str) -> str:
     ``https://<name>.<subdomain>.workers.dev`` URL (parsed from wrangler's stdout,
     falling back to constructing it from PAW_CF_WORKERS_SUBDOMAIN).
 
+    ``d1_database_id`` (DYNAMIC sites) binds the site's per-tenant D1 as ``DB``, so a
+    dynamic site can serve its live data WITHOUT a Workers-for-Platforms dispatch
+    namespace (a paid add-on). The D1 must already exist and be migrated — the
+    provision job does both before calling this.
+
     The project MUST already carry the generator's ``.svelte-kit/cloudflare/``
     static output (generator.build() emits it before this is called). On a non-zero
     wrangler exit this raises ``Internal`` with the stderr tail so the failure
-    surfaces as a clean 5xx envelope, not an opaque crash.
-
-    NOTE: dynamic-site rejection is the CALLER's job (the service deploy-mode
-    selector knows the pattern). This function deploys whatever static output it is
-    given — it does not re-classify the site."""
+    surfaces as a clean 5xx envelope, not an opaque crash."""
     name = _worker_name(site_id)
     if not _WORKER_NAME_RE.match(name):  # defensive — _worker_name always sanitizes
         raise ValidationError(
             "sites.workers_bad_name",
             f"Computed an invalid worker name from site id {site_id!r}.",
         )
-    _write_deploy_files(project_dir, name)
+    _write_deploy_files(project_dir, name, d1_database_id)
 
-    argv = [*_wrangler_argv(), "deploy"]
-    logger.info("sites.workers: deploying %s via %s", name, argv[:-1])
+    # ``--config`` is REQUIRED, not cosmetic: a dynamic project dir also holds the
+    # generator's wrangler.toml (whose queue producers reference queues that do not
+    # exist on this path), and wrangler must not pick it up.
+    argv = [*_wrangler_argv(), "deploy", "--config", _CONFIG_FILENAME]
+    logger.info("sites.workers: deploying %s (d1=%s) via %s", name, bool(d1_database_id), argv)
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
