@@ -28,6 +28,23 @@
 #   legacy/global type predating tenancy (or an OSS / single-tenant caller),
 #   which a scoped read still sees — exactly the NULL-as-legacy boundary the
 #   W4a object/link scoping already uses.
+# Updated: 2026-07-10 (FST-1 — Fabric source-truth schema) — added ``Statement``
+#   and ``SourceRef``: the provenance layer for the source-truth chain. A
+#   Statement records ONE observed (object, property, value) claim with full
+#   provenance (who wrote it — ``writer_class``; where it came from —
+#   ``source_ref_id``; bitemporal fields — observed/recorded/valid_from/
+#   valid_to) plus a curation rank. A SourceRef identifies WHERE a statement
+#   came from (a connector run, a document, a human actor, an agent session)
+#   and is deduplicated on that identity by ``FabricStore.upsert_source``.
+#   Both models carry ``workspace_id`` (W4a tenancy, same type/default as
+#   ObjectType.workspace_id: ``str | None = None``); on SourceRef it is PART
+#   of the dedup identity — the same source identity in two workspaces is two
+#   rows, so tenant data never rendezvouses on a shared SourceRef.
+#   ADDITIVE ONLY: nothing in the existing read path (FabricObject.properties,
+#   fabric_query, widgets, projections) consumes these yet — statements are
+#   inert until the ``fabric_source_truth_mode`` flag (default "off") gains
+#   shadow/enforce semantics in later slices. The flat properties dict remains
+#   the primary read path.
 
 from __future__ import annotations
 
@@ -105,6 +122,80 @@ class FabricLink(BaseModel):
     link_type: str  # "has_orders", "belongs_to", "purchased"
     properties: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.now)
+
+
+class SourceRef(BaseModel):
+    """The identity of WHERE a :class:`Statement` came from (FST-1).
+
+    One row per distinct source identity: a connector run, a document, a
+    human actor, or an agent session. ``FabricStore.upsert_source`` dedups on
+    the identity tuple ``(kind, connector, run_id, document_uri, actor_id,
+    session_id, workspace_id)`` — calling it twice with the same identity
+    returns the same row, so statements from the same source share one
+    SourceRef. ``workspace_id`` IS part of the identity: the same source seen
+    from two workspaces is two rows (tenancy isolation beats dedup).
+
+    The identity fields are a union across the four kinds; only the ones
+    relevant to a given ``kind`` are expected to be set (e.g. a
+    ``connector_run`` carries ``connector`` + ``run_id``; a ``document``
+    carries ``document_uri``; a ``human_actor`` carries ``actor_id``; an
+    ``agent_session`` carries ``session_id``). Unset fields are ``None`` and
+    still participate in the identity (as "absent").
+    """
+
+    id: str = Field(default_factory=lambda: _gen_id("src"))
+    kind: Literal["connector_run", "document", "human_actor", "agent_session"]
+    connector: str | None = None
+    run_id: str | None = None
+    document_uri: str | None = None
+    actor_id: str | None = None
+    session_id: str | None = None
+    retrieved_at: datetime | None = None
+    # Tenancy (W4a semantics, carried on the model like ObjectType.workspace_id):
+    # the owning workspace. ``None`` = OSS / single-tenant caller. Unlike the
+    # other tables, this is PART OF THE DEDUP IDENTITY (see the docstring).
+    workspace_id: str | None = None
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class Statement(BaseModel):
+    """One observed (object, property, value) claim with provenance (FST-1).
+
+    Statements are APPEND-ONLY: the store exposes no update/delete verbs for
+    them (rank changes land in a later slice as new curation writes). Nothing
+    reads statements in production paths yet — the flat
+    ``FabricObject.properties`` dict remains the primary read path until the
+    ``fabric_source_truth_mode`` flag gains shadow/enforce semantics.
+
+    Bitemporal fields:
+
+    - ``observed_at`` — when the source says the value was true / was seen.
+    - ``recorded_at`` — when THIS store recorded the claim (stamped on write).
+    - ``valid_from`` / ``valid_to`` — the validity interval of the claim;
+      ``valid_to=None`` means "still valid as far as this statement knows".
+
+    ``rank`` is the curation knob resolvers will consume later:
+    ``preferred`` outranks ``normal`` outranks ``deprecated``; ``pinned``
+    marks a statement a human explicitly fixed in place.
+    """
+
+    id: str = Field(default_factory=lambda: _gen_id("stm"))
+    object_id: str
+    property: str
+    value: Any = None
+    source_ref_id: str
+    writer_class: Literal["human", "connector", "mirror", "agent", "inferred"]
+    observed_at: datetime = Field(default_factory=datetime.now)
+    recorded_at: datetime = Field(default_factory=datetime.now)
+    valid_from: datetime = Field(default_factory=datetime.now)
+    valid_to: datetime | None = None
+    rank: Literal["preferred", "normal", "deprecated"] = "normal"
+    rank_reason: str | None = None
+    pinned: bool = False
+    # Tenancy (W4a semantics): the owning workspace, stamped on append.
+    # ``None`` = OSS / single-tenant caller; a scoped read still sees NULL
+    # rows (own rows + legacy NULL — the standard W4a read scope).
+    workspace_id: str | None = None
 
 
 class PathHop(BaseModel):

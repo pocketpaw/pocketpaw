@@ -1,5 +1,14 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-07-08 (CS-13, feat/per-send-model-override) — ``run`` /
+  ``_build_options`` grow an optional ``model_override: str | None = None``
+  keyword. When set, it is applied as the LAST word in the model-selection block,
+  so it wins over the non-anthropic ``llm.model``, smart-routing's complexity pick,
+  and the configured ``claude_sdk_model`` — it is the user's explicit per-send
+  choice from the composer's model picker. Because ``_client_cache_key`` already
+  folds ``model`` in, an override that differs from the warm client's model MISSES
+  the cache and gets a fresh subprocess (no stale-model reuse). ``None`` (the
+  default, and all ``prewarm`` ever passes) is byte-identical to the prior path.
 Updated: 2026-07-02 (feat/atlas-fabric AT-7) — the ``pocketpaw_atlas`` server
   additionally gets a per-run live Fabric introspector (``atlas/fabric.py``)
   when — and only when — the tenant scope is a real ``ws:<id>`` (not the OSS
@@ -1525,6 +1534,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         skill_names: frozenset[str],
         stderr_sink: list[str],
         session_handle: SessionHandle | None = None,
+        model_override: str | None = None,
     ) -> _BuiltOptions:
         """Assemble the ``ClaudeAgentOptions`` a turn (or a prewarm) will run on.
 
@@ -1989,6 +1999,19 @@ class ClaudeSDKBackend(BaseAgentBackend):
             elif self.settings.claude_sdk_model:
                 options_kwargs["model"] = self.settings.claude_sdk_model
 
+        # CS-13 — per-send model override. Applied LAST so it wins over ALL of the
+        # above: the non-anthropic ``llm.model``, smart-routing's complexity pick,
+        # and the configured ``claude_sdk_model``. It is the user's explicit choice
+        # for THIS one turn (the composer's model picker), so nothing overrides it.
+        # Already validated at the HTTP edge (``CloudAgentChatRequest.model`` —
+        # ``max_length`` + a strict character pattern) before it ever reaches this
+        # subprocess launch arg. Because ``_client_cache_key`` folds ``model`` in, a
+        # turn carrying a different model naturally MISSES the warm client and gets a
+        # fresh subprocess — no stale-model reuse. ``None`` (the default, and the
+        # only value ``prewarm`` ever passes) leaves the selection above untouched.
+        if model_override:
+            options_kwargs["model"] = model_override
+
         # Capture stderr for better error diagnostics
         def _on_stderr(line: str) -> None:
             stderr_sink.append(line)
@@ -2280,6 +2303,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         session_handle: SessionHandle | None = None,
         warm_client: LeasedClient | None = None,
         on_client_built: Callable[[Any, str, Callable], None] | None = None,
+        model_override: str | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
@@ -2445,6 +2469,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 allow_mcp_tool_ids=allow_mcp_tool_ids,
                 skill_names=skill_names,
                 session_handle=session_handle,
+                model_override=model_override,
                 stderr_sink=_stderr_lines,
             )
             options = _built.options
@@ -2572,6 +2597,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
             _announced_tools: set[str] = set()
             _event_count = 0
             _saw_result = False  # Track if ResultMessage was consumed
+            # The model that actually answered (from AssistantMessage.model) —
+            # feeds token_usage's ``model`` when the CLI auto-selected.
+            _last_seen_model: str | None = None
             # feat/session-supervisor SS-1: emit the native session id at most
             # once per run (from the SDK's turn-1 init/system message). Gated on
             # an opted-in ``session_handle`` so the legacy stream is byte-identical.
@@ -2684,6 +2712,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
                     # ========== AssistantMessage - main content ==========
                     if self._AssistantMessage and isinstance(event, self._AssistantMessage):
+                        # Remember the model that actually answered — when the
+                        # CLI auto-selects (no explicit model option), this is
+                        # the only truthful source for token_usage's ``model``.
+                        _msg_model = getattr(event, "model", None)
+                        if isinstance(_msg_model, str) and _msg_model:
+                            _last_seen_model = _msg_model
                         if not _streamed_via_events:
                             text = self._extract_text_from_message(event)
                             if text:
@@ -2746,7 +2780,22 @@ class ClaudeSDKBackend(BaseAgentBackend):
                         total_cost = getattr(event, "total_cost_usd", None)
                         usage = getattr(event, "usage", None) or {}
                         if isinstance(usage, dict) and (usage or total_cost):
-                            _model_name = options_kwargs.get("model", "claude")
+                            # Report the model that ACTUALLY ran, not the
+                            # request option: prefer the ResultMessage's
+                            # modelUsage keys (the CLI's own accounting),
+                            # then the last AssistantMessage's model, then
+                            # the explicit option. The old hard fallback
+                            # "claude" hid the auto-selected model from the
+                            # UI's response-meta line.
+                            _model_usage = getattr(event, "modelUsage", None) or getattr(
+                                event, "model_usage", None
+                            )
+                            if isinstance(_model_usage, dict) and _model_usage:
+                                _model_name = next(iter(_model_usage.keys()))
+                            else:
+                                _model_name = (
+                                    _last_seen_model or options_kwargs.get("model") or "claude"
+                                )
                             # MCG-11 — read prompt-cache effectiveness off the
                             # SDK usage via the universal helper so the margin
                             # from the byte-stable cached prefix (site/pocket-gen)

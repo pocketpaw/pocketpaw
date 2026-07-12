@@ -289,9 +289,7 @@ class TestRobustness:
             raise RuntimeError("instinct store down")
 
         monkeypatch.setattr("pocketpaw.stores.get_instinct_store", _boom)
-        result = await propose_customer_decision(
-            widget=widget, event=event, paw_bar_store=pp_store
-        )
+        result = await propose_customer_decision(widget=widget, event=event, paw_bar_store=pp_store)
         assert result is None
 
     async def test_deliver_no_parked_row_is_noop(self, stores) -> None:

@@ -66,7 +66,7 @@ EXPECTED_SURFACE_IDS = {
     "surface:pockets",
     "surface:sites",
     "surface:belt",
-    "surface:paw-print",
+    "surface:decisions",
     "surface:decisions-graph",
     "surface:mission-control",
     "surface:agents",
@@ -90,7 +90,7 @@ EXPECTED_SURFACE_IDS = {
 # cross-links, so atlas_describe answers include where to see the result).
 EXPECTED_PRIMITIVE_SURFACES = {
     "primitive:pocket": "/pockets",
-    "primitive:instinct": "/paw-print",
+    "primitive:instinct": "/decisions",
     "primitive:connector": "/settings/workspace/integrations",
     "primitive:sites": "/sites",
     "primitive:belt": "/belt",

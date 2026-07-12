@@ -1,6 +1,35 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-07-10 (HE-2 — canonical engine module): the engine content-selection
+# checks now route through ``sites.engines`` predicates instead of inline
+# ``== "svelte"`` string equality. ``is_source_engine(engine)`` replaces the
+# "source vs rippleSpec" content switch (publish/activate promote, preview/audit
+# fallback, dynamic-envelope), and ``content_key(engine)`` replaces the literal
+# ``"source" | "rippleSpec"`` key pick. PURE refactor, zero behaviour change for the
+# existing ripple/svelte engines. The three svelte NATIVE-EDITING guards
+# (``apply_leaf_edits`` ~2595, native shadow-render ~2697, ``edit_svelte_component``
+# ~2823) deliberately KEEP the ``!= "svelte"`` literal — their bodies are svelte-only
+# (component-path splice, ``.svelte-kit/cloudflare`` read, DSV-5 source split), so
+# guard and body must widen together; HE-9 widens ``apply_leaf_edits`` when the html
+# editing lane lands.
+#
+# Updated 2026-07-09 (DP0-4 — publish async split + single-flight): ``_deploy_site_doc``
+# now FORKS on ``_is_dynamic`` BEFORE any build. A DYNAMIC site no longer builds /
+# deploys inline — it returns early into the new ``_provision_dynamic_site`` helper,
+# which ensures the canonical Site doc in ``provision_status="provisioning"``
+# (``deployed=False``, ``url=""``) and enqueues the durable ``provision_site`` job via
+# ``jobs.service.dispatch_job`` (``params={}``). SINGLE-FLIGHT: a re-publish while the
+# site is already ``provisioning`` does NOT enqueue a second job (a double-publish is a
+# no-op). The enqueued job id rides the returned doc on the transient
+# ``_provision_job_id`` PrivateAttr, which ``_to_response`` surfaces on
+# ``SiteResponse.provision_job_id`` alongside ``provision_status``. The STATIC path is
+# byte-for-byte the pre-DP0-4 inline build → deploy → upsert (regression guarantee).
+# Both publish entry points reach it through ``_deploy_site_doc`` (the free ``publish``
+# and the charge-first ``activate_site``), so both get the async behaviour; the return
+# is still a plain ``_SiteDoc`` so their post-processing (plan stamp / sub-active) is
+# unchanged.
+#
 # Updated 2026-07-02 (harden native-editing endpoints): (1) ``get_native_artifact``
 # now routes its arm build through ``_build_or_cloud_error`` (like the publish paths)
 # so a missing-toolchain / non-zero build / SmokeGateFailed becomes a clean
@@ -211,6 +240,15 @@
 # side (entity isolation; this service never imports the Pocket model). _to_response
 # gained an optional ``pattern`` arg; both DTOs default it to "" (empty-safe for a
 # pocket with no pattern or a missing/cross-tenant pocket).
+#
+# Updated 2026-07-09 (SR-9 — surface each site's ENGINE): the sibling of DS-1a.
+# list_for_workspace() and pocket_status() now also carry the source pocket's
+# authoring ``engine`` ("svelte" | "ripple") so the gallery can badge each card's
+# engine (Custom vs Ripple) without a per-site fetch. Resolved via the new
+# pockets_service.engines_for_pockets (one projected $in read, tenant-scoped),
+# mirroring patterns_for_pockets. _to_response gained an optional ``engine`` arg;
+# both DTOs default it to "" (empty-safe for a pocket that predates the engine
+# field or a missing/cross-tenant pocket).
 #
 # Updated 2026-06-19 (P2b-backend — "Last Deployed" + revert endpoint): publish()
 # now stamps the Site doc's ``deployed_at`` (UTC) ONLY when a non-preview deploy
@@ -508,6 +546,7 @@ from pocketpaw_ee.sites.dto import (
     SiteResponse,
     SiteStatusResponse,
 )
+from pocketpaw_ee.sites.engines import content_key, is_source_engine
 from pocketpaw_ee.sites.generator_client import GeneratorClient
 
 logger = logging.getLogger(__name__)
@@ -984,7 +1023,7 @@ async def _promote_pocket_draft_to_published(
         )
 
 
-def _to_response(doc: _SiteDoc, pattern: str = "") -> SiteResponse:
+def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResponse:
     deployed_at = getattr(doc, "deployed_at", None)
     return SiteResponse(
         id=str(doc.id),
@@ -1004,11 +1043,20 @@ def _to_response(doc: _SiteDoc, pattern: str = "") -> SiteResponse:
         # ...), resolved by the caller from Pocket.pattern (it lives on the pocket,
         # not the Site). "" when unset / unresolved so the gallery is empty-safe.
         pattern=pattern,
+        # SR-9: the source pocket's authoring engine ("svelte" | "ripple"),
+        # resolved by the caller from Pocket.engine (sibling of pattern above). ""
+        # when unresolved, so the gallery's engine badge is empty-safe.
+        engine=engine,
         # charge-first: the Dodo checkout link a PAID-tier publish returns, read
         # from the transient ``_checkout_url`` PrivateAttr (never persisted). None
         # for a free/live publish and for any list/status read (those docs are
         # loaded from Mongo, where the PrivateAttr defaults to None).
         checkout_url=getattr(doc, "_checkout_url", None),
+        # DP0-4: the dynamic-site provision state (persisted) + the id of the job a
+        # dynamic publish just enqueued (transient ``_provision_job_id`` PrivateAttr,
+        # None for a static publish / any DB-loaded doc / a single-flight no-op).
+        provision_status=getattr(doc, "provision_status", "none"),
+        provision_job_id=getattr(doc, "_provision_job_id", None),
     )
 
 
@@ -1225,7 +1273,7 @@ async def publish(
     # not-live while the published tag stands). The snapshot for the promote is the
     # engine's content: the rippleSpec for a ripple site, the {path: contents}
     # source map for a svelte site.
-    version_content: dict[str, Any] = (source if engine == "svelte" else ripple_spec) or {}
+    version_content: dict[str, Any] = (source if is_source_engine(engine) else ripple_spec) or {}
     await _promote_pocket_draft_to_published(
         pocket_id=pocket_id,
         workspace_id=workspace_id,
@@ -1308,7 +1356,29 @@ async def _deploy_site_doc(
     ``workers_deploy`` is the test-injection seam for the workers-mode deployer
     (mirrors ``local_deploy``/``cloudflare``); ``None`` uses the real
     ``workers_deploy.deploy_workers``.
+
+    DP0-4 — DYNAMIC split: a DYNAMIC site (``pattern == "dynamic"`` / a spec carrying
+    live bindings) is NOT built or deployed inline here. Its per-tenant D1 data plane
+    must be stood up by the durable ``provision_site`` job (create D1 → build with the
+    real id → migrate → deploy), so this returns EARLY into ``_provision_dynamic_site``
+    — which ensures the canonical Site doc in ``provision_status="provisioning"`` and
+    enqueues the job (single-flight: a re-publish while already provisioning does NOT
+    enqueue a second job). Only the STATIC path below runs the inline build → deploy →
+    upsert (byte-for-byte the pre-DP0-4 behaviour, the regression guarantee).
     """
+    # DP0-4: fork BEFORE any build. A dynamic site defers to the provision job; only
+    # a static site takes the inline build/deploy/upsert path unchanged below.
+    if _is_dynamic(pattern, ripple_spec):
+        return await _provision_dynamic_site(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            site_id=site_id,
+            signed_key=signed_key,
+            site_name=site_name,
+            builder_origin=builder_origin,
+        )
+
     gen = generator or GeneratorClient()
     # DEP-3: map a generator/install/smoke failure (missing toolchain, non-zero
     # build, SSR fail-gate) to a clean CloudError (sites.generator_failed → 5xx)
@@ -1479,6 +1549,105 @@ async def _deploy_site_doc(
     return doc
 
 
+async def _provision_dynamic_site(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    site_id: str,
+    signed_key: str,
+    site_name: str,
+    builder_origin: str | None,
+) -> _SiteDoc:
+    """DP0-4 — the DYNAMIC half of ``_deploy_site_doc``: stand the site up
+    ASYNCHRONOUSLY via the durable ``provision_site`` job instead of deploying inline.
+
+    A dynamic site is backed by a per-tenant Cloudflare D1 that must be created,
+    migrated, and bound BEFORE the Worker can serve — work the ``provision_site`` job
+    owns (create D1 → build with the real id → migrate → deploy → mark provisioned).
+    So rather than build/deploy here, this:
+
+      1. ENSURES the ONE canonical Site doc for ``(workspace, pocket_id)`` exists in
+         ``provision_status="provisioning"`` (``deployed=False``, ``url=""`` — the job
+         flips those on finalize), mirroring the fields the static upsert seeds on a
+         first publish (script_name / owner / signed_key / capture defaults).
+      2. SINGLE-FLIGHT: if the doc is ALREADY ``provisioning``, it does NOT enqueue a
+         second job — a double-publish is a no-op that returns the in-progress
+         provisioning response (without a fresh job id).
+      3. DISPATCHES the ``provision_site`` job (``params={}`` — the job re-reads the
+         pocket's spec itself; ``validate_job_params({})`` passes with no schema).
+
+    Returns the Site doc in ``provisioning`` state, carrying the enqueued job id on the
+    transient ``_provision_job_id`` PrivateAttr so ``_to_response`` surfaces it. Both
+    publish entry points (the free ``publish`` and the charge-first ``activate_site``)
+    reach this through ``_deploy_site_doc``, so both get the async behaviour; each does
+    its own post-processing on the returned doc (plan stamp / sub-active), which is a
+    plain ``_SiteDoc`` exactly as before — only ``deployed``/``provision_status`` differ.
+    """
+    oid = ObjectId(site_id)
+    doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+
+    # SINGLE-FLIGHT: a publish while the site is already provisioning must not enqueue
+    # a second job — return the in-progress provisioning response as a no-op. (We do
+    # not resolve the in-flight job id here; the caller can poll the site's status.)
+    if doc is not None and doc.provision_status == "provisioning":
+        doc._provision_job_id = None
+        return doc
+
+    # Ensure the canonical doc exists in ``provisioning`` state. leave ``deployed`` /
+    # ``url`` for the job to finalize; seed the same identity/capture fields the static
+    # upsert seeds so the site is coherent while it provisions.
+    if doc is None:
+        doc = _SiteDoc(
+            id=oid,
+            workspace=workspace_id,
+            pocket_id=pocket_id,
+            owner=user_id,
+            name=site_name,
+            script_name=site_id,
+            deployed=False,
+            url="",
+            signed_key=signed_key,
+            provision_status="provisioning",
+            builder_origin=builder_origin or "",
+            allowed_origins=_default_allowed_origins(),
+            event_mapping=_DEFAULT_EVENT_MAPPING,
+        )
+        await doc.insert()
+    else:
+        # Re-publish of a not-currently-provisioning dynamic site (e.g. a failed /
+        # provisioned one re-run): reset to ``provisioning`` and refresh the identity
+        # fields. Preserve the stored ``signed_key`` (the capture endpoint verifies
+        # against it) and any connected domain / allowlist. Clear any captured
+        # pending-deploy inputs — the charge-first webhook has already handed off to
+        # the job, so the snapshot is no longer needed.
+        doc.pocket_id = pocket_id
+        doc.owner = user_id
+        doc.name = site_name
+        doc.script_name = site_id
+        doc.deployed = False
+        doc.url = ""
+        doc.provision_status = "provisioning"
+        doc.pending_deploy_inputs = {}
+        await doc.save()
+
+    # DISPATCH the durable provision job. Lazy import keeps the sites service free of
+    # an eager jobs/arq import at module load (mirrors the billing/pockets lazy
+    # imports). ``params={}`` — the job re-reads the pocket spec; no params needed.
+    from pocketpaw_ee.cloud.jobs import service as jobs_service
+
+    result = await jobs_service.dispatch_job(
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        action="provision_site",
+        job_name="provision_site",
+        params={},
+        triggered_by=user_id,
+    )
+    doc._provision_job_id = result.get("job_id")
+    return doc
+
+
 async def _load(workspace_id: str, site_id: str) -> _SiteDoc:
     # Guard the cast: a malformed site_id is not a 500. bson raises InvalidId
     # (TypeError for non-str/bytes inputs); both mean "no such site".
@@ -1557,6 +1726,178 @@ async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | N
     # Prefer the newest doc that carries a real url (the freshest live build);
     # fall back to the newest doc overall when none has one.
     return next((d for d in docs if d.url), docs[0])
+
+
+# ---------------------------------------------------------------------------
+# DP0-3 — durable ``provision_site`` job seams.
+#
+# The provision job (ee/pocketpaw_ee/cloud/jobs/builtin/provision_site.py) takes a
+# dynamic site from spec to live: create D1 → build (with the real id baked in) →
+# apply migration → deploy the Worker → mark provisioned. The job orchestrates the
+# steps (migrate sits BETWEEN build and deploy), so these are granular seams — the
+# Site-doc Beanie reads/writes funnel through THIS module (the import-linter
+# boundary keeps the builtin job off the Beanie doc), and the build/deploy
+# mechanics reuse ``_deploy_site_doc``'s exact helpers rather than duplicating them.
+# ---------------------------------------------------------------------------
+
+
+def provision_cf_client() -> Any:
+    """The Cloudflare client the provision job uses (create_database / put_worker).
+
+    Thin public wrapper over ``_cf_client()`` so the builtin job builds the real CF
+    client the SAME way ``_deploy_site_doc`` does, and tests can monkeypatch this one
+    seam to inject a fake client without importing the client class."""
+    return _cf_client()
+
+
+def provision_d1_bindings(d1_database_id: str) -> list[dict]:
+    """The Worker D1 binding list a provisioned dynamic site deploys with — a single
+    ``{"type": "d1", "name": "DB", "id": <database_id>}`` (``_D1_BINDING_NAME``), the
+    exact shape ``_deploy_site_doc`` passes ``put_worker`` on the dynamic path."""
+    return [{"type": "d1", "name": _D1_BINDING_NAME, "id": d1_database_id}]
+
+
+async def provision_deploy(
+    *,
+    site_id: str,
+    project_dir: str,
+    bundle: bytes,
+    d1_database_id: str,
+    cloudflare: Any = None,
+) -> str:
+    """Deploy a PROVISIONED dynamic site to whichever target ``_deploy_mode()`` names,
+    and return its public URL. The one seam the provision job deploys through.
+
+    Before this existed the job always called ``cf.put_worker``, which only uploads
+    into a Workers-for-Platforms dispatch namespace. WfP is a PAID add-on, so an
+    account without it got a bare ``Cloudflare API 403`` (CF error 10121) and NO
+    dynamic site could ever publish — regardless of PAW_CF_DEPLOY_MODE, which the job
+    never consulted. Honouring the mode here gives dynamic sites the same free
+    workers.dev target static sites already use:
+
+      * ``workers`` → ``workers_deploy.deploy_workers`` with the D1 bound as ``DB``.
+        Free tier, no dispatch namespace. Returns the real workers.dev URL.
+      * ``wfp`` / UNSET → the pre-existing ``put_worker`` upload (unchanged), whose
+        URL comes from ``provision_site_url``.
+
+    ``local`` is not a dynamic target (nothing serves the D1 binding locally), so it
+    degrades to ``workers`` rather than deploying a site that cannot reach its own
+    database."""
+    mode = _deploy_mode()
+    if mode == "local":
+        logger.info("sites.provision: local mode has no dynamic target — using workers mode")
+        mode = "workers"
+
+    if mode == "workers":
+        from pocketpaw_ee.sites import workers_deploy as workers_deploy_mod
+
+        return await workers_deploy_mod.deploy_workers(
+            site_id, project_dir, d1_database_id=d1_database_id
+        )
+
+    cf = cloudflare or _cf_client()
+    await cf.put_worker(
+        script_name=site_id,
+        bundle=bundle,
+        bindings=provision_d1_bindings(d1_database_id),
+    )
+    return provision_site_url(site_id)
+
+
+def provision_site_url(site_id: str) -> str:
+    """The public URL a provisioned dynamic site resolves to — the per-site subdomain
+    ``https://<site_id>.<PAW_CF_SITES_DOMAIN>`` when the sites domain is configured,
+    else "" (the Worker is uploaded + reachable via the dispatch worker once the
+    operator sets the domain). Mirrors ``_deploy_site_doc``'s WfP URL logic."""
+    import os
+
+    domain = os.environ.get("PAW_CF_SITES_DOMAIN", "").strip()
+    return f"https://{site_id}.{domain}" if domain else ""
+
+
+async def load_provision_site(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
+    """The canonical Site doc the provision job operates on, or None. Resolves the
+    ONE canonical doc for (workspace, pocket_id) (``_canonical_site_doc``), so a
+    pre-PERF-1 pocket with legacy dupes still provisions the live one."""
+    return await _canonical_site_doc(workspace_id, pocket_id)
+
+
+async def persist_provision_d1_id(site: _SiteDoc, d1_database_id: str) -> None:
+    """Persist a freshly-created D1 id on the Site doc IMMEDIATELY (DP0-3 contract).
+
+    ``provision_status`` stays ``provisioning`` — only ``d1_database_id`` is stamped
+    — so a retry of the job REUSES this D1 instead of creating (and orphaning) a
+    second one. Called right after ``cf.create_database`` succeeds, before build /
+    migrate / deploy."""
+    site.d1_database_id = d1_database_id
+    site.provision_status = "provisioning"
+    await site.save()
+
+
+async def finalize_provisioned_site(site: _SiteDoc, *, url: str) -> None:
+    """Mark a Site doc fully provisioned after migrate + deploy succeed (DP0-3):
+    ``provision_status="provisioned"``, ``deployed=True``, stamp the live URL +
+    ``deployed_at``. The last write of the durable job's happy path."""
+    site.provision_status = "provisioned"
+    site.deployed = True
+    site.deployed_at = datetime.now(UTC)
+    site.url = url
+    await site.save()
+
+
+async def mark_provision_failed(site: _SiteDoc) -> None:
+    """Mark a Site doc's provision as failed (DP0-3). The ``d1_database_id`` already
+    persisted (``persist_provision_d1_id``) is LEFT in place so a retry reuses that
+    D1 — only ``provision_status`` flips to ``failed``."""
+    site.provision_status = "failed"
+    await site.save()
+
+
+async def build_provision_bundle(
+    *,
+    site: _SiteDoc,
+    ripple_spec: dict[str, Any] | None,
+    d1_database_id: str,
+    generator: GeneratorClient | None = None,
+) -> tuple[str, bytes]:
+    """Build a dynamic site with its REAL D1 id baked in; return ``(project_dir,
+    bundle)`` (DP0-3).
+
+    Reuses ``_deploy_site_doc``'s exact build assembly: it derives the theme from
+    the rippleSpec, runs the SSR-gated build through ``_build_or_cloud_error`` (so a
+    broken build maps to a clean CloudError, never an opaque 500), and reads the
+    Worker bundle via ``_default_bundle_reader``. ``d1_database_id`` rides
+    ``siteConfig.d1DatabaseId`` so the generator threads it into the emitted
+    wrangler.toml ``database_id`` — this is what makes the later ``wrangler d1
+    migrations apply`` and the Worker's D1 binding target the right database. The
+    caller applies migrations against ``project_dir`` (which carries wrangler.toml +
+    migrations/) BEFORE deploying ``bundle``. ``generator`` is the test-injection
+    seam; None uses a real ``GeneratorClient``."""
+    gen = generator or GeneratorClient()
+    theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
+    site_id = str(site.id)
+    build = await _build_or_cloud_error(
+        gen,
+        ripple_spec=ripple_spec,
+        theme=theme,
+        site_id=site_id,
+        title=site.name or "Untitled site",
+        capture_api_base=_capture_base(),
+        capture_signed_key=site.signed_key,
+        # A dynamic Paw Site is authored as a ripple site carrying live bindings
+        # (objects / sources / actions / auth) — the create-dynamic-site path.
+        engine="ripple",
+        source=None,
+        builder_origin=site.builder_origin or None,
+        # DP0-3: the REAL D1 uuid, baked into the emitted wrangler.toml.
+        d1_database_id=d1_database_id,
+        pocket_id=site.pocket_id,
+        # A live provision keeps the SSR fail-gate on — a broken site is rejected
+        # before it deploys (same as _deploy_site_doc).
+        smoke=True,
+    )
+    bundle = _default_bundle_reader(build.project_dir)
+    return build.project_dir, bundle
 
 
 async def add_domain(
@@ -2155,7 +2496,9 @@ async def activate_site(
     # record, mirroring the live publish path (best-effort; versioning never gates
     # the deploy/activation).
     version_content: dict[str, Any] = (
-        inputs.get("source") if (inputs.get("engine") == "svelte") else inputs.get("ripple_spec")
+        inputs.get("source")
+        if is_source_engine(inputs.get("engine"))
+        else inputs.get("ripple_spec")
     ) or {}
     await _promote_pocket_draft_to_published(
         pocket_id=pocket_id,
@@ -2312,6 +2655,10 @@ async def apply_leaf_edits(
     # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
     # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
     pocket = await pockets_service.get(pocket_id, user_id)
+    # KEPT svelte-specific (not is_source_engine): the body below runs the DSV-5
+    # ``_split_svelte_source`` split and the SvelteKit leaf-edit CLI, both svelte-only.
+    # HE-9 widens THIS guard to html (via is_source_engine) in the same change that
+    # teaches the CLI the html editing lane, so guard and body widen together.
     if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
         raise ValidationError(
             "pocket.not_svelte_site",
@@ -2414,6 +2761,9 @@ async def get_native_artifact(
     # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
     # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
     pocket = await pockets_service.get(pocket_id, user_id)
+    # KEPT svelte-specific (not is_source_engine): this shadow-renders the SvelteKit
+    # ARMED build by reading ``.svelte-kit/cloudflare/index.html``. An html site's
+    # served artifact IS its source, so it never uses this SvelteKit render path.
     if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
         raise ValidationError(
             "pocket.not_svelte_site",
@@ -2540,6 +2890,9 @@ async def edit_svelte_component(
         # A missing component path is a NotFound (same contract as the full-rewrite
         # path, where set_svelte_source_file raises it) — not a silent create.
         pocket = await pockets_service.get(pocket_id, user_id)
+        # KEPT svelte-specific (not is_source_engine): edits a single named SvelteKit
+        # component by ``component_path`` and persists via ``set_svelte_source_file``.
+        # html has no per-component model — it edits by uid splice (HE-9), not here.
         if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(
             pocket.get("source"), dict
         ):
@@ -2698,7 +3051,7 @@ async def _ensure_pocket_draft(*, workspace_id: str, user_id: str, pocket_id: st
             return
         pocket = await pockets_service.get(pocket_id, user_id)
         engine = pocket.get("engine") or "ripple"
-        if engine == "svelte":
+        if is_source_engine(engine):
             content = pocket.get("source") if isinstance(pocket.get("source"), dict) else {}
         else:
             content = pocket.get("rippleSpec") if isinstance(pocket.get("rippleSpec"), dict) else {}
@@ -2753,7 +3106,7 @@ async def preview_pocket(
 
     # The pocket's CURRENT content for the engine — the fallback when the Branch
     # primitive has no draft row for this pocket yet.
-    if engine == "svelte":
+    if is_source_engine(engine):
         source = pocket.get("source")
         current = source if isinstance(source, dict) else None
     else:
@@ -2862,7 +3215,7 @@ async def audit_pocket(
 
     # The pocket's CURRENT content for the engine — the fallback when the Branch
     # primitive has no draft row for this pocket yet (mirrors preview_pocket).
-    if engine == "svelte":
+    if is_source_engine(engine):
         source = pocket.get("source")
         current: dict[str, Any] | None = source if isinstance(source, dict) else None
     else:
@@ -2925,7 +3278,7 @@ def _dynamic_content_envelope(pocket: dict[str, Any]) -> dict[str, Any]:
     engine-agnostic ``_is_dynamic`` / ``_dynamic_objects`` helpers can read the
     bindings off it without caring which engine produced it."""
     engine = pocket.get("engine") or "ripple"
-    key = "source" if engine == "svelte" else "rippleSpec"
+    key = content_key(engine)
     content = pocket.get(key)
     return content if isinstance(content, dict) else {}
 
@@ -3181,13 +3534,16 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     # no deployed site or the doc predates the field (a pre-P2b row).
     deployed_at = getattr(doc, "deployed_at", None) if doc is not None else None
 
-    # DS-1a: resolve the source pocket's authoring pattern so a by-pocket status
-    # read can badge a dynamic site too. ONE read, tenant-scoped; "" when the
-    # pocket has no pattern or could not be resolved (empty-safe).
+    # DS-1a/SR-9: resolve the source pocket's authoring pattern + engine so a
+    # by-pocket status read can badge a dynamic site AND its engine too. Each is
+    # ONE read, tenant-scoped; "" when the pocket has no value or could not be
+    # resolved (empty-safe).
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     patterns = await pockets_service.patterns_for_pockets(workspace_id, [pocket_id])
     pattern = patterns.get(pocket_id) or ""
+    engines = await pockets_service.engines_for_pockets(workspace_id, [pocket_id])
+    engine = engines.get(pocket_id) or ""
 
     return SiteStatusResponse(
         pocket_id=pocket_id,
@@ -3201,6 +3557,7 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         url=(doc.url or None) if doc is not None else None,
         deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
         pattern=pattern,
+        engine=engine,
     )
 
 
@@ -3353,15 +3710,24 @@ async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
         -_SiteDoc.createdAt
     )  # type: ignore[operator]
     docs = [doc async for doc in cursor]
-    # ONE cross-entity read for every card's pattern (no per-site fetch). The
-    # Pocket read stays in the pockets service (entity isolation) — this service
-    # never imports the Pocket model.
+    # ONE cross-entity read per field for every card's pattern + engine (no
+    # per-site fetch). The Pocket reads stay in the pockets service (entity
+    # isolation) — this service never imports the Pocket model. SR-9 adds the
+    # engine resolution alongside DS-1a's pattern; each is a single projected
+    # $in query keyed on the listed pockets.
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
-    patterns = await pockets_service.patterns_for_pockets(
-        workspace_id, [doc.pocket_id for doc in docs]
-    )
-    return [_to_response(doc, patterns.get(doc.pocket_id) or "") for doc in docs]
+    pocket_ids = [doc.pocket_id for doc in docs]
+    patterns = await pockets_service.patterns_for_pockets(workspace_id, pocket_ids)
+    engines = await pockets_service.engines_for_pockets(workspace_id, pocket_ids)
+    return [
+        _to_response(
+            doc,
+            patterns.get(doc.pocket_id) or "",
+            engines.get(doc.pocket_id) or "",
+        )
+        for doc in docs
+    ]
 
 
 async def site_pocket_ids(workspace_id: str) -> set[str]:

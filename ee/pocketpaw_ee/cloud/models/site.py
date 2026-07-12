@@ -85,6 +85,24 @@
 #     the publish path stashes the Dodo checkout link on so the router can surface
 #     it on ``SiteResponse.checkout_url`` for a paid publish. None for a free
 #     publish. Private so it never round-trips through the DB.
+#
+# Updated 2026-07-08 (DP0-1 — Dynamic Paw Sites Phase 0 provisioning state): added
+# ``provision_status`` (none | provisioning | provisioned | failed) alongside
+# ``d1_database_id``. It tracks where a dynamic site is in the durable D1 provision
+# job. The contract the job upholds: it persists ``d1_database_id`` IMMEDIATELY
+# after the D1 is created (status still ``provisioning``) so a retry reuses the same
+# D1 instead of orphaning a second one; status advances to ``provisioned`` only
+# after migrate + deploy succeed, and to ``failed`` on error. Defaults ``"none"`` so
+# every static site and every pre-DP0 row reads "not provisioning" — no migration.
+#
+# Updated 2026-07-09 (DP0-4 — publish async split + single-flight): added
+# ``_provision_job_id`` — a TRANSIENT pydantic PrivateAttr (NOT persisted to Mongo),
+# mirroring ``_checkout_url``. A DYNAMIC-site publish no longer deploys inline; it
+# ensures the Site doc in ``provision_status="provisioning"`` and enqueues the
+# durable ``provision_site`` job, stashing the enqueued job id here so the router
+# can surface it on ``SiteResponse.provision_job_id``. None for a static publish and
+# for any DB-loaded doc (the PrivateAttr defaults to None). Private so it never
+# round-trips through the DB.
 
 from __future__ import annotations
 
@@ -129,6 +147,13 @@ class Site(TimestampedDocument):
     # Stable across re-publishes (publish reuses the stored value) so the D1
     # binding target — and the data behind it — never moves under a live site.
     d1_database_id: str = ""
+    # DP0-1: where a dynamic site sits in the durable D1 provision job
+    # (none | provisioning | provisioned | failed). Contract: the job persists
+    # ``d1_database_id`` IMMEDIATELY after the D1 is created (status still
+    # ``provisioning``) so a retry REUSES the same D1 instead of orphaning a second
+    # one; status becomes ``provisioned`` only after migrate + deploy succeed, and
+    # ``failed`` on error. Defaults "none" for static sites and pre-DP0 rows.
+    provision_status: str = "none"
     # BC-9: per-site annual plan (the Webflow model — each published site has its
     # OWN recurring annual plan on a tier, distinct from the workspace plan).
     # ``plan_tier`` is the site-plan catalog key (basic | pro | business — see
@@ -153,6 +178,11 @@ class Site(TimestampedDocument):
     # publish. The publish path stashes it here so the router can surface it on
     # ``SiteResponse.checkout_url``; a PrivateAttr so it never serializes to Mongo.
     _checkout_url: str | None = PrivateAttr(default=None)
+    # DP0-4: TRANSIENT (NOT persisted) id of the durable ``provision_site`` job a
+    # DYNAMIC-site publish enqueued. The publish path stashes it here so the router
+    # can surface it on ``SiteResponse.provision_job_id``; a PrivateAttr so it never
+    # serializes to Mongo. None for a static publish and any DB-loaded doc.
+    _provision_job_id: str | None = PrivateAttr(default=None)
     # PERF-2: a non-destructive tombstone for duplicate Site docs the pre-PERF-1
     # per-publish ObjectId minting left behind. The dedupe migration keeps ONE
     # canonical doc per (workspace, pocket_id) active and sets this True on the

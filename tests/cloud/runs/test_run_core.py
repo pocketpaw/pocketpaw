@@ -826,3 +826,140 @@ async def test_execute_run_legacy_path_leaves_surface_context_none(monkeypatch):
     resolved = captured.get("resolved_profile")
     assert resolved is not None
     assert resolved.deny_mcp_tool_ids == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# ART-1 — deliver_artifact rides the same persist/SSE seam as ripple. A
+# successful delivery lands a ``{type:"artifact", meta}`` attachment on the
+# assistant message AND an ``artifact`` SSE event carrying the frozen contract
+# payload; multiple deliveries in one run produce multiple of each, in delivery
+# order, alongside any ripple attachment (never clobbering it).
+# ---------------------------------------------------------------------------
+
+
+def _delivering_events(metas: list[dict], *, block: str | None = None):
+    """A fake ``_iter_agent_events`` that records each meta in ``metas`` to the
+    per-run collector (as ``deliver_artifact`` would on success), optionally
+    streaming a fenced ``block`` so the run also carries a ripple attachment."""
+
+    async def _gen(spec, ctx):
+        from pocketpaw_ee.cloud.chat.agent_service import record_delivered_artifact
+
+        for meta in metas:
+            record_delivered_artifact(meta)
+            yield ("chunk", {"content": f"delivered {meta['name']}\n", "type": "text"})
+        if block is not None:
+            yield ("chunk", {"content": block, "type": "text"})
+
+    return _gen
+
+
+async def _run_and_capture(monkeypatch, events_gen):
+    """Drive ``execute_run`` with ``events_gen`` and return
+    ``(sse_events, persisted_attachments)``."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+
+    captured: dict[str, Any] = {}
+
+    async def _capture_persist(spec, ctx, full_text, attachments, usage=None):
+        captured["attachments"] = list(attachments)
+        return "assistant-msg-1"
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", events_gen)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_persist_and_complete", _capture_persist)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
+
+    await run_core.execute_run(_spec())
+
+    events = [e async for e in transport.read_events("r1", after="0", block_ms=10)]
+    return events, captured.get("attachments", [])
+
+
+async def test_execute_run_emits_artifact_event_and_persists_attachment(monkeypatch):
+    meta = {"file_id": "f1", "name": "index.html", "mime": "text/html", "size": 12345}
+    events, attachments = await _run_and_capture(monkeypatch, _delivering_events([meta]))
+
+    artifact_events = [e for e in events if e.event == "artifact"]
+    assert len(artifact_events) == 1
+    # The event payload is the flat contract shape (not wrapped in a key).
+    assert artifact_events[0].data == meta
+    # ...persisted as one {type:"artifact", meta} attachment.
+    assert attachments == [{"type": "artifact", "meta": meta}]
+    # The artifact event fires before the terminal stream_end.
+    assert [e.event for e in events][-1] == "stream_end"
+
+
+async def test_execute_run_multiple_deliveries_preserve_order(monkeypatch):
+    metas = [
+        {"file_id": "f1", "name": "a.txt", "mime": "text/plain", "size": 1},
+        {"file_id": "f2", "name": "b.zip", "mime": "application/zip", "size": 2},
+        {"file_id": "f3", "name": "c.pdf", "mime": "application/pdf", "size": 3},
+    ]
+    events, attachments = await _run_and_capture(monkeypatch, _delivering_events(metas))
+
+    artifact_events = [e.data for e in events if e.event == "artifact"]
+    assert artifact_events == metas
+    assert attachments == [{"type": "artifact", "meta": m} for m in metas]
+
+
+async def test_execute_run_artifact_rides_alongside_ripple(monkeypatch):
+    meta = {"file_id": "f1", "name": "site.zip", "mime": "application/zip", "size": 9}
+    events, attachments = await _run_and_capture(
+        monkeypatch, _delivering_events([meta], block=_CANONICAL_UI_SPEC_BLOCK)
+    )
+
+    # Both a ripple event AND an artifact event fire.
+    assert any(e.event == "ripple" for e in events)
+    assert any(e.event == "artifact" for e in events)
+    # The ripple attachment is not clobbered by the artifact one; both persist.
+    types = [a["type"] for a in attachments]
+    assert "ripple" in types
+    assert {"type": "artifact", "meta": meta} in attachments
+
+
+async def test_execute_run_no_delivery_emits_no_artifact_event(monkeypatch):
+    events, attachments = await _run_and_capture(monkeypatch, _delivering_events([]))
+
+    assert not any(e.event == "artifact" for e in events)
+    assert all(a["type"] != "artifact" for a in attachments)
+    assert [e.event for e in events][-1] == "stream_end"
+
+
+def _recording_only_events(metas: list[dict]):
+    """A fake ``_iter_agent_events`` that records each meta (as a successful
+    ``deliver_artifact`` would) but yields NO text — the empty-reply case that
+    used to early-return and silently drop the delivered artifacts."""
+
+    async def _gen(spec, ctx):
+        from pocketpaw_ee.cloud.chat.agent_service import record_delivered_artifact
+
+        for meta in metas:
+            record_delivered_artifact(meta)
+        if False:  # pragma: no cover — makes this an async generator with no yields
+            yield None
+
+    return _gen
+
+
+async def test_execute_run_persists_artifacts_when_reply_text_empty(monkeypatch):
+    """ART-1 regression: a non-cancelled run that delivered an artifact but
+    produced NO closing text must still persist the ``{type:"artifact"}``
+    attachment and emit the ``artifact`` event — the file already landed in blob
+    storage, so the empty-text early return must not drop it."""
+    meta = {"file_id": "f9", "name": "export.csv", "mime": "text/csv", "size": 42}
+    events, attachments = await _run_and_capture(monkeypatch, _recording_only_events([meta]))
+
+    # The artifact event fired despite the empty reply...
+    artifact_events = [e for e in events if e.event == "artifact"]
+    assert len(artifact_events) == 1
+    assert artifact_events[0].data == meta
+    # ...and the assistant message was persisted carrying the attachment.
+    assert attachments == [{"type": "artifact", "meta": meta}]
+    # stream_end carries a real assistant_message_id (persist ran, not the
+    # empty-text early return whose stream_end has assistant_message_id=None).
+    stream_end = [e for e in events if e.event == "stream_end"][-1]
+    assert stream_end.data["assistant_message_id"] == "assistant-msg-1"

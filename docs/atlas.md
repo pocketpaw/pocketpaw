@@ -168,7 +168,7 @@ in its `surface` field:
 | `surface:pockets` | `/pockets` | pocket list + live canvas detail |
 | `surface:sites` | `/sites` | published-sites gallery, create→publish flow |
 | `surface:belt` | `/belt` | develop-station console: runs + diff viewer |
-| `surface:paw-print` | `/paw-print` | org-wide decision feed (Instinct corrections) |
+| `surface:decisions` | `/decisions` | org-wide decision feed (Instinct corrections) |
 | `surface:decisions-graph` | `/decisions-graph` | visual query layer over decision history |
 | `surface:mission-control` | `/mission-control` | operator work feed (cycles, analytics) |
 | `surface:agents` | `/agents` | agent list + per-agent editor |
@@ -187,7 +187,7 @@ in its `surface` field:
 
 Primitives with a natural home route cross-link it in their own `surface`
 field so `atlas_describe` answers include where to see the result:
-`primitive:pocket` → `/pockets`, `primitive:instinct` → `/paw-print`,
+`primitive:pocket` → `/pockets`, `primitive:instinct` → `/decisions`,
 `primitive:connector` → `/settings/workspace/integrations`,
 `primitive:sites` → `/sites`, `primitive:belt` → `/belt`. (There is no
 dedicated billing route in the client today; plan info lives on
