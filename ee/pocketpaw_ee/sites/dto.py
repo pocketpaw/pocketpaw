@@ -94,6 +94,13 @@
 # already-rendered {uid, op} edits and the endpoint returns one verdict per edit.
 # ``op`` rides as an open dict — its {kind:setText|setProp,...} shape is validated
 # downstream by the paw-sites apply-leaf-edit CLI, not at this DTO boundary.
+# Updated 2026-07-09 (DP0-4 — publish async split): ``SiteResponse`` gains
+# ``provision_status`` (none | provisioning | provisioned | failed) and
+# ``provision_job_id``. A DYNAMIC-site publish no longer deploys inline — it enqueues
+# the durable ``provision_site`` job and returns immediately with
+# ``provision_status="provisioning"`` / ``deployed=False`` and the enqueued job id;
+# the site goes live only when the job finalizes. Both default to "none" / None so a
+# static publish and every non-publish response stay backward-compatible.
 # Updated 2026-07-01 (NE-5b — native-artifact endpoint): added NativeArtifactResponse
 # ({pocket_id, body_html, css}) — the response of GET
 # /sites/by-pocket/{pocket_id}/native-artifact. ``body_html`` is the armed svelte
@@ -101,6 +108,10 @@
 # ``paw-edit-manifest`` script); ``css`` is the built stylesheet(s) concatenated into
 # one string. The native editor injects both into a shadow root to render the site
 # natively instead of framing an iframe.
+# Updated 2026-07-09 (SR-9 — surface each site's ENGINE): ``SiteResponse`` and
+# ``SiteStatusResponse`` gain ``engine`` ("svelte" | "ripple"; "" when unresolved) —
+# the sibling of DS-1a's ``pattern``, resolved from the source Pocket.engine so the
+# gallery can badge each card's engine (Custom vs Ripple) without a per-site fetch.
 
 from __future__ import annotations
 
@@ -147,12 +158,28 @@ class SiteResponse(BaseModel):
     # the pocket has no pattern or could not be resolved. Lets the frontend badge
     # dynamic sites in the gallery without a second fetch.
     pattern: str = ""
+    # SR-9: the source pocket's authoring engine ("svelte" | "ripple"), resolved
+    # from Pocket.engine (it lives on the pocket, not the Site) — the sibling of
+    # ``pattern`` above. Lets the gallery badge each card's engine (Custom vs
+    # Ripple) without a second per-site fetch. "" when the pocket predates the
+    # engine field or could not be resolved (the card shows no engine badge).
+    engine: str = ""
     # charge-first: the Dodo annual-checkout link for a PAID-tier publish. A paid
     # publish creates the site as PENDING (deployed=False) and returns this link
     # the caller redirects the buyer to; the site deploys + goes live only after
     # the ``subscription.active`` webhook confirms payment. None for a free/base
     # publish (which deploys immediately) and for any non-publish response.
     checkout_url: str | None = None
+    # DP0-4: where a dynamic site sits in the durable D1 provision job
+    # (none | provisioning | provisioned | failed). A DYNAMIC-site publish does NOT
+    # deploy inline — it enqueues the ``provision_site`` job and returns immediately
+    # with ``provision_status="provisioning"`` (``deployed=False``); the site goes
+    # live only when the job finalizes. "none" for a static site (deploys inline).
+    provision_status: str = "none"
+    # DP0-4: the id of the ``provision_site`` job a dynamic publish enqueued, so the
+    # caller can poll the job. None for a static publish, and None on a single-flight
+    # no-op (a second publish while already provisioning does not enqueue a job).
+    provision_job_id: str | None = None
 
 
 class SitePreviewResponse(BaseModel):
@@ -206,6 +233,10 @@ class SiteStatusResponse(BaseModel):
     # the list response carries, so a by-pocket status read can badge a dynamic
     # site too.
     pattern: str = ""
+    # SR-9: the source pocket's authoring engine ("svelte" | "ripple"), resolved
+    # from Pocket.engine — the same field the list response carries, so a by-pocket
+    # status read can badge the engine too. "" when unresolved / pre-engine row.
+    engine: str = ""
 
 
 class SiteVersionResponse(BaseModel):

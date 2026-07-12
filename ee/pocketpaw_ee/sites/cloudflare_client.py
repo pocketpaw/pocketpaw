@@ -1,9 +1,12 @@
 # ee/pocketpaw_ee/sites/cloudflare_client.py — async Cloudflare API client for
-# the Sites control plane. Three surfaces:
+# the Sites control plane. Four surfaces:
 #   * Workers for Platforms — PUT a user Worker into our dispatch namespace
 #     (one synchronous call per site; live on 200; no per-account script cap).
 #   * Cloudflare for SaaS — create a custom hostname, return the single CNAME
 #     the client pastes, poll validation + TLS status.
+#   * D1 provisioning (DP0-1) — create a per-tenant D1 database and return its
+#     real uuid, so a Dynamic Paw Site's data plane can be stood up; see
+#     create_database.
 #   * D1 (DS-3) — query a dynamic site's per-tenant D1 over the HTTP API so the
 #     control plane can READ its data (the operator data-view); see query_d1.
 # httpx-based; account id + token come from settings (env), not per-tenant rows
@@ -13,6 +16,16 @@
 # header — never logged, never written to disk. All errors fail closed (raise
 # ValidationError), so a failed CF call never silently reports success.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.2).
+#
+# Updated 2026-07-08 (DP0-1 — D1 provisioning for Dynamic Paw Sites Phase 0):
+# added create_database(). It POSTs to the Cloudflare D1 create endpoint
+# (POST /accounts/{acct}/d1/database) with a ``{"name": <name>}`` body and returns
+# the new database's real uuid (``result.uuid`` in the envelope). It mirrors the
+# existing client style exactly: the CF token in the in-memory Authorization header
+# only, and fail-closed via the shared ``_unwrap`` (a non-2xx or success:false
+# raises ValidationError). This is the FIRST step of the durable provision job: the
+# returned uuid is persisted immediately so a retry reuses the same D1 instead of
+# orphaning a second one.
 #
 # Updated 2026-06-20 (DS-3 — control-plane read of a dynamic site's D1): added
 # query_d1(). It POSTs to the Cloudflare D1 query endpoint
@@ -248,6 +261,24 @@ class CloudflareClient:
             resp = await client.get(url)
         result = self._unwrap(resp)
         return _map_status(result.get("status", ""), (result.get("ssl") or {}).get("status", ""))
+
+    async def create_database(self, name: str) -> str:
+        """Create a Cloudflare D1 database and return its real uuid (DP0-1).
+
+        POSTs to the D1 create endpoint (POST /accounts/{acct}/d1/database) with a
+        ``{"name": <name>}`` body. Cloudflare returns the new database in the
+        standard envelope; the D1 uuid is at ``result.uuid``. This returns that
+        uuid string — the id every later step (migrate, the Worker's D1 binding,
+        the generated wrangler.toml ``database_id``) keys on.
+
+        Fail-closed: a non-2xx or a ``success: false`` envelope raises
+        ValidationError via ``_unwrap``, so a failed create never silently returns
+        an empty/garbage id."""
+        url = f"{_CF_API}/accounts/{self._account_id}/d1/database"
+        async with self._client() as client:
+            resp = await client.post(url, json={"name": name})
+        result = self._unwrap(resp)
+        return result["uuid"]
 
     async def query_d1(
         self, *, database_id: str, sql: str, params: list | None = None

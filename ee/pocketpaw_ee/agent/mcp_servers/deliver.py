@@ -1,6 +1,15 @@
 # deliver.py — in-process MCP server exposing ``deliver_artifact`` to the cloud
 # chat agent (claude_agent_sdk). Created: 2026-06-26 (ART-4).
 #
+# 2026-07-11 (ART-1): on a SUCCESSFUL delivery the tool now records the delivery
+# facts ({file_id, name, mime, size}) to the per-run collector in
+# ``ee.cloud.chat.agent_service`` (``record_delivered_artifact``). ``run_core``
+# drains that collector at persist time into a ``{type:"artifact", meta}``
+# attachment on the assistant message plus one ``artifact`` SSE event apiece, so
+# the client gets a structured signal instead of only a link buried in the
+# tool-result text. Failed deliveries record nothing (they return before the
+# recording call); the recording is best-effort and never fails the delivery.
+#
 # This is the payoff of the cloud-artifacts stack: a cloud agent builds a file
 # (or a whole directory) inside its per-tenant jail (ART-2), then calls this tool
 # to LAND that artifact in the tenant's blob storage and hand the user back a
@@ -123,6 +132,20 @@ def _success_response(body: dict[str, Any]) -> dict[str, Any]:
             }
         ]
     }
+
+
+def _record_delivery(meta: dict[str, Any]) -> None:
+    """Publish a successful delivery to the per-run collector in
+    ``ee.cloud.chat.agent_service`` (drained by ``run_core`` into an ``artifact``
+    attachment + SSE event). Best-effort: outside a chat run it's a no-op, and a
+    collector failure must never fail an otherwise-successful delivery — so any
+    error here is swallowed."""
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import record_delivered_artifact
+
+        record_delivered_artifact(meta)
+    except Exception:  # noqa: BLE001
+        logger.debug("recording delivered artifact failed", exc_info=True)
 
 
 def _identity() -> tuple[str | None, str | None]:
@@ -376,6 +399,18 @@ async def _deliver_handler(args: dict) -> dict:
     finally:
         if tmp_to_clean is not None:
             tmp_to_clean.unlink(missing_ok=True)
+
+    # Record the delivery for the run's assistant message + SSE stream. Uses
+    # ``name`` (not the result body's ``filename``) to match the frozen artifact
+    # attachment/event contract the client is built against.
+    _record_delivery(
+        {
+            "file_id": rec.id,
+            "name": rec.filename,
+            "mime": rec.mime,
+            "size": rec.size,
+        }
+    )
 
     return _success_response(
         {

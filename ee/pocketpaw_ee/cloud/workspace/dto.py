@@ -20,6 +20,10 @@ that activates the layered Instinct gate's triager for a workspace.
 2026-07-10 (compliance-starter): added ``SetRetentionRequest`` (positive-or-
 null ``retention_days``, ``extra="forbid"``) + ``RetentionOut`` for the
 dedicated per-workspace data-retention endpoint.
+2026-07-08 (chore/decisions-feed-rename): renamed the Instinct decision-feed
+route key in ``VALID_ROUTES`` to ``decisions`` — mirrors the atlas surface
+``surface:decisions`` (route ``/decisions``), the org-wide feed of recent
+Instinct corrections (sibling to ``/decisions-graph``).
 """
 
 from __future__ import annotations
@@ -357,7 +361,7 @@ class SetMemberRoutePermissionsRequest(BaseModel):
             "foresight",
             "sites",
             "belt",
-            "paw-print",
+            "decisions",
             "audit",
             "settings",
         }

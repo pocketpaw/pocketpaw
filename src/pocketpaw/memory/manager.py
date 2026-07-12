@@ -3,6 +3,10 @@
 # Updated: 2026-02-04 - Added Mem0 backend support
 # Updated: 2026-02-07 - Configurable providers, auto-learn, semantic context - Memory System
 # Updated: 2026-02-11 - Sender-scoped memory isolation
+# Updated: 2026-07-11 (ART-OSS) - get_session_history lifts metadata["attachments"]
+#   to a TOP-LEVEL "attachments" key per message (mirrors the EE Mongo history
+#   shape the client reads) so delivered artifact cards and user files survive a
+#   reload; the OSS read path previously returned only {role, content}.
 
 import hashlib
 import logging
@@ -312,15 +316,32 @@ class MemoryManager:
         self,
         session_key: str,
         limit: int = 50,
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, Any]]:
         """
-        Get session history in LLM message format.
+        Get session history for display / the chat history API.
 
-        Returns:
-            List of {"role": "...", "content": "..."} dicts.
+        Returns a list of ``{"role", "content", "attachments"}`` dicts. Any
+        attachments persisted under ``entry.metadata["attachments"]`` — artifact
+        cards the agent delivered, or files the user sent — are lifted to a
+        TOP-LEVEL ``attachments`` key so the client reads them exactly as it does
+        in cloud mode (the EE Mongo history serializes attachments top-level). The
+        OSS read path used to return only ``{role, content}``, so a delivered
+        artifact card vanished on reload. ``attachments`` is always present (empty
+        list when none) to match the cloud shape. This is a display path, not the
+        LLM-history feed (that is ``get_compacted_history``), so the extra key
+        never reaches a model.
         """
         entries = await self._store.get_session(session_key)
-        return [{"role": e.role or "user", "content": e.content} for e in entries[-limit:]]
+        history: list[dict[str, Any]] = []
+        for e in entries[-limit:]:
+            history.append(
+                {
+                    "role": e.role or "user",
+                    "content": e.content,
+                    "attachments": (e.metadata or {}).get("attachments") or [],
+                }
+            )
+        return history
 
     async def search(
         self,

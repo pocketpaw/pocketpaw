@@ -37,6 +37,12 @@ ABOVE the respond-mode evaluation — before ``_smart_relevance_check``'s Haiku
 pre-classifier call and before ``pool.run`` — so an over-budget tenant triggers
 NO model call on the group/DM auto-response path. On rejection it emits one
 ``agent.error`` to the group and returns.
+Updated 2026-07-11 (ART-1): ``_run_agent_response`` binds a per-run
+delivered-artifact collector around ``pool.run`` and drains it into a
+``{type:"artifact", meta}`` attachment per successful ``deliver_artifact`` call,
+so a group/DM agent that delivers a file persists the structured signal too.
+This path has no run-transport SSE stream, so it emits no ``artifact`` event —
+that applies only to the streaming ``run_core`` path.
 """
 
 from __future__ import annotations
@@ -464,7 +470,9 @@ async def _run_agent_response(
     from pocketpaw_ee.cloud.chat import message_service
     from pocketpaw_ee.cloud.chat.agent_service import (
         attach_agent_identity,
+        attach_delivered_artifacts_collector,
         detach_agent_identity,
+        detach_delivered_artifacts_collector,
     )
 
     pool = get_agent_pool()
@@ -544,6 +552,14 @@ async def _run_agent_response(
     # (call from a cloud chat session)". ``user_id`` is the agent itself — it is
     # the actor on this path, matching the cloud MCP tests' setup.
     identity_tokens = attach_agent_identity(workspace_id=workspace_id, user_id=agent_id)
+    # ART-1: bind a per-run collector so a ``deliver_artifact`` call on THIS
+    # (group/DM) path lands a ``{type:"artifact", meta}`` attachment on the agent
+    # message. This path has no run-transport SSE stream, so it persists the
+    # attachment only — no ``artifact`` event (that applies to the streaming
+    # ``run_core`` path). The list is bound before ``pool.run`` so the descendant
+    # SDK task's tool appends onto the same object this function drains below.
+    delivered_artifacts: list[dict[str, Any]] = []
+    delivered_token = attach_delivered_artifacts_collector(delivered_artifacts)
     try:
         async for event in pool.run(
             agent_id, user_message, session_key, history, knowledge_context=knowledge_context
@@ -602,12 +618,16 @@ async def _run_agent_response(
         full_text = full_text or "[Agent response failed]"
     finally:
         detach_agent_identity(identity_tokens)
+        detach_delivered_artifacts_collector(delivered_token)
 
     if saw_error_event and not full_text.strip():
         details = f": {error_summary}" if error_summary else ""
         full_text = f"[Agent encountered an error and could not produce a full response{details}]"
 
-    if not full_text.strip():
+    # ART-1: an empty reply that nonetheless DELIVERED artifacts must not be
+    # dropped — the files landed in blob storage, so fall through to persist a
+    # message carrying the ``{type:"artifact"}`` attachments (empty text is fine).
+    if not full_text.strip() and not delivered_artifacts:
         return None
 
     # Check for ripple spec in response
@@ -626,6 +646,12 @@ async def _run_agent_response(
                 full_text = full_text.strip()
     except Exception:
         pass
+
+    # ART-1: persist one ``{type:"artifact", meta}`` attachment per successful
+    # delivery on this path too (alongside any ripple attachment). No SSE event —
+    # the group/DM bridge has no run transport stream.
+    for meta in delivered_artifacts:
+        attachment_dicts.append({"type": "artifact", "meta": meta})
 
     # Auto-create pocket from ripple spec
     pocket_id = None

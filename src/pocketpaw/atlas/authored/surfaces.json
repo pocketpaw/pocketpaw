@@ -111,13 +111,13 @@
       ]
     },
     {
-      "id": "surface:paw-print",
+      "id": "surface:decisions",
       "kind": "surface",
-      "name": "Paw Print",
+      "name": "Decisions",
       "summary": "Org-wide decision feed: recent Instinct corrections across the workspace's pockets, with diff viewers.",
-      "narrative": "Paw Print is the org-wide decision feed — recent Instinct corrections across the workspace, each rendered through a diff viewer. Point a user here to review what decisions agents and humans have been making. It is the decision-feed home of the Instinct primitive; the historical query layer is /decisions-graph.",
+      "narrative": "Decisions is the org-wide decision feed — recent Instinct corrections across the workspace, each rendered through a diff viewer. Point a user here to review what decisions agents and humans have been making. It is the decision-feed home of the Instinct primitive; the historical query layer is /decisions-graph.",
       "how": "",
-      "surface": "/paw-print",
+      "surface": "/decisions",
       "requires": [
         "primitive:instinct"
       ],
@@ -136,7 +136,7 @@
       "kind": "surface",
       "name": "Decision Graph",
       "summary": "Visual query layer over the historical Decision projection: trace a decision's graph by id, depth, and mode.",
-      "narrative": "Decision Graph lets an operator query the historical Decision projection visually — deep-linkable by decision id, depth, and mode. Point a user here to trace WHY a decision happened and what it connects to; for the live feed of recent decisions use /paw-print instead.",
+      "narrative": "Decision Graph lets an operator query the historical Decision projection visually — deep-linkable by decision id, depth, and mode. Point a user here to trace WHY a decision happened and what it connects to; for the live feed of recent decisions use /decisions instead.",
       "how": "",
       "surface": "/decisions-graph",
       "requires": [

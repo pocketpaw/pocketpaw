@@ -33,7 +33,7 @@
       "gist": "the governance gate — agents PROPOSE actions and a human approves, rejects, or edits each one at the gate",
       "narrative": "Instinct is the governance primitive: agents PROPOSE actions instead of executing them, and humans approve, reject, or edit each proposal at a gate. Every decision captures a reasoning trace. It is becoming a multi-lane triage router (auto / optimistic / escalate / dry-run + a trust ledger), with ASK as the default lane. Reach for it whenever an agent action needs governance — approvals, human review of agent writes, gated side effects. It pairs with Branch (which builds propose→review→merge on top of the gate) and Belt (where the human mans the Instinct gate on proposed diffs). NOT a biology term — Instinct is the approval pipeline.",
       "how": "Instinct action store + gate APIs; agents emit proposals, humans resolve them at the gate",
-      "surface": "/paw-print",
+      "surface": "/decisions",
       "requires": [],
       "keywords": [
         "approve",

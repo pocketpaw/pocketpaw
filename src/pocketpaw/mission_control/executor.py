@@ -1,6 +1,20 @@
 """Mission Control Task Executor.
 
 Created: 2026-02-05
+Updated: 2026-07-10 — three-position ``verify_mode`` (feat/verify-mode-shadow):
+  the completion block now resolves ``effective_deep_work_verify_mode()``
+  ONCE (off | shadow | enforce; the legacy
+  ``deep_work_verify_loop_enabled`` bool resolves to ENFORCE for
+  back-compat). ``off`` skips the whole block — byte-for-byte today's
+  default. ``shadow`` is the new rollout rung: the deterministic verdict is
+  computed and stamped (``verify_verdict``), the judge shadow still runs
+  when its flag is on, and what enforce WOULD have decided is computed
+  READ-ONLY and recorded as ``verify_would_have=<done|requeued|escalated>``
+  plus a ``verify_mode='shadow'`` marker and a ``verify shadow mode:
+  would_have=...`` log line — but status/should_retry are NEVER touched, no
+  ``verify_requeue_count`` bump, no ``verify_feedback`` growth: the task
+  completes DONE with the deliverable + side-effects intact. ``enforce`` is
+  exactly the prior flag-on behaviour (SVL-1/2/3 + J-1 below, unchanged).
 Updated: 2026-07-02 — LLM-as-judge SHADOW stamp (J-1, #1168): inside the
   existing ``deep_work_verify_loop_enabled`` block, AFTER the deterministic
   verdict is computed and stamped, when ``deep_work_verify_judge_shadow_enabled``
@@ -322,15 +336,24 @@ class MCTaskExecutor:
             if final_status == "completed":
                 new_task_status = TaskStatus.DONE
 
-                # Self-Verifying Loop: when the loop is enabled, check the
-                # completed task's result against the success_criteria captured
-                # at intake and STAMP the verdict on the task — the "verify"
-                # half (SVL-1). SVL-2 then ACTS on the verdict: a result that
-                # does NOT meet its criteria is requeued with the specific unmet
-                # criteria fed back, up to a budget, then escalated to BLOCKED.
-                # When the flag is off this whole block is skipped and behaviour
-                # is byte-for-byte unchanged.
-                if get_settings().deep_work_verify_loop_enabled and task_fresh:
+                # Self-Verifying Loop: resolve the three-position mode ONCE
+                # (off | shadow | enforce — the legacy bool resolves to
+                # 'enforce' via effective_deep_work_verify_mode()).
+                #   off     → this whole block is skipped; byte-for-byte
+                #             today's default behaviour.
+                #   shadow  → the rollout rung: compute + STAMP the verdict
+                #             (SVL-1) and run the judge shadow if its flag is
+                #             on, then compute READ-ONLY what enforce WOULD
+                #             have done and record it as would_have telemetry
+                #             — but NEVER touch status/should_retry, counters,
+                #             or feedback: the task falls through to normal
+                #             DONE with deliverable + side-effects intact.
+                #   enforce → the full loop, exactly the prior flag-on
+                #             behaviour: SVL-2 ACTS on the verdict (requeue
+                #             with feedback, bounded by the budget, then
+                #             escalate to BLOCKED; SVL-3 no-progress guard).
+                verify_mode = get_settings().effective_deep_work_verify_mode()
+                if verify_mode != "off" and task_fresh:
                     success_criteria = task_fresh.metadata.get("success_criteria", [])
                     verdict = DeterministicVerdictProvider().verify(
                         task_fresh.output, success_criteria
@@ -375,9 +398,11 @@ class MCTaskExecutor:
                     # SVL-2: act on the verdict. SOLVED / UNKNOWN pass through
                     # as DONE — a passing (or uncheckable) result is NEVER
                     # requeued or mutated. PARTIAL / NOT_SOLVED means the output
-                    # missed at least one captured criterion: requeue the task
-                    # with the unmet criteria fed back, bounded by
-                    # deep_work_verify_max_requeues, then escalate to BLOCKED.
+                    # missed at least one captured criterion: in ENFORCE mode,
+                    # requeue the task with the unmet criteria fed back, bounded
+                    # by deep_work_verify_max_requeues, then escalate to
+                    # BLOCKED; in SHADOW mode only record what enforce would
+                    # have done.
                     if verdict.status in (
                         OutcomeStatus.PARTIAL,
                         OutcomeStatus.NOT_SOLVED,
@@ -410,7 +435,35 @@ class MCTaskExecutor:
                             )
                             no_progress = current == prev or len(current) >= len(prev)
 
-                        if no_progress:
+                        if verify_mode == "shadow":
+                            # SHADOW: record what enforce WOULD have decided
+                            # (no-progress vs budget vs requeue — computed
+                            # read-only above) WITHOUT mutating anything the
+                            # loop acts through: no status change, no
+                            # should_retry, no verify_requeue_count bump, no
+                            # verify_feedback growth. The task falls through
+                            # to normal DONE; the would_have stamp + log line
+                            # are the rollout telemetry a tenant reads before
+                            # daring enforce.
+                            if no_progress:
+                                would_have = "escalated"
+                                would_reason = "no_progress"
+                            elif n < max_requeues:
+                                would_have = "requeued"
+                                would_reason = ""
+                            else:
+                                would_have = "escalated"
+                                would_reason = "budget_exhausted"
+                            task_fresh.metadata["verify_mode"] = "shadow"
+                            task_fresh.metadata["verify_would_have"] = would_have
+                            logger.info(
+                                "verify shadow mode: would_have=%s%s verdict=%s task=%s",
+                                would_have,
+                                f" reason={would_reason}" if would_reason else "",
+                                verdict.status.value,
+                                task_id,
+                            )
+                        elif no_progress:
                             # Same/non-shrinking unmet set: stuck. Escalate to
                             # the SAME BLOCKED status + cascade branch as a
                             # budget exhaustion, distinguished only by the
@@ -469,6 +522,18 @@ class MCTaskExecutor:
                                 verdict.status,
                                 n,
                             )
+                    elif verify_mode == "shadow":
+                        # SHADOW + SOLVED/UNKNOWN: enforce would have passed it
+                        # through as DONE too — stamp would_have=done so the
+                        # shadow telemetry covers every completion, not just
+                        # the failing ones.
+                        task_fresh.metadata["verify_mode"] = "shadow"
+                        task_fresh.metadata["verify_would_have"] = "done"
+                        logger.info(
+                            "verify shadow mode: would_have=done verdict=%s task=%s",
+                            verdict.status.value,
+                            task_id,
+                        )
             elif final_status in ("error", "timeout") and task_fresh:
                 # Check if we should retry
                 if task_fresh.retry_count < task_fresh.max_retries:

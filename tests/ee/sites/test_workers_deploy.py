@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -121,8 +122,54 @@ async def test_deploy_writes_assetsignore_and_wrangler_jsonc(tmp_path, monkeypat
     assert cfg["compatibility_flags"] == ["nodejs_compat"]
     assert cfg["compatibility_date"] == "2024-09-23"
     assert cfg["assets"] == {"binding": "ASSETS", "directory": ".svelte-kit/cloudflare"}
+    # A STATIC site binds no database.
+    assert "d1_databases" not in cfg
 
     assert url == "https://paw-site-507f1f77bcf86cd799439011.acct.workers.dev"
+
+
+# ── dynamic sites: the D1 binding on the free workers.dev tier ───────────────
+
+
+@pytest.mark.asyncio
+async def test_dynamic_deploy_binds_d1_in_wrangler_jsonc(tmp_path, monkeypatch):
+    """A dynamic site must reach its per-tenant D1 WITHOUT Workers-for-Platforms.
+
+    WfP (``put_worker``'s dispatch namespace) is a paid add-on; an account without it
+    gets CF error 10121 / HTTP 403. Binding the D1 in the workers-mode config is what
+    lets the same built worker serve live data on the free tier."""
+    project = _build_project(tmp_path)
+    site_id = "507f1f77bcf86cd799439011"
+    proc = _FakeProc(0, b"https://paw-site-507f1f77bcf86cd799439011.acct.workers.dev\n", b"")
+    _patch_subprocess(monkeypatch, proc)
+
+    await workers_deploy.deploy_workers(site_id, project, d1_database_id="d1-uuid-0001")
+
+    cfg = json.loads(Path(project, "wrangler.jsonc").read_text())
+    assert cfg["d1_databases"] == [
+        {
+            "binding": "DB",
+            "database_name": f"paw-site-{site_id}",
+            "database_id": "d1-uuid-0001",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_deploy_declares_no_queue_producers(tmp_path, monkeypatch):
+    """Cloudflare Queues is paid and these queues are never created on this path.
+
+    Declaring a producer for a nonexistent queue fails ``wrangler deploy`` outright,
+    so the emitted config must carry none. Both site-side consumers already degrade
+    gracefully on a missing binding."""
+    project = _build_project(tmp_path)
+    proc = _FakeProc(0, b"https://x.y.workers.dev\n", b"")
+    _patch_subprocess(monkeypatch, proc)
+
+    await workers_deploy.deploy_workers("507f1f77bcf86cd799439011", project, d1_database_id="d1-1")
+
+    cfg = json.loads(Path(project, "wrangler.jsonc").read_text())
+    assert "queues" not in cfg
 
 
 @pytest.mark.asyncio
@@ -135,7 +182,16 @@ async def test_deploy_invokes_wrangler_with_deploy_in_project_dir(tmp_path, monk
 
     await workers_deploy.deploy_workers("507f1f77bcf86cd799439011", project)
 
-    assert captured["argv"] == ["bunx", "wrangler@4.101.0", "deploy"]
+    # On Windows the shared resolver rewrites `bunx` -> `bun x` (there is no bunx.exe
+    # for create_subprocess_exec to launch); POSIX keeps the real `bunx`.
+    # ``--config wrangler.jsonc`` is always passed: a DYNAMIC project dir also holds
+    # the generator's wrangler.toml, and wrangler must not resolve that one.
+    expected = (
+        ["bun", "x", "wrangler@4.101.0", "deploy", "--config", "wrangler.jsonc"]
+        if sys.platform == "win32"
+        else ["bunx", "wrangler@4.101.0", "deploy", "--config", "wrangler.jsonc"]
+    )
+    assert captured["argv"] == expected
     assert captured["cwd"] == project
     # The CF creds wrangler reads itself ride through the env (full os.environ).
     assert captured["env"] is not None

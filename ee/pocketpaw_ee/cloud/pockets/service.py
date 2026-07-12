@@ -1716,6 +1716,41 @@ async def patterns_for_pockets(workspace_id: str, pocket_ids: list[str]) -> dict
     return {str(row["_id"]): row.get("pattern") for row in rows}
 
 
+async def engines_for_pockets(workspace_id: str, pocket_ids: list[str]) -> dict[str, str | None]:
+    """Map each given ``pocket_id`` to its ``Pocket.engine`` in ONE query.
+
+    The sibling of ``patterns_for_pockets`` (DS-1a): the sites service surfaces a
+    published site's authoring ``engine`` ("svelte" | "ripple") on its list/status
+    responses (SR-9) so the gallery can badge each card's engine WITHOUT a second
+    per-site fetch. The engine lives on the source Pocket, not the Site, so this is
+    the cross-entity read — the Pocket read stays here (the sole owner of Pocket
+    reads, entity isolation), exactly like the pattern resolution.
+
+    ONE ``$in`` query projected to ``_id`` + ``engine`` only, tenant-scoped on
+    ``workspace`` (a pocket in another workspace is not returned even if its id is
+    passed). Keyed by the wire-string ``pocket_id``; a doc that predates the
+    ``engine`` field is absent from its projection and reads ``None`` (the caller
+    defaults it to ""), and an id with no matching pocket (deleted / cross-tenant /
+    malformed) is simply absent from the map. Malformed ids that cannot cast to an
+    ObjectId are skipped; an empty list is a no-op (empty map)."""
+    if not pocket_ids:
+        return {}
+    oids: list[PydanticObjectId] = []
+    for pid in pocket_ids:
+        try:
+            oids.append(PydanticObjectId(pid))
+        except (InvalidId, TypeError, ValueError):
+            continue
+    if not oids:
+        return {}
+    collection = _PocketDoc.get_pymongo_collection()
+    rows = await collection.find(
+        {"workspace": workspace_id, "_id": {"$in": oids}},
+        {"_id": 1, "engine": 1},
+    ).to_list(length=None)
+    return {str(row["_id"]): row.get("engine") for row in rows}
+
+
 async def get(pocket_id: str, user_id: str) -> dict:
     """Get a single pocket. Access check: owner, team member, shared_with,
     or workspace-visible.

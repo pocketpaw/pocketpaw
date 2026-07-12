@@ -59,6 +59,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Response,
     UploadFile,
     status,
@@ -488,41 +489,45 @@ async def download_url(
 @router.get("/{file_id}/grant")
 async def grant(
     file_id: str,
+    w: int = Query(default=0, ge=0, le=2048, description="Thumbnail width"),
+    h: int = Query(default=0, ge=0, le=2048, description="Thumbnail height"),
+    q: int = Query(default=80, ge=1, le=100, description="Thumbnail quality"),
+    f: str = Query(default="webp", description="Thumbnail format: webp, jpeg, png"),
     workspace: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> dict:
     """Mint a short-lived download URL for ``file_id``.
 
-    Returns the storage adapter's presigned URL when available (S3 and
-    friends). Otherwise returns the authenticated cloud download URL —
-    the paw-enterprise browser attaches ``paw_auth`` cookies via
-    ``withCredentials`` so ``<img src>`` / ``<a href download>`` work
-    directly without a Bearer header.
+    When ``w`` or ``h`` is provided, returns a URL to a resized thumbnail
+    served through the ``GET /uploads/{id}`` endpoint. Thumbnail generation
+    is deferred to the first request (server-cached after that).
 
-    HMAC-signed ``?t=`` grants are intentionally NOT used here: the EE
-    download route at ``GET /uploads/{id}`` requires ``current_active_user``
-    (JWT), and the OSS dashboard auth middleware verifies HMAC with its
-    own master token, not EE's ``SECRET``. Embedding these URLs in
-    cookie-less contexts (mobile webviews, cross-origin embeds) requires
-    S3 presigning — use that adapter for production.
+    For full-size downloads, returns the S3 presigned URL when available.
+    For thumbnails, always returns a cookie-authed server URL.
     """
     import time
 
     from pocketpaw.uploads.signing import DEFAULT_TTL_SECONDS
 
+    has_thumb = w > 0 or h > 0
     try:
         _rec, presigned = await _SVC.presigned_get(file_id, user_id, workspace, DEFAULT_TTL_SECONDS)
     except NotFound as e:
         raise HTTPException(status_code=404, detail="not found") from e
 
-    if presigned:
+    has_presigned = presigned is not None
+
+    if has_thumb or not has_presigned:
+        thumb_qs = f"w={w}&h={h}&q={q}&f={f}" if has_thumb else ""
+        base = f"/api/v1/uploads/{file_id}"
+        sep = "?" if thumb_qs else ""
         return {
-            "url": presigned,
+            "url": f"{base}{sep}{thumb_qs}",
             "expires_at": int(time.time()) + DEFAULT_TTL_SECONDS,
         }
 
     return {
-        "url": f"/api/v1/uploads/{file_id}",
+        "url": presigned,
         "expires_at": int(time.time()) + DEFAULT_TTL_SECONDS,
     }
 
@@ -530,9 +535,44 @@ async def grant(
 @router.get("/{file_id}")
 async def download(
     file_id: str,
+    w: int = Query(default=0, ge=0, le=2048),
+    h: int = Query(default=0, ge=0, le=2048),
+    q: int = Query(default=80, ge=1, le=100),
+    f: str = Query(default="webp"),
     workspace: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> StreamingResponse:
+    """Stream a file or a resized thumbnail.
+
+    When ``w`` or ``h`` is > 0, returns a thumbnail in the requested format
+    (WebP by default). Otherwise returns the full original file.
+    """
+    has_thumb = w > 0 or h > 0
+
+    if has_thumb:
+        try:
+            rec, mime_type, it = await _SVC.thumbnail(
+                file_id,
+                user_id,
+                workspace,
+                width=w,
+                height=h,
+                quality=q,
+                fmt=f,
+            )
+        except NotFound as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except Exception as e:
+            raise HTTPException(status_code=500, detail="thumbnail generation failed") from e
+        return StreamingResponse(
+            it,
+            media_type=mime_type,
+            headers={
+                "Cache-Control": "public, max-age=86400, immutable",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     try:
         rec, it = await _SVC.stream(file_id, user_id, workspace)
     except NotFound as e:
