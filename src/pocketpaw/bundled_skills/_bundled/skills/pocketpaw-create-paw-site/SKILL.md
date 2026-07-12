@@ -37,6 +37,33 @@ as a conversion funnel: grab attention, explain the offer, prove it,
 price it, and capture the lead. The tool emits exactly that funnel from
 your copy.
 
+## Opt-in: the raw-HTML track (only when explicitly asked)
+
+The copy-only path above is the **default** and what you should use for a
+normal "build me a landing site" request. There is one exception. When the
+user **explicitly** asks for a plain / raw / single-file **HTML** site — "just
+give me an `index.html`", "no framework", "hand-written HTML/CSS", "no
+Svelte" — author the markup yourself and call **`create_html_site`** instead:
+
+```
+mcp__pocketpaw_sites_manager__create_html_site(
+  source = { "index.html": "<!doctype html>…", "styles.css": "…" },
+  name   = "…"                       // optional; defaults to "HTML site"
+)
+```
+
+`source` is a `{ relative_path: file_contents }` map of raw HTML/CSS/JS.
+It **must** include `index.html` (the edge serves it at the root); add
+stylesheets, scripts, and assets as sibling entries — every value is a
+content string. Publishing an html site skips the build step entirely, so
+the page must be complete on its own (inline or linked CSS/JS, real copy —
+never "TBD"/"Lorem ipsum"). It returns `{ ok, pocket_id, pocket }`; hand
+`pocket_id` to `publish` exactly like the copy path (STEP 3). If `ok` is
+false, relay the error.
+
+**Do not reach for this by default.** Unless the user explicitly wants raw
+HTML, use the copy-only `create_landing_site` path below.
+
 ## Why copy-only (and why this is the reliable path)
 
 Earlier versions of this skill asked the agent to draft the rippleSpec
