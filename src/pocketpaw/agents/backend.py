@@ -3,6 +3,14 @@
 Every agent backend (Claude SDK, OpenAI Agents, Gemini CLI, OpenCode CLI)
 must expose a ``info()`` staticmethod and an async ``run()`` generator.
 
+Updated: 2026-07-08 (CS-13, feat/per-send-model-override) — the shared ``run``
+signature grows an optional ``model_override: str | None = None`` keyword: the
+client's per-send model choice. It rides the same withhold-when-empty contract as
+``deny_mcp_tool_ids`` / ``skill_names`` — ``AgentPool.run`` forwards it ONLY when
+non-None, so the 7 backends that keep the narrower signature are unaffected. Only
+the Claude SDK backend acts on it (it wins over smart-routing / ``claude_sdk_model``
+in ``_build_options``). ``None`` = the unchanged legacy path.
+
 Updated: 2026-06-30 (feat/warm-reuse WH-1) — adds the ``LeasedClient`` dataclass:
 a connected, CALLER-owned warm ``ClaudeSDKClient`` plus the backend cache key it
 was connected under. The ``SessionSupervisor`` (WH-2/WH-3) owns a per-(workspace,
@@ -182,6 +190,12 @@ class AgentBackend(Protocol):
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
         allow_sdk_tools: frozenset[str] = frozenset(),
         skill_names: frozenset[str] = frozenset(),
+        # CS-13 — optional per-send model override. Rides the withhold-when-empty
+        # contract: ``AgentPool.run`` forwards it ONLY when non-None, so backends
+        # that keep the narrower signature never receive it. Backends that DO
+        # accept it (the Claude SDK backend) let it win over their own model
+        # selection; any other backend that grows the kwarg may simply ignore it.
+        model_override: str | None = None,
     ) -> AsyncIterator[AgentEvent]: ...
 
     async def stop(self) -> None: ...

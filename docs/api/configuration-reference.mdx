@@ -7,6 +7,13 @@ keywords: ["configuration", "environment variables", "settings reference", "conf
 tags: ["api", "configuration"]
 ---
 
+{/*
+  docs/api/configuration-reference.mdx
+  Updated 2026-07-11 (feat/fst-8-harness, FST-8) — added the "Fabric" section
+  with fabric_source_truth_mode (the off/shadow/enforce rollout switch) and
+  its divergence-report enforce gate.
+*/}
+
 # Configuration Reference
 
 Complete reference of all configuration settings. All environment variables use the `POCKETPAW_` prefix.
@@ -214,3 +221,9 @@ The pocket specialist does NOT receive Composio — its tool surface stays narro
 | `mem0_embedder_provider` | `POCKETPAW_MEM0_EMBEDDER_PROVIDER` | enum | `openai` | Embedder provider (`openai`, `ollama`, `huggingface`) |
 | `mem0_embedder_model` | `POCKETPAW_MEM0_EMBEDDER_MODEL` | string | `text-embedding-3-small` | Embedder model |
 | `mem0_vector_store` | `POCKETPAW_MEM0_VECTOR_STORE` | enum | `qdrant` | Vector store (`qdrant`, `chroma`) |
+
+## Fabric
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `fabric_source_truth_mode` | `POCKETPAW_FABRIC_SOURCE_TRUTH_MODE` | enum | `off` | Rollout mode for Fabric source truth (`off`, `shadow`, `enforce`). `off` = pure last-writer-wins, no statements. `shadow` = provenance statements + divergence log lines recorded alongside the LWW cache. `enforce` = the trust-ladder resolver's winner owns the cache. Gate the flip to `enforce` with `python -m pocketpaw.fabric.divergence_report` — see [Fabric Source Truth](/concepts/architecture#fabric-source-truth). |

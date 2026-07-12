@@ -3,6 +3,12 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Updated: 2026-07-08 (CS-13, feat/per-send-model-override) — ``run`` accepts an
+  optional ``model_override: str | None`` (the client's per-send model choice) and
+  forwards it to the backend's ``run`` ONLY when non-None (the same
+  withhold-when-empty idiom as ``deny_mcp_tool_ids`` / ``skill_names``). Only the
+  Claude SDK backend consumes it, where it wins over smart-routing /
+  ``claude_sdk_model``. ``None`` = the unchanged legacy path.
 Updated: 2026-05-21 — ``_build`` now translates an agent's ``config.tools``
   entries that name an opt-in in-process MCP server (see
   ``pocketpaw.tools.policy.OPT_IN_MCP_SERVERS``) into a per-agent
@@ -453,6 +459,7 @@ class AgentPool:
         session_handle: SessionHandle | None = None,
         warm_client: LeasedClient | None = None,
         on_client_built: Callable[[Any, str, Callable], None] | None = None,
+        model_override: str | None = None,
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -504,6 +511,12 @@ class AgentPool:
         non-Claude backends keep their narrower signature and only the Claude SDK
         backend acts on them. Both unset (the default) = the unchanged legacy
         warm-client path.
+
+        ``model_override`` (CS-13) is the client's per-send model choice. It rides
+        the SAME withhold-when-empty contract as the kwargs above — forwarded to the
+        backend's ``run`` ONLY when set, so the 6 non-Claude backends keep their
+        narrower signature and only the Claude SDK backend acts on it (where it wins
+        over smart-routing / ``claude_sdk_model``). ``None`` = the unchanged path.
         """
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
@@ -595,6 +608,13 @@ class AgentPool:
                 run_kwargs["warm_client"] = warm_client
             if on_client_built is not None:
                 run_kwargs["on_client_built"] = on_client_built
+            # Per-send model override (CS-13). Same withhold-when-empty rule as
+            # the kwargs above: only the Claude SDK backend accepts
+            # ``model_override``; the other backends keep the narrower signature,
+            # so the override is forwarded ONLY when the client chose a model for
+            # this turn. None = legacy path, unchanged for every existing run.
+            if model_override is not None:
+                run_kwargs["model_override"] = model_override
             async for event in instance.backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
                 yield event

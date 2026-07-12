@@ -42,6 +42,15 @@
 #   ``*-context`` routes on the file_versions router (which still use the inline
 #   ``pool.run`` path) and the registered ``EditDocumentTool`` family (which edit
 #   a Library file by id and write a revertable version).
+# Changes: 2026-07-08 (CS-13, feat/per-send-model-override) — added the optional
+#   ``model`` field: a per-send model override id chosen by the client's composer
+#   picker for THIS turn only. Validated (``max_length=100`` + a strict character
+#   pattern) because it lands in a subprocess launch arg downstream; a bad value
+#   fails as a 422 rather than reaching the shell. ``None`` (the default / what
+#   every older client sends) leaves model selection entirely to the backend's
+#   existing smart-routing / ``claude_sdk_model`` logic — behavior byte-identical.
+#   It rides ``RunSpec.model_override`` → ``ScopeContext`` → ``AgentPool.run`` to
+#   the Claude SDK backend, where it wins over ALL other model sources.
 """Request and SSE-event payload schemas for the enterprise agent chat endpoint.
 
 The endpoint lives at ``POST /cloud/chat/{scope}/{scope_id}/agent`` and streams
@@ -117,6 +126,18 @@ class CloudAgentChatRequest(BaseModel):
     spreadsheet_snapshot: dict[str, Any] | None = None
     # reveal.js deck JSON from an open slides editor.
     slides_data: dict[str, Any] | None = None
+    # CS-13 — per-send model override. The composer's model picker stamps the
+    # model id to run THIS turn on (e.g. ``claude-haiku-4-5-20251001``); it is
+    # the user's explicit choice for this one send and takes precedence over the
+    # backend's smart-routing / ``claude_sdk_model`` selection. ``None`` (the
+    # default, and what every older client sends) leaves model selection to the
+    # backend, byte-identical to today. Validated at the edge — ``max_length``
+    # plus a strict pattern (letters, digits, ``. _ : / -``) — because the value
+    # is threaded into the Claude CLI subprocess launch options downstream; the
+    # pattern rejects whitespace and shell metacharacters, so a hostile or
+    # malformed id fails as a 422 instead of reaching the process spawn. The
+    # pattern's ``+`` also rejects the empty string.
+    model: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9._:/-]+$")
 
     @field_validator("intent")
     @classmethod

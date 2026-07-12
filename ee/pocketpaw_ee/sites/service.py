@@ -1,6 +1,19 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-07-10 (HE-2 — canonical engine module): the engine content-selection
+# checks now route through ``sites.engines`` predicates instead of inline
+# ``== "svelte"`` string equality. ``is_source_engine(engine)`` replaces the
+# "source vs rippleSpec" content switch (publish/activate promote, preview/audit
+# fallback, dynamic-envelope), and ``content_key(engine)`` replaces the literal
+# ``"source" | "rippleSpec"`` key pick. PURE refactor, zero behaviour change for the
+# existing ripple/svelte engines. The three svelte NATIVE-EDITING guards
+# (``apply_leaf_edits`` ~2595, native shadow-render ~2697, ``edit_svelte_component``
+# ~2823) deliberately KEEP the ``!= "svelte"`` literal — their bodies are svelte-only
+# (component-path splice, ``.svelte-kit/cloudflare`` read, DSV-5 source split), so
+# guard and body must widen together; HE-9 widens ``apply_leaf_edits`` when the html
+# editing lane lands.
+#
 # Updated 2026-07-09 (DP0-4 — publish async split + single-flight): ``_deploy_site_doc``
 # now FORKS on ``_is_dynamic`` BEFORE any build. A DYNAMIC site no longer builds /
 # deploys inline — it returns early into the new ``_provision_dynamic_site`` helper,
@@ -227,6 +240,15 @@
 # side (entity isolation; this service never imports the Pocket model). _to_response
 # gained an optional ``pattern`` arg; both DTOs default it to "" (empty-safe for a
 # pocket with no pattern or a missing/cross-tenant pocket).
+#
+# Updated 2026-07-09 (SR-9 — surface each site's ENGINE): the sibling of DS-1a.
+# list_for_workspace() and pocket_status() now also carry the source pocket's
+# authoring ``engine`` ("svelte" | "ripple") so the gallery can badge each card's
+# engine (Custom vs Ripple) without a per-site fetch. Resolved via the new
+# pockets_service.engines_for_pockets (one projected $in read, tenant-scoped),
+# mirroring patterns_for_pockets. _to_response gained an optional ``engine`` arg;
+# both DTOs default it to "" (empty-safe for a pocket that predates the engine
+# field or a missing/cross-tenant pocket).
 #
 # Updated 2026-06-19 (P2b-backend — "Last Deployed" + revert endpoint): publish()
 # now stamps the Site doc's ``deployed_at`` (UTC) ONLY when a non-preview deploy
@@ -524,6 +546,7 @@ from pocketpaw_ee.sites.dto import (
     SiteResponse,
     SiteStatusResponse,
 )
+from pocketpaw_ee.sites.engines import content_key, is_source_engine
 from pocketpaw_ee.sites.generator_client import GeneratorClient
 
 logger = logging.getLogger(__name__)
@@ -1000,7 +1023,7 @@ async def _promote_pocket_draft_to_published(
         )
 
 
-def _to_response(doc: _SiteDoc, pattern: str = "") -> SiteResponse:
+def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResponse:
     deployed_at = getattr(doc, "deployed_at", None)
     return SiteResponse(
         id=str(doc.id),
@@ -1020,6 +1043,10 @@ def _to_response(doc: _SiteDoc, pattern: str = "") -> SiteResponse:
         # ...), resolved by the caller from Pocket.pattern (it lives on the pocket,
         # not the Site). "" when unset / unresolved so the gallery is empty-safe.
         pattern=pattern,
+        # SR-9: the source pocket's authoring engine ("svelte" | "ripple"),
+        # resolved by the caller from Pocket.engine (sibling of pattern above). ""
+        # when unresolved, so the gallery's engine badge is empty-safe.
+        engine=engine,
         # charge-first: the Dodo checkout link a PAID-tier publish returns, read
         # from the transient ``_checkout_url`` PrivateAttr (never persisted). None
         # for a free/live publish and for any list/status read (those docs are
@@ -1246,7 +1273,7 @@ async def publish(
     # not-live while the published tag stands). The snapshot for the promote is the
     # engine's content: the rippleSpec for a ripple site, the {path: contents}
     # source map for a svelte site.
-    version_content: dict[str, Any] = (source if engine == "svelte" else ripple_spec) or {}
+    version_content: dict[str, Any] = (source if is_source_engine(engine) else ripple_spec) or {}
     await _promote_pocket_draft_to_published(
         pocket_id=pocket_id,
         workspace_id=workspace_id,
@@ -1728,6 +1755,53 @@ def provision_d1_bindings(d1_database_id: str) -> list[dict]:
     ``{"type": "d1", "name": "DB", "id": <database_id>}`` (``_D1_BINDING_NAME``), the
     exact shape ``_deploy_site_doc`` passes ``put_worker`` on the dynamic path."""
     return [{"type": "d1", "name": _D1_BINDING_NAME, "id": d1_database_id}]
+
+
+async def provision_deploy(
+    *,
+    site_id: str,
+    project_dir: str,
+    bundle: bytes,
+    d1_database_id: str,
+    cloudflare: Any = None,
+) -> str:
+    """Deploy a PROVISIONED dynamic site to whichever target ``_deploy_mode()`` names,
+    and return its public URL. The one seam the provision job deploys through.
+
+    Before this existed the job always called ``cf.put_worker``, which only uploads
+    into a Workers-for-Platforms dispatch namespace. WfP is a PAID add-on, so an
+    account without it got a bare ``Cloudflare API 403`` (CF error 10121) and NO
+    dynamic site could ever publish — regardless of PAW_CF_DEPLOY_MODE, which the job
+    never consulted. Honouring the mode here gives dynamic sites the same free
+    workers.dev target static sites already use:
+
+      * ``workers`` → ``workers_deploy.deploy_workers`` with the D1 bound as ``DB``.
+        Free tier, no dispatch namespace. Returns the real workers.dev URL.
+      * ``wfp`` / UNSET → the pre-existing ``put_worker`` upload (unchanged), whose
+        URL comes from ``provision_site_url``.
+
+    ``local`` is not a dynamic target (nothing serves the D1 binding locally), so it
+    degrades to ``workers`` rather than deploying a site that cannot reach its own
+    database."""
+    mode = _deploy_mode()
+    if mode == "local":
+        logger.info("sites.provision: local mode has no dynamic target — using workers mode")
+        mode = "workers"
+
+    if mode == "workers":
+        from pocketpaw_ee.sites import workers_deploy as workers_deploy_mod
+
+        return await workers_deploy_mod.deploy_workers(
+            site_id, project_dir, d1_database_id=d1_database_id
+        )
+
+    cf = cloudflare or _cf_client()
+    await cf.put_worker(
+        script_name=site_id,
+        bundle=bundle,
+        bindings=provision_d1_bindings(d1_database_id),
+    )
+    return provision_site_url(site_id)
 
 
 def provision_site_url(site_id: str) -> str:
@@ -2422,7 +2496,9 @@ async def activate_site(
     # record, mirroring the live publish path (best-effort; versioning never gates
     # the deploy/activation).
     version_content: dict[str, Any] = (
-        inputs.get("source") if (inputs.get("engine") == "svelte") else inputs.get("ripple_spec")
+        inputs.get("source")
+        if is_source_engine(inputs.get("engine"))
+        else inputs.get("ripple_spec")
     ) or {}
     await _promote_pocket_draft_to_published(
         pocket_id=pocket_id,
@@ -2579,6 +2655,10 @@ async def apply_leaf_edits(
     # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
     # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
     pocket = await pockets_service.get(pocket_id, user_id)
+    # KEPT svelte-specific (not is_source_engine): the body below runs the DSV-5
+    # ``_split_svelte_source`` split and the SvelteKit leaf-edit CLI, both svelte-only.
+    # HE-9 widens THIS guard to html (via is_source_engine) in the same change that
+    # teaches the CLI the html editing lane, so guard and body widen together.
     if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
         raise ValidationError(
             "pocket.not_svelte_site",
@@ -2681,6 +2761,9 @@ async def get_native_artifact(
     # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
     # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
     pocket = await pockets_service.get(pocket_id, user_id)
+    # KEPT svelte-specific (not is_source_engine): this shadow-renders the SvelteKit
+    # ARMED build by reading ``.svelte-kit/cloudflare/index.html``. An html site's
+    # served artifact IS its source, so it never uses this SvelteKit render path.
     if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
         raise ValidationError(
             "pocket.not_svelte_site",
@@ -2807,6 +2890,9 @@ async def edit_svelte_component(
         # A missing component path is a NotFound (same contract as the full-rewrite
         # path, where set_svelte_source_file raises it) — not a silent create.
         pocket = await pockets_service.get(pocket_id, user_id)
+        # KEPT svelte-specific (not is_source_engine): edits a single named SvelteKit
+        # component by ``component_path`` and persists via ``set_svelte_source_file``.
+        # html has no per-component model — it edits by uid splice (HE-9), not here.
         if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(
             pocket.get("source"), dict
         ):
@@ -2965,7 +3051,7 @@ async def _ensure_pocket_draft(*, workspace_id: str, user_id: str, pocket_id: st
             return
         pocket = await pockets_service.get(pocket_id, user_id)
         engine = pocket.get("engine") or "ripple"
-        if engine == "svelte":
+        if is_source_engine(engine):
             content = pocket.get("source") if isinstance(pocket.get("source"), dict) else {}
         else:
             content = pocket.get("rippleSpec") if isinstance(pocket.get("rippleSpec"), dict) else {}
@@ -3020,7 +3106,7 @@ async def preview_pocket(
 
     # The pocket's CURRENT content for the engine — the fallback when the Branch
     # primitive has no draft row for this pocket yet.
-    if engine == "svelte":
+    if is_source_engine(engine):
         source = pocket.get("source")
         current = source if isinstance(source, dict) else None
     else:
@@ -3129,7 +3215,7 @@ async def audit_pocket(
 
     # The pocket's CURRENT content for the engine — the fallback when the Branch
     # primitive has no draft row for this pocket yet (mirrors preview_pocket).
-    if engine == "svelte":
+    if is_source_engine(engine):
         source = pocket.get("source")
         current: dict[str, Any] | None = source if isinstance(source, dict) else None
     else:
@@ -3192,7 +3278,7 @@ def _dynamic_content_envelope(pocket: dict[str, Any]) -> dict[str, Any]:
     engine-agnostic ``_is_dynamic`` / ``_dynamic_objects`` helpers can read the
     bindings off it without caring which engine produced it."""
     engine = pocket.get("engine") or "ripple"
-    key = "source" if engine == "svelte" else "rippleSpec"
+    key = content_key(engine)
     content = pocket.get(key)
     return content if isinstance(content, dict) else {}
 
@@ -3448,13 +3534,16 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     # no deployed site or the doc predates the field (a pre-P2b row).
     deployed_at = getattr(doc, "deployed_at", None) if doc is not None else None
 
-    # DS-1a: resolve the source pocket's authoring pattern so a by-pocket status
-    # read can badge a dynamic site too. ONE read, tenant-scoped; "" when the
-    # pocket has no pattern or could not be resolved (empty-safe).
+    # DS-1a/SR-9: resolve the source pocket's authoring pattern + engine so a
+    # by-pocket status read can badge a dynamic site AND its engine too. Each is
+    # ONE read, tenant-scoped; "" when the pocket has no value or could not be
+    # resolved (empty-safe).
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     patterns = await pockets_service.patterns_for_pockets(workspace_id, [pocket_id])
     pattern = patterns.get(pocket_id) or ""
+    engines = await pockets_service.engines_for_pockets(workspace_id, [pocket_id])
+    engine = engines.get(pocket_id) or ""
 
     return SiteStatusResponse(
         pocket_id=pocket_id,
@@ -3468,6 +3557,7 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         url=(doc.url or None) if doc is not None else None,
         deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
         pattern=pattern,
+        engine=engine,
     )
 
 
@@ -3620,15 +3710,24 @@ async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
         -_SiteDoc.createdAt
     )  # type: ignore[operator]
     docs = [doc async for doc in cursor]
-    # ONE cross-entity read for every card's pattern (no per-site fetch). The
-    # Pocket read stays in the pockets service (entity isolation) — this service
-    # never imports the Pocket model.
+    # ONE cross-entity read per field for every card's pattern + engine (no
+    # per-site fetch). The Pocket reads stay in the pockets service (entity
+    # isolation) — this service never imports the Pocket model. SR-9 adds the
+    # engine resolution alongside DS-1a's pattern; each is a single projected
+    # $in query keyed on the listed pockets.
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
-    patterns = await pockets_service.patterns_for_pockets(
-        workspace_id, [doc.pocket_id for doc in docs]
-    )
-    return [_to_response(doc, patterns.get(doc.pocket_id) or "") for doc in docs]
+    pocket_ids = [doc.pocket_id for doc in docs]
+    patterns = await pockets_service.patterns_for_pockets(workspace_id, pocket_ids)
+    engines = await pockets_service.engines_for_pockets(workspace_id, pocket_ids)
+    return [
+        _to_response(
+            doc,
+            patterns.get(doc.pocket_id) or "",
+            engines.get(doc.pocket_id) or "",
+        )
+        for doc in docs
+    ]
 
 
 async def site_pocket_ids(workspace_id: str) -> set[str]:

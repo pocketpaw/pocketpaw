@@ -108,6 +108,10 @@
 # ``paw-edit-manifest`` script); ``css`` is the built stylesheet(s) concatenated into
 # one string. The native editor injects both into a shadow root to render the site
 # natively instead of framing an iframe.
+# Updated 2026-07-09 (SR-9 — surface each site's ENGINE): ``SiteResponse`` and
+# ``SiteStatusResponse`` gain ``engine`` ("svelte" | "ripple"; "" when unresolved) —
+# the sibling of DS-1a's ``pattern``, resolved from the source Pocket.engine so the
+# gallery can badge each card's engine (Custom vs Ripple) without a per-site fetch.
 
 from __future__ import annotations
 
@@ -154,6 +158,12 @@ class SiteResponse(BaseModel):
     # the pocket has no pattern or could not be resolved. Lets the frontend badge
     # dynamic sites in the gallery without a second fetch.
     pattern: str = ""
+    # SR-9: the source pocket's authoring engine ("svelte" | "ripple"), resolved
+    # from Pocket.engine (it lives on the pocket, not the Site) — the sibling of
+    # ``pattern`` above. Lets the gallery badge each card's engine (Custom vs
+    # Ripple) without a second per-site fetch. "" when the pocket predates the
+    # engine field or could not be resolved (the card shows no engine badge).
+    engine: str = ""
     # charge-first: the Dodo annual-checkout link for a PAID-tier publish. A paid
     # publish creates the site as PENDING (deployed=False) and returns this link
     # the caller redirects the buyer to; the site deploys + goes live only after
@@ -223,6 +233,10 @@ class SiteStatusResponse(BaseModel):
     # the list response carries, so a by-pocket status read can badge a dynamic
     # site too.
     pattern: str = ""
+    # SR-9: the source pocket's authoring engine ("svelte" | "ripple"), resolved
+    # from Pocket.engine — the same field the list response carries, so a by-pocket
+    # status read can badge the engine too. "" when unresolved / pre-engine row.
+    engine: str = ""
 
 
 class SiteVersionResponse(BaseModel):
