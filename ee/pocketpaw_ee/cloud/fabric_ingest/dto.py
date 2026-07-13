@@ -1,5 +1,12 @@
 # dto.py — Request/validation schemas for the Firestore→Fabric ingest worker.
 # Created: 2026-06-11 — generic Firestore→Fabric ingestion worker.
+# Updated: 2026-07-11 (feat/real-pipeline-s1) — FieldMappingSpec mirrors the
+#   model's new additive source discriminator (``source_kind`` +
+#   ``connector_id``) so connector-source mappings validate at entry like
+#   firestore ones. Also added the transform-surface DTOs the new
+#   ``fabric_ingest/router.py`` uses: ``MappingUpsertRequest`` (author a
+#   mapping), ``MappingsListResponse`` / ``MappingResponse`` (read side),
+#   ``RunNowRequest`` / ``RunNowResponse`` (run-now dispatch result).
 #
 # Per cloud rule §4 (request/response split) and §6 (validate at entry): the
 # service functions re-parse their inputs through these even when called by
@@ -10,6 +17,8 @@
 # mirroring nothing or crashing mid-sweep.
 
 from __future__ import annotations
+
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -73,6 +82,12 @@ class FieldMappingSpec(BaseModel):
     field_map: dict[str, str] = Field(default_factory=dict)
     cursor_field: str = ""
     link_rules: list[LinkRuleSpec] = Field(default_factory=list)
+    # Source discriminator (feat/real-pipeline-s1) — mirrors the model field.
+    # "connector" mappings pull records through the OSS ingestor registry;
+    # ``connector_id`` defaults to ``collection`` when unset (the collection
+    # holds the connector name for connector mappings by convention).
+    source_kind: Literal["firestore", "connector"] = "firestore"
+    connector_id: str | None = None
 
     @field_validator("collection", "object_type_id")
     @classmethod
@@ -109,3 +124,60 @@ class IngestConfigRequest(BaseModel):
         if not v.strip():
             raise ValueError("workspace_id must not be blank")
         return v
+
+
+# ---------------------------------------------------------------------------
+# Transform-surface DTOs (feat/real-pipeline-s1) — the fabric_ingest router's
+# request/response split (cloud rule §4). The workspace never travels in the
+# body; the router injects the caller's active workspace (cloud rule §7).
+# ---------------------------------------------------------------------------
+
+
+class MappingUpsertRequest(FieldMappingSpec):
+    """Author one mapping (create-or-replace, keyed on ``collection``).
+
+    Same validated shape as ``FieldMappingSpec`` — subclassed so the router's
+    request type names its intent while the service keeps one validation
+    source of truth.
+    """
+
+
+class MappingResponse(FieldMappingSpec):
+    """One mapping as read back from the workspace's config."""
+
+
+class MappingsListResponse(BaseModel):
+    """The workspace's authored mappings."""
+
+    mappings: list[MappingResponse] = Field(default_factory=list)
+
+
+class RunNowRequest(BaseModel):
+    """Trigger one mapping's ingest immediately. ``collection`` is the
+    routing key (the connector name for connector mappings)."""
+
+    collection: str = Field(min_length=1)
+
+    @field_validator("collection")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("collection must not be blank")
+        return v
+
+
+class RunNowResponse(BaseModel):
+    """The result dict of ``ingest_collection``, typed for the wire.
+
+    ``status`` is ``"ok"`` or ``"error"`` — a misconfigured mapping (missing
+    connector, unregistered ingestor, no mapping) reports here rather than as
+    an HTTP 5xx, matching the sweep's never-raise contract.
+    """
+
+    workspace_id: str
+    source_id: str
+    status: str
+    mode: str
+    objects: int
+    cursor: str
+    errors: list[Any] = Field(default_factory=list)

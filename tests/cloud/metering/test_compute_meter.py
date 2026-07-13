@@ -25,6 +25,10 @@
 # depends on ambient settings.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-3): new test module.
+# Updated 2026-07-11 (feat/llm-cost-attribution): added two token-attribution
+# cases — ``bill_run`` stamps the run's real ``total_tokens`` on the debit ref
+# (summed from input + output + cached when no explicit total is given, and the
+# explicit backend-supplied total wins when present).
 
 from __future__ import annotations
 
@@ -277,3 +281,57 @@ async def test_sweep_covers_terminal_states_and_skips_active(mongo_db):
     for rid in ("run-queued", "run-running"):
         doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == rid)
         assert doc is not None and doc.billed is False
+
+
+# ---------------------------------------------------------------------------
+# Token attribution — bill_run stamps the run's real total_tokens on the debit
+# ref so the ledger-sourced usage graph can surface real volume (not a hardcoded
+# 0). The token counts ride ChatRunDoc.usage in every mode — NOT the LiteLLM path.
+# ---------------------------------------------------------------------------
+
+
+async def test_bill_run_stamps_total_tokens_on_ref(mongo_db):
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    run = await _make_run(
+        run_id="run-tok",
+        usage={
+            "total_cost_usd": 0.04,
+            "model": "claude-sonnet-4-20250514",
+            "input_tokens": 1200,
+            "output_tokens": 300,
+            "cached_input_tokens": 100,
+        },
+    )
+
+    await metering.bill_run(run, rate_card=RATE)
+
+    spend = await CreditLedgerEntry.find(
+        CreditLedgerEntry.workspace == WS,
+        CreditLedgerEntry.idempotency_key == "run:run-tok",
+    ).to_list()
+    assert len(spend) == 1
+    # input + output + cached = 1200 + 300 + 100.
+    assert spend[0].ref.get("total_tokens") == 1600
+
+
+async def test_bill_run_prefers_explicit_total_tokens(mongo_db):
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    run = await _make_run(
+        run_id="run-tt",
+        usage={
+            "total_cost_usd": 0.04,
+            "model": "claude-sonnet-4-20250514",
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 999,  # backend supplied an explicit total — trust it
+        },
+    )
+
+    await metering.bill_run(run, rate_card=RATE)
+
+    spend = await CreditLedgerEntry.find(
+        CreditLedgerEntry.workspace == WS,
+        CreditLedgerEntry.idempotency_key == "run:run-tt",
+    ).to_list()
+    assert len(spend) == 1
+    assert spend[0].ref.get("total_tokens") == 999

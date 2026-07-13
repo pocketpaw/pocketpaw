@@ -444,6 +444,15 @@ class AnalyticsResponse(BaseModel):
     per_day: list[AnalyticsDayDTO]
     by_agent: list[AnalyticsAgentDTO]
     by_pocket: list[AnalyticsPocketDTO]
+    # Outcome-verdict rollup (evals slice). ``solved_rate`` = solved / checkable
+    # (checkable = solved + partial + not_solved; ``unknown`` reported separately
+    # so low criteria coverage stays visible). None = no checkable verdicts in
+    # the window — the UI renders an em dash, never a fake 0% or 100%.
+    solved_rate: float | None = None  # 0-100
+    solved_count: int = 0
+    partial_count: int = 0
+    not_solved_count: int = 0
+    unknown_count: int = 0
 
 
 __all__ = [

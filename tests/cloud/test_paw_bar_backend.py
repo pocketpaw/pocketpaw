@@ -1,6 +1,12 @@
 # tests/cloud/test_paw_bar_backend.py — PR-A: Paw Bar models + store.
 # Created: 2026-04-13 — Covers validation caps, domain normalization, token
 # rotation, event persistence, and the rate-limit primitives used by PR-B.
+# Updated: 2026-07-11 (W4a tenancy seam) — Added TestWorkspaceScoping (two-
+# tenant isolation on get/list/update/rotate/delete + legacy ''-row matching),
+# TestSpecRevisions (archive-on-update, rollback round-trip, workspace-scoped
+# rollback), and TestScopedFabricWrite (the leak fix: _apply_event_mapping
+# threads the widget row's workspace_id into get_fabric_store; '' → None keeps
+# the single-tenant default store).
 
 from __future__ import annotations
 
@@ -297,3 +303,212 @@ class TestEventStore:
             now=now,
         )
         assert allowed is False
+
+
+# ---------------------------------------------------------------------------
+# W4a — in-row workspace scoping (two-tenant isolation)
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspaceScoping:
+    @pytest.mark.asyncio
+    async def test_get_widget_is_workspace_scoped(self, store: PawBarStore) -> None:
+        widget = await store.create_widget(_widget(workspace_id="w1"))
+        assert await store.get_widget(widget.id, workspace_id="w1") is not None
+        assert await store.get_widget(widget.id, workspace_id="w2") is None
+        # None ⇒ unscoped (backward-compatible internal reads).
+        assert await store.get_widget(widget.id) is not None
+
+    @pytest.mark.asyncio
+    async def test_legacy_empty_workspace_row_matches_any_scope(self, store: PawBarStore) -> None:
+        widget = await store.create_widget(_widget())  # workspace_id defaults to ""
+        assert await store.get_widget(widget.id, workspace_id="w1") is not None
+        assert await store.get_widget(widget.id, workspace_id="w2") is not None
+
+    @pytest.mark.asyncio
+    async def test_list_widgets_is_workspace_scoped(self, store: PawBarStore) -> None:
+        await store.create_widget(_widget(workspace_id="w1", owner="user:maya"))
+        await store.create_widget(_widget(workspace_id="w2", owner="user:priya"))
+        legacy = await store.create_widget(_widget(owner="user:legacy"))  # ""
+
+        w1 = await store.list_widgets(workspace_id="w1")
+        assert {w.owner for w in w1} == {"user:maya", "user:legacy"}
+        w2 = await store.list_widgets(workspace_id="w2")
+        assert {w.owner for w in w2} == {"user:priya", "user:legacy"}
+        unscoped = await store.list_widgets()
+        assert len(unscoped) == 3
+        assert legacy.workspace_id == ""
+
+    @pytest.mark.asyncio
+    async def test_update_spec_cross_tenant_returns_none_and_never_mutates(
+        self, store: PawBarStore
+    ) -> None:
+        widget = await store.create_widget(_widget(workspace_id="w1"))
+        new_spec = PawBarSpec(
+            widget_id=widget.id,
+            pocket_id=widget.pocket_id,
+            blocks=[PawBarBlock(type="text", content="hijacked")],
+        )
+        assert await store.update_spec(widget.id, new_spec, workspace_id="w2") is None
+        untouched = await store.get_widget(widget.id)
+        assert untouched is not None
+        assert untouched.spec.blocks[0].content == "Today's menu"
+
+    @pytest.mark.asyncio
+    async def test_rotate_token_cross_tenant_returns_none_and_never_mutates(
+        self, store: PawBarStore
+    ) -> None:
+        widget = await store.create_widget(_widget(workspace_id="w1"))
+        assert await store.rotate_token(widget.id, workspace_id="w2") is None
+        unchanged = await store.get_widget(widget.id)
+        assert unchanged is not None
+        assert unchanged.access_token == widget.access_token
+
+    @pytest.mark.asyncio
+    async def test_delete_widget_cross_tenant_is_a_noop(self, store: PawBarStore) -> None:
+        widget = await store.create_widget(_widget(workspace_id="w1"))
+        assert await store.delete_widget(widget.id, workspace_id="w2") is False
+        assert await store.get_widget(widget.id) is not None
+        # Same-tenant delete still works.
+        assert await store.delete_widget(widget.id, workspace_id="w1") is True
+
+
+# ---------------------------------------------------------------------------
+# W4a — spec revisions + rollback
+# ---------------------------------------------------------------------------
+
+
+class TestSpecRevisions:
+    @pytest.mark.asyncio
+    async def test_update_archives_prior_spec_and_rollback_restores_it(
+        self, store: PawBarStore
+    ) -> None:
+        widget = await store.create_widget(_widget())
+        new_spec = PawBarSpec(
+            widget_id=widget.id,
+            pocket_id=widget.pocket_id,
+            blocks=[PawBarBlock(type="text", content="Closed today")],
+        )
+        await store.update_spec(widget.id, new_spec)
+
+        latest = await store.latest_spec_revision(widget.id)
+        assert latest is not None
+        revision, archived = latest
+        assert revision == 1
+        assert archived.blocks[0].content == "Today's menu"
+
+        restored = await store.rollback_spec(widget.id)
+        assert restored is not None
+        assert restored.spec.blocks[0].content == "Today's menu"
+
+        # The rollback itself archived the replaced spec (monotonic revision),
+        # so rolling back again restores "Closed today" — always reversible.
+        latest2 = await store.latest_spec_revision(widget.id)
+        assert latest2 is not None
+        assert latest2[0] == 2
+        again = await store.rollback_spec(widget.id)
+        assert again is not None
+        assert again.spec.blocks[0].content == "Closed today"
+
+    @pytest.mark.asyncio
+    async def test_rollback_without_revisions_returns_none(self, store: PawBarStore) -> None:
+        widget = await store.create_widget(_widget())
+        assert await store.rollback_spec(widget.id) is None
+
+    @pytest.mark.asyncio
+    async def test_rollback_is_workspace_scoped(self, store: PawBarStore) -> None:
+        widget = await store.create_widget(_widget(workspace_id="w1"))
+        new_spec = PawBarSpec(
+            widget_id=widget.id,
+            pocket_id=widget.pocket_id,
+            blocks=[PawBarBlock(type="text", content="v2")],
+        )
+        await store.update_spec(widget.id, new_spec, workspace_id="w1")
+        assert await store.rollback_spec(widget.id, workspace_id="w2") is None
+        current = await store.get_widget(widget.id)
+        assert current is not None
+        assert current.spec.blocks[0].content == "v2"
+
+
+# ---------------------------------------------------------------------------
+# W4a — the public-path Fabric write is scoped to the widget's workspace
+# ---------------------------------------------------------------------------
+
+
+class _StubFabricObject:
+    """Kwarg-eating FabricObject stand-in for the seam tests below."""
+
+    def __init__(self, **kwargs: object) -> None:
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+
+class TestScopedFabricWrite:
+    @pytest.mark.asyncio
+    async def test_apply_event_mapping_threads_the_widget_workspace(self, monkeypatch) -> None:
+        """The cross-tenant leak fix: get_fabric_store must receive the OWNER's
+        workspace_id (from the widget row), not be called bare."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        import pocketpaw_ee.api as ee_api
+        from pocketpaw_ee.paw_bar import router as ppr
+
+        captured: dict[str, object] = {}
+        created_obj = MagicMock()
+        created_obj.id = "obj_scoped_1"
+        fabric = MagicMock()
+        fabric.create_object = AsyncMock(return_value=created_obj)
+
+        def spy_get_fabric_store(*, workspace_id: str | None = None):
+            captured["workspace_id"] = workspace_id
+            return fabric
+
+        monkeypatch.setattr(ee_api, "get_fabric_store", spy_get_fabric_store)
+        # NOTE: the real FabricObject requires type_id (the router only passes
+        # type_name — a pre-existing gap, unrelated to W4a); stub it so this
+        # test isolates the tenancy seam.
+        monkeypatch.setattr("pocketpaw.fabric.models.FabricObject", _StubFabricObject)
+
+        widget = _widget(workspace_id="w-owner")
+        event = PawBarEvent(
+            widget_id=widget.id,
+            type="order_click",
+            payload={"item": "oat_latte"},
+            customer_ref="cust_a",
+        )
+        obj_id = await ppr._apply_event_mapping(widget, event)
+        assert obj_id == "obj_scoped_1"
+        assert captured["workspace_id"] == "w-owner"
+
+    @pytest.mark.asyncio
+    async def test_legacy_widget_keeps_the_default_store(self, monkeypatch) -> None:
+        """An unstamped ('' workspace) widget passes None — single-tenant
+        behavior is unchanged."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        import pocketpaw_ee.api as ee_api
+        from pocketpaw_ee.paw_bar import router as ppr
+
+        captured: dict[str, object] = {"workspace_id": "sentinel"}
+        created_obj = MagicMock()
+        created_obj.id = "obj_default_1"
+        fabric = MagicMock()
+        fabric.create_object = AsyncMock(return_value=created_obj)
+
+        def spy_get_fabric_store(*, workspace_id: str | None = None):
+            captured["workspace_id"] = workspace_id
+            return fabric
+
+        monkeypatch.setattr(ee_api, "get_fabric_store", spy_get_fabric_store)
+        monkeypatch.setattr("pocketpaw.fabric.models.FabricObject", _StubFabricObject)
+
+        widget = _widget()  # workspace_id defaults to ""
+        event = PawBarEvent(
+            widget_id=widget.id,
+            type="order_click",
+            payload={"item": "oat_latte"},
+            customer_ref="cust_a",
+        )
+        obj_id = await ppr._apply_event_mapping(widget, event)
+        assert obj_id == "obj_default_1"
+        assert captured["workspace_id"] is None

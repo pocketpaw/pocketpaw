@@ -130,6 +130,12 @@
 # must not read ``CreditLedgerEntry`` itself, so this owns the read (sibling to
 # ``sum_debits_by_cause``). It performs NO writes and changes NOTHING that is
 # charged — a pure re-source of the display.
+# Changed 2026-07-11 (feat/llm-cost-attribution): ``spend_by_model`` now sums each
+# debit's ``ref.total_tokens`` per (day, model) and returns it on the new
+# ``ModelSpendRow.tokens`` field, so the ledger-sourced usage graph surfaces real
+# token volume instead of a hardcoded 0. A legacy entry whose ref predates the
+# token stamp contributes 0 (the credits + requests figures are unchanged). Read
+# only — no new writes.
 # Changed 2026-06-30 (feat/billing-quota-enforcement, chunk 2): added the monthly
 # credit-QUOTA reads + assertion. ``month_to_date_spend`` sums this UTC calendar
 # month's APPLIED spend debits (compute_spend + litellm_spend, the same two
@@ -691,9 +697,10 @@ async def spend_by_model(
     charged spend with no model still counts toward the day so the chart
     reconciles with the wallet); ``credits`` is the POSITIVE amount debited (a
     stray positive delta is clamped out, like ``sum_debits_by_cause``). ``requests``
-    is the COUNT of entries in the (day, model) group — the ledger ``ref`` does not
-    carry a token count, so tokens are not recoverable here (a follow-up could add
-    ``total_tokens`` to the debit ``ref``).
+    is the COUNT of entries in the (day, model) group. ``tokens`` is the real total
+    token volume for the group, summed from each entry's ``ref.total_tokens`` (the
+    metering path now records it — a legacy entry without it contributes 0, so the
+    figure reflects real volume going forward without breaking historical reads).
 
     EE entity-isolation: billing must not read ``CreditLedgerEntry`` directly, so
     this owns the read (sibling to ``sum_debits_by_cause``). It performs NO writes.
@@ -714,7 +721,8 @@ async def spend_by_model(
     # credits and count entries. A stray positive ``amount_delta`` under a spend
     # cause (there should be none — spend is debit-only) is skipped so a bad row
     # can't make a group read as a refund.
-    grouped: dict[tuple[str, str], list[int]] = {}  # (day, model) -> [credits, requests]
+    # (day, model) -> [credits, requests, tokens]
+    grouped: dict[tuple[str, str], list[int]] = {}
     for e in entries:
         delta = int(e.amount_delta)
         if delta >= 0:
@@ -725,13 +733,20 @@ async def spend_by_model(
         day = created.date().isoformat()
         ref = e.ref or {}
         model = ref.get("model") or "unknown"
-        bucket = grouped.setdefault((day, model), [0, 0])
+        # ``total_tokens`` is the real per-run volume the metering path stamps on
+        # the ref; a legacy entry without it (or a non-int) reads 0.
+        try:
+            tokens = int(ref.get("total_tokens") or 0)
+        except (TypeError, ValueError):
+            tokens = 0
+        bucket = grouped.setdefault((day, model), [0, 0, 0])
         bucket[0] += -delta  # positive credits debited
         bucket[1] += 1  # one more request in this group
+        bucket[2] += tokens if tokens > 0 else 0  # real token volume
 
     return [
-        ModelSpendRow(day=day, model=model, credits=credits, requests=requests)
-        for (day, model), (credits, requests) in grouped.items()
+        ModelSpendRow(day=day, model=model, credits=credits, requests=requests, tokens=tokens)
+        for (day, model), (credits, requests, tokens) in grouped.items()
     ]
 
 

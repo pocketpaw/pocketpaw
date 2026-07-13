@@ -21,6 +21,10 @@
 #
 # Created 2026-06-29 (fix/billing-usage-ledger-source): new test module — unit
 # coverage for the ledger read that re-sources the billing usage graph.
+# Updated 2026-07-11 (feat/llm-cost-attribution): ``_seed`` gained a ``tokens``
+# param (stamps ``ref.total_tokens``) and two cases cover the new token sum —
+# real per-group volume across token-bearing debits + a legacy debit adding 0,
+# and an all-legacy group reporting tokens=0.
 
 from __future__ import annotations
 
@@ -44,10 +48,17 @@ async def _seed(
     applied: bool = True,
     idem: str,
     ws: str = WS,
+    tokens: int | None = None,
 ) -> None:
     """Insert one ledger entry stamped at ``when`` (back-dated via the raw
-    collection so the window boundaries can be asserted)."""
+    collection so the window boundaries can be asserted).
+
+    When ``tokens`` is given it is stamped on the ref as ``total_tokens`` (the real
+    volume the metering path records); omitting it models a legacy debit whose ref
+    predates token attribution (contributes 0 to the group's token sum)."""
     ref = {"model": model} if model is not None else {}
+    if tokens is not None:
+        ref["total_tokens"] = tokens
     entry = CreditLedgerEntry(
         workspace=ws,
         kind="spend",
@@ -215,6 +226,60 @@ async def test_missing_ref_model_buckets_unknown(mongo_db):
     assert len(rows) == 1
     assert rows[0].model == "unknown"
     assert rows[0].credits == 15
+
+
+async def test_sums_total_tokens_per_group(mongo_db):
+    # Two token-bearing debits + one legacy debit (no total_tokens) in one group:
+    # the group's tokens is the sum of the real figures, the legacy one adds 0.
+    await _seed(
+        when=datetime(2026, 6, 1, 9, 0, tzinfo=UTC),
+        amount_delta=-4,
+        model=SONNET,
+        idem="t1",
+        tokens=1000,
+    )
+    await _seed(
+        when=datetime(2026, 6, 1, 18, 0, tzinfo=UTC),
+        amount_delta=-6,
+        model=SONNET,
+        idem="t2",
+        tokens=500,
+    )
+    await _seed(
+        when=datetime(2026, 6, 1, 20, 0, tzinfo=UTC),
+        amount_delta=-2,
+        model=SONNET,
+        idem="t3",  # legacy: no total_tokens on the ref
+    )
+
+    rows = await credits.spend_by_model(
+        WS,
+        since=datetime(2026, 6, 1, tzinfo=UTC),
+        until=datetime(2026, 6, 2, tzinfo=UTC),
+    )
+    by = _by_key(rows)
+
+    row = by[("2026-06-01", SONNET)]
+    assert row.tokens == 1500  # 1000 + 500 + 0 (legacy)
+    assert row.requests == 3
+    assert row.credits == 12  # 4 + 6 + 2 — unaffected by tokens
+
+
+async def test_tokens_default_zero_when_no_ref_tokens(mongo_db):
+    # A group made entirely of legacy debits reports tokens=0 (credits still real).
+    await _seed(
+        when=datetime(2026, 6, 1, 9, 0, tzinfo=UTC), amount_delta=-7, model=GPT, idem="legacy"
+    )
+
+    rows = await credits.spend_by_model(
+        WS,
+        since=datetime(2026, 6, 1, tzinfo=UTC),
+        until=datetime(2026, 6, 2, tzinfo=UTC),
+    )
+
+    assert len(rows) == 1
+    assert rows[0].tokens == 0
+    assert rows[0].credits == 7
 
 
 async def test_is_tenant_scoped(mongo_db):

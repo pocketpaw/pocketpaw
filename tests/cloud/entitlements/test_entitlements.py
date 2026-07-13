@@ -25,6 +25,11 @@
 #   now also populates ``monthly_ceiling`` from the plan catalog — every known tier
 #   carries the catalog's ceiling (incl. enterprise=None uncapped), and an unknown
 #   / missing plan FAILS CLOSED to the Free ceiling (1000), never None/uncapped.
+# Updated 2026-07-08 (feat/billing-smb-caps): proves the resolver also surfaces the
+#   three SMB caps (``max_seats`` / ``max_pockets`` / ``max_connectors``) from the
+#   plan catalog for every known tier (incl. enterprise=None uncapped), and that an
+#   unknown / missing plan FAILS CLOSED to the Free values (5 / 200 / 50), never
+#   None/uncapped.
 
 from __future__ import annotations
 
@@ -95,6 +100,28 @@ async def test_every_known_plan_resolves_its_catalog_ceiling(patch_plan, plan):
         assert ent.monthly_ceiling is None  # the one uncapped tier
 
 
+@pytest.mark.parametrize("plan", ["free", "go", "pro", "pro_max", "enterprise"])
+async def test_every_known_plan_resolves_its_catalog_smb_caps(patch_plan, plan):
+    """The resolver mirrors the catalog's three SMB caps for every known tier."""
+    from pocketpaw_ee.cloud.billing import plans
+
+    patch_plan(plan)
+    ent = await entitlements.resolve_entitlements(WS)
+    tier = plans.get_plan(plan)
+    assert ent.max_seats == tier.max_seats
+    assert ent.max_pockets == tier.max_pockets
+    assert ent.max_connectors == tier.max_connectors
+    if plan == "enterprise":
+        # The one uncapped tier — all three surface as None.
+        assert ent.max_seats is None
+        assert ent.max_pockets is None
+        assert ent.max_connectors is None
+    else:
+        assert isinstance(ent.max_seats, int)
+        assert isinstance(ent.max_pockets, int)
+        assert isinstance(ent.max_connectors, int)
+
+
 # ---------------------------------------------------------------------------
 # Criterion (b) — no/unknown plan, or missing workspace, falls back to free.
 # ---------------------------------------------------------------------------
@@ -109,6 +136,20 @@ async def test_unknown_plan_falls_back_to_free(patch_plan):
     assert ent.monthly_credit_allotment == 0
     # FAIL-CLOSED: an unknown plan caps at the Free ceiling, never None/uncapped.
     assert ent.monthly_ceiling == 1_000
+    # FAIL-CLOSED on the SMB caps too: the Free values, never None/uncapped.
+    assert ent.max_seats == 5
+    assert ent.max_pockets == 200
+    assert ent.max_connectors == 50
+
+
+async def test_missing_workspace_falls_back_to_free_smb_caps(patch_plan):
+    """A missing workspace (get_workspace_plan -> None) fails closed on all SMB caps."""
+    patch_plan(None)
+    ent = await entitlements.resolve_entitlements(WS)
+    assert ent.plan == "free"
+    assert ent.max_seats == 5
+    assert ent.max_pockets == 200
+    assert ent.max_connectors == 50
 
 
 async def test_missing_workspace_falls_back_to_free(patch_plan):

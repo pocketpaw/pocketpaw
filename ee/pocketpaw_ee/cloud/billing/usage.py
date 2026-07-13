@@ -32,10 +32,13 @@
 #   * READ-ONLY: a pure read. It NEVER debits, NEVER touches the ledger or the
 #     balance, NEVER calls the cutover/metering path. It only reads + folds.
 #
-# TOKENS=0 (a deliberate limitation): the ledger ``ref`` does not carry a token
-# count, so per-model ``tokens`` is reported as 0. The credit + request figures are
-# accurate; a follow-up can add ``total_tokens`` to the debit ``ref`` and surface
-# it here. Do NOT try to recover tokens from elsewhere — they aren't on the wallet.
+# TOKENS: the metering path (``metering.service.bill_run``) now stamps the run's
+# real ``total_tokens`` onto the debit ``ref``, and ``spend_by_model`` sums it per
+# (day, model), so per-model ``tokens`` reflects real volume — no longer a
+# hardcoded 0. It is sourced from the wallet's own ledger like credits + requests
+# (NOT the blocked LiteLLM path). A debit written before the ref carried tokens
+# contributes 0, so historical days may under-report tokens while credits stay
+# exact; volume is accurate for every run billed after the change.
 #
 # UNKNOWN MODEL: a real charged debit whose ``ref.model`` is absent is bucketed
 # under the model id ``"unknown"`` so its credits STILL count toward the day + the
@@ -67,6 +70,12 @@
 # record-folding helpers); kept the date-range validator + clamp and the response
 # contract intact. tokens=0 is now intentional (the ledger ref carries no token
 # count).
+# Changed 2026-07-11 (feat/llm-cost-attribution): per-model ``tokens`` now carries
+# REAL volume — the metering path stamps ``total_tokens`` on the debit ref and
+# ``spend_by_model`` sums it, so this surfaces ``row.tokens`` instead of the former
+# hardcoded 0. Sourced from the wallet's own ledger (NOT the blocked LiteLLM path);
+# legacy debits without the ref field contribute 0. The response contract is
+# unchanged (the ``tokens`` field already existed) — only its value became real.
 
 from __future__ import annotations
 
@@ -151,10 +160,11 @@ async def get_workspace_usage(
     window defaults to the trailing 30 days. ``spend_reader`` is injectable for
     pure-unit tests (defaults to ``credits.service.spend_by_model``).
 
-    ``tokens`` is reported as 0 per model — the ledger ``ref`` does not carry a
-    token count (the credit + request figures are accurate). A workspace with no
-    spend in the window returns an empty contract (no models, no buckets, total 0)
-    at HTTP 200 — never an error.
+    ``tokens`` per model is the real volume the ledger now carries (the metering
+    path stamps ``total_tokens`` on each debit ref; a legacy debit without it reads
+    0). Credits are integer CREDITS (1 credit == $0.01 — NOT USD). A workspace with
+    no spend in the window returns an empty contract (no models, no buckets, total
+    0) at HTTP 200 — never an error.
     """
     # Rule 6 — validate at entry.
     if not workspace_id:
@@ -189,16 +199,17 @@ async def get_workspace_usage(
         models_seen.add(row.model)
         per_model = buckets.setdefault(row.day, {})
         existing = per_model.get(row.model)
-        # ``tokens=0`` intentionally — the ledger ref carries no token count
-        # (see the module header). Credits + requests come straight off the ledger.
+        # ``tokens`` is the real per-(day, model) volume the ledger now carries
+        # (summed from each debit's ``ref.total_tokens`` in ``spend_by_model``); a
+        # legacy row without it reads 0. Credits + requests come off the ledger too.
         if existing is None:
             per_model[row.model] = UsageModelStats(
-                credits=row.credits, tokens=0, requests=row.requests
+                credits=row.credits, tokens=row.tokens, requests=row.requests
             )
         else:
             per_model[row.model] = UsageModelStats(
                 credits=existing.credits + row.credits,
-                tokens=0,
+                tokens=existing.tokens + row.tokens,
                 requests=existing.requests + row.requests,
             )
 

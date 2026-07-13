@@ -151,6 +151,51 @@
 #   gets truncated instead of growing unbounded across 128+ cached tenants. The
 #   W4a in-row workspace_id WHERE-filter is UNCHANGED — physical file isolation
 #   is ADDITIVE defense-in-depth layered on top of it, never a replacement.
+# Updated: 2026-07-10 (ontology-operator-ux) — makes the ontology operable by a
+#   non-engineer, in three additive pieces:
+#     1. WRITE-TIME TYPE ENFORCEMENT. ``validate_object_properties()`` checks a
+#        provided property bag against the type's declared ``PropertyDef``s and
+#        raises ``FabricTypeError`` on a clash. ``create_object`` and
+#        ``update_object`` now call it (create validates the full bag; update
+#        validates only the provided delta). Enforcement is DECLARED-ONLY and
+#        LENIENT by design so it never breaks live connector / agent ingest: only
+#        declared properties are checked, a ``None`` / absent value is skipped
+#        (``required`` is NOT enforced at write time), unknown keys pass through,
+#        an empty schema is a no-op, and scalar checks accept the JSON-string form
+#        of a number/bool/date (a connector often ships "42"). A genuinely wrong
+#        value — "not-a-number" for a ``number`` field, a value outside a declared
+#        ``enum`` — is rejected.
+#     2. SCHEMA VERSIONING + NON-DESTRUCTIVE MIGRATION. ``fabric_object_types``
+#        gains a ``version INTEGER DEFAULT 1`` column (additive ALTER, swallow the
+#        duplicate-column error like the W4a/SZD-2 tenancy columns). ``update_type``
+#        bumps the version and migrates existing objects for a property RENAME (the
+#        key is moved on every object of the type) and an ADDITIVE add (a new
+#        property carrying a default is backfilled onto objects that lack it).
+#        DESTRUCTIVE removal is DEFERRED: a property dropped from the schema leaves
+#        its now-orphaned key untouched on existing objects (documented behaviour,
+#        asserted in tests).
+#     3. Both are OSS-side and framework-agnostic; ``FabricTypeError`` lives in
+#        models so the EE router (422) and OSS callers (ValueError) both consume it.
+# Updated: 2026-07-11 (feat/paw-cli, C2) — added ``get_link(link_id,
+#   workspace_id=None)``, a scoped single-link read mirroring ``get_object``.
+#   It exists as the tenancy guard for deletes: ``unlink`` is deliberately
+#   unscoped, so multi-tenant callers (the EE DELETE /fabric/links route and
+#   the fabric MCP link-delete tool) resolve the link through this scoped read
+#   first and refuse a cross-tenant id.
+# Updated: 2026-07-11 (self-serve-analysis S1) — transparent-analysis read engine
+#   on ``query``: when a FabricQuery carries ``group_by``/``aggregate`` (and the
+#   POCKETPAW_FABRIC_ANALYST flag is ON — otherwise FabricAnalystDisabledError,
+#   fail-loud), the query runs as a SQL GROUP BY over the ALREADY workspace-scoped
+#   + filtered set (scope-then-aggregate: the same WHERE the plain path builds,
+#   extracted into ``_flat_query_conditions``, is applied BEFORE grouping so a
+#   cross-workspace object can never enter a group total). Supports
+#   count/sum/avg/min/max (numeric folds CAST to REAL like the numeric filters),
+#   optional RangeBucket bucketing of a numeric group key (a fully-parameterized
+#   CASE chain), and value/key sort. The result carries ``aggregates``
+#   ({key, value} rows, paginated by limit/offset) plus human-readable ``steps``
+#   (QueryPlanStep — the ReasoningTrace contract). Plain queries are untouched
+#   (same SQL, no steps); aggregation composes with filters/linked_to but not
+#   ``path`` (rejected at the model).
 # Updated: 2026-07-10 (FST-1 — Fabric source-truth schema) — two NEW tables,
 #   ``fabric_statements`` + ``fabric_sources``, with append-only CRUD:
 #   ``append_statement()`` / ``get_statements()`` / ``upsert_source()``. A
@@ -304,13 +349,16 @@ from typing import Any
 import aiosqlite
 
 from pocketpaw.fabric.models import (
+    FabricAnalystDisabledError,
     FabricLink,
     FabricObject,
     FabricQuery,
     FabricQueryResult,
+    FabricTypeError,
     ObjectType,
     PathHop,
     PropertyDef,
+    QueryPlanStep,
     SourceRef,
     Statement,
 )
@@ -383,6 +431,10 @@ CREATE TABLE IF NOT EXISTS fabric_object_types (
     -- a scoped read still sees it (own rows + NULL). On a pre-SZD-2 DB this
     -- column is added by the ALTER migration in _ensure_schema, NOT here.
     workspace_id TEXT,
+    -- Schema version (ontology-operator-ux). 1 on define_type; bumped by
+    -- update_type on a non-destructive change (rename / additive add). On a
+    -- pre-version DB this column is added by the ALTER migration, NOT here.
+    version INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -661,6 +713,294 @@ def _build_filter_conditions(filters: dict[str, Any]) -> tuple[list[str], list[A
     return conditions, params
 
 
+def _flat_query_conditions(q: FabricQuery, workspace_id: str | None) -> tuple[list[str], list[Any]]:
+    """Build the flat (non-path) WHERE fragments + params for a FabricQuery.
+
+    Extracted from ``FabricStore.query`` (self-serve-analysis S1) so the plain
+    fetch path and the aggregation path share ONE condition builder — the
+    scope-then-aggregate invariant holds by construction, not by parallel
+    maintenance. Covers type constraint, single-hop ``linked_to``/``link_type``,
+    property filters (``_build_filter_conditions``), and the W4a tenancy scope
+    (``_workspace_scope``). Every value is a bound ``?`` parameter.
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+
+    if q.type_id:
+        conditions.append("o.type_id = ?")
+        params.append(q.type_id)
+    elif q.type_name:
+        conditions.append("LOWER(o.type_name) = LOWER(?)")
+        params.append(q.type_name)
+
+    if q.linked_to:
+        if q.link_type:
+            link_cond = (
+                "o.id IN ("
+                "SELECT to_object_id FROM fabric_links"
+                " WHERE from_object_id = ? AND link_type = ? "
+                "UNION "
+                "SELECT from_object_id FROM fabric_links"
+                " WHERE to_object_id = ? AND link_type = ?"
+                ")"
+            )
+            conditions.append(link_cond)
+            params.extend([q.linked_to, q.link_type, q.linked_to, q.link_type])
+        else:
+            link_cond = (
+                "o.id IN ("
+                "SELECT to_object_id FROM fabric_links WHERE from_object_id = ? "
+                "UNION "
+                "SELECT from_object_id FROM fabric_links WHERE to_object_id = ?"
+                ")"
+            )
+            conditions.append(link_cond)
+            params.extend([q.linked_to, q.linked_to])
+
+    # Property filters against the JSON properties bag. Kept as a localized
+    # block (see _build_filter_conditions) so concurrent work on this method
+    # — e.g. workspace_id scoping — merges without touching this logic.
+    if q.filters:
+        filter_conditions, filter_params = _build_filter_conditions(q.filters)
+        conditions.extend(filter_conditions)
+        params.extend(filter_params)
+
+    # Tenancy scope (W4a) — an ADDITIONAL condition ANDed alongside the W0d
+    # property filters above, never a replacement for them. Restricts the
+    # result set to the caller's workspace plus legacy NULL-workspace rows.
+    ws_cond, ws_params = _workspace_scope(workspace_id, column="o.workspace_id")
+    if ws_cond:
+        conditions.append(ws_cond)
+        params.extend(ws_params)
+
+    return conditions, params
+
+
+# Aggregate function whitelist (self-serve-analysis S1): FabricQuery.aggregate
+# -> the SQL function name. Mirrors _FILTER_OPS — user input selects FROM this
+# fixed map and never reaches the SQL text itself.
+_AGG_FN_SQL: dict[str, str] = {
+    "sum": "SUM",
+    "avg": "AVG",
+    "min": "MIN",
+    "max": "MAX",
+}
+
+# Sort whitelist for the aggregate output rows. ``val``/``grp`` are the fixed
+# SELECT aliases; the default (sort=None) is value descending — "biggest group
+# first", the order an analyst reads.
+_AGG_SORT_SQL: dict[str, str] = {
+    "value_desc": "val DESC",
+    "value_asc": "val ASC",
+    "key_asc": "grp ASC",
+    "key_desc": "grp DESC",
+}
+
+
+def _group_key_expr(q: FabricQuery) -> tuple[str, list[Any]]:
+    """SQL expression + bound params for the GROUP BY key (S1).
+
+    Plain grouping extracts the raw JSON property value. With ``q.ranges`` the
+    numeric value (CAST to REAL, same affinity rule as numeric filters) is
+    bucketed by a CASE chain — bounds AND labels are bound ``?`` params, and a
+    value matching no bucket (or a missing property, which CASTs to NULL) falls
+    to ELSE NULL and is dropped by the caller's HAVING.
+    """
+    path = f"$.{q.group_by}"
+    if not q.ranges:
+        return "json_extract(o.properties, ?)", [path]
+
+    cast = "CAST(json_extract(o.properties, ?) AS REAL)"
+    whens: list[str] = []
+    params: list[Any] = []
+    for bucket in q.ranges:
+        conds: list[str] = []
+        # A NULL property must never match an open-ended bucket by accident:
+        # NULL comparisons yield NULL (not-matched) in SQLite, so the bound
+        # checks alone are safe — no explicit IS NOT NULL needed.
+        if bucket.min is not None:
+            conds.append(f"{cast} >= ?")
+            params.extend([path, bucket.min])
+        if bucket.max is not None:
+            conds.append(f"{cast} < ?")
+            params.extend([path, bucket.max])
+        whens.append(f"WHEN {' AND '.join(conds)} THEN ?")
+        params.append(bucket.resolved_label())
+    return f"CASE {' '.join(whens)} ELSE NULL END", params
+
+
+def _aggregate_expr(q: FabricQuery) -> tuple[str, list[Any]]:
+    """SQL expression + bound params for the aggregate value (S1).
+
+    ``count`` counts the rows in each group; the numeric folds read
+    ``aggregate_field`` CAST to REAL so "sum of price" adds numbers even when a
+    connector stored them as JSON strings (the same affinity rule the numeric
+    filter operators use). The function name comes from ``_AGG_FN_SQL``.
+    """
+    if q.aggregate == "count":
+        return "COUNT(*)", []
+    fn = _AGG_FN_SQL[q.aggregate or ""]
+    return f"{fn}(CAST(json_extract(o.properties, ?) AS REAL))", [f"$.{q.aggregate_field}"]
+
+
+def _describe_filters(filters: dict[str, Any]) -> str:
+    """Human-readable one-line summary of a FabricQuery.filters bag (S1 steps)."""
+    parts: list[str] = []
+    for key, raw_val in filters.items():
+        if isinstance(raw_val, dict):
+            for op, value in raw_val.items():
+                parts.append(f"{key} {op} {value}")
+        else:
+            parts.append(f"{key} = {raw_val}")
+    return " and ".join(parts)
+
+
+def _build_plan_steps(q: FabricQuery, *, total: int, group_count: int) -> list[QueryPlanStep]:
+    """The human-readable reasoning trace for an aggregation run (S1).
+
+    Emits the ``{title, detail?, status?}`` QueryPlanStep contract ripple's
+    ReasoningTrace consumes: what was filtered/scanned (with the matched-object
+    count), how it was grouped (property or range buckets), and what was
+    computed. Every step is ``status="done"`` — the read engine reports a
+    finished run; "thinking" is for streaming surfaces.
+    """
+    type_label = q.type_name or q.type_id or "objects"
+    steps: list[QueryPlanStep] = []
+    if q.filters:
+        steps.append(
+            QueryPlanStep(
+                title=f"Filtered {type_label} where {_describe_filters(q.filters)}",
+                detail=f"{total} matching objects",
+                status="done",
+            )
+        )
+    else:
+        steps.append(
+            QueryPlanStep(
+                title=f"Scanned {type_label}",
+                detail=f"{total} objects",
+                status="done",
+            )
+        )
+    groups_label = f"{group_count} group{'s' if group_count != 1 else ''}"
+    grouped_detail = (
+        f"{len(q.ranges)} value range{'s' if len(q.ranges) != 1 else ''}"
+        if q.ranges
+        else groups_label
+    )
+    steps.append(
+        QueryPlanStep(title=f"Grouped by {q.group_by}", detail=grouped_detail, status="done")
+    )
+    computed = f"Computed {q.aggregate}"
+    if q.aggregate_field:
+        computed += f" of {q.aggregate_field}"
+    steps.append(
+        QueryPlanStep(
+            title=computed,
+            detail=f"{groups_label} from {total} objects",
+            status="done",
+        )
+    )
+    return steps
+
+
+def _looks_numeric(value: Any) -> bool:
+    """True if ``value`` is a real number or a string that parses as one.
+
+    A connector routinely ships a number as a string ("42", "3.14"), so a
+    tolerant check keeps write-time enforcement from breaking live ingest while
+    still rejecting genuine garbage ("not-a-number"). ``bool`` is excluded — it
+    is an ``int`` subclass in Python but is never a valid ``number`` value.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        try:
+            float(value.strip())
+            return True
+        except ValueError:
+            return False
+    return False
+
+
+def _property_value_ok(prop: PropertyDef, value: Any) -> bool:
+    """Return True if ``value`` satisfies ``prop``'s declared type (lenient).
+
+    Enforcement is deliberately tolerant so it never breaks live connector /
+    agent writes (see the module header). Rules per declared ``type``:
+
+    - ``number`` — a real number OR a numeric string (``_looks_numeric``).
+    - ``boolean`` — a ``bool``, ``0`` / ``1``, or a common truthy/falsy string.
+    - ``date`` — a string or a number (an ISO string or an epoch); a
+      ``dict`` / ``list`` / bare ``bool`` is rejected.
+    - ``enum`` — membership in ``enum_values`` (compared directly and as a
+      string) when that set is declared; no constraint when it is empty.
+    - ``string`` / anything unknown — any non-``None`` scalar-or-not is accepted
+      (string fields stay lenient; the meaningful checks are the ones above).
+
+    ``None`` is handled by the caller (skipped — absence is not a type clash).
+    """
+    declared = (prop.type or "string").strip().lower()
+    if declared == "number":
+        return _looks_numeric(value)
+    if declared == "boolean":
+        if isinstance(value, bool):
+            return True
+        if isinstance(value, int) and value in (0, 1):
+            return True
+        return isinstance(value, str) and value.strip().lower() in {
+            "true",
+            "false",
+            "1",
+            "0",
+            "yes",
+            "no",
+        }
+    if declared == "date":
+        return isinstance(value, str) or (
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+        )
+    if declared == "enum":
+        allowed = prop.enum_values or []
+        if not allowed:
+            return True
+        return value in allowed or str(value) in {str(a) for a in allowed}
+    # string / unknown declared type -> no strict constraint.
+    return True
+
+
+def validate_object_properties(obj_type: ObjectType | None, properties: dict[str, Any]) -> None:
+    """Enforce a property bag against a type's declared schema (ontology-operator-ux).
+
+    Raises :class:`FabricTypeError` on the FIRST declared property whose provided
+    value clashes with its ``PropertyDef.type`` / ``enum_values``. Declared-only
+    and lenient by design (see the module header and :func:`_property_value_ok`):
+
+    - ``obj_type is None`` or a type with NO declared properties -> no-op (every
+      pre-schema type and every ``properties=[]`` type keeps working unchanged).
+    - only keys that are BOTH declared AND present with a non-``None`` value are
+      checked; ``required`` is NOT enforced at write time, and unknown extra keys
+      pass through (the schema is open / additive).
+    """
+    if obj_type is None or not obj_type.properties:
+        return
+    declared = {p.name: p for p in obj_type.properties}
+    for key, value in properties.items():
+        prop = declared.get(key)
+        if prop is None or value is None:
+            continue
+        if not _property_value_ok(prop, value):
+            expected = prop.type
+            if prop.type == "enum" and prop.enum_values:
+                expected = f"enum{list(prop.enum_values)}"
+            raise FabricTypeError(
+                f"property {key!r} expected type {expected!r} "
+                f"but got {value!r} ({type(value).__name__})"
+            )
+
+
 class FabricStore:
     """Async SQLite store for Fabric ontology data."""
 
@@ -695,6 +1035,16 @@ class FabricStore:
                     await db.execute(f"ALTER TABLE {_tbl} ADD COLUMN workspace_id TEXT")
                 except aiosqlite.OperationalError:
                     pass
+            # Additive migration (ontology-operator-ux): the schema-version column
+            # on a pre-existing fabric_object_types. Same swallow-the-duplicate
+            # pattern as the tenancy columns above — a pre-version row defaults to
+            # 1, matching the ObjectType model default.
+            try:
+                await db.execute(
+                    "ALTER TABLE fabric_object_types ADD COLUMN version INTEGER DEFAULT 1"
+                )
+            except aiosqlite.OperationalError:
+                pass
             # SZD-2: drop the pre-SZD-2 GLOBAL unique index on LOWER(name) if it
             # exists. It enforced one type name per WHOLE DB; under per-workspace
             # tenancy two tenants must be able to use the same name, so it would
@@ -902,8 +1252,9 @@ class FabricStore:
         async with self._conn() as db:
             await db.execute(
                 "INSERT INTO fabric_object_types"
-                " (id, name, description, icon, color, properties_schema, workspace_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " (id, name, description, icon, color, properties_schema,"
+                " workspace_id, version)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     obj_type.id,
                     obj_type.name,
@@ -912,6 +1263,7 @@ class FabricStore:
                     obj_type.color,
                     json.dumps([p.model_dump() for p in properties]),
                     workspace_id,
+                    obj_type.version,
                 ),
             )
             await db.commit()
@@ -1015,6 +1367,116 @@ class FabricStore:
             await db.execute("DELETE FROM fabric_object_types WHERE id = ?", (type_id,))
             await db.commit()
 
+    async def update_type(
+        self,
+        type_id: str,
+        *,
+        properties: list[PropertyDef] | None = None,
+        renames: dict[str, str] | None = None,
+        description: str | None = None,
+        icon: str | None = None,
+        color: str | None = None,
+        workspace_id: str | None = None,
+    ) -> ObjectType | None:
+        """Version + non-destructively migrate an object type (ontology-operator-ux).
+
+        The operator's "edit the schema" path. Bumps ``version`` and migrates the
+        type's existing objects for the two SAFE change kinds:
+
+        - **rename** — ``renames`` maps ``old_property_name -> new_property_name``.
+          The key is moved on the type's schema AND on every existing object of
+          the type (value preserved), so no object is orphaned by the rename.
+        - **additive add** — a ``PropertyDef`` present in the new ``properties``
+          that the type did not declare before. If it carries a non-``None``
+          ``default``, that default is backfilled onto every existing object that
+          lacks the key; otherwise the property is simply declared (existing
+          objects gain it lazily on their next write).
+
+        **Destructive removal is DEFERRED.** If ``properties`` omits a property the
+        type previously declared (and it is not the source of a rename), the
+        declaration is dropped but the now-orphaned key is LEFT UNTOUCHED on
+        existing objects — no data is scrubbed. This is the documented, intentional
+        behaviour for this build (a later task adds an explicit, opt-in purge).
+
+        Returns the updated :class:`ObjectType`, or ``None`` if ``type_id`` does
+        not resolve within ``workspace_id`` (a cross-tenant / unknown id). Passing
+        neither ``properties`` nor ``renames`` still bumps the version and applies
+        any metadata (``description`` / ``icon`` / ``color``) change.
+        """
+        existing = await self.get_type(type_id, workspace_id=workspace_id)
+        if existing is None:
+            return None
+        renames = {k: v for k, v in (renames or {}).items() if k != v}
+
+        # Resolve the NEW schema. Start from the caller's list (or keep the old
+        # one), then fold in renames so a rename is reflected even when the caller
+        # passes an unchanged property list.
+        new_props = list(properties) if properties is not None else list(existing.properties)
+        if renames:
+            for prop in new_props:
+                if prop.name in renames:
+                    prop.name = renames[prop.name]
+
+        old_names = {p.name for p in existing.properties}
+        # Additive properties carrying a default -> backfill onto existing objects.
+        additive_defaults = {
+            p.name: p.default
+            for p in new_props
+            if p.name not in old_names and p.name not in renames.values() and p.default is not None
+        }
+
+        new_version = (existing.version or 1) + 1
+        schema_json = json.dumps([p.model_dump() for p in new_props])
+        new_description = description if description is not None else existing.description
+        new_icon = icon if icon is not None else existing.icon
+        new_color = color if color is not None else existing.color
+
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            # 1. Migrate existing objects (rename keys + additive default backfill).
+            if renames or additive_defaults:
+                async with db.execute(
+                    "SELECT id, properties FROM fabric_objects WHERE type_id = ?",
+                    (type_id,),
+                ) as cur:
+                    rows = await cur.fetchall()
+                for row in rows:
+                    props = json.loads(row["properties"]) if row["properties"] else {}
+                    changed = False
+                    for old_name, new_name in renames.items():
+                        if old_name in props:
+                            props[new_name] = props.pop(old_name)
+                            changed = True
+                    for name, default in additive_defaults.items():
+                        if name not in props:
+                            props[name] = default
+                            changed = True
+                    if changed:
+                        await db.execute(
+                            "UPDATE fabric_objects SET properties = ?,"
+                            " updated_at = datetime('now') WHERE id = ?",
+                            (json.dumps(props), row["id"]),
+                        )
+            # 2. Persist the new schema + bumped version on the type row.
+            await db.execute(
+                "UPDATE fabric_object_types SET properties_schema = ?, version = ?,"
+                " description = ?, icon = ?, color = ?, updated_at = datetime('now')"
+                " WHERE id = ?",
+                (schema_json, new_version, new_description, new_icon, new_color, type_id),
+            )
+            await db.commit()
+        return ObjectType(
+            id=existing.id,
+            name=existing.name,
+            description=new_description,
+            icon=new_icon,
+            color=new_color,
+            properties=new_props,
+            workspace_id=existing.workspace_id,
+            version=new_version,
+        )
+
     # --- Objects ---
 
     async def create_object(
@@ -1026,6 +1488,11 @@ class FabricStore:
         workspace_id: str | None = None,
     ) -> FabricObject:
         obj_type = await self.get_type(type_id)
+        # Write-time type enforcement (ontology-operator-ux): reject a property
+        # whose value clashes with its declared PropertyDef. Declared-only and
+        # lenient (see validate_object_properties) so pre-schema / empty-schema
+        # types and live connector ingest are unaffected.
+        validate_object_properties(obj_type, properties)
         obj = FabricObject(
             type_id=type_id,
             type_name=obj_type.name if obj_type else "",
@@ -1166,6 +1633,11 @@ class FabricStore:
         existing = await self.get_object(obj_id, workspace_id=workspace_id)
         if not existing:
             return None
+        # Write-time type enforcement (ontology-operator-ux): validate the PROVIDED
+        # delta against the type's declared schema. Only the incoming keys are
+        # checked (a merge-update touches only those); the type is loaded unscoped
+        # because the object read above already carries the tenancy guard.
+        validate_object_properties(await self.get_type(existing.type_id), properties)
         merged = {**existing.properties, **properties}
         if mode == "enforce":
             # FST-5: statement pass BEFORE the commit so the resolver's winner
@@ -2096,6 +2568,29 @@ class FabricStore:
 
         return links, total
 
+    async def get_link(self, link_id: str, workspace_id: str | None = None) -> FabricLink | None:
+        """Fetch one link by id, optionally scoped to ``workspace_id`` (W4a).
+
+        The scoped read is the tenancy guard for deletes: :meth:`unlink` is
+        deliberately unscoped (single-tenant OSS callers), so a multi-tenant
+        caller (the EE router / MCP tools) resolves the link THROUGH this scoped
+        read first — a cross-tenant ``link_id`` returns ``None`` (legacy
+        NULL-workspace links stay visible, matching :meth:`list_links`).
+        """
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        sql = "SELECT * FROM fabric_links WHERE id = ?"
+        params: list[Any] = [link_id]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
+
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, params) as cur:
+                row = await cur.fetchone()
+        return self._row_to_link(row) if row else None
+
     async def unlink(self, link_id: str) -> None:
         await self._ensure_schema()
         async with self._conn() as db:
@@ -2498,57 +2993,13 @@ class FabricStore:
         await self._ensure_schema()
         if q.path:
             return await self._query_path(q, workspace_id)
+        if q.group_by:
+            # Self-serve-analysis S1: aggregation runs over the SAME flat
+            # scoped+filtered WHERE the plain path builds (scope-then-aggregate).
+            # Flag-gated inside — a dark feature rejects fail-loud.
+            return await self._query_aggregate(q, workspace_id)
 
-        conditions: list[str] = []
-        params: list[Any] = []
-
-        if q.type_id:
-            conditions.append("o.type_id = ?")
-            params.append(q.type_id)
-        elif q.type_name:
-            conditions.append("LOWER(o.type_name) = LOWER(?)")
-            params.append(q.type_name)
-
-        if q.linked_to:
-            if q.link_type:
-                link_cond = (
-                    "o.id IN ("
-                    "SELECT to_object_id FROM fabric_links"
-                    " WHERE from_object_id = ? AND link_type = ? "
-                    "UNION "
-                    "SELECT from_object_id FROM fabric_links"
-                    " WHERE to_object_id = ? AND link_type = ?"
-                    ")"
-                )
-                conditions.append(link_cond)
-                params.extend([q.linked_to, q.link_type, q.linked_to, q.link_type])
-            else:
-                link_cond = (
-                    "o.id IN ("
-                    "SELECT to_object_id FROM fabric_links WHERE from_object_id = ? "
-                    "UNION "
-                    "SELECT from_object_id FROM fabric_links WHERE to_object_id = ?"
-                    ")"
-                )
-                conditions.append(link_cond)
-                params.extend([q.linked_to, q.linked_to])
-
-        # Property filters against the JSON properties bag. Kept as a localized
-        # block (see _build_filter_conditions) so concurrent work on this method
-        # — e.g. workspace_id scoping — merges without touching this logic.
-        if q.filters:
-            filter_conditions, filter_params = _build_filter_conditions(q.filters)
-            conditions.extend(filter_conditions)
-            params.extend(filter_params)
-
-        # Tenancy scope (W4a) — an ADDITIONAL condition ANDed alongside the W0d
-        # property filters above, never a replacement for them. Restricts the
-        # result set to the caller's workspace plus legacy NULL-workspace rows.
-        ws_cond, ws_params = _workspace_scope(workspace_id, column="o.workspace_id")
-        if ws_cond:
-            conditions.append(ws_cond)
-            params.extend(ws_params)
-
+        conditions, params = _flat_query_conditions(q, workspace_id)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
         await self._ensure_schema()
@@ -2570,6 +3021,76 @@ class FabricStore:
                 objects = [self._row_to_object(row) async for row in cur]
 
         return FabricQueryResult(objects=objects, total=total)
+
+    async def _query_aggregate(self, q: FabricQuery, workspace_id: str | None) -> FabricQueryResult:
+        """Run a flag-gated SQL GROUP BY aggregation (self-serve-analysis S1).
+
+        Contract:
+
+        - GATE: requires the ``fabric_analyst`` settings flag
+          (POCKETPAW_FABRIC_ANALYST). Off -> :class:`FabricAnalystDisabledError`
+          (fail-loud; the EE router maps it to 422 ``fabric.analyst_disabled``).
+        - SCOPE-THEN-AGGREGATE: the WHERE is built by the same
+          ``_flat_query_conditions`` the plain path uses — tenancy scope (W4a)
+          and property filters constrain the row set BEFORE grouping, so a
+          cross-workspace object can never be counted into a group.
+        - GROUPING: plain ``group_by`` groups on the raw JSON property value;
+          with ``q.ranges`` a fully-parameterized CASE chain buckets the
+          numeric value (min inclusive, max exclusive; labels are bound
+          params). Rows whose group key resolves to NULL (missing property, or
+          a value outside every bucket) are dropped via HAVING.
+        - AGGREGATE: ``count`` = COUNT(*); sum/avg/min/max fold
+          ``aggregate_field`` CAST to REAL (same numeric affinity rule as the
+          numeric filter operators). Function names come from a fixed internal
+          map — user input never reaches the SQL text; property names ride as
+          bound ``$.name`` json_extract path params.
+        - OUTPUT: ``aggregates`` = one ``{"key", "value"}`` dict per group,
+          ordered by ``q.sort`` (default: value descending) and paginated by
+          ``limit``/``offset``; ``objects`` is empty (this is an analysis read,
+          not a fetch); ``total`` = scoped+filtered object count; ``steps`` =
+          the human-readable reasoning trace (:class:`QueryPlanStep`).
+        """
+        from pocketpaw.config import get_settings
+
+        if not get_settings().fabric_analyst:
+            raise FabricAnalystDisabledError(
+                "Fabric self-serve analysis is disabled: aggregation queries "
+                "(group_by/aggregate) require the POCKETPAW_FABRIC_ANALYST "
+                "flag. Plain queries remain available."
+            )
+
+        # The model validator guarantees: group_by set, aggregate normalized
+        # (count default), aggregate_field present iff sum/avg/min/max, no path.
+        assert q.group_by is not None and q.aggregate is not None
+
+        conditions, params = _flat_query_conditions(q, workspace_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        group_expr, group_params = _group_key_expr(q)
+        agg_expr, agg_params = _aggregate_expr(q)
+        order_sql = _AGG_SORT_SQL[q.sort or "value_desc"]
+
+        sql = (
+            f"SELECT {group_expr} AS grp, {agg_expr} AS val"
+            f" FROM fabric_objects o {where}"
+            " GROUP BY grp HAVING grp IS NOT NULL"
+            f" ORDER BY {order_sql} LIMIT ? OFFSET ?"
+        )
+
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT COUNT(*) as cnt FROM fabric_objects o {where}", params
+            ) as cur:
+                row = await cur.fetchone()
+                total = row["cnt"] if row else 0
+            async with db.execute(
+                sql, [*group_params, *agg_params, *params, q.limit, q.offset]
+            ) as cur:
+                aggregates = [{"key": r["grp"], "value": r["val"]} async for r in cur]
+
+        steps = _build_plan_steps(q, total=total, group_count=len(aggregates))
+        return FabricQueryResult(objects=[], total=total, aggregates=aggregates, steps=steps)
 
     async def _query_path(self, q: FabricQuery, workspace_id: str | None) -> FabricQueryResult:
         """Walk ``q.path`` server-side and return the terminal-hop objects.
@@ -2796,6 +3317,9 @@ class FabricStore:
         # column (defensive — current callers all SELECT *).
         keys = row.keys() if hasattr(row, "keys") else ()
         workspace_id = row["workspace_id"] if "workspace_id" in keys else None
+        # version may be absent on a projection that predates the column; a NULL
+        # (pre-migration row) reads back as the model default of 1.
+        version = row["version"] if "version" in keys and row["version"] is not None else 1
         return ObjectType(
             id=row["id"],
             name=row["name"],
@@ -2804,6 +3328,7 @@ class FabricStore:
             color=row["color"] or "#0A84FF",
             properties=[PropertyDef(**p) for p in props_raw],
             workspace_id=workspace_id,
+            version=version,
         )
 
     def _row_to_object(self, row: Any) -> FabricObject:

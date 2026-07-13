@@ -478,6 +478,98 @@ async def test_create_invite_seat_limit(owner, monkeypatch) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# feat/billing-smb-caps — the seat gate is PLAN-SOURCED (max(doc.seats, plan cap)).
+# ---------------------------------------------------------------------------
+
+
+async def test_effective_seat_limit_is_max_of_doc_seats_and_plan(owner) -> None:
+    """The enforced ceiling is max(doc.seats, plan.max_seats) — plan lifts it, and a
+    custom-higher doc.seats never regresses."""
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WSDoc
+
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    doc = await _WSDoc.get(ws.id)
+
+    # Free plan (max_seats=5) == the default doc.seats=5: no change.
+    assert await workspace_service._effective_seat_limit(doc) == 5
+
+    # Upgrade the plan to pro (max_seats=25): the ceiling rises to 25.
+    doc.plan = "pro"
+    await doc.save()
+    assert await workspace_service._effective_seat_limit(doc) == 25
+
+    # A workspace whose custom doc.seats already exceeds the plan cap keeps the
+    # higher number — enforcement never strips seats it already has.
+    doc.plan = "free"
+    doc.seats = 40
+    await doc.save()
+    assert await workspace_service._effective_seat_limit(doc) == 40
+
+    # An uncapped plan (enterprise, max_seats=None) defers to doc.seats.
+    doc.plan = "enterprise"
+    doc.seats = 12
+    await doc.save()
+    assert await workspace_service._effective_seat_limit(doc) == 12
+
+
+async def test_create_invite_uses_plan_seat_limit_not_flat_seats(owner, monkeypatch) -> None:
+    """A workspace saturated at its flat doc.seats but on a higher-cap plan can still
+    invite — the gate sources the limit from the plan, not doc.seats alone."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WSDoc
+
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    # Move to pro (max_seats=25) while doc.seats stays the default 5.
+    doc = await _WSDoc.get(ws.id)
+    doc.plan = "pro"
+    await doc.save()
+
+    # Fill past the OLD flat limit of 5 (owner + 5 members = 6 > 5).
+    for i in range(5):
+        u = await _seed_user(email=f"seat{i}@x.c")
+        await workspace_service._add_member(ws.id, str(u.id), role="member")
+
+    # Under the flat-seats rule this would raise; under the plan cap (25) it succeeds.
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="x@y.z")
+    )
+    assert invite.id
+
+
+async def test_raise_seats_for_plan_lifts_on_upgrade_only(owner) -> None:
+    """raise_seats_for_plan bumps doc.seats UP to the plan cap and never down."""
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WSDoc
+
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    # Default seats == 5. Upgrade to pro (25) lifts the stored cap.
+    new_seats = await workspace_service.raise_seats_for_plan(ws.id, "pro")
+    assert new_seats == 25
+    assert (await _WSDoc.get(ws.id)).seats == 25
+
+    # A "downgrade" to free (cap 5) must NOT strip the 25 seats it already has.
+    unchanged = await workspace_service.raise_seats_for_plan(ws.id, "free")
+    assert unchanged == 25
+    assert (await _WSDoc.get(ws.id)).seats == 25
+
+    # An uncapped plan (enterprise) is a no-op — returns None, leaves seats as-is.
+    ent_result = await workspace_service.raise_seats_for_plan(ws.id, "enterprise")
+    assert ent_result is None
+    assert (await _WSDoc.get(ws.id)).seats == 25
+
+    # An unknown plan key is a safe no-op (None), seats untouched.
+    assert await workspace_service.raise_seats_for_plan(ws.id, "bogus_tier") is None
+    assert (await _WSDoc.get(ws.id)).seats == 25
+
+
 async def test_create_invite_rejects_duplicate_pending(owner, monkeypatch) -> None:
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop

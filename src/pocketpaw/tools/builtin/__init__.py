@@ -100,6 +100,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "AddWidgetTool": (".pocket", "AddWidgetTool"),
     "RemoveWidgetTool": (".pocket", "RemoveWidgetTool"),
     "StartFlowTool": (".flow_tool", "StartFlowTool"),
+    "StepPipelineTool": (".step_pipeline_tool", "StepPipelineTool"),
     "DiscordCLITool": (".discord", "DiscordCLITool"),
     "ConnectorListTool": (".connector_tools", "ConnectorListTool"),
     "ConnectorConnectTool": (".connector_tools", "ConnectorConnectTool"),

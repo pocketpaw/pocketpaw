@@ -1,26 +1,43 @@
-# fabric_ingest — Generic Firestore→Fabric ingestion worker.
+# fabric_ingest — Generic source→Fabric ingestion worker (Firestore + connectors).
 # Created: 2026-06-11 — generic Firestore→Fabric ingestion worker.
+# Updated: 2026-07-11 (feat/real-pipeline-s1) — the transform surface. Mappings
+#   now carry a ``source_kind`` ("firestore" | "connector"): connector mappings
+#   dispatch through the OSS ``FABRIC_INGESTORS`` registry with the workspace's
+#   own WorkspaceConnector binding (per-user token via ``wc.user_id``). New
+#   ``router.py`` exposes author/list/delete + run-now over the mappings
+#   (mounted at /api/v1/fabric/ingest/*), backed by new service helpers
+#   (``list_mappings`` / ``upsert_mapping`` / ``delete_mapping``).
 # Updated: 2026-06-11 (rebase onto dev) — the upsert path now delegates to the
 #   canonical OSS connector→Fabric mapper (pocketpaw.connectors.fabric_ingest,
 #   landed in the Calendar ingestion PR #1418) instead of a private loop.
-"""Continuously mirror selected Firestore collections into Fabric objects.
+"""Continuously mirror selected sources into Fabric objects.
 
-Fully generic: the per-deployment mapping (which collections, which Fabric
+Fully generic: the per-deployment mapping (which sources, which Fabric
 object types, field maps, cursor fields, link rules) lives in a per-workspace
 ``FabricIngestConfig`` document. NOTHING domain-specific lives in this package.
+Two source kinds per mapping: ``"firestore"`` (the original reader path) and
+``"connector"`` (records pulled through the OSS connector→Fabric ingestor
+registry — gcalendar first).
 
 Pieces
 ------
-* ``service.ingest_collection`` — mirror ONE Firestore collection into Fabric
-  objects for one workspace. Reads the mapping from the workspace's config and
-  upserts each document through the canonical OSS connector→Fabric mapper
-  (``pocketpaw.connectors.fabric_ingest.ingest_records`` — the same loop the
-  Calendar connector ingestion uses), keyed on the doc's source path so a
-  re-run updates rather than duplicates. Every object is stamped with
-  ``workspace_id`` + ``source_connector="firestore"`` + ``source_id`` (the full
-  doc path); the worker advances a REAL high-water cursor taken from document
-  data and applies any link rules. Backfill on first run, incremental
-  thereafter.
+* ``router`` — the transform surface: ``GET/POST/DELETE
+  /fabric/ingest/mappings`` (author the workspace's mappings) and
+  ``POST /fabric/ingest/run`` (run one mapping now). Same gates as the fabric
+  router: license + plan feature ``fabric``, ``fabric.read``/``fabric.write``
+  per route, workspace from ``current_workspace_id``.
+* ``service.ingest_collection`` — mirror ONE source into Fabric objects for
+  one workspace. Reads the mapping from the workspace's config; a firestore
+  mapping upserts each document through the canonical OSS connector→Fabric
+  mapper (``pocketpaw.connectors.fabric_ingest.ingest_records`` — the same
+  loop the Calendar connector ingestion uses), keyed on the doc's source path
+  so a re-run updates rather than duplicates; a connector mapping resolves the
+  workspace's enabled ``WorkspaceConnector`` row and calls the registered
+  ingestor with that row's ``user_id`` (misconfiguration is an error result,
+  never a raise). Every object is stamped with ``workspace_id`` +
+  ``source_connector`` + ``source_id``; the firestore path advances a REAL
+  high-water cursor taken from document data and applies any link rules.
+  Backfill on first run, incremental thereafter.
 * ``service.run_ingest_sweep`` — fan ``ingest_collection`` out across every
   configured (workspace, collection) pair under a bounded concurrency cap;
   per-collection failures are isolated.

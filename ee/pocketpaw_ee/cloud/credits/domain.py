@@ -23,6 +23,11 @@
 # own ledger (the universal meter, mode-agnostic across compute_spend /
 # litellm_spend) instead of the LiteLLM proxy. Framework-free like the other
 # domain shapes — billing consumes this, never the Beanie doc.
+# Changed 2026-07-11 (feat/llm-cost-attribution): ``ModelSpendRow`` gained a
+# ``tokens`` field — the real per-(day, model) token volume summed from the debit
+# ``ref.total_tokens`` the metering path now records. Defaults to 0 so a legacy
+# entry (written before the ref carried tokens) contributes nothing rather than
+# breaking the read; the credits + requests figures are unaffected.
 
 from __future__ import annotations
 
@@ -56,15 +61,18 @@ class ModelSpendRow:
     proxy. ``day`` is ``YYYY-MM-DD`` (UTC, from the entry's ``createdAt`` date);
     ``model`` is the charged model id (``ref.model``, or ``"unknown"`` when the
     debit carried no model); ``credits`` is the POSITIVE credits debited for that
-    (day, model) over the window; ``requests`` is the number of ledger entries in
-    that group (a proxy for request count — the ledger ``ref`` does not carry a
-    token count, so tokens are not recoverable here).
+    (day, model) over the window (integer CREDITS, 1 credit == $0.01 — NOT USD);
+    ``requests`` is the number of ledger entries in that group (a proxy for request
+    count); ``tokens`` is the real total token volume for the group, summed from
+    each debit's ``ref.total_tokens`` (0 for legacy entries written before the ref
+    carried tokens — the credits + requests figures stay accurate regardless).
     """
 
     day: str
     model: str
     credits: int
     requests: int
+    tokens: int = 0
 
 
 @dataclass(frozen=True)

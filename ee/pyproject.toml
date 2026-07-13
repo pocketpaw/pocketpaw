@@ -448,12 +448,32 @@ type = "forbidden"
 allow_indirect_imports = "true"
 source_modules = [
     # Discovered governed rules (SZD slice-2). Only ``rules.service`` owns the
-    # InstinctRuleDoc Beanie write; dto/domain go through it. No router this slice
-    # (rules are born via the _instinct_rule gate executor, not over HTTP).
+    # InstinctRuleDoc / InstinctWorkspaceConfig Beanie writes; dto/domain/router
+    # go through it. The router (feat/instinct-guardrail-rules) is thin — it maps
+    # HTTP to service calls and must not import a Beanie doc directly.
     "pocketpaw_ee.cloud.rules.dto",
     "pocketpaw_ee.cloud.rules.domain",
+    "pocketpaw_ee.cloud.rules.router",
 ]
-forbidden_modules = ["pocketpaw_ee.cloud.models.instinct_rule"]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.instinct_rule",
+    "pocketpaw_ee.cloud.models.instinct_workspace_config",
+]
+
+[[tool.importlinter.contracts]]
+name = "AutomationsStatus — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # feat/external-alerting-c2c3 (C3) — only ``automations_status.service`` owns
+    # the WorkspaceAutomationConfig Beanie writes; dto/domain/router go through it.
+    # The router is thin — it maps HTTP to service calls and must not import a
+    # Beanie doc directly.
+    "pocketpaw_ee.cloud.automations_status.dto",
+    "pocketpaw_ee.cloud.automations_status.domain",
+    "pocketpaw_ee.cloud.automations_status.router",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.workspace_automation_config"]
 
 [[tool.importlinter.contracts]]
 name = "Notifications — Beanie writes only from service.py"
@@ -464,7 +484,13 @@ source_modules = [
     "pocketpaw_ee.cloud.notifications.dto",
     "pocketpaw_ee.cloud.notifications.domain",
 ]
-forbidden_modules = ["pocketpaw_ee.cloud.models.notification"]
+# The external-delivery config doc (feat/external-alerting-delivery) is written
+# only by ``notifications.service`` and read by ``notifications.delivery`` — the
+# router/dto/domain façade must never touch either Beanie doc directly.
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.notification",
+    "pocketpaw_ee.cloud.models.notification_delivery",
+]
 
 [[tool.importlinter.contracts]]
 name = "FileVersions — Beanie writes only from service.py"

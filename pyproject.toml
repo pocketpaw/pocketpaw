@@ -366,6 +366,7 @@ dev = [
 
 [project.scripts]
 pocketpaw = "pocketpaw.__main__:main"
+paw = "pocketpaw.paw.cli:main"
 
 # --- Extension-point providers (OSS-EE split) ---
 # Core (`pocketpaw`) discovers optional providers via importlib entry-points
