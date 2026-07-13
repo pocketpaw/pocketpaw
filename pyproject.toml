@@ -545,7 +545,6 @@ ignore_imports = [
     # try/except runtime import; the OSS core never imports EE statically.
     "pocketpaw.dashboard_lifecycle -> pocketpaw_ee.cloud.chat.runs.executor",
     "pocketpaw.api.v1.cloud_projects -> pocketpaw_ee.cloud.daytona.client",
-    "pocketpaw.api.v1.cloud_projects -> pocketpaw_ee.cloud.daytona.router",
     "pocketpaw.api.v1.cloud_projects -> pocketpaw_ee.cloud.daytona.store",
     # atlas resolves optional EE introspection (Fabric schema) and the
     # role-aware entitlement provider via try/except ImportError seams — an
