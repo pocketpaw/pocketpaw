@@ -502,9 +502,7 @@ class TestLinkDelete:
         again = member_client.delete(f"/api/v1/fabric/links/{lnk['id']}")
         assert again.status_code == 404
 
-    def test_cross_tenant_link_404s_and_survives(
-        self, member_client: TestClient
-    ) -> None:
+    def test_cross_tenant_link_404s_and_survives(self, member_client: TestClient) -> None:
         # A link stamped with ANOTHER workspace inside the same store file must
         # 404 (no existence leak) and must NOT be deleted — the in-row scope
         # guard, independent of the physical per-workspace file split.

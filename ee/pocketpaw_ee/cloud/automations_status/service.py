@@ -195,9 +195,7 @@ async def set_workspace_config(
         doc = WorkspaceAutomationConfig(
             workspace=workspace_id,
             sweeps_enabled=True if sweeps_enabled is None else sweeps_enabled,
-            automations_enabled=(
-                True if automations_enabled is None else automations_enabled
-            ),
+            automations_enabled=(True if automations_enabled is None else automations_enabled),
         )
         await doc.insert()
     else:
@@ -251,8 +249,7 @@ async def automations_enabled_for_workspace(workspace_id: str) -> bool:
         state = await get_workspace_config(workspace_id)
     except Exception:
         logger.warning(
-            "automations_status: automation-gate read failed for workspace=%s — "
-            "failing OPEN",
+            "automations_status: automation-gate read failed for workspace=%s — failing OPEN",
             workspace_id,
             exc_info=True,
         )

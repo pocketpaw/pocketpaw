@@ -1924,9 +1924,7 @@ async def agent_analytics(ctx: RequestContext, window: str = "7d") -> AnalyticsR
         status = ((d.verify or {}).get("verdict") or {}).get("status")
         if status in verdict_counts:
             verdict_counts[status] += 1
-    checkable = (
-        verdict_counts["solved"] + verdict_counts["partial"] + verdict_counts["not_solved"]
-    )
+    checkable = verdict_counts["solved"] + verdict_counts["partial"] + verdict_counts["not_solved"]
     solved_rate = round(verdict_counts["solved"] / checkable * 100, 1) if checkable else None
 
     return AnalyticsResponse(

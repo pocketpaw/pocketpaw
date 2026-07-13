@@ -61,9 +61,7 @@ async def list_mappings(
 ) -> MappingsListResponse:
     """List the caller's workspace's authored transform mappings."""
     mappings = await service.list_mappings(workspace_id)
-    return MappingsListResponse(
-        mappings=[MappingResponse.model_validate(m) for m in mappings]
-    )
+    return MappingsListResponse(mappings=[MappingResponse.model_validate(m) for m in mappings])
 
 
 @router.post(

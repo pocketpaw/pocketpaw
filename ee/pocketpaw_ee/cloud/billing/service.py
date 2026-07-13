@@ -705,9 +705,7 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
         # a resync hiccup must not fail the (already-applied) credit grant / plan
         # move, and the seat gates also lift the ceiling live via the resolved plan.
         try:
-            new_seats = await workspace_service.raise_seats_for_plan(
-                event.workspace_id, tier.key
-            )
+            new_seats = await workspace_service.raise_seats_for_plan(event.workspace_id, tier.key)
             if new_seats is not None:
                 logger.info(
                     "billing.webhook: %s resynced seat cap to %d for workspace=%s plan=%s",

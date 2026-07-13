@@ -360,8 +360,7 @@ def _serialize_type(obj_type: Any) -> dict[str, Any]:
         "version": getattr(obj_type, "version", 1),
         "description": obj_type.description,
         "properties": [
-            {"name": p.name, "type": p.type, "required": p.required}
-            for p in obj_type.properties
+            {"name": p.name, "type": p.type, "required": p.required} for p in obj_type.properties
         ],
     }
 
@@ -463,8 +462,7 @@ async def _fabric_link_create_handler(args: dict) -> dict:
             obj = await store.get_object(obj_id, workspace_id=workspace_id)
             if obj is None:
                 return _error_response(
-                    f"fabric_link_create `{field_name}` {obj_id!r} was not found in this "
-                    "workspace."
+                    f"fabric_link_create `{field_name}` {obj_id!r} was not found in this workspace."
                 )
 
         # One enforcement implementation, two surfaces: reuse the EE router's

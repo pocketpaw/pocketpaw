@@ -486,9 +486,7 @@ def _registry() -> WorkspaceFabricStore:
     return get_registry_store()
 
 
-async def _enforce_link_type(
-    store: FabricStore, workspace_id: str, req: LinkRequest
-) -> None:
+async def _enforce_link_type(store: FabricStore, workspace_id: str, req: LinkRequest) -> None:
     """Reject a link that violates the workspace's declared link schema.
 
     No-op when the workspace has declared no link types (backward compatible).
@@ -520,8 +518,7 @@ async def _enforce_link_type(
         ]
         raise ValidationError(
             "fabric.link_type_mismatch",
-            f"link {req.link_type!r} expects {expected} but got "
-            f"{from_type!r} -> {to_type!r}",
+            f"link {req.link_type!r} expects {expected} but got {from_type!r} -> {to_type!r}",
         )
 
 

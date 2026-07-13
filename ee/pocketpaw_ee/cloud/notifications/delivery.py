@@ -216,8 +216,8 @@ async def _post_one(
 ) -> None:
     """POST the notification to one sink. Raises on failure — the caller
     swallows it per-sink so one dead sink never blocks the others."""
-    payload = _slack_payload(notification) if sink_name == SINK_SLACK else _generic_payload(
-        notification
+    payload = (
+        _slack_payload(notification) if sink_name == SINK_SLACK else _generic_payload(notification)
     )
     resp = await client.post(url, json=payload, timeout=_DELIVERY_TIMEOUT_SECONDS)
     # 2xx is success; anything else is logged but not retried in v1.
