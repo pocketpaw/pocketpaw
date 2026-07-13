@@ -1443,8 +1443,13 @@ async def _deploy_site_doc(
     if mode == "local":
         from pocketpaw_ee.sites import local_server
 
-        deploy = local_deploy or local_server.deploy_local
-        url = deploy(site_id, build.project_dir)
+        # HE-4: the real local deploy is engine-aware too — an html site's static
+        # tree is the project root, not .svelte-kit/cloudflare. The injected test
+        # seam stays 2-arg (fakes don't serve a real tree, so they ignore engine).
+        if local_deploy is not None:
+            url = local_deploy(site_id, build.project_dir)
+        else:
+            url = local_server.deploy_local(site_id, build.project_dir, engine=engine)
     elif mode == "workers":
         # Free workers.dev tier — STATIC sites only. A dynamic site needs a
         # per-tenant D1 + Queues (Phase 2 / use WfP), so reject it cleanly rather
