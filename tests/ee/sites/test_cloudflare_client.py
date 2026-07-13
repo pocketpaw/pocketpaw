@@ -14,6 +14,10 @@
 # bindings + compatibility_date, plus the module file part) so a dynamic site's
 # deployed Worker reaches its per-tenant D1. When omitted it keeps the exact
 # single-module upload (static sites unchanged) — both paths are asserted here.
+# Updated 2026-07-08 (DP0-1 — D1 provisioning): added coverage for
+# create_database(): a successful create returns the uuid at ``result.uuid``, and
+# a Cloudflare error envelope (success:false or non-2xx) fails closed by raising
+# ValidationError with code ``sites.cloudflare_error``.
 from __future__ import annotations
 
 import json
@@ -211,3 +215,61 @@ async def test_non_2xx_raises():
     client = _client(handler)
     with pytest.raises(Exception):
         await client.put_worker(script_name="x", bundle=b"")
+
+
+@pytest.mark.asyncio
+async def test_create_database_returns_uuid_and_posts_name():
+    """DP0-1: create_database POSTs {"name": <name>} to the D1 create endpoint and
+    returns the new database's uuid from ``result.uuid``."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["method"] = request.method
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"success": True, "result": {"uuid": "d1_uuid_xyz", "name": "site-db"}},
+        )
+
+    client = _client(handler)
+    db_id = await client.create_database("site-db")
+    assert db_id == "d1_uuid_xyz"
+    assert seen["method"] == "POST"
+    assert seen["url"].endswith("/accounts/acct_1/d1/database")
+    assert seen["body"] == {"name": "site-db"}
+    # sanity: a real ValidationError type is importable (used by the fail path below).
+    assert ValidationError is not None
+
+
+@pytest.mark.asyncio
+async def test_create_database_error_envelope_raises_cloudflare_error():
+    """A Cloudflare error envelope (success:false) fails closed: create_database
+    raises ValidationError with code ``sites.cloudflare_error``."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"success": False, "errors": [{"message": "d1 quota exceeded"}]}
+        )
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.create_database("site-db")
+    assert exc.value.code == "sites.cloudflare_error"
+
+
+@pytest.mark.asyncio
+async def test_create_database_non_2xx_raises_cloudflare_error():
+    """A non-2xx response fails closed with the same ``sites.cloudflare_error`` code."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"success": False, "errors": [{"message": "boom"}]})
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.create_database("site-db")
+    assert exc.value.code == "sites.cloudflare_error"

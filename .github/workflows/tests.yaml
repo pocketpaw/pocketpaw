@@ -42,8 +42,8 @@ jobs:
     # docs/design/drafts/2026-06-26-cloud-iso-flag-mode-followups.md):
     #   FU-2 — the abandon-sweeper scans all tenants from one store
     #          (tests/cloud/test_action_sweeper.py is multi-tenant under the flag)
-    #   FU-3 — paw_print's colon-qualified owner is not a path-safe workspace id
-    #          (tests/cloud/test_paw_print_decision_loop.py)
+    #   FU-3 — paw_bar's colon-qualified owner is not a path-safe workspace id
+    #          (tests/cloud/test_paw_bar_decision_loop.py)
     # Add each to the list below once it's fixed; then this lane covers the whole
     # cloud surface and the class stops slipping past CI.
     name: pytest (flag mode)

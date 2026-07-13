@@ -1,5 +1,5 @@
 # src/pocketpaw/sites_capture/ingest.py — pure, dependency-free ingest hardening
-# generalized from ee/paw_print/router.py. Origin pinning, honeypot, and mapping
+# generalized from ee/paw_bar/router.py. Origin pinning, honeypot, and mapping
 # interpolation live here so the cloud entity and any other caller share one
 # implementation. Rate-limit COUNTING stays in the store (it needs persistence);
 # this module only holds the stateless predicates + interpolation.
@@ -16,7 +16,7 @@ _PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}")
 
 def origin_allowed(allowed_origins: list[str], origin: str | None) -> bool:
     """Host-only origin match (port + path ignored), generalized from
-    paw-print's `_origin_allowed`. Difference: the capture path is a public
+    paw-bar's `_origin_allowed`. Difference: the capture path is a public
     internet endpoint, so an EMPTY allowlist or a MISSING origin fails closed."""
     if not allowed_origins:
         return False
@@ -38,7 +38,7 @@ def is_honeypot_tripped(payload: dict[str, Any], *, honeypot_field: str) -> bool
 
 def interpolate_mapping(mapping: SiteEventMapping, context: dict[str, Any]) -> dict[str, Any]:
     """Resolve `{{ a.b }}` placeholders in every mapping field — verbatim
-    generalization of paw-print's `_interpolate` / `_lookup`."""
+    generalization of paw-bar's `_interpolate` / `_lookup`."""
     return {key: _interpolate(template, context) for key, template in mapping.fields.items()}
 
 

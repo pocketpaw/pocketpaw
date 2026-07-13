@@ -1,5 +1,25 @@
 """Workspace document — one per deployment/org.
 
+2026-07-10 (compliance-starter): ``WorkspaceSettings.retention_days`` is no
+longer decorative. Added a field validator so a persisted value is always
+``None`` (keep forever) or a POSITIVE day count — 0 / negative are rejected
+at construction, closing both the dedicated retention endpoint and the
+general ``update()`` settings-merge path. The setting is read/written through
+``workspace.service.get_retention`` / ``set_retention`` and enforced by
+``workspace.service.enforce_retention`` (purges audit rows older than the
+cutoff). Nothing else on this document changed.
+
+2026-06-28 (AW-7 template gate deny-on-no-match): added
+``Workspace.instinct_template_default_deny`` — the PER-WORKSPACE override for
+the TEMPLATE-level deny-by-default. ``None`` (the default) means "use the
+global config default" (``Settings.instinct_template_default_deny``, itself
+False). When set True, a template BOUND to a pocket that declares no rule
+matching a MUTATING action parks the write for a human instead of firing;
+reads stay ungated. Resolved exactly like ``instinct_approval_level`` (per-
+workspace field → global default) via
+``resolve_workspace_template_default_deny``; the cloud router reads it and
+threads it through ``run_action`` → ``gate_action``.
+
 2026-06-19 (layered/learning gate, T6): added
 ``Workspace.instinct_approval_level`` — the PER-WORKSPACE override for the
 layered Instinct gate's triager activation level ("ASK" | "TRIAGE" |
@@ -24,7 +44,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from beanie import Indexed
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
@@ -32,7 +52,20 @@ from pocketpaw_ee.cloud.models.base import TimestampedDocument
 class WorkspaceSettings(BaseModel):
     default_agent: str | None = None  # Agent ID
     allow_invites: bool = True
-    retention_days: int | None = None  # None = keep forever
+    # Compliance retention policy: None = keep forever; otherwise a POSITIVE
+    # number of days after which audit records are purged (enforced by
+    # ``workspace.service.enforce_retention``). Zero / negative is rejected so
+    # a bad value can never silently disable retention or wipe everything.
+    retention_days: int | None = None
+
+    @field_validator("retention_days")
+    @classmethod
+    def _validate_retention_days(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError(
+                "retention_days must be a positive number of days, or null to keep forever"
+            )
+        return v
 
 
 class Branding(BaseModel):
@@ -109,6 +142,13 @@ class Workspace(TimestampedDocument):
     # workspace's writes; nothing else changes the default for an existing
     # tenant (design MF-9 — global config cannot silently upgrade tenants).
     instinct_approval_level: str | None = None
+    # AW-7 — per-workspace override for the TEMPLATE-level deny-by-default.
+    # None = use the global config default (Settings.
+    # instinct_template_default_deny, False). True parks a MUTATING action a
+    # bound template declares no rule for (instead of firing); reads stay
+    # ungated. Same MF-9 contract as instinct_approval_level above — a global
+    # env var never silently flips an existing tenant.
+    instinct_template_default_deny: bool | None = None
 
     class Settings:
         name = "workspaces"

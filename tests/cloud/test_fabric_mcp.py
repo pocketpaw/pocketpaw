@@ -18,10 +18,24 @@
 #   * error relaying: bad input types refuse cleanly; a store failure returns a
 #     plain relayable error; missing identity refuses.
 #
+# Updated: 2026-07-11 (feat/paw-cli, C2) — the server grew three ontology
+# MODIFICATION tools; this file now also pins:
+#   * the extended tool-id contract (5 ids).
+#   * fabric_link_create — creates a workspace-stamped link; refuses a
+#     cross-tenant endpoint id; enforces the workspace's DECLARED link schema
+#     through the router's own _enforce_link_type.
+#   * fabric_link_delete — deletes through the scoped get_link guard; a
+#     cross-tenant link id refuses and the row survives.
+#   * fabric_type_update — RBAC-gated on fabric.admin (deny envelope for a
+#     non-admin, never a write); renames migrate existing objects and bump the
+#     type version; refuses an empty change set.
+#
 # `pocketpaw_ee` is import-skipped on an OSS-only install. The handlers read
 # identity through ee.cloud.chat.agent_service ContextVars (set in-test via
 # attach_agent_identity) and the store through pocketpaw.stores.get_fabric_store
 # (patched to a tmp-file store so nothing touches ~/.pocketpaw/fabric.db).
+# The registry (declared link types / schema re-registration) is patched to a
+# tmp-file WorkspaceFabricStore at BOTH import sites (router + storage).
 
 from __future__ import annotations
 
@@ -113,9 +127,15 @@ def test_tool_id_contract_pin() -> None:
     assert fabric_mcp.SERVER_NAME == "pocketpaw_fabric"
     assert fabric_mcp.FABRIC_QUERY_TOOL_ID == "mcp__pocketpaw_fabric__fabric_query"
     assert fabric_mcp.FABRIC_STATS_TOOL_ID == "mcp__pocketpaw_fabric__fabric_stats"
+    assert fabric_mcp.FABRIC_LINK_CREATE_TOOL_ID == "mcp__pocketpaw_fabric__fabric_link_create"
+    assert fabric_mcp.FABRIC_LINK_DELETE_TOOL_ID == "mcp__pocketpaw_fabric__fabric_link_delete"
+    assert fabric_mcp.FABRIC_TYPE_UPDATE_TOOL_ID == "mcp__pocketpaw_fabric__fabric_type_update"
     assert fabric_mcp.FABRIC_TOOL_IDS == (
         "mcp__pocketpaw_fabric__fabric_query",
         "mcp__pocketpaw_fabric__fabric_stats",
+        "mcp__pocketpaw_fabric__fabric_link_create",
+        "mcp__pocketpaw_fabric__fabric_link_delete",
+        "mcp__pocketpaw_fabric__fabric_type_update",
     )
 
 
@@ -308,3 +328,245 @@ async def test_store_error_is_relayed(store, monkeypatch):
         res = await fabric_mcp._fabric_query_handler({"type_name": "Customer"})
     assert res.get("is_error") is True
     assert "fabric db is locked" in res["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# C2 modification tools — fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def registry(tmp_path: Path, monkeypatch):
+    """Isolated workspace-registry store, patched at BOTH call sites: the
+    router's module-level import (used by _enforce_link_type) and the storage
+    factory (used by the type-update handler's re-registration)."""
+    from pocketpaw_ee.fabric.storage import WorkspaceFabricStore
+
+    reg = WorkspaceFabricStore(tmp_path / "fabric_registry_test.db")
+    monkeypatch.setattr("pocketpaw_ee.fabric.router.get_registry_store", lambda: reg)
+    monkeypatch.setattr("pocketpaw_ee.fabric.storage.get_registry_store", lambda: reg)
+    return reg
+
+
+@pytest.fixture
+def admin_ok(monkeypatch):
+    """Make the fabric.admin RBAC gate PASS: a resolvable user + a no-op check."""
+
+    async def _fake_load_user(user_id):
+        return object()
+
+    monkeypatch.setattr(fabric_mcp, "_load_user", _fake_load_user)
+    monkeypatch.setattr(
+        "pocketpaw_ee.guards.deps.check_workspace_action", lambda user, ws, action: None
+    )
+
+
+async def _seed_link(store: FabricStore, workspace: str = "w1"):
+    """Two Customer objects + one link between them in ``workspace``.
+    Returns (from_id, to_id, link_id)."""
+    obj_type = await store.define_type(name=f"Cust-{workspace}", properties=[])
+    a = await store.create_object(obj_type.id, {"name": "A"}, workspace_id=workspace)
+    b = await store.create_object(obj_type.id, {"name": "B"}, workspace_id=workspace)
+    lnk = await store.link(a.id, b.id, "knows", workspace_id=workspace)
+    return a.id, b.id, lnk.id
+
+
+# ---------------------------------------------------------------------------
+# fabric_link_create
+# ---------------------------------------------------------------------------
+
+
+async def test_link_create_stamps_workspace(store, registry):
+    """A created link lands workspace-stamped — visible to w1, not to w2."""
+    w1_ids = await _seed_customers(store)
+
+    with _identity(workspace="w1"):
+        res = await fabric_mcp._fabric_link_create_handler(
+            {"from_id": w1_ids[0], "to_id": w1_ids[1], "link_type": "competes_with"}
+        )
+
+    body = await _result_body(res)
+    assert body["created"] is True
+    assert body["link"]["from_object_id"] == w1_ids[0]
+    assert body["link"]["link_type"] == "competes_with"
+
+    links_w1, total_w1 = await store.list_links(workspace_id="w1")
+    assert total_w1 == 1
+    _, total_w2 = await store.list_links(workspace_id="w2")
+    assert total_w2 == 0
+
+
+async def test_link_create_refuses_cross_tenant_endpoint(store, registry):
+    """An endpoint id belonging to another workspace refuses — no link written."""
+    await _seed_customers(store)
+    # The w2 object (scoped read from w1 must not resolve it).
+    w2_objs = await store.query(
+        __import__("pocketpaw.fabric.models", fromlist=["FabricQuery"]).FabricQuery(),
+        workspace_id="w2",
+    )
+    w2_id = w2_objs.objects[0].id
+    w1_ids = await _seed_customers(store)
+
+    with _identity(workspace="w1"):
+        res = await fabric_mcp._fabric_link_create_handler(
+            {"from_id": w1_ids[0], "to_id": w2_id, "link_type": "knows"}
+        )
+
+    assert res.get("is_error") is True
+    assert "not found in this workspace" in res["content"][0]["text"]
+    _, total = await store.list_links(workspace_id="w1")
+    assert total == 0
+
+
+async def test_link_create_enforces_declared_schema(store, registry):
+    """With a declared link schema, an unregistered link type refuses — the
+    router's own enforcement runs behind the MCP tool."""
+    w1_ids = await _seed_customers(store)
+    registry.register_link("w1", "has_order", "Customer", "Order")
+
+    with _identity(workspace="w1"):
+        res = await fabric_mcp._fabric_link_create_handler(
+            {"from_id": w1_ids[0], "to_id": w1_ids[1], "link_type": "made_up_type"}
+        )
+
+    assert res.get("is_error") is True
+    assert "made_up_type" in res["content"][0]["text"]
+    _, total = await store.list_links(workspace_id="w1")
+    assert total == 0
+
+
+@pytest.mark.parametrize("missing", ["from_id", "to_id", "link_type"])
+async def test_link_create_requires_fields(store, registry, missing):
+    args = {"from_id": "a", "to_id": "b", "link_type": "knows"}
+    del args[missing]
+    with _identity(workspace="w1"):
+        res = await fabric_mcp._fabric_link_create_handler(args)
+    assert res.get("is_error") is True
+    assert f"`{missing}`" in res["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# fabric_link_delete
+# ---------------------------------------------------------------------------
+
+
+async def test_link_delete_removes_own_link(store):
+    _, _, link_id = await _seed_link(store, workspace="w1")
+
+    with _identity(workspace="w1"):
+        res = await fabric_mcp._fabric_link_delete_handler({"link_id": link_id})
+
+    body = await _result_body(res)
+    assert body["deleted"] is True
+    assert body["link"]["id"] == link_id
+    _, total = await store.list_links(workspace_id="w1")
+    assert total == 0
+
+
+async def test_link_delete_refuses_cross_tenant_link(store):
+    """Another tenant's link id refuses, and the row SURVIVES."""
+    _, _, w2_link_id = await _seed_link(store, workspace="w2")
+
+    with _identity(workspace="w1"):
+        res = await fabric_mcp._fabric_link_delete_handler({"link_id": w2_link_id})
+
+    assert res.get("is_error") is True
+    assert "not found in this workspace" in res["content"][0]["text"]
+    _, total = await store.list_links(workspace_id="w2")
+    assert total == 1
+
+
+async def test_link_delete_requires_link_id(store):
+    with _identity(workspace="w1"):
+        res = await fabric_mcp._fabric_link_delete_handler({})
+    assert res.get("is_error") is True
+    assert "`link_id`" in res["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# fabric_type_update
+# ---------------------------------------------------------------------------
+
+
+async def test_type_update_renames_and_bumps_version(store, registry, admin_ok):
+    """A rename migrates existing objects and bumps the type version."""
+    from pocketpaw.fabric.models import PropertyDef
+
+    obj_type = await store.define_type(
+        name="Customer",
+        properties=[PropertyDef(name="name", type="string")],
+        workspace_id="w1",
+    )
+    obj = await store.create_object(obj_type.id, {"name": "Acme"}, workspace_id="w1")
+
+    with _identity(workspace="w1"):
+        res = await fabric_mcp._fabric_type_update_handler(
+            {"type_name": "Customer", "renames": {"name": "full_name"}}
+        )
+
+    body = await _result_body(res)
+    assert body["updated"] is True
+    assert body["type"]["version"] == 2
+
+    migrated = await store.get_object(obj.id, workspace_id="w1")
+    assert migrated.properties.get("full_name") == "Acme"
+    assert "name" not in migrated.properties
+
+
+async def test_type_update_denied_for_non_admin(store, registry, monkeypatch):
+    """A non-admin gets a structured deny envelope and NO write happens."""
+    from pocketpaw_ee.guards.rbac import Forbidden
+
+    async def _fake_load_user(user_id):
+        return object()
+
+    def _deny(user, ws, action):
+        raise Forbidden("workspace.insufficient_role", "admin required")
+
+    monkeypatch.setattr(fabric_mcp, "_load_user", _fake_load_user)
+    monkeypatch.setattr("pocketpaw_ee.guards.deps.check_workspace_action", _deny)
+
+    obj_type = await store.define_type(name="Customer", properties=[], workspace_id="w1")
+
+    with _identity(workspace="w1"):
+        res = await fabric_mcp._fabric_type_update_handler(
+            {"type_name": "Customer", "description": "hacked"}
+        )
+
+    body = await _result_body(res)
+    assert body["denied"] is True
+    assert body["ok"] is False
+    unchanged = await store.get_type(obj_type.id, workspace_id="w1")
+    assert unchanged.description != "hacked"
+
+
+async def test_type_update_requires_a_change(store, registry, admin_ok):
+    await store.define_type(name="Customer", properties=[], workspace_id="w1")
+    with _identity(workspace="w1"):
+        res = await fabric_mcp._fabric_type_update_handler({"type_name": "Customer"})
+    assert res.get("is_error") is True
+    assert "at least one change" in res["content"][0]["text"]
+
+
+async def test_type_update_unknown_type_refuses(store, registry, admin_ok):
+    with _identity(workspace="w1"):
+        res = await fabric_mcp._fabric_type_update_handler(
+            {"type_name": "Ghost", "description": "x"}
+        )
+    assert res.get("is_error") is True
+    assert "Ghost" in res["content"][0]["text"]
+
+
+@pytest.mark.parametrize(
+    "handler,args",
+    [
+        (fabric_mcp._fabric_link_create_handler, {"from_id": "a", "to_id": "b", "link_type": "t"}),
+        (fabric_mcp._fabric_link_delete_handler, {"link_id": "x"}),
+        (fabric_mcp._fabric_type_update_handler, {"type_name": "Customer", "description": "d"}),
+    ],
+)
+async def test_write_tools_require_identity(store, handler, args):
+    """Called without workspace ContextVars → an explicit error, no write."""
+    res = await handler(args)
+    assert res.get("is_error") is True
+    assert "workspace context" in res["content"][0]["text"]

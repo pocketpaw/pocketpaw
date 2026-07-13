@@ -29,6 +29,11 @@
 # Updated: 2026-05-21 (PR #1164 review) — documented in
 #   ``agent_update_task`` that success_criteria / preconditions are
 #   intentionally not patchable (planner-set, not ad-hoc editable).
+# Updated: 2026-07-02 (feat/svl-5-cloud-verify) — ``_to_domain`` threads
+#   the new ``verify`` dict (Self-Verifying Loop state stamped by the
+#   cloud planner terminal, SVL-5) from the Beanie doc onto the domain
+#   Task so the DTO surfaces it read-only. Not patchable through any
+#   endpoint — the planner terminal is the sole writer.
 """Tasks entity — business logic service.
 
 Public API (all module-level ``async def``):
@@ -127,6 +132,7 @@ def _to_domain(doc: _TaskDoc) -> Task:
         blocked_by=tuple(getattr(doc, "blocked_by", None) or ()),
         success_criteria=tuple(getattr(doc, "success_criteria", None) or ()),
         preconditions=tuple(getattr(doc, "preconditions", None) or ()),
+        verify=dict(getattr(doc, "verify", None) or {}),
         due_at=doc.due_at,
         blocked_reason=doc.blocked_reason,
         created_at=getattr(doc, "createdAt", None),
@@ -550,11 +556,13 @@ async def agent_reassign_task(
     body = ReassignTaskRequest.model_validate(body)
     doc = await _fetch_task(ctx, task_id)
     if doc.creator_id != ctx.user_id and doc.assignee_id != ctx.user_id:
-        # Only the creator or current assignee can reassign. Workspace
-        # members at large must go through their own delegation path.
-        raise Forbidden(
-            "task.reassign_denied", "Only the creator or assignee can reassign this task"
-        )
+        # Workspace owners can also reassign tasks (bulk reassign from MC,
+        # picking up unassigned meeting-notes action items, etc.).
+        if not await _is_workspace_owner(ctx.user_id, doc.workspace_id):
+            raise Forbidden(
+                "task.reassign_denied",
+                "Only the creator, assignee, or workspace owner can reassign this task",
+            )
     doc.assignee = _AssigneeDoc(
         kind=body.assignee_kind,
         id=body.assignee_id,

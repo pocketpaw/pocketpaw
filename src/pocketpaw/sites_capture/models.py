@@ -1,7 +1,7 @@
-# src/pocketpaw/sites_capture/models.py — generalized from paw_print/models.py.
-# A "site form" is the generalization of a paw-print widget: an origin-pinned,
+# src/pocketpaw/sites_capture/models.py — generalized from paw_bar/models.py.
+# A "site form" is the generalization of a paw-bar widget: an origin-pinned,
 # rate-limited, signed-key-gated public ingest surface. SiteEventMapping is the
-# verbatim generalization of PawPrintEventMapping (event type → store object).
+# verbatim generalization of PawBarEventMapping (event type → store object).
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ class SiteEventMapping(BaseModel):
     """How an inbound form submission becomes a tenant-store Lead record.
 
     `creates` is the lead's logical type; `fields` values use `{{ placeholder }}`
-    interpolation over the submission payload + metadata (mirrors paw-print)."""
+    interpolation over the submission payload + metadata (mirrors paw-bar)."""
 
     creates: str
     fields: dict[str, str] = Field(default_factory=dict)

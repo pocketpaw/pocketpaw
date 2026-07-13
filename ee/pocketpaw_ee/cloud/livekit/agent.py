@@ -7,7 +7,13 @@ as a silent listener participant and transcribes the conversation using
 Deepgram's speech-to-text API.
 
 1. Connects to the LiveKit room via ``livekit.rtc.Room`` (WebRTC)
-2. Subscribes to all remote audio tracks
+2. Subscribes to remote MICROPHONE AUDIO tracks only — never video or
+   screenshare. The room is joined with ``auto_subscribe=False`` and each
+   audio publication is opted in via ``_should_subscribe`` /
+   ``publication.set_subscribed(True)``. This keeps the bot's per-participant
+   load flat: auto-subscribe would otherwise pull (and decode) every
+   participant's video, which the bot never uses (Bug A — the call got
+   unstable past a few participants).
 3. Pipes each track through Deepgram STT streaming for real-time transcription
 4. Accumulates transcript segments with speaker identification
 5. Detects when the room empties (via polling + room events)
@@ -40,7 +46,9 @@ from typing import Any
 from pocketpaw_ee.cloud.livekit.prompts import (
     ANTHROPIC_SUMMARY_PROMPT,
     DEEPSEEK_SUMMARY_PROMPT,
+    MERGE_SUMMARY_PROMPT,
     OPENAI_SUMMARY_PROMPT,
+    PROGRESSIVE_SUMMARY_PROMPT,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,6 +62,52 @@ _CALL_END_GRACE_SECONDS = 5
 
 # How often (seconds) to poll room state
 _MONITOR_POLL_INTERVAL = 5
+
+# How often (seconds) to run progressive summarization of accumulated transcript
+_PROGRESSIVE_INTERVAL = 300  # 5 minutes
+
+# Max transcript chars in the stdout JSON payload. The parent reads via
+# StreamReader.readline() which has a default 64 KiB limit. The rest of the
+# payload (summary, participants, etc.) takes ~10-14 KiB, so cap transcript at
+# 40 KiB to keep the total comfortably under 64 KiB.
+_MAX_STDOUT_TRANSCRIPT_CHARS = 40_000
+
+# Redis key prefix for progressive summary storage
+_REDIS_PROGRESSIVE_KEY = "livekit:progressive:{group_id}"
+# TTL for the progressive summaries Redis key (6 hours — plenty for any call)
+_REDIS_PROGRESSIVE_TTL = 6 * 3600
+
+
+# ---------------------------------------------------------------------------
+# Track subscription policy
+# ---------------------------------------------------------------------------
+
+
+def _should_subscribe(publication: Any) -> bool:
+    """Decide whether the call bot should subscribe to a remote publication.
+
+    The meeting-notes bot only transcribes participant microphone audio, so it
+    subscribes to microphone audio publications and nothing else — never video
+    (camera or screenshare) and never screenshare system audio. Combined with
+    ``auto_subscribe=False`` on connect, this keeps the bot's per-participant
+    load flat instead of pulling and decoding every participant's video.
+
+    Kept as a small pure function (it only reads ``publication.kind`` and
+    ``publication.source``) so the subscribe decision is unit-testable without
+    standing up the whole LiveKit SDK.
+    """
+    # ``kind`` / ``source`` are protobuf int enums (TrackKind.ValueType /
+    # TrackSource.ValueType), NOT strings — comparing against "audio" silently
+    # never matches.
+    from livekit.rtc import TrackKind, TrackSource
+
+    if getattr(publication, "kind", None) != TrackKind.KIND_AUDIO:
+        return False
+    # ``source`` may be SOURCE_UNKNOWN when the publisher didn't tag the track;
+    # treat untagged audio as a microphone (the common plain-audio publish) so
+    # we don't drop real speech. Screenshare system audio is excluded.
+    source = getattr(publication, "source", TrackSource.SOURCE_UNKNOWN)
+    return source in (TrackSource.SOURCE_MICROPHONE, TrackSource.SOURCE_UNKNOWN)
 
 
 # ---------------------------------------------------------------------------
@@ -92,9 +146,18 @@ class CallMeetingAgent:
         self._running = False
         self._monitor_task: asyncio.Task | None = None
         self._transcribe_task: asyncio.Task | None = None
+        self._progressive_task: asyncio.Task | None = None
 
         # LiveKit RTC room (set when connected)
         self._rtc_room: Any = None
+
+        # ── Progressive summarization state ──
+        # How many transcript segments have been consumed by progressive summaries
+        self._progressive_last_idx: int = 0
+        # In-memory fallback list of progressive summaries (dicts)
+        self._progressive_summaries: list[dict[str, Any]] = []
+        # Cached Redis client (created lazily)
+        self._redis: Any = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -122,6 +185,9 @@ class CallMeetingAgent:
         # Connect to the LiveKit room and begin transcription
         self._transcribe_task = asyncio.create_task(self._connect_and_transcribe())
 
+        # Progressive summarization (runs every 5 min during the call)
+        self._progressive_task = asyncio.create_task(self._progressive_worker())
+
     async def stop(self) -> None:
         """Stop the agent and generate meeting notes."""
         self._running = False
@@ -142,6 +208,10 @@ class CallMeetingAgent:
         if self._transcribe_task:
             self._transcribe_task.cancel()
 
+        # Cancel progressive summarization so it doesn't fire mid-finalize
+        if self._progressive_task:
+            self._progressive_task.cancel()
+
         await self._finalize_notes()
 
         # Brief drain for cancelled tasks so they don't leak
@@ -155,6 +225,14 @@ class CallMeetingAgent:
                 await asyncio.wait_for(self._monitor_task, timeout=1)
             except (asyncio.CancelledError, TimeoutError):
                 pass
+        if self._progressive_task and not self._progressive_task.done():
+            try:
+                await asyncio.wait_for(self._progressive_task, timeout=3)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
+
+        # Close Redis if we opened it
+        await self._close_redis()
 
         logger.info(
             "CallMeetingAgent stopped for room %s (group %s)",
@@ -204,6 +282,12 @@ class CallMeetingAgent:
         """
         import aiohttp
 
+        # Declared before the try so the finally block can always clean them
+        # up — even if the livekit import below fails.
+        stt_streams: dict[str, Any] = {}  # participant identity → Deepgram stream
+        pipe_tasks: dict[str, asyncio.Task] = {}  # participant identity → audio pipe task
+        http_session: Any = None
+
         try:
             from livekit.plugins.deepgram import STT as DeepgramSTT
             from livekit.rtc import (
@@ -214,13 +298,13 @@ class CallMeetingAgent:
                 TrackSource,
             )
 
-            room_opts = RoomOptions(auto_subscribe=True)
+            # auto_subscribe=False: do NOT pull every participant's tracks.
+            # The bot opts in to microphone audio only (see _should_subscribe),
+            # so it never decodes the video/screenshare it has no use for —
+            # which is what made the call unstable past a few participants.
+            room_opts = RoomOptions(auto_subscribe=False)
             room = Room(loop=asyncio.get_event_loop())
             self._rtc_room = room
-
-            # Track STT streams keyed by participant identity
-            stt_streams: dict[str, Any] = {}
-            pipe_tasks: dict[str, asyncio.Task] = {}
 
             # Shared HTTP session for Deepgram (avoids "outside job context" error)
             http_session = aiohttp.ClientSession()
@@ -295,6 +379,34 @@ class CallMeetingAgent:
                     )
 
             # ------------------------------------------------------------------
+            # Helper: opt in to a participant's microphone publications
+            # ------------------------------------------------------------------
+            def _subscribe_mic_publications(participant: RemoteParticipant) -> None:
+                """Subscribe to a participant's mic audio publications only.
+
+                With ``auto_subscribe=False`` nothing is subscribed by default,
+                so we explicitly opt in to microphone audio (and never video /
+                screenshare) via ``_should_subscribe``.
+                """
+                for pub in participant.track_publications.values():
+                    if _should_subscribe(pub) and not pub.subscribed:
+                        logger.info(
+                            "Agent: subscribing to %s's mic audio track",
+                            participant.name or participant.identity,
+                        )
+                        pub.set_subscribed(True)
+
+            # ------------------------------------------------------------------
+            # Helper: close a Deepgram STT stream (fire-and-forget on disconnect)
+            # ------------------------------------------------------------------
+            async def _aclose_stt_stream(stt_stream: Any, pid: str) -> None:
+                """Close a Deepgram WebSocket stream so it doesn't leak."""
+                try:
+                    await stt_stream.aclose()
+                except Exception as exc:
+                    logger.debug("Error closing STT stream for %s: %s", pid, exc)
+
+            # ------------------------------------------------------------------
             # Event handlers (set up BEFORE connect to avoid race conditions)
             # ------------------------------------------------------------------
 
@@ -309,14 +421,44 @@ class CallMeetingAgent:
                     participant.name or pid,
                     pid,
                 )
+                # Opt in to any mic audio they already have published; tracks
+                # published later are picked up by the track_published handler.
+                _subscribe_mic_publications(participant)
                 asyncio.create_task(_setup_audio_pipe_for_participant(participant))
+
+            @room.on("track_published")
+            def on_track_published(publication: Any, participant: Any) -> None:
+                """Subscribe to newly published microphone audio only.
+
+                With ``auto_subscribe=False`` the server forwards a track only
+                once we subscribe, so this is where we opt in to mic audio (and
+                skip video / screenshare entirely).
+                """
+                pid = participant.identity if participant else ""
+                if not pid or pid == "call-bot":
+                    return
+                if _should_subscribe(publication) and not publication.subscribed:
+                    logger.info(
+                        "Agent: subscribing to %s's published mic audio track",
+                        participant.name or pid,
+                    )
+                    publication.set_subscribed(True)
 
             @room.on("participant_disconnected")
             def on_participant_disconnected(participant: RemoteParticipant) -> None:
-                """Clean up when a participant leaves."""
+                """Clean up when a participant leaves.
+
+                Cancels the audio pipe task and closes the participant's
+                Deepgram WebSocket so it doesn't leak for the rest of a long
+                call.
+                """
                 pid = participant.identity
-                stt_streams.pop(pid, None)
-                pipe_tasks.pop(pid, None)
+                stt_stream = stt_streams.pop(pid, None)
+                pipe_task = pipe_tasks.pop(pid, None)
+                if pipe_task is not None:
+                    pipe_task.cancel()
+                if stt_stream is not None:
+                    asyncio.create_task(_aclose_stt_stream(stt_stream, pid))
                 logger.info(
                     "Agent: participant disconnected: %s",
                     pid,
@@ -328,13 +470,13 @@ class CallMeetingAgent:
                 publication: Any,
                 participant: Any,
             ) -> None:
-                """Fallback: handle any tracks that get auto-subscribed.
+                """Safety net: ensure a pipe exists for a subscribed mic track.
 
-                This is a safety net in case ``from_participant`` doesn't
-                cover all scenarios. We only act if we don't already have
-                a pipe for this participant.
+                With ``auto_subscribe=False`` this fires only for tracks we
+                explicitly subscribed to (mic audio), but we still guard with
+                ``_should_subscribe`` and skip if a pipe already exists.
                 """
-                if track.kind != "audio":
+                if not _should_subscribe(publication):
                     return
                 pid = participant.identity if participant else ""
                 if not pid or pid == "call-bot":
@@ -381,14 +523,9 @@ class CallMeetingAgent:
                 )
                 asyncio.create_task(_setup_audio_pipe_for_participant(participant))
 
-                # Also explicitly subscribe to any audio publications as backup
-                for pub in participant.track_publications.values():
-                    if pub.kind == "audio" and not pub.subscribed:
-                        logger.info(
-                            "Agent: explicitly subscribing to %s's audio track",
-                            participant.name or pid,
-                        )
-                        pub.set_subscribed(True)
+                # Explicitly opt in to their mic audio publications (needed
+                # under auto_subscribe=False so the server forwards the track).
+                _subscribe_mic_publications(participant)
 
             logger.info(
                 "Agent: transcription running for room %s (watching %d participants)",
@@ -417,17 +554,21 @@ class CallMeetingAgent:
 
             logger.error("Traceback:\n%s", traceback.format_exc())
         finally:
+            # Cancel any still-running audio pipe tasks
+            for t in pipe_tasks.values():
+                t.cancel()
             # Clean up STT streams
-            for pid, s in list(stt_streams.items()):
+            for s in list(stt_streams.values()):
                 try:
                     await s.aclose()
                 except Exception:
                     pass
-            # Clean up the HTTP session
-            try:
-                await http_session.close()
-            except Exception:
-                pass
+            # Clean up the HTTP session (may be None if the import failed)
+            if http_session is not None:
+                try:
+                    await http_session.close()
+                except Exception:
+                    pass
 
     async def _pipe_audio_to_stt(
         self,
@@ -566,6 +707,8 @@ class CallMeetingAgent:
                                 await self._transcribe_task
                             except asyncio.CancelledError:
                                 pass
+                        if self._progressive_task:
+                            self._progressive_task.cancel()
                         await self._finalize_notes()
                         await self._cleanup_room()
                         return
@@ -619,65 +762,79 @@ class CallMeetingAgent:
     # ------------------------------------------------------------------
 
     async def _finalize_notes(self) -> None:
-        """Generate and post meeting notes to the group."""
+        """Generate and post meeting notes to the group.
+
+        Uses progressive summaries (accumulated every 5 min during the call)
+        when available. Falls back to sending the raw (truncated) transcript
+        if the call was too short for any progressive summary.
+        """
         logger.warning("Agent: _finalize_notes called")
         duration = int(time.time() - self._call_start_time)
 
-        # Collect participant names from segments + room info
+        # Build the full transcript text (used as fallback + for the stdout payload)
         speakers_seen: set[str] = set()
-
+        transcript_text = ""
         if self.transcript_segments:
             transcript_lines = []
             for seg in self.transcript_segments:
                 speaker = seg.get("speaker", "Unknown")
                 speakers_seen.add(speaker)
                 transcript_lines.append(f"[{speaker}]: {seg['text']}")
-
             transcript_text = "\n".join(transcript_lines)
 
-            # Truncate long transcripts before sending to the LLM so the
-            # API call finishes within the process-grace-period window.
-            # Limit to ~5K chars (~1K tokens) which captures enough context
-            # for a useful summary while keeping latency predictable.
-            # The full transcript is still included in the meeting notes payload.
+        # ── Try progressive merge path ──
+        # Fetch progressive summaries that were accumulated every 5 min.
+        # Each covers a small chunk of the call so the merge LLM gets full
+        # context without truncation.
+        progressive_summaries = await self._fetch_progressive_summaries()
+        if progressive_summaries:
+            logger.info(
+                "Agent: merging %d progressive summaries for final notes",
+                len(progressive_summaries),
+            )
+            try:
+                summary, action_items = await self._merge_progressive_summaries(
+                    progressive_summaries,
+                    transcript_text,
+                )
+            except Exception:
+                logger.exception("Agent: progressive merge failed — falling back to direct summary")
+                summary = ""
+                action_items = []
+        else:
+            summary = ""
+            action_items = []
+
+        # ── Fallback: direct summarization if progressive path yielded nothing ──
+        if not summary and transcript_text:
+            logger.info("Agent: falling back to direct transcript summarization")
+            # Truncate for the LLM so the API call finishes within the
+            # process-grace-period window (~5K chars / ~1K tokens).
             llm_transcript = transcript_text
             if len(transcript_text) > 5000:
-                logger.info(
-                    "Agent: truncating long transcript for LLM (%d chars → 5000)",
-                    len(transcript_text),
-                )
                 llm_transcript = (
                     transcript_text[:2500]
                     + "\n\n[... transcript truncated at 5000 chars ...]\n\n"
                     + transcript_text[-2500:]
                 )
-
-            # Generate AI summary — non-fatal if it fails; notes still post
-            # with raw transcript (or a fallback message).
             try:
-                summary, action_items = await self._generate_summary(
-                    llm_transcript,
-                )
+                summary, action_items = await self._generate_summary(llm_transcript)
             except Exception:
-                logger.exception("Agent: AI summarization failed — posting notes without summary")
+                logger.exception("Agent: AI summarization failed")
                 summary = "AI summarization unavailable."
                 action_items = ["Transcript captured but summarization failed."]
-        else:
-            transcript_text = ""
 
-            # Still attempt AI summarization so DeepSeek can process
-            # whatever context is available (room info, participant IDs).
+        if not summary:
+            # No speech at all
             try:
                 summary, action_items = await self._generate_summary(
-                    transcript_text or "(no speech captured)",
+                    "(no speech captured)",
                 )
             except Exception:
-                logger.exception("Agent: AI summarization failed — posting notes without summary")
                 summary = "Call ended with no speech detected."
                 action_items = []
 
-        # Merge participant identities from room tracking + transcript.
-        # Resolve identity strings to display names for the meeting notes.
+        # ── Build participant info ──
         all_participants_set: set[str] = set()
         for pid in sorted(self._participant_identities):
             display_name = self._participant_info.get(pid, pid)
@@ -686,24 +843,39 @@ class CallMeetingAgent:
             all_participants_set.add(s)
         all_participants = sorted(all_participants_set)
 
-        # Build structured participant info (identity → display_name) so the
-        # service can resolve @mentions in action items to real user IDs
-        # without querying the User collection.
         participant_map = [
             {"identity": pid, "name": self._participant_info.get(pid, pid)}
             for pid in sorted(self._participant_identities)
         ]
 
         # ── Emit notes payload to stdout ──
-        # Instead of calling post_meeting_notes_to_group directly (which
-        # requires Beanie/MongoDB initialized in this subprocess), we write
-        # the payload as a JSON line to stdout.  The parent process reads
-        # this line and handles the DB write where Beanie is already set up.
+        # The parent reads this via proc.stdout.readline() which has a
+        # default 64 KiB limit (asyncio.StreamReader._DEFAULT_LIMIT).
+        # If the JSON line exceeds that, Python raises LimitOverrunError
+        # ("Separator is found, but chunk is longer than limit") and the
+        # meeting notes are silently dropped.
+        # Truncate the transcript to keep the total well under 64 KiB.
+        _stdout_transcript = transcript_text
+        if len(_stdout_transcript) > _MAX_STDOUT_TRANSCRIPT_CHARS:
+            logger.info(
+                "Agent: truncating transcript for stdout payload (%d chars -> %d)",
+                len(_stdout_transcript),
+                _MAX_STDOUT_TRANSCRIPT_CHARS,
+            )
+            # The truncation message adds chars, so subtract its length
+            # from the available budget before splitting evenly.
+            _TRUNC_MSG = "\n\n[... transcript truncated for stdout ...]\n\n"
+            available = _MAX_STDOUT_TRANSCRIPT_CHARS - len(_TRUNC_MSG)
+            midpoint = available // 2
+            _stdout_transcript = (
+                _stdout_transcript[:midpoint] + _TRUNC_MSG + _stdout_transcript[-midpoint:]
+            )
+
         payload = json.dumps(
             {
                 "type": "meeting_notes",
                 "group_id": self.group_id,
-                "transcript": transcript_text,
+                "transcript": _stdout_transcript,
                 "summary": summary,
                 "action_items": action_items,
                 "participants": all_participants,
@@ -716,6 +888,449 @@ class CallMeetingAgent:
             "Agent: meeting notes payload written to stdout for group %s",
             self.group_id,
         )
+
+    # ------------------------------------------------------------------
+    # Progressive summarization
+    # ------------------------------------------------------------------
+
+    async def _get_redis(self) -> Any | None:
+        """Get the shared Redis client, or None if Redis is unavailable."""
+        if self._redis is not None:
+            return self._redis
+        try:
+            from pocketpaw_ee.cloud._core.redis_client import get_redis
+
+            self._redis = get_redis()
+            return self._redis
+        except (RuntimeError, ImportError, Exception):
+            logger.debug("Agent: Redis unavailable — progressive summaries in memory only")
+            return None
+
+    async def _close_redis(self) -> None:
+        """Close the Redis client if it was opened."""
+        if self._redis is not None:
+            try:
+                await self._redis.aclose()
+            except Exception:
+                pass
+            self._redis = None
+
+    async def _progressive_worker(self) -> None:
+        """Background worker that summarises transcript chunks every 5 minutes.
+
+        Every ``_PROGRESSIVE_INTERVAL`` seconds, collects transcript segments
+        accumulated since the last run, sends them to the LLM for a compact
+        progressive summary, and stores the result in Redis (with an in-memory
+        fallback).  The final merge in ``_finalize_notes`` combines all
+        progressive summaries into the final meeting notes.
+        """
+        # Wait for transcription to actually start producing segments
+        await asyncio.sleep(_PROGRESSIVE_INTERVAL * 0.5)  # 2.5 min initial delay
+
+        while self._running:
+            try:
+                now = time.time()
+                elapsed = now - self._call_start_time
+
+                # Skip if too early in the call
+                if elapsed < 30:
+                    await asyncio.sleep(15)
+                    continue
+
+                # Collect segments since the last progressive run
+                new_segments = self.transcript_segments[self._progressive_last_idx :]
+                if len(new_segments) < 3:
+                    # Not enough speech yet
+                    await asyncio.sleep(_PROGRESSIVE_INTERVAL)
+                    continue
+
+                logger.info(
+                    "Agent: progressive summarising %d new transcript segments "
+                    "(elapsed %ds, call %s)",
+                    len(new_segments),
+                    int(elapsed),
+                    self.group_id,
+                )
+
+                summary_dict = await self._generate_progressive_summary(new_segments)
+                if summary_dict:
+                    await self._store_progressive_summary(summary_dict)
+                    self._progressive_last_idx = len(self.transcript_segments)
+                    logger.info(
+                        "Agent: stored progressive summary %d for group %s",
+                        len(self._progressive_summaries),
+                        self.group_id,
+                    )
+                else:
+                    logger.warning(
+                        "Agent: progressive summary returned empty — retrying next cycle"
+                    )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning(
+                    "Agent: progressive summarization error: %s",
+                    exc,
+                )
+
+            # Wait for the next tick. Use a tight loop with short sleeps so
+            # CancelledError is noticed promptly when the call ends.
+            for _ in range(_PROGRESSIVE_INTERVAL):
+                if not self._running:
+                    return
+                await asyncio.sleep(1)
+
+    async def _generate_progressive_summary(
+        self,
+        segments: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Send a chunk of transcript segments to the LLM for a compact summary.
+
+        Returns a dict with keys: segment_summary, action_items, topics, participants.
+        Returns None if no LLM is configured or all calls fail.
+        """
+        if not segments:
+            return None
+
+        # Format into flat text (same as finalize does for full transcript)
+        lines = []
+        speakers_in_chunk: set[str] = set()
+        for seg in segments:
+            speaker = seg.get("speaker", "Unknown")
+            speakers_in_chunk.add(speaker)
+            lines.append(f"[{speaker}]: {seg['text']}")
+        transcript = "\n".join(lines)
+
+        # Truncate very long chunks (shouldn't happen with 5-min intervals,
+        # but guard against it)
+        if len(transcript) > 15_000:
+            transcript = transcript[:7500] + "\n\n[...]\n\n" + transcript[-7500:]
+
+        prompt = PROGRESSIVE_SUMMARY_PROMPT.format(transcript=transcript)
+
+        # Try DeepSeek first, then Anthropic, then OpenAI
+        deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        if deepseek_key:
+            try:
+                content = await self._call_llm_json(
+                    provider="deepseek",
+                    api_key=deepseek_key,
+                    prompt=prompt,
+                    model="deepseek-chat",
+                    max_tokens=1024,
+                    timeout=60,
+                )
+                if content:
+                    return self._parse_progressive_json(content, speakers_in_chunk)
+            except Exception as exc:
+                logger.warning("DeepSeek progressive summary failed: %s", exc)
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if api_key:
+            try:
+                content = await self._call_llm_json(
+                    provider="anthropic",
+                    api_key=api_key,
+                    prompt=prompt,
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=1024,
+                    timeout=60,
+                )
+                if content:
+                    return self._parse_progressive_json(content, speakers_in_chunk)
+            except Exception as exc:
+                logger.warning("Anthropic progressive summary failed: %s", exc)
+
+        openai_key = os.environ.get("OPENAI_API_KEY", "")
+        if openai_key:
+            try:
+                content = await self._call_llm_json(
+                    provider="openai",
+                    api_key=openai_key,
+                    prompt=prompt,
+                    model="gpt-4o-mini",
+                    max_tokens=1024,
+                    timeout=60,
+                )
+                if content:
+                    return self._parse_progressive_json(content, speakers_in_chunk)
+            except Exception as exc:
+                logger.warning("OpenAI progressive summary failed: %s", exc)
+
+        return None
+
+    async def _call_llm_json(
+        self,
+        provider: str,
+        api_key: str,
+        prompt: str,
+        model: str,
+        max_tokens: int,
+        timeout: int,
+    ) -> str:
+        """Call an LLM provider and return the raw response text.
+
+        Supports 'deepseek', 'anthropic', 'openai'. Returns the content string
+        from the response, or raises on failure.
+        """
+        import httpx
+
+        if provider == "deepseek":
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    "https://api.deepseek.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": max_tokens,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+        elif provider == "anthropic":
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": max_tokens,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return data.get("content", [{}])[0].get("text", "")
+
+        elif provider == "openai":
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": max_tokens,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+        else:
+            raise ValueError(f"Unknown LLM provider: {provider}")
+
+    def _parse_progressive_json(
+        self,
+        content: str,
+        speakers_in_chunk: set[str],
+    ) -> dict[str, Any]:
+        """Parse the JSON response from a progressive summary LLM call.
+
+        Falls back gracefully: if JSON parsing fails, builds a minimal
+        summary from the raw response text and the segment metadata.
+        """
+        content = content.strip()
+        # Strip markdown code fences if present
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0].strip()
+
+        try:
+            parsed = json.loads(content)
+            return {
+                "segment_summary": parsed.get("segment_summary", content[:500]),
+                "action_items": parsed.get("action_items", []),
+                "topics": parsed.get("topics", []),
+                "participants": list(speakers_in_chunk),
+                "timestamp": time.time(),
+            }
+        except (json.JSONDecodeError, Exception):
+            logger.warning(
+                "Agent: failed to parse progressive summary JSON — using raw text fallback"
+            )
+            return {
+                "segment_summary": content[:500],
+                "action_items": [],
+                "topics": [],
+                "participants": list(speakers_in_chunk),
+                "timestamp": time.time(),
+            }
+
+    async def _store_progressive_summary(
+        self,
+        summary_dict: dict[str, Any],
+    ) -> None:
+        """Store a progressive summary to Redis (with in-memory fallback).
+
+        Always stores in the in-memory list (``_progressive_summaries``)
+        regardless of Redis availability so the merge path always has data.
+        """
+        # Always keep an in-memory copy (fallback if Redis is down at call-end)
+        self._progressive_summaries.append(summary_dict)
+
+        # Also persist to Redis for durability across restarts
+        redis = await self._get_redis()
+        if redis is not None:
+            try:
+                key = _REDIS_PROGRESSIVE_KEY.format(group_id=self.group_id)
+                serialized = json.dumps(summary_dict)
+                await redis.rpush(key, serialized)
+                # Reset TTL on each push so the key lives long enough for
+                # the call to end, but doesn't accumulate orphaned keys
+                await redis.expire(key, _REDIS_PROGRESSIVE_TTL)
+            except Exception as exc:
+                logger.warning(
+                    "Agent: failed to store progressive summary in Redis: %s",
+                    exc,
+                )
+
+    async def _fetch_progressive_summaries(
+        self,
+    ) -> list[dict[str, Any]]:
+        """Fetch all progressive summaries for this group.
+
+        Tries Redis first; falls back to the in-memory list if Redis is
+        unavailable or the call was short (no Redis entries).
+        """
+        redis = await self._get_redis()
+        if redis is not None:
+            try:
+                key = _REDIS_PROGRESSIVE_KEY.format(group_id=self.group_id)
+                raw_list = await redis.lrange(key, 0, -1)
+                if raw_list:
+                    summaries = []
+                    for raw in raw_list:
+                        try:
+                            summaries.append(json.loads(raw))
+                        except (json.JSONDecodeError, Exception):
+                            pass
+                    if summaries:
+                        logger.info(
+                            "Agent: fetched %d progressive summaries from Redis",
+                            len(summaries),
+                        )
+                        return summaries
+            except Exception as exc:
+                logger.warning(
+                    "Agent: failed to fetch progressive summaries from Redis: %s",
+                    exc,
+                )
+
+        # Fall back to in-memory
+        if self._progressive_summaries:
+            logger.info(
+                "Agent: using %d in-memory progressive summaries",
+                len(self._progressive_summaries),
+            )
+            return self._progressive_summaries
+
+        return []
+
+    async def _merge_progressive_summaries(
+        self,
+        progressive_summaries: list[dict[str, Any]],
+        full_transcript: str,
+    ) -> tuple[str, list[str]]:
+        """Merge N progressive summaries into a comprehensive final meeting note.
+
+        Sends the progressive summaries (as JSON) plus the full transcript to the
+        LLM with the merge prompt. Falls back to ``_generate_summary`` if the
+        merge call fails.
+        """
+        summaries_json = json.dumps(progressive_summaries, indent=2)
+
+        # Truncate if the merge prompt would be too large (shouldn't happen
+        # but guard against it)
+        if len(summaries_json) > 25_000:
+            summaries_json = summaries_json[:25_000] + "\n...]"
+
+        # Truncate the full transcript to keep the merge prompt manageable
+        merge_transcript = full_transcript
+        if len(merge_transcript) > 10_000:
+            merge_transcript = merge_transcript[:5000] + "\n\n[...]\n\n" + merge_transcript[-5000:]
+
+        prompt = MERGE_SUMMARY_PROMPT.format(
+            summaries_json=summaries_json,
+            transcript=merge_transcript,
+        )
+
+        # Use the same LLM fallback chain as _generate_summary, but with
+        # the MERGE prompt. Try DeepSeek first (markdown output).
+        deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        if deepseek_key:
+            try:
+                content = await self._call_llm_json(
+                    provider="deepseek",
+                    api_key=deepseek_key,
+                    prompt=prompt,
+                    model="deepseek-chat",
+                    max_tokens=4096,
+                    timeout=120,
+                )
+                if content:
+                    return self._parse_summary_json(content)
+            except Exception as exc:
+                logger.warning("DeepSeek merge failed: %s", exc)
+
+        # Fallback to Anthropic
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if api_key:
+            try:
+                content = await self._call_llm_json(
+                    provider="anthropic",
+                    api_key=api_key,
+                    prompt=prompt,
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=4096,
+                    timeout=120,
+                )
+                if content:
+                    return self._parse_summary_json(content)
+            except Exception as exc:
+                logger.warning("Anthropic merge failed: %s", exc)
+
+        # Fallback to OpenAI
+        openai_key = os.environ.get("OPENAI_API_KEY", "")
+        if openai_key:
+            try:
+                content = await self._call_llm_json(
+                    provider="openai",
+                    api_key=openai_key,
+                    prompt=prompt,
+                    model="gpt-4o-mini",
+                    max_tokens=4096,
+                    timeout=120,
+                )
+                if content:
+                    return self._parse_summary_json(content)
+            except Exception as exc:
+                logger.warning("OpenAI merge failed: %s", exc)
+
+        # Final fallback: just use the first progressive summary
+        if progressive_summaries:
+            first = progressive_summaries[0]
+            return (
+                first.get("segment_summary", "Meeting summary unavailable."),
+                first.get("action_items", []),
+            )
+
+        return "AI summarization unavailable.", ["Summarization failed."]
 
     # ------------------------------------------------------------------
     # AI summarization
@@ -861,7 +1476,16 @@ class CallMeetingAgent:
         return summary, []
 
     def _parse_summary_json(self, content: str) -> tuple[str, list[str]]:
-        """Parse JSON summary response from LLM."""
+        """Parse JSON summary response from LLM.
+
+        When the LLM returns structured JSON (Anthropic / OpenAI direct
+        summary), the ``action_items`` list is extracted directly.  When the
+        LLM returns Markdown (DeepSeek or the progressive-merge path), JSON
+        parsing fails — in that case we extract action items from the
+        ``## ✅ Action Items`` or ``### ✅ Action Items`` section of the
+        Markdown so the final meeting-notes payload always carries assignable
+        action items regardless of which LLM produced the summary.
+        """
         content = content.strip()
         if "```json" in content:
             content = content.split("```json")[1].split("```")[0].strip()
@@ -874,7 +1498,62 @@ class CallMeetingAgent:
             action_items = parsed.get("action_items", [])
             return summary, action_items
         except (json.JSONDecodeError, KeyError):
-            return content, []
+            # Markdown output – extract action items from the rendered section
+            action_items = self._extract_action_items_from_markdown(content)
+            return content, action_items
+
+    @staticmethod
+    def _extract_action_items_from_markdown(markdown: str) -> list[str]:
+        """Extract bullet-point action items from a Markdown meeting summary.
+
+        Looks for a heading matching "Action Items" (with optional emoji
+        prefix) at any heading level (``##`` or ``###``) and collects all
+        following list items until the next heading or end of text.
+        Strips markdown bold markers (``**``) from extracted items so the
+        ``@Name:`` assignee prefix is at position 0 for downstream parsing.
+        """
+        import re as _re
+
+        lines = markdown.split("\n")
+        in_section = False
+        items: list[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+
+            # Detect the start of the Action Items section — accepts ``##`` or
+            # ``###`` headings, with or without emoji prefix.  The DeepSeek
+            # + merge prompts use ``###`` level headings; the regex also
+            # accepts ``##`` for backwards-compatibility with older prompt
+            # versions.
+            if (
+                _re.match(r"^#{2,3}\s*[✅📋📌⚠️🔜❓⚙️]*\s*Action\s*Items", stripped, _re.IGNORECASE)
+                or _re.match(r"^#{2,3}\s*✅\s*Action\s*Items", stripped, _re.IGNORECASE)
+                or _re.match(r"^#{2,3}\s*Action\s*Items", stripped, _re.IGNORECASE)
+            ):
+                in_section = True
+                continue
+
+            # If we hit another heading, stop
+            if in_section and stripped.startswith("##"):
+                break
+
+            if in_section:
+                # Match bullet points: -, *, or numbered 1.
+                m = _re.match(r"\s*[-*]\s+(.*)", stripped)
+                if not m:
+                    m = _re.match(r"\s*\d+[.)]\s+(.*)", stripped)
+                if m:
+                    text = m.group(1).strip()
+                    # Strip bold markers so ``**@Name:** description``
+                    # becomes ``@Name: description`` — the assignee
+                    # parser in the parent process expects ``@`` at the
+                    # start of the string.
+                    text = text.replace("**", "")
+                    if text and text != "None" and not text.startswith("```"):
+                        items.append(text)
+
+        return items
 
 
 # ---------------------------------------------------------------------------
@@ -945,6 +1624,9 @@ if __name__ == "__main__":
                 # its 5s sleep interval.
                 if agent._monitor_task:
                     agent._monitor_task.cancel()
+                # Cancel progressive summarization so it doesn't fire mid-finalize
+                if agent._progressive_task:
+                    agent._progressive_task.cancel()
                 await agent._finalize_notes()
                 # Do NOT clean up the room here — the parent process
                 # (end_room) handles room deletion after the agent exits.

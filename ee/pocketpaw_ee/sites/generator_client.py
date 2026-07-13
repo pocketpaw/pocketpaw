@@ -8,6 +8,83 @@
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-07-10 (HE-3 — html publish skips the Node build): build()/_build_one()
+# now branch the STAGE-2 payload AND the build chain on the engine's CAPABILITY, via
+# ``needs_node_build(engine)`` / ``is_source_engine(engine)`` from the canonical
+# engines.py (HE-2) — NOT by overloading ``smoke`` / ``static_build``. Overloading a
+# flag across this layer seam is exactly what caused the 2026-06-19 edit-overlay bug
+# (see that entry below); PRD Decision 6 guardrail #1 makes the new, third predicate
+# binding. Two additions, both html-only; ripple + svelte are byte-for-byte unchanged:
+#   * INPUT: html is a source-map engine, so it sends its raw {path: contents} static
+#     tree on ``input.source`` and OMITS ``rippleSpec`` (no binding split — dynamic
+#     html is a non-goal). The svelte ``if engine == "svelte"`` branch and the ripple
+#     ``else`` are untouched; html rides a new ``elif is_source_engine(engine)``.
+#   * BUILD: when ``needs_node_build(engine)`` is False (html), _build_one runs
+#     ``generate`` then RETURNS — skipping ``_rewrite_ripple_dep`` / ``_ripple_motion_dep``
+#     (an html site has no package.json), ``bun install``, ``bun run build``
+#     (build_static), AND the workerd SSR smoke gate. The workerd gate is replaced,
+#     for html only, by ``_html_static_smoke`` — a stdlib-only static check (parse the
+#     emitted index.html + resolve internal links) that raises the SAME
+#     ``SmokeGateFailed`` on a malformed/broken page, so the caller's rollback path is
+#     unchanged and a bad page never deploys. ripple + svelte (needs_node_build True)
+#     take the existing generate → install → build_static → gate chain unchanged.
+#
+# Updated 2026-07-09 (fix/sites-svelte-kit-ebusy-windows): every RE-publish of a
+# site 500'd on Windows with SmokeGateFailed: "build failed (exit 1)". Root cause:
+# PERF-3 reuses a per-pocket build dir to cache node_modules, so the prior build's
+# ``.svelte-kit/cloudflare`` survives; adapter-cloudflare's ``adapt()`` starts by
+# ``rimraf``-ing that dir, and a lingering Windows handle (a just-exited workerd, or
+# real-time AV scanning the freshly written ``_worker.js``) makes the rmdir fail
+# ``EBUSY: resource busy or locked`` → build exits 1. The FIRST publish (fresh dir)
+# worked; every reuse hit the stale leftover. Fix: ``build_static`` now calls the new
+# ``_clear_stale_svelte_kit(project_dir)`` BEFORE spawning ``bun run build`` — it
+# wipes ``.svelte-kit`` (never node_modules) at a quiet moment, with a short retry +
+# workerd reap, so the adapter's own rimraf has nothing contended to remove. Also:
+# the non-zero-exit failure reason now carries the captured stderr TAIL (mirrors the
+# install path) so this class of failure is diagnosable from the log, not an opaque
+# "exit 1" (log-only — the client envelope keeps the static generator_failed message).
+#
+# Updated 2026-07-08 (DP0-1 — per-tenant D1 id plumbing for Dynamic Paw Sites
+# Phase 0): build()/_build_one() gained an optional ``d1_database_id: str = ""``
+# param that is ALWAYS written onto ``siteConfig.d1DatabaseId``. The paw-sites
+# generator already threads ``siteConfig.d1DatabaseId`` into the emitted
+# wrangler.toml ``database_id``, but this bridge never populated it, so today every
+# generated wrangler.toml ships ``database_id = ""``. This adds ONLY the
+# pass-through: a caller CAN now supply the per-tenant D1 id and it lands in
+# ``siteConfig.d1DatabaseId`` (default "" → the prior empty value, so a static site
+# is byte-unchanged). Wiring the real id from the provision job at the caller
+# (service.py) is a LATER task (DP0-3/DP0-4) — not done here.
+#
+# Updated 2026-07-09 (fix/sites-gen-windows-process-kill): ``_kill_process_group``
+# was POSIX-only — it unconditionally called ``os.killpg(os.getpgid(pid), SIGKILL)``,
+# neither of which exists on Windows. On a Windows host a build TIMEOUT therefore
+# crashed inside ``_communicate_bounded``'s timeout handler with ``AttributeError:
+# module 'os' has no attribute 'killpg'``, masking the real ``_BuildTimeout`` and
+# escaping ``publish_pocket`` as an unhandled 500. ``_kill_process_group`` now
+# branches on ``sys.platform``: POSIX keeps the process-group SIGKILL; Windows calls
+# the new ``_kill_process_tree_windows`` (``taskkill /F /T`` to reap the leaked
+# workerd child TREE, best-effort ``proc.kill()`` fallback if taskkill is missing).
+#
+# Updated 2026-07-02 (harden apply_leaf_edits temp-file cleanup): ``apply_leaf_edits``
+# now assigns ``input_path = fh.name`` BEFORE ``json.dump`` inside the ``with`` and
+# wraps creation + write + exec in ONE guarded try/finally, so a serialization
+# failure mid-``json.dump`` no longer leaves ``input_path`` unbound (NameError in the
+# cleanup) nor leaks the delete=False tempfile — the finally only unlinks a path that
+# was assigned and still exists.
+#
+# Updated 2026-07-01 (NE-4b — native-editing leaf-edit bridge): added the
+# module-level ``apply_leaf_edits(source, edits, *, _exec=None)`` coroutine — the
+# Python bridge to the paw-sites ``apply-leaf-edit`` CLI (NE-4a). It shells out to
+# the SAME tokenised generator command (``_gen_cmd_argv()``) but with the
+# ``apply-leaf-edit`` subcommand: it writes ``{source, edits}`` to a tempfile
+# ``--input`` and parses the single JSON stdout line
+# ``{source, results:[{uid,applied,reason?}]}``. It reuses the build path's
+# ``_communicate_bounded`` timeout guard (a timed-out splice raises RuntimeError,
+# mirroring ``generate``); a non-zero exit raises RuntimeError with the CLI stderr.
+# Unlike ``build`` it is a PURE transform — no install, no ``bun run build``, no
+# workerd — so it is safe to call inline on the NE-4b persist path. ``_exec`` is an
+# injectable subprocess-exec seam so the bridge is unit-testable without Bun.
+#
 # Updated 2026-06-26 (fix/sites-build-subprocess-timeout — stop-gap: bound the build
 # subprocesses): all THREE _SubprocessRunner subprocesses (the generator, `bun
 # install`, and the `bun run build` static build) ran a bare ``await
@@ -172,12 +249,20 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shlex
+import shutil
 import signal
+import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import unquote
+
+from pocketpaw_ee.sites.engines import is_source_engine, needs_node_build, static_output_rel
 
 logger = logging.getLogger(__name__)
 
@@ -224,19 +309,49 @@ class _BuildTimeout(RuntimeError):
         super().__init__(f"{label} timed out after {timeout_s}s")
 
 
-def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
-    """SIGKILL the entire process GROUP of a launched subprocess so leaked workerd
-    CHILDREN die too, not just the parent.
+def _kill_process_tree_windows(proc: asyncio.subprocess.Process) -> None:
+    """Windows has no ``setsid`` process groups, so kill the whole child TREE with
+    ``taskkill /F /T`` — ``/T`` recurses into children, reaping the leaked workerd
+    child the bun parent never cleans up (the POSIX ``killpg`` equivalent). If
+    ``taskkill`` is missing or blocked, degrade to a best-effort parent kill so the
+    exception never escapes the timeout handler."""
+    pid = proc.pid
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=10,
+        )
+    except Exception:
+        # taskkill unavailable / blocked / timed out — best-effort parent kill.
+        with contextlib.suppress(Exception):
+            proc.kill()
 
-    The build subprocesses are launched with ``start_new_session=True``, so each is
-    its own process-group leader (pgid == pid). ``adapter-cloudflare``'s prerender
-    boots a workerd child that the bun parent never reaps; killing only the parent
-    would leave that child wedged. ``os.killpg(os.getpgid(pid), SIGKILL)`` takes out
-    the whole group. Guards ``ProcessLookupError`` (the proc/group already exited)
-    and ``PermissionError`` (can't signal — nothing we can do) so a best-effort kill
-    never raises into the build path."""
+
+def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    """Kill a launched build subprocess AND its leaked children so a wedged workerd
+    prerender dies too, not just the parent.
+
+    ``adapter-cloudflare``'s prerender boots a workerd child that the bun parent
+    never reaps; killing only the parent would leave that child wedged. The
+    mechanism is platform-specific:
+
+    * **POSIX** — the subprocesses are launched with ``start_new_session=True``, so
+      each leads its own process group (pgid == pid); ``os.killpg(os.getpgid(pid),
+      SIGKILL)`` takes out the whole group. Guards ``ProcessLookupError`` (already
+      exited) and ``PermissionError`` (can't signal) so the best-effort kill never
+      raises into the build path.
+    * **Windows** — ``start_new_session`` is a no-op, and ``os.killpg`` /
+      ``os.getpgid`` don't exist at all (referencing them raised ``AttributeError``
+      inside the timeout handler, masking ``_BuildTimeout`` and escaping publish as
+      an unhandled 500). Use ``taskkill /F /T`` to kill the child tree instead."""
     pid = proc.pid
     if pid is None:
+        return
+    if sys.platform == "win32":
+        _kill_process_tree_windows(proc)
         return
     try:
         os.killpg(os.getpgid(pid), signal.SIGKILL)
@@ -385,8 +500,226 @@ def reap_build_workerd(project_dir: str) -> int:
     return len(victims)
 
 
+# The regenerable build-output dir a `bun run build` writes under a project. PERF-3
+# reuses a per-pocket build dir across publishes to cache node_modules, so this
+# dir survives between builds — and on Windows its leftover triggers the EBUSY
+# below. Wiping it before each build (never node_modules) is the fix.
+_SVELTE_KIT_DIRNAME = ".svelte-kit"
+# A lingering Windows handle on the prior build's output can take a beat to release
+# after that build's process returns; retry the wipe a few times with a short backoff.
+_SVELTE_KIT_CLEAR_ATTEMPTS = 4
+_SVELTE_KIT_CLEAR_BACKOFF_SEC = 0.25
+
+
+async def _clear_stale_svelte_kit(project_dir: str) -> None:
+    """Remove the reused build dir's ``.svelte-kit`` output BEFORE ``bun run build``.
+
+    PERF-3 reuses a per-pocket build dir (``build_home()/<pocket_id>/``) so
+    ``node_modules`` is cached across publishes. But ``adapter-cloudflare``'s
+    ``adapt()`` step begins by ``rimraf``-ing its own ``.svelte-kit/cloudflare``
+    output, and on Windows a lingering handle on the PRIOR build's output — a
+    just-exited workerd child, or a real-time AV scan of the freshly written
+    ``_worker.js`` — makes that ``rmdir`` fail ``EBUSY: resource busy or locked``.
+    The build then exits 1 → ``build_static`` returns ``(False, ...)`` →
+    ``SmokeGateFailed`` → ``sites.generator_failed``. The FIRST publish into a fresh
+    dir succeeds; every RE-publish hit the stale, momentarily-locked leftover — the
+    exact repro behind fix/sites-svelte-kit-ebusy-windows.
+
+    Wiping ``.svelte-kit`` HERE — at a quiet moment, before any build process opens a
+    handle under it — sidesteps the adapter's contended rimraf entirely (it then has
+    nothing to remove). ``.svelte-kit`` is pure regenerable output (``svelte-kit
+    sync`` + the build rebuild it); ``node_modules`` (the expensive install cache) is
+    left untouched, so PERF-3's install-skip still holds. Retries with a short backoff
+    because the lingering handle can take a beat to release after the prior build
+    returns; a best-effort ``reap_build_workerd`` between attempts kills a straggler
+    still holding it. If it ultimately can't be cleared, log and continue — the
+    adapter's own rimraf may still succeed, and either way the ``(False, <stderr
+    tail>)`` path now surfaces a clear reason instead of a bare ``exit 1``."""
+    target = Path(project_dir, _SVELTE_KIT_DIRNAME)
+    if not target.exists():
+        return
+    for attempt in range(_SVELTE_KIT_CLEAR_ATTEMPTS):
+        try:
+            shutil.rmtree(target)
+            return
+        except OSError as exc:
+            # EBUSY / PermissionError on a Windows locked handle (or a slow network
+            # unlink). On the last try, log and let the build proceed — the fix is
+            # best-effort and must never itself break a build.
+            if attempt == _SVELTE_KIT_CLEAR_ATTEMPTS - 1:
+                logger.warning(
+                    "sites: could not clear stale %s in %s after %d attempts: %s "
+                    "(build will fall back to the adapter's own cleanup)",
+                    _SVELTE_KIT_DIRNAME,
+                    project_dir,
+                    _SVELTE_KIT_CLEAR_ATTEMPTS,
+                    exc,
+                )
+                return
+            # A straggler workerd from the prior build may still hold the dir; reap it,
+            # back off, and retry the wipe.
+            reap_build_workerd(project_dir)
+            await asyncio.sleep(_SVELTE_KIT_CLEAR_BACKOFF_SEC * (attempt + 1))
+
+
 class SmokeGateFailed(RuntimeError):
     """Raised when the workerd smoke render fails — the site is not deployed."""
+
+
+# --------------------------------------------------------------------------- #
+# HE-3 — the html static smoke check (the html-path replacement for the workerd
+# SSR gate). ripple/svelte fail-gate a LIVE publish on a workerd SSR render (see
+# ``_WORKERD_SSR_MARKERS``); an html site has NO SSR and NO workerd, so that gate
+# is inapplicable — not skipped, replaced. This lightweight static check parses the
+# emitted index.html with the STDLIB parser (no new dependency) and confirms every
+# internal link / local asset ref resolves to a file in the output tree. It raises
+# the SAME ``SmokeGateFailed`` the workerd gate raises, so the publish caller's
+# existing rollback-on-SmokeGateFailed path is unchanged and a malformed page NEVER
+# reaches deploy (it fails closed). It is a clearly-named function, gated in
+# _build_one on the EXPLICIT ``needs_node_build(engine)`` predicate — never folded
+# into an overloaded ``smoke`` / ``static_build`` flag.
+# --------------------------------------------------------------------------- #
+
+_HTML_SMOKE_ENTRY = "index.html"
+
+# HTML void elements have no end tag: a ``</...>`` for one is never "unbalanced", and
+# one left "open" is not a structural error. Everything else pushes/pops the tag
+# stack in _HtmlSmokeParser. Matches HE-1's byte-preserving generator (unclosed
+# ``<br>`` is a valid authored input and must pass the smoke check).
+_HTML_VOID_ELEMENTS: frozenset[str] = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
+
+# A href/src value carrying a URL scheme (http:, https:, mailto:, tel:, data:,
+# javascript:, ...) is EXTERNAL / non-file and is never resolved to a local file.
+_URL_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
+
+
+class _HtmlSmokeParser(HTMLParser):
+    """Collects href/src refs and detects gross structural malformation while
+    parsing the emitted ``index.html`` with the stdlib parser (no dependency).
+
+    * ``local_refs`` — every href/src attribute value seen (filtered to local files
+      by :func:`_local_ref_path` at check time).
+    * ``saw_element`` — whether ANY element start tag was seen; a file with none is
+      not a servable HTML document (a truncated/garbage input fails here).
+    * ``stray_end_tag`` — an end tag that closes no open element (an extra/unbalanced
+      ``</div>``): a genuine malformation a well-formed page never contains. Void and
+      explicitly self-closing tags never push, so they can't trigger a false
+      positive. This is the parse-side "malformed fails closed" teeth; the local-link
+      resolution check is the other.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.local_refs: list[str] = []
+        self.saw_element = False
+        self.stray_end_tag = False
+        self._open: list[str] = []
+
+    def _collect(self, attrs: list[tuple[str, str | None]]) -> None:
+        for name, value in attrs:
+            if name in ("href", "src") and value:
+                self.local_refs.append(value)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.saw_element = True
+        self._collect(attrs)
+        if tag not in _HTML_VOID_ELEMENTS:
+            self._open.append(tag)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # An explicit self-closing tag (``<foo/>``) opens nothing.
+        self.saw_element = True
+        self._collect(attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _HTML_VOID_ELEMENTS:
+            return
+        if tag in self._open:
+            # Pop down to the matching open tag (tolerates optional-close nesting).
+            while self._open and self._open.pop() != tag:
+                continue
+        else:
+            self.stray_end_tag = True
+
+
+def _local_ref_path(ref: str) -> str | None:
+    """Return the local file path a href/src points at, or ``None`` when the ref is
+    not a local file we should verify.
+
+    ``None`` (skip) for: an in-page anchor (``#...``), a protocol-relative URL
+    (``//host``), any scheme-bearing URL (http/https/mailto/tel/data/javascript), an
+    empty value, or a same-document ``?query`` / ``#frag``. The query string and
+    fragment are stripped and the path is percent-decoded; a leading ``/``
+    (site-absolute) is resolved against the deploy root by the caller."""
+    value = ref.strip()
+    if not value or value.startswith("#"):
+        return None
+    if value.startswith("//"):  # protocol-relative → external
+        return None
+    if _URL_SCHEME_RE.match(value):  # http:, https:, mailto:, tel:, data:, ...
+        return None
+    path = value.split("#", 1)[0].split("?", 1)[0]
+    if not path:  # was a pure ?query / #frag → same document, nothing to resolve
+        return None
+    return unquote(path)
+
+
+def _html_static_smoke(static_dir: Path, *, entry: str = _HTML_SMOKE_ENTRY) -> None:
+    """The html-path smoke check (HE-3). Fails closed with ``SmokeGateFailed``.
+
+    Asserts the emitted static tree is coherent enough to serve: the entry
+    ``index.html`` exists and parses, contains at least one element, has no
+    unbalanced/stray end tag, and every internal link / local asset ref
+    (``href`` / ``src`` with a relative or site-absolute local path) resolves to a
+    file that exists under ``static_dir``. External refs (http/https/mailto/tel/data),
+    protocol-relative URLs, and in-page anchors are ignored. Any failure raises
+    ``SmokeGateFailed`` — the same class the workerd gate raises — so the caller's
+    rollback path is unchanged and a broken page never deploys."""
+    root = static_dir.resolve()
+    entry_path = root / entry
+    if not entry_path.is_file():
+        raise SmokeGateFailed(f"html smoke: no {entry} in the generated static tree ({root})")
+    markup = entry_path.read_text(encoding="utf-8", errors="replace")
+    parser = _HtmlSmokeParser()
+    try:
+        parser.feed(markup)
+        parser.close()
+    except Exception as exc:  # noqa: BLE001 — any parse error = an unservable page
+        raise SmokeGateFailed(f"html smoke: {entry} did not parse: {exc}") from exc
+    if not parser.saw_element:
+        raise SmokeGateFailed(f"html smoke: {entry} contains no HTML elements")
+    if parser.stray_end_tag:
+        raise SmokeGateFailed(f"html smoke: {entry} has an unbalanced/stray end tag")
+    for ref in parser.local_refs:
+        path = _local_ref_path(ref)
+        if path is None:
+            continue
+        target = (root / path.lstrip("/")).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise SmokeGateFailed(
+                f"html smoke: link/asset escapes the site root: {ref!r}"
+            ) from None
+        if not target.exists():
+            raise SmokeGateFailed(f"html smoke: internal link/asset does not resolve: {ref!r}")
 
 
 @dataclass(frozen=True)
@@ -580,6 +913,11 @@ class _SubprocessRunner:
         #     (the live publish still gates + rolls back, so a broken edit can't go
         #     live) but still BUILDS so the served preview is fresh + anchored.
         timeout_s = _build_timeout_sec()
+        # Windows EBUSY guard: wipe the reused dir's stale .svelte-kit output before
+        # the build so adapter-cloudflare's own rimraf of .svelte-kit/cloudflare never
+        # races a lingering handle left by the PRIOR build (keeps node_modules). This
+        # is what made every RE-publish 500 on Windows. See _clear_stale_svelte_kit.
+        await _clear_stale_svelte_kit(project_dir)
         # start_new_session=True: own process group. This is the step that wedges —
         # adapter-cloudflare's workerd prerender can hang forever (upstream SvelteKit
         # bug). The group kill on timeout takes out the leaked workerd CHILD too, not
@@ -611,7 +949,12 @@ class _SubprocessRunner:
         reap_build_workerd(project_dir)
         haystack = stdout.decode() + "\n" + stderr.decode()
         if proc.returncode != 0:
-            return False, f"build failed (exit {proc.returncode})"
+            # Surface the captured stderr TAIL in the failure reason (mirrors the
+            # install path) so a build failure is diagnosable from the SmokeGateFailed
+            # log instead of an opaque "exit 1" — the whole reason this class of
+            # failure needed a manual repro to root-cause. Log-only: the client
+            # envelope keeps the static sites.generator_failed message.
+            return False, f"build failed (exit {proc.returncode}): {stderr.decode()[-800:]}"
         if gate:
             for marker in _WORKERD_SSR_MARKERS:
                 if marker in haystack:
@@ -623,6 +966,75 @@ class _SubprocessRunner:
         # The real path now routes through build_static; this delegates to it with
         # the gate ON so any direct/legacy caller keeps the publish-time semantics.
         return await self.build_static(project_dir, gate=True)
+
+
+async def apply_leaf_edits(
+    source: dict[str, str],
+    edits: list[dict[str, Any]],
+    *,
+    _exec: Any = None,
+) -> dict[str, Any]:
+    """Splice native-editor leaf edits into a svelte source map via the paw-sites
+    ``apply-leaf-edit`` CLI (NE-4b) and return its per-uid verdict.
+
+    The Python bridge to NE-4a's ``apply-leaf-edit`` subcommand. It shells out to
+    the SAME tokenised generator command as the build path (``_gen_cmd_argv()``) but
+    with ``apply-leaf-edit --input <tempfile>``, where the tempfile carries
+    ``{"source": {<relpath>: <contents>}, "edits": [{"uid","op"}, ...]}`` (``op`` is
+    ``{"kind":"setText","html":...}`` or ``{"kind":"setProp","name":...,"value":...}``).
+    The CLI applies each edit IN ORDER to the file that carries that leaf and emits
+    exactly ONE JSON line on stdout:
+    ``{"source": {<relpath>: <contents>}, "results": [{"uid","applied","reason"?}]}``.
+    A rejected edit (``applied: false`` + ``reason``) leaves ITS file byte-identical
+    in the returned ``source`` (the caller keeps the whole-file re-author for it).
+
+    Unlike ``build`` this is a PURE transform — no ``bun install``, no
+    ``bun run build``, no workerd — so it is fast and safe to call inline on the
+    NE-4b persist path (the native editor already rendered the edit optimistically;
+    persisting the spliced draft is the whole job).
+
+    Failure surfaces as a ``RuntimeError`` the caller must handle: a non-zero exit
+    (carrying the CLI's stderr) or a timed-out splice — a wedged splice is a failed
+    splice, mirroring how ``_SubprocessRunner.generate`` converts ``_BuildTimeout``.
+
+    ``_exec`` is an injectable subprocess-exec seam (defaults to
+    ``asyncio.create_subprocess_exec``): a test passes a fake returning a stub proc
+    with a canned ``communicate()`` so the bridge is unit-testable without Bun.
+    """
+    # Assign input_path FIRST (before json.dump) so a serialization failure can't
+    # leave the created temp file un-tracked: NamedTemporaryFile(delete=False)
+    # materializes the file immediately, so if json.dump raises mid-write we still
+    # need its path to clean it up. ONE outer try/finally covers creation + write +
+    # exec, and the finally is guarded (only unlink a path that was assigned AND still
+    # exists) so it never NameErrors on an early failure and never leaks the tempfile.
+    input_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            input_path = fh.name
+            json.dump({"source": source, "edits": edits}, fh)
+        timeout_s = _build_timeout_sec()
+        # start_new_session=True: own process group so a wedged splice (and any
+        # children it leaked) can be killed as a group on timeout — same as generate().
+        proc = await (_exec or asyncio.create_subprocess_exec)(
+            *_gen_cmd_argv(),
+            "apply-leaf-edit",
+            "--input",
+            input_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = await _communicate_bounded(proc, timeout_s, "apply-leaf-edit")
+        except _BuildTimeout as exc:
+            # A timed-out splice is a failed splice (mirror generate()'s raise-on-timeout).
+            raise RuntimeError(f"apply-leaf-edit timed out after {exc.timeout_s}s") from exc
+        if proc.returncode != 0:
+            raise RuntimeError(f"apply-leaf-edit failed: {stderr.decode()}")
+        return json.loads(stdout.decode().strip().splitlines()[-1])
+    finally:
+        if input_path and os.path.exists(input_path):
+            os.unlink(input_path)
 
 
 class GeneratorClient:
@@ -656,6 +1068,7 @@ class GeneratorClient:
         engine: str = "ripple",
         source: dict[str, Any] | None = None,
         builder_origin: str | None = None,
+        d1_database_id: str = "",
         pocket_id: str | None = None,
         smoke: bool = True,
         static_build: bool = True,
@@ -689,6 +1102,13 @@ class GeneratorClient:
         is OMITTED from the payload when ``None`` so a normal (non-editable)
         publish keeps the exact prior wire bytes and the generator does not inject
         the bridge.
+
+        ``d1_database_id`` (DP0-1) is the per-tenant Cloudflare D1 id a DYNAMIC
+        site's data plane is bound to. It ALWAYS rides ``siteConfig.d1DatabaseId``
+        (default "" for a static site); the paw-sites generator threads that value
+        into the emitted wrangler.toml ``database_id`` so the deployed Worker binds
+        the right D1. This is only the pass-through — the real id is supplied by the
+        provision job at the caller in a later task (DP0-3/DP0-4).
 
         ``pocket_id`` (PERF-3) builds into a STABLE per-pocket working dir under
         build_home() (``<build_home>/<pocket_id>/``) so node_modules persists and
@@ -726,6 +1146,7 @@ class GeneratorClient:
                 engine=engine,
                 source=source,
                 builder_origin=builder_origin,
+                d1_database_id=d1_database_id,
                 pocket_id=None,
                 smoke=smoke,
                 static_build=static_build,
@@ -741,6 +1162,7 @@ class GeneratorClient:
                 engine=engine,
                 source=source,
                 builder_origin=builder_origin,
+                d1_database_id=d1_database_id,
                 pocket_id=pocket_id,
                 smoke=smoke,
                 static_build=static_build,
@@ -758,6 +1180,7 @@ class GeneratorClient:
         engine: str,
         source: dict[str, Any] | None,
         builder_origin: str | None,
+        d1_database_id: str,
         pocket_id: str | None,
         smoke: bool,
         static_build: bool = True,
@@ -778,6 +1201,12 @@ class GeneratorClient:
             "title": title,
             "captureApiBase": capture_api_base,
             "captureSignedKey": capture_signed_key,
+            # DP0-1: the per-tenant D1 id the generator threads into the emitted
+            # wrangler.toml ``database_id``. ALWAYS present (default "" for a static
+            # site — the prior empty value), so a caller CAN bind a dynamic site's
+            # data plane by supplying it. The real id comes from the provision job
+            # at the caller in a later task (DP0-3/DP0-4).
+            "d1DatabaseId": d1_database_id,
         }
         # SE-2b: only present when the site is being published as editable, so a
         # non-editable publish's payload is byte-identical to before this change.
@@ -802,10 +1231,38 @@ class GeneratorClient:
             files, bindings = _split_svelte_source(source)
             input_json["source"] = files
             input_json.update(bindings)
+        elif is_source_engine(engine):
+            # HE-3/HE-1: html is a source-map engine too — it sends its raw
+            # ``{path: contents}`` static tree on ``input.source`` and OMITS
+            # ``rippleSpec`` (a hand-authored html site has no rippleSpec). Unlike
+            # svelte there is NO binding split: dynamic (live-data) html is a
+            # non-goal, so an html source map carries only files. ripple (not a
+            # source engine) is untouched by this branch and still sends rippleSpec
+            # below, so its wire bytes — and svelte's — are unchanged.
+            input_json["source"] = source or {}
         else:
             input_json["rippleSpec"] = ripple_spec
         gen = await self._runner.generate(input_json, out_dir)
         project_dir = gen["projectDir"]
+        # HE-3: an html publish's last-mile output IS the authored source (HE-1 makes
+        # the generator emit a raw static tree), so there is NOTHING to install, no
+        # Vite/SvelteKit ``bun run build``, and no workerd SSR render. Skip all three
+        # and run the lightweight html static smoke instead. The skip is gated on the
+        # EXPLICIT ``needs_node_build(engine)`` predicate (engines.py, HE-2) — NEVER by
+        # overloading ``smoke`` / ``static_build``. Those two flags gate the workerd SSR
+        # fail-check and the ``bun run build`` step respectively; overloading either to
+        # ALSO mean "skip the node build" is the exact layer-seam flag conflation that
+        # caused the edit-overlay bug (this file's 2026-06-19 entry; PRD Decision 6,
+        # guardrail #1). ``needs_node_build`` is a THIRD, independent concept. Because
+        # this returns BEFORE ``_rewrite_ripple_dep`` / the install / ``build_static``
+        # below, NONE of them run on the html path — and neither ``_rewrite_ripple_dep``
+        # nor ``_ripple_motion_dep`` ever touch an html site (it has no package.json to
+        # rewrite). ripple + svelte (``needs_node_build`` True) fall through to the
+        # unchanged generate → install → build_static → gate chain.
+        if not needs_node_build(engine):
+            static_dir = Path(project_dir, static_output_rel(engine))
+            _html_static_smoke(static_dir)
+            return BuildResult(project_dir=project_dir, ripple_version=gen.get("rippleVersion"))
         # Make the generated project's deps resolvable BEFORE install (and before
         # the dep-hash is computed, so the rewrite is part of the fingerprint).
         # The template pins an unpublished @ripple-ui/svelte; the rewrite swaps it

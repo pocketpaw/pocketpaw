@@ -8,6 +8,9 @@
 #     wrapper). Net = override + instructions + knowledge.
 #   * ``skill_names`` — forwarded to the backend's ``run`` ONLY when non-empty
 #     (withhold-when-empty, so the 6 non-Claude backends keep their signature).
+# Updated: 2026-07-08 (CS-13, feat/per-send-model-override) — adds coverage for
+#   ``model_override`` forwarding: reaches the backend verbatim when the client
+#   picked a model, WITHHELD when None (the same withhold-when-empty contract).
 
 from __future__ import annotations
 
@@ -181,3 +184,24 @@ async def test_no_skill_refs_no_skill_names_withheld(monkeypatch):
     inst = _instance_with(backend)  # no skill_refs, no caller skill_names
     await _run_with_instance(monkeypatch, inst)
     assert "skill_names" not in backend.last_kwargs
+
+
+# ---------------------------------------------------------------------------
+# CS-13 — model_override forwarding (withhold-when-empty)
+# ---------------------------------------------------------------------------
+
+
+async def test_model_override_forwarded_when_set(monkeypatch):
+    """A per-send model choice reaches the backend's ``run`` verbatim so the
+    Claude SDK backend can make it win over its own model selection."""
+    backend = await _run_with(monkeypatch, model_override="claude-haiku-4-5-20251001")
+    assert backend.last_kwargs.get("model_override") == "claude-haiku-4-5-20251001"
+
+
+async def test_model_override_withheld_when_none(monkeypatch):
+    """No picker (None) must be WITHHELD so the 6 non-Claude backends keep their
+    narrower signature — the same contract as skill_names / deny_mcp_tool_ids."""
+    backend = await _run_with(monkeypatch)
+    assert "model_override" not in backend.last_kwargs, (
+        "None model_override must be withheld so non-Claude backends keep their signature"
+    )

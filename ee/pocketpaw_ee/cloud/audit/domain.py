@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Literal, NewType
 
 AuditEntryId = NewType("AuditEntryId", str)
-AuditCategory = Literal["decision", "data", "config", "security"]
+AuditCategory = Literal["decision", "data", "config", "security", "tool"]
 
 
 @dataclass(frozen=True)

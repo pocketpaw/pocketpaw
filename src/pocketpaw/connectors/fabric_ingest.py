@@ -12,6 +12,51 @@
 #   existing ObjectType by id (the EE Firestore→Fabric worker's per-workspace
 #   mapping) ride this same canonical upsert loop instead of hand-rolling a
 #   parallel one. Additive; name-based callers are unchanged.
+# Updated: 2026-07-11 (feat/real-pipeline-s1) — added the connector→Fabric
+#   INGESTOR REGISTRY: ``IngestorFn`` (the ``(store, *, workspace_id, user_id)
+#   -> IngestResult`` contract), the ``FABRIC_INGESTORS`` dict, and
+#   ``get_fabric_ingestor()`` which lazily seeds the built-ins (gcalendar's
+#   existing ``ingest_to_fabric``) on first lookup. The seed is LAZY because
+#   adapters/gcalendar.py imports FabricMapping/ingest_records from THIS
+#   module — an eager top-level import back into the adapter would be
+#   circular. Registry lives OSS; the EE fabric_ingest service lazy-imports
+#   it (no OSS→EE edge).
+# Updated: 2026-07-10 (FST-3 — SHADOW mode at merge site 1) — ingest_records
+#   now threads source-truth provenance into the UPDATE path: update_object is
+#   called with writer_class="connector", source_kind="connector_run",
+#   source_connector=<this connector>, and the new optional ``run_id`` param
+#   (default None — every existing caller unchanged) as source_run_id. When
+#   fabric_source_truth_mode is shadow/enforce, statements recorded at merge
+#   site 1 therefore carry honest connector provenance end-to-end; in 'off'
+#   (default) the kwargs are inert and behavior is byte-for-byte. CREATE path
+#   untouched (FST-4's scope).
+# Updated: 2026-07-10 (FST-4 — SHADOW mode at merge site 3) — three OPTIONAL
+#   keyword-only params so the EE Firestore→Fabric mirror worker can thread
+#   its true provenance through this same loop (defaults keep every FST-3
+#   caller byte-identical):
+#     * ``writer_class`` (default "connector") — the mirror passes "mirror"
+#       (a Firestore mirror is not a primary connector; the trust ladder
+#       ranks connector > mirror);
+#     * ``document_uri_field`` — a record key whose value becomes the
+#       per-record ``source_document_uri`` (the mirror passes its doc-path
+#       sentinel, so each statement's SourceRef identifies the exact
+#       Firestore collection/doc);
+#     * ``observed_at_field`` — a record key holding a datetime that becomes
+#       the per-record ``observed_at`` (the mirror grafts the best available
+#       source time; non-datetime values are ignored → ingest-time default).
+#   CREATE-path decision (FST-4, settled): creates get NO statement hook.
+#   Promotion-time seeding already preserves the create-time claim — when a
+#   second source later updates a property, the seed statement is built from
+#   the current cache value with the OBJECT-level provenance (its
+#   source_connector) and touch-time observed_at, so the create-then-update
+#   flow yields both claims and a visible conflict without any create hook
+#   (proven by tests/test_fabric_shadow_create_path.py).
+# Updated: 2026-07-10 (FST-5 — ENFORCE at merge site 3, no code change) — the
+#   re-ingest UPDATE path already goes through store.update_object with full
+#   provenance (FST-3/4 above), so enforce mode flows through this module
+#   AUTOMATICALLY: for a TRACKED property the store commits the resolver's
+#   winner instead of the blind LWW value; untracked properties keep LWW.
+#   Proven by tests/cloud/fabric_ingest/test_fabric_ingest_enforce.py.
 # Updated: 2026-06-19 (SZD-2 — workspace-scope object TYPES) — ensure_type() now
 #   threads ``workspace_id`` into both the get_type_by_name() resolve and the
 #   define_type() create, so the type catalog stays per-tenant: a connector
@@ -58,8 +103,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from pocketpaw.fabric.models import PropertyDef
@@ -68,6 +114,41 @@ from pocketpaw.fabric.store import FabricStore
 # A field projection value is either a record key (str) or a callable that
 # derives the value from the whole record (for normalization / joins).
 FieldSource = str | Callable[[Mapping[str, Any]], Any]
+
+# The connector→Fabric ingestor contract: pull this connector's records and
+# land them as typed Fabric objects in ``store``, scoped to ``workspace_id``
+# and reading with ``user_id``'s per-user OAuth token bucket (``None`` = the
+# shared/workspace bucket). Concretely ``(store, *, workspace_id, user_id)
+# -> IngestResult`` — extra keyword defaults (e.g. gcalendar's ``days_ahead``)
+# are allowed but callers pass only the contract kwargs.
+IngestorFn = Callable[..., Awaitable["IngestResult"]]
+
+# Registry of connector-name → ingestor. Built-ins are seeded LAZILY by
+# ``get_fabric_ingestor`` (adapters import FabricMapping/ingest_records from
+# this module, so an eager import back into an adapter would be circular).
+# Third-party/OSS callers may register additional ingestors directly.
+FABRIC_INGESTORS: dict[str, IngestorFn] = {}
+
+
+def _seed_builtin_ingestors() -> None:
+    """Populate ``FABRIC_INGESTORS`` with the built-in adapters (idempotent).
+
+    ``setdefault`` so a test double or an explicit registration installed
+    before the first lookup is never clobbered.
+    """
+    from pocketpaw.connectors.adapters.gcalendar import GoogleCalendarConnector
+
+    FABRIC_INGESTORS.setdefault("gcalendar", GoogleCalendarConnector().ingest_to_fabric)
+
+
+def get_fabric_ingestor(connector_id: str) -> IngestorFn | None:
+    """Resolve the registered ingestor for ``connector_id`` (or ``None``).
+
+    Seeds the built-ins on first use — the one lookup path callers (the EE
+    fabric_ingest dispatch) should go through instead of reading the dict raw.
+    """
+    _seed_builtin_ingestors()
+    return FABRIC_INGESTORS.get(connector_id)
 
 
 @dataclass(frozen=True)
@@ -169,6 +250,11 @@ async def ingest_records(
     records: Iterable[Mapping[str, Any]],
     mapping: FabricMapping,
     workspace_id: str | None = None,
+    run_id: str | None = None,
+    *,
+    writer_class: str = "connector",
+    document_uri_field: str | None = None,
+    observed_at_field: str | None = None,
 ) -> IngestResult:
     """Map connector records into typed Fabric objects with provenance (idempotent).
 
@@ -180,6 +266,24 @@ async def ingest_records(
         workspace_id: W4a tenancy scope; threaded into both the dedup read and
             the create write so an ingest stays inside its tenant. ``None`` for
             single-tenant / OSS callers.
+        run_id: optional sync-run identity (FST-3). When set, the SourceRef the
+            shadow pass records for updated objects carries it, so statements
+            from different sync runs of the same connector are distinguishable.
+            ``None`` = "this connector, unattributed run".
+        writer_class: the writer class stamped on shadow statements from the
+            UPDATE path (FST-4). Default "connector" — byte-identical to
+            FST-3 for every real connector. The EE Firestore mirror passes
+            "mirror": a mirror is not a primary connector, and the trust
+            ladder ranks it below one.
+        document_uri_field: optional record key whose value becomes the
+            per-record ``source_document_uri`` (FST-4). Gives each statement's
+            SourceRef a document-precise identity (the mirror passes its
+            doc-path sentinel key). Empty/absent values → no document URI.
+        observed_at_field: optional record key holding a ``datetime`` that
+            becomes the per-record ``observed_at`` (FST-4) — when the SOURCE
+            says the value was true, not when we ingested it. Values that are
+            not datetimes are ignored (the statement then defaults to
+            ingest time).
 
     Returns:
         IngestResult with created / updated / skipped counts and the object ids.
@@ -189,6 +293,22 @@ async def ingest_records(
     store's merge-update); a new source_id CREATES one with provenance. Records
     lacking a usable source_id are skipped (counted) — without a stable key they
     cannot be deduplicated and would silently duplicate on every sync.
+
+    FST-3: the UPDATE path passes full source-truth provenance
+    (``writer_class`` + a ``connector_run`` SourceRef with this connector,
+    run_id, and optionally a per-record document URI + observed_at) into
+    ``store.update_object``, so when ``fabric_source_truth_mode`` is
+    shadow/enforce the statements recorded at merge site 1 carry honest
+    provenance. In mode 'off' the kwargs are inert.
+
+    CREATE path (FST-4 decision): creates append NO statements, by design.
+    A create doesn't merge — there is no prior claim to preserve and no
+    conflict to observe. The create-time claim is NOT lost: if a second
+    source later updates a tracked-able property, the FST-3 promotion gate
+    seeds a statement from the current cache value with the object's own
+    provenance (source_connector) and touch-time observed_at, so the
+    create-then-update flow surfaces both claims. Proven by
+    tests/test_fabric_shadow_create_path.py — do not add a create hook.
     """
     type_id = await ensure_type(store, mapping, workspace_id=workspace_id)
     result = IngestResult(type_name=mapping.type_name)
@@ -206,7 +326,30 @@ async def ingest_records(
             workspace_id=workspace_id,
         )
         if existing is not None:
-            updated = await store.update_object(existing.id, properties, workspace_id=workspace_id)
+            # FST-4: per-record provenance. The document URI (when a field is
+            # declared) pins the SourceRef to the exact upstream document;
+            # observed_at (when a field is declared AND holds a datetime)
+            # carries the source's own timestamp instead of ingest time.
+            source_document_uri: str | None = None
+            if document_uri_field is not None:
+                raw_uri = record.get(document_uri_field)
+                source_document_uri = str(raw_uri) if raw_uri else None
+            observed_at: datetime | None = None
+            if observed_at_field is not None:
+                raw_observed = record.get(observed_at_field)
+                if isinstance(raw_observed, datetime):
+                    observed_at = raw_observed
+            updated = await store.update_object(
+                existing.id,
+                properties,
+                workspace_id=workspace_id,
+                writer_class=writer_class,
+                source_kind="connector_run",
+                source_connector=connector,
+                source_run_id=run_id,
+                source_document_uri=source_document_uri,
+                observed_at=observed_at,
+            )
             result.updated += 1
             result.object_ids.append((updated or existing).id)
         else:

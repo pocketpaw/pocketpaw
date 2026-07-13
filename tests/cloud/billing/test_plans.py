@@ -17,6 +17,19 @@
 #   (0/1500/7500/30000/1_000_000); added coverage for the new user-facing display +
 #   price fields (display_name, usage_label, usage_detail, INR/USD prices) the
 #   billing UI renders instead of raw credits.
+# Updated 2026-06-30 (feat/billing-quota-enforcement, chunk 1): added coverage for
+#   the per-plan ``monthly_ceiling`` (the credit-quota cap later chunks enforce):
+#   each tier carries the approved ceiling (free=1000 explicit trial, go/pro/pro_max
+#   = allotment × 1.5, enterprise=None uncapped), and an unknown key built directly
+#   FAILS CLOSED to the Free ceiling (never None/uncapped).
+# Updated 2026-07-08 (feat/billing-smb-caps): added coverage for the three SMB
+#   resource caps (``max_seats`` / ``max_pockets`` / ``max_connectors``): every tier
+#   carries an int cap (Enterprise is None = uncapped), Free ``max_seats`` == the
+#   ``Workspace.seats`` default (5) so no workspace regresses, and an unknown key
+#   built directly FAILS CLOSED to the Free value on all three (never None/uncapped).
+#   The numbers under test are the GENEROUS PLACEHOLDERS pending the captain's
+#   pricing call — these tests lock the machinery (present on every tier, uncapped
+#   Enterprise, fail-closed default), not the exact figures.
 
 from __future__ import annotations
 
@@ -37,6 +50,16 @@ EXPECTED_ALLOTMENTS = {
     "pro_max": 30_000,
     "enterprise": 1_000_000,
 }
+# The per-plan monthly credit CEILING (the cap later chunks enforce). The rule is
+# allotment × 1.5 for the paid usage tiers; Free is an explicit trial cap (its
+# allotment is 0, so ×1.5 can't derive it); Enterprise is uncapped (None).
+EXPECTED_CEILINGS: dict[str, int | None] = {
+    "free": 1_000,
+    "go": 2_250,
+    "pro": 11_250,
+    "pro_max": 45_000,
+    "enterprise": None,
+}
 # The user-facing usage labels the UI shows INSTEAD of raw credits.
 EXPECTED_USAGE_LABELS = {
     "free": "Limited",
@@ -44,6 +67,30 @@ EXPECTED_USAGE_LABELS = {
     "pro": "5× the usage",
     "pro_max": "20× the usage",
     "enterprise": "Custom",
+}
+# The three SMB resource caps (feat/billing-smb-caps) — GENEROUS PLACEHOLDERS
+# pending the captain's pricing call. Enterprise is None (uncapped). Free
+# ``max_seats`` MUST equal the Workspace.seats default (5) so no workspace regresses.
+EXPECTED_MAX_SEATS: dict[str, int | None] = {
+    "free": 5,
+    "go": 10,
+    "pro": 25,
+    "pro_max": 100,
+    "enterprise": None,
+}
+EXPECTED_MAX_POCKETS: dict[str, int | None] = {
+    "free": 200,
+    "go": 1_000,
+    "pro": 5_000,
+    "pro_max": 20_000,
+    "enterprise": None,
+}
+EXPECTED_MAX_CONNECTORS: dict[str, int | None] = {
+    "free": 50,
+    "go": 100,
+    "pro": 250,
+    "pro_max": 1_000,
+    "enterprise": None,
 }
 
 
@@ -83,6 +130,113 @@ def test_list_plans_allotments_are_the_exact_ladder():
     by_key = {p.key: p for p in plans.list_plans()}
     for key, expected in EXPECTED_ALLOTMENTS.items():
         assert by_key[key].monthly_credit_allotment == expected, key
+
+
+def test_list_plans_ceilings_are_the_exact_ladder():
+    """Each tier carries the approved monthly_ceiling, incl. enterprise=None.
+
+    free=1000 (explicit trial cap), go/pro/pro_max = allotment × 1.5, enterprise
+    uncapped (None). This is the cap later chunks enforce against the wallet.
+    """
+    by_key = {p.key: p for p in plans.list_plans()}
+    for key, expected in EXPECTED_CEILINGS.items():
+        assert by_key[key].monthly_ceiling == expected, key
+
+
+def test_paid_tier_ceilings_are_allotment_times_one_point_five():
+    """The go/pro/pro_max ceilings are exactly 1.5× their allotment (the rule)."""
+    by_key = {p.key: p for p in plans.list_plans()}
+    for key in ("go", "pro", "pro_max"):
+        assert by_key[key].monthly_ceiling == int(by_key[key].monthly_credit_allotment * 1.5), key
+
+
+def test_enterprise_ceiling_is_uncapped():
+    """Enterprise is the one uncapped tier — its ceiling is None, never a number."""
+    assert plans.get_plan("enterprise").monthly_ceiling is None
+
+
+def test_free_ceiling_is_the_explicit_trial_cap():
+    """Free's ceiling is the explicit 1000 trial cap (its 0 allotment can't derive it)."""
+    free = plans.get_plan("free")
+    assert free.monthly_credit_allotment == 0
+    assert free.monthly_ceiling == 1_000
+
+
+def test_build_unknown_key_fails_closed_to_free_ceiling():
+    """An unknown key built directly never yields None/uncapped — it caps at Free.
+
+    Callers reach the catalog via get_plan/list_plans (known keys only), but the
+    ceiling default is the fail-closed floor regardless: a stray key must NOT
+    produce an uncapped (None) ceiling.
+    """
+    bogus = plans._build("definitely_not_a_tier")
+    assert bogus.monthly_ceiling == EXPECTED_CEILINGS["free"]
+    assert bogus.monthly_ceiling is not None
+
+
+# ---------------------------------------------------------------------------
+# SMB resource caps — max_seats / max_pockets / max_connectors.
+# ---------------------------------------------------------------------------
+
+
+def test_every_tier_carries_the_three_smb_caps():
+    """Each tier exposes max_seats / max_pockets / max_connectors (the machinery).
+
+    Locks that the caps are PRESENT on every tier with the placeholder values, not
+    that the figures are final — the captain's pricing call moves the numbers, not
+    the shape.
+    """
+    by_key = {p.key: p for p in plans.list_plans()}
+    for key in EXPECTED_ORDER:
+        assert by_key[key].max_seats == EXPECTED_MAX_SEATS[key], key
+        assert by_key[key].max_pockets == EXPECTED_MAX_POCKETS[key], key
+        assert by_key[key].max_connectors == EXPECTED_MAX_CONNECTORS[key], key
+
+
+def test_free_max_seats_is_at_least_the_workspace_default():
+    """Free max_seats MUST be >= the Workspace.seats model default (5) — no regression.
+
+    The seat gate enforces max(doc.seats, plan.max_seats); if Free's cap dropped
+    below 5 a default free workspace would be blocked below the seats it already
+    has. This is the CRITICAL non-regression invariant.
+    """
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    default_seats = Workspace.model_fields["seats"].default
+    assert default_seats == 5
+    assert plans.get_plan("free").max_seats is not None
+    assert plans.get_plan("free").max_seats >= default_seats
+
+
+def test_enterprise_smb_caps_are_uncapped():
+    """Enterprise is the one uncapped tier on every SMB cap (None, never a number)."""
+    ent = plans.get_plan("enterprise")
+    assert ent.max_seats is None
+    assert ent.max_pockets is None
+    assert ent.max_connectors is None
+
+
+def test_non_enterprise_smb_caps_are_positive_ints():
+    """Every non-Enterprise tier carries a concrete positive cap on all three."""
+    by_key = {p.key: p for p in plans.list_plans()}
+    for key in ("free", "go", "pro", "pro_max"):
+        for cap in (by_key[key].max_seats, by_key[key].max_pockets, by_key[key].max_connectors):
+            assert isinstance(cap, int) and cap > 0, key
+
+
+def test_build_unknown_key_fails_closed_to_free_smb_caps():
+    """An unknown key built directly caps at the Free values on all three — never None.
+
+    Same fail-closed floor the ceiling uses: a stray/typo'd key must NOT resolve to
+    an uncapped SMB cap.
+    """
+    bogus = plans._build("definitely_not_a_tier")
+    assert bogus.max_seats == EXPECTED_MAX_SEATS["free"]
+    assert bogus.max_pockets == EXPECTED_MAX_POCKETS["free"]
+    assert bogus.max_connectors == EXPECTED_MAX_CONNECTORS["free"]
+    assert bogus.max_seats is not None
+    assert bogus.max_pockets is not None
+    assert bogus.max_connectors is not None
 
 
 def test_list_plans_is_cheapest_first():

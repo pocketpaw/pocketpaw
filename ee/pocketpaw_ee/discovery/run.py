@@ -19,16 +19,23 @@
 #     HTTP 503 ``connector.local_agent_unavailable`` for local-mode actions, so
 #     the orchestrator drives the local ``ConnectorRegistry`` directly.
 #
-# Slice 1 is a DETERMINISTIC digest (no LLM refine). The optional draft-refine
-# pass (cleaning the ontology with an agent) is gated behind ``opts.refine`` and,
-# when enabled, MUST use the on-box / tenant model — never route tenant raw data
-# to a cloud model. It is not wired in slice 1 (the deterministic digest is
-# accepted); ``opts.refine=True`` raises so a caller can't silently get an
-# unrefined draft while believing it was refined.
+# The default path is a DETERMINISTIC digest (no LLM). The optional draft-refine
+# pass (cleaning the inferred ontology with the tenant's model) is gated behind
+# ``opts.refine``.
+#
+# WIRED IN F3 (feat/szd-finish-core): when ``opts.refine`` is True, after the
+# deterministic ``digest()`` produces the draft we run it through
+# ``_refine.refine_draft(draft, settings)`` — which is HARD-PINNED to the
+# tenant's ON-BOX model (Ollama) via ``resolve_llm_client(force_provider=
+# "ollama")`` and NEVER routes tenant data to a cloud model. Refine fails closed
+# on sovereignty, soft on availability: if Ollama is down it returns the
+# deterministic draft with ``meta["refine"]="unavailable"`` rather than raising
+# or falling back to a cloud call. ``opts.refine=False`` (the default) is the
+# unchanged deterministic path.
 #
 # Async orchestration; depends on the OSS connector registry/adapter surface
-# (duck-typed for testability) + the SZD-3 digester. No DB writes — the draft is
-# returned for a downstream gate to review.
+# (duck-typed for testability) + the SZD-3 digester + the F3 ``_refine`` helper.
+# No DB writes — the draft is returned for a downstream gate to review.
 
 from __future__ import annotations
 
@@ -85,9 +92,12 @@ class DiscoveryRunOptions:
       all requested connectors are sampled — connector-level permission
       enforcement isn't merged yet, so we degrade gracefully to allow-all and
       record that in the draft meta.
-    * ``refine`` — request the optional on-box LLM refine pass. Not wired in
-      slice 1; setting it ``True`` raises rather than silently returning an
-      unrefined draft.
+    * ``refine`` — request the optional on-box LLM refine pass (F3). When
+      ``True``, the deterministic draft is cleaned by the tenant's ON-BOX model
+      (Ollama, hard-pinned — never a cloud model). Fails soft on availability:
+      if Ollama is down the deterministic draft is returned with
+      ``meta["refine"]="unavailable"``. Default ``False`` is the deterministic
+      path.
     """
 
     sample_cap: int = DEFAULT_SAMPLE_CAP
@@ -215,16 +225,6 @@ class DiscoveryRun:
         opts: DiscoveryRunOptions | None = None,
     ) -> OntologyDraft:
         opts = opts or DiscoveryRunOptions()
-        if opts.refine:
-            # The on-box refine pass is not wired in slice 1. Fail loud rather
-            # than hand back a deterministic draft while a caller believes it
-            # was LLM-refined. When it lands it MUST use the tenant/on-box model.
-            raise NotImplementedError(
-                "DiscoveryRun refine pass is not implemented in slice 1; the "
-                "deterministic digest is the slice-1 contract. When wired, the "
-                "refine pass must run on the on-box / tenant model — never a "
-                "cloud model on tenant raw data."
-            )
 
         requested = [c for c in connector_ids]
         total_connectors = len(requested)
@@ -296,6 +296,19 @@ class DiscoveryRun:
             "skipped_by_permission": skipped,
             "connectors": per_connector,
         }
+
+        # Optional ON-BOX refine pass (F3). Runs ONLY when the caller opts in.
+        # Hard-pinned to the tenant's Ollama model inside ``refine_draft`` —
+        # never a cloud model on tenant data. Fails soft: if Ollama is down the
+        # deterministic draft comes back stamped ``meta["refine"]="unavailable"``
+        # rather than raising. The default path (``opts.refine=False``) skips
+        # this entirely and stays purely deterministic.
+        if opts.refine:
+            from pocketpaw.config import get_settings
+            from pocketpaw_ee.discovery import _refine
+
+            draft = await _refine.refine_draft(draft, get_settings())
+
         return draft
 
     async def _read_actions_for(

@@ -1,6 +1,6 @@
 # tests/sites_capture/test_ingest.py — failing-first tests for the OSS-core
 # site form-capture ingest primitive (Task 3.1, Paw Sites publish pipeline).
-# Exercises the pure predicates/interpolation generalized from paw_print:
+# Exercises the pure predicates/interpolation generalized from paw_bar:
 # origin pinning (fail-closed on the public capture path), honeypot detection,
 # and {{ placeholder }} mapping interpolation. Created 2026-05-30.
 from __future__ import annotations
@@ -14,13 +14,13 @@ from pocketpaw.sites_capture.models import SiteEventMapping
 
 
 def test_origin_allowed_host_only_match():
-    # host-only match: port + path ignored (mirrors paw-print _origin_allowed)
+    # host-only match: port + path ignored (mirrors paw-bar _origin_allowed)
     assert origin_allowed(["brightsmiledental.com"], "https://brightsmiledental.com:443/contact")
     assert not origin_allowed(["brightsmiledental.com"], "https://evil.example.com")
 
 
 def test_origin_allowed_empty_allowlist_blocks_in_capture_mode():
-    # Capture path is public-on-the-internet; unlike paw-print's demo default,
+    # Capture path is public-on-the-internet; unlike paw-bar's demo default,
     # an empty allowlist must FAIL CLOSED (no origin → reject).
     assert not origin_allowed([], "https://anything.example.com")
 

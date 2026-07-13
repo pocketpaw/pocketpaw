@@ -1,5 +1,14 @@
 """Notification service — CRUD + realtime fan-out.
 
+Updated: 2026-07-08 (feat/external-alerting-delivery) — ``create`` now also
+fans the new notification OUT of the app: right after the in-app realtime
+``emit(NotificationNew(...))`` it awaits ``delivery._deliver_external(created)``,
+which POSTs to the workspace's configured Slack incoming-webhook and/or generic
+HTTPS webhook. That call is never-raise, so a dead sink can't roll back the
+insert. Added ``get_delivery_config`` / ``set_delivery_config`` — this service is
+the SOLE writer of the ``NotificationDeliveryConfig`` doc (upsert), fronted by
+the PUT /notifications/delivery-config route.
+
 Sole owner of writes to the ``Notification`` Beanie document. Writes are
 inline; there is no separate repository layer. Tests use the shared
 ``mongo_db`` fixture (mongomock-motor) instead of injecting a Protocol
@@ -7,11 +16,13 @@ fake.
 
 Public API is module-level ``async def`` functions:
 
-- ``create(...)`` — insert a notification, emit ``NotificationNew``
+- ``create(...)`` — insert a notification, emit ``NotificationNew``, fan out
 - ``list_for_user(user_id)`` — list domain ``Notification`` objects
 - ``list_for_user_dicts(user_id)`` — list of legacy wire-format dicts
 - ``mark_read(notification_id, user_id)`` — flip the read flag, emit
 - ``clear_all(user_id)`` — bulk mark unread → read for a user, emit
+- ``get_delivery_config(workspace_id)`` — read the external-delivery config
+- ``set_delivery_config(workspace_id, ...)`` — upsert the external-delivery config
 
 Cross-module fan-out callers (``chat/message_service.py``,
 ``workspace/service.py``) call ``notifications_service.create(...)``
@@ -27,11 +38,13 @@ from beanie import PydanticObjectId
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     NotificationCleared,
+    NotificationDeleted,
     NotificationNew,
     NotificationRead,
 )
 from pocketpaw_ee.cloud.models.notification import Notification as _NotificationDoc
 from pocketpaw_ee.cloud.models.notification import NotificationSource as _NotificationSourceDoc
+from pocketpaw_ee.cloud.notifications.delivery import _deliver_external, is_safe_webhook_url
 from pocketpaw_ee.cloud.notifications.domain import Notification, NotificationSource
 from pocketpaw_ee.cloud.notifications.dto import notification_to_dto
 
@@ -72,6 +85,7 @@ def _to_domain(doc: _NotificationDoc) -> Notification:
         id=str(doc.id),
         workspace_id=doc.workspace,
         recipient_id=doc.recipient,
+        actor_id=doc.actor,
         kind=doc.type,  # Beanie field is `type`; domain renames to `kind`
         title=doc.title,
         body=doc.body,
@@ -98,10 +112,12 @@ async def create(
     title: str,
     body: str = "",
     source: _NotificationSourceDoc | NotificationSource | None = None,
+    actor_id: str | None = None,
 ) -> Notification:
     doc = _NotificationDoc(
         workspace=workspace_id,
         recipient=recipient,
+        actor=actor_id,
         type=kind,
         title=title,
         body=body,
@@ -111,6 +127,9 @@ async def create(
     await doc.insert()
     created = _to_domain(doc)
     await emit(NotificationNew(data=notification_to_dto(created).model_dump()))
+    # External fan-out (Slack / generic webhook). Never-raise: a dead sink must
+    # not roll back the insert or the emit above. See notifications/delivery.py.
+    await _deliver_external(created)
     return created
 
 
@@ -161,13 +180,99 @@ async def clear_all(user_id: str) -> int:
     return count
 
 
+async def delete_notification(notification_id: str, user_id: str) -> bool:
+    """Delete a single notification. Returns True if deleted, False if not found."""
+    doc = await _NotificationDoc.get(PydanticObjectId(notification_id))
+    if not doc or doc.recipient != user_id:
+        return False
+    await doc.delete()
+    await emit(NotificationDeleted(data={"id": notification_id, "user_id": user_id}))
+    return True
+
+
+# ---------------------------------------------------------------------------
+# External-delivery config — this service is the SOLE writer of the
+# NotificationDeliveryConfig doc (import-linter "Notifications" contract).
+# ---------------------------------------------------------------------------
+
+
+def _config_to_dict(doc) -> dict:
+    """Wire shape for the delivery config. Returns the workspace's own config,
+    so the URLs are returned as-stored (the admin who set them may see them)."""
+    return {
+        "workspace_id": doc.workspace,
+        "slack_webhook_url": doc.slack_webhook_url,
+        "webhook_url": doc.webhook_url,
+        "enabled": doc.enabled,
+        "routes": dict(doc.routes or {}),
+    }
+
+
+async def get_delivery_config(workspace_id: str) -> dict | None:
+    """Return the workspace's external-delivery config as a wire dict, or
+    ``None`` when unset."""
+    from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
+
+    doc = await NotificationDeliveryConfig.find_one(
+        NotificationDeliveryConfig.workspace == workspace_id
+    )
+    return _config_to_dict(doc) if doc is not None else None
+
+
+async def set_delivery_config(
+    workspace_id: str,
+    *,
+    slack_webhook_url: str | None = None,
+    webhook_url: str | None = None,
+    enabled: bool = False,
+    routes: dict[str, list[str]] | None = None,
+) -> dict:
+    """Upsert the workspace's external-delivery config and return the wire dict.
+
+    A non-empty URL that fails the SSRF safety check is rejected up front with a
+    ``Forbidden`` so a bad value never reaches storage (and later the delivery
+    hot path). Empty / ``None`` clears that sink. This is the only write path to
+    ``NotificationDeliveryConfig``.
+    """
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+    from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
+
+    slack = (slack_webhook_url or "").strip() or None
+    generic = (webhook_url or "").strip() or None
+    if slack is not None and not is_safe_webhook_url(slack):
+        raise Forbidden(
+            "notifications.invalid_webhook_url",
+            "Slack webhook URL must be an https:// URL to a public host.",
+        )
+    if generic is not None and not is_safe_webhook_url(generic):
+        raise Forbidden(
+            "notifications.invalid_webhook_url",
+            "Webhook URL must be an https:// URL to a public host.",
+        )
+
+    doc = await NotificationDeliveryConfig.find_one(
+        NotificationDeliveryConfig.workspace == workspace_id
+    )
+    if doc is None:
+        doc = NotificationDeliveryConfig(workspace=workspace_id)
+    doc.slack_webhook_url = slack
+    doc.webhook_url = generic
+    doc.enabled = enabled
+    doc.routes = dict(routes or {})
+    await doc.save()
+    return _config_to_dict(doc)
+
+
 __all__ = [
     "Notification",
     "NotificationSource",
     "count_unread",
     "create",
+    "delete_notification",
+    "get_delivery_config",
     "list_for_user",
     "list_for_user_dicts",
     "mark_read",
     "clear_all",
+    "set_delivery_config",
 ]

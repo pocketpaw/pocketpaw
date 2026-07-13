@@ -37,6 +37,12 @@
 # invariant: the balance MAY go slightly negative from metered compute overage
 # (BC-3) — the no-overdraft guarantee is enforced at run-start, not by clamping
 # the balance to >= 0 here.
+# Changed 2026-06-30 (feat/billing-quota-enforcement, chunk 2): added a second
+# ``CreditLedgerEntry`` index ``ix_workspace_created_at`` on
+# ``(workspace, createdAt)``. The monthly-quota read (``month_to_date_spend``)
+# and the sibling windowed reads (``sum_debits_by_cause`` / ``spend_by_model``)
+# all ``$match`` on ``workspace`` + a ``createdAt`` range; this compound index
+# keeps that scan off the full per-tenant ledger.
 
 from __future__ import annotations
 
@@ -138,5 +144,15 @@ class CreditLedgerEntry(TimestampedDocument):
                 [("workspace", 1), ("idempotency_key", 1)],
                 unique=True,
                 name="uq_workspace_idempotency_key",
+            ),
+            # Windowed-read index. ``month_to_date_spend`` /
+            # ``sum_debits_by_cause`` / ``spend_by_model`` all filter the ledger by
+            # ``workspace`` + a ``createdAt`` range (and group/sum server-side). This
+            # compound index serves that ``$match`` (workspace equality + createdAt
+            # range scan) so the monthly-quota aggregation never collection-scans a
+            # busy tenant's full ledger.
+            IndexModel(
+                [("workspace", 1), ("createdAt", 1)],
+                name="ix_workspace_created_at",
             ),
         ]

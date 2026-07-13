@@ -59,6 +59,19 @@ Updated: 2026-06-26 (ART-4) — documented the Agent Artifact Delivery
 (deliver_artifact) in-process MCP tool: routes a built file/dir through the
 workspace upload pipeline (file as-is, dir zipped) and returns a presigned
 download URL; jail-scoped path safety; POCKETPAW_DELIVER_MAX_MB cap.
+Updated: 2026-07-02 (NE-4b / NE-5b) — documented the Sites — Native Editing
+section: POST /sites/by-pocket/{id}/leaf-edits (splice editor edits into the
+svelte source via the apply-leaf-edit CLI and persist as a Branch draft, no
+rebuild — dynamic-source split + input-keyspace confinement) and GET
+/sites/by-pocket/{id}/native-artifact (serve the armed build's body_html + css
+for shadow render — per-GET arm-build cost, path-traversal-guarded CSS reader).
+
+Updated: 2026-07-11 (feat/real-pipeline-s1) — documented the Fabric — Transform
+Mappings section: GET/POST/DELETE /fabric/ingest/mappings (author the
+workspace's source→Fabric mappings, now with a "connector" source_kind that
+dispatches through the OSS FABRIC_INGESTORS registry — gcalendar first) and
+POST /fabric/ingest/run (run one mapping immediately; misconfiguration reports
+status="error" in the body, never a 5xx).
 -->
 
 # Cloud REST API Reference
@@ -1059,3 +1072,198 @@ whose mime is not in `INLINE_MIMES` (HTML, SVG, JS, …) is served with
 does not render inline on the storage origin. Inline-safe types (images, pdf,
 plain text) still embed as before. The whole tool is gated on
 `is_multi_tenant_cloud()`.
+
+## Sites — Native Editing
+
+NE-4b / NE-5b. The **native site editor** renders a svelte Paw Site directly in
+the dashboard — the built page's markup is injected into a shadow root rather
+than framed in an iframe — and persists in-place text / prop edits by splicing
+them back into the pocket's component source as a **reviewable Branch draft**.
+Two endpoints back it: one serves the render, one persists the edits. Source:
+`ee/pocketpaw_ee/sites/router.py`.
+
+Both require an authenticated workspace context, the `fabric.write` action, and
+the `sites` plan feature (the whole sites router is gated on it). Both operate
+on a **svelte** Paw Site — a pocket with `engine: "svelte"` and a `source`
+component map; a ripple-engine or non-site pocket is a `422`
+(`pocket.not_svelte_site`). A missing or access-denied pocket surfaces as `404`
+(`pocket.not_found`) / `403` (`pocket.access_denied`) from the pockets service,
+exactly like every other `by-pocket` route. All work is tenant-scoped on the
+request context (`workspace_id`, `user_id`).
+
+### `POST /sites/by-pocket/{pocket_id}/leaf-edits`
+
+Persist a batch of native-editor leaf edits as a Branch draft. The editor has
+already rendered each edit optimistically; this splices them into the pocket's
+svelte source and writes the draft — **there is no rebuild**. Skipping the
+per-edit iframe rebuild is the UX win over the older `edit_svelte_component`
+path; an approved review is what later takes the draft live.
+
+Request body:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `edits` | array | Required, non-empty. Each entry is one leaf edit. An empty list is a `422` (`site_leaf_edit.empty_edits`). |
+
+Each edit:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `uid` | string | The stable id of the edited leaf, e.g. `"Hero:headline:0"`. |
+| `op` | object | The change. One of `{ "kind": "setText", "html": "<new inner HTML>" }` or `{ "kind": "setProp", "name": "<prop>", "value": <any> }`. The `op` shape is validated downstream by the `apply-leaf-edit` CLI, not at the request boundary. |
+
+Response `200`:
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "results": [
+    { "uid": "Hero:headline:0", "applied": true, "reason": null },
+    { "uid": "Pricing:cta:2", "applied": false, "reason": "uid not found in current source" }
+  ]
+}
+```
+
+One verdict per submitted edit, in submission order. `applied` is whether the
+splice landed; `reason` (CLI-produced) explains a rejection and is `null` on
+success. The caller keeps the whole-file re-author path for any leaf that comes
+back `applied: false`.
+
+**How it persists.** Edits apply **in order** through the paw-sites
+`apply-leaf-edit` CLI — a pure source transform, no build or workerd. Only the
+files whose contents actually changed are persisted (each write auto-writes the
+Branch-draft snapshot), so a rejected edit churns no draft. A **dynamic** svelte
+site carries its live-data bindings (`objects` / `sources` / `actions` / `auth`)
+as sibling keys of the `{path: contents}` file map; the service splits those out
+before the splice (the CLI treats every source key as a file) and **confines the
+persist loop to the original file keyspace** — a binding key, or a brand-new
+path the CLI might echo, is never written back as a component file.
+
+Errors:
+
+| HTTP | Code | When |
+|------|------|------|
+| 422 | `site_leaf_edit.empty_edits` | The `edits` list is empty. |
+| 422 | `pocket.not_svelte_site` | The pocket is not a svelte Paw Site (no component source map). |
+| 404 | `pocket.not_found` | Unknown pocket id. |
+| 403 | `pocket.access_denied` | The caller lacks access to the pocket. |
+| 500 | `sites.leaf_edit_failed` | The `apply-leaf-edit` CLI exited non-zero, timed out, or returned unparseable output. |
+
+### `GET /sites/by-pocket/{pocket_id}/native-artifact`
+
+Serve the armed svelte build's body markup and CSS so the native editor can
+shadow-render the site.
+
+Response `200`:
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "body_html": "<div data-uid=\"Hero:root:0\">…<script id=\"paw-edit-manifest\">…</script></div>",
+  "css": "/* concatenated stylesheets */"
+}
+```
+
+- `body_html` is the built page's `<body>` **inner** HTML — the `data-uid`-stamped
+  editable leaves plus the embedded `<script id="paw-edit-manifest">`. The
+  frontend injects it into a shadow root.
+- `css` is the built stylesheet(s) — inline `<style>` blocks plus every linked
+  stylesheet — concatenated into one string, injected as a single `<style>`.
+
+**Auth is `fabric.write`, not a read scope,** because the GET **arms a build**:
+it (re)builds the pocket with a builder origin set so the generator stamps
+`data-uid` on the editable leaves and embeds the edit manifest. The builder
+origin is resolved from the request's `Origin` header, falling back to the
+configured `PAW_SITES_BUILDER_ORIGIN` when absent (the same precedence as
+`/editable` and `/dev-preview`), so the call works with no header. **Every GET
+rebuilds** — the arm build runs on each request. The build is keyed on
+`pocket_id` in a stable directory, so `node_modules` / `bun install` stay cached
+across requests, but the compile still runs on each call; treat this as a
+heavier read. The arm build skips the SSR smoke fail-gate (`smoke=False`) but
+still emits the static output that is read.
+
+**CSS reader is path-traversal-guarded.** Stylesheet `href`s from the built
+`index.html` are resolved against the build tree (relative `./_app/…` and
+absolute `/_app/…` hrefs both) and each resolved path is checked to be contained
+inside the tree before it is read — a `../` traversal in a hand-authored
+component's `<link>` is refused.
+
+Errors:
+
+| HTTP | Code | When |
+|------|------|------|
+| 422 | `pocket.not_svelte_site` | The pocket is not a svelte Paw Site (no component build to render). |
+| 404 | `pocket.not_found` | Unknown pocket id. |
+| 403 | `pocket.access_denied` | The caller lacks access to the pocket. |
+| 500 | `sites.generator_failed` | The arm build failed (missing toolchain, non-zero build, or smoke-gate failure). |
+
+## Fabric — Transform Mappings (source→Fabric ingest)
+
+The transform surface over the per-workspace `FabricIngestConfig`: which
+sources land as typed Fabric objects, and how. A mapping's `source_kind`
+picks the pipeline:
+
+- `"firestore"` (default) — the original reader path: mirror a Firestore
+  collection, keyed on the doc path, with a real high-water cursor.
+- `"connector"` — pull records through the OSS connector→Fabric ingestor
+  registry (`pocketpaw.connectors.fabric_ingest.FABRIC_INGESTORS`;
+  `gcalendar` is the first registered adopter). By convention `collection`
+  holds the connector name (it stays the routing key everywhere);
+  `connector_id` overrides it when they differ. The run resolves the
+  workspace's **enabled** `WorkspaceConnector` row and calls the ingestor
+  with that row's `user_id`, so a user-scoped connector reads with that
+  member's OAuth token bucket (`null` = the shared/workspace bucket).
+
+All routes are license + plan-feature `fabric` gated (business tier and up).
+Reads require `fabric.read`, mutations (author, delete, run-now) require
+`fabric.write`; the workspace is always the caller's active workspace — it
+never travels in a request body.
+
+### `GET /fabric/ingest/mappings`
+
+Returns `{"mappings": [...]}` — the caller's workspace's authored mappings
+(empty list when nothing is configured yet). Shown regardless of the config's
+`enabled` flag so a paused pipeline is still visible.
+
+### `POST /fabric/ingest/mappings`
+
+Author one mapping — create-or-replace, keyed on `collection` (201). Body:
+
+```json
+{
+  "collection": "gcalendar",
+  "object_type_id": "ot-calendar-event",
+  "source_kind": "connector",
+  "connector_id": null,
+  "field_map": {},
+  "cursor_field": "",
+  "link_rules": []
+}
+```
+
+A malformed mapping (blank `collection` / `object_type_id`, blank field-map
+entries) is rejected with 422 before anything is stored.
+
+### `DELETE /fabric/ingest/mappings?collection=<key>`
+
+Remove the mapping keyed on `collection` (204; 404 when it doesn't exist).
+The key rides a query param, not a path segment — Firestore collection paths
+can contain `/`.
+
+### `POST /fabric/ingest/run`
+
+Run one mapping's ingest immediately. Body: `{"collection": "<key>"}`.
+Returns the ingest result envelope:
+
+```json
+{
+  "workspace_id": "…", "source_id": "gcalendar", "status": "ok",
+  "mode": "backfill", "objects": 3, "cursor": "", "errors": []
+}
+```
+
+Misconfiguration — no mapping for the key, connector not connected or
+disabled, no ingestor registered under the connector id — reports
+`status: "error"` with the reason in `errors` (HTTP 200, matching the
+background sweep's never-raise, per-source isolation contract). Re-runs are
+idempotent: objects upsert by `(source_connector, source_id)`.

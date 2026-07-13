@@ -8,6 +8,17 @@
 # sites if needed. Sibling to ``pocketpaw.fabric.store.FabricStore``
 # (OSS, async, holds the live ontology object data); the ``Workspace``
 # prefix flags the workspace-scoped, registry-only role.
+# Updated: 2026-07-02 (feat/atlas-fabric, AT-7) — added
+# ``list_entity_links()``: enumerate the declared links touching one
+# entity type (either end), so the atlas Fabric introspector can
+# describe a workspace's live schema. Read-only, additive.
+# Updated: 2026-07-10 (ontology-operator-ux) — two additions for the
+# operator schema surface: ``list_links(workspace_id)`` enumerates ALL
+# declared link types in a workspace (name + from/to type), used by the
+# GET /fabric/schema list endpoint and by write-time LINK enforcement in
+# the router; and ``get_registry_store()`` builds a WorkspaceFabricStore
+# under the OSS data dir (``pocketpaw.stores._DATA_DIR``) so it inherits
+# the same test isolation the OSS Fabric store already gets. Both additive.
 """SQLite-backed workspace-scoped Fabric registry store.
 
 The store is the write-side of the concrete ``FabricRegistry``
@@ -267,8 +278,66 @@ class WorkspaceFabricStore:
             )
             return cur.fetchone() is not None
 
+    def list_entity_links(self, workspace_id: str, entity_type: str) -> list[dict[str, str]]:
+        """Every declared link touching ``entity_type`` (either end) in
+        ``workspace_id``, as ``{"name", "from_type", "to_type"}`` dicts.
+
+        Ordered by (name, from_type, to_type) for stable callers. Added
+        for the atlas Fabric introspector (AT-7): the registry exposed
+        existence checks but no way to enumerate a type's links when
+        describing the workspace schema.
+        """
+        with self._connect() as conn:
+            cur = conn.execute(
+                "SELECT name, from_type, to_type FROM fabric_registry_links "
+                "WHERE workspace = ? AND (from_type = ? OR to_type = ?) "
+                "ORDER BY name, from_type, to_type",
+                (workspace_id, entity_type, entity_type),
+            )
+            return [
+                {"name": row[0], "from_type": row[1], "to_type": row[2]} for row in cur.fetchall()
+            ]
+
+    def list_links(self, workspace_id: str) -> list[dict[str, str]]:
+        """Every declared link type in ``workspace_id`` as ``{"name",
+        "from_type", "to_type"}`` dicts (ontology-operator-ux).
+
+        Unlike :meth:`list_entity_links` (which filters to one entity), this
+        returns the WHOLE link schema for the workspace — what the operator's
+        GET /fabric/schema list endpoint renders, and what write-time link
+        enforcement in the router checks a new link against. Ordered by
+        (name, from_type, to_type) for stable callers.
+        """
+        with self._connect() as conn:
+            cur = conn.execute(
+                "SELECT name, from_type, to_type FROM fabric_registry_links "
+                "WHERE workspace = ? ORDER BY name, from_type, to_type",
+                (workspace_id,),
+            )
+            return [
+                {"name": row[0], "from_type": row[1], "to_type": row[2]} for row in cur.fetchall()
+            ]
+
+
+def get_registry_store() -> WorkspaceFabricStore:
+    """Return the workspace-registry store under the OSS data dir (ontology-operator-ux).
+
+    The registry is a SINGLE SQLite file with a ``workspace`` column (not a
+    per-workspace file), living beside the OSS Fabric data at
+    ``<pocketpaw.stores._DATA_DIR>/fabric_registry.db``. Reading ``_DATA_DIR`` at
+    call time (rather than binding ``DEFAULT_DB_PATH`` once) means a test that
+    repoints ``stores._DATA_DIR`` at a tmp dir isolates the registry too — the
+    same isolation the OSS Fabric store already inherits from the factory. In
+    production ``_DATA_DIR`` is ``~/.pocketpaw``, so the path equals the module
+    default.
+    """
+    from pocketpaw import stores  # local import: OSS core, avoids an import cycle
+
+    return WorkspaceFabricStore(stores._DATA_DIR / "fabric_registry.db")
+
 
 __all__ = [
     "DEFAULT_DB_PATH",
     "WorkspaceFabricStore",
+    "get_registry_store",
 ]

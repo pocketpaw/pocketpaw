@@ -94,6 +94,12 @@ from or weaken them. It returns ``None`` for the legacy (no-workspace) path, lea
 the OSS factory's shared singleton in place. This activates the entry-point end to
 end and gives EE the single hook to later swap in a cloud-backed store without
 touching core.
+
+Updated: 2026-07-11 (feat/paw-cli, C2) — ``CloudFabricMcpProvider`` is no longer
+read-only: the ``pocketpaw_fabric`` server grew three ontology modification
+tools (``fabric_link_create`` / ``fabric_link_delete`` at MEMBER tier,
+``fabric_type_update`` RBAC-gated on ``fabric.admin``), mirroring the REST
+routes. ``tool_ids()`` picks them up automatically via ``FABRIC_TOOL_IDS``.
 """
 
 from __future__ import annotations
@@ -778,6 +784,34 @@ class CloudMediaMcpProvider:
         return list(MEDIA_TOOL_IDS)
 
 
+class CloudStockImagesMcpProvider:
+    """`pocketpaw.mcp_servers` — the stock-photo search in-process server
+    (``pocketpaw_stock``). Hosts ``search_stock_images`` only.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so the bundled
+    ``pocketpaw-create-svelte-site`` skill can source real photography for a
+    generated marketing site without an explicit opt-in — the same regime the
+    sites manager + media + deliver servers use. The cloud chat agent runs on
+    the claude_agent_sdk backend, which only sees in-process MCP servers (a
+    plain BaseTool is invisible to it), so stock search MUST be surfaced here.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.stock_images import build_stock_server
+
+            return build_stock_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the stock server is unavailable,
+            # same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.stock_images import STOCK_TOOL_IDS
+
+        return list(STOCK_TOOL_IDS)
+
+
 class CloudDeliverMcpProvider:
     """`pocketpaw.mcp_servers` — the artifact-delivery in-process server
     (``pocketpaw_deliver``). Hosts ``deliver_artifact`` only (ART-4).
@@ -905,15 +939,55 @@ class CloudExternalActionsMcpProvider:
         return list(EXTERNAL_ACTIONS_TOOL_IDS)
 
 
+class CloudWorkspaceAdminMcpProvider:
+    """`pocketpaw.mcp_servers` — the workspace-administration in-process server
+    (``pocketpaw_workspace_admin``, feat/workspace-admin-tools WA-1).
+
+    Lets the cloud chat agent perform workspace administration, gated by the
+    EXISTING RBAC system (``guards/``). Hosts two tools in WA-1: ``members_list``
+    (READ, gated at ``workspace.view`` — any member) and ``member_update_role``
+    (WRITE, gated at ``workspace.member.role_change`` — ADMIN). The write is
+    NEVER applied inline — an admin mutation is human-gated through Instinct. WA-1
+    ships the read fully; the write authorizes (fail-closed ADMIN gate) and
+    returns a pending envelope without mutating, because the Instinct
+    approve→execute spine for admin actions isn't wired yet (see the module
+    header on ``agent.mcp_servers.workspace_admin``).
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) — the same regime the sibling
+    connectors / belt / external_actions servers use; the RBAC gate is the
+    security boundary, not registration. ``build_admin_server`` returns None —
+    and the registration loop skips it — when the claude_agent_sdk isn't
+    installed, so chat never breaks.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.workspace_admin import build_admin_server
+
+            return build_admin_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the server is unavailable, same as
+            # the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.workspace_admin import ADMIN_TOOL_IDS
+
+        return list(ADMIN_TOOL_IDS)
+
+
 class CloudFabricMcpProvider:
-    """`pocketpaw.mcp_servers` — read-only Fabric ontology access in-process
-    server (``pocketpaw_fabric``). Hosts ``fabric_query`` + ``fabric_stats``.
+    """`pocketpaw.mcp_servers` — Fabric ontology access in-process server
+    (``pocketpaw_fabric``). Hosts the reads ``fabric_query`` + ``fabric_stats``
+    and, since feat/paw-cli C2, the modification tools ``fabric_link_create``
+    / ``fabric_link_delete`` (MEMBER tier — mirroring the fabric.write REST
+    routes) and ``fabric_type_update`` (RBAC-gated on ``fabric.admin``,
+    mirroring the ADMIN schema routes).
 
     On the claude_agent_sdk backend, registry tools (BaseTool) never reach the
     agent — only MCP servers do — so this server is the cloud chat agent's only
-    path to the Fabric ontology. Both tools are READ-ONLY and workspace-scoped
-    via the chat ContextVars; ontology writes from this backend should arrive
-    as gated proposals, never ambient writes.
+    path to the Fabric ontology. All tools are workspace-scoped via the chat
+    ContextVars and every write is audited via record_tool_call.
 
     Ambient (NOT in ``OPT_IN_MCP_SERVERS``) — surfaces scope access via their
     profile allowlist, the same regime the sibling belt / external-actions /
@@ -971,13 +1045,48 @@ class CloudInstinctMcpProvider:
         return list(INSTINCT_TOOL_IDS)
 
 
+class CloudDaytonaMcpProvider:
+    """`pocketpaw.mcp_servers` — the Daytona sandbox in-process server
+    (``pocketpaw_daytona``). Hosts sandbox-aware read_file, write_file,
+    edit_file, list_dir, shell, and run_python tools.
+
+    When an agent is on the /code surface with a cloud project that has a
+    Daytona sandbox provisioned, these tools let the agent read, write, edit
+    files, run shell commands, and execute Python code — all inside the
+    sandbox VM instead of the local filesystem.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) — the /code surface scopes
+    access via its profile allowlist, the same regime the sibling
+    fabric / instinct / media servers use. ``build_daytona_server`` returns
+    None — and the loop skips it — when the claude_agent_sdk isn't installed,
+    so chat never breaks.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.daytona import build_daytona_server
+
+            return build_daytona_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the server is unavailable, same as
+            # the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.daytona import DAYTONA_TOOL_IDS
+
+        return list(DAYTONA_TOOL_IDS)
+
+
 class CloudAgentExtension:
     """`pocketpaw.agent_extensions` — EE additions to the core agent runtime.
 
     Contributes the cloud pocket-specialist function tool to MCP-capable
     tool-list backends, cloud workspace/user/session identity to agent
-    subprocess environments, and (ART-2) a per-tenant agent working-directory
-    jail so each cloud workspace's file ops stay isolated from every other.
+    subprocess environments, (ART-2) a per-tenant agent working-directory
+    jail so each cloud workspace's file ops stay isolated from every other,
+    and Daytona-aware tool variants that route file/shell operations through
+    a provisioned sandbox VM when active.
     """
 
     # Backends that receive ``PocketSpecialistTool`` as a native function
@@ -987,16 +1096,36 @@ class CloudAgentExtension:
     # through the function-tool bridge for either would advertise a name
     # their dispatcher can't resolve.
     _SPECIALIST_FUNCTION_TOOL_BACKENDS = frozenset({"deep_agents", "google_adk", "openai_agents"})
+    # Same backends also receive Daytona-aware tools (read_file, write_file,
+    # edit_file, list_dir, shell, run_python) that route through the sandbox
+    # VM when a Daytona context is active. Because these tools use the EXACT
+    # SAME names as the OSS builtins, they replace them in the ToolRegistry
+    # via last-writer-wins registration.
+    _DAYTONA_TOOL_BACKENDS = frozenset({"deep_agents", "google_adk", "openai_agents"})
 
     def agent_tools(self, backend: str) -> list[Any]:
-        if backend not in self._SPECIALIST_FUNCTION_TOOL_BACKENDS:
-            return []
-        try:
-            from pocketpaw_ee.agent.pocket_specialist.tool import PocketSpecialistTool
+        tools: list[Any] = []
 
-            return [PocketSpecialistTool()]
-        except Exception:  # noqa: BLE001
-            return []
+        # Pocket specialist tool.
+        if backend in self._SPECIALIST_FUNCTION_TOOL_BACKENDS:
+            try:
+                from pocketpaw_ee.agent.pocket_specialist.tool import PocketSpecialistTool
+
+                tools.append(PocketSpecialistTool())
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Daytona-aware tools — replace OSS builtins with sandbox-routing
+        # variants when Daytona is configured.
+        if backend in self._DAYTONA_TOOL_BACKENDS:
+            try:
+                from pocketpaw_ee.cloud.daytona.tools import get_daytona_tools
+
+                tools.extend(get_daytona_tools())
+            except Exception:  # noqa: BLE001
+                pass
+
+        return tools
 
     def subprocess_env(self) -> dict[str, str]:
         try:

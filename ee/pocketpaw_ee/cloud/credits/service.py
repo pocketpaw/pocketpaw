@@ -16,6 +16,13 @@
 #   * ``check_balance`` — raise ``InsufficientCredits`` when the wallet is
 #                     out of credits (balance <= 0). The pure, flag-free
 #                     assertion behind BC-4's run-start hard-block.
+#   * ``month_to_date_spend`` — server-side ``$sum`` of this UTC month's APPLIED
+#                     spend debits (compute_spend + litellm_spend). The read the
+#                     monthly-quota gate compares against.
+#   * ``check_quota`` — raise ``QuotaExceeded`` (402) when month-to-date spend
+#                     meets the workspace's effective monthly ceiling (plan
+#                     ceiling + purchased top-ups this period). Pure + flag-free,
+#                     mirroring ``check_balance``; a no-op for an uncapped plan.
 #   * ``history``   — page the append-only ledger, newest first.
 #   * ``reconcile`` — recompute ``balance == sum(amount_delta)`` and repair the
 #                     CreditBalance doc if it drifted (covers a crash between
@@ -112,6 +119,40 @@
 # tenant's window so the llm_provisioning entity never reads the credit ledger doc
 # directly (the credits service owns reads of its own ``CreditLedgerEntry``). It
 # performs NO writes — shadow mode debits nothing.
+# Changed 2026-06-29 (fix/billing-usage-ledger-source): added ``spend_by_model`` —
+# a read-only, tenant-filtered breakdown of spend credits by (UTC day, model)
+# over a ``createdAt`` window, summed across the spend causes
+# (``compute_spend`` + ``litellm_spend``, only ``applied`` entries). The billing
+# usage graph reads through it so the "Usage by model" chart is sourced from the
+# wallet's OWN ledger (the universal meter, mode-agnostic) instead of the LiteLLM
+# proxy — which is empty in the default off-mode where finished runs debit the
+# ledger directly and never route through the proxy. EE entity-isolation: billing
+# must not read ``CreditLedgerEntry`` itself, so this owns the read (sibling to
+# ``sum_debits_by_cause``). It performs NO writes and changes NOTHING that is
+# charged — a pure re-source of the display.
+# Changed 2026-07-11 (feat/llm-cost-attribution): ``spend_by_model`` now sums each
+# debit's ``ref.total_tokens`` per (day, model) and returns it on the new
+# ``ModelSpendRow.tokens`` field, so the ledger-sourced usage graph surfaces real
+# token volume instead of a hardcoded 0. A legacy entry whose ref predates the
+# token stamp contributes 0 (the credits + requests figures are unchanged). Read
+# only — no new writes.
+# Changed 2026-06-30 (feat/billing-quota-enforcement, chunk 2): added the monthly
+# credit-QUOTA reads + assertion. ``month_to_date_spend`` sums this UTC calendar
+# month's APPLIED spend debits (compute_spend + litellm_spend, the same two
+# ``spend_by_model`` reads) via a SERVER-SIDE Mongo ``$match`` + ``$group`` (not
+# pull-all-then-sum) — iterated with ``async for`` because the mongomock-motor
+# test harness cannot ``await`` a latent command cursor (Beanie's
+# ``aggregate().to_list()`` raises there), so async-iteration is the call style
+# that runs the aggregation in both real Mongo and tests. ``check_quota`` is the
+# pure, flag-free monthly-cap assertion (the credit-spend sibling of
+# ``check_balance``): it resolves the plan ``monthly_ceiling`` via
+# ``entitlements.resolve_entitlements`` (no-op when None/uncapped), adds the
+# PURCHASED top-ups granted this period (``cause="top_up"`` only — the recurring
+# ``subscription_grant`` allotment is the ceiling's own baseline and is NOT
+# counted, which would otherwise double-credit the cap), and raises
+# ``QuotaExceeded`` (402 ``credits.quota_exceeded``) when month-to-date spend is
+# ``>=`` that effective ceiling. Reads only; charges nothing. Chunk 3 wires the
+# gate at run-start — this chunk owns only the reusable read + assertion.
 
 from __future__ import annotations
 
@@ -123,10 +164,14 @@ from beanie import PydanticObjectId
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from pocketpaw_ee.cloud._core.errors import InsufficientCredits, ValidationError
+from pocketpaw_ee.cloud._core.errors import (
+    InsufficientCredits,
+    QuotaExceeded,
+    ValidationError,
+)
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import CreditMovement
-from pocketpaw_ee.cloud.credits.domain import GrantResult, LedgerEntry
+from pocketpaw_ee.cloud.credits.domain import GrantResult, LedgerEntry, ModelSpendRow
 from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 
 logger = logging.getLogger(__name__)
@@ -397,6 +442,82 @@ async def check_balance(workspace: str) -> None:
         raise InsufficientCredits(1, max(bal, 0))
 
 
+# The grant cause that EXTENDS the monthly ceiling — a PURCHASED one-time top-up
+# (``billing.service.handle_webhook`` records ``payment.succeeded`` as
+# ``cause="top_up"``, a positive grant). It is the only cause that raises the cap:
+# a top-up is credits the workspace bought ON TOP of its plan, so its monthly cap
+# rises by what it purchased this period. The RECURRING monthly allotment is
+# recorded under a DIFFERENT cause (``subscription_grant``, in
+# ``_handle_subscription_event``) and is deliberately NOT here — the allotment is
+# the baseline the plan ``monthly_ceiling`` already accounts for (the ceiling is
+# allotment × 1.5 for paid tiers), so counting it would double-credit the cap.
+_TOPUP_CAUSE = "top_up"
+
+
+async def _period_topup_credits(workspace: str) -> int:
+    """Sum of PURCHASED top-up credits granted to ``workspace`` this UTC month.
+
+    The amount the effective monthly ceiling is raised by: the POSITIVE
+    ``amount_delta`` summed over the APPLIED ``top_up`` grants with
+    ``createdAt >= start-of-current-UTC-month``. Only ``top_up`` (a bought
+    extension) counts — NOT ``subscription_grant`` (the recurring allotment, which
+    is the plan ceiling's own baseline). Runs server-side ``$match`` + ``$group``,
+    same as ``month_to_date_spend``. A top-up grant's ``amount_delta`` is positive,
+    so the grouped sum is ``>= 0``; a (should-never-happen) net-negative under the
+    top-up cause is clamped to 0 so a stray debit can't SHRINK the ceiling.
+    """
+    month_start = _utc_month_start(datetime.now(UTC))
+    query: dict[str, Any] = {
+        "workspace": workspace,
+        "cause": _TOPUP_CAUSE,
+        "applied": True,
+        "createdAt": {"$gte": month_start},
+    }
+    net = await _sum_amount_delta(query)
+    return max(net, 0)
+
+
+async def check_quota(workspace: str) -> None:
+    """Raise ``QuotaExceeded`` when the workspace has hit its monthly credit cap.
+
+    The monthly-quota assertion, the credit-spend sibling of ``check_balance``: a
+    PURE, flag-free read (it carries NO ``billing_enforced`` logic so the caller
+    owns the on/off decision and the check stays reusable by any future gate).
+
+    Resolves the workspace's plan ``monthly_ceiling``
+    (``entitlements.resolve_entitlements``). An UNCAPPED plan (Enterprise →
+    ceiling is ``None``) is a no-op. Otherwise the EFFECTIVE ceiling is the plan
+    ceiling PLUS any credits the workspace PURCHASED via top-ups this period
+    (``_period_topup_credits``) — a bought top-up raises the cap; the recurring
+    allotment does not (it is already the ceiling's baseline). Raises
+    ``QuotaExceeded`` (402 ``credits.quota_exceeded``) when month-to-date spend is
+    AT or ABOVE the effective ceiling (boundary is ``>=`` — exactly-at-ceiling
+    raises); a no-op below it.
+
+    A workspace with no/unknown plan resolves (via the entitlements resolver) to
+    the Free trial ceiling (1000), so this fails CLOSED — an unresolvable plan is
+    capped, never uncapped.
+    """
+    if not workspace:
+        raise ValidationError("credits.invalid_workspace", "workspace is required")
+
+    # Lazy import — keeps this module free of the entitlements/billing import chain
+    # at load (it pulls the plan catalog + workspace service), mirroring how
+    # ``entitlements.service`` itself lazy-imports the workspace service.
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = await entitlements_service.resolve_entitlements(workspace)
+    ceiling = ent.monthly_ceiling
+    # None == uncapped (Enterprise / custom). No cap to enforce — no-op.
+    if ceiling is None:
+        return
+
+    effective_ceiling = ceiling + await _period_topup_credits(workspace)
+    spent = await month_to_date_spend(workspace)
+    if spent >= effective_ceiling:
+        raise QuotaExceeded(ceiling=effective_ceiling, spent=spent)
+
+
 async def is_recorded(workspace: str, idempotency_key: str) -> bool:
     """Whether a movement with this ``(workspace, idempotency_key)`` already exists.
 
@@ -469,6 +590,164 @@ async def sum_debits_by_cause(
     # can't make the spend total read as a refund.
     total = sum(-int(e.amount_delta) for e in entries if int(e.amount_delta) < 0)
     return total, len(entries)
+
+
+# The spend causes that count toward the monthly quota — the SAME two the usage
+# graph reads (``spend_by_model``). ``compute_spend`` is the default off-mode
+# debit a finished run records against the ledger; ``litellm_spend`` is the
+# post-cutover live-proxy debit. They are mutually exclusive per run, so summing
+# both is safe (a given run is billed under exactly one). Grants
+# (``top_up`` / ``subscription_grant`` / ``genesis`` / ``promo``) are NOT spend
+# and never count here.
+_SPEND_CAUSES: tuple[str, ...] = ("compute_spend", "litellm_spend")
+
+
+def _utc_month_start(now: datetime) -> datetime:
+    """Start-of-current-UTC-calendar-month (midnight on the 1st), tz-aware UTC."""
+    return datetime(now.year, now.month, 1, tzinfo=UTC)
+
+
+async def _sum_amount_delta(query: dict[str, Any]) -> int:
+    """Server-side ``$sum`` of ``amount_delta`` over the entries matching ``query``.
+
+    Runs a Mongo ``$match`` + ``$group`` aggregation in the DB (NOT a
+    pull-all-then-sum in Python) and returns the summed ``amount_delta`` (signed),
+    or 0 when nothing matches. We iterate the raw pymongo command cursor with
+    ``async for`` because awaiting it directly (``await coll.aggregate(...)``)
+    raises ``TypeError`` under the mongomock-motor test harness; ``async for`` runs
+    the server-side ``$match`` + ``$group`` in BOTH real Mongo and the harness.
+    (Beanie's ``Document.aggregate(...).to_list()`` also works under the harness
+    and is the form used elsewhere, e.g. ``workspace/service.py`` — either is
+    genuinely DB-side; this module uses the cursor form.)
+    """
+    coll = CreditLedgerEntry.get_pymongo_collection()
+    cursor = coll.aggregate(
+        [
+            {"$match": query},
+            {"$group": {"_id": None, "total": {"$sum": "$amount_delta"}}},
+        ]
+    )
+    async for row in cursor:
+        return int(row.get("total") or 0)
+    return 0
+
+
+async def month_to_date_spend(workspace: str) -> int:
+    """Total credits spent by ``workspace`` this UTC calendar month.
+
+    Returns the POSITIVE credits debited under a SPEND cause
+    (``compute_spend`` / ``litellm_spend``) with ``applied is True`` and
+    ``createdAt >= start-of-current-UTC-month``. Grants (``top_up`` /
+    ``subscription_grant`` / …) are excluded by the cause filter, and a
+    committed-but-unapplied phantom is excluded by ``applied is True`` (it never
+    moved the wallet) — the same windowing / applied discipline as
+    ``sum_debits_by_cause``.
+
+    The sum runs SERVER-SIDE: a Mongo ``$match`` (workspace + spend causes +
+    applied + month window) feeds a ``$group`` ``$sum`` of ``amount_delta``, so a
+    busy tenant's full ledger is never pulled into the process. A debit's
+    ``amount_delta`` is negative, so the grouped sum is ``<= 0``; we flip the sign
+    to a positive "credits spent" figure and CLAMP a (should-never-happen) net
+    positive to 0 — a stray positive delta under a spend cause must not read as
+    negative spend (the same clamp ``sum_debits_by_cause`` applies). The reusable,
+    flag-free read the monthly-quota gate (``check_quota``) compares against.
+    """
+    if not workspace:
+        raise ValidationError("credits.invalid_workspace", "workspace is required")
+
+    month_start = _utc_month_start(datetime.now(UTC))
+    query: dict[str, Any] = {
+        "workspace": workspace,
+        "cause": {"$in": list(_SPEND_CAUSES)},
+        "applied": True,
+        "createdAt": {"$gte": month_start},
+    }
+    # ``amount_delta`` is negative for a debit, so the grouped sum is <= 0. Flip to
+    # positive credits spent; clamp a stray net-positive to 0 (spend is debit-only).
+    net = await _sum_amount_delta(query)
+    return max(-net, 0)
+
+
+async def spend_by_model(
+    workspace: str,
+    *,
+    since: datetime,
+    until: datetime,
+    causes: tuple[str, ...] = ("compute_spend", "litellm_spend"),
+) -> list[ModelSpendRow]:
+    """Break a workspace's spend down by (UTC day, model) over a window.
+
+    Returns one ``ModelSpendRow`` per (day, model) that had spend in the window,
+    summed across ``causes``. This is the read the billing usage graph uses so the
+    "Usage by model" chart is sourced from the wallet's OWN ledger — the universal
+    meter — rather than the LiteLLM proxy. The two spend causes
+    (``compute_spend`` in the default off-mode, ``litellm_spend`` after a live
+    cutover) are mutually exclusive per run, so reading both is safe: a given run
+    is billed under exactly one cause and an off->live cutover leaves both in
+    history with no double-count.
+
+    The window is on ``createdAt``: ``since`` is inclusive (``>=``), ``until`` is
+    EXCLUSIVE (``<``) — identical to ``sum_debits_by_cause`` so adjacent windows
+    never double-count a boundary entry. Only ``applied is True`` entries are
+    counted (a committed-but-unapplied phantom never moved the wallet, so it must
+    not appear on the chart, the same rule ``reconcile`` enforces).
+
+    Per entry: ``day`` is ``createdAt.date()`` in UTC (``YYYY-MM-DD``); ``model``
+    is ``ref.model`` or ``"unknown"`` when the debit carried no model (real
+    charged spend with no model still counts toward the day so the chart
+    reconciles with the wallet); ``credits`` is the POSITIVE amount debited (a
+    stray positive delta is clamped out, like ``sum_debits_by_cause``). ``requests``
+    is the COUNT of entries in the (day, model) group. ``tokens`` is the real total
+    token volume for the group, summed from each entry's ``ref.total_tokens`` (the
+    metering path now records it — a legacy entry without it contributes 0, so the
+    figure reflects real volume going forward without breaking historical reads).
+
+    EE entity-isolation: billing must not read ``CreditLedgerEntry`` directly, so
+    this owns the read (sibling to ``sum_debits_by_cause``). It performs NO writes.
+    """
+    if not workspace:
+        raise ValidationError("credits.invalid_workspace", "workspace is required")
+
+    query: dict[str, Any] = {
+        "workspace": workspace,
+        "cause": {"$in": list(causes)},
+        "applied": True,
+        "createdAt": {"$gte": since, "$lt": until},
+    }
+    entries = await CreditLedgerEntry.find(query).to_list()
+
+    # In-Python aggregation over the fetched window (bounded — matches
+    # ``sum_debits_by_cause``). Group by (UTC day, model); sum positive-debited
+    # credits and count entries. A stray positive ``amount_delta`` under a spend
+    # cause (there should be none — spend is debit-only) is skipped so a bad row
+    # can't make a group read as a refund.
+    # (day, model) -> [credits, requests, tokens]
+    grouped: dict[tuple[str, str], list[int]] = {}
+    for e in entries:
+        delta = int(e.amount_delta)
+        if delta >= 0:
+            continue
+        created = getattr(e, "createdAt", None)
+        if created is None:
+            continue
+        day = created.date().isoformat()
+        ref = e.ref or {}
+        model = ref.get("model") or "unknown"
+        # ``total_tokens`` is the real per-run volume the metering path stamps on
+        # the ref; a legacy entry without it (or a non-int) reads 0.
+        try:
+            tokens = int(ref.get("total_tokens") or 0)
+        except (TypeError, ValueError):
+            tokens = 0
+        bucket = grouped.setdefault((day, model), [0, 0, 0])
+        bucket[0] += -delta  # positive credits debited
+        bucket[1] += 1  # one more request in this group
+        bucket[2] += tokens if tokens > 0 else 0  # real token volume
+
+    return [
+        ModelSpendRow(day=day, model=model, credits=credits, requests=requests, tokens=tokens)
+        for (day, model), (credits, requests, tokens) in grouped.items()
+    ]
 
 
 async def history(
@@ -669,12 +948,16 @@ async def reconcile(workspace: str) -> int:
 
 __all__ = [
     "GrantResult",
+    "ModelSpendRow",
     "balance",
     "check_balance",
+    "check_quota",
     "debit",
     "grant",
     "history",
     "is_recorded",
+    "month_to_date_spend",
     "reconcile",
+    "spend_by_model",
     "sum_debits_by_cause",
 ]

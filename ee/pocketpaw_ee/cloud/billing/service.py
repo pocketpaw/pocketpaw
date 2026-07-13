@@ -67,6 +67,40 @@
 #   ``active`` does not re-deploy. ``renewed`` just refreshes the renewal date (the
 #   site is already live), ``cancelled`` marks the site cancelled WITHOUT undeploying
 #   it in v1.
+# Updated 2026-06-28 (fix/billing-checkout-sessions): ``subscribe`` now takes an
+#   ``origin`` (the buyer's app origin, read off the /subscribe route's Origin /
+#   Referer header) and threads it through ``_checkout_return_urls`` into the
+#   provider's ``return_url`` / ``cancel_url`` so Dodo returns the buyer to
+#   ``{origin}/settings/billing?checkout=success|cancel`` after pay/cancel (the
+#   prior payment-link checkout had nowhere to send the buyer). Falls back to the
+#   ``dodo_checkout_return_base`` config when no origin is present; omits the
+#   redirect entirely if both are absent. The webhook grant + idempotency are
+#   unchanged — they key on the event body's subscription_id + metadata + event_id.
+# Updated 2026-07-08 (feat/billing-cancel-downgrade): two money-management fixes.
+#   (A) ``cancel`` — wire the previously dead-coded provider ``cancel_subscription``
+#   end to end: load the workspace's ACTIVE Subscription row (the ``(workspace)``
+#   index is NON-unique, so select ``status == "active"`` specifically, never a
+#   naive first-match that could pick a stale cancelled row) and tell the gateway to
+#   stop billing it; 402 ``billing.no_active_subscription`` when there is none. The
+#   entitlement revert stays REACTIVE on the ``subscription.cancelled`` webhook — this
+#   only adds the initiation side (no duplicate plan-revert). (B) ``subscribe`` no
+#   longer double-subscribes: when a workspace ALREADY has an active subscription a
+#   plain ``create_subscription`` opened a SECOND parallel Dodo subscription (double
+#   billing). It now runs a GUARDED cancel-then-create — open the NEW checkout FIRST
+#   (a create failure leaves the current sub untouched, no coverage gap), THEN cancel
+#   the OLD subscription at the gateway (billing stops synchronously, so the two are
+#   never both billing). Webhook ``event_id`` idempotency is untouched. See the
+#   ``subscribe`` body for the native-``change_plan`` follow-up note.
+# Updated 2026-07-09 (fix/cancel-webhook-revert-guard): the ``subscription.cancelled``
+#   plan revert is no longer UNCONDITIONAL. Webhook delivery is unordered /
+#   at-least-once, so a ``cancelled(old_sub)`` retry can land AFTER ``active(new_sub)``
+#   during a plan switch and would previously downgrade a paying customer to free
+#   (nothing self-heals it — only ``subscription.active`` re-sets the plan). The
+#   handler now marks THIS sub cancelled first, then reverts to free ONLY when no
+#   OTHER active Subscription row still owns the workspace; a stale/out-of-order
+#   cancel is logged and skipped. Credits are still never clawed back. See the
+#   ``subscribe`` body for the STILL-OPEN downgrade lag-window (checkout→active
+#   webhook) that only the atomic Dodo ``change_plan`` closes.
 
 from __future__ import annotations
 
@@ -75,7 +109,7 @@ from datetime import UTC, datetime, timedelta
 
 from pymongo.errors import DuplicateKeyError
 
-from pocketpaw_ee.cloud._core.errors import ValidationError
+from pocketpaw_ee.cloud._core.errors import NoActiveSubscription, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     BillingSubscriptionGranted,
@@ -178,11 +212,57 @@ def _dodo_product_for_plan(plan_key: str) -> str | None:
     return tier.dodo_product_id if tier is not None else None
 
 
+def _checkout_return_urls(origin: str | None) -> tuple[str | None, str | None]:
+    """Build (return_url, cancel_url) for the subscription checkout, or (None, None).
+
+    After paying on Dodo the buyer must land back in the app. The base is the
+    buyer's ``origin`` (the route reads it from the Origin / Referer header); when
+    that is absent we fall back to the ``dodo_checkout_return_base`` config. If
+    BOTH are empty we return (None, None) and the provider omits return_url rather
+    than crash — a checkout with no redirect still works, the buyer just isn't
+    auto-returned.
+    """
+    base = (origin or "").strip()
+    if not base:
+        from pocketpaw.config import get_settings
+
+        base = (getattr(get_settings(), "dodo_checkout_return_base", "") or "").strip()
+    if not base:
+        return None, None
+    base = base.rstrip("/")
+    return (
+        f"{base}/settings/billing?checkout=success",
+        f"{base}/settings/billing?checkout=cancel",
+    )
+
+
+async def _active_subscription(workspace_id: str) -> Subscription | None:
+    """The workspace's currently-ACTIVE gateway subscription, or None.
+
+    The ``Subscription`` ``(workspace)`` index is NON-UNIQUE — a workspace
+    accumulates historical rows over its lifetime (a prior tier it switched off, an
+    earlier subscription that was cancelled). So NEVER take a naive first-match:
+    filter on ``status == "active"`` and, if more than one somehow qualifies, take
+    the most-recent (``-createdAt``) for a deterministic pick. Returns None when the
+    workspace has no active subscription (only historical / cancelled rows, or never
+    subscribed).
+    """
+    return (
+        await Subscription.find(
+            Subscription.workspace == workspace_id,
+            Subscription.status == "active",
+        )
+        .sort("-createdAt")
+        .first_or_none()
+    )
+
+
 async def subscribe(
     workspace_id: str,
     user_id: str,
     plan_key: str,
     *,
+    origin: str | None = None,
     customer_email: str | None = None,
     provider: IPaymentsProvider | None = None,
 ) -> dict:
@@ -195,6 +275,17 @@ async def subscribe(
     right tier, and returns ``{"checkout_url": ...}``. Credits are NOT granted and
     the plan is NOT changed here — both land when Dodo posts a verified
     ``subscription.active`` to the public webhook.
+
+    ``origin`` is the buyer's app origin (the route reads it from the Origin /
+    Referer header). It builds the return_url / cancel_url Dodo sends the buyer
+    back to after pay / cancel, so the buyer is NOT stranded on the gateway. When
+    absent it falls back to the ``dodo_checkout_return_base`` config; if both are
+    empty the redirect is simply omitted.
+
+    DOWNGRADE / SWITCH: if the workspace ALREADY has an active subscription this
+    does NOT open a second parallel one (which would double-bill). It runs a guarded
+    cancel-then-create — see the body — so a plan switch replaces the old
+    subscription instead of stacking on top of it.
     """
     # Rule 6 — validate at entry.
     if not workspace_id:
@@ -217,15 +308,120 @@ async def subscribe(
             "(POCKETPAW_DODO_PLAN_PRODUCTS).",
         )
 
+    return_url, cancel_url = _checkout_return_urls(origin)
     prov = provider or _default_provider()
+
+    # DOWNGRADE / SWITCH GUARD (fix double-subscribe). If the workspace ALREADY has
+    # an active gateway subscription, a plain create would open a SECOND parallel
+    # Dodo subscription and double-bill (the bug). Detect the active sub up front,
+    # then run a GUARDED cancel-then-create:
+    #   1. open the NEW checkout FIRST — if it raises we surface the error here and
+    #      the current subscription is untouched (no coverage gap, no orphaned
+    #      cancel; the tenant keeps billing the plan they had).
+    #   2. ONLY after the new checkout is open, cancel the OLD subscription at the
+    #      gateway. Dodo stops billing the old one synchronously, so the two are
+    #      never both billing; the plan mutations still land reactively on the
+    #      webhooks (the new ``subscription.active`` upgrades, the old
+    #      ``subscription.cancelled`` reverts) exactly as a fresh subscribe.
+    # Webhook idempotency is untouched — each grant still keys on its own event_id
+    # (BC-1's unique index), so a replayed active/renewed after a switch re-grants
+    # nothing.
+    #
+    # KNOWN LIMITATION — DOWNGRADE LAG WINDOW (not fixed here; needs change_plan).
+    # ``_active_subscription`` reads the LOCAL Subscription row, and only the
+    # ``subscription.active`` webhook writes ``status="active"``. Between checkout
+    # COMPLETION (buyer paid) and that ``active`` webhook LANDING, no local active
+    # row exists yet, so a fast SECOND switch in that window sees ``existing is None``,
+    # skips the cancel-then-create guard, and opens a SECOND parallel gateway
+    # subscription = double-charge — the exact defect this branch set out to fix.
+    #
+    # Why we do NOT close it by querying the gateway here: Dodo's
+    # ``subscriptions.list`` filters only by ``customer_id`` / ``product_id`` /
+    # ``status`` / dates — there is NO metadata filter, and we store no per-workspace
+    # Dodo ``customer_id`` (each ``create_subscription`` mints a fresh customer from
+    # the email). So "list THIS workspace's active subs at the gateway" would mean
+    # paging EVERY active subscription in the business and filtering client-side on
+    # ``metadata.workspace_id`` — fragile and unbounded. We deliberately do not add
+    # that under pressure.
+    #
+    # REAL FIX (follow-up): Dodo's SDK exposes an ATOMIC
+    # ``subscriptions.change_plan`` (proration, no re-checkout, no drop-to-free
+    # window) that removes cancel-then-create ENTIRELY — no lag window, no second
+    # subscription, no "buyer abandons the new checkout after the old is cancelled"
+    # gap. Wiring it is a scoped change: a new provider-port method, a
+    # ``subscription.plan_changed`` webhook handler (grant + plan + audit; the
+    # service acts on active/renewed/cancelled only today), and a /subscribe
+    # response-contract change (change_plan returns no checkout url). Tracked as the
+    # billing plan-change follow-up; until it lands the lag window above remains.
+    existing = await _active_subscription(workspace_id)
+
     checkout = await prov.create_subscription(
         plan_key=plan_key,
         product_id=product_id,
         workspace_id=workspace_id,
         customer_email=customer_email,
         metadata={"workspace_id": workspace_id, "plan_key": plan_key, "user_id": user_id or ""},
+        return_url=return_url,
+        cancel_url=cancel_url,
     )
+
+    if existing is not None and existing.gateway_subscription_id:
+        # Cancel the prior subscription now that the new checkout is open. If THIS
+        # raises, the caller gets an error and the OLD sub keeps billing (never a
+        # silent double-charge); the just-opened checkout session simply expires
+        # unused (no new subscription exists until the buyer pays it).
+        await prov.cancel_subscription(existing.gateway_subscription_id)
+        logger.info(
+            "billing.subscribe: workspace=%s switching plans — opened new checkout "
+            "for plan=%s and cancelled prior subscription=%s",
+            workspace_id,
+            plan_key,
+            existing.gateway_subscription_id,
+        )
+
     return {"checkout_url": checkout.checkout_url}
+
+
+async def cancel(
+    workspace_id: str,
+    *,
+    provider: IPaymentsProvider | None = None,
+) -> dict:
+    """Cancel the workspace's ACTIVE recurring subscription at the gateway.
+
+    Loads the workspace's currently-active ``Subscription`` row and tells the
+    gateway to stop billing it (``provider.cancel_subscription``). Returns
+    ``{"ok": True}``.
+
+    The entitlement revert (``Workspace.plan`` -> free) and the Subscription-row
+    status flip are NOT done here — they land REACTIVELY on the verified
+    ``subscription.cancelled`` webhook (mirroring how ``subscribe`` defers the
+    upgrade to the ``subscription.active`` webhook; the webhook handler is the sole
+    writer of that plan mutation, so cancelling here would duplicate it).
+
+    Raises 402 ``billing.no_active_subscription`` when the workspace has no active
+    subscription — only historical / already-cancelled rows, or never subscribed.
+    """
+    # Rule 6 — validate at entry.
+    if not workspace_id:
+        raise ValidationError("billing.invalid_workspace", "workspace_id is required")
+
+    active = await _active_subscription(workspace_id)
+    if active is None or not active.gateway_subscription_id:
+        # An active row with a gateway id is required. A stale cancelled row or no
+        # subscription at all is a 402 (not a silent success, and not a naive
+        # first-match against a historical row).
+        raise NoActiveSubscription()
+
+    prov = provider or _default_provider()
+    await prov.cancel_subscription(active.gateway_subscription_id)
+    logger.info(
+        "billing.cancel: requested gateway cancel for workspace=%s subscription=%s "
+        "(plan revert lands reactively on the subscription.cancelled webhook)",
+        workspace_id,
+        active.gateway_subscription_id,
+    )
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +579,9 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
 
     * ``subscription.active`` / ``subscription.renewed`` → grant the tier's
       monthly allotment ADDITIVELY (unused credits roll over) keyed on the
-      per-renewal ``event_id``; ``active`` ALSO upgrades ``Workspace.plan``.
+      per-renewal ``event_id``; ``active`` ALSO upgrades ``Workspace.plan`` and
+      resyncs the stored seat cap UP to the new plan (upgrade-only — a later
+      cancel reverts the plan but never strips seats).
     * ``subscription.cancelled`` → revert ``Workspace.plan`` to ``free`` WITHOUT
       clawing back any granted credits.
     * any other subscription.* delivery → acked, no action.
@@ -414,13 +612,35 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
         return {"ok": True, "granted": False}
 
     if event.type == _SUB_CANCELLED:
-        # Revert the entitlement to free. Do NOT claw back granted credits — the
-        # workspace keeps the rolled-over balance it already paid for.
-        ok = await workspace_service.set_workspace_plan(event.workspace_id, "free")
+        # Mark THIS subscription cancelled FIRST, then decide whether to revert the
+        # plan. Webhook delivery is unordered / at-least-once: during a plan switch a
+        # ``cancelled(old_sub)`` retry can land AFTER ``active(new_sub)``. Reverting
+        # to free UNCONDITIONALLY there would strand a paying customer on free
+        # entitlements — and nothing self-heals it (only subscription.active re-sets
+        # the plan; renewed does not). So flip this sub's row to cancelled, then ask
+        # whether any OTHER active subscription still owns the workspace:
+        #   * a newer active sub exists -> SKIP the revert (a stale cancel must not
+        #     downgrade the live plan);
+        #   * none -> revert to free (the normal cancel, and the common
+        #     cancel-then-active ordering still self-corrects because active arrives
+        #     later and re-sets the plan).
+        # Credits are NEVER clawed back either way.
         await _upsert_subscription(event, status="cancelled", plan_key="free")
+        still_active = await _active_subscription(event.workspace_id)
+        if still_active is not None:
+            logger.info(
+                "billing.webhook: subscription.cancelled for workspace=%s (event_id=%s) — "
+                "a newer active subscription=%s still owns the workspace; NOT reverting to "
+                "free (out-of-order/stale cancel)",
+                event.workspace_id,
+                event.event_id,
+                still_active.gateway_subscription_id,
+            )
+            return {"ok": True, "granted": False}
+        ok = await workspace_service.set_workspace_plan(event.workspace_id, "free")
         logger.info(
             "billing.webhook: subscription.cancelled for workspace=%s (event_id=%s) — "
-            "plan reverted to free=%s, credits NOT clawed back",
+            "no other active subscription; plan reverted to free=%s, credits NOT clawed back",
             event.workspace_id,
             event.event_id,
             ok,
@@ -479,6 +699,29 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
     # subscription.active upgrades the entitlement to the subscribed tier.
     if event.type == _SUB_ACTIVE:
         await workspace_service.set_workspace_plan(event.workspace_id, tier.key)
+        # feat/billing-smb-caps: lift the stored seat cap to the new plan so an
+        # upgrade actually raises it. UPGRADE-ONLY (max(doc.seats, plan.max_seats))
+        # — a later cancel reverts the plan but never strips the seats. Best-effort:
+        # a resync hiccup must not fail the (already-applied) credit grant / plan
+        # move, and the seat gates also lift the ceiling live via the resolved plan.
+        try:
+            new_seats = await workspace_service.raise_seats_for_plan(event.workspace_id, tier.key)
+            if new_seats is not None:
+                logger.info(
+                    "billing.webhook: %s resynced seat cap to %d for workspace=%s plan=%s",
+                    event.type,
+                    new_seats,
+                    event.workspace_id,
+                    tier.key,
+                )
+        except Exception:
+            logger.exception(
+                "billing.webhook: seat-cap resync failed for workspace=%s plan=%s "
+                "(event_id=%s) — plan upgrade stands; seat gate still lifts live",
+                event.workspace_id,
+                tier.key,
+                event.event_id,
+            )
 
     # Track the subscription lifecycle (active for both active + renewed).
     await _upsert_subscription(event, status="active", plan_key=tier.key)
@@ -676,6 +919,7 @@ async def _upsert_subscription(event: SubscriptionEvent, *, status: str, plan_ke
 
 
 __all__ = [
+    "cancel",
     "create_topup",
     "handle_webhook",
     "subscribe",

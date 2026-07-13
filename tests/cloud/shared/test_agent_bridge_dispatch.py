@@ -1,4 +1,9 @@
-"""Dispatch behavior tests for the cloud agent bridge."""
+"""Dispatch behavior tests for the cloud agent bridge.
+
+Updated 2026-06-28 (feat/aiam-agent-revoke, AW-5): added the disabled-agent
+skip test — when ``pool.get`` raises ``AgentDisabled``, ``_run_agent_response``
+returns ``None`` (skips the agent cleanly) instead of erroring to the channel.
+"""
 
 from __future__ import annotations
 
@@ -282,3 +287,105 @@ async def test_dispatch_agent_responses_skips_synthesis_when_only_one_agent_resp
     # No "Final response:" label was emitted because synthesis was skipped.
     final_labels = [call.kwargs.get("response_label") for call in run_mock.await_args_list]
     assert "Final response:" not in final_labels
+
+
+# --- disabled-agent skip (AW-4 behavior, AW-5 regression test) -------------
+
+
+@pytest.mark.asyncio
+async def test_run_agent_response_skips_disabled_agent() -> None:
+    """A soft-disabled agent is revoked at the AgentPool chokepoint: ``pool.get``
+    raises ``AgentDisabled``. The bridge must catch it and return ``None`` —
+    skip the agent with no error to the channel, no stream-start emit, no 500.
+
+    This is the auto-dispatch half of the revoke-everywhere guarantee: a
+    disabled agent simply stops responding in groups/DMs until re-enabled.
+    """
+    from pocketpaw_ee.cloud.shared import agent_bridge
+
+    from pocketpaw.agents.errors import AgentDisabled
+
+    fake_pool = SimpleNamespace(get=AsyncMock(side_effect=AgentDisabled("agent-x")))
+    emit_mock = AsyncMock()
+
+    with (
+        patch(
+            "pocketpaw.agents.pool.get_agent_pool",
+            return_value=fake_pool,
+        ),
+        patch("pocketpaw_ee.cloud.shared.agent_bridge.emit", new=emit_mock),
+    ):
+        result = await agent_bridge._run_agent_response(
+            agent_id="agent-x",
+            group_id="group-disabled",
+            workspace_id="ws-disabled",
+            user_message="hello?",
+            group_members=["user-1"],
+        )
+
+    # Skipped cleanly — no reply text, and nothing emitted to the channel
+    # (no AgentStreamStart for a revoked agent).
+    assert result is None
+    assert emit_mock.await_count == 0
+    fake_pool.get.assert_awaited_once_with("agent-x")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_skips_disabled_agent_keeps_live_one() -> None:
+    """End-to-end at the dispatch layer: two auto-mode agents, one disabled.
+
+    The disabled agent's ``pool.get`` raises ``AgentDisabled`` (revoked at the
+    chokepoint), which ``_run_agent_response`` catches and turns into ``None``
+    (proven directly in ``test_run_agent_response_skips_disabled_agent``); the
+    live agent still responds. Here we model that contract — disabled -> ``None``
+    — and prove auto-dispatch does NOT 500 on a disabled member and does not
+    drop the healthy one.
+    """
+    from pocketpaw_ee.cloud.shared import agent_bridge
+
+    group = SimpleNamespace(
+        members=["user-1"],
+        agents=[
+            SimpleNamespace(agent_id="agent-live", respond_mode="auto"),
+            SimpleNamespace(agent_id="agent-disabled", respond_mode="auto"),
+        ],
+    )
+
+    async def fake_run_agent_response(*, agent_id: str, **_kwargs):
+        # Mirror the real bridge contract: a disabled agent is a clean skip
+        # (returns None, the bridge having caught AgentDisabled internally); a
+        # live agent returns its reply text.
+        if agent_id == "agent-disabled":
+            return None
+        return "live reply"
+
+    with (
+        patch(
+            "pocketpaw_ee.cloud.chat.group_service.get_for_dispatch",
+            new=AsyncMock(return_value=group),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.shared.agent_bridge._should_agent_respond",
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.shared.agent_bridge._run_agent_response",
+            new=AsyncMock(side_effect=fake_run_agent_response),
+        ) as run_mock,
+    ):
+        # Should not raise even though one member is disabled.
+        await agent_bridge._dispatch_agent_responses(
+            {
+                "group_id": "group-mixed",
+                "sender_id": "user-1",
+                "content": "anyone home?",
+                "mentions": [],
+                "workspace_id": "ws-mixed",
+            }
+        )
+
+    # Both were attempted (disabled isn't pre-filtered from the roster), but
+    # only the live one produced a reply and the disabled one was a clean skip.
+    dispatched = [call.kwargs["agent_id"] for call in run_mock.await_args_list]
+    assert "agent-live" in dispatched
+    assert "agent-disabled" in dispatched

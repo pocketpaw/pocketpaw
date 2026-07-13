@@ -113,6 +113,14 @@ def _patch_pipeline(
     monkeypatch.setattr("pocketpaw_ee.cloud.extraction.build_chain", lambda settings: chain)
     monkeypatch.setattr(listeners, "_resolve_adapter", lambda: adapter)
 
+    # FL-11b: the listener fails CLOSED — it needs a resolvable, non-hidden
+    # FileUpload row or it skips indexing. Provide a non-hidden stub so the
+    # vector-path tests reach the ingest + embed pipeline.
+    async def _load_doc(_file_id, _workspace_id):
+        return type("_Doc", (), {"hide_from_ai": False, "tags": []})()
+
+    monkeypatch.setattr(listeners, "_load_upload_doc", _load_doc)
+
     from pocketpaw_ee.cloud.agents import knowledge as kn
 
     monkeypatch.setattr(kn.KnowledgeService, "ingest_text_to_scope", ingest)

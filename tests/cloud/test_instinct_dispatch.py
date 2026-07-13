@@ -463,3 +463,292 @@ async def test_decide_cross_workspace_not_found() -> None:
 
     with pytest.raises(NotFound):
         await approvals_service.approve("wB", "u_approver", gate.approval_id, None)
+
+
+# ---------------------------------------------------------------------------
+# AW-7 — TEMPLATE-level deny-on-no-match. A bound template that declares no
+# rule matching a MUTATING action parks the write for a human when the
+# per-workspace / global flag is ON. Reads stay ungated; flag OFF is unchanged;
+# a per-workspace override beats the global default.
+# ---------------------------------------------------------------------------
+
+
+async def test_template_default_deny_parks_uncovered_mutating_action(recording_bus) -> None:
+    """Flag ON + a bound template with NO rule for a MUTATING action ⇒ park
+    (PENDING_APPROVAL), not proceed. This is the deny-by-default flip."""
+    # `auto` policy + no rules → resolve_instinct returns its default EXECUTE
+    # (reason="auto") — the no-rule-match case AW-7 must park.
+    template = _template(instinct_policy="auto")
+
+    result = await instinct_dispatch.gate_action(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="p1",
+        template=template,
+        action_name="do_thing",
+        row_context={"value": 1},
+        row_id="row-1",
+        park={"action": "do_thing", "method": "POST", "path": "/items", "params": {}},
+        now=FROZEN_NOW,
+        template_default_deny=True,
+        is_mutating=True,
+    )
+
+    assert result.next_step == "pending_approval"
+    assert result.approval_id is not None
+    # The verdict is still EXECUTE/auto — we did not invent a rule, we parked a
+    # write the template did not govern.
+    assert result.decision.verdict == "EXECUTE"
+    assert result.decision.reason == "auto"
+
+    # One human-pending approval row was persisted.
+    approvals = await approvals_service.list_approvals("w1", "u1", {})
+    assert len(approvals) == 1
+    assert approvals[0]["id"] == result.approval_id
+    assert approvals[0]["status"] == "pending"
+    created = [e for e in recording_bus.events if isinstance(e, InstinctApprovalCreated)]
+    assert len(created) == 1
+
+
+async def test_template_default_deny_does_not_park_read(recording_bus) -> None:
+    """Flag ON but a READ (is_mutating=False) ⇒ proceed ungated. A read has
+    nothing to govern, so the deny-on-no-match flip must never gate it."""
+    template = _template(instinct_policy="auto")
+
+    result = await instinct_dispatch.gate_action(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="p1",
+        template=template,
+        action_name="do_thing",
+        row_context={"value": 1},
+        now=FROZEN_NOW,
+        template_default_deny=True,
+        is_mutating=False,  # read_only / GET / HEAD
+    )
+
+    assert result.next_step == "proceed"
+    assert result.approval_id is None
+    # No approval row persisted for a read.
+    approvals = await approvals_service.list_approvals("w1", "u1", {})
+    assert approvals == []
+    created = [e for e in recording_bus.events if isinstance(e, InstinctApprovalCreated)]
+    assert created == []
+
+
+async def test_template_default_deny_off_is_unchanged() -> None:
+    """Flag OFF (the default) ⇒ the no-rule-match EXECUTE still proceeds —
+    zero day-one behavior change."""
+    template = _template(instinct_policy="auto")
+
+    result = await instinct_dispatch.gate_action(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="p1",
+        template=template,
+        action_name="do_thing",
+        row_context={"value": 1},
+        now=FROZEN_NOW,
+        template_default_deny=False,
+        is_mutating=True,
+    )
+
+    assert result.next_step == "proceed"
+    assert result.approval_id is None
+
+
+async def test_template_default_deny_does_not_override_matched_execute_rule(recording_bus) -> None:
+    """A rule that MATCHED and returned EXECUTE is an explicit policy decision —
+    deny-on-no-match must not override it. Only the no-rule-match `auto`
+    default parks. A notify rule that matches gives reason != "auto", so the
+    write still proceeds even with the flag ON."""
+    template = _template(
+        instinct_policy="notify_only",
+        rules=[{"when": "value > 0", "action": "notify"}],
+    )
+
+    result = await instinct_dispatch.gate_action(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="p1",
+        template=template,
+        action_name="do_thing",
+        row_context={"value": 5},
+        now=FROZEN_NOW,
+        template_default_deny=True,
+        is_mutating=True,
+    )
+
+    # notify_only author floor → NOTIFY_AND_EXECUTE (reason "notify_only"), NOT
+    # the no-rule-match "auto" default — so it proceeds, unparked.
+    assert result.next_step == "proceed"
+    assert result.decision.verdict == "NOTIFY_AND_EXECUTE"
+    assert result.approval_id is None
+    created = [e for e in recording_bus.events if isinstance(e, InstinctApprovalCreated)]
+    assert created == []
+
+
+async def test_template_default_deny_block_still_blocks() -> None:
+    """A BLOCK rule short-circuits before the deny-on-no-match flip — a blocked
+    write is still blocked, never silently turned into a park."""
+    template = _template(
+        instinct_policy="auto",
+        rules=[{"when": "value > 100", "action": "block"}],
+    )
+
+    result = await instinct_dispatch.gate_action(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="p1",
+        template=template,
+        action_name="do_thing",
+        row_context={"value": 999},
+        now=FROZEN_NOW,
+        template_default_deny=True,
+        is_mutating=True,
+    )
+
+    assert result.next_step == "blocked"
+    assert result.approval_id is None
+
+
+# --- executor-level integration (the gate is wired through run_action) ------
+
+
+async def test_executor_template_default_deny_parks_mutating_write(recording_bus) -> None:
+    """Flag ON threaded through `run_action` + a bound template with no rule
+    for a MUTATING (POST) action ⇒ `instinct_pending`, no HTTP call. The
+    executor computes is_mutating=True from the parsed binding."""
+    template = _template(instinct_policy="auto")
+
+    result = await action_executor.run_action(
+        workspace_id="w1",
+        pocket_id="p1",
+        user_id="u1",
+        action="do_thing",
+        raw_action={"kind": "write_binding", "method": "POST", "path": "/items"},
+        path="/items",
+        params={"x": 1},
+        base_url="https://example.test",
+        auth_type="bearer",
+        auth_header=None,
+        token="t",
+        allowed_writes=[{"method": "POST", "path_pattern": "/items*"}],
+        template=template,
+        row_context={"value": 1},
+        row_id="r1",
+        template_default_deny=True,
+    )
+
+    assert result["ok"] is True
+    assert result["code"] == "instinct_pending"
+    assert result["approval_id"]
+    approvals = await approvals_service.list_approvals("w1", "u1", {})
+    assert len(approvals) == 1
+
+
+async def test_executor_template_default_deny_proceeds_for_read_only(recording_bus) -> None:
+    """Flag ON + a read_only GET binding ⇒ the executor computes
+    is_mutating=False, so the gate does NOT park; the write falls through to
+    the HTTP stack (the bogus base_url rejects later). No approval row, no
+    `instinct_pending`."""
+    template = _template(instinct_policy="auto")
+
+    result = await action_executor.run_action(
+        workspace_id="w1",
+        pocket_id="p1",
+        user_id="u1",
+        action="do_thing",
+        raw_action={
+            "kind": "write_binding",
+            "method": "GET",
+            "path": "/items",
+            "read_only": True,
+        },
+        path="/items",
+        params={},
+        base_url="https://example.test",
+        auth_type="bearer",
+        auth_header=None,
+        token="t",
+        allowed_writes=[{"method": "GET", "path_pattern": "/items*"}],
+        template=template,
+        row_context={"value": 1},
+        row_id="r1",
+        template_default_deny=True,
+    )
+
+    # NOT parked — a read is never gated by the template default-deny flip.
+    assert result.get("code") != "instinct_pending"
+    approvals = await approvals_service.list_approvals("w1", "u1", {})
+    assert approvals == []
+    created = [e for e in recording_bus.events if isinstance(e, InstinctApprovalCreated)]
+    assert created == []
+
+
+async def test_executor_template_default_deny_off_proceeds(recording_bus) -> None:
+    """Flag OFF (default) threaded through `run_action` ⇒ the no-rule-match
+    mutating write is NOT parked — it falls into the existing HTTP gate stack
+    (bogus base_url rejects). Zero behavior change."""
+    template = _template(instinct_policy="auto")
+
+    result = await action_executor.run_action(
+        workspace_id="w1",
+        pocket_id="p1",
+        user_id="u1",
+        action="do_thing",
+        raw_action={"kind": "write_binding", "method": "POST", "path": "/items"},
+        path="/items",
+        params={"x": 1},
+        base_url="https://example.test",
+        auth_type="bearer",
+        auth_header=None,
+        token="t",
+        allowed_writes=[{"method": "POST", "path_pattern": "/items*"}],
+        template=template,
+        row_context={"value": 1},
+        row_id="r1",
+        # template_default_deny defaults False
+    )
+
+    assert result.get("code") != "instinct_pending"
+    approvals = await approvals_service.list_approvals("w1", "u1", {})
+    assert approvals == []
+
+
+# --- per-workspace override beats the global default ------------------------
+
+
+async def test_workspace_override_beats_global_template_default_deny(monkeypatch) -> None:
+    """The per-workspace `instinct_template_default_deny` field overrides the
+    global config default (resolve order mirrors approval_level)."""
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    # Global default OFF, workspace field ON → resolver returns True.
+    monkeypatch.setattr(
+        "pocketpaw.config.get_settings",
+        lambda: type("S", (), {"instinct_template_default_deny": False})(),
+    )
+    ws = Workspace(name="ws-on", slug="ws-on", owner="u1", instinct_template_default_deny=True)
+    await ws.insert()
+    resolved = await pockets_service.resolve_workspace_template_default_deny(str(ws.id))
+    assert resolved is True
+
+    # Global default ON, workspace field OFF → workspace wins (returns False).
+    monkeypatch.setattr(
+        "pocketpaw.config.get_settings",
+        lambda: type("S", (), {"instinct_template_default_deny": True})(),
+    )
+    ws_off = Workspace(
+        name="ws-off", slug="ws-off", owner="u1", instinct_template_default_deny=False
+    )
+    await ws_off.insert()
+    resolved_off = await pockets_service.resolve_workspace_template_default_deny(str(ws_off.id))
+    assert resolved_off is False
+
+    # Workspace field unset (None) → falls back to the global default (True).
+    ws_none = Workspace(name="ws-none", slug="ws-none", owner="u1")
+    await ws_none.insert()
+    resolved_none = await pockets_service.resolve_workspace_template_default_deny(str(ws_none.id))
+    assert resolved_none is True

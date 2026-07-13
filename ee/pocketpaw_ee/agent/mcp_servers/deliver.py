@@ -1,11 +1,26 @@
 # deliver.py — in-process MCP server exposing ``deliver_artifact`` to the cloud
 # chat agent (claude_agent_sdk). Created: 2026-06-26 (ART-4).
 #
+# 2026-07-11 (ART-1): on a SUCCESSFUL delivery the tool now records the delivery
+# facts ({file_id, name, mime, size}) to the per-run collector in
+# ``ee.cloud.chat.agent_service`` (``record_delivered_artifact``). ``run_core``
+# drains that collector at persist time into a ``{type:"artifact", meta}``
+# attachment on the assistant message plus one ``artifact`` SSE event apiece, so
+# the client gets a structured signal instead of only a link buried in the
+# tool-result text. Failed deliveries record nothing (they return before the
+# recording call); the recording is best-effort and never fails the delivery.
+#
 # This is the payoff of the cloud-artifacts stack: a cloud agent builds a file
 # (or a whole directory) inside its per-tenant jail (ART-2), then calls this tool
-# to LAND that artifact in the tenant's blob storage and get back a real,
-# short-lived download URL to hand the user — instead of printing a container
-# path or spinning a 127.0.0.1 preview server the user can never reach.
+# to LAND that artifact in the tenant's blob storage and hand the user back a
+# STABLE link to that file in their Files — instead of printing a container path
+# or spinning a 127.0.0.1 preview server the user can never reach.
+#
+# 2026-06-29: deliver returns the Files module's own stable download link
+# (``/api/v1/uploads/{file_id}``) rather than minting its own short-lived presign.
+# The delivered file is already a first-class /files row, so its permanent,
+# auth-gated link never expires — and since deliver no longer hands back a raw
+# storage presign, it sidesteps the inline-render concern entirely.
 #
 # Mirrors the sibling mcp_servers (sites.py / media.py): a single
 # ``create_sdk_mcp_server`` behind an SDK import-guard, ``SERVER_NAME`` /
@@ -18,8 +33,11 @@
 # Routing: a single file is uploaded directly (mime guessed from the filename); a
 # directory is zipped (``application/zip``) and the zip is uploaded. Both go
 # through ``EEUploadService.upload`` — the DOWNLOAD path that gives arbitrary
-# mime + a presigned URL + ``FileReady``→KB + visibility in the tenant's /files
-# (NOT file_versions.write_file, which is the editor-document path, Slice-D).
+# mime + ``FileReady``→KB + visibility in the tenant's /files (NOT
+# file_versions.write_file, which is the editor-document path, Slice-D). deliver
+# then hands back the Files module's OWN stable link to that row,
+# ``GET /api/v1/uploads/{file_id}`` (auth-gated, never expires) — not a
+# self-minted, expiring presign.
 #
 # Security: the path MUST resolve to inside the caller's own jail
 # (``workspace_jail_root()/<workspace_id>/...``). ``..``, absolute paths, and
@@ -27,9 +45,10 @@
 # workspace root), reusing ART-2's path-segment guard so the agent can never
 # deliver ``/etc/passwd`` or another tenant's jail. Because the upload relaxes
 # the mime allowlist, a delivered non-inline type (HTML/SVG/JS) is served as a
-# DOWNLOAD, not inline — EEUploadService.presigned_get forces
+# DOWNLOAD, not inline — the stable ``GET /api/v1/uploads/{file_id}`` route forces
 # ``Content-Disposition: attachment`` for anything outside INLINE_MIMES, so a
-# delivered .html can't render active content on the storage origin. The whole
+# delivered .html can't render active content. Returning that app route instead
+# of a raw storage presign sidesteps the inline-render concern entirely. The whole
 # server is gated on is_multi_tenant_cloud() (cloud-only, like the ART-4 boot
 # guard and ART-2 jail).
 """Agent-side MCP surface for delivering a built artifact to tenant blob storage.
@@ -38,11 +57,12 @@ Tool registered:
 
   - ``deliver_artifact(path)`` — persist the file or directory at ``path``
     (inside the caller's workspace jail) to the tenant's blob storage and return
-    ``{ok, filename, url, file_id, size, mime, expires_in_seconds}``. ``url`` is a
-    short-TTL download link the agent shows the user. ``is_error`` is set (with a
-    plain reason) when identity is missing, the path escapes the jail, the file
-    is missing / too large, or the upload fails — the agent then surfaces the
-    reason instead of fabricating a working link.
+    ``{ok, filename, url, file_id, size, mime}``. ``url`` is the stable link to
+    the file in the user's Files (``/api/v1/uploads/{file_id}`` — never expires;
+    the file also appears in the Files panel) that the agent shows the user.
+    ``is_error`` is set (with a plain reason) when identity is missing, the path
+    escapes the jail, the file is missing / too large, or the upload fails — the
+    agent then surfaces the reason instead of fabricating a working link.
 
 Workspace / user identity comes from the per-stream ``ContextVar``s in
 ``ee.cloud.chat.agent_service`` (same chokepoint the sites + tasks MCP servers
@@ -77,9 +97,10 @@ _DEFAULT_DELIVER_MAX_MB = 100.0
 _TOOL_DESCRIPTION = (
     "Deliver a built artifact to the user as a downloadable file. Pass `path` — "
     "a file OR a directory inside your workspace. A single file is uploaded as-is; "
-    "a directory is zipped first. Returns {ok, filename, url, file_id, size, mime, "
-    "expires_in_seconds} — show the user the `url` (a short-lived download link) "
-    "and the filename. USE THIS whenever you produce something the user should be "
+    "a directory is zipped first. Returns {ok, filename, url, file_id, size, mime} "
+    "— show the user the `url` (a stable link to the file in their Files; it never "
+    "expires and the file also appears in their Files panel) and the filename. "
+    "USE THIS whenever you produce something the user should be "
     "able to download (a report, an export, a generated file, a built site bundle): "
     "do NOT just print the path you wrote to, and do NOT start a local preview / web "
     "server — the user cannot reach your container's filesystem or 127.0.0.1. "
@@ -111,6 +132,20 @@ def _success_response(body: dict[str, Any]) -> dict[str, Any]:
             }
         ]
     }
+
+
+def _record_delivery(meta: dict[str, Any]) -> None:
+    """Publish a successful delivery to the per-run collector in
+    ``ee.cloud.chat.agent_service`` (drained by ``run_core`` into an ``artifact``
+    attachment + SSE event). Best-effort: outside a chat run it's a no-op, and a
+    collector failure must never fail an otherwise-successful delivery — so any
+    error here is swallowed."""
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import record_delivered_artifact
+
+        record_delivered_artifact(meta)
+    except Exception:  # noqa: BLE001
+        logger.debug("recording delivered artifact failed", exc_info=True)
 
 
 def _identity() -> tuple[str | None, str | None]:
@@ -246,7 +281,7 @@ def _zip_dir_to_tempfile(src: Path) -> Path:
     return tmp_path
 
 
-async def _upload_and_sign(
+async def _upload_artifact(
     upload_path: Path,
     *,
     filename: str,
@@ -263,14 +298,19 @@ async def _upload_and_sign(
     ``UploadSettings`` whose ``allowed_mimes`` includes the computed mime (+ zip)
     so the OSS pipeline's mime gate never rejects a first-party artifact — while
     its magic-byte sniff still upgrades recognized types (png/pdf/…) to their
-    canonical mime. ``url`` is the adapter's presigned URL when available (S3),
-    else the authenticated cloud download path.
+    canonical mime.
+
+    ``url`` is the Files module's own STABLE download link to the new row,
+    ``/api/v1/uploads/{rec.id}`` — auth-gated, never expires, and already
+    attachment-safe for non-inline mimes. We deliberately do NOT mint a
+    short-lived presign here: the delivered file is a first-class /files entry, so
+    we hand back its permanent link instead. (On-demand presigning still lives on
+    the /grant + /download-url routes for external / unauthenticated sharing.)
     """
     from fastapi import UploadFile
 
     from pocketpaw.uploads.config import DEFAULT_ALLOWED_MIMES, UploadSettings
     from pocketpaw.uploads.factory import build_adapter
-    from pocketpaw.uploads.signing import DEFAULT_TTL_SECONDS
     from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
     from pocketpaw_ee.cloud.uploads.service import EEUploadService
 
@@ -292,17 +332,14 @@ async def _upload_and_sign(
         )
         rec = await svc.upload(upload, owner_id=user_id, chat_id=None, workspace=workspace_id)
 
-    # Owner-scoped presign (the uploader is the requester, so the read gate
-    # passes). Fall back to the authenticated cloud download path when the
-    # adapter can't presign (local adapter).
-    _rec, url = await svc.presigned_get(rec.id, user_id, workspace_id, DEFAULT_TTL_SECONDS)
-    return rec, url or f"/api/v1/uploads/{rec.id}"
+    # The file is now a first-class /files row; hand back its stable, auth-gated
+    # download link instead of a self-minted presign that would expire.
+    return rec, f"/api/v1/uploads/{rec.id}"
 
 
 async def _deliver_handler(args: dict) -> dict:
     """MCP handler for ``deliver_artifact`` — resolve, jail-check, route, upload."""
     from pocketpaw.uploads.errors import UploadError
-    from pocketpaw.uploads.signing import DEFAULT_TTL_SECONDS
 
     workspace_id, user_id = _identity()
     if not workspace_id or not user_id:
@@ -345,7 +382,7 @@ async def _deliver_handler(args: dict) -> dict:
             filename = resolved.name
             mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
-        rec, url = await _upload_and_sign(
+        rec, url = await _upload_artifact(
             upload_path,
             filename=filename,
             mime=mime,
@@ -363,6 +400,18 @@ async def _deliver_handler(args: dict) -> dict:
         if tmp_to_clean is not None:
             tmp_to_clean.unlink(missing_ok=True)
 
+    # Record the delivery for the run's assistant message + SSE stream. Uses
+    # ``name`` (not the result body's ``filename``) to match the frozen artifact
+    # attachment/event contract the client is built against.
+    _record_delivery(
+        {
+            "file_id": rec.id,
+            "name": rec.filename,
+            "mime": rec.mime,
+            "size": rec.size,
+        }
+    )
+
     return _success_response(
         {
             "ok": True,
@@ -371,7 +420,6 @@ async def _deliver_handler(args: dict) -> dict:
             "file_id": rec.id,
             "size": rec.size,
             "mime": rec.mime,
-            "expires_in_seconds": DEFAULT_TTL_SECONDS,
         }
     )
 

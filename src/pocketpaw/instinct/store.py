@@ -1,5 +1,17 @@
 # Instinct store — async SQLite operations for the decision pipeline.
 # Created: 2026-03-28 — Action lifecycle + audit log.
+# Updated: 2026-07-05 (fix/atlas-admin-security-hardening, FINDING B) — closed a
+#   TOCTOU double-flip in ``_update_status``. The ``require_status`` guard was a
+#   Python pre-check between ``get_action`` and the UPDATE, whose WHERE was
+#   ``id = ?`` only — so two concurrent ``approve()`` on one PENDING action both
+#   read PENDING, both flipped to APPROVED, both returned a non-None Action, and
+#   the admin executor fired the whitelisted write (role change / member removal /
+#   connector write) or opened two checkouts TWICE. The flip is now ATOMIC: when a
+#   required status is given the UPDATE carries ``AND status = ?`` and a
+#   ``rowcount==0`` (the concurrent loser, or a row not in the required state)
+#   rolls the transaction back and returns None — exactly one approver wins. The
+#   Python pre-check stays only as a cheap early-out. Unconditional lifecycle
+#   writes (mark_executed / mark_failed, no require_status) are unchanged.
 # Updated: 2026-06-26 (ISO-4 — audit-lock keyed outside the evictable instance)
 #   — the audit-append lock (``_log_lock``, which serializes the chain
 #   read-head + insert in ``_log``) is no longer a per-instance
@@ -26,6 +38,10 @@
 #   isolation is ADDITIVE defense-in-depth layered on top of it. The store class
 #   itself is workspace-agnostic; isolation is entirely in which file the factory
 #   hands it.
+# Updated: 2026-06-21 (F4 — edit-in-review) — added ``update_parameters(action_id,
+#   params)``: a thin, status-preserving write of the JSON ``parameters`` bag (does NOT
+#   touch ``status``/``approved_*``), used by the router's PATCH proposal-edit endpoint
+#   to persist a re-validated, tenancy-pinned blob on a PENDING action before approval.
 # Updated: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) — ADDITIVE
 #   generic scope on the actions table. ``instinct_actions`` now carries a
 #   nullable ``scope_type`` column (additive ALTER, mirrors the assignee /
@@ -582,6 +598,12 @@ class InstinctStore:
         return await self._update_status(
             action_id,
             ActionStatus.APPROVED,
+            # Only a PENDING action may be approved — same guard auto_approve /
+            # bulk_approve already carry. Without it, re-approving an action that
+            # already flipped to APPROVED (e.g. after an executor that mutated but
+            # then failed to record its outcome) would re-enter the executor and
+            # double-fire the underlying write. Returns None on a non-pending row.
+            require_status=ActionStatus.PENDING,
             approved_by=approver,
             approved_at=datetime.now().isoformat(),
             event="action_approved",
@@ -780,7 +802,12 @@ class InstinctStore:
             return None
         # ``require_status`` lets bulk callers enforce "only act on rows
         # still in this state" without breaking the existing pending →
-        # approved → executed flow used by mark_executed / mark_failed.
+        # approved → executed flow used by mark_executed / mark_failed. This
+        # Python read is a cheap early-out ONLY — the authoritative guard is the
+        # atomic ``AND status = ?`` on the UPDATE below (FINDING B). Between this
+        # read and the UPDATE a concurrent approver can flip the row, so the
+        # pre-check alone was a TOCTOU: two approve() both saw PENDING, both
+        # flipped, both returned an Action, and the admin executor double-fired.
         if require_status is not None and action.status != require_status:
             return None
 
@@ -790,7 +817,17 @@ class InstinctStore:
             if v is not None:
                 sets.append(f"{k} = ?")
                 params.append(v)
+        # FINDING B — make the flip ATOMIC. When a required status is given, the
+        # UPDATE only matches a row STILL in that status; the SQLite engine
+        # serializes the write, so of two concurrent flips exactly one matches
+        # (rowcount==1) and the other matches nothing (rowcount==0) — the loser is
+        # a no-op. This, not the Python pre-check above, is what stops the
+        # double-fire.
+        where = "id = ?"
         params.append(action_id)
+        if require_status is not None:
+            where += " AND status = ?"
+            params.append(require_status.value)
 
         await self._ensure_schema()
         # FIX 2 — the status UPDATE and the lifecycle audit row must land
@@ -814,9 +851,19 @@ class InstinctStore:
         try:
             async with self._log_lock, self._conn() as db:
                 await db.execute("BEGIN")
-                await db.execute(
-                    f"UPDATE instinct_actions SET {', '.join(sets)} WHERE id = ?", params
+                cur = await db.execute(
+                    f"UPDATE instinct_actions SET {', '.join(sets)} WHERE {where}", params
                 )
+                # FINDING B — rowcount==0 means the required-status guard did not
+                # match: another approver already flipped this row (the concurrent
+                # loser) or it was never in the required state. Roll the
+                # transaction back so NO audit row lands, and return None — the
+                # no-op, exactly what the Python pre-check returned for the serial
+                # case. Only run this when a status was required; unconditional
+                # lifecycle writes (mark_executed / mark_failed) keep firing.
+                if require_status is not None and cur.rowcount == 0:
+                    await db.execute("ROLLBACK")
+                    return None
                 # W4a — read back the action's owning workspace so the lifecycle
                 # audit row (approve / reject / execute / fail) is stamped with
                 # the same tenant the action belongs to. Done with a tiny direct
@@ -853,6 +900,28 @@ class InstinctStore:
             ) as cur:
                 row = await cur.fetchone()
                 return self._row_to_action(row) if row else None
+
+    async def update_parameters(self, action_id: str, parameters: dict[str, Any]) -> Action | None:
+        """Persist a new ``parameters`` JSON bag on an Action, status-preserving.
+
+        F4 (edit-in-review) — the PATCH proposal-edit endpoint mutates only the editable
+        sub-fields of a PENDING discovery proposal's blob and writes the re-validated,
+        tenancy-pinned ``parameters`` back here. This is a CONTENT write only: it touches
+        ``parameters`` + ``updated_at`` and NEVER ``status`` / ``approved_*`` / chain
+        terminals (the approve click stays a separate, deliberate step). Returns the
+        reloaded Action, or ``None`` if the id doesn't resolve.
+        """
+        await self._ensure_schema()
+        async with self._conn() as db:
+            cur = await db.execute(
+                "UPDATE instinct_actions SET parameters = ?, "
+                "updated_at = datetime('now') WHERE id = ?",
+                (json.dumps(parameters or {}), action_id),
+            )
+            await db.commit()
+            if cur.rowcount == 0:
+                return None
+        return await self.get_action(action_id)
 
     async def pending(
         self,

@@ -43,6 +43,223 @@ _KB_HEADER = "## Your Knowledge Base\nUse the following information..."
 _MEM_HEADER = "## Relevant Past Memories\nBelow are memories..."
 
 
+# ---------------------------------------------------------------------------
+# Added 2026-07-01 (integration/warm-reuse): regression tests for the MID-prompt
+# soul "# Key Knowledge" block. ``AgentPool._assemble_system_prompt`` splices it
+# in right after the stable soul identity via
+# ``f"{system_prompt}\n\n# Key Knowledge\n{knowledge_lines}"`` (pool.py:243-245).
+# Its lines are ALL volatile soul state — self-image confidences, an
+# incrementing bond level, a growing memory count, recalled memories
+# (soul/_bridge.py) — none of them behavioral instructions. Live instrumentation
+# proved warm-client reuse NEVER fired: two consecutive supervised turns'
+# behavior prefixes differed by exactly 2 chars, the incrementing "Bond level"
+# and "Memories" digits inside this block, so the prefix digest changed every
+# turn and the subprocess was rebuilt every turn. The block sits EARLY (char
+# ~1.4k of a ~44k prefix) between the stable identity and ~43KB of stable
+# ``<runtime-identity>`` + tool docs, so it must be EXCISED IN PLACE — a naive
+# tail-cut marker would strip ~97% of the real behavioral prefix.
+
+
+# A realistic prompt shape: stable identity, then the mid-prompt soul block,
+# then a large stable ``<runtime-identity>`` + tool-docs section, matching the
+# real ``ctx.identity`` -> "# Key Knowledge" -> runtime layout in pool.py.
+_IDENTITY = "<soul-identity>\nI am Paw, a persistent companion." + ("X" * 1300)
+_RUNTIME_TAIL = "\n\n<runtime-identity>\nTool docs and skills...\n" + ("Y" * 43000)
+
+
+def _soul_block(*, bond: str, memories: int) -> str:
+    """The exact block pool.py builds: ``\\n\\n# Key Knowledge\\n`` + ``- `` lines
+    of volatile soul state (self-image, bond, memory count)."""
+    lines = "\n".join(
+        [
+            "- [creative] confidence=0.82",
+            f"- Bond level: {bond}/100",
+            f"- Memories: {memories}",
+        ]
+    )
+    return f"\n\n# Key Knowledge\n{lines}"
+
+
+def _full_prompt(*, bond: str, memories: int, kb: str) -> str:
+    """Assemble a full system prompt exactly as ``AgentPool`` would: stable
+    identity + soul block + stable runtime tail + a per-turn volatile KB tail."""
+    return (
+        _IDENTITY
+        + _soul_block(bond=bond, memories=memories)
+        + _RUNTIME_TAIL
+        + "\n\n"
+        + _KB_HEADER
+        + "\n"
+        + kb
+    )
+
+
+def test_incrementing_soul_block_keeps_key_stable():
+    """THE reproduction: two consecutive supervised turns whose ONLY difference
+    is the incrementing bond level / memory count inside the mid-prompt
+    "# Key Knowledge" block must produce the SAME cache key, so the warm
+    subprocess is reused instead of rebuilt every turn.
+
+    FAILS on pre-fix code — the tail-only strip leaves the mid-prompt block in
+    the hashed prefix, so the 50.0->50.5 / 0->1 drift changes the digest."""
+    turn1 = _full_prompt(bond="50.0", memories=0, kb="turn-1 kb snippet")
+    turn2 = _full_prompt(bond="50.5", memories=1, kb="turn-2 kb snippet")
+    k1 = ClaudeSDKBackend._client_cache_key(_opts(turn1), session_key="s1")
+    k2 = ClaudeSDKBackend._client_cache_key(_opts(turn2), session_key="s1")
+    assert k1 == k2, (
+        "an incrementing soul '# Key Knowledge' block (bond level / memory "
+        "count) must not rebuild the warm client — it carries no behavioral "
+        "instructions, only per-turn soul state"
+    )
+
+
+def test_soul_block_stripped_but_behavioral_change_still_rekeys():
+    """The excise must NOT over-strip: a genuinely different behavioral prefix
+    (different persona/identity BEFORE the soul block) must still change the key
+    even though both prompts carry an identical soul block, so a stale client is
+    NOT reused for a different persona."""
+    identity_a = "<soul-identity>\nI am Paw." + ("X" * 1300)
+    identity_b = "<soul-identity>\nI am Rex, a DIFFERENT persona." + ("X" * 1300)
+    block = _soul_block(bond="50.0", memories=0)
+    prompt_a = identity_a + block + _RUNTIME_TAIL + "\n\n" + _KB_HEADER + "\nkb"
+    prompt_b = identity_b + block + _RUNTIME_TAIL + "\n\n" + _KB_HEADER + "\nkb"
+    ka = ClaudeSDKBackend._client_cache_key(_opts(prompt_a), session_key="s1")
+    kb = ClaudeSDKBackend._client_cache_key(_opts(prompt_b), session_key="s1")
+    assert ka != kb, (
+        "a real behavioral change (different identity before the soul block) "
+        "must still rebuild the warm client — the excise must not over-strip"
+    )
+
+
+def test_soul_block_strip_preserves_stable_runtime_tail():
+    """Excising the mid-prompt block must keep the large stable section AFTER it
+    (``<runtime-identity>`` + tool docs) in the behavioral prefix, so a change
+    there still rekeys — proving we removed only the block, not everything after
+    the header (the over-strip failure mode of a tail-cut marker)."""
+    prompt = _full_prompt(bond="50.0", memories=0, kb="kb")
+    prefix = ClaudeSDKBackend._behavior_prefix(prompt)
+    assert "# Key Knowledge" not in prefix, "the soul block must be excised"
+    assert "<soul-identity>" in prefix, "stable identity before the block must remain"
+    assert "<runtime-identity>" in prefix, "stable runtime tail after the block must remain"
+    # A tail-cut marker would have shrunk this to ~1.3k; the surgical excise
+    # keeps the ~43KB runtime tail.
+    assert len(prefix) > 40000, "the ~43KB stable runtime tail must survive the excise"
+
+
+def test_soul_block_as_last_section_is_stripped():
+    """Edge case: the soul block is the LAST section (no trailing blank line, no
+    KB tail). The incrementing values must still be excised so the key is
+    stable, and everything before the block preserved."""
+    p1 = _IDENTITY + _soul_block(bond="50.0", memories=0)
+    p2 = _IDENTITY + _soul_block(bond="51.5", memories=3)
+    k1 = ClaudeSDKBackend._client_cache_key(_opts(p1), session_key="s1")
+    k2 = ClaudeSDKBackend._client_cache_key(_opts(p2), session_key="s1")
+    assert k1 == k2, "a block-as-last-section drift must not rebuild the warm client"
+    assert ClaudeSDKBackend._behavior_prefix(p1) == _IDENTITY
+
+
+def test_absent_soul_block_is_byte_identical():
+    """Edge case: empty ``ctx.knowledge`` means no block at all (and the legacy
+    flag-off path). The behavioral prefix must be byte-identical to the input's
+    stable head — the excise is a no-op when the header is absent."""
+    no_block = _IDENTITY + _RUNTIME_TAIL + "\n\n" + _KB_HEADER + "\nkb"
+    prefix = ClaudeSDKBackend._behavior_prefix(no_block)
+    assert prefix == _IDENTITY + _RUNTIME_TAIL, "no block present → excise is a no-op"
+
+
+# ---------------------------------------------------------------------------
+# Hardening (integration/warm-reuse): the block is excised by STRUCTURE (its
+# ``- ``-prefixed item run), not by "cut at the first blank line". These guard
+# the failure modes a blank-line cut has: (1) a recalled memory whose content
+# wraps onto a continuation line, (2) a plain-prose stable section (the ripple
+# LAW ``instructions``) that follows the block and must NOT be over-stripped,
+# and (3) a user-authored "# Key Knowledge" heading in persona prose that must
+# not be mistaken for the machine block.
+
+
+def _soul_block_with_memory(*, bond: str, memories: int, memory: str) -> str:
+    """The block with a trailing recalled-memory item (soul/_bridge.py:106 builds
+    it as ``- [semantic] {content}``). ``memory`` may contain newlines — a real
+    multi-line memory ``content``."""
+    return (
+        "\n\n# Key Knowledge\n"
+        "- [creative] confidence=0.82\n"
+        f"- Bond level: {bond}/100\n"
+        f"- Memories: {memories}\n"
+        f"- [semantic] {memory}"
+    )
+
+
+def test_wrapped_multiline_memory_keeps_key_stable():
+    """A recalled memory whose content wraps onto a continuation line (single
+    ``\\n``, no blank line) is absorbed into the block. Two turns differing only
+    in the incrementing bond/memory counts (and the wrapped memory text) must
+    still hash identically — the wrapped line must not leak into the prefix."""
+    turn1 = (
+        _IDENTITY
+        + _soul_block_with_memory(bond="50.0", memories=0, memory="note A\nwrapped tail 1")
+        + _RUNTIME_TAIL
+        + "\n\n"
+        + _KB_HEADER
+        + "\nturn-1 kb"
+    )
+    turn2 = (
+        _IDENTITY
+        + _soul_block_with_memory(bond="50.5", memories=1, memory="note B\nwrapped tail 2")
+        + _RUNTIME_TAIL
+        + "\n\n"
+        + _KB_HEADER
+        + "\nturn-2 kb"
+    )
+    k1 = ClaudeSDKBackend._client_cache_key(_opts(turn1), session_key="s1")
+    k2 = ClaudeSDKBackend._client_cache_key(_opts(turn2), session_key="s1")
+    assert k1 == k2, "a wrapped multi-line recalled memory must not rebuild the warm client"
+    prefix = ClaudeSDKBackend._behavior_prefix(turn1)
+    assert "wrapped tail 1" not in prefix, "the wrapped memory line must be excised"
+    assert "<runtime-identity>" in prefix, "the stable runtime tail must survive"
+
+
+def test_plain_prose_instructions_after_block_not_overstripped():
+    """The authoritative ``instructions`` (ripple LAW) are appended DIRECTLY
+    after the block (pool.py:268-269) as ``\\n\\n{instructions}`` and can start
+    in plain prose (no ``#``/``<`` anchor). Excising the block must keep them, so
+    a real instructions change still rekeys — the over-strip guard that a
+    heuristic "consume until the next heading/tag" terminator would fail."""
+    instr_a = "\n\nYou must ALWAYS cite your sources and stay terse."
+    instr_b = "\n\nYou must NEVER cite sources and may be verbose."
+    block = _soul_block(bond="50.0", memories=0)
+    p_a = _IDENTITY + block + instr_a + _RUNTIME_TAIL
+    p_b = _IDENTITY + block + instr_b + _RUNTIME_TAIL
+    prefix_a = ClaudeSDKBackend._behavior_prefix(p_a)
+    assert "# Key Knowledge" not in prefix_a, "the soul block must be excised"
+    assert "cite your sources" in prefix_a, "plain-prose instructions after the block must be kept"
+    k_a = ClaudeSDKBackend._client_cache_key(_opts(p_a), session_key="s1")
+    k_b = ClaudeSDKBackend._client_cache_key(_opts(p_b), session_key="s1")
+    assert k_a != k_b, "a real instructions change after the block must still rebuild the client"
+
+
+def test_persona_key_knowledge_heading_is_not_the_machine_block():
+    """A user-authored "# Key Knowledge" heading inside persona/identity prose
+    (NOT followed by ``- `` items) must not be mistaken for the machine block.
+    The machine block (``rfind`` + ``- `` item guard) is excised; the persona
+    prose stays in the prefix, so a persona edit still rekeys."""
+    persona_a = "PERSONA\n\n# Key Knowledge\nI value honesty above all.\n\nmore persona."
+    persona_b = "PERSONA\n\n# Key Knowledge\nI value brevity above all.\n\nmore persona."
+    block = _soul_block(bond="50.0", memories=0)
+    p_a = persona_a + block + _RUNTIME_TAIL
+    p_b = persona_b + block + _RUNTIME_TAIL
+    prefix_a = ClaudeSDKBackend._behavior_prefix(p_a)
+    assert "I value honesty above all" in prefix_a, "persona prose heading must be preserved"
+    assert "Bond level" not in prefix_a, "the machine soul block must still be excised"
+    k_a = ClaudeSDKBackend._client_cache_key(_opts(p_a), session_key="s1")
+    k_b = ClaudeSDKBackend._client_cache_key(_opts(p_b), session_key="s1")
+    assert k_a != k_b, "a persona change (even under a matching heading) must still rekey"
+    # And the machine block's own drift is still neutralized under a persona
+    # heading collision.
+    p_drift = persona_a + _soul_block(bond="99.9", memories=7) + _RUNTIME_TAIL
+    assert ClaudeSDKBackend._behavior_prefix(p_a) == ClaudeSDKBackend._behavior_prefix(p_drift)
+
+
 def test_config_flip_changes_key():
     """A home backend flipping configured:false -> configured:true changes the
     behavioral prefix, so the cache key must differ and force a client rebuild."""

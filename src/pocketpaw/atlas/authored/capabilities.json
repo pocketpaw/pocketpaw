@@ -1,0 +1,353 @@
+{
+  "schema": "paw.atlas/v1",
+  "entries": [
+    {
+      "id": "capability:admin.members_list",
+      "kind": "capability",
+      "name": "List workspace members",
+      "summary": "Read the workspace member roster (email, name, role, joined-at). Any member may read it.",
+      "narrative": "Reads the current workspace's member roster — email, name, workspace role, and joined-at — for every member. A MEMBER-level read: any member may see who is in the workspace. No mutation, so it runs directly (reads are not human-gated). Reach for it when the user asks who is in the workspace or what someone's role is.",
+      "how": "member_update_role's read sibling — mcp__pocketpaw_workspace_admin__members_list (no args; the workspace is the active chat stream's)",
+      "surface": "/settings/workspace",
+      "requires": [
+        "role:member"
+      ],
+      "keywords": [
+        "members",
+        "roster",
+        "who is in the workspace",
+        "team",
+        "people",
+        "member list",
+        "user",
+        "users",
+        "list users",
+        "who are my users",
+        "manage users",
+        "manage members",
+        "team management"
+      ]
+    },
+    {
+      "id": "capability:admin.workspace_settings_read",
+      "kind": "capability",
+      "name": "Read workspace settings",
+      "summary": "Read the workspace name, slug, plan, seat usage, and branding. A member-level read.",
+      "narrative": "Reads a compact view of the workspace's own settings — name, slug, plan tier, seat usage (used / available), and display branding — with no internal ids or secrets. A MEMBER-level read that runs directly. Reach for it when the user asks about the current plan, seat count, or workspace name; changing any of these is a separate, human-gated admin action.",
+      "how": "mcp__pocketpaw_workspace_admin__workspace_settings_read (no args)",
+      "surface": "/settings/workspace",
+      "requires": [
+        "role:member"
+      ],
+      "keywords": [
+        "workspace settings",
+        "plan",
+        "seats",
+        "workspace name",
+        "branding",
+        "current plan"
+      ]
+    },
+    {
+      "id": "capability:admin.connectors_list",
+      "kind": "capability",
+      "name": "List workspace connectors",
+      "summary": "Read the workspace's connectors and their enabled / connected status. A member-level read.",
+      "narrative": "Reads the connectors available in the workspace with their enabled and live connected status, filtered to what the calling member is permitted to see. A MEMBER-level read that runs directly. Reach for it when the user asks which integrations are set up or connected; enabling, disabling, or configuring a connector is a separate, human-gated admin action.",
+      "how": "mcp__pocketpaw_workspace_admin__connectors_list (no args)",
+      "surface": "/settings/workspace/integrations",
+      "requires": [
+        "role:member"
+      ],
+      "keywords": [
+        "connectors",
+        "integrations",
+        "connected",
+        "enabled",
+        "list integrations",
+        "which connectors"
+      ]
+    },
+    {
+      "id": "capability:admin.billing_usage_read",
+      "kind": "capability",
+      "name": "Read workspace usage",
+      "summary": "Read the workspace's daily usage and spend over an optional date window. A member-level read.",
+      "narrative": "Reads the workspace's usage and credit spend by day and by model over an optional start/end window (default: the trailing 30 days). A MEMBER-level read — any member may read their own workspace's usage — that runs directly. Reach for it when the user asks how much the workspace has spent or used; changing the paid plan is a separate, owner-level human-gated action.",
+      "how": "mcp__pocketpaw_workspace_admin__billing_usage_read (optional start / end YYYY-MM-DD)",
+      "surface": "/settings/workspace",
+      "requires": [
+        "role:member"
+      ],
+      "keywords": [
+        "usage",
+        "spend",
+        "credits",
+        "billing usage",
+        "how much have we used",
+        "cost"
+      ]
+    },
+    {
+      "id": "capability:admin.invites_list",
+      "kind": "capability",
+      "name": "List pending invites",
+      "summary": "Read the workspace's pending invites (email, role, expiry). Admin-only read.",
+      "narrative": "Reads the workspace's pending invitations — invited email, offered role, who invited them, and expiry. An ADMIN-level read (the same gate the invites management route uses), so a member never sees it. It runs directly once the admin gate passes. Reach for it when an admin asks who has been invited but has not yet joined.",
+      "how": "mcp__pocketpaw_workspace_admin__invites_list (no args)",
+      "surface": "/settings/workspace",
+      "requires": [
+        "role:admin"
+      ],
+      "keywords": [
+        "invites",
+        "pending invites",
+        "invited",
+        "outstanding invitations",
+        "who was invited"
+      ]
+    },
+    {
+      "id": "capability:admin.audit_read",
+      "kind": "capability",
+      "name": "Read the audit log",
+      "summary": "Read recent workspace audit-log rows (who did what, when). Admin-only read.",
+      "narrative": "Reads recent rows from the workspace audit log — the compliance-grade record of actor, action, target, and time. An ADMIN-level read (the same gate the audit route uses), so a member never sees it. It runs directly once the admin gate passes. Reach for it when an admin asks for the authoritative trail of who or what did something in the workspace.",
+      "how": "mcp__pocketpaw_workspace_admin__audit_read (optional limit 1-100)",
+      "surface": "/audit",
+      "requires": [
+        "role:admin"
+      ],
+      "keywords": [
+        "audit log",
+        "who did what",
+        "compliance trail",
+        "history",
+        "audit events",
+        "record"
+      ]
+    },
+    {
+      "id": "capability:admin.member_update_role",
+      "kind": "capability",
+      "name": "Change a member's role",
+      "summary": "Change a member's workspace role (member / admin / owner). Admin-only; every change needs human approval.",
+      "narrative": "Proposes changing a member's workspace role. An ADMIN-level WRITE that is NEVER applied from chat — it files an Instinct proposal and the role change fires only when a human approves it in the Tray, after re-checking the proposer still holds admin. A member never sees this. Reach for it when an admin asks to promote or demote a member; tell the user it needs approval, do not claim it is done.",
+      "how": "mcp__pocketpaw_workspace_admin__member_update_role (user_id, role) — proposes for human approval; never mutates inline",
+      "surface": "/settings/workspace",
+      "requires": [
+        "role:admin"
+      ],
+      "keywords": [
+        "change role",
+        "promote member",
+        "demote member",
+        "make admin",
+        "member role",
+        "update role",
+        "user",
+        "user role",
+        "change user role",
+        "manage users",
+        "manage members"
+      ]
+    },
+    {
+      "id": "capability:admin.member_remove",
+      "kind": "capability",
+      "name": "Remove a member",
+      "summary": "Remove a member from the workspace. Admin-only; the removal needs human approval.",
+      "narrative": "Proposes removing a member from the workspace (the service cascade also strips their keys and sessions). An ADMIN-level WRITE that is NEVER applied from chat — it files an Instinct proposal and the removal fires only on human approval, after re-checking the proposer still holds admin. A member never sees this. Reach for it when an admin asks to remove someone; tell the user it needs approval, do not claim it is done.",
+      "how": "mcp__pocketpaw_workspace_admin__member_remove (user_id) — proposes for human approval; never mutates inline",
+      "surface": "/settings/workspace",
+      "requires": [
+        "role:admin"
+      ],
+      "keywords": [
+        "remove member",
+        "kick",
+        "offboard",
+        "delete member",
+        "revoke access",
+        "user",
+        "remove user",
+        "delete user",
+        "remove a user",
+        "delete a user",
+        "manage users"
+      ]
+    },
+    {
+      "id": "capability:admin.invite_create",
+      "kind": "capability",
+      "name": "Invite a member",
+      "summary": "Invite someone to the workspace as admin or member. Admin-only; the invite needs human approval.",
+      "narrative": "Proposes inviting someone to the workspace as admin or member (an invite can never mint an owner). An ADMIN-level WRITE that is NEVER sent from chat — it files an Instinct proposal and the invite goes out only on human approval, after re-checking the proposer still holds admin. A member never sees this. Reach for it when an admin asks to invite someone; tell the user it needs approval, do not claim it was sent.",
+      "how": "mcp__pocketpaw_workspace_admin__invite_create (email, role) — proposes for human approval; never mutates inline",
+      "surface": "/settings/workspace",
+      "requires": [
+        "role:admin"
+      ],
+      "keywords": [
+        "invite",
+        "add member",
+        "send invite",
+        "onboard",
+        "invite user"
+      ]
+    },
+    {
+      "id": "capability:admin.invite_revoke",
+      "kind": "capability",
+      "name": "Revoke an invite",
+      "summary": "Revoke a pending workspace invite. Admin-only; the revocation needs human approval.",
+      "narrative": "Proposes revoking a pending invitation. An ADMIN-level WRITE that is NEVER applied from chat — it files an Instinct proposal and the revocation fires only on human approval, after re-checking the proposer still holds admin. A member never sees this. Reach for it when an admin asks to cancel an outstanding invite; tell the user it needs approval, do not claim it is done.",
+      "how": "mcp__pocketpaw_workspace_admin__invite_revoke (invite_id) — proposes for human approval; never mutates inline",
+      "surface": "/settings/workspace",
+      "requires": [
+        "role:admin"
+      ],
+      "keywords": [
+        "revoke invite",
+        "cancel invite",
+        "withdraw invitation",
+        "delete invite"
+      ]
+    },
+    {
+      "id": "capability:admin.connector_enable",
+      "kind": "capability",
+      "name": "Enable a connector",
+      "summary": "Enable a connector for the workspace. Admin-only; the change needs human approval.",
+      "narrative": "Proposes enabling a connector for the workspace. An ADMIN-level WRITE that is NEVER applied from chat — it files an Instinct proposal and the connector is enabled only on human approval, after re-checking the proposer still holds admin. A member never sees this. Reach for it when an admin asks to turn on an integration; tell the user it needs approval, do not claim it is done.",
+      "how": "mcp__pocketpaw_workspace_admin__connector_enable (name) — proposes for human approval; never mutates inline",
+      "surface": "/settings/workspace/integrations",
+      "requires": [
+        "role:admin"
+      ],
+      "keywords": [
+        "enable connector",
+        "turn on integration",
+        "activate connector",
+        "connect"
+      ]
+    },
+    {
+      "id": "capability:admin.connector_disable",
+      "kind": "capability",
+      "name": "Disable a connector",
+      "summary": "Disable a connector for the workspace. Admin-only; the change needs human approval.",
+      "narrative": "Proposes disabling a connector for the workspace. An ADMIN-level WRITE that is NEVER applied from chat — it files an Instinct proposal and the connector is disabled only on human approval, after re-checking the proposer still holds admin. A member never sees this. Reach for it when an admin asks to turn off an integration; tell the user it needs approval, do not claim it is done.",
+      "how": "mcp__pocketpaw_workspace_admin__connector_disable (name) — proposes for human approval; never mutates inline",
+      "surface": "/settings/workspace/integrations",
+      "requires": [
+        "role:admin"
+      ],
+      "keywords": [
+        "disable connector",
+        "turn off integration",
+        "deactivate connector",
+        "disconnect",
+        "disconnect gmail",
+        "disconnect provider",
+        "disconnect integration",
+        "disable integration",
+        "unlink",
+        "revoke connector"
+      ]
+    },
+    {
+      "id": "capability:admin.connector_config",
+      "kind": "capability",
+      "name": "Configure a connector",
+      "summary": "Patch a connector's saved config. Admin-only; the change needs human approval.",
+      "narrative": "Proposes patching a connector's saved configuration (the config is opaque data the connectors service validates and merges). An ADMIN-level WRITE that is NEVER applied from chat — it files an Instinct proposal and the config change lands only on human approval, after re-checking the proposer still holds admin. A member never sees this. Reach for it when an admin asks to change an integration's settings; tell the user it needs approval, do not claim it is done.",
+      "how": "mcp__pocketpaw_workspace_admin__connector_config (name, config) — proposes for human approval; never mutates inline",
+      "surface": "/settings/workspace/integrations",
+      "requires": [
+        "role:admin"
+      ],
+      "keywords": [
+        "configure connector",
+        "connector config",
+        "integration settings",
+        "update connector"
+      ]
+    },
+    {
+      "id": "capability:admin.workspace_update",
+      "kind": "capability",
+      "name": "Update workspace settings",
+      "summary": "Update the workspace name, settings, or branding. Admin-only; the change needs human approval.",
+      "narrative": "Proposes updating the workspace's name, settings, or branding (only recognized fields are carried). An ADMIN-level WRITE that is NEVER applied from chat — it files an Instinct proposal and the update lands only on human approval, after re-checking the proposer still holds admin. A member never sees this. Reach for it when an admin asks to rename the workspace or change its branding; tell the user it needs approval, do not claim it is done.",
+      "how": "mcp__pocketpaw_workspace_admin__workspace_update (name?, settings?, branding?) — proposes for human approval; never mutates inline",
+      "surface": "/settings/workspace",
+      "requires": [
+        "role:admin"
+      ],
+      "keywords": [
+        "rename workspace",
+        "workspace name",
+        "branding",
+        "workspace settings",
+        "update workspace"
+      ]
+    },
+    {
+      "id": "capability:admin.instinct_approval_level_set",
+      "kind": "capability",
+      "name": "Set the Instinct approval level",
+      "summary": "Set the workspace's Instinct-gate approval level (ASK / TRIAGE / TRUSTED). Owner-only; needs human approval.",
+      "narrative": "Proposes setting the workspace's Instinct-gate approval level — a non-ASK level turns on workspace-wide auto-approval of agent writes, the single most governance-sensitive switch, so it is OWNER-only. It is NEVER applied from chat: it files an Instinct proposal and the level changes only on human approval, after re-checking the proposer still holds owner (the agent can't flip its own leash off). Members and admins never see this. Tell the user it needs owner approval; do not claim it is done.",
+      "how": "mcp__pocketpaw_workspace_admin__instinct_approval_level_set (level) — proposes for human approval; never mutates inline",
+      "surface": "/settings/workspace",
+      "requires": [
+        "role:owner"
+      ],
+      "keywords": [
+        "approval level",
+        "auto-approve",
+        "instinct level",
+        "trust level",
+        "governance"
+      ]
+    },
+    {
+      "id": "capability:admin.workspace_delete",
+      "kind": "capability",
+      "name": "Delete the workspace",
+      "summary": "Permanently delete the entire workspace. Owner-only, irreversible; needs human approval.",
+      "narrative": "Proposes permanently DELETING the entire workspace — an irreversible cascade across every member, room, agent, and file. OWNER-only and NEVER applied from chat: it files an Instinct proposal and the deletion fires only on explicit human approval, after re-checking the proposer still holds owner. Members and admins never see this. Tell the user it is irreversible and needs owner approval; do not claim the workspace was deleted.",
+      "how": "mcp__pocketpaw_workspace_admin__workspace_delete (no args) — proposes for human approval; never mutates inline",
+      "surface": "/settings/workspace",
+      "requires": [
+        "role:owner"
+      ],
+      "keywords": [
+        "delete workspace",
+        "destroy workspace",
+        "remove workspace",
+        "irreversible"
+      ]
+    },
+    {
+      "id": "capability:admin.billing_plan_change",
+      "kind": "capability",
+      "name": "Change the billing plan",
+      "summary": "Change the workspace's paid plan via hosted checkout. Owner-only; needs human approval, then payment.",
+      "narrative": "Proposes changing the workspace's paid plan. OWNER-only and NEVER applied from chat: it files an Instinct proposal and, on human approval, produces a hosted checkout link a human must complete — the plan flips only when the payment provider confirms via webhook, never synchronously. Members and admins never see this. Tell the user it needs owner approval and then payment; do not claim the plan changed.",
+      "how": "mcp__pocketpaw_workspace_admin__billing_plan_change (plan) — proposes for human approval; opens checkout, never mutates inline",
+      "surface": "/settings/workspace",
+      "requires": [
+        "role:owner"
+      ],
+      "keywords": [
+        "change plan",
+        "upgrade plan",
+        "downgrade plan",
+        "billing plan",
+        "subscribe"
+      ]
+    }
+  ]
+}

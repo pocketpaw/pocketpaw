@@ -7,6 +7,15 @@ keywords: ["event-driven architecture", "message bus pattern", "protocol-oriente
 tags: ["architecture", "design"]
 ---
 
+{/*
+  docs/concepts/architecture.mdx
+  Updated 2026-07-11 (feat/fst-8-harness, FST-8) — added the "Fabric Source
+  Truth" section: the statement model, the trust ladder, the off/shadow/
+  enforce mode ladder, the divergence report as the enforce gate, PIN/IGNORE
+  + the stewardship queue, and freshness decay. The section documents the
+  FST-1..8 chain in src/pocketpaw/fabric/ for devs who haven't read it.
+*/}
+
 # PocketPaw Architecture: Event-Driven Message Bus
 
 PocketPaw is built on an **event-driven message bus** architecture. This design decouples channels from agent backends, making it easy to add new channels and swap backends without touching the core pipeline.
@@ -76,3 +85,43 @@ The AgentLoop is the central coordinator:
 - **Memory** — Context builder assembles session history, long-term facts, and semantic search results
 - **Tools** — The tool registry provides available tools filtered by the policy system
 - **Backends** — The router delegates to the selected agent backend
+
+## Fabric Source Truth
+
+Fabric is PocketPaw's typed workspace ontology — objects like `Customer` or `Deal` with a flat `properties` dict that connectors, agents, and humans all write to. By default those writes are **last-writer-wins (LWW)**: whoever writes last owns the value, regardless of how trustworthy they are. The source-truth chain (`src/pocketpaw/fabric/`) fixes that without changing the read path.
+
+### The statement model
+
+Instead of only overwriting the cache, a tracked property accumulates **statements**: append-only claims (`fabric_statements` + `fabric_sources`), each carrying the value, who wrote it (`writer_class`), which source it came from (connector run, agent session, document, human actor), and when it was observed. Statements are opt-in per property — a property is only *promoted* to tracking when a **second distinct source** writes a materially different value. Single-source properties stay cheap scalar writes with zero extra rows.
+
+### The trust ladder
+
+A resolver (`resolver.py` + `trust.py`) orders a property's open statements by a global writer-class ladder, strongest first:
+
+`human > connector > mirror > agent > inferred`
+
+Within a tier, recency wins. Two same-tier claims with materially different values observed within a 24h epsilon are **unresolvable** — the ladder can't order them confidently, so the resolver returns a provisional winner and flags it. Two claims from different writer families disagreeing marks the resolution **disputed**. Human pins short-circuit the ladder entirely.
+
+### Freshness
+
+Every value decays: `fresh → aging → stale`, on per-class TTLs (volatile = 1 day, default = 30 days, stable = 1 year). A stale higher-tier value can be demoted below a fresh same-family one, and every resolution reports the winner's freshness — so a "the CRM said so, eight months ago" value is visible for what it is.
+
+### The mode ladder: off → shadow → enforce
+
+Rollout is a three-position switch, `fabric_source_truth_mode` (default `off`):
+
+| Mode | Statements | Cache (`properties`) |
+|------|-----------|---------------------|
+| `off` | never touched | pure LWW — byte-for-byte the pre-FST behavior |
+| `shadow` | recorded at every merge site | still LWW; the resolver runs advisory-only |
+| `enforce` | recorded | the **resolver's winner** is written — a lower-trust write no longer lands |
+
+In shadow and enforce, every statement-producing property logs one grep-stable divergence line (`fabric shadow: object=... lww=... resolver=... diverged=... disputed=... unresolvable=... freshness=...`). A failure in the statement pass never breaks the cache write — the write degrades to plain LWW with a warning. Flipping back to `off` is always safe: reads serve the last-resolved cache, LWW resumes, and statement history stays on disk. Shadow recording is at-most-once per journal event, so divergence logs are a lower bound on traffic, not an exact ledger.
+
+### The divergence report — the enforce gate
+
+`python -m pocketpaw.fabric.divergence_report <logfile>` (or stdin) parses those lines and answers "is shadow clean enough to enforce?". A divergence is **explained** when the line shows why the resolver disagreed with LWW (a flagged dispute, an unresolvable tie, freshness demotion — multi-source ordering doing its job). **Unexplained** divergences — the resolver overrode fresh, undisputed data with no visible reason — must be ZERO before flipping to enforce. The report exits 0/1 on its `ENFORCE-READY` verdict, so it drops into CI or a rollout script as-is.
+
+### Curation and stewardship
+
+Humans stay in the loop through four verbs on the store: **CHANGE** (supersede the winner with a preferred claim), **CORRECT** (deprecate a wrong claim with a reason), **PIN** (this value wins outright until unpinned), and **IGNORE** (strike a claim from resolution). Unresolvable conflicts are recomputed on scan (`conflicts.py` — no conflicts table to drift) and surface as one Instinct **stewardship-queue** proposal per conflicted property; answering with any verb, or a new higher-tier observation, closes the conflict on the next scan.

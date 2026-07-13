@@ -1,6 +1,75 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-07-10 (HE-2 — canonical engine module): the engine content-selection
+# checks now route through ``sites.engines`` predicates instead of inline
+# ``== "svelte"`` string equality. ``is_source_engine(engine)`` replaces the
+# "source vs rippleSpec" content switch (publish/activate promote, preview/audit
+# fallback, dynamic-envelope), and ``content_key(engine)`` replaces the literal
+# ``"source" | "rippleSpec"`` key pick. PURE refactor, zero behaviour change for the
+# existing ripple/svelte engines. The three svelte NATIVE-EDITING guards
+# (``apply_leaf_edits`` ~2595, native shadow-render ~2697, ``edit_svelte_component``
+# ~2823) deliberately KEEP the ``!= "svelte"`` literal — their bodies are svelte-only
+# (component-path splice, ``.svelte-kit/cloudflare`` read, DSV-5 source split), so
+# guard and body must widen together; HE-9 widens ``apply_leaf_edits`` when the html
+# editing lane lands.
+#
+# Updated 2026-07-09 (DP0-4 — publish async split + single-flight): ``_deploy_site_doc``
+# now FORKS on ``_is_dynamic`` BEFORE any build. A DYNAMIC site no longer builds /
+# deploys inline — it returns early into the new ``_provision_dynamic_site`` helper,
+# which ensures the canonical Site doc in ``provision_status="provisioning"``
+# (``deployed=False``, ``url=""``) and enqueues the durable ``provision_site`` job via
+# ``jobs.service.dispatch_job`` (``params={}``). SINGLE-FLIGHT: a re-publish while the
+# site is already ``provisioning`` does NOT enqueue a second job (a double-publish is a
+# no-op). The enqueued job id rides the returned doc on the transient
+# ``_provision_job_id`` PrivateAttr, which ``_to_response`` surfaces on
+# ``SiteResponse.provision_job_id`` alongside ``provision_status``. The STATIC path is
+# byte-for-byte the pre-DP0-4 inline build → deploy → upsert (regression guarantee).
+# Both publish entry points reach it through ``_deploy_site_doc`` (the free ``publish``
+# and the charge-first ``activate_site``), so both get the async behaviour; the return
+# is still a plain ``_SiteDoc`` so their post-processing (plan stamp / sub-active) is
+# unchanged.
+#
+# Updated 2026-07-02 (harden native-editing endpoints): (1) ``get_native_artifact``
+# now routes its arm build through ``_build_or_cloud_error`` (like the publish paths)
+# so a missing-toolchain / non-zero build / SmokeGateFailed becomes a clean
+# CloudError (``sites.generator_failed``) instead of an opaque 500 (DEP-3); (2)
+# ``apply_leaf_edits`` wraps the leaf-edit CLI bridge + result parse and maps its
+# RuntimeError / KeyError / IndexError / TypeError to ``Internal("sites.leaf_edit_failed")``
+# — a structured envelope, not a 500; and (3) it now SPLITS a dynamic svelte pocket's
+# source envelope (``_split_svelte_source``) so the CLI receives ONLY the file map and
+# the persist loop is CONFINED to the input file keyspace — a binding key
+# (objects/sources/actions/auth) or a CLI-invented path is never written back as a
+# component file.
+#
+# Updated 2026-07-01 (NE-5b — native-artifact endpoint): added
+# ``get_native_artifact`` — the backend of the native shadow-render path. It ensures
+# the pocket's ARMED svelte build (builder_origin set, so the paw-sites generator
+# stamps ``data-uid`` on the editable leaves + embeds the ``paw-edit-manifest``
+# script) via a DIRECT ``GeneratorClient.build`` (smoke=False, the same arm/preview
+# gate ``make_site_editable`` uses) and returns the built ``<body>`` inner HTML +
+# concatenated CSS as a dict, so the native editor can inject it into a shadow root
+# instead of framing an iframe. The built static output is located by the returned
+# ``BuildResult.project_dir`` + ``.svelte-kit/cloudflare/index.html`` — the SAME tree
+# ``_default_bundle_reader`` reads ``_worker.js`` from and ``local_server`` copies to
+# serve. A non-svelte pocket raises ValidationError (422); a missing / cross-tenant
+# pocket surfaces the pockets service's NotFound / Forbidden (404 / 403).
+# ``_generator`` + ``_read_built`` are injectable seams so the path is unit-testable
+# without Bun / a real build.
+#
+# Updated 2026-07-01 (NE-4b — native-editing leaf-edit persist): added
+# ``apply_leaf_edits`` — the backend of the native site-editing persist path. It
+# splices the native editor's forwarded ``{uid, op}`` leaf edits into the pocket's
+# svelte ``source`` map via ``generator_client.apply_leaf_edits`` (the paw-sites
+# apply-leaf-edit CLI, a PURE transform — no build/workerd) and persists ONLY the
+# changed files through ``pockets_service.set_svelte_source_file`` (each write
+# auto-writes a Branch draft). Unlike ``edit_svelte_component`` it does NOT
+# republish/rebuild — the editor already rendered the edit optimistically, so
+# persisting the reviewable draft is the whole job. Empty edits / a non-svelte
+# pocket raise ValidationError (422); a missing / cross-tenant pocket surfaces as
+# the pockets service's NotFound / Forbidden (404 / 403). ``_apply`` is an
+# injectable bridge seam so the path is unit-testable without Bun.
+#
 # Updated 2026-06-26 (feat/sites-dev-bridge-source, S1 — dev source carries the
 # edit-bridge): ``dev_preview_pocket`` gained an optional ``builder_origin`` and
 # threads it to ``get_manager().ensure_dev_server(builder_origin=...)`` so the
@@ -27,6 +96,19 @@
 # local mode — so the existing local/CF tests are unaffected. New
 # ``_workers_deploy`` test-injection seam threads ``publish`` → ``_deploy_site_doc``
 # (mirrors ``_local_deploy``/``_cloudflare``). Billing/charge-first logic untouched.
+#
+# Updated 2026-06-25 (feat/sites-cf-dispatch-worker — wire the published URL for the
+# WfP serving layer): a user worker uploaded into the `paw-sites` dispatch namespace
+# is NOT directly URL-addressable in Workers for Platforms — it serves only when the
+# new Dynamic Dispatch Worker (ee/pocketpaw_ee/sites/cloudflare/dispatch-worker)
+# routes `<site_id>.<PAW_CF_SITES_DOMAIN>` to it. So the CF branch of
+# ``_deploy_site_doc`` now, AFTER ``put_worker`` succeeds, stamps the public URL as
+# ``https://{site_id}.{PAW_CF_SITES_DOMAIN}`` when ``PAW_CF_SITES_DOMAIN`` is set; if
+# it is unset it leaves ``url=""`` (the worker IS uploaded — the deploy succeeded —
+# it is just unreachable until the operator deploys the dispatch worker + sets the
+# domain) and logs a warning. The LOCAL branch is untouched. v1 is subdomain routing
+# only; a connected custom hostname needs a hostname→site_id map in the dispatch
+# worker (follow-up).
 #
 # Updated 2026-06-25 (feat/paw-sites-prod-deploy, DEP-3 — graceful generator
 # failure): the publish path shells out to the paw-sites generator + bun, which in
@@ -158,6 +240,15 @@
 # side (entity isolation; this service never imports the Pocket model). _to_response
 # gained an optional ``pattern`` arg; both DTOs default it to "" (empty-safe for a
 # pocket with no pattern or a missing/cross-tenant pocket).
+#
+# Updated 2026-07-09 (SR-9 — surface each site's ENGINE): the sibling of DS-1a.
+# list_for_workspace() and pocket_status() now also carry the source pocket's
+# authoring ``engine`` ("svelte" | "ripple") so the gallery can badge each card's
+# engine (Custom vs Ripple) without a per-site fetch. Resolved via the new
+# pockets_service.engines_for_pockets (one projected $in read, tenant-scoped),
+# mirroring patterns_for_pockets. _to_response gained an optional ``engine`` arg;
+# both DTOs default it to "" (empty-safe for a pocket that predates the engine
+# field or a missing/cross-tenant pocket).
 #
 # Updated 2026-06-19 (P2b-backend — "Last Deployed" + revert endpoint): publish()
 # now stamps the Site doc's ``deployed_at`` (UTC) ONLY when a non-preview deploy
@@ -422,6 +513,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -454,12 +546,19 @@ from pocketpaw_ee.sites.dto import (
     SiteResponse,
     SiteStatusResponse,
 )
+from pocketpaw_ee.sites.engines import content_key, is_source_engine
 from pocketpaw_ee.sites.generator_client import GeneratorClient
 
 logger = logging.getLogger(__name__)
 
 # The control plane reads the Worker bundle adapter-cloudflare emits here.
 _WORKER_BUNDLE_REL = ".svelte-kit/cloudflare/_worker.js"
+
+# The prerendered static site adapter-cloudflare emits (index.html + the
+# ``_app/...`` assets) — the SAME tree ``_default_bundle_reader`` reads
+# ``_worker.js`` from and ``local_server.persist_site`` copies to serve. NE-5b reads
+# the armed build's index.html + CSS from here.
+_CLOUDFLARE_BUILD_REL = ".svelte-kit/cloudflare"
 
 # BP-2: the source pocket is the versionable artifact behind a site. The Branch
 # primitive (BP-1) keys every version on (scope_type, scope_id); for a site the
@@ -491,6 +590,74 @@ _MAX_PENDING_DEPLOY_INPUT_BYTES = 4_000_000
 
 def _default_bundle_reader(project_dir: str) -> bytes:
     return Path(project_dir, _WORKER_BUNDLE_REL).read_bytes()
+
+
+def _extract_body_inner(html: str) -> str:
+    """Return the INNER HTML of the built page's ``<body>`` (NE-5b).
+
+    The prerendered ``index.html`` wraps the data-uid-stamped leaves + the embedded
+    ``<script id="paw-edit-manifest">`` in ``<body>…</body>``; the native editor
+    injects only that inner markup into a shadow root, so the ``<html>``/``<head>``
+    chrome is stripped. Falls back to the whole document if (defensively) no body tag
+    is present — a prerendered SvelteKit page always has one."""
+    m = re.search(r"<body[^>]*>(.*)</body>", html, re.DOTALL | re.IGNORECASE)
+    return (m.group(1) if m else html).strip()
+
+
+def _extract_css(html: str, cloudflare_dir: Path) -> str:
+    """Concatenate the built page's CSS into ONE string the native editor injects as
+    a single ``<style>`` (NE-5b).
+
+    Collects, in document order: (1) any inline ``<style>…</style>`` blocks
+    (SvelteKit can inline critical CSS), then (2) every ``<link rel="stylesheet">``
+    stylesheet, read from disk under the built ``.svelte-kit/cloudflare/`` tree. The
+    prerendered index links assets with either a RELATIVE (``./_app/…``) or ABSOLUTE
+    (``/_app/…``) href, so both are resolved against the build dir. Each resolved
+    path is contained to the build tree (a ``../`` traversal in a hand-authored
+    component's link is refused) before it is read."""
+    parts: list[str] = []
+    for style in re.findall(r"<style[^>]*>(.*?)</style>", html, re.DOTALL | re.IGNORECASE):
+        if style.strip():
+            parts.append(style.strip())
+
+    root = cloudflare_dir.resolve()
+    for tag in re.findall(r"<link\b[^>]*>", html, re.IGNORECASE):
+        if not re.search(r"""rel\s*=\s*["']?stylesheet""", tag, re.IGNORECASE):
+            continue
+        href_m = re.search(r"""href\s*=\s*["']([^"']+)["']""", tag, re.IGNORECASE)
+        if not href_m:
+            continue
+        rel = href_m.group(1).split("?", 1)[0].split("#", 1)[0]
+        if rel.startswith("./"):
+            rel = rel[2:]
+        rel = rel.lstrip("/")
+        if not rel:
+            continue
+        css_path = (cloudflare_dir / rel).resolve()
+        # Refuse to read outside the built output tree (defensive — the hrefs come
+        # from our own generator, but a component author controls the leaf markup).
+        try:
+            css_path.relative_to(root)
+        except ValueError:
+            continue
+        if css_path.is_file():
+            text = css_path.read_text(encoding="utf-8").strip()
+            if text:
+                parts.append(text)
+    return "\n".join(parts)
+
+
+def _read_native_artifact(project_dir: str) -> tuple[str, str]:
+    """Read the armed build's ``<body>`` inner HTML + concatenated CSS from the built
+    static output (NE-5b) — the default ``_read_built`` seam.
+
+    ``project_dir`` is the ``BuildResult.project_dir`` the generator returns; the
+    prerendered site lives under ``<project_dir>/.svelte-kit/cloudflare/`` (the SAME
+    tree ``_default_bundle_reader`` / ``local_server`` read). Returns
+    ``(body_html, css)``."""
+    cloudflare_dir = Path(project_dir, _CLOUDFLARE_BUILD_REL)
+    html = (cloudflare_dir / "index.html").read_text(encoding="utf-8")
+    return _extract_body_inner(html), _extract_css(html, cloudflare_dir)
 
 
 async def _build_or_cloud_error(
@@ -856,7 +1023,7 @@ async def _promote_pocket_draft_to_published(
         )
 
 
-def _to_response(doc: _SiteDoc, pattern: str = "") -> SiteResponse:
+def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResponse:
     deployed_at = getattr(doc, "deployed_at", None)
     return SiteResponse(
         id=str(doc.id),
@@ -876,11 +1043,20 @@ def _to_response(doc: _SiteDoc, pattern: str = "") -> SiteResponse:
         # ...), resolved by the caller from Pocket.pattern (it lives on the pocket,
         # not the Site). "" when unset / unresolved so the gallery is empty-safe.
         pattern=pattern,
+        # SR-9: the source pocket's authoring engine ("svelte" | "ripple"),
+        # resolved by the caller from Pocket.engine (sibling of pattern above). ""
+        # when unresolved, so the gallery's engine badge is empty-safe.
+        engine=engine,
         # charge-first: the Dodo checkout link a PAID-tier publish returns, read
         # from the transient ``_checkout_url`` PrivateAttr (never persisted). None
         # for a free/live publish and for any list/status read (those docs are
         # loaded from Mongo, where the PrivateAttr defaults to None).
         checkout_url=getattr(doc, "_checkout_url", None),
+        # DP0-4: the dynamic-site provision state (persisted) + the id of the job a
+        # dynamic publish just enqueued (transient ``_provision_job_id`` PrivateAttr,
+        # None for a static publish / any DB-loaded doc / a single-flight no-op).
+        provision_status=getattr(doc, "provision_status", "none"),
+        provision_job_id=getattr(doc, "_provision_job_id", None),
     )
 
 
@@ -1097,7 +1273,7 @@ async def publish(
     # not-live while the published tag stands). The snapshot for the promote is the
     # engine's content: the rippleSpec for a ripple site, the {path: contents}
     # source map for a svelte site.
-    version_content: dict[str, Any] = (source if engine == "svelte" else ripple_spec) or {}
+    version_content: dict[str, Any] = (source if is_source_engine(engine) else ripple_spec) or {}
     await _promote_pocket_draft_to_published(
         pocket_id=pocket_id,
         workspace_id=workspace_id,
@@ -1180,7 +1356,29 @@ async def _deploy_site_doc(
     ``workers_deploy`` is the test-injection seam for the workers-mode deployer
     (mirrors ``local_deploy``/``cloudflare``); ``None`` uses the real
     ``workers_deploy.deploy_workers``.
+
+    DP0-4 — DYNAMIC split: a DYNAMIC site (``pattern == "dynamic"`` / a spec carrying
+    live bindings) is NOT built or deployed inline here. Its per-tenant D1 data plane
+    must be stood up by the durable ``provision_site`` job (create D1 → build with the
+    real id → migrate → deploy), so this returns EARLY into ``_provision_dynamic_site``
+    — which ensures the canonical Site doc in ``provision_status="provisioning"`` and
+    enqueues the job (single-flight: a re-publish while already provisioning does NOT
+    enqueue a second job). Only the STATIC path below runs the inline build → deploy →
+    upsert (byte-for-byte the pre-DP0-4 behaviour, the regression guarantee).
     """
+    # DP0-4: fork BEFORE any build. A dynamic site defers to the provision job; only
+    # a static site takes the inline build/deploy/upsert path unchanged below.
+    if _is_dynamic(pattern, ripple_spec):
+        return await _provision_dynamic_site(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            site_id=site_id,
+            signed_key=signed_key,
+            site_name=site_name,
+            builder_origin=builder_origin,
+        )
+
     gen = generator or GeneratorClient()
     # DEP-3: map a generator/install/smoke failure (missing toolchain, non-zero
     # build, SSR fail-gate) to a clean CloudError (sites.generator_failed → 5xx)
@@ -1268,6 +1466,25 @@ async def _deploy_site_doc(
             [{"type": "d1", "name": _D1_BINDING_NAME, "id": d1_database_id}] if is_dynamic else None
         )
         await cf.put_worker(script_name=site_id, bundle=bundle, bindings=bindings)
+        # CF-DISPATCH: the worker is now in the `paw-sites` dispatch namespace, but
+        # a user worker in a WfP dispatch namespace is NOT directly URL-addressable
+        # — it only serves when the dispatch worker
+        # (ee/pocketpaw_ee/sites/cloudflare/dispatch-worker) routes
+        # `<site_id>.<PAW_CF_SITES_DOMAIN>` to it. So the public URL is the
+        # per-site subdomain, NOT a *.workers.dev address. When PAW_CF_SITES_DOMAIN
+        # is configured, stamp it; when it is not, leave url="" (the deploy still
+        # succeeded — the worker is uploaded — it is just unreachable until the
+        # operator deploys the dispatch worker + sets the domain) and warn.
+        import os
+
+        domain = os.environ.get("PAW_CF_SITES_DOMAIN", "").strip()
+        if domain:
+            url = f"https://{site_id}.{domain}"
+        else:
+            logger.warning(
+                "PAW_CF_SITES_DOMAIN unset — published site has no public URL "
+                "(set it + deploy the dispatch worker)"
+            )
 
     # PERF-1: UPSERT ONE canonical Site doc per (workspace, pocket_id) keyed on the
     # stable ``_id`` (== site_id), rather than inserting a fresh row every publish.
@@ -1329,6 +1546,105 @@ async def _deploy_site_doc(
         if is_dynamic:
             doc.d1_database_id = d1_database_id
         await doc.save()
+    return doc
+
+
+async def _provision_dynamic_site(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    site_id: str,
+    signed_key: str,
+    site_name: str,
+    builder_origin: str | None,
+) -> _SiteDoc:
+    """DP0-4 — the DYNAMIC half of ``_deploy_site_doc``: stand the site up
+    ASYNCHRONOUSLY via the durable ``provision_site`` job instead of deploying inline.
+
+    A dynamic site is backed by a per-tenant Cloudflare D1 that must be created,
+    migrated, and bound BEFORE the Worker can serve — work the ``provision_site`` job
+    owns (create D1 → build with the real id → migrate → deploy → mark provisioned).
+    So rather than build/deploy here, this:
+
+      1. ENSURES the ONE canonical Site doc for ``(workspace, pocket_id)`` exists in
+         ``provision_status="provisioning"`` (``deployed=False``, ``url=""`` — the job
+         flips those on finalize), mirroring the fields the static upsert seeds on a
+         first publish (script_name / owner / signed_key / capture defaults).
+      2. SINGLE-FLIGHT: if the doc is ALREADY ``provisioning``, it does NOT enqueue a
+         second job — a double-publish is a no-op that returns the in-progress
+         provisioning response (without a fresh job id).
+      3. DISPATCHES the ``provision_site`` job (``params={}`` — the job re-reads the
+         pocket's spec itself; ``validate_job_params({})`` passes with no schema).
+
+    Returns the Site doc in ``provisioning`` state, carrying the enqueued job id on the
+    transient ``_provision_job_id`` PrivateAttr so ``_to_response`` surfaces it. Both
+    publish entry points (the free ``publish`` and the charge-first ``activate_site``)
+    reach this through ``_deploy_site_doc``, so both get the async behaviour; each does
+    its own post-processing on the returned doc (plan stamp / sub-active), which is a
+    plain ``_SiteDoc`` exactly as before — only ``deployed``/``provision_status`` differ.
+    """
+    oid = ObjectId(site_id)
+    doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+
+    # SINGLE-FLIGHT: a publish while the site is already provisioning must not enqueue
+    # a second job — return the in-progress provisioning response as a no-op. (We do
+    # not resolve the in-flight job id here; the caller can poll the site's status.)
+    if doc is not None and doc.provision_status == "provisioning":
+        doc._provision_job_id = None
+        return doc
+
+    # Ensure the canonical doc exists in ``provisioning`` state. leave ``deployed`` /
+    # ``url`` for the job to finalize; seed the same identity/capture fields the static
+    # upsert seeds so the site is coherent while it provisions.
+    if doc is None:
+        doc = _SiteDoc(
+            id=oid,
+            workspace=workspace_id,
+            pocket_id=pocket_id,
+            owner=user_id,
+            name=site_name,
+            script_name=site_id,
+            deployed=False,
+            url="",
+            signed_key=signed_key,
+            provision_status="provisioning",
+            builder_origin=builder_origin or "",
+            allowed_origins=_default_allowed_origins(),
+            event_mapping=_DEFAULT_EVENT_MAPPING,
+        )
+        await doc.insert()
+    else:
+        # Re-publish of a not-currently-provisioning dynamic site (e.g. a failed /
+        # provisioned one re-run): reset to ``provisioning`` and refresh the identity
+        # fields. Preserve the stored ``signed_key`` (the capture endpoint verifies
+        # against it) and any connected domain / allowlist. Clear any captured
+        # pending-deploy inputs — the charge-first webhook has already handed off to
+        # the job, so the snapshot is no longer needed.
+        doc.pocket_id = pocket_id
+        doc.owner = user_id
+        doc.name = site_name
+        doc.script_name = site_id
+        doc.deployed = False
+        doc.url = ""
+        doc.provision_status = "provisioning"
+        doc.pending_deploy_inputs = {}
+        await doc.save()
+
+    # DISPATCH the durable provision job. Lazy import keeps the sites service free of
+    # an eager jobs/arq import at module load (mirrors the billing/pockets lazy
+    # imports). ``params={}`` — the job re-reads the pocket spec; no params needed.
+    from pocketpaw_ee.cloud.jobs import service as jobs_service
+
+    result = await jobs_service.dispatch_job(
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        action="provision_site",
+        job_name="provision_site",
+        params={},
+        triggered_by=user_id,
+    )
+    doc._provision_job_id = result.get("job_id")
     return doc
 
 
@@ -1410,6 +1726,178 @@ async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | N
     # Prefer the newest doc that carries a real url (the freshest live build);
     # fall back to the newest doc overall when none has one.
     return next((d for d in docs if d.url), docs[0])
+
+
+# ---------------------------------------------------------------------------
+# DP0-3 — durable ``provision_site`` job seams.
+#
+# The provision job (ee/pocketpaw_ee/cloud/jobs/builtin/provision_site.py) takes a
+# dynamic site from spec to live: create D1 → build (with the real id baked in) →
+# apply migration → deploy the Worker → mark provisioned. The job orchestrates the
+# steps (migrate sits BETWEEN build and deploy), so these are granular seams — the
+# Site-doc Beanie reads/writes funnel through THIS module (the import-linter
+# boundary keeps the builtin job off the Beanie doc), and the build/deploy
+# mechanics reuse ``_deploy_site_doc``'s exact helpers rather than duplicating them.
+# ---------------------------------------------------------------------------
+
+
+def provision_cf_client() -> Any:
+    """The Cloudflare client the provision job uses (create_database / put_worker).
+
+    Thin public wrapper over ``_cf_client()`` so the builtin job builds the real CF
+    client the SAME way ``_deploy_site_doc`` does, and tests can monkeypatch this one
+    seam to inject a fake client without importing the client class."""
+    return _cf_client()
+
+
+def provision_d1_bindings(d1_database_id: str) -> list[dict]:
+    """The Worker D1 binding list a provisioned dynamic site deploys with — a single
+    ``{"type": "d1", "name": "DB", "id": <database_id>}`` (``_D1_BINDING_NAME``), the
+    exact shape ``_deploy_site_doc`` passes ``put_worker`` on the dynamic path."""
+    return [{"type": "d1", "name": _D1_BINDING_NAME, "id": d1_database_id}]
+
+
+async def provision_deploy(
+    *,
+    site_id: str,
+    project_dir: str,
+    bundle: bytes,
+    d1_database_id: str,
+    cloudflare: Any = None,
+) -> str:
+    """Deploy a PROVISIONED dynamic site to whichever target ``_deploy_mode()`` names,
+    and return its public URL. The one seam the provision job deploys through.
+
+    Before this existed the job always called ``cf.put_worker``, which only uploads
+    into a Workers-for-Platforms dispatch namespace. WfP is a PAID add-on, so an
+    account without it got a bare ``Cloudflare API 403`` (CF error 10121) and NO
+    dynamic site could ever publish — regardless of PAW_CF_DEPLOY_MODE, which the job
+    never consulted. Honouring the mode here gives dynamic sites the same free
+    workers.dev target static sites already use:
+
+      * ``workers`` → ``workers_deploy.deploy_workers`` with the D1 bound as ``DB``.
+        Free tier, no dispatch namespace. Returns the real workers.dev URL.
+      * ``wfp`` / UNSET → the pre-existing ``put_worker`` upload (unchanged), whose
+        URL comes from ``provision_site_url``.
+
+    ``local`` is not a dynamic target (nothing serves the D1 binding locally), so it
+    degrades to ``workers`` rather than deploying a site that cannot reach its own
+    database."""
+    mode = _deploy_mode()
+    if mode == "local":
+        logger.info("sites.provision: local mode has no dynamic target — using workers mode")
+        mode = "workers"
+
+    if mode == "workers":
+        from pocketpaw_ee.sites import workers_deploy as workers_deploy_mod
+
+        return await workers_deploy_mod.deploy_workers(
+            site_id, project_dir, d1_database_id=d1_database_id
+        )
+
+    cf = cloudflare or _cf_client()
+    await cf.put_worker(
+        script_name=site_id,
+        bundle=bundle,
+        bindings=provision_d1_bindings(d1_database_id),
+    )
+    return provision_site_url(site_id)
+
+
+def provision_site_url(site_id: str) -> str:
+    """The public URL a provisioned dynamic site resolves to — the per-site subdomain
+    ``https://<site_id>.<PAW_CF_SITES_DOMAIN>`` when the sites domain is configured,
+    else "" (the Worker is uploaded + reachable via the dispatch worker once the
+    operator sets the domain). Mirrors ``_deploy_site_doc``'s WfP URL logic."""
+    import os
+
+    domain = os.environ.get("PAW_CF_SITES_DOMAIN", "").strip()
+    return f"https://{site_id}.{domain}" if domain else ""
+
+
+async def load_provision_site(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
+    """The canonical Site doc the provision job operates on, or None. Resolves the
+    ONE canonical doc for (workspace, pocket_id) (``_canonical_site_doc``), so a
+    pre-PERF-1 pocket with legacy dupes still provisions the live one."""
+    return await _canonical_site_doc(workspace_id, pocket_id)
+
+
+async def persist_provision_d1_id(site: _SiteDoc, d1_database_id: str) -> None:
+    """Persist a freshly-created D1 id on the Site doc IMMEDIATELY (DP0-3 contract).
+
+    ``provision_status`` stays ``provisioning`` — only ``d1_database_id`` is stamped
+    — so a retry of the job REUSES this D1 instead of creating (and orphaning) a
+    second one. Called right after ``cf.create_database`` succeeds, before build /
+    migrate / deploy."""
+    site.d1_database_id = d1_database_id
+    site.provision_status = "provisioning"
+    await site.save()
+
+
+async def finalize_provisioned_site(site: _SiteDoc, *, url: str) -> None:
+    """Mark a Site doc fully provisioned after migrate + deploy succeed (DP0-3):
+    ``provision_status="provisioned"``, ``deployed=True``, stamp the live URL +
+    ``deployed_at``. The last write of the durable job's happy path."""
+    site.provision_status = "provisioned"
+    site.deployed = True
+    site.deployed_at = datetime.now(UTC)
+    site.url = url
+    await site.save()
+
+
+async def mark_provision_failed(site: _SiteDoc) -> None:
+    """Mark a Site doc's provision as failed (DP0-3). The ``d1_database_id`` already
+    persisted (``persist_provision_d1_id``) is LEFT in place so a retry reuses that
+    D1 — only ``provision_status`` flips to ``failed``."""
+    site.provision_status = "failed"
+    await site.save()
+
+
+async def build_provision_bundle(
+    *,
+    site: _SiteDoc,
+    ripple_spec: dict[str, Any] | None,
+    d1_database_id: str,
+    generator: GeneratorClient | None = None,
+) -> tuple[str, bytes]:
+    """Build a dynamic site with its REAL D1 id baked in; return ``(project_dir,
+    bundle)`` (DP0-3).
+
+    Reuses ``_deploy_site_doc``'s exact build assembly: it derives the theme from
+    the rippleSpec, runs the SSR-gated build through ``_build_or_cloud_error`` (so a
+    broken build maps to a clean CloudError, never an opaque 500), and reads the
+    Worker bundle via ``_default_bundle_reader``. ``d1_database_id`` rides
+    ``siteConfig.d1DatabaseId`` so the generator threads it into the emitted
+    wrangler.toml ``database_id`` — this is what makes the later ``wrangler d1
+    migrations apply`` and the Worker's D1 binding target the right database. The
+    caller applies migrations against ``project_dir`` (which carries wrangler.toml +
+    migrations/) BEFORE deploying ``bundle``. ``generator`` is the test-injection
+    seam; None uses a real ``GeneratorClient``."""
+    gen = generator or GeneratorClient()
+    theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
+    site_id = str(site.id)
+    build = await _build_or_cloud_error(
+        gen,
+        ripple_spec=ripple_spec,
+        theme=theme,
+        site_id=site_id,
+        title=site.name or "Untitled site",
+        capture_api_base=_capture_base(),
+        capture_signed_key=site.signed_key,
+        # A dynamic Paw Site is authored as a ripple site carrying live bindings
+        # (objects / sources / actions / auth) — the create-dynamic-site path.
+        engine="ripple",
+        source=None,
+        builder_origin=site.builder_origin or None,
+        # DP0-3: the REAL D1 uuid, baked into the emitted wrangler.toml.
+        d1_database_id=d1_database_id,
+        pocket_id=site.pocket_id,
+        # A live provision keeps the SSR fail-gate on — a broken site is rejected
+        # before it deploys (same as _deploy_site_doc).
+        smoke=True,
+    )
+    bundle = _default_bundle_reader(build.project_dir)
+    return build.project_dir, bundle
 
 
 async def add_domain(
@@ -2008,7 +2496,9 @@ async def activate_site(
     # record, mirroring the live publish path (best-effort; versioning never gates
     # the deploy/activation).
     version_content: dict[str, Any] = (
-        inputs.get("source") if (inputs.get("engine") == "svelte") else inputs.get("ripple_spec")
+        inputs.get("source")
+        if is_source_engine(inputs.get("engine"))
+        else inputs.get("ripple_spec")
     ) or {}
     await _promote_pocket_draft_to_published(
         pocket_id=pocket_id,
@@ -2117,6 +2607,215 @@ def apply_edits(source: str, edits: list[dict[str, str]]) -> str:
     return result
 
 
+async def apply_leaf_edits(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    edits: list[dict[str, Any]],
+    _apply: Any = None,
+) -> list[dict[str, Any]]:
+    """Persist native-editor leaf edits as a reviewable Branch draft (NE-4b).
+
+    The backend of the native site-editing persist path. The native editor forwards
+    a batch of ``{uid, op}`` leaf edits it has ALREADY rendered optimistically; this
+    splices them into the pocket's svelte ``source`` map via the paw-sites
+    ``apply-leaf-edit`` CLI (a PURE transform — no build, no workerd) and persists
+    each CHANGED file through the pockets service, which auto-writes a Branch draft
+    ArtifactVersion snapshotting the full edited source map. There is NO
+    republish/rebuild: persisting the draft is the whole job — the deliberate UX win
+    over ``edit_svelte_component``'s per-edit iframe rebuild (the editor already
+    shows the change; an approved review is what later takes it live).
+
+    Steps:
+      1. reject an empty edit batch (``ValidationError`` → 422);
+      2. read the pocket (the pockets service's public ``get`` raises NotFound /
+         Forbidden itself — a missing / cross-tenant pocket is 404 / 403) and assert
+         it is a svelte site (else ``ValidationError`` → 422);
+      3. splice via the generator bridge — edits apply IN ORDER, and a rejected edit
+         leaves ITS file byte-identical in the returned source;
+      4. persist ONLY the files whose contents actually changed (so a rejected edit
+         naturally persists nothing and never churns an empty draft), each write
+         auto-writing the Branch draft snapshot;
+      5. return the per-uid verdicts unchanged.
+
+    ``_apply`` is an injectable seam for the generator bridge (defaults to
+    ``generator_client.apply_leaf_edits``) so the orchestration is unit-testable
+    without Bun / workerd.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import generator_client
+
+    if not isinstance(edits, list) or not edits:
+        raise ValidationError(
+            "site_leaf_edit.empty_edits",
+            "apply_leaf_edits requires a non-empty list of {uid, op} leaf edits.",
+        )
+
+    # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
+    # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
+    pocket = await pockets_service.get(pocket_id, user_id)
+    # KEPT svelte-specific (not is_source_engine): the body below runs the DSV-5
+    # ``_split_svelte_source`` split and the SvelteKit leaf-edit CLI, both svelte-only.
+    # HE-9 widens THIS guard to html (via is_source_engine) in the same change that
+    # teaches the CLI the html editing lane, so guard and body widen together.
+    if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
+        raise ValidationError(
+            "pocket.not_svelte_site",
+            "This pocket is not a svelte Paw Site — it has no component source map to edit.",
+        )
+    source_map = pocket["source"]
+
+    # DSV-5 binding-key safety: a DYNAMIC svelte pocket's source envelope carries its
+    # live-data bindings (objects/sources/actions/auth) as SIBLING keys of the
+    # {path: contents} SvelteKit files. Split them out exactly like the build path
+    # (_split_svelte_source): the leaf-edit CLI must receive ONLY the file map (it
+    # treats every source key as a file, so a binding key mixed in would break the
+    # splice), and the persist loop below is CONFINED to this input file keyspace so a
+    # binding key is never written back as a component file and a brand-new key the
+    # CLI might invent is never persisted.
+    files, _bindings = generator_client._split_svelte_source(source_map)
+
+    # Splice the {uid, op} edits into the file map via the apply-leaf-edit CLI. The
+    # bridge raises a bare RuntimeError on a non-zero exit / timed-out splice, and the
+    # result parse can KeyError / IndexError / TypeError on malformed CLI output — map
+    # them all to a clean CloudError (sites.leaf_edit_failed → 5xx) so the client gets
+    # a structured envelope with a reason instead of an opaque unhandled 500 (the
+    # cloud error handler maps ONLY CloudError). A CloudError raised inside is
+    # re-raised unchanged; the cause is chained for logs, never leaked to the client.
+    try:
+        out = await (_apply or generator_client.apply_leaf_edits)(source=files, edits=edits)
+        new_map, results = out["source"], out["results"]
+    except CloudError:
+        raise
+    except (RuntimeError, KeyError, IndexError, TypeError) as exc:
+        logger.error("sites.apply_leaf_edits: leaf-edit bridge failed", exc_info=True)
+        raise with_cause(
+            Internal(
+                "sites.leaf_edit_failed",
+                "Applying the edits failed — the editing toolchain is unavailable or "
+                "returned an unexpected result. See server logs for details.",
+            ),
+            exc,
+        ) from exc
+
+    # Persist ONLY the files that actually changed, CONFINED to the input file
+    # keyspace. A rejected edit leaves its file byte-identical (the CLI contract), so
+    # this comparison naturally skips it — no empty draft churn. A binding key or a
+    # brand-new path the CLI echoed / invented is NOT in ``files``, so it is skipped
+    # too (never persisted as a component file — set_svelte_source_file would
+    # otherwise overwrite a live-data binding or 404 on an unknown path). Each write
+    # auto-writes a Branch draft snapshotting the FULL edited map, so after the loop
+    # the draft == the fully edited source. Multi-file safe.
+    for path, contents in new_map.items():
+        if path not in files:
+            continue
+        if files.get(path) != contents:
+            await pockets_service.set_svelte_source_file(
+                pocket_id, user_id, component_path=path, new_source=contents
+            )
+
+    return results
+
+
+async def get_native_artifact(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    builder_origin: str | None = None,
+    _generator: GeneratorClient | None = None,
+    _read_built: Callable[[str], tuple[str, str]] | None = None,
+) -> dict[str, str]:
+    """Serve a svelte Paw Site's ARMED build as ``{pocket_id, body_html, css}`` so the
+    native editor can shadow-render it (NE-5b) instead of framing an iframe.
+
+    The native-editing render path. It:
+      1. reads the pocket (the pockets service's PUBLIC ``get`` raises NotFound /
+         Forbidden itself — a missing / cross-tenant pocket surfaces as 404 / 403)
+         and asserts it is a svelte site (else ``ValidationError`` → 422), mirroring
+         ``apply_leaf_edits`` / ``edit_svelte_component``;
+      2. ENSURES the ARMED build: it builds the pocket with ``builder_origin`` set so
+         the paw-sites generator stamps ``data-uid`` on the editable leaves AND embeds
+         the ``<script id="paw-edit-manifest">`` (SE-1 / EP-6 gate on ``builderOrigin``).
+         ``builder_origin`` defaults to the configured dashboard origin
+         (``PAW_SITES_BUILDER_ORIGIN``) exactly like ``make_site_editable``, so the
+         call works with no explicit origin. It builds via a DIRECT
+         ``GeneratorClient.build`` — the SAME arm/preview gate ``make_site_editable``
+         uses (``smoke=False`` skips the SSR FAIL-check but the static build still
+         runs; ``static_build`` stays the default ``True`` so ``.svelte-kit/cloudflare/``
+         is emitted) — instead of the full ``publish_pocket`` preview path, because
+         this is a READ: it needs neither a deploy, a Site doc, a promote, nor billing,
+         and ``build()`` RETURNS the ``project_dir`` so the built output is located
+         without reconstructing a path. PERF-3 builds into the stable
+         ``build_home()/<pocket_id>/`` so node_modules / bun install stay cached;
+      3. reads the built ``<body>`` inner HTML + concatenated CSS from that
+         ``project_dir``'s ``.svelte-kit/cloudflare/index.html`` (the SAME tree
+         ``_default_bundle_reader`` / ``local_server`` read) and returns them.
+
+    ``_generator`` (defaults to a real ``GeneratorClient``) and ``_read_built``
+    (defaults to ``_read_native_artifact`` — the disk read + HTML/CSS extraction) are
+    injectable seams so the path is unit-testable without Bun / a real build."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
+    # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
+    pocket = await pockets_service.get(pocket_id, user_id)
+    # KEPT svelte-specific (not is_source_engine): this shadow-renders the SvelteKit
+    # ARMED build by reading ``.svelte-kit/cloudflare/index.html``. An html site's
+    # served artifact IS its source, so it never uses this SvelteKit render path.
+    if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
+        raise ValidationError(
+            "pocket.not_svelte_site",
+            "This pocket is not a svelte Paw Site — it has no component build to render.",
+        )
+    source = pocket["source"]
+    # theme rides the build on both engine tracks (mirrors publish_pocket); a svelte
+    # pocket has no rippleSpec, so it resolves to {}.
+    ripple_spec = pocket.get("rippleSpec") or {}
+    theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
+    site_name = (pocket.get("name") or "").strip() or "Untitled site"
+
+    # Arm the build: a NON-EMPTY builder_origin is what makes the generator stamp
+    # data-uid + embed the manifest. Default to the configured dashboard origin when
+    # the caller passes none, exactly like make_site_editable.
+    origin = (builder_origin or "").strip() or _builder_origin()
+    generator = _generator or GeneratorClient()
+    # DEP-3: route the arm build through _build_or_cloud_error (the SAME helper the
+    # publish paths at ~1152 / ~1293 use) so a missing-toolchain / non-zero build /
+    # SmokeGateFailed becomes a clean CloudError (sites.generator_failed → 5xx)
+    # instead of escaping as an opaque unhandled 500. Unlike edit_svelte_component's
+    # preview build (map_smoke_gate=False, which preserves its
+    # rollback-on-SmokeGateFailed contract), this is a READ-ONLY render with no source
+    # mutation to roll back, so SmokeGateFailed is mapped too (default
+    # map_smoke_gate=True) — the caller just gets a structured error.
+    build = await _build_or_cloud_error(
+        generator,
+        ripple_spec=ripple_spec,
+        theme=theme,
+        # Transient, per-pocket-stable id — cosmetic here (it only rides the built
+        # page's capture config, which the native editor ignores). The build DIR is
+        # keyed on pocket_id (PERF-3), not this, so it does not affect where the
+        # output lands.
+        site_id=_preview_id(pocket_id),
+        title=site_name,
+        capture_api_base=_capture_base(),
+        capture_signed_key=f"site_key_{secrets.token_urlsafe(24)}",
+        engine="svelte",
+        source=source,
+        builder_origin=origin,
+        pocket_id=pocket_id,
+        # Arm/preview gate: skip the SSR FAIL-check but STILL emit the static
+        # .svelte-kit/cloudflare/ output (static_build defaults True) so there is an
+        # index.html to read.
+        smoke=False,
+    )
+
+    read = _read_built or _read_native_artifact
+    body_html, css = read(build.project_dir)
+    return {"pocket_id": pocket_id, "body_html": body_html, "css": css}
+
+
 async def edit_svelte_component(
     *,
     workspace_id: str,
@@ -2191,6 +2890,9 @@ async def edit_svelte_component(
         # A missing component path is a NotFound (same contract as the full-rewrite
         # path, where set_svelte_source_file raises it) — not a silent create.
         pocket = await pockets_service.get(pocket_id, user_id)
+        # KEPT svelte-specific (not is_source_engine): edits a single named SvelteKit
+        # component by ``component_path`` and persists via ``set_svelte_source_file``.
+        # html has no per-component model — it edits by uid splice (HE-9), not here.
         if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(
             pocket.get("source"), dict
         ):
@@ -2349,7 +3051,7 @@ async def _ensure_pocket_draft(*, workspace_id: str, user_id: str, pocket_id: st
             return
         pocket = await pockets_service.get(pocket_id, user_id)
         engine = pocket.get("engine") or "ripple"
-        if engine == "svelte":
+        if is_source_engine(engine):
             content = pocket.get("source") if isinstance(pocket.get("source"), dict) else {}
         else:
             content = pocket.get("rippleSpec") if isinstance(pocket.get("rippleSpec"), dict) else {}
@@ -2404,7 +3106,7 @@ async def preview_pocket(
 
     # The pocket's CURRENT content for the engine — the fallback when the Branch
     # primitive has no draft row for this pocket yet.
-    if engine == "svelte":
+    if is_source_engine(engine):
         source = pocket.get("source")
         current = source if isinstance(source, dict) else None
     else:
@@ -2513,7 +3215,7 @@ async def audit_pocket(
 
     # The pocket's CURRENT content for the engine — the fallback when the Branch
     # primitive has no draft row for this pocket yet (mirrors preview_pocket).
-    if engine == "svelte":
+    if is_source_engine(engine):
         source = pocket.get("source")
         current: dict[str, Any] | None = source if isinstance(source, dict) else None
     else:
@@ -2576,7 +3278,7 @@ def _dynamic_content_envelope(pocket: dict[str, Any]) -> dict[str, Any]:
     engine-agnostic ``_is_dynamic`` / ``_dynamic_objects`` helpers can read the
     bindings off it without caring which engine produced it."""
     engine = pocket.get("engine") or "ripple"
-    key = "source" if engine == "svelte" else "rippleSpec"
+    key = content_key(engine)
     content = pocket.get(key)
     return content if isinstance(content, dict) else {}
 
@@ -2832,13 +3534,16 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     # no deployed site or the doc predates the field (a pre-P2b row).
     deployed_at = getattr(doc, "deployed_at", None) if doc is not None else None
 
-    # DS-1a: resolve the source pocket's authoring pattern so a by-pocket status
-    # read can badge a dynamic site too. ONE read, tenant-scoped; "" when the
-    # pocket has no pattern or could not be resolved (empty-safe).
+    # DS-1a/SR-9: resolve the source pocket's authoring pattern + engine so a
+    # by-pocket status read can badge a dynamic site AND its engine too. Each is
+    # ONE read, tenant-scoped; "" when the pocket has no value or could not be
+    # resolved (empty-safe).
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     patterns = await pockets_service.patterns_for_pockets(workspace_id, [pocket_id])
     pattern = patterns.get(pocket_id) or ""
+    engines = await pockets_service.engines_for_pockets(workspace_id, [pocket_id])
+    engine = engines.get(pocket_id) or ""
 
     return SiteStatusResponse(
         pocket_id=pocket_id,
@@ -2852,6 +3557,7 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         url=(doc.url or None) if doc is not None else None,
         deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
         pattern=pattern,
+        engine=engine,
     )
 
 
@@ -3004,15 +3710,24 @@ async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
         -_SiteDoc.createdAt
     )  # type: ignore[operator]
     docs = [doc async for doc in cursor]
-    # ONE cross-entity read for every card's pattern (no per-site fetch). The
-    # Pocket read stays in the pockets service (entity isolation) — this service
-    # never imports the Pocket model.
+    # ONE cross-entity read per field for every card's pattern + engine (no
+    # per-site fetch). The Pocket reads stay in the pockets service (entity
+    # isolation) — this service never imports the Pocket model. SR-9 adds the
+    # engine resolution alongside DS-1a's pattern; each is a single projected
+    # $in query keyed on the listed pockets.
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
-    patterns = await pockets_service.patterns_for_pockets(
-        workspace_id, [doc.pocket_id for doc in docs]
-    )
-    return [_to_response(doc, patterns.get(doc.pocket_id) or "") for doc in docs]
+    pocket_ids = [doc.pocket_id for doc in docs]
+    patterns = await pockets_service.patterns_for_pockets(workspace_id, pocket_ids)
+    engines = await pockets_service.engines_for_pockets(workspace_id, pocket_ids)
+    return [
+        _to_response(
+            doc,
+            patterns.get(doc.pocket_id) or "",
+            engines.get(doc.pocket_id) or "",
+        )
+        for doc in docs
+    ]
 
 
 async def site_pocket_ids(workspace_id: str) -> set[str]:

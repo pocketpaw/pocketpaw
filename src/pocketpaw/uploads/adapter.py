@@ -17,6 +17,15 @@ class StoredObject:
     mime: str
 
 
+@dataclass
+class StorageItem:
+    """One entry in a directory listing returned by ``browse``."""
+
+    name: str
+    is_dir: bool
+    size: int = 0
+
+
 class StorageAdapter(Protocol):
     """Abstract byte storage. Knows nothing about metadata, auth, or mime logic.
 
@@ -68,3 +77,33 @@ class StorageAdapter(Protocol):
         local adapter ignores it (it never presigns); ``None`` preserves the
         adapter/object default disposition.
         """
+
+    async def list_prefix(self, prefix: str) -> list[str]:
+        """List every key that starts with ``prefix`` (non-recursive, one level).
+
+        Returns the unique "sub-directory" names (the next path segment after
+        ``prefix``). S3 adapters return the CommonPrefixes from a
+        delimiter'd ``list_objects_v2``. Local adapters return the child
+        file/directory names.
+
+        Adapters that don't support prefix listing return ``[]``.
+        """
+
+    async def browse(self, prefix: str) -> list[StorageItem]:
+        """List one directory level. Returns both files and sub-folders.
+
+        Each item carries its name, whether it is a directory, and the file
+        size in bytes (zero for directories). The default (no-op)
+        implementation returns empty — adapters override to provide actual
+        listing.
+        """
+        return []
+
+    async def rename_key(self, old_key: str, new_key: str) -> None:
+        """Rename (move) a key from ``old_key`` to ``new_key``.
+
+        The default raises ``NotImplementedError``. Adapters that support
+        rename must implement this so the cloud project file endpoints can
+        rename files and directories.
+        """
+        raise NotImplementedError("rename_key not supported by this adapter")

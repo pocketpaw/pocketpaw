@@ -4,6 +4,12 @@ Scope is personal to the current user within the current workspace. Ownership
 drives RBAC: the owner has full CRUD; workspace admins get manage; everyone
 else is read-only.
 
+2026-07-03 (FL-1 "Library metadata"): ``_to_entry`` now surfaces the file's
+``collections`` and ``hide_from_ai`` metadata (alongside the pre-existing
+``tags``) onto the ``FileEntry`` so the unified /files listing carries them.
+Reads stay defensive (``doc.get``) so legacy dict rows without the keys map to
+empty list / False.
+
 2026-04-21: folder support. The ``uploads`` provider is the only one that
 surfaces folders; other providers stay flat. Folder entries render with
 ``mime = "application/x-directory"`` and no ``download`` capability.
@@ -144,6 +150,8 @@ class UploadsProvider(BaseFolderProvider):
             workspace_id=doc.get("workspace_id"),
             scope="personal",
             tags=list(doc.get("tags", [])),
+            collections=list(doc.get("collections", [])),
+            hide_from_ai=bool(doc.get("hide_from_ai", False)),
             created_at=doc["created_at"],
             updated_at=doc.get("updated_at", doc["created_at"]),
             source_ref={},

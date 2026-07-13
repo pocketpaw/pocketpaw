@@ -1,6 +1,9 @@
+# Updated: 2026-07-08 — Renamed widget "Paw Print" → "Paw Bar": get_paw_print_store→
+#   get_paw_bar_store, PawPrintStore→PawBarStore, paw_print.db→paw_bar.db. The separate
+#   one-word audit feed (past-tense record) is a DIFFERENT feature and is not affected.
 """Process-wide store factories for the local SQLite-backed runtime stores.
 
-Instinct, Fabric and Paw Print keep their state in SQLite under
+Instinct, Fabric and Paw Bar keep their state in SQLite under
 ``~/.pocketpaw/``. These factories return a lazily-created handle so agent
 tools, automations and routers share one instance per process (or, for Fabric
 and Instinct, one instance per WORKSPACE — see below).
@@ -53,7 +56,7 @@ first refusal on building the store, so a later task can swap in a cloud-backed
 implementation without touching core. An OSS-only install finds no provider and
 uses the local SQLite default.
 
-Paw Print is UNCHANGED — still a plain process-wide singleton on the shared file
+Paw Bar is UNCHANGED — still a plain process-wide singleton on the shared file
 (not tenant-isolated yet).
 
 The factories moved here from ``pocketpaw_ee/api.py`` in the OSS-EE split
@@ -75,7 +78,7 @@ from typing import Any
 from pocketpaw._registry import first
 from pocketpaw.fabric.store import FabricStore
 from pocketpaw.instinct.store import InstinctStore
-from pocketpaw.paw_print.store import PawPrintStore
+from pocketpaw.paw_bar.store import PawBarStore
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +235,7 @@ class _StoreKind:
 
 
 # The registry of workspace-keyed store kinds. Fabric is wired by ISO-1, Instinct
-# by ISO-2. Paw Print stays a plain shared singleton (not tenant-isolated yet).
+# by ISO-2. Paw Bar stays a plain shared singleton (not tenant-isolated yet).
 _FABRIC_KIND = _StoreKind(name="fabric", cls=FabricStore)
 _INSTINCT_KIND = _StoreKind(name="instinct", cls=InstinctStore)
 _STORE_KINDS: tuple[_StoreKind, ...] = (_FABRIC_KIND, _INSTINCT_KIND)
@@ -476,18 +479,18 @@ def get_instinct_store(*, workspace_id: str | None = None) -> InstinctStore:
 
 
 # ---------------------------------------------------------------------------
-# Paw Print — plain process-wide singleton (NOT workspace-isolated yet)
+# Paw Bar — plain process-wide singleton (NOT workspace-isolated yet)
 # ---------------------------------------------------------------------------
 
-_paw_print_store: PawPrintStore | None = None
+_paw_bar_store: PawBarStore | None = None
 
 
-def get_paw_print_store() -> PawPrintStore:
-    """Return the global PawPrintStore singleton (``~/.pocketpaw/paw_print.db``)."""
-    global _paw_print_store
-    if _paw_print_store is None:
-        _paw_print_store = PawPrintStore(_DATA_DIR / "paw_print.db")
-    return _paw_print_store
+def get_paw_bar_store() -> PawBarStore:
+    """Return the global PawBarStore singleton (``~/.pocketpaw/paw_bar.db``)."""
+    global _paw_bar_store
+    if _paw_bar_store is None:
+        _paw_bar_store = PawBarStore(_DATA_DIR / "paw_bar.db")
+    return _paw_bar_store
 
 
 def reset_store_caches() -> None:
@@ -497,8 +500,8 @@ def reset_store_caches() -> None:
     factory between cases. Evicted per-workspace handles are aclose()d
     best-effort so a checkpoint runs and no WAL sidecar is left behind.
     """
-    global _paw_print_store
-    _paw_print_store = None
+    global _paw_bar_store
+    _paw_bar_store = None
     for kind in _STORE_KINDS:
         kind.legacy = None
         while kind.cache:

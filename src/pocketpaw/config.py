@@ -1,6 +1,103 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-07-11 (self-serve-analysis S1): Added ``fabric_analyst`` (default False,
+    env POCKETPAW_FABRIC_ANALYST) — gates the Fabric transparent-analysis read
+    engine (SQL GROUP BY aggregation + reasoning steps on FabricStore.query /
+    POST /fabric/query). Off (default): an aggregation query is rejected
+    fail-loud with FabricAnalystDisabledError -> HTTP 422
+    fabric.analyst_disabled; plain queries are unaffected either way.
+  - 2026-07-11 (feat/external-alerting-c2c3): Added ``automation_evaluator_autostart``
+    (default True, env POCKETPAW_AUTOMATION_EVALUATOR_AUTOSTART) — the OSS
+    always-on automation switch. When on (default), the background
+    AutomationEvaluator starts at dashboard boot so threshold rules fire without
+    a manual POST /automations/evaluator/start. A new default-ON flag is safe: a
+    fresh install with no enabled rules just sleeps.
+  - 2026-07-11 (FST-8 — divergence report + docs): Refreshed the
+    ``fabric_source_truth_mode`` Field description — shadow/enforce semantics
+    SHIPPED in FST-3..7 (the FST-1 "RESERVED / INERT" wording was stale):
+    shadow records statements + divergence lines while the cache stays LWW,
+    enforce hands the cache to the trust-ladder resolver, and the flip to
+    enforce is gated by ``python -m pocketpaw.fabric.divergence_report``.
+    Description text only — no behavioral change.
+  - 2026-07-10 (FST-1 — Fabric source-truth schema): Added
+    ``fabric_source_truth_mode`` (Literal off|shadow|enforce, default 'off';
+    POCKETPAW_FABRIC_SOURCE_TRUTH_MODE) — the three-position rollout switch for
+    the Fabric source-truth chain, mirroring the ``litellm_spend_mode``
+    pattern. INERT in FST-1: no code path reads it yet; only the
+    fabric_statements/fabric_sources schema + append-only store CRUD exist.
+    'off' is byte-for-byte today's behavior (the flat properties dict is the
+    only read path); shadow/enforce semantics land in later FST slices.
+  - 2026-07-10 (feat/verify-mode-shadow): Added the three-position verify
+    rollout modes — ``deep_work_verify_mode`` and ``cloud_plan_verify_mode``
+    (Literal off|shadow|enforce, default 'off'; env
+    POCKETPAW_DEEP_WORK_VERIFY_MODE / POCKETPAW_CLOUD_PLAN_VERIFY_MODE) —
+    superseding the boolean kill-switches so a real tenant can run a SAFE
+    observe-only SHADOW phase (verdict + judge stamps + a
+    ``would_have=<done|requeued|escalated>`` telemetry line; task status
+    NEVER touched) before anyone risks ENFORCE. Resolved by
+    ``effective_deep_work_verify_mode()`` /
+    ``effective_cloud_plan_verify_mode()`` (mirrors
+    ``effective_spend_mode()``): a non-'off' mode wins outright; mode 'off'
+    + legacy bool True resolves to 'enforce' — NOT shadow — because the
+    bools' SHIPPED meaning is the full acting loop, and mapping them to
+    shadow would silently strip requeue/escalate from any deployment that
+    already set them. The legacy bools stay for back-compat.
+  - 2026-07-02 (feat/judge-shadow-1168): Added the LLM-as-judge SHADOW settings
+    (J-1, issue #1168) — ``deep_work_verify_judge_shadow_enabled`` (default
+    False; when True AND deep_work_verify_loop_enabled is on, every completing
+    deep_work task is ALSO scored by the LlmJudgeVerdictProvider and the
+    verdict stamped observe-only on ``metadata["verify_judge_verdict"]`` — it
+    NEVER drives requeue/escalate; the deterministic verdict alone acts),
+    ``deep_work_verify_judge_model`` (default "haiku" — the ``claude`` CLI
+    ``--model`` alias for the cheap judge tier),
+    ``deep_work_verify_judge_timeout_seconds`` (default 60 — the CLI
+    subprocess timeout) and ``deep_work_verify_judge_confidence_floor``
+    (default 0.75 — below it the judge abstains to UNKNOWN). Env:
+    POCKETPAW_DEEP_WORK_VERIFY_JUDGE_* .
+  - 2026-07-02 (feat/svl-5-cloud-verify): Added the CLOUD planner-terminal
+    Self-Verifying Loop flags (SVL-5) — ``cloud_plan_verify_loop_enabled``
+    (default False; kill-switch — when False cloud plan tasks auto-complete
+    exactly as before) and ``cloud_plan_verify_max_requeues`` (default 2; the
+    verify-requeue bound, SEPARATE from any error-retry budget). Mirrors the
+    deep_work_verify_* pair at the ee/cloud planner terminal
+    (``_execute_ready_plan_tasks`` → ``_run_one``). Env:
+    POCKETPAW_CLOUD_PLAN_VERIFY_* .
+  - 2026-06-30 (feat/billing-quota-enforcement, chunk 4): Expanded the
+    ``billing_enforced`` field docstring — when the flag is on the run-start 402
+    hard-block now covers TWO conditions (was: balance <= 0 only): balance <= 0
+    (credits.insufficient) AND month-to-date spend >= the per-plan monthly credit
+    ceiling (credits.quota_exceeded), enforced at run start across both the chat
+    HTTP path and the worker/executor. No logic change — the gate was wired in
+    chunk 3; this only documents it. Kept the "default False -> OSS/self-host
+    unaffected" note.
+  - 2026-06-28 (AW-7 template gate deny-on-no-match): Added
+    ``instinct_template_default_deny`` (default False, env
+    POCKETPAW_INSTINCT_TEMPLATE_DEFAULT_DENY) — the host-wide default for the
+    TEMPLATE-level deny-by-default. When a template is BOUND to a pocket but
+    declares NO rule matching a MUTATING action, the template gate previously
+    returned EXECUTE (proceed). With this flag ON, that no-rule-match case
+    parks the write for human approval (PENDING_APPROVAL) instead; READS
+    (read_only / GET / HEAD actions) still proceed ungated. OFF by default so
+    day-one behavior is unchanged. A per-workspace override field
+    (``instinct_template_default_deny`` on the workspace document; null = use
+    this global default) is resolved exactly like
+    ``instinct_approval_level``.
+  - 2026-06-28 (AW-1 connector egress guard): Added
+    ``connector_egress_guard`` (default False; env
+    POCKETPAW_CONNECTOR_EGRESS_GUARD) — the kill-switch for routing
+    DirectREST connector HTTP through the SSRF egress guard
+    (``assert_egress_allowed`` + the pinned-IP transport). OFF by default so
+    flipping it on per-deployment closes the connector SSRF bypass without
+    risking live connectors in the same change. The existing
+    ``POCKETPAW_ALLOW_INTERNAL_URLS`` flag stays the dev escape that permits
+    internal/loopback hosts when the guard is on.
+  - 2026-06-28 (fix/billing-checkout-sessions): Added ``dodo_checkout_return_base``
+    (default "", env POCKETPAW_DODO_CHECKOUT_RETURN_BASE) — the fallback base URL a
+    Dodo subscription checkout session returns the buyer to after pay / cancel when
+    the /billing/subscribe request carries no Origin (or usable Referer) header.
+    Return urls become ``{base}/settings/billing?checkout=success|cancel``; empty
+    default omits the redirect when no origin is available.
   - 2026-06-26 (WU-F billing cutover): Added ``litellm_spend_mode``
     (Literal off|shadow|live, default 'off'; POCKETPAW_LITELLM_SPEND_MODE) — the
     three-position billing-cutover switch that supersedes the
@@ -44,6 +141,19 @@ Changes:
     SVL-2, landed here so later slices don't touch config). SVL-1 only reads
     the enable flag to stamp an observe-only OutcomeVerdict on a completing
     task. Env: POCKETPAW_DEEP_WORK_VERIFY_* .
+  - 2026-06-22: Added ``discovery_sovereign_model`` (default True) — the model-lane
+    sovereignty posture for discovery's categorize (F2) / refine (F3) passes.
+    True (default, unchanged behavior): hard-pin the model to the on-box Ollama
+    so tenant data never leaves the box. False: use the workspace's configured
+    provider via ``resolve_llm_client`` — a CLOUD model is allowed (explicit
+    tenant opt-in). The kb ingest/build tripwire holds regardless. Env:
+    POCKETPAW_DISCOVERY_SOVEREIGN_MODEL.
+  - 2026-06-21: Added ``instinct_enforce_discovered_rules`` (default False, F6) —
+    when true, approved workspace-discovered Instinct rules are merged with
+    template rules at the live gate and govern actions. Off by default; the
+    discovered branch is dead code on the default path. A separate, narrower
+    flag than ``instinct_approval_level``. Env:
+    POCKETPAW_INSTINCT_ENFORCE_DISCOVERED_RULES.
   - 2026-06-18: Added the four layered/learning Instinct gate defaults —
     ``instinct_approval_level`` (default "ASK", dormant),
     ``instinct_auto_approve_threshold`` (0.9), ``instinct_dry_run_mode``
@@ -55,6 +165,10 @@ Changes:
     Belt & Pulley code-change gate (BS-3). A ``belt_propose_change`` proposal's
     repo path must resolve inside one of these roots; empty defaults to the
     cwd's parent. Env: POCKETPAW_BELT_REPO_ALLOWLIST (JSON list).
+  - 2026-07-01: Added ``shield_api_socket`` + ``shield_api_token`` (SEC-5) —
+    the same-box shield daemon's control-API UNIX socket + Bearer token. The
+    cloud ``/api/v1/security/*`` proxy reads these to reach shield; the token
+    is never logged. Env: POCKETPAW_SHIELD_API_SOCKET / POCKETPAW_SHIELD_API_TOKEN.
   - 2026-06-10: Added ``loom_bin`` + ``loom_model_path`` — the codebase
     orientation (loom) MCP server settings. ``loom_model_path`` defaults
     to None, which disables the loom MCP server; set it to a built
@@ -503,15 +617,45 @@ class Settings(BaseSettings):
     deep_work_verify_loop_enabled: bool = Field(
         default=False,
         description=(
-            "Kill-switch for the deep_work Self-Verifying Loop. When False "
-            "(default) deep_work tasks complete exactly as before — no outcome "
-            "verification, byte-for-byte today's behaviour. When True, every "
-            "task that completes successfully has its result checked against "
-            "the success_criteria captured at intake and the resulting "
-            "OutcomeVerdict is stamped on the task's metadata "
-            "(``verify_verdict``) and logged. The verdict is observe-only in "
-            "this slice (SVL-1): the task's status is NOT changed by the "
-            "verification — that is the requeue slice (SVL-2)."
+            "LEGACY back-compat bool for the deep_work Self-Verifying Loop — "
+            "superseded by the three-position "
+            "POCKETPAW_DEEP_WORK_VERIFY_MODE switch. Kept so an existing "
+            "deployment that set this bool keeps the behaviour it shipped "
+            "with: when the new mode is left at its 'off' default and this "
+            "bool is True, ``effective_deep_work_verify_mode()`` resolves to "
+            "'enforce' (the FULL acting loop — verify, requeue, escalate), "
+            "NOT 'shadow' — the bool's shipped meaning IS enforce, and "
+            "mapping it to shadow would silently weaken a deploy that "
+            "already relies on requeue/escalate. Ignored once the mode is "
+            "set to any non-'off' value. Set via "
+            "POCKETPAW_DEEP_WORK_VERIFY_LOOP_ENABLED."
+        ),
+    )
+    deep_work_verify_mode: Literal["off", "shadow", "enforce"] = Field(
+        default="off",
+        description=(
+            "Three-position rollout switch for the deep_work Self-Verifying "
+            "Loop (OSS Mission Control executor terminal). Supersedes the "
+            "deep_work_verify_loop_enabled bool so a tenant can run a SAFE "
+            "observe-only phase before verification is allowed to touch "
+            "task status:\n"
+            "  * 'off'     (default) — no verification; tasks complete "
+            "byte-for-byte as today.\n"
+            "  * 'shadow'  — the safe rollout rung. The deterministic "
+            "verdict is computed and stamped (``verify_verdict``, plus a "
+            "``verify_mode='shadow'`` marker and "
+            "``verify_would_have=<done|requeued|escalated>`` — what enforce "
+            "WOULD have decided), and the judge shadow still runs when its "
+            "flag is on; but the task ALWAYS completes DONE — no requeue, "
+            "no escalation, no ``verify_requeue_count``, no "
+            "``verify_feedback`` growth. Pure telemetry.\n"
+            "  * 'enforce' — the full loop: PARTIAL / NOT_SOLVED requeues "
+            "with feedback (bounded by deep_work_verify_max_requeues) then "
+            "escalates to BLOCKED — exactly the legacy bool's behaviour.\n"
+            "Precedence (``effective_deep_work_verify_mode()``): a non-'off' "
+            "mode wins outright; mode 'off' + legacy bool True resolves to "
+            "'enforce'; otherwise 'off'. Set via "
+            "POCKETPAW_DEEP_WORK_VERIFY_MODE."
         ),
     )
     deep_work_verify_max_requeues: int = Field(
@@ -522,6 +666,109 @@ class Settings(BaseSettings):
             "the requeue slice (SVL-2); landed here so later slices don't have "
             "to touch config. SVL-1 only READS deep_work_verify_loop_enabled "
             "and ignores this bound."
+        ),
+    )
+    deep_work_verify_judge_shadow_enabled: bool = Field(
+        default=False,
+        description=(
+            "SHADOW switch for the LLM-as-judge verdict tier (J-1, #1168). "
+            "When True AND deep_work_verify_loop_enabled is on, every "
+            "completing deep_work task is ALSO scored by the "
+            "LlmJudgeVerdictProvider on the same (output, success_criteria) "
+            "and the judge's OutcomeVerdict is stamped observe-only on "
+            "``metadata['verify_judge_verdict']`` plus one structured "
+            "deterministic-vs-judge agreement log line. The judge verdict "
+            "NEVER feeds the requeue/escalate decision — the deterministic "
+            "verdict alone drives behaviour, exactly as with this flag off. "
+            "Requires the loop flag: judge-on + loop-off runs nothing."
+        ),
+    )
+    deep_work_verify_judge_model: str = Field(
+        default="haiku",
+        description=(
+            "Model passed to the ``claude`` CLI via ``--model`` for the "
+            "LLM-as-judge verdict call. A plain string so ops can point the "
+            "judge at any alias/id the installed CLI accepts (e.g. 'haiku', "
+            "'sonnet', or a full model id). Cheap tier by default — the "
+            "judge is one extra model call per completed task."
+        ),
+    )
+    deep_work_verify_judge_timeout_seconds: int = Field(
+        default=60,
+        description=(
+            "Timeout (seconds) for the LLM-as-judge ``claude`` CLI "
+            "subprocess. A hung CLI must never wedge task completion — on "
+            "timeout the judge abstains with an UNKNOWN verdict (fail-safe)."
+        ),
+    )
+    deep_work_verify_judge_confidence_floor: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Confidence floor for an LLM-as-judge verdict. A judge decision "
+            "whose self-reported confidence falls below this floor is "
+            "discarded and the judge abstains with an UNKNOWN verdict — an "
+            "uncertain judgment must never be recorded as a real "
+            "pass/fail signal (mirrors the auto-triage _MIN_CONFIDENCE "
+            "pattern)."
+        ),
+    )
+    cloud_plan_verify_loop_enabled: bool = Field(
+        default=False,
+        description=(
+            "LEGACY back-compat bool for the Self-Verifying Loop at the "
+            "CLOUD planner terminal — superseded by the three-position "
+            "POCKETPAW_CLOUD_PLAN_VERIFY_MODE switch. Kept so an existing "
+            "deployment that set this bool keeps the behaviour it shipped "
+            "with: when the new mode is left at its 'off' default and this "
+            "bool is True, ``effective_cloud_plan_verify_mode()`` resolves "
+            "to 'enforce' (the FULL acting loop — verify, requeue, "
+            "escalate), NOT 'shadow' — the bool's shipped meaning IS "
+            "enforce, and mapping it to shadow would silently weaken a "
+            "deploy that already relies on requeue/escalate. Ignored once "
+            "the mode is set to any non-'off' value. Set via "
+            "POCKETPAW_CLOUD_PLAN_VERIFY_LOOP_ENABLED."
+        ),
+    )
+    cloud_plan_verify_mode: Literal["off", "shadow", "enforce"] = Field(
+        default="off",
+        description=(
+            "Three-position rollout switch for the Self-Verifying Loop at "
+            "the CLOUD planner terminal (ee/cloud plan-task execution — the "
+            "paw-enterprise product path). Supersedes the "
+            "cloud_plan_verify_loop_enabled bool so a real tenant can run a "
+            "SAFE observe-only phase before verification is allowed to "
+            "touch task status:\n"
+            "  * 'off'     (default) — no verification; plan tasks "
+            "auto-complete byte-for-byte as today.\n"
+            "  * 'shadow'  — the safe rollout rung. The deterministic "
+            "verdict is computed and stamped on the task's ``verify`` dict "
+            "(``verify.verdict``, plus ``verify.mode='shadow'`` and "
+            "``verify.would_have=<done|requeued|escalated>`` — what enforce "
+            "WOULD have decided); the task ALWAYS completes done with every "
+            "DONE side-effect intact — no requeue, no escalation, no "
+            "``verify.requeue_count``, no ``verify.feedback`` growth. Pure "
+            "telemetry.\n"
+            "  * 'enforce' — the full loop: PARTIAL / NOT_SOLVED requeues "
+            "with feedback (bounded by cloud_plan_verify_max_requeues) then "
+            "fails with ``verify.escalation_reason`` — exactly the legacy "
+            "bool's behaviour.\n"
+            "Precedence (``effective_cloud_plan_verify_mode()``): a "
+            "non-'off' mode wins outright; mode 'off' + legacy bool True "
+            "resolves to 'enforce'; otherwise 'off'. Set via "
+            "POCKETPAW_CLOUD_PLAN_VERIFY_MODE."
+        ),
+    )
+    cloud_plan_verify_max_requeues: int = Field(
+        default=2,
+        description=(
+            "Max verify-driven requeues a single CLOUD plan task may take "
+            "before the loop stops requeuing and fails the task with "
+            "``verify.escalation_reason='budget_exhausted'``. SEPARATE from "
+            "any error-retry budget — verify requeues and error retries "
+            "never share a counter. Mirrors deep_work_verify_max_requeues "
+            "at the cloud planner terminal (SVL-5)."
         ),
     )
     auto_install_bundled_skills: bool = Field(
@@ -901,6 +1148,12 @@ class Settings(BaseSettings):
     tavily_api_key: str | None = Field(default=None, description="Tavily search API key")
     brave_search_api_key: str | None = Field(default=None, description="Brave Search API key")
     parallel_api_key: str | None = Field(default=None, description="Parallel AI API key")
+    # Stock photography (Paw Sites imagery — search_stock_images). Both optional;
+    # with neither set, stock search returns [] and sites ship text-only.
+    pexels_api_key: str | None = Field(default=None, description="Pexels stock-photo API key")
+    unsplash_access_key: str | None = Field(
+        default=None, description="Unsplash Access Key (stock-photo API)"
+    )
     url_extract_provider: str = Field(
         default="auto", description="URL extract provider: 'auto', 'parallel', or 'local'"
     )
@@ -970,6 +1223,31 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Shield — the same-box Go security daemon (deny-by-default connector
+    # egress + agent-decision control plane). shield serves a control API on a
+    # UNIX socket; the cloud ``/api/v1/security/*`` router proxies it,
+    # OWNER-gated, and degrades cleanly when shield is absent (a socket that is
+    # unset / missing / unreachable → a typed available:false read or a 409
+    # write, never a 500). The Bearer token authenticates the backend → shield
+    # hop over the socket; it is NEVER logged. Env auto-derives
+    # POCKETPAW_SHIELD_API_SOCKET / POCKETPAW_SHIELD_API_TOKEN.
+    shield_api_socket: str = Field(
+        default="/run/shield/api.sock",
+        description=(
+            "Filesystem path to shield's control-API UNIX socket. The cloud "
+            "security proxy connects here via an httpx UDS transport. When the "
+            "socket is missing or unreachable the proxy degrades to a typed "
+            "'shield_not_deployed' / 'unreachable' response."
+        ),
+    )
+    shield_api_token: str = Field(
+        default="",
+        description=(
+            "Bearer token the cloud security proxy presents to shield over the "
+            "socket. Sent as 'Authorization: Bearer <token>'. Never logged."
+        ),
+    )
+
     # Security
     bypass_permissions: bool = Field(
         default=False, description="Skip permission prompts for agent actions (use with caution)"
@@ -990,6 +1268,16 @@ class Settings(BaseSettings):
     a2a_trusted_agents: list[str] = Field(
         default_factory=list,
         description="Explicitly allowed A2A agent base URLs for task delegation (prevents SSRF)",
+    )
+    connector_egress_guard: bool = Field(
+        default=False,
+        description=(
+            "Route DirectREST connector HTTP through the SSRF egress guard "
+            "(host allow-list, DNS pre-resolve + internal-range reject, pinned-IP "
+            "transport). OFF by default — a safe-rollout kill-switch; flip on "
+            "per-deployment to close the connector SSRF bypass. "
+            "POCKETPAW_ALLOW_INTERNAL_URLS permits internal hosts when set."
+        ),
     )
     api_rate_limit_per_key: int = Field(
         default=60,
@@ -1478,6 +1766,60 @@ class Settings(BaseSettings):
             "POCKETPAW_INSTINCT_OPTIMISTIC_TTL_SECONDS."
         ),
     )
+    # AW-7 — TEMPLATE-level deny-by-default. Binding-level deny-by-default
+    # (``ActionBinding.requires_instinct`` defaults True) is already live; this
+    # closes the remaining hole: a template BOUND to a pocket that declares NO
+    # rule matching a MUTATING action used to fall through to the template
+    # gate's EXECUTE default and fire. When this flag is ON the no-rule-match
+    # case parks the write for a human (PENDING_APPROVAL) instead. READS
+    # (read_only / GET / HEAD actions) still proceed ungated — a read has
+    # nothing to govern. DORMANT by default (False): shipping it changes zero
+    # behavior. A per-workspace override field of the same name on the
+    # workspace document (null = use this global default) is resolved exactly
+    # like ``instinct_approval_level`` via
+    # ``resolve_workspace_template_default_deny``.
+    instinct_template_default_deny: bool = Field(
+        default=False,
+        description=(
+            "When true, a template BOUND to a pocket that declares no rule "
+            "matching a MUTATING action (POST/PUT/PATCH/DELETE and not "
+            "read_only) parks the write for human approval instead of firing "
+            "(template-level deny-by-default). Reads (read_only / GET / HEAD) "
+            "still proceed ungated. Off by default (zero behavior change). "
+            "Per-workspace overrides live on the workspace document. Set via "
+            "POCKETPAW_INSTINCT_TEMPLATE_DEFAULT_DENY."
+        ),
+    )
+    # Sovereign Zero-Setup Discovery — F6 live enforcement (2026-06-21).
+    # When true, approved workspace-discovered Instinct rules
+    # (rules.service.get_active_rules) are merged with template rules at the
+    # live gate (instinct_dispatch.gate_action) and govern actions. OFF by
+    # default — the template-rule path is unchanged and the discovered branch
+    # is dead code on the default path (get_active_rules is never called).
+    # This is a SEPARATE, NARROWER flag than instinct_approval_level: enforcing
+    # WHICH discovered CEL conditions fire and activating WHETHER escalations can
+    # auto-resolve are independent risk axes and must toggle independently.
+    instinct_enforce_discovered_rules: bool = Field(
+        default=False,
+        description=(
+            "When true, approved workspace-discovered Instinct rules "
+            "(rules.service.get_active_rules) are merged with template rules at "
+            "the live gate. Off by default — the template-rule path is unchanged "
+            "and the whole discovered branch is dead code on the default path. "
+            "Set via POCKETPAW_INSTINCT_ENFORCE_DISCOVERED_RULES."
+        ),
+    )
+    automation_evaluator_autostart: bool = Field(
+        default=True,
+        description=(
+            "When true (the default), the background AutomationEvaluator starts at "
+            "dashboard boot so threshold/data-change rules fire without a manual "
+            "POST /automations/evaluator/start. This is the OSS always-on automation "
+            "switch — a new flag defaulting ON is safe because a fresh install with no "
+            "enabled rules does nothing but sleep. Set POCKETPAW_AUTOMATION_EVALUATOR_"
+            "AUTOSTART=false to keep the evaluator dormant until started via the router."
+        ),
+    )
 
     # Billing — Dodo Payments gateway (BC-2, the Gateway primitive).
     # The only payment gateway in v1; a provider abstraction
@@ -1542,6 +1884,19 @@ class Settings(BaseSettings):
             "subscriptions (subscribe raises a clear ValidationError)."
         ),
     )
+    dodo_checkout_return_base: str = Field(
+        default="",
+        description=(
+            "Fallback base URL the Dodo subscription CHECKOUT SESSION returns the "
+            "buyer to after pay / cancel, used ONLY when the /billing/subscribe "
+            "request carries no Origin (and no usable Referer) header. The return "
+            "urls become ``{base}/settings/billing?checkout=success|cancel``. Set "
+            "via POCKETPAW_DODO_CHECKOUT_RETURN_BASE (e.g. https://app.example.com). "
+            "Default empty: when both this and the request Origin are absent the "
+            "redirect is omitted (the checkout still works, the buyer just isn't "
+            "auto-returned)."
+        ),
+    )
 
     # Billing — compute-cost metering rate card (BC-3, the Meter + Price
     # primitives). A completed chat run is billed by its real compute cost times
@@ -1570,12 +1925,35 @@ class Settings(BaseSettings):
     billing_enforced: bool = Field(
         default=False,
         description=(
-            "Run-start hard-block (BC-4). When True, STARTING a new chat run on a "
-            "workspace whose credit balance is <= 0 is rejected with HTTP 402 "
-            "(credits.insufficient) BEFORE any run row is written; in-flight runs "
-            "are never killed. Default False so OSS / self-host deployments (which "
-            "run no credit ledger) are unaffected; the cloud turns it on via "
-            "POCKETPAW_BILLING_ENFORCED."
+            "Run-start hard-block (BC-4). When True, STARTING a new chat run is "
+            "rejected with HTTP 402 BEFORE any run row is written, on two "
+            "conditions, both gated by this flag and both enforced at run start "
+            "across the synchronous chat HTTP path (chat/agent_router) AND the "
+            "worker/executor path (chat/runs/run_core.execute_run): (1) the "
+            "workspace credit balance is <= 0 -> 402 credits.insufficient; (2) the "
+            "workspace has hit its monthly credit CEILING (per-plan cap from the "
+            "catalog plus any top-ups bought this period; month-to-date spend >= "
+            "that ceiling) -> 402 credits.quota_exceeded. In-flight runs are never "
+            "killed. Default False so OSS / self-host deployments (which run no "
+            "credit ledger) are unaffected; the cloud / subscription (PEE) "
+            "deployments turn it on via POCKETPAW_BILLING_ENFORCED."
+        ),
+    )
+
+    # Self-serve analysis (S1 — transparent-analysis read engine). Gates the
+    # Fabric aggregation surface (FabricQuery.group_by/aggregate) end-to-end at
+    # the store, so neither the EE /fabric/query route nor agent-tool callers
+    # can aggregate while the feature is dark.
+    fabric_analyst: bool = Field(
+        default=False,
+        description=(
+            "Enable the Fabric self-serve-analysis read engine (S1): SQL "
+            "GROUP BY aggregation + human-readable reasoning steps on "
+            "FabricStore.query / POST /fabric/query. When False (the default) a "
+            "query carrying group_by/aggregate is rejected with a clear "
+            "FabricAnalystDisabledError (HTTP 422, code fabric.analyst_disabled) "
+            "— fail-loud, never silent degrade; plain queries are unaffected "
+            "either way. Set via POCKETPAW_FABRIC_ANALYST."
         ),
     )
 
@@ -1665,6 +2043,31 @@ class Settings(BaseSettings):
             "Set via POCKETPAW_LITELLM_RECONCILE_GAP_THRESHOLD_CREDITS."
         ),
     )
+    fabric_source_truth_mode: Literal["off", "shadow", "enforce"] = Field(
+        default="off",
+        description=(
+            "Rollout mode for the Fabric source-truth chain (FST). Three-position "
+            "switch, mirroring litellm_spend_mode:\n"
+            "  * 'off'     (default) — byte-for-byte pre-FST behavior: pure "
+            "last-writer-wins; nothing reads or writes the fabric_statements / "
+            "fabric_sources provenance tables; the flat FabricObject.properties "
+            "dict is the only read path.\n"
+            "  * 'shadow'  — provenance statements are recorded at every merge "
+            "site and one grep-stable divergence line is logged per "
+            "statement-producing property; the cache still takes the LWW value "
+            "(the trust-ladder resolver runs advisory-only) and keeps serving "
+            "every read.\n"
+            "  * 'enforce' — the resolver's winner owns the cache: a lower-trust "
+            "write no longer lands in the flat properties dict; the losing claim "
+            "is recorded as a statement, not dropped.\n"
+            "Flipping back to 'off' is always safe: reads serve the last-resolved "
+            "cache, LWW resumes, statement history stays on disk. Gate the flip "
+            "to 'enforce' with the FST-8 divergence report (python -m "
+            "pocketpaw.fabric.divergence_report <logfile>) — target ZERO "
+            "unexplained divergences. Set via "
+            "POCKETPAW_FABRIC_SOURCE_TRUTH_MODE."
+        ),
+    )
     site_pending_alert_hours: float = Field(
         default=24.0,
         description=(
@@ -1676,6 +2079,39 @@ class Settings(BaseSettings):
             "the sweep never auto-deploys or auto-cancels. Tuned above Dodo's "
             "webhook retry window so a transient delay is not flagged. Set via "
             "POCKETPAW_SITE_PENDING_ALERT_HOURS."
+        ),
+    )
+
+    # Sovereign Zero-Setup Discovery — model-lane sovereignty posture (2026-06-22).
+    # Discovery's categorize (F2) and refine (F3) passes send the tenant's data
+    # SHAPE (type/property names, article summaries — never raw exhaust) to a
+    # model. WHICH model is a sovereignty choice, not a code constant:
+    #   * sovereign-local (default, True): the model is hard-pinned to the
+    #     tenant's on-box Ollama. ``api_key is None``; no cloud key ever rides
+    #     into the request path. Nothing leaves the box. This is the safe
+    #     default and matches the original shipped behavior.
+    #   * configured-provider (False): discovery uses the workspace's CONFIGURED
+    #     provider via ``resolve_llm_client(settings)`` — anthropic / openai /
+    #     openai_compatible / gemini / litellm, a CLOUD model is allowed. This is
+    #     the tenant's EXPLICIT opt-in to send discovery exhaust to their own
+    #     configured model. Most businesses are fine here (faster, better
+    #     categories); regulated / sovereign tenants keep the default.
+    # Independent of the kb-ingest tripwire: ``kb ingest`` / ``kb build`` (which
+    # POST raw tenant text to Anthropic's KB API) are NEVER called regardless of
+    # this setting — that path is never correct and stays hard-blocked.
+    discovery_sovereign_model: bool = Field(
+        default=True,
+        description=(
+            "Sovereignty posture for discovery's categorize/refine model call. "
+            "True (default): hard-pin the model to the tenant's on-box Ollama — "
+            "data never leaves the box, no cloud key in the request path "
+            "(sovereign-local, the safe default for regulated tenants). False: "
+            "use the workspace's configured provider via resolve_llm_client — a "
+            "CLOUD model is allowed; this is the tenant's explicit opt-in to send "
+            "discovery's inferred data shape to their configured model (faster, "
+            "richer categories — fine for most businesses). The kb ingest/build "
+            "tripwire holds regardless of this setting. Set via "
+            "POCKETPAW_DISCOVERY_SOVEREIGN_MODEL."
         ),
     )
 
@@ -1992,6 +2428,54 @@ class Settings(BaseSettings):
             return self.litellm_spend_mode
         if self.litellm_spend_ingest_enabled:
             return "shadow"
+        return "off"
+
+    def effective_deep_work_verify_mode(self) -> Literal["off", "shadow", "enforce"]:
+        """Resolve the deep_work verify-loop mode, honouring the legacy bool.
+
+        Mirrors the ``effective_spend_mode()`` shape: the three-position
+        ``deep_work_verify_mode`` switch supersedes the
+        ``deep_work_verify_loop_enabled`` bool. Resolution, in order:
+
+          1. An EXPLICIT ``POCKETPAW_DEEP_WORK_VERIFY_MODE`` (any non-'off'
+             value) wins outright — ``shadow`` and ``enforce`` are taken as
+             set.
+          2. Mode unset / 'off' + the legacy bool True → ``enforce``.
+          3. Mode unset / 'off' + the legacy bool False/unset → ``off``.
+
+        WHY the legacy bool maps to ``enforce`` and never ``shadow`` (the
+        DELIBERATE opposite of the spend-mode precedent): the verify bool's
+        SHIPPED meaning is the full acting loop — requeue on PARTIAL /
+        NOT_SOLVED, escalate to BLOCKED on budget / no-progress. A
+        deployment that set the bool opted into that enforcement; resolving
+        it to 'shadow' would silently strip requeue/escalate from that
+        deployment on upgrade — a behaviour downgrade with no operator
+        decision. (The spend bool mapped to the safe MIDDLE position
+        because 'live' moves money and the bool's legacy path had no
+        periodic caller; here the bool's legacy behaviour IS the strong
+        position, so back-compat preserves it.)
+        """
+        if self.deep_work_verify_mode != "off":
+            return self.deep_work_verify_mode
+        if self.deep_work_verify_loop_enabled:
+            return "enforce"
+        return "off"
+
+    def effective_cloud_plan_verify_mode(self) -> Literal["off", "shadow", "enforce"]:
+        """Resolve the CLOUD planner verify-loop mode, honouring the legacy bool.
+
+        Identical shape to ``effective_deep_work_verify_mode()`` at the
+        ee/cloud planner terminal: an explicit non-'off'
+        ``POCKETPAW_CLOUD_PLAN_VERIFY_MODE`` wins outright; mode 'off' +
+        legacy ``cloud_plan_verify_loop_enabled`` True → ``enforce`` (NOT
+        shadow — the bool's shipped meaning is the acting loop, see the
+        deep_work resolver's docstring for the full rationale); otherwise
+        ``off``.
+        """
+        if self.cloud_plan_verify_mode != "off":
+            return self.cloud_plan_verify_mode
+        if self.cloud_plan_verify_loop_enabled:
+            return "enforce"
         return "off"
 
     def save(self) -> None:

@@ -185,8 +185,11 @@ class TestMemoryManager:
         # Get history
         history = await memory_manager.get_session_history(session_key)
         assert len(history) == 3
-        assert history[0] == {"role": "user", "content": "Hello!"}
-        assert history[1] == {"role": "assistant", "content": "Hi there!"}
+        # get_session_history now includes a top-level ``attachments`` key per
+        # message (empty list when none), mirroring the EE Mongo history shape the
+        # client reads on reload.
+        assert history[0] == {"role": "user", "content": "Hello!", "attachments": []}
+        assert history[1] == {"role": "assistant", "content": "Hi there!", "attachments": []}
 
         # Clear
         count = await memory_manager.clear_session(session_key)

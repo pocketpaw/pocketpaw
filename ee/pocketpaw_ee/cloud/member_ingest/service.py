@@ -1,5 +1,9 @@
 # service.py — Per-user Gmail/Calendar → private-KB ingest worker (Phase B).
 # Created: 2026-06-08 — VIP Onboarding Phase B (per-user ingest worker).
+# Updated: 2026-07-11 (feat/external-alerting-c2c3) — ``run_ingest_sweep`` now
+#   filters members by the per-workspace automation opt-out
+#   (``automations_status.service.filter_sweep_enabled_workspaces``): a tenant
+#   that turned its background sweeps off is skipped. Fails OPEN.
 #
 # What this does
 # --------------
@@ -315,6 +319,18 @@ async def run_ingest_sweep(
     fn = ingest_fn or ingest_member
 
     members = await list_connected_members(workspace_id=workspace_id)
+    if not members:
+        return {"members": 0, "ok": 0, "errors": 0}
+
+    # Per-workspace opt-out (feat/external-alerting-c2c3): drop members whose
+    # workspace turned its background sweeps off. One deduped check per unique
+    # workspace; fails OPEN so a config-read hiccup keeps the always-on default.
+    from pocketpaw_ee.cloud.automations_status.service import (
+        filter_sweep_enabled_workspaces,
+    )
+
+    enabled_ws = await filter_sweep_enabled_workspaces({m["workspace_id"] for m in members})
+    members = [m for m in members if m["workspace_id"] in enabled_ws]
     if not members:
         return {"members": 0, "ok": 0, "errors": 0}
 

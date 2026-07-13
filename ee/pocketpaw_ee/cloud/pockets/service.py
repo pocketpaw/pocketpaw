@@ -4,6 +4,15 @@ Sole owner of writes to the ``Pocket`` Beanie document. Module-level
 ``async def`` API. The doc → domain mapping helpers (formerly in
 ``repositories.py``) live alongside the public API as private helpers.
 
+Updated: 2026-06-28 (AW-7 template gate deny-on-no-match) — added
+``resolve_workspace_template_default_deny`` — the effective TEMPLATE-level
+deny-by-default for a workspace (per-workspace ``instinct_template_default_deny``
+field → global config default → False). Mirrors
+``resolve_workspace_approval_level`` exactly: any read failure falls back to the
+global default (ultimately False), so a DB hiccup can never accidentally start
+parking writes. The cloud router reads it and threads it through ``run_action``
+→ ``gate_action``.
+
 Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — ``_check_domain_edit_access``
 now allows the synthetic ``system:workspace_job`` identity so a workspace job
 can merge its result back even on a private (non-workspace-visible) pocket.
@@ -241,6 +250,16 @@ recompile is in play. The typed model is used INTERNALLY only — Beanie
 ``Pocket.rippleSpec`` and ``domain.Pocket.ripple_spec`` stay ``dict``, and
 every reader still receives a flat dict (executor dual-path readers deferred
 to a Phase 2 gated on PR #1472).
+Changes: 2026-07-08 (feat/billing-smb-caps) — added a per-plan POCKET cap. A new
+shared helper ``_pocket_cap_exceeded`` resolves the workspace's plan
+``max_pockets`` and counts its live pockets; it is GATED on ``billing_enforced``
+(a no-op for OSS / self-host) and never trips on an uncapped Enterprise plan.
+``create`` raises ``PocketLimitError`` (402) before any write when at/over the
+cap; ``create_from_ripple_spec`` (the agent auto-create path, which does NOT
+funnel through ``create``) returns ``None`` at/over the cap so the agent turn
+degrades gracefully. ``create_pocket_and_session`` funnels through ``create`` and
+is covered transitively. Enforcement is create-time only — an existing pocket is
+never removed.
 """
 
 from __future__ import annotations
@@ -258,6 +277,7 @@ from bson.errors import InvalidId
 from pydantic import ValidationError as PydanticValidationError
 
 from pocketpaw.bundled_templates.schema import RippleSpec
+from pocketpaw_ee.cloud._core.errors import PocketLimitError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     PocketCreated,
@@ -1340,9 +1360,81 @@ async def resolve_workspace_approval_level(workspace_id: str) -> str:
     return global_default
 
 
+async def resolve_workspace_template_default_deny(workspace_id: str) -> bool:
+    """Return the effective TEMPLATE-level deny-by-default for a workspace (AW-7).
+
+    Resolution order (mirrors ``resolve_workspace_approval_level``):
+      1. The workspace document's ``instinct_template_default_deny`` field, when
+         set to a non-null bool — the PER-WORKSPACE opt-in.
+      2. Otherwise the GLOBAL config default
+         (``Settings.instinct_template_default_deny``, itself ``False``).
+
+    A global env var therefore changes the default only for workspaces that have
+    NOT set their own field; it can never silently flip a workspace that relies
+    on the default once that workspace pins its own value. Any read failure
+    falls back to the global default (and ultimately ``False``), so a DB hiccup
+    can never accidentally start parking a workspace's writes.
+
+    Returns a bare bool; ``gate_action`` reads it directly.
+    """
+    from pocketpaw.config import get_settings
+
+    try:
+        global_default = bool(get_settings().instinct_template_default_deny)
+    except Exception:  # noqa: BLE001 — config read failure → dormant (False)
+        global_default = False
+
+    if not workspace_id:
+        return global_default
+
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    try:
+        ws = await Workspace.get(PydanticObjectId(workspace_id))
+    except Exception:  # noqa: BLE001 — malformed id / read failure → global default
+        return global_default
+    if ws is None:
+        return global_default
+    field = getattr(ws, "instinct_template_default_deny", None)
+    if isinstance(field, bool):
+        return field
+    return global_default
+
+
 # ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------
+
+
+async def _pocket_cap_exceeded(workspace_id: str) -> tuple[bool, int, int | None]:
+    """Would a new pocket exceed this workspace's plan cap? -> (exceeded, count, limit).
+
+    feat/billing-smb-caps. GATED on ``billing_enforced``: OSS / self-host tenants
+    (billing off) always get ``(False, 0, None)`` — no cap, no extra DB read — so a
+    self-hosted deployment behaves exactly as before. When enforced, resolves the
+    workspace's plan ``max_pockets`` and counts its live pockets. An uncapped plan
+    (Enterprise, ``max_pockets=None``) never trips. ``exceeded`` is ``count >=
+    limit`` — checked BEFORE the insert, so it blocks the create that WOULD push the
+    workspace over, never an existing pocket (create-time only, never retroactive).
+
+    Returns the tuple rather than raising so each caller responds in its native
+    shape: the HTTP ``create`` path raises ``PocketLimitError`` (402); the agent
+    auto-create path returns ``None``. Imports are lazy to keep this module off the
+    config / entitlements import graph at load.
+    """
+    from pocketpaw.config import get_settings
+
+    if not get_settings().billing_enforced:
+        return (False, 0, None)
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = await entitlements_service.resolve_entitlements(workspace_id)
+    limit = ent.max_pockets
+    if limit is None:
+        return (False, 0, None)
+    count = await _PocketDoc.find(_PocketDoc.workspace == workspace_id).count()
+    return (count >= limit, count, limit)
 
 
 async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> dict:
@@ -1353,7 +1445,22 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     ``project.not_found`` otherwise. Pockets without a ``project_id``
     surface as "unassigned" in the Mission Control project picker, which
     is exactly the pre-projects-rollout shape.
+
+    feat/billing-smb-caps: raises ``PocketLimitError`` (402) BEFORE any write when
+    the workspace is at/over its plan's ``max_pockets`` — a no-op unless
+    ``billing_enforced``. Also covers ``create_pocket_and_session``, which funnels
+    through here.
     """
+    exceeded, count, limit = await _pocket_cap_exceeded(workspace_id)
+    if exceeded:
+        logger.info(
+            "pocket create blocked by plan cap: workspace=%s has %d pockets (limit %s)",
+            workspace_id,
+            count,
+            limit,
+        )
+        raise PocketLimitError(limit)  # type: ignore[arg-type]  # limit is int when exceeded
+
     from pocketpaw_ee.cloud.sessions import service as sessions_service
 
     normalized_spec = normalize_ripple_spec(body.ripple_spec) if body.ripple_spec else None
@@ -1607,6 +1714,41 @@ async def patterns_for_pockets(workspace_id: str, pocket_ids: list[str]) -> dict
         {"_id": 1, "pattern": 1},
     ).to_list(length=None)
     return {str(row["_id"]): row.get("pattern") for row in rows}
+
+
+async def engines_for_pockets(workspace_id: str, pocket_ids: list[str]) -> dict[str, str | None]:
+    """Map each given ``pocket_id`` to its ``Pocket.engine`` in ONE query.
+
+    The sibling of ``patterns_for_pockets`` (DS-1a): the sites service surfaces a
+    published site's authoring ``engine`` ("svelte" | "ripple") on its list/status
+    responses (SR-9) so the gallery can badge each card's engine WITHOUT a second
+    per-site fetch. The engine lives on the source Pocket, not the Site, so this is
+    the cross-entity read — the Pocket read stays here (the sole owner of Pocket
+    reads, entity isolation), exactly like the pattern resolution.
+
+    ONE ``$in`` query projected to ``_id`` + ``engine`` only, tenant-scoped on
+    ``workspace`` (a pocket in another workspace is not returned even if its id is
+    passed). Keyed by the wire-string ``pocket_id``; a doc that predates the
+    ``engine`` field is absent from its projection and reads ``None`` (the caller
+    defaults it to ""), and an id with no matching pocket (deleted / cross-tenant /
+    malformed) is simply absent from the map. Malformed ids that cannot cast to an
+    ObjectId are skipped; an empty list is a no-op (empty map)."""
+    if not pocket_ids:
+        return {}
+    oids: list[PydanticObjectId] = []
+    for pid in pocket_ids:
+        try:
+            oids.append(PydanticObjectId(pid))
+        except (InvalidId, TypeError, ValueError):
+            continue
+    if not oids:
+        return {}
+    collection = _PocketDoc.get_pymongo_collection()
+    rows = await collection.find(
+        {"workspace": workspace_id, "_id": {"$in": oids}},
+        {"_id": 1, "engine": 1},
+    ).to_list(length=None)
+    return {str(row["_id"]): row.get("engine") for row in rows}
 
 
 async def get(pocket_id: str, user_id: str) -> dict:
@@ -2103,8 +2245,25 @@ async def create_from_ripple_spec(
     ``pattern`` records the create-pocket layout pattern (``"landing"``
     for a marketing site). Optional; defaults to ``None`` so the
     pre-existing inline auto-create path is unchanged.
+
+    feat/billing-smb-caps: this path does NOT funnel through ``create``, so it
+    carries its OWN pocket-cap check. It returns ``None`` (not a 402) when at/over
+    the cap — consistent with the function's "return None on failure" contract, so
+    the agent turn degrades gracefully (no pocket attached) instead of surfacing a
+    raw 402 through the agent loop. A no-op unless ``billing_enforced``.
     """
     try:
+        exceeded, count, limit = await _pocket_cap_exceeded(workspace_id)
+        if exceeded:
+            logger.warning(
+                "Auto-create blocked by pocket cap: workspace=%s has %d pockets "
+                "(limit %s) — no pocket created",
+                workspace_id,
+                count,
+                limit,
+            )
+            return None
+
         normalized = normalize_ripple_spec(ripple_spec)
         if not normalized:
             return None
@@ -2220,6 +2379,8 @@ async def update_widget(
         widget.data = body.data
     if body.assigned_agent is not None:
         widget.assignedAgent = body.assigned_agent
+    if body.span is not None:
+        widget.span = body.span
     await doc.save()
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)

@@ -18,7 +18,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import pytest
 from pocketpaw_ee.discovery import (
     DiscoveryRun,
     DiscoveryRunOptions,
@@ -280,11 +279,33 @@ async def test_permission_filter_skips_disallowed_connectors() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# The on-box refine pass is not wired in slice 1 — fail loud, don't lie.
+# The on-box refine pass is WIRED in F3 — opts.refine=True runs the deterministic
+# digest, then routes it through the on-box refine helper (no longer raises).
+# The deep sovereignty/availability assertions live in test_discovery_refine.py;
+# here we just prove run() delegates to _refine.refine_draft and never raises.
 # --------------------------------------------------------------------------- #
-async def test_refine_pass_not_implemented_in_slice_1() -> None:
-    registry = _MockRegistry({})
+async def test_refine_pass_delegates_to_on_box_refine(monkeypatch) -> None:
+    from pocketpaw_ee.discovery import _refine
+
+    adapter = _MockAdapter(
+        schemas=[_MockActionSchema(name="list_rows", trust_level="auto")],
+        data_by_action={"list_rows": _records(2)},
+    )
+    registry = _MockRegistry({"c": adapter})
     run = DiscoveryRun(registry=registry)
 
-    with pytest.raises(NotImplementedError, match="on-box / tenant model"):
-        await run.run("ws-1", [], DiscoveryRunOptions(refine=True))
+    seen: dict[str, Any] = {}
+
+    async def _fake_refine(draft: OntologyDraft, settings: Any) -> OntologyDraft:
+        seen["called"] = True
+        draft.meta["refine"] = "applied"
+        return draft
+
+    monkeypatch.setattr(_refine, "refine_draft", _fake_refine)
+
+    draft = await run.run("ws-1", ["c"], DiscoveryRunOptions(refine=True))
+
+    assert seen.get("called") is True, "refine=True must delegate to _refine.refine_draft"
+    assert draft.meta["refine"] == "applied"
+    # The deterministic provenance is still stamped underneath the refine pass.
+    assert draft.meta["discovery"]["label"] == "based on 1 of 1"

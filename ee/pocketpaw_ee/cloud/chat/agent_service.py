@@ -124,6 +124,16 @@ type-gated. The renderer re-sanitizes even though ``summarize_ripple_spec``
 now sanitizes at the source (the get_pocket ``_summary`` path) — it never
 trusts a hand-built dict. Capped lists render honest "+N more" markers
 from the summarizer's new ``*_omitted`` counters.
+Changes: 2026-06-18 (fix/session-history-workspace-scope) —
+``load_history_for_scope``'s pocket/session query now also filters by
+``workspace_id`` (from ``ctx.workspace_id``). Defense-in-depth: pocket/session
+ObjectIds are globally unique so ``session_key`` alone never collides today,
+but the query no longer RELIES on id-uniqueness for tenant isolation — the
+workspace boundary is now an explicit predicate, and the query lands on the
+``(workspace_id, session_key, createdAt)`` compound index. Mirrors the
+existing ``MongoMemoryStore.get_session_in_workspace`` pattern. Normal-path
+behavior (ordering, limit, ``session_key_for`` formula) is unchanged.
+
 Changes: 2026-06-25 (fix/worker-trusts-spec-workspace) — ``resolve_scope_context``
 and the three resolvers gained ``expected_workspace_id``: the authenticated,
 route-validated workspace the run worker threads from ``spec.workspace_id``.
@@ -142,6 +152,16 @@ now REJECTS an empty ``workspace_id`` / ``user_id`` (raises ``ValueError``)
 instead of binding ``""``, so any future caller that loses tenancy fails loudly
 at the seam, not deep inside an MCP tool.
 
+Changes: 2026-07-11 (ART-1) — added the per-run ``_delivered_artifacts``
+collector ContextVar beside the identity ContextVars (+ ``record_delivered_artifact``
+and the ``attach_/detach_delivered_artifacts_collector`` primitives and the
+``collect_delivered_artifacts`` context manager). The ``deliver_artifact`` MCP
+tool appends one meta dict per SUCCESSFUL delivery; ``run_core`` binds a fresh
+list at run start and drains it at persist time into ``{type:"artifact", meta}``
+attachments plus one ``artifact`` SSE event apiece (in delivery order). It holds
+a MUTABLE list so the tool's append (never a rebind) is visible to the run task
+that bound it across the SDK task boundary — the same shared-object propagation
+``_sse_event_sink`` relies on.
 Changes: 2026-06-27 (fix/cloud-artifacts-reland) — added the per-run
 ``_active_cloud_chat_run`` marker ContextVar (+ ``current_cloud_chat_run`` and
 the ``mark_cloud_chat_run`` context manager) beside the identity ContextVars.
@@ -392,6 +412,70 @@ attach_pocket_event_sink = attach_sse_event_sink
 detach_pocket_event_sink = detach_sse_event_sink
 
 
+# ---------------------------------------------------------------------------
+# Per-run delivered-artifact collector (ART-1)
+#
+# ``deliver_artifact`` (``mcp_servers/deliver.py``) appends one meta dict —
+# ``{file_id, name, mime, size}`` — per SUCCESSFUL delivery. ``run_core`` binds a
+# fresh list at run start and drains it at persist time into a
+# ``{type:"artifact", meta:...}`` attachment on the assistant message plus one
+# ``artifact`` SSE event apiece, in delivery order (mirroring the ripple event).
+# The ContextVar holds a MUTABLE list: the tool mutates it (``append``), never
+# rebinds, so every delivery is visible to the run task that bound the list even
+# though the tool runs in a descendant SDK task — the same shared-object
+# propagation ``_sse_event_sink`` relies on. ``None`` (unbound) => no-op, so a
+# deliver call outside a chat run (a CLI invocation, a direct unit test) records
+# nothing.
+# ---------------------------------------------------------------------------
+
+
+_delivered_artifacts: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "agent_delivered_artifacts", default=None
+)
+
+
+def attach_delivered_artifacts_collector(collector: list[dict[str, Any]]) -> Token:
+    """Bind ``collector`` as the active run's delivered-artifact sink.
+
+    Mirrors ``attach_sse_event_sink`` — the caller keeps its own reference to
+    ``collector`` and reads it post-run; deliver-tool appends land on the same
+    object.
+    """
+    return _delivered_artifacts.set(collector)
+
+
+def detach_delivered_artifacts_collector(token: Token) -> None:
+    """Restore the previous collector binding."""
+    _delivered_artifacts.reset(token)
+
+
+@contextmanager
+def collect_delivered_artifacts() -> Iterator[list[dict[str, Any]]]:
+    """Bind a fresh per-run delivered-artifact collector and yield it.
+
+    The yielded list stays valid after the block exits (Python keeps the ``as``
+    target in scope), so the run can drain it at persist time even though the
+    ContextVar is reset on exit.
+    """
+    collector: list[dict[str, Any]] = []
+    token = attach_delivered_artifacts_collector(collector)
+    try:
+        yield collector
+    finally:
+        detach_delivered_artifacts_collector(token)
+
+
+def record_delivered_artifact(meta: dict[str, Any]) -> None:
+    """Append one successful delivery's ``meta`` (file_id/name/mime/size) to the
+    active run's collector. No-op when unbound (a deliver call outside a chat
+    run). Never raises — a collector hiccup must not fail an otherwise-successful
+    delivery."""
+    collector = _delivered_artifacts.get()
+    if collector is None:
+        return
+    collector.append(meta)
+
+
 class ScopeKind(StrEnum):
     DM = "dm"
     GROUP = "group"
@@ -483,6 +567,13 @@ class ScopeContext:
     # array as "this pocket is an empty shell"). ``None`` when the chat
     # isn't anchored to a pocket — no block, behavior unchanged.
     pocket_summary: dict[str, Any] | None = None
+    # CS-13 — the per-send model override the client's composer picker chose for
+    # THIS turn. ``execute_run`` copies it off ``RunSpec.model_override`` onto the
+    # ctx it rebuilds; ``_drive_agent_loop`` forwards it into ``AgentPool.run`` only
+    # when set, where the Claude SDK backend makes it win over smart-routing /
+    # ``claude_sdk_model``. ``None`` (older clients / no picker) leaves the backend's
+    # own selection untouched — byte-identical to today.
+    model_override: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1980,9 +2071,16 @@ async def load_history_for_scope(ctx: ScopeContext, *, limit: int = 50) -> list[
 
     try:
         if ctx.kind in (ScopeKind.POCKET, ScopeKind.SESSION):
+            # Scope by workspace_id too (defense-in-depth). Pocket/session
+            # ObjectIds are globally unique, so session_key alone never
+            # collides in practice — but pinning the workspace makes tenant
+            # isolation an explicit predicate rather than an implicit
+            # consequence of id-uniqueness, and hits the
+            # ``(workspace_id, session_key, createdAt)`` compound index.
             query: dict[str, Any] = {
                 "context_type": ctx.kind.value,
                 "session_key": session_key_for(ctx),
+                "workspace_id": ctx.workspace_id,
             }
         else:  # GROUP, DM — both land in a group row
             query = {

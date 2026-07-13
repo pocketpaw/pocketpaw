@@ -5,6 +5,17 @@ message, submitting a ``Run`` to the configured executor, and tailing the
 run's Redis Stream so durability sits underneath the wire shape the
 frontend already speaks.
 
+Changes: 2026-06-30 (feat/billing-quota-enforcement, chunk 3) — the run-start
+credit gate now also enforces the MONTHLY QUOTA. Beside the existing BC-4
+``check_balance`` call (inside the same ``if get_settings().billing_enforced:``
+block, before ``create_run``/submit), ``post_agent_chat`` now also
+``await credits_service.check_quota(workspace_id)`` so a workspace that has spent
+up to its monthly ceiling gets a clean 402 ``credits.quota_exceeded`` with NO DB
+trace — the same universal cap the executor enforces in
+``run_core.execute_run``, mirrored here for the synchronous HTTP path.
+``check_balance`` is unchanged and stays FIRST (balance <= 0 is the secondary
+guard). Both are no-ops when the flag is OFF.
+
 Changes: 2026-06-25 (fix/worker-trusts-spec-workspace) — ``post_agent_chat``
 threads the authenticated ``workspace_id`` into ``resolve_scope_context`` via
 ``expected_workspace_id``, matching the run worker. The HTTP route already
@@ -163,19 +174,31 @@ async def post_agent_chat(
     except InvalidScope:
         raise CloudError(400, "scope.invalid", "Invalid scope") from None
 
-    # BC-4 run-start hard-block. Sit the credit gate at the SINGLE run-start
-    # chokepoint — BEFORE any DB write (no user message, no ChatRunDoc) and
-    # BEFORE the executor submit — so a blocked run leaves no trace and
-    # IN-FLIGHT runs (already past this point) are never killed. Flag-gated:
-    # OFF by default (OSS / self-host run no ledger), ON for the cloud via
-    # ``POCKETPAW_BILLING_ENFORCED``. ``check_balance`` raises
-    # ``InsufficientCredits`` (402, credits.insufficient), which the CloudError
-    # handler maps to the wire — we never raise HTTPException here. Imported
-    # locally to keep the credits package off this hot module's import graph.
+    # BC-4 run-start hard-block + chunk-3 monthly-quota fast-reject. Sit BOTH
+    # credit gates at the SINGLE run-start chokepoint — BEFORE any DB write (no
+    # user message, no ChatRunDoc) and BEFORE the executor submit — so a blocked
+    # run leaves no trace and IN-FLIGHT runs (already past this point) are never
+    # killed. Flag-gated: OFF by default (OSS / self-host run no ledger), ON for
+    # the cloud via ``POCKETPAW_BILLING_ENFORCED``. We never raise HTTPException
+    # here; both gates raise a ``CloudError`` the handler maps to the 402 wire.
+    # The credits package is imported locally to keep it off this hot module's
+    # import graph.
+    #
+    #   * ``check_balance`` (BC-4) — the wallet is empty (balance <= 0): raises
+    #     ``InsufficientCredits`` (402, credits.insufficient). The SECONDARY
+    #     guard; stays first and unchanged.
+    #   * ``check_quota`` (chunk 3) — the wallet may still hold credits but the
+    #     workspace has spent up to its monthly ceiling (plan cap + period
+    #     top-ups): raises ``QuotaExceeded`` (402, credits.quota_exceeded). This
+    #     is the universal monthly cap; the same assertion the run-start gate in
+    #     ``run_core.execute_run`` enforces, mirrored here so the synchronous
+    #     chat HTTP path returns a clean 402 with no DB trace instead of starting
+    #     a run that the executor would only reject afterward.
     if get_settings().billing_enforced:
         from pocketpaw_ee.cloud.credits import service as credits_service
 
         await credits_service.check_balance(workspace_id)
+        await credits_service.check_quota(workspace_id)
 
     transport = get_stream_transport()
     # Resolve the surface-aware context preamble AFTER scope is resolved
@@ -241,6 +264,10 @@ async def post_agent_chat(
         # request's ctx and is dropped when the run is submitted.
         surface=body.surface,
         surface_meta=body.surface_meta or {},
+        # CS-13 — carry the per-send model override to the executor. Validated on
+        # the request body; ``None`` for every older client leaves model selection
+        # to the backend.
+        model_override=body.model,
     )
     # create_run is idempotent on (workspace, client_message_id) — when a doc
     # already exists, re-use its run_id so the executor + SSE stream both
@@ -264,12 +291,24 @@ async def post_agent_chat(
         cursor = "0"
         while True:
             saw_terminal = False
-            async for ev in transport.read_events(run_id, after=cursor, block_ms=15000):
+            # Short block timeout so cancellation is checked promptly
+            # when the executor hasn't yet written a terminal event
+            # (e.g. blocked on pool.get / build_knowledge_context before
+            # its is_cancelled loop). If the cancel flag is set while
+            # read_events is waiting, we detect it between blocks.
+            async for ev in transport.read_events(run_id, after=cursor, block_ms=2000):
                 cursor = ev.entry_id
                 yield _sse(ev.event, ev.data, entry_id=ev.entry_id)
                 if ev.is_terminal:
                     saw_terminal = True
             if saw_terminal:
+                return
+            # Check if the executor set the cancel flag (via /agent/stop).
+            # If so, yield a terminal event so the client sees the stream
+            # end, even if the executor hasn't written one yet (e.g. it
+            # is blocked before its cancellation loop).
+            if await transport.is_cancelled(run_id):
+                yield _sse("interrupted", {"reason": "user_cancelled"})
                 return
             yield b": ping\n\n"
 

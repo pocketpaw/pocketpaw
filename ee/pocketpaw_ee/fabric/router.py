@@ -52,6 +52,37 @@
 #   ``workspace_id`` filter args are UNCHANGED — physical file isolation is
 #   additive defense-in-depth, kept alongside the in-row WHERE-filter, not a
 #   replacement for it.
+# Updated: 2026-07-10 (ontology-operator-ux) — makes the ontology operable by a
+#   non-engineer. Three additions:
+#     1. A new ADMIN-gated schema-authoring surface under ``/fabric/schema`` —
+#        ``POST /fabric/schema/types`` (create a typed object type),
+#        ``POST /fabric/schema/types/{id}/properties`` (add a property, additive),
+#        ``PATCH /fabric/schema/types/{id}`` (version + rename/additive migrate),
+#        ``POST /fabric/schema/link-types`` (declare a link type), and
+#        ``GET /fabric/schema`` (list object types + their properties + link types
+#        for the UI). The write routes are gated on the new ``fabric.admin`` action
+#        (ADMIN); the list is ``fabric.read`` so any member can render the browser.
+#        The schema WRITES call ``WorkspaceFabricStore.register_*`` directly IN the
+#        handler — the injected FabricRegistry Protocol is read-only, so registry
+#        authoring must run here, never through it.
+#     2. Write-time LINK enforcement in ``create_link``: when the workspace has
+#        declared any link types, a new link must name a declared type AND match
+#        its declared (from_type -> to_type) endpoints, else 422. No declarations
+#        -> no enforcement (backward compatible).
+#     3. ``create_object`` now surfaces the OSS store's ``FabricTypeError`` (a
+#        declared-property type clash) as a 422 instead of a 500.
+# Updated: 2026-07-11 (feat/paw-cli, C2) — added ``DELETE /fabric/links/{id}``
+#   (``fabric.write``), completing link CRUD over HTTP. The delete resolves the
+#   link through the store's new scoped ``get_link`` first — a cross-tenant or
+#   unknown id 404s (no existence leak), because ``unlink`` itself is unscoped.
+# Updated: 2026-07-11 (self-serve-analysis S1) — ``POST /fabric/query`` now
+#   surfaces the store's flag-gated aggregation path: a query carrying
+#   ``group_by``/``aggregate`` returns ``aggregates`` ({key, value} rows) plus
+#   ``steps`` (the {title, detail, status} QueryPlanStep reasoning trace) via
+#   the extended FabricQueryResult response model; with POCKETPAW_FABRIC_ANALYST
+#   off the store's FabricAnalystDisabledError maps to 422
+#   ``fabric.analyst_disabled``. Plain queries are unchanged on the wire
+#   (aggregates/steps serialize as null).
 
 from __future__ import annotations
 
@@ -62,18 +93,22 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from pocketpaw.fabric.models import (
+    FabricAnalystDisabledError,
     FabricLink,
     FabricObject,
     FabricQuery,
     FabricQueryResult,
+    FabricTypeError,
     ObjectType,
     PropertyDef,
 )
 from pocketpaw.fabric.store import FabricStore
 from pocketpaw.stores import get_fabric_store
 from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_plan_feature
+from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import require_action_any_workspace
+from pocketpaw_ee.fabric.storage import WorkspaceFabricStore, get_registry_store
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +156,65 @@ class LinkRequest(BaseModel):
     to_id: str
     link_type: str
     properties: dict[str, Any] = {}
+
+
+# --- Schema-authoring surface (ontology-operator-ux) ---
+
+
+class SchemaTypeRequest(BaseModel):
+    """Create an object type with typed properties (the operator 'create a type')."""
+
+    name: str
+    properties: list[PropertyDef] = []
+    description: str = ""
+    icon: str = "box"
+    color: str = "#0A84FF"
+
+
+class AddPropertyRequest(BaseModel):
+    """Add one property to an existing object type (additive schema change)."""
+
+    property: PropertyDef
+
+
+class UpdateTypeRequest(BaseModel):
+    """Version + non-destructively migrate a type (rename and/or additive).
+
+    ``renames`` maps ``old_property_name -> new_property_name`` (the key is moved
+    on every existing object). ``properties`` replaces the declared schema (a
+    property dropped from it is deferred — its orphaned key is left on existing
+    objects, never scrubbed). All fields optional; an empty body still bumps the
+    version.
+    """
+
+    properties: list[PropertyDef] | None = None
+    renames: dict[str, str] | None = None
+    description: str | None = None
+    icon: str | None = None
+    color: str | None = None
+
+
+class LinkTypeRequest(BaseModel):
+    """Declare a directed link type between two object types."""
+
+    name: str
+    from_type: str
+    to_type: str
+
+
+class LinkTypeDef(BaseModel):
+    """A declared link type as rendered in the schema list."""
+
+    name: str
+    from_type: str
+    to_type: str
+
+
+class SchemaResponse(BaseModel):
+    """The current ontology schema: object types (with properties) + link types."""
+
+    object_types: list[ObjectType]
+    link_types: list[LinkTypeDef]
 
 
 # ---------------------------------------------------------------------------
@@ -240,14 +334,23 @@ async def create_object(
     req: CreateObjectRequest,
     workspace_id: str = Depends(current_workspace_id),
 ):
-    """Create an object stamped with the caller's active workspace (W4a)."""
-    return await _store(workspace_id).create_object(
-        type_id=req.type_id,
-        properties=req.properties,
-        source_connector=req.source_connector,
-        source_id=req.source_id,
-        workspace_id=workspace_id,
-    )
+    """Create an object stamped with the caller's active workspace (W4a).
+
+    Write-time type enforcement (ontology-operator-ux): the OSS store validates
+    the property bag against the type's declared schema and raises
+    ``FabricTypeError`` on a clash. Surface that as a 422 (a well-formed request
+    that fails a field rule) rather than letting it bubble to a 500.
+    """
+    try:
+        return await _store(workspace_id).create_object(
+            type_id=req.type_id,
+            properties=req.properties,
+            source_connector=req.source_connector,
+            source_id=req.source_id,
+            workspace_id=workspace_id,
+        )
+    except FabricTypeError as exc:
+        raise ValidationError("fabric.property_type_mismatch", str(exc)) from exc
 
 
 @router.get(
@@ -279,8 +382,21 @@ async def query_fabric(
     q: FabricQuery,
     workspace_id: str = Depends(current_workspace_id),
 ):
-    """Run an arbitrary FabricQuery, scoped to the caller's workspace (W4a)."""
-    return await _store(workspace_id).query(q, workspace_id=workspace_id)
+    """Run an arbitrary FabricQuery, scoped to the caller's workspace (W4a).
+
+    Self-serve-analysis S1: a query carrying ``group_by``/``aggregate`` runs the
+    flag-gated aggregation path and the response additionally carries
+    ``aggregates`` ({key, value} rows) and ``steps`` — the reasoning trace in
+    the exact ``{title, detail, status}`` QueryPlanStep wire shape ripple's
+    ReasoningTrace consumes. With POCKETPAW_FABRIC_ANALYST off the store
+    rejects the aggregation fail-loud and this handler maps it to 422
+    ``fabric.analyst_disabled``. Plain queries are byte-compatible with the
+    pre-S1 response (aggregates/steps null).
+    """
+    try:
+        return await _store(workspace_id).query(q, workspace_id=workspace_id)
+    except FabricAnalystDisabledError as exc:
+        raise ValidationError("fabric.analyst_disabled", str(exc)) from exc
 
 
 @router.post(
@@ -292,14 +408,45 @@ async def create_link(
     req: LinkRequest,
     workspace_id: str = Depends(current_workspace_id),
 ):
-    """Create a link stamped with the caller's active workspace (W4a)."""
-    return await _store(workspace_id).link(
+    """Create a link stamped with the caller's active workspace (W4a).
+
+    Write-time LINK enforcement (ontology-operator-ux): if the workspace has
+    declared any link types, the new link must name a declared type AND match its
+    declared ``from_type -> to_type`` endpoints, else 422. A workspace with no
+    declared link types is unaffected (backward compatible).
+    """
+    store = _store(workspace_id)
+    await _enforce_link_type(store, workspace_id, req)
+    return await store.link(
         from_id=req.from_id,
         to_id=req.to_id,
         link_type=req.link_type,
         properties=req.properties,
         workspace_id=workspace_id,
     )
+
+
+@router.delete(
+    "/fabric/links/{link_id}",
+    status_code=204,
+    dependencies=[Depends(require_action_any_workspace("fabric.write"))],
+)
+async def delete_link(
+    link_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+) -> None:
+    """Delete one link, scoped to the caller's workspace (feat/paw-cli, C2).
+
+    ``FabricStore.unlink`` is unscoped by design (OSS single-tenant callers),
+    so the tenancy guard lives HERE: the link is resolved through the scoped
+    ``get_link`` first, and a cross-tenant or unknown id gets a 404 — never a
+    cross-workspace delete, and no existence leak for other tenants' ids.
+    """
+    store = _store(workspace_id)
+    link = await store.get_link(link_id, workspace_id=workspace_id)
+    if link is None:
+        raise HTTPException(404, "Link not found")
+    await store.unlink(link_id)
 
 
 @router.get(
@@ -316,3 +463,179 @@ async def fabric_stats(workspace_id: str = Depends(current_workspace_id)):
     leaked another tenant's experimental type names into chat.
     """
     return await _store(workspace_id).stats(workspace_id=workspace_id)
+
+
+# ---------------------------------------------------------------------------
+# Schema-authoring surface (ontology-operator-ux)
+#
+# ADMIN-gated (``fabric.admin``) writes that let a non-engineer author the
+# ontology: create a typed object type, add a property, version + migrate a
+# type, and declare a link type. The registry-write methods
+# (``register_entity_type`` / ``register_property`` / ``register_link``) live on
+# the concrete ``WorkspaceFabricStore`` and are called DIRECTLY here — the
+# injected ``FabricRegistry`` Protocol is read-only, so authoring must run in the
+# handler, never through it. Object types + their declared properties + versions
+# live in the OSS ``FabricStore`` (the source of truth for write-time property
+# enforcement and versioning); link types live in the EE registry store. The
+# schema list stitches both.
+# ---------------------------------------------------------------------------
+
+
+def _registry() -> WorkspaceFabricStore:
+    """The workspace-registry store (single file under the OSS data dir)."""
+    return get_registry_store()
+
+
+async def _enforce_link_type(store: FabricStore, workspace_id: str, req: LinkRequest) -> None:
+    """Reject a link that violates the workspace's declared link schema.
+
+    No-op when the workspace has declared no link types (backward compatible).
+    Otherwise the link's ``link_type`` must be a declared name AND the from/to
+    objects' TYPE NAMES must match one declared ``(from_type -> to_type)`` pair
+    for that name. Endpoint types are resolved from the objects themselves
+    (workspace-scoped), so a link to a cross-tenant / unknown object cannot
+    satisfy a declaration.
+    """
+    declared = _registry().list_links(workspace_id)
+    if not declared:
+        return
+    names = {d["name"] for d in declared}
+    if req.link_type not in names:
+        raise ValidationError(
+            "fabric.link_type_unregistered",
+            f"link type {req.link_type!r} is not defined in this workspace's ontology",
+        )
+    from_obj = await store.get_object(req.from_id, workspace_id=workspace_id)
+    to_obj = await store.get_object(req.to_id, workspace_id=workspace_id)
+    from_type = from_obj.type_name if from_obj else None
+    to_type = to_obj.type_name if to_obj else None
+    if not any(
+        d["name"] == req.link_type and d["from_type"] == from_type and d["to_type"] == to_type
+        for d in declared
+    ):
+        expected = [
+            f"{d['from_type']} -> {d['to_type']}" for d in declared if d["name"] == req.link_type
+        ]
+        raise ValidationError(
+            "fabric.link_type_mismatch",
+            f"link {req.link_type!r} expects {expected} but got {from_type!r} -> {to_type!r}",
+        )
+
+
+@router.get(
+    "/fabric/schema",
+    response_model=SchemaResponse,
+    dependencies=[Depends(require_action_any_workspace("fabric.read"))],
+)
+async def get_schema(workspace_id: str = Depends(current_workspace_id)) -> SchemaResponse:
+    """Render the workspace's current ontology schema for the operator UI.
+
+    Object types (with their declared, typed properties and schema version) come
+    from the OSS store; link types come from the EE registry. Both are scoped to
+    the caller's workspace.
+    """
+    object_types = await _store(workspace_id).list_types(workspace_id=workspace_id)
+    link_types = [LinkTypeDef(**d) for d in _registry().list_links(workspace_id)]
+    return SchemaResponse(object_types=object_types, link_types=link_types)
+
+
+@router.post(
+    "/fabric/schema/types",
+    response_model=ObjectType,
+    status_code=201,
+    dependencies=[Depends(require_action_any_workspace("fabric.admin"))],
+)
+async def create_schema_type(
+    req: SchemaTypeRequest,
+    workspace_id: str = Depends(current_workspace_id),
+) -> ObjectType:
+    """Create a typed object type + register it in the workspace registry (ADMIN)."""
+    obj_type = await _store(workspace_id).define_type(
+        name=req.name,
+        properties=req.properties,
+        description=req.description,
+        icon=req.icon,
+        color=req.color,
+        workspace_id=workspace_id,
+    )
+    reg = _registry()
+    reg.register_entity_type(workspace_id, obj_type.name)
+    for prop in req.properties:
+        reg.register_property(workspace_id, obj_type.name, prop.name, prop.type)
+    return obj_type
+
+
+@router.post(
+    "/fabric/schema/types/{type_id}/properties",
+    response_model=ObjectType,
+    dependencies=[Depends(require_action_any_workspace("fabric.admin"))],
+)
+async def add_schema_property(
+    type_id: str,
+    req: AddPropertyRequest,
+    workspace_id: str = Depends(current_workspace_id),
+) -> ObjectType:
+    """Add one property to a type (additive; bumps the type version) (ADMIN)."""
+    store = _store(workspace_id)
+    existing = await store.get_type(type_id, workspace_id=workspace_id)
+    if existing is None:
+        raise NotFound("object type", type_id)
+    if any(p.name == req.property.name for p in existing.properties):
+        raise ValidationError(
+            "fabric.property_exists",
+            f"property {req.property.name!r} is already declared on {existing.name!r}",
+        )
+    updated = await store.update_type(
+        type_id,
+        properties=[*existing.properties, req.property],
+        workspace_id=workspace_id,
+    )
+    reg = _registry()
+    reg.register_entity_type(workspace_id, existing.name)
+    reg.register_property(workspace_id, existing.name, req.property.name, req.property.type)
+    # update_type returned the type; None is impossible here (existing resolved).
+    return updated  # type: ignore[return-value]
+
+
+@router.patch(
+    "/fabric/schema/types/{type_id}",
+    response_model=ObjectType,
+    dependencies=[Depends(require_action_any_workspace("fabric.admin"))],
+)
+async def update_schema_type(
+    type_id: str,
+    req: UpdateTypeRequest,
+    workspace_id: str = Depends(current_workspace_id),
+) -> ObjectType:
+    """Version + non-destructively migrate a type (rename / additive) (ADMIN)."""
+    updated = await _store(workspace_id).update_type(
+        type_id,
+        properties=req.properties,
+        renames=req.renames,
+        description=req.description,
+        icon=req.icon,
+        color=req.color,
+        workspace_id=workspace_id,
+    )
+    if updated is None:
+        raise NotFound("object type", type_id)
+    reg = _registry()
+    reg.register_entity_type(workspace_id, updated.name)
+    for prop in updated.properties:
+        reg.register_property(workspace_id, updated.name, prop.name, prop.type)
+    return updated
+
+
+@router.post(
+    "/fabric/schema/link-types",
+    response_model=LinkTypeDef,
+    status_code=201,
+    dependencies=[Depends(require_action_any_workspace("fabric.admin"))],
+)
+async def create_link_type(
+    req: LinkTypeRequest,
+    workspace_id: str = Depends(current_workspace_id),
+) -> LinkTypeDef:
+    """Declare a directed link type in the workspace registry (ADMIN)."""
+    _registry().register_link(workspace_id, req.name, req.from_type, req.to_type)
+    return LinkTypeDef(name=req.name, from_type=req.from_type, to_type=req.to_type)
