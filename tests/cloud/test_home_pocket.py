@@ -71,8 +71,11 @@ async def test_ensure_home_pocket_provisions_empty_home_pocket() -> None:
     assert pocket["type"] == "home"
     assert pocket["visibility"] == "private"
     assert pocket["owner"] == user_id
-    # No seed widgets — the client owns default widgets.
-    assert pocket["widgets"] == []
+    # Only auto_seed=True widgets (currently just Intent of the Day) are
+    # pre-pinned on first provision. The rest are discoverable in the
+    # AddWidgetPicker "Built-in" section.
+    assert len(pocket["widgets"]) == 1
+    assert pocket["widgets"][0]["name"] == "Intent of the Day"
     # The new pocket id is persisted back onto the user setting.
     assert await auth_service.get_home_pocket_id(user_id) == pocket["_id"]
 

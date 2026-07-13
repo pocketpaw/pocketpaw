@@ -435,6 +435,19 @@ async def get_home_pocket(
     return HomePocketResponse(pocket_id=pocket["_id"], pocket=pocket, created=created)
 
 
+@router.get("/builtin-widgets")
+async def get_builtin_widgets() -> list[dict]:
+    """Return every enabled built-in widget definition.
+
+    The frontend's AddWidgetPicker "Built-in" section fetches this list
+    to populate its rail. Declared ahead of ``GET /{pocket_id}`` so the
+    static ``/builtin-widgets`` segment wins the route match. No auth
+    required — these are system-level definitions visible to every
+    authenticated user (the frontend's auth layer gates the call).
+    """
+    return await pockets_service.list_builtin_widgets()
+
+
 @router.get("/{pocket_id}")
 async def get_pocket(
     pocket_id: str,
@@ -1575,14 +1588,13 @@ async def update_widget(
     return await pockets_service.update_widget(pocket_id, widget_id, user_id, body)
 
 
-@router.delete("/{pocket_id}/widgets/{widget_id}", status_code=204)
+@router.delete("/{pocket_id}/widgets/{widget_id}")
 async def remove_widget(
     pocket_id: str,
     widget_id: str,
     user_id: str = Depends(current_user_id),
-) -> Response:
-    await pockets_service.remove_widget(pocket_id, widget_id, user_id)
-    return Response(status_code=204)
+) -> dict:
+    return await pockets_service.remove_widget(pocket_id, widget_id, user_id)
 
 
 @router.post("/{pocket_id}/widgets/reorder")
