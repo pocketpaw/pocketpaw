@@ -1476,7 +1476,16 @@ class CallMeetingAgent:
         return summary, []
 
     def _parse_summary_json(self, content: str) -> tuple[str, list[str]]:
-        """Parse JSON summary response from LLM."""
+        """Parse JSON summary response from LLM.
+
+        When the LLM returns structured JSON (Anthropic / OpenAI direct
+        summary), the ``action_items`` list is extracted directly.  When the
+        LLM returns Markdown (DeepSeek or the progressive-merge path), JSON
+        parsing fails — in that case we extract action items from the
+        ``## ✅ Action Items`` or ``### ✅ Action Items`` section of the
+        Markdown so the final meeting-notes payload always carries assignable
+        action items regardless of which LLM produced the summary.
+        """
         content = content.strip()
         if "```json" in content:
             content = content.split("```json")[1].split("```")[0].strip()
@@ -1489,7 +1498,62 @@ class CallMeetingAgent:
             action_items = parsed.get("action_items", [])
             return summary, action_items
         except (json.JSONDecodeError, KeyError):
-            return content, []
+            # Markdown output – extract action items from the rendered section
+            action_items = self._extract_action_items_from_markdown(content)
+            return content, action_items
+
+    @staticmethod
+    def _extract_action_items_from_markdown(markdown: str) -> list[str]:
+        """Extract bullet-point action items from a Markdown meeting summary.
+
+        Looks for a heading matching "Action Items" (with optional emoji
+        prefix) at any heading level (``##`` or ``###``) and collects all
+        following list items until the next heading or end of text.
+        Strips markdown bold markers (``**``) from extracted items so the
+        ``@Name:`` assignee prefix is at position 0 for downstream parsing.
+        """
+        import re as _re
+
+        lines = markdown.split("\n")
+        in_section = False
+        items: list[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+
+            # Detect the start of the Action Items section — accepts ``##`` or
+            # ``###`` headings, with or without emoji prefix.  The DeepSeek
+            # + merge prompts use ``###`` level headings; the regex also
+            # accepts ``##`` for backwards-compatibility with older prompt
+            # versions.
+            if (
+                _re.match(r"^#{2,3}\s*[✅📋📌⚠️🔜❓⚙️]*\s*Action\s*Items", stripped, _re.IGNORECASE)
+                or _re.match(r"^#{2,3}\s*✅\s*Action\s*Items", stripped, _re.IGNORECASE)
+                or _re.match(r"^#{2,3}\s*Action\s*Items", stripped, _re.IGNORECASE)
+            ):
+                in_section = True
+                continue
+
+            # If we hit another heading, stop
+            if in_section and stripped.startswith("##"):
+                break
+
+            if in_section:
+                # Match bullet points: -, *, or numbered 1.
+                m = _re.match(r"\s*[-*]\s+(.*)", stripped)
+                if not m:
+                    m = _re.match(r"\s*\d+[.)]\s+(.*)", stripped)
+                if m:
+                    text = m.group(1).strip()
+                    # Strip bold markers so ``**@Name:** description``
+                    # becomes ``@Name: description`` — the assignee
+                    # parser in the parent process expects ``@`` at the
+                    # start of the string.
+                    text = text.replace("**", "")
+                    if text and text != "None" and not text.startswith("```"):
+                        items.append(text)
+
+        return items
 
 
 # ---------------------------------------------------------------------------
