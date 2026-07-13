@@ -17,8 +17,19 @@ Public API:
   ``list_peer_ids(user_id)`` — used as function refs by the realtime
   audience resolver
 - ``get_workspace_plan(workspace_id)`` — lightweight plan-tier lookup for
-  the plan-feature gate dependency; returns "team" on any failure so the
-  dep fails open on plan rather than crashing with a 500.
+  the plan-feature gate dependency; returns None when the workspace is
+  missing/soft-deleted/malformed (the gate maps that to a 404) and
+  re-raises DB errors rather than silently downgrading a paying customer.
+- ``set_workspace_plan(workspace_id, plan)`` — set the workspace's plan
+  tier (BC-7). The billing subscription webhook is the only caller: a
+  verified ``subscription.active`` upgrades to the subscribed tier and a
+  ``subscription.cancelled`` reverts to ``free``. Returns True on a write,
+  False when the workspace is missing/soft-deleted.
+- ``raise_seats_for_plan(workspace_id, plan_key)`` — UPGRADE-ONLY resync of
+  the stored ``Workspace.seats`` up to the new plan's ``max_seats`` (never
+  down). The subscription.active webhook calls it after set_workspace_plan so
+  an upgrade actually lifts the seat cap; a downgrade/cancel never strips
+  seats a workspace already has.
 
 Changes: added get_workspace_plan helper for plan-feature gate dep; added
 slug_reason() (format + reserved + uniqueness) backing the live
@@ -27,6 +38,69 @@ slug-available check, and create() now also rejects reserved slugs.
 a ConflictError (409) instead of letting it escape as an unhandled 500 — the
 leftover unique index on the nullable legacy ``token`` column made every
 second invite collide on ``token=null``.
+2026-06-08 (Phase B chunk 7): remove_member now runs a 4th best-effort cascade
+— purge_member_data — so an offboarded member's personal Gmail/calendar (their
+private ``user:{id}`` KB scope), per-user OAuth tokens, connector rows, and
+ingest-state are deleted. The purge counts land in the audit row's cascade
+metadata.
+2026-06-09: accept_invite is now self-healing. The atomic claim and the
+membership write aren't transactional, so an accept interrupted mid-flight
+(backend restart) could leave an invite accepted=True with no membership,
+locking the invitee out of every workspace read. Both already_accepted
+raise-sites now route through _heal_or_conflict: a rightful invitee missing
+the membership gets it added (idempotent) instead of a 409; a genuine
+duplicate (already a member) still raises invite.already_accepted.
+2026-06-14 (WB-1): update() now accepts an optional branding patch. A
+BrandingPatch merges onto the workspace's existing Branding (partial patches
+don't wipe set fields). logo_asset / favicon_asset are ownership-checked
+against the workspace via _assert_asset_owned (mirrors the uploads
+workspace-scoped lookup) — a cross-workspace or unknown asset ref raises
+Forbidden (workspace.branding_asset_not_owned). accent_color format is
+validated upstream by BrandingPatch (422). _workspace_to_domain now carries
+branding through to the domain object so it serializes onto WorkspaceOut.
+2026-06-19 (feat/instinct-gate-integration, security-review FIX 1): added
+set_instinct_approval_level() — the dedicated, OWNER-gated writer for a
+workspace's layered-Instinct-gate triager level. Validates against the
+ApprovalLevel enum (422 on a bad value, nothing written), kept off the
+general update() path on purpose (a non-ASK level enables auto-approval of
+agent writes), and emits a WARNING-severity append-only audit event with the
+old→new level. The write goes through this service per the import-linter
+Beanie-writes-only-from-service contract.
+2026-06-26 (feat/litellm-billing-cutover, WU-F): create() now also fires the
+per-tenant LiteLLM key provisioning trigger — a BEST-EFFORT, NON-BLOCKING
+ensure_tenant_key(workspace) call. A proxy outage / mint failure is logged and
+swallowed (workspace creation NEVER fails on a provisioning error); the call is
+idempotent, so the billing-cutover sweep and any later workspace touch back-fill
+a key that didn't mint here. Mirrors the best-effort seed_default_agent step.
+2026-07-05 (fix/atlas-admin-security-hardening, FINDING A): privilege-escalation
+guard on ownership. ``update_member_role`` now refuses to GRANT the ``owner``
+role unless the ACTOR already holds owner (code ``owner_grant_requires_owner``),
+and ``remove_member`` refuses to REMOVE an owner-role member unless the actor
+holds owner (code ``owner_removal_requires_owner``). The admin-tool RBAC action
+(workspace.member.role_change / .remove) is only ADMIN-gated, so without the
+actor-role check an ADMIN could self-promote to owner or evict a sitting owner on
+approval. The guard lives in the service so every caller (admin tool, executor,
+route) inherits it; it mirrors the existing "an invite can never mint an owner"
+rule. The last-owner + cannot_demote/remove-doc-owner guards are unchanged.
+2026-07-10 (compliance-starter): retention setting is now real. update()'s
+settings write MERGES via ``_merge_settings`` instead of the destructive
+``WorkspaceSettings(**body.settings)`` full-replace (a partial patch no longer
+wipes sibling settings — recon-flagged bug). Added ``get_retention`` /
+``set_retention`` (the clean, no-clobber compliance read/write for
+``settings.retention_days``, owner/admin-gated at the route) and
+``enforce_retention`` (again-callable purge of audit rows older than the
+policy cutoff; delegates the delete to ``audit.service.purge_workspace_audit``
+so the AuditEvent-write contract stays in the audit module).
+2026-07-08 (feat/billing-smb-caps): the three seat gates (create_invite,
+bulk_create_invites, accept_invite) now source their ceiling from the workspace's
+RESOLVED PLAN, not the flat ``doc.seats`` alone. ``_effective_seat_limit`` returns
+``max(doc.seats, plan.max_seats)`` (an uncapped Enterprise plan keeps the
+negotiated ``doc.seats``) so a plan upgrade lifts the cap while a workspace that
+already carries a higher custom seat count never regresses. Seat enforcement stays
+ALWAYS-ON (not behind ``billing_enforced``), unchanged from before; the Free
+``max_seats`` == the model default (5) means a free tenant sees the identical
+limit. ``raise_seats_for_plan`` (upgrade-only) keeps the stored ``doc.seats`` in
+step with the plan on a subscription.active.
 """
 
 from __future__ import annotations
@@ -37,6 +111,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from beanie import PydanticObjectId
+from pydantic import ValidationError as PydanticValidationError
 from pymongo.errors import DuplicateKeyError
 
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
@@ -45,6 +120,7 @@ from pocketpaw_ee.cloud._core.errors import (
     Forbidden,
     NotFound,
     SeatLimitError,
+    ValidationError,
 )
 from pocketpaw_ee.cloud._core.realtime.bus import get_resolver
 from pocketpaw_ee.cloud._core.realtime.emit import emit
@@ -65,20 +141,31 @@ from pocketpaw_ee.cloud.mail import send_invite_email
 from pocketpaw_ee.cloud.models.agent import Agent as _AgentDoc
 from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
 from pocketpaw_ee.cloud.models.invite import Invite as _InviteDoc
+from pocketpaw_ee.cloud.models.invite import InviteContext as _InviteContextDoc
 from pocketpaw_ee.cloud.models.invite import hash_token
 from pocketpaw_ee.cloud.models.notification import NotificationSource
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.models.user import WorkspaceMembership as _Membership
+from pocketpaw_ee.cloud.models.workspace import Branding as _BrandingDoc
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
 from pocketpaw_ee.cloud.models.workspace import WorkspaceSettings
 from pocketpaw_ee.cloud.notifications import service as notifications_service
+from pocketpaw_ee.cloud.people import service as people_service
 from pocketpaw_ee.cloud.shared.events import event_bus
 from pocketpaw_ee.cloud.uploads.models import FileUpload as _FileUploadDoc
-from pocketpaw_ee.cloud.workspace.domain import Invite, Workspace, WorkspaceMember
+from pocketpaw_ee.cloud.workspace.domain import (
+    Branding,
+    Invite,
+    InviteContext,
+    Workspace,
+    WorkspaceMember,
+)
 from pocketpaw_ee.cloud.workspace.dto import (
+    BrandingPatch,
     BulkInviteRequest,
     CreateInviteRequest,
     CreateWorkspaceRequest,
+    InviteContextDTO,
     UpdateWorkspaceRequest,
 )
 from pocketpaw_ee.cloud.workspace.slug import SlugReason, static_slug_reason
@@ -95,6 +182,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _branding_doc_to_domain(b: _BrandingDoc | None) -> Branding | None:
+    """Map the embedded persistence ``Branding`` to the domain value object.
+
+    ``None`` (no custom branding) passes straight through — the frontend
+    renders the Paw defaults."""
+    if b is None:
+        return None
+    return Branding(
+        logo_asset=b.logo_asset,
+        favicon_asset=b.favicon_asset,
+        display_name=b.display_name,
+        tab_title=b.tab_title,
+        accent_color=b.accent_color,
+        show_paw_mark=b.show_paw_mark,
+    )
+
+
 def _workspace_to_domain(doc: _WorkspaceDoc, *, member_count: int = 0) -> Workspace:
     return Workspace(
         id=str(doc.id),
@@ -106,7 +210,14 @@ def _workspace_to_domain(doc: _WorkspaceDoc, *, member_count: int = 0) -> Worksp
         created_at=getattr(doc, "createdAt", None),  # type: ignore[arg-type]
         member_count=member_count,
         deleted_at=doc.deleted_at,
+        branding=_branding_doc_to_domain(getattr(doc, "branding", None)),
     )
+
+
+def _context_doc_to_domain(ctx: _InviteContextDoc | None) -> InviteContext | None:
+    if ctx is None:
+        return None
+    return InviteContext(focus=ctx.focus, profile_pic=ctx.profile_pic)
 
 
 def _invite_to_domain(doc: _InviteDoc, *, plaintext_token: str | None = None) -> Invite:
@@ -122,6 +233,7 @@ def _invite_to_domain(doc: _InviteDoc, *, plaintext_token: str | None = None) ->
         revoked=doc.revoked,
         expired=doc.expired,
         expires_at=doc.expires_at,
+        context=_context_doc_to_domain(doc.context),
     )
 
 
@@ -273,6 +385,24 @@ async def create(ctx: RequestContext, body: CreateWorkspaceRequest) -> Workspace
     except Exception as exc:
         logger.warning("Failed to seed default agent for workspace %s (non-fatal): %s", doc.id, exc)
 
+    # Provision the per-tenant LiteLLM virtual key (WU-F / MCG-8). BEST-EFFORT and
+    # NON-BLOCKING: if the proxy is unreachable or the mint fails, log + continue —
+    # workspace creation must NEVER fail on a provisioning error. ``ensure_tenant_key``
+    # is idempotent, so the cutover sweep (which iterates provisioned tenants) and a
+    # later workspace touch both back-fill a key that didn't get minted here. Lazy
+    # import keeps the workspace service free of an llm_provisioning dependency at
+    # module load.
+    try:
+        from pocketpaw_ee.cloud.llm_provisioning import service as llm_provisioning_service
+
+        await llm_provisioning_service.ensure_tenant_key(str(doc.id))
+    except Exception as exc:  # noqa: BLE001 — provisioning is best-effort, never fatal
+        logger.warning(
+            "Failed to provision LiteLLM tenant key for workspace %s (non-fatal): %s",
+            doc.id,
+            exc,
+        )
+
     await emit(
         WorkspaceMemberAdded(
             data={"workspace_id": str(doc.id), "user_id": ctx.user_id, "role": "owner"}
@@ -305,6 +435,47 @@ async def get(ctx: RequestContext, workspace_id: str) -> Workspace:
     return _workspace_to_domain(doc, member_count=count)
 
 
+async def _assert_asset_owned(workspace_id: str, file_id: str) -> None:
+    """Reject a branding asset ref that doesn't belong to this workspace.
+
+    Mirrors the chat-attachment ownership check (uploads' workspace-scoped
+    lookup): the asset must exist as a non-deleted ``FileUpload`` whose
+    ``workspace`` matches. A cross-workspace ref OR a non-existent id both
+    fail the same way — neither is owned by this workspace. Raises ``Forbidden``
+    so the route returns a 403, consistent with the rest of the workspace
+    authorization surface.
+    """
+    owned = await _FileUploadDoc.find_one(
+        {"file_id": file_id, "workspace": workspace_id, "deleted_at": None}
+    )
+    if owned is None:
+        raise Forbidden(
+            "workspace.branding_asset_not_owned",
+            f"Asset '{file_id}' does not belong to this workspace",
+        )
+
+
+async def _apply_branding_patch(
+    doc: _WorkspaceDoc, workspace_id: str, patch: BrandingPatch
+) -> None:
+    """Validate + merge a branding patch onto the workspace doc.
+
+    Asset refs (``logo_asset`` / ``favicon_asset``) are ownership-checked
+    against this workspace before anything is written. The patch MERGES onto
+    any existing branding so a partial patch (e.g. only ``display_name``)
+    doesn't wipe previously set fields. ``accent_color`` format was already
+    validated by ``BrandingPatch`` at the route boundary (422).
+    """
+    if patch.logo_asset is not None:
+        await _assert_asset_owned(workspace_id, patch.logo_asset)
+    if patch.favicon_asset is not None:
+        await _assert_asset_owned(workspace_id, patch.favicon_asset)
+
+    current = doc.branding or _BrandingDoc()
+    merged = current.model_copy(update=patch.model_dump(exclude_unset=True))
+    doc.branding = merged
+
+
 async def update(
     ctx: RequestContext,
     workspace_id: str,
@@ -316,7 +487,9 @@ async def update(
     if body.name is not None:
         doc.name = body.name
     if body.settings is not None:
-        doc.settings = WorkspaceSettings(**body.settings)
+        doc.settings = _merge_settings(doc.settings, body.settings)
+    if body.branding is not None:
+        await _apply_branding_patch(doc, workspace_id, body.branding)
     await doc.save()
 
     patched = body.model_dump(exclude_unset=True)
@@ -329,6 +502,217 @@ async def update(
         target_type="workspace",
         target_id=workspace_id,
         metadata={"patched": patched},
+    )
+
+    count = await _count_members(workspace_id)
+    return _workspace_to_domain(doc, member_count=count)
+
+
+def _merge_settings(current: WorkspaceSettings, patch: dict) -> WorkspaceSettings:
+    """MERGE a partial settings dict onto the existing settings.
+
+    The old code did ``WorkspaceSettings(**body.settings)`` — a destructive
+    FULL-REPLACE that silently reset every field the caller didn't send (a
+    ``{"retention_days": 30}`` patch wiped ``default_agent`` and
+    ``allow_invites`` back to their defaults). Mirrors ``_apply_branding_patch``:
+    dump the current settings, overlay only the keys the patch carries, and
+    re-validate through the model (so ``retention_days`` bounds are enforced
+    on this path too). A bad value raises ``ValidationError`` (422) rather than
+    persisting junk.
+    """
+    merged = current.model_dump()
+    merged.update(patch)
+    try:
+        return WorkspaceSettings(**merged)
+    except PydanticValidationError as exc:
+        raise ValidationError("workspace.invalid_settings", str(exc)) from exc
+
+
+async def get_retention(ctx: RequestContext, workspace_id: str) -> int | None:
+    """Read a workspace's data-retention policy (``retention_days``).
+
+    ``None`` means "keep forever". Membership is enforced at the route layer;
+    this is a plain read of the workspace document the service owns.
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+    return doc.settings.retention_days
+
+
+async def set_retention(
+    ctx: RequestContext,
+    workspace_id: str,
+    retention_days: int | None,
+) -> Workspace:
+    """Set a workspace's data-retention policy without clobbering siblings.
+
+    Writes ONLY ``settings.retention_days`` — the other settings fields are
+    carried through the merge untouched. ``retention_days`` is re-validated
+    through ``WorkspaceSettings`` (positive-or-null) so a direct service
+    caller gets the same guarantee the route DTO enforces. ``None`` clears the
+    policy (keep forever). Emits a workspace audit row so the compliance
+    change is attributable.
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+
+    old = doc.settings.retention_days
+    doc.settings = _merge_settings(doc.settings, {"retention_days": retention_days})
+    await doc.save()
+
+    await audit_service.record(
+        workspace_id,
+        ctx.user_id,
+        "workspace.retention_set",
+        target_type="workspace",
+        target_id=workspace_id,
+        metadata={"old_retention_days": old, "new_retention_days": retention_days},
+    )
+
+    count = await _count_members(workspace_id)
+    return _workspace_to_domain(doc, member_count=count)
+
+
+async def enforce_retention(workspace_id: str) -> dict:
+    """Purge records older than the workspace's ``retention_days`` policy.
+
+    Idempotent / again-callable: it deletes everything older than
+    ``now - retention_days`` for THIS workspace, so running it twice is safe
+    and running it late just catches up. A ``None`` policy (keep forever) is a
+    no-op. The audit-event store is the retention target — it is the durable,
+    workspace-scoped compliance record store (the decision journal is a
+    projection rebuilt from the immutable journal, so purging it would not
+    stick; the soul journal itself is the event source-of-truth and is out of
+    scope for a per-workspace age purge). Notifications + journal purge are
+    tracked as a FOLLOW-UP.
+
+    FOLLOW-UP (scheduler wiring): nothing calls this on a cadence yet. It is
+    intentionally a pure, side-effect-scoped function so a periodic sweep can
+    iterate workspaces with a non-null ``retention_days`` and call it — the
+    natural home is a cloud background loop registered at ``mount_cloud`` /
+    the temporal scheduler (``ee/pocketpaw_ee/cloud/temporal_sweeps``). Until
+    that lands, an admin can trigger a purge by re-saving the retention policy
+    and calling this from an ops shell.
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+
+    retention_days = doc.settings.retention_days
+    if retention_days is None:
+        return {
+            "workspace_id": workspace_id,
+            "retention_days": None,
+            "audit_deleted": 0,
+            "skipped": "no_retention_policy",
+        }
+
+    cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+    audit_deleted = await audit_service.purge_workspace_audit(workspace_id, cutoff)
+
+    logger.info(
+        "retention: purged %d audit rows older than %s for workspace %s (retention_days=%d)",
+        audit_deleted,
+        cutoff.isoformat(),
+        workspace_id,
+        retention_days,
+    )
+    return {
+        "workspace_id": workspace_id,
+        "retention_days": retention_days,
+        "cutoff": cutoff.isoformat(),
+        "audit_deleted": audit_deleted,
+    }
+
+
+def _audit_approval_level_change(
+    *, actor: str, workspace_id: str, old_level: str, new_level: str
+) -> None:
+    """Append-only audit of the layered-gate activation switch (security FIX 1).
+
+    Setting a non-ASK ``instinct_approval_level`` turns ON auto-approval of
+    agent WRITE actions for the workspace — the single most security-sensitive
+    governance switch in the gate. Emitted at WARNING severity (a
+    state-changing, potentially-dangerous op, mirroring ``action_executor.
+    _audit_action_run``) carrying actor + workspace_id + old→new level so the
+    flip is loud and attributable. Audit failure must never break the write, so
+    the whole call is wrapped.
+    """
+    try:
+        from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+        get_audit_logger().log(
+            AuditEvent.create(
+                severity=AuditSeverity.WARNING,
+                actor=actor,
+                action="instinct.approval_level.set",
+                target=workspace_id,
+                status="changed" if old_level != new_level else "unchanged",
+                category="instinct_activation",
+                workspace_id=workspace_id,
+                old_level=old_level,
+                new_level=new_level,
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the activation write
+        logger.warning("instinct approval-level audit-log write failed", exc_info=True)
+
+
+async def set_instinct_approval_level(
+    ctx: RequestContext,
+    workspace_id: str,
+    level: str,
+) -> Workspace:
+    """Set a workspace's layered-Instinct-gate triager activation level.
+
+    The DEDICATED writer for the activation switch (security-review FIX 1).
+    Kept off the general ``UpdateWorkspaceRequest``/PATCH path on purpose: a
+    non-ASK level enables AUTO-APPROVAL of agent WRITE actions workspace-wide,
+    so it gets its own OWNER-only route (``instinct.activate``) and its own
+    loud WARNING audit trail, never folded into the routine workspace patch.
+
+    ``level`` is validated against the canonical ``ApprovalLevel`` enum here
+    (defense in depth — the DTO already constrains it at the route boundary).
+    An out-of-enum value raises ``ValidationError`` (422) and NOTHING is
+    written: the level must fail loudly, never be coerced to a fallback that
+    silently parks a typo on the document (the gate would then read it and
+    route ASK, masking the misconfiguration). The write goes through this
+    service per the import-linter contract (Beanie writes only from
+    ``service.py``). Emits a WARNING audit event carrying old→new level.
+    """
+    from pocketpaw_ee.cloud.pockets.instinct_triage import ApprovalLevel
+
+    valid = {lvl.value for lvl in ApprovalLevel}
+    if level not in valid:
+        raise ValidationError(
+            "workspace.invalid_approval_level",
+            f"approval level {level!r} must be one of {sorted(valid)}",
+        )
+
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+
+    old_level = doc.instinct_approval_level or "ASK"
+    doc.instinct_approval_level = level
+    await doc.save()
+
+    _audit_approval_level_change(
+        actor=ctx.user_id,
+        workspace_id=workspace_id,
+        old_level=old_level,
+        new_level=level,
+    )
+
+    await audit_service.record(
+        workspace_id,
+        ctx.user_id,
+        "workspace.instinct_approval_level_set",
+        target_type="workspace",
+        target_id=workspace_id,
+        metadata={"old_level": old_level, "new_level": level},
     )
 
     count = await _count_members(workspace_id)
@@ -468,6 +852,19 @@ async def update_member_role(
     doc = await _fetch_workspace(workspace_id)
     if doc is None:
         raise NotFound("workspace", workspace_id)
+    # FINDING A — privilege-escalation guard. Granting the ``owner`` role is
+    # OWNER-only: the caller's RBAC action (workspace.member.role_change) is gated
+    # at ADMIN, so without this an ADMIN could promote any member — themselves
+    # included — to owner and it would land on approval. Mirror how an invite can
+    # never mint an owner: only a sitting owner may create another. The check is
+    # in the service so every path (admin tool, executor, route) inherits it.
+    if role == "owner":
+        actor_role = await _get_member_role(workspace_id, actor_user_id)
+        if actor_role != "owner":
+            raise Forbidden(
+                "workspace.owner_grant_requires_owner",
+                "Only an owner can grant the owner role.",
+            )
     if doc.owner == target_user_id and role != "owner":
         raise Forbidden(
             "workspace.cannot_demote_owner",
@@ -558,6 +955,16 @@ async def remove_member(
     # Role-based last-owner guard (independent of doc.owner field).
     target_role = await _get_member_role(workspace_id, target_user_id)
     if target_role == "owner":
+        # FINDING A — evicting an owner is OWNER-only. Same escalation class as
+        # granting owner: an ADMIN (gated at workspace.member.role_change) must
+        # not be able to remove a sitting owner. Checked before the last-owner
+        # guard so an ADMIN gets the actor-role denial regardless of owner count.
+        actor_role = await _get_member_role(workspace_id, actor_user_id)
+        if actor_role != "owner":
+            raise Forbidden(
+                "workspace.owner_removal_requires_owner",
+                "Only an owner can remove an owner.",
+            )
         owner_count = await _count_owners(workspace_id)
         if owner_count <= 1:
             raise Forbidden(
@@ -614,6 +1021,27 @@ async def remove_member(
             exc_info=True,
         )
 
+    # Phase B per-user data purge — an offboarded member's PERSONAL Gmail/
+    # calendar (ingested into their private ``user:{id}`` KB scope), their
+    # per-user OAuth tokens, connector rows, and ingest-state must be deleted:
+    # it's their personal data; leaving the workspace must purge it. Lazy
+    # import keeps the workspace service free of a member_ingest dependency at
+    # module load. Best-effort like the cascades above — purge_member_data is
+    # itself idempotent and isolates per-store failures, so a worst case here
+    # is one logged warning, never a blocked offboard.
+    member_data_purged: dict | None = None
+    try:
+        from pocketpaw_ee.cloud.member_ingest.purge import purge_member_data
+
+        member_data_purged = await purge_member_data(workspace_id, target_user_id)
+    except Exception:
+        logger.warning(
+            "remove_member: member-data purge failed for user=%s ws=%s",
+            target_user_id,
+            workspace_id,
+            exc_info=True,
+        )
+
     await event_bus.emit(
         "member.removed",
         {
@@ -648,6 +1076,9 @@ async def remove_member(
                 "api_keys_revoked": api_keys_revoked,
                 "sessions_revoked": sessions_revoked,
                 "invites_revoked": invites_revoked,
+                # Phase B: what the per-user data purge removed (None if the
+                # purge step itself raised — the warning above has the detail).
+                "member_data_purged": member_data_purged,
             },
         },
     )
@@ -671,11 +1102,15 @@ async def _mint_invite_for_email(
     email: str,
     role: str,
     group_id: str | None,
+    context: InviteContextDTO | None = None,
 ) -> Invite:
     """Pre-clean expired/stale rows, reject duplicate pending, insert the
     hashed invite. Shared between ``create_invite`` (single) and
     ``bulk_create_invites`` (batch) so token hashing + pre-cleanup stay
     in lockstep. Does NOT emit or notify — the caller handles side-effects.
+
+    ``context`` is the optional admin onboarding payload (pp#1365); persisted
+    verbatim on the invite document and None when omitted.
     """
     # Mongo TTL is the long-term GC; this pre-cleanup makes the
     # collision check below honest about what's "still pending."
@@ -716,6 +1151,11 @@ async def _mint_invite_for_email(
         token=None,  # plaintext never persisted for new invites
         token_hash=hash_token(plaintext),
         group=group_id,
+        context=(
+            _InviteContextDoc(focus=context.focus, profile_pic=context.profile_pic)
+            if context is not None
+            else None
+        ),
     )
     try:
         await invite_doc.insert()
@@ -750,6 +1190,34 @@ async def _lookup_user_name(user_id: str) -> str:
     return "Someone"
 
 
+async def _effective_seat_limit(doc: _WorkspaceDoc) -> int:
+    """The seat ceiling to enforce for this workspace — plan-sourced.
+
+    Sources the limit from the workspace's RESOLVED PLAN (``max_seats``) rather
+    than the flat ``doc.seats`` alone, so a plan upgrade lifts the cap. Enforced
+    as ``max(doc.seats, plan.max_seats)`` so a workspace that already carries a
+    higher custom ``doc.seats`` — a seeded enterprise box, or a legacy
+    hand-bumped seat count — never regresses below what it has today. An uncapped
+    plan (Enterprise, ``max_seats=None``) imposes no plan ceiling: the workspace's
+    own ``doc.seats`` stands.
+
+    ALWAYS-ON (NOT gated on ``billing_enforced``), mirroring the pre-existing seat
+    gate. Because the Free ``max_seats`` equals the ``Workspace.seats`` model
+    default (5), a free tenant sees byte-for-byte the same limit it had before
+    this became plan-sourced — no regression.
+
+    The entitlements resolver is imported LAZILY to keep this module off the
+    resolver's import graph (the resolver itself imports this service lazily);
+    there is no static cycle.
+    """
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = await entitlements_service.resolve_entitlements(str(doc.id))
+    if ent.max_seats is None:
+        return doc.seats
+    return max(doc.seats, ent.max_seats)
+
+
 async def create_invite(
     ctx: RequestContext,
     workspace_id: str,
@@ -760,10 +1228,13 @@ async def create_invite(
         raise NotFound("workspace", workspace_id)
 
     member_count = await _count_members(workspace_id)
-    if member_count >= doc.seats:
-        raise SeatLimitError(doc.seats)
+    seat_limit = await _effective_seat_limit(doc)
+    if member_count >= seat_limit:
+        raise SeatLimitError(seat_limit)
 
-    invite = await _mint_invite_for_email(ctx, workspace_id, body.email, body.role, body.group_id)
+    invite = await _mint_invite_for_email(
+        ctx, workspace_id, body.email, body.role, body.group_id, body.context
+    )
 
     invited_user_id = await _find_user_id_by_email(body.email)
 
@@ -793,6 +1264,7 @@ async def create_invite(
             kind="invite",
             title=f"You were invited to join {doc.name}",
             body="",
+            actor_id=ctx.user_id,
             source=NotificationSource(
                 type="invite",
                 id=invite.id,  # the invite document id, not the token
@@ -834,8 +1306,9 @@ async def bulk_create_invites(
         raise NotFound("workspace", workspace_id)
 
     current_count = await _count_members(workspace_id)
-    if current_count + len(body.emails) > doc.seats:
-        raise SeatLimitError(doc.seats)
+    seat_limit = await _effective_seat_limit(doc)
+    if current_count + len(body.emails) > seat_limit:
+        raise SeatLimitError(seat_limit)
 
     created: list[Invite] = []
     skipped: list[dict] = []
@@ -883,6 +1356,7 @@ async def bulk_create_invites(
                 kind="invite",
                 title=f"You were invited to join {doc.name}",
                 body="",
+                actor_id=ctx.user_id,
                 source=NotificationSource(
                     type="invite",
                     id=invite.id,
@@ -958,6 +1432,18 @@ async def preview_invite(token: str, viewer_user_id: str | None) -> dict:
             else:
                 state = "ready_wrong_user"
 
+    # Surface the admin onboarding context (pp#1365) so the member-facing
+    # accept UI can carry the invitee's focus + profile_pic into the
+    # downstream VIP-onboarding welcome. None when the invite has no context.
+    context_domain = _context_doc_to_domain(invite_doc.context)
+    context_wire = (
+        InviteContextDTO(
+            focus=context_domain.focus, profile_pic=context_domain.profile_pic
+        ).model_dump()
+        if context_domain is not None
+        else None
+    )
+
     return {
         "state": state,
         "email": invite_doc.email,
@@ -966,10 +1452,41 @@ async def preview_invite(token: str, viewer_user_id: str | None) -> dict:
         "group": invite_doc.group,
         "group_name": None,
         "viewer_email": viewer_email,
+        "context": context_wire,
     }
 
 
+async def _heal_or_conflict(ctx: RequestContext, existing: _InviteDoc) -> None:
+    """Self-heal an accepted invite whose membership never landed.
+
+    Reached only after the identity check passed, so ``ctx.user_id`` is the
+    rightful, email-matched invitee. The accept flow is non-atomic: it
+    atomically claims the invite (accepted=True), then several awaits later
+    writes the membership. If the request dies between those steps (backend
+    restart, handler abort), the invite is burned with no membership and the
+    user is locked out of every workspace read with no recovery path.
+
+    Converge instead of raising: if the invitee has no membership, add it
+    (``_add_member`` is idempotent) and treat it as success. Only a genuine
+    duplicate — the invitee is already a member — still raises 409.
+    """
+    workspace_id = existing.workspace
+    already = await _get_member_role(workspace_id, ctx.user_id) is not None
+    if not already:
+        await _add_member(workspace_id, ctx.user_id, role=existing.role, set_active=True)
+        return
+    raise ConflictError("invite.already_accepted", "This invite has already been accepted")
+
+
 async def accept_invite(ctx: RequestContext, token: str) -> None:
+    """Accept a workspace invite for the logged-in user.
+
+    Self-healing: the claim (accepted=True) and the membership write are not
+    wrapped in a transaction, so a backend restart between them can burn an
+    invite with no membership. Re-accepting by the rightful invitee adds the
+    missing membership instead of raising — see ``_heal_or_conflict``. A
+    genuine duplicate (already a member) still raises ``invite.already_accepted``.
+    """
     th = hash_token(token)
 
     # Identity check: the logged-in user's email must match the invitee's.
@@ -1009,7 +1526,10 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
         if existing is None:
             raise NotFound("invite")
         if existing.accepted:
-            raise ConflictError("invite.already_accepted", "This invite has already been accepted")
+            # Already claimed. Either a genuine duplicate accept, or the
+            # claim landed but the membership write never did (non-atomic
+            # accept interrupted mid-flight). Self-heal the latter.
+            return await _heal_or_conflict(ctx, existing)
         if existing.revoked:
             raise Forbidden("invite.revoked", "This invite has been revoked")
         if existing.expired:
@@ -1024,7 +1544,10 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
             return_document=False,
         )
         if claimed is None:
-            raise ConflictError("invite.already_accepted", "This invite has already been accepted")
+            # Backfilled row was already accepted (duplicate or a burned
+            # accept that never wrote the membership). Self-heal the burn;
+            # ``existing`` carries the stable workspace + role for it.
+            return await _heal_or_conflict(ctx, existing)
 
     # Rebuild the domain object from the BEFORE doc so downstream emit/
     # membership logic has the data it needs.
@@ -1042,17 +1565,45 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
     already_member = await _get_member_role(invite.workspace_id, ctx.user_id) is not None
     if not already_member:
         member_count = await _count_members(invite.workspace_id)
-        if member_count >= ws_doc.seats:
+        seat_limit = await _effective_seat_limit(ws_doc)
+        if member_count >= seat_limit:
             await collection.update_one(
                 {"_id": claimed["_id"]},
                 {"$set": {"accepted": False, "accepted_at": None}},
             )
-            raise SeatLimitError(ws_doc.seats)
+            raise SeatLimitError(seat_limit)
         await _add_member(
             invite.workspace_id,
             ctx.user_id,
             role=invite.role,
             set_active=True,
+        )
+
+    # Materialize the member as a standalone Fabric ``Person`` — the
+    # identity spine a later VIP-onboarding flow reads (pp#1366). Built
+    # from the member's own profile + the invite's admin context, with
+    # provenance (invited_by + source=admin_context). Idempotent on the
+    # member's user id, so re-accepting updates rather than duplicating.
+    # The journal ``fabric.object.*`` event is the emit-on-write here.
+    # Wrapped defensively: membership is the source of truth, the Person
+    # is a derived projection — a Fabric/journal hiccup must not roll back
+    # an accepted invite.
+    try:
+        await people_service.materialize_person_from_invite(
+            workspace_id=invite.workspace_id,
+            user_id=ctx.user_id,
+            name=viewer.full_name,
+            email=viewer.email or invite.email,
+            avatar=viewer.avatar,
+            invite=invite,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Fabric Person materialization skipped for user=%s workspace=%s — "
+            "invite accept proceeds; the Person can be re-materialized later",
+            ctx.user_id,
+            invite.workspace_id,
+            exc_info=True,
         )
 
     await event_bus.emit(
@@ -1371,15 +1922,232 @@ async def get_workspace_plan(workspace_id: str) -> str | None:
     return doc.plan
 
 
+async def set_workspace_plan(workspace_id: str, plan: str) -> bool:
+    """Set a workspace's plan tier (BC-7 subscription lifecycle).
+
+    The ONLY caller is the billing subscription webhook: a verified
+    ``subscription.active`` upgrades the workspace to the subscribed tier, and a
+    ``subscription.cancelled`` reverts it to ``free``. Idempotent — writing the
+    same plan the workspace already holds is a harmless no-op write.
+
+    Returns True when the plan was written, False when the workspace is missing /
+    soft-deleted / has a malformed id (so the webhook can log-and-ack rather than
+    500 on an unroutable event). Does NOT touch credits — the per-renewal grant is
+    BC-1's job, keyed on the webhook event id; this only moves the entitlement.
+    """
+    if not plan:
+        raise ValidationError("workspace.invalid_plan", "plan is required")
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception:
+        return False
+    doc = await _WorkspaceDoc.get(oid)
+    if doc is None or doc.deleted_at is not None:
+        return False
+    doc.plan = plan
+    await doc.save()
+    return True
+
+
+async def raise_seats_for_plan(workspace_id: str, plan_key: str) -> int | None:
+    """Bump the stored ``Workspace.seats`` UP to the plan's ``max_seats`` (never down).
+
+    Called by the billing subscription webhook on a ``subscription.active`` upgrade,
+    right after ``set_workspace_plan``, so an upgrade actually lifts the stored seat
+    cap (the seat gates also lift it live via ``_effective_seat_limit``, but keeping
+    the persisted field in step means every direct ``doc.seats`` reader — dashboards,
+    "X of Y seats" — sees the new ceiling too).
+
+    UPGRADE-ONLY: writes ``max(doc.seats, plan.max_seats)`` so a downgrade / cancel
+    (which reverts the plan to ``free``) can NEVER strip seats a workspace already
+    has — a workspace on 100 seats that cancels to free keeps its 100. An uncapped
+    plan (Enterprise, ``max_seats=None``) leaves the negotiated ``doc.seats``
+    untouched. A same-or-lower target is a no-op write.
+
+    Returns the resulting seat count, or ``None`` when the plan is unknown/uncapped
+    or the workspace is missing / soft-deleted / malformed (the webhook logs-and-acks
+    rather than 500-ing on an unroutable event). The plan catalog is imported lazily
+    to keep this service off its import graph.
+    """
+    from pocketpaw_ee.cloud.billing import plans as plan_catalog
+
+    tier = plan_catalog.get_plan(plan_key)
+    if tier is None or tier.max_seats is None:
+        return None
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception:
+        return None
+    doc = await _WorkspaceDoc.get(oid)
+    if doc is None or doc.deleted_at is not None:
+        return None
+    new_seats = max(doc.seats, tier.max_seats)
+    if new_seats != doc.seats:
+        doc.seats = new_seats
+        await doc.save()
+    return new_seats
+
+
+# ---------------------------------------------------------------------------
+# Route Permissions
+# ---------------------------------------------------------------------------
+
+
+async def get_route_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+) -> dict[str, list[str]]:
+    """Return the full route-permissions map for the workspace.
+
+    Returns a dict of user_id → list of allowed route keys. An empty list
+    or missing entry means full access (no restrictions).
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+    return dict(doc.route_permissions or {})
+
+
+async def set_member_route_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+    user_id: str,
+    routes: list[str],
+) -> None:
+    """Set route permissions for a single member.
+
+    An empty ``routes`` list clears restrictions (full access).
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+
+    perms = dict(doc.route_permissions or {})
+    if routes:
+        perms[user_id] = routes
+    else:
+        # Empty list = full access; remove the entry entirely
+        perms.pop(user_id, None)
+
+    await _WorkspaceDoc.find_one({"_id": doc.id}).update(
+        {"$set": {"route_permissions": perms}},
+    )
+
+    logger.info(
+        "route_permissions.set",
+        extra={"workspace_id": workspace_id, "user_id": user_id, "routes": routes},
+    )
+
+
+async def clear_member_route_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+    user_id: str,
+) -> None:
+    """Remove all route restrictions for a member (grants full access)."""
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+
+    perms = dict(doc.route_permissions or {})
+    perms.pop(user_id, None)
+
+    await _WorkspaceDoc.find_one({"_id": doc.id}).update(
+        {"$set": {"route_permissions": perms}},
+    )
+
+    logger.info(
+        "route_permissions.clear",
+        extra={"workspace_id": workspace_id, "user_id": user_id},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Connector Permissions
+# ---------------------------------------------------------------------------
+
+
+async def get_connector_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+) -> dict[str, list[str]]:
+    """Return the full connector-permissions map for the workspace.
+
+    Returns a dict of user_id → list of allowed connector names. An empty
+    list or missing entry means full access (no restrictions).
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+    return dict(doc.connector_permissions or {})
+
+
+async def set_member_connector_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+    user_id: str,
+    connectors: list[str],
+) -> None:
+    """Set connector permissions for a single member.
+
+    An empty ``connectors`` list clears restrictions (full access).
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+
+    perms = dict(doc.connector_permissions or {})
+    if connectors:
+        perms[user_id] = connectors
+    else:
+        perms.pop(user_id, None)
+
+    await _WorkspaceDoc.find_one({"_id": doc.id}).update(
+        {"$set": {"connector_permissions": perms}},
+    )
+
+    logger.info(
+        "connector_permissions.set",
+        extra={"workspace_id": workspace_id, "user_id": user_id, "connectors": connectors},
+    )
+
+
+async def clear_member_connector_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+    user_id: str,
+) -> None:
+    """Remove all connector restrictions for a member (grants full access)."""
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+
+    perms = dict(doc.connector_permissions or {})
+    perms.pop(user_id, None)
+
+    await _WorkspaceDoc.find_one({"_id": doc.id}).update(
+        {"$set": {"connector_permissions": perms}},
+    )
+
+    logger.info(
+        "connector_permissions.clear",
+        extra={"workspace_id": workspace_id, "user_id": user_id},
+    )
+
+
 __all__ = [
     "accept_invite",
     "bulk_create_invites",
+    "clear_member_connector_permissions",
+    "clear_member_route_permissions",
     "create",
     "create_invite",
     "decline_invite",
     "delete",
     "get",
+    "get_connector_permissions",
     "get_delete_preview",
+    "get_route_permissions",
     "get_workspace_plan",
     "legacy_ctx",
     "list_admin_ids",
@@ -1389,10 +2157,14 @@ __all__ = [
     "list_members",
     "list_peer_ids",
     "preview_invite",
+    "raise_seats_for_plan",
     "remove_member",
     "resend_invite",
     "revoke_invite",
     "seed_default_workspace",
+    "set_member_connector_permissions",
+    "set_member_route_permissions",
+    "set_instinct_approval_level",
     "update",
     "update_member_role",
     "validate_invite",

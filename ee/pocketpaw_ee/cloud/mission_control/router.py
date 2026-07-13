@@ -17,6 +17,19 @@
 # (mirrors the audit + plan-sessions guard); the actual Beanie write
 # is delegated to ``cycles.service.agent_create_cycle`` via the MC
 # service so the cycles entity stays the sole owner of the write path.
+# Updated: 2026-07-04 (fix/approval-resolution) — ``GET /items`` now
+# accepts a ``status`` query param and threads it into
+# ``ListWorkItemsRequest``. Previously the endpoint documented a status
+# filter but never accepted the param, so ``?status=pending`` was silently
+# ignored and terminal (done/failed) items leaked into the awaiting-approval
+# feed; the service now honors it (``pending`` → awaiting-approval).
+# Updated: 2026-07-05 (fix/mission-control-resolver-consistency) — ``GET /items``
+# now validates ``section`` at the router boundary and raises a
+# ``ValidationError`` (422 ``mission_control.invalid_section``) on an out-of-enum
+# value. Before, an unknown ``section`` raised a raw pydantic
+# ``ValidationError`` when the router built ``ListWorkItemsRequest``, which
+# escaped as HTTP 500. The check mirrors the lenient ``status`` handling
+# (typed ``str``, normalised downstream); valid section values are unchanged.
 """Mission Control façade router.
 
 Thin per ee/cloud rule #4 — parses requests, delegates to
@@ -42,10 +55,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, Request
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
-from pocketpaw_ee.cloud._core.errors import CloudError
+from pocketpaw_ee.cloud._core.errors import CloudError, ValidationError
 from pocketpaw_ee.cloud.cycles.dto import CycleResponse
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.mission_control import service as mc_service
+from pocketpaw_ee.cloud.mission_control.domain import WorkItemSection
 from pocketpaw_ee.cloud.mission_control.dto import (
     ActivityEventResponse,
     AnalyticsResponse,
@@ -53,8 +67,11 @@ from pocketpaw_ee.cloud.mission_control.dto import (
     AttachCycleItemsResponse,
     BulkActionRequest,
     BulkReassignRequest,
+    BulkRevertRequest,
     BulkSnoozeRequest,
     CreateCycleRequest,
+    DetachCycleItemsRequest,
+    DetachCycleItemsResponse,
     ListActivityRequest,
     ListPlanSessionsRequest,
     ListWorkItemsRequest,
@@ -78,21 +95,35 @@ async def list_items(
     agent: str | None = Query(None),
     pocket: str | None = Query(None),
     project_id: str | None = Query(None),
+    status: str | None = Query(None),
     limit: int = Query(50, ge=1, le=500),
     ctx: RequestContext = Depends(request_context),
 ) -> list[WorkItemResponse]:
     """Workspace-aware work item feed.
 
     Filters compose: ``section`` narrows to one pane; ``agent``, ``pocket``,
-    and ``project_id`` further restrict; ``limit`` caps the projected list.
-    Pass ``project_id`` as an empty string to filter for "no project
-    assigned".
+    ``project_id``, and ``status`` further restrict; ``limit`` caps the
+    projected list. Pass ``project_id`` as an empty string to filter for
+    "no project assigned". ``status=pending`` returns only the
+    awaiting-approval feed (excludes terminal done/failed items); omit
+    ``status`` for the full feed.
     """
+    # Validate ``section`` at the boundary so an out-of-enum value degrades to
+    # a clean 422 instead of the raw pydantic ``ValidationError`` (HTTP 500)
+    # that building ``ListWorkItemsRequest`` would otherwise raise. Mirrors the
+    # lenient ``status`` handling (typed ``str``, normalised in the service).
+    if section is not None and section not in WorkItemSection.__members__.values():
+        valid = ", ".join(s.value for s in WorkItemSection)
+        raise ValidationError(
+            "mission_control.invalid_section",
+            f"section must be one of: {valid}",
+        )
     body = ListWorkItemsRequest(
         section=section,
         agent=agent,
         pocket=pocket,
         project_id=project_id,
+        status=status,
         limit=limit,
     )
     return await mc_service.agent_list_work_items(ctx, body)
@@ -150,6 +181,20 @@ async def bulk_snooze(
     ``mission_control.invalid_until_iso``.
     """
     return await mc_service.agent_bulk_snooze(ctx, body)
+
+
+@router.post("/items/bulk-revert")
+async def bulk_revert(
+    body: BulkRevertRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> dict:
+    """Revert N Tasks from a terminal status back to in_progress.
+
+    Flips task status from ``done``, ``reverted``, or ``failed`` back to
+    ``in_progress`` so the operator can resume work. Ids that aren't
+    Tasks land in ``skipped``.
+    """
+    return await mc_service.agent_bulk_revert(ctx, body)
 
 
 @router.get("/outcomes", response_model=OutcomeSummaryResponse)
@@ -231,6 +276,24 @@ async def attach_cycle_items(
     so a half-stale selection still partially succeeds.
     """
     return await mc_service.agent_attach_cycle_items(ctx, cycle_id, body)
+
+
+@router.post(
+    "/cycles/{cycle_id}/items/detach",
+    response_model=DetachCycleItemsResponse,
+)
+async def detach_cycle_items(
+    cycle_id: str,
+    body: DetachCycleItemsRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> DetachCycleItemsResponse:
+    """Detach work items from a sprint.
+
+    Removes items from the sprint by clearing their ``cycle_id``.
+    Items the caller can't see are reported back in ``skipped``
+    rather than failing the whole batch.
+    """
+    return await mc_service.agent_detach_cycle_items(ctx, cycle_id, body)
 
 
 @router.get("/analytics", response_model=AnalyticsResponse)

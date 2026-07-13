@@ -1,56 +1,68 @@
 {
   "version": "1.0",
   "scope": "pocketpaw",
-  "generated_at": "2026-05-31T06:14:38Z",
+  "generated_at": "2026-06-21T12:30:00Z",
   "source_path": "/Users/prakash-1/Documents/paw-workspace/pocketpaw",
+  "authored": true,
   "model": {
     "people": [],
     "systems": [
       {
         "id": "pocketpaw",
-        "name": "Pocketpaw",
-        "description": "Software system: pocketpaw",
-        "tags": [
-          "internal"
-        ],
+        "name": "PocketPaw",
+        "description": "Self-hosted agentic OS: agents live, decide, and remember on the customer's own infrastructure. OSS runtime (src/pocketpaw) plus the multi-tenant enterprise cloud tier (ee/pocketpaw_ee).",
+        "tags": ["internal"],
         "containers": [
           {
-            "id": "pocketpaw",
-            "name": "Pocketpaw",
-            "description": "Docker service: pocketpaw",
-            "technology": "",
-            "tags": [],
-            "components": []
+            "id": "pocketpaw-app",
+            "name": "PocketPaw Runtime + Cloud",
+            "description": "The Python application: the OSS agent runtime and the enterprise cloud tier (FastAPI). Components below are the major logical subsystems.",
+            "technology": "Python 3.12, FastAPI, Pydantic",
+            "tags": ["internal"],
+            "kb_article": "",
+            "components": [
+              {"id": "runtime", "name": "Runtime", "description": "Agent core: 8 pluggable LLM backends, 11 channel adapters, the message bus, the tool registry with trust-level policy, and bundled-skills auto-install. src/pocketpaw/{agents,bus,tools,runtime}.", "technology": "Python", "kb_article": ""},
+              {"id": "fabric", "name": "Fabric (ontology)", "description": "Typed-object + typed-link ontology with provenance and multi-hop (<=5) queries. Two SQLite stores: live objects/links (async) and the type registry (sync). src/pocketpaw/fabric + ee/pocketpaw_ee/fabric.", "technology": "Python, SQLite", "kb_article": ""},
+              {"id": "instinct", "name": "Instinct (governance gate)", "description": "Propose -> approve/reject -> meter governance with a tamper-evident audit ledger and Decision-Graph events. Gates pocket writes, code changes, connectors, and mandates. src/pocketpaw/instinct + ee/pocketpaw_ee/instinct + ee/cloud/pockets/instinct_*.", "technology": "Python, SQLite, MongoDB", "kb_article": ""},
+              {"id": "connectors", "name": "Connectors", "description": "Workspace-scoped typed data integrations (Gmail/Stripe/Postgres/...). CLOUD vs LOCAL execution; derives per-pocket surface profiles. src/pocketpaw/connectors + ee/cloud/connectors.", "technology": "Python, YAML, httpx", "kb_article": ""},
+              {"id": "discovery", "name": "Discovery (Sovereign Zero-Setup)", "description": "On-box digesters turn connector exhaust and Instinct corrections into Fabric objects and governed rules, proposed for human review. Pure/deterministic, no off-box calls. ee/pocketpaw_ee/discovery. NOTE: currently branch-only (feat/szd-*), not yet merged to dev.", "technology": "Python", "kb_article": ""},
+              {"id": "cloud-chat-surface", "name": "Cloud Chat + Surface engine", "description": "Cloud agent orchestration: resolves the chat surface (home/pockets/sites/code/studio/belt), injects per-surface preambles, and assembles scope/pocket/participant context. ee/cloud/chat (agent_service) + ee/cloud/surface.", "technology": "Python, claude_agent_sdk", "kb_article": ""},
+              {"id": "pockets", "name": "Pockets + rippleSpec", "description": "Pocket workspace containers (agents+data+tools+KB+rules). The rippleSpec merge endpoint; data sources (read GETs) and write actions gated through Instinct. ee/cloud/pockets.", "technology": "Python", "kb_article": ""},
+              {"id": "sites", "name": "Paw Sites", "description": "Publish pockets as edge sites. Two engines x two modes: {ripple,svelte} x {static,dynamic}; dynamic = per-tenant Cloudflare D1. ee/pocketpaw_ee/sites + the paw-sites generator.", "technology": "Python, Bun, SvelteKit", "kb_article": ""},
+              {"id": "foresight", "name": "Foresight", "description": "Scenario simulation / rehearsal: soul-seeded personas run per-tick cognition loops with calibration and backtest gating. ee/pocketpaw_ee/foresight.", "technology": "Python", "kb_article": ""},
+              {"id": "enterprise-ops", "name": "Enterprise Ops", "description": "Fleet install, Calendar (external sync + conflict detection), Guards (RBAC/ABAC), Audit (placeholder), and the Paw Bar customer decision loop. ee/pocketpaw_ee/{fleet,calendar,guards,audit,paw_bar}.", "technology": "Python", "kb_article": ""}
+            ]
           },
-          {
-            "id": "ollama",
-            "name": "Ollama",
-            "description": "Docker service: ollama",
-            "technology": "ollama/ollama:latest",
-            "tags": [],
-            "components": []
-          },
-          {
-            "id": "qdrant",
-            "name": "Qdrant",
-            "description": "Docker service: qdrant",
-            "technology": "qdrant/qdrant:latest",
-            "tags": [],
-            "components": []
-          },
-          {
-            "id": "mongo",
-            "name": "Mongo",
-            "description": "Docker service: mongo",
-            "technology": "MongoDB",
-            "tags": [
-              "database"
-            ],
-            "components": []
-          }
+          {"id": "mongo", "name": "MongoDB", "description": "Primary cloud datastore: pockets, sessions, messages, agents, sites, Instinct approvals, connectors.", "technology": "MongoDB (Beanie ODM)", "tags": ["database"], "kb_article": "", "components": []},
+          {"id": "redis", "name": "Redis / Dragonfly", "description": "Resumable chat-run streams (SSE transport) and source-refresh rate budgets.", "technology": "Redis / Dragonfly", "tags": ["database", "queue"], "kb_article": "", "components": []},
+          {"id": "qdrant", "name": "Qdrant", "description": "Vector store for embeddings and semantic retrieval.", "technology": "qdrant/qdrant:latest", "tags": ["database"], "kb_article": "", "components": []},
+          {"id": "ollama", "name": "Ollama", "description": "Local LLM inference for self-hosted / sovereign deployments.", "technology": "ollama/ollama:latest", "tags": [], "kb_article": "", "components": []}
         ]
-      }
+      },
+      {"id": "soul-protocol", "name": "Soul Protocol", "description": "External: portable identity + 5-tier memory (.soul). PocketPaw runtime, Fabric, and Instinct write to the soul journal (Decision Graph).", "tags": ["external"], "containers": []},
+      {"id": "ripple", "name": "Ripple", "description": "External: Svelte 5 generative-UI runtime that renders rippleSpec into live UI. Pockets and the static/ripple site track compile through it.", "tags": ["external"], "containers": []},
+      {"id": "cloudflare", "name": "Cloudflare Workers + D1", "description": "External: edge deploy target for Paw Sites; per-tenant D1 backs dynamic sites.", "tags": ["external"], "containers": []},
+      {"id": "kb-go", "name": "kb-go", "description": "External: on-box knowledge-base compiler. Discovery uses its keyless convo-ingest path to compile unstructured exhaust without any off-box call.", "tags": ["external"], "containers": []}
     ],
-    "relationships": []
+    "relationships": [
+      {"source": "connectors", "target": "fabric", "description": "ingests typed records", "technology": "", "style": "sync"},
+      {"source": "discovery", "target": "fabric", "description": "reads objects, proposes types", "technology": "", "style": "async"},
+      {"source": "discovery", "target": "instinct", "description": "proposes governed rules", "technology": "", "style": "async"},
+      {"source": "discovery", "target": "kb-go", "description": "on-box compile (keyless)", "technology": "subprocess", "style": "sync"},
+      {"source": "pockets", "target": "instinct", "description": "gates write actions", "technology": "", "style": "sync"},
+      {"source": "pockets", "target": "ripple", "description": "renders rippleSpec", "technology": "", "style": "sync"},
+      {"source": "cloud-chat-surface", "target": "pockets", "description": "creates / edits pockets", "technology": "", "style": "sync"},
+      {"source": "cloud-chat-surface", "target": "fabric", "description": "queries the ontology", "technology": "", "style": "sync"},
+      {"source": "cloud-chat-surface", "target": "instinct", "description": "routes approvals", "technology": "", "style": "sync"},
+      {"source": "cloud-chat-surface", "target": "mongo", "description": "persists sessions / messages", "technology": "", "style": "sync"},
+      {"source": "cloud-chat-surface", "target": "redis", "description": "streams run events", "technology": "SSE", "style": "async"},
+      {"source": "sites", "target": "pockets", "description": "publishes from a pocket spec", "technology": "", "style": "sync"},
+      {"source": "sites", "target": "ripple", "description": "compiles the ripple track", "technology": "", "style": "sync"},
+      {"source": "sites", "target": "cloudflare", "description": "deploys worker + D1", "technology": "", "style": "sync"},
+      {"source": "runtime", "target": "soul-protocol", "description": "loads / saves memory", "technology": "", "style": "sync"},
+      {"source": "fabric", "target": "soul-protocol", "description": "writes the object journal", "technology": "", "style": "async"},
+      {"source": "instinct", "target": "soul-protocol", "description": "emits Decision-Graph events", "technology": "", "style": "async"},
+      {"source": "pockets", "target": "mongo", "description": "persists pocket + spec", "technology": "", "style": "sync"}
+    ]
   }
 }

@@ -5,6 +5,11 @@ We persist sha256(plaintext) so a DB read cannot reconstruct a usable
 invite link. ``token`` is the legacy plaintext column kept Optional for
 backfill during the hashing rollout — new invites set ``token_hash``
 and leave ``token`` as None.
+
+2026-06-08 (pp#1365): added the optional embedded ``InviteContext`` and the
+nullable ``context`` field so an invite can carry admin-provided onboarding
+hints (``focus`` + ``profile_pic``) for a later VIP-onboarding flow. Fully
+optional — pre-existing invite rows read back with ``context=None``.
 """
 
 from __future__ import annotations
@@ -13,12 +18,25 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 
 from beanie import Document, Indexed
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pymongo import IndexModel
 
 
 def _default_expiry() -> datetime:
     return datetime.now(UTC) + timedelta(days=7)
+
+
+class InviteContext(BaseModel):
+    """Optional admin-provided onboarding hints carried on an invite.
+
+    Both fields are optional so the admin can supply either, both, or
+    neither. ``focus`` is a one-line description of what the new member
+    will own; ``profile_pic`` is a reference (e.g. an uploaded file id)
+    to a suggested avatar. Consumed by the downstream VIP-onboarding flow.
+    """
+
+    focus: str | None = None
+    profile_pic: str | None = None
 
 
 def hash_token(plaintext: str) -> str:
@@ -42,6 +60,7 @@ class Invite(Document):
     token: str | None = None  # legacy plaintext (deprecated; nulled after migration)
     token_hash: Indexed(str, unique=True) | None = None  # type: ignore[valid-type]
     group: str | None = None
+    context: InviteContext | None = None  # optional admin onboarding hints (pp#1365)
     accepted: bool = False
     revoked: bool = False
     revoked_reason: str | None = None  # e.g. "declined" when invitee declines vs inviter-revoke

@@ -6,6 +6,31 @@ to JSON responses.
 
 Re-exports remain accessible via `ee.cloud.shared.errors` (a shim) for
 the transition period; new code should import from this module.
+
+Changed 2026-06-30 (feat/billing-quota-enforcement, chunk 2): added
+`QuotaExceeded` (402, `credits.quota_exceeded`) — the monthly-credit-cap
+sibling of `InsufficientCredits`. Same 402 status (the client can't spend
+right now) but a distinct code so the UI can prompt a plan upgrade / top-up
+rather than a balance refill; it carries the effective `ceiling` and the
+`spent` figure that crossed it.
+
+FL-2 (file-version spine, port of dewani12's #1193) added
+``PreconditionFailed`` (412) for stale ``If-Match`` optimistic-concurrency
+failures on the file-version write path.
+
+Changed 2026-07-08 (feat/billing-cancel-downgrade): added
+``NoActiveSubscription`` (402, ``billing.no_active_subscription``) — raised by
+the subscription-cancel path when a workspace has no ``active`` subscription to
+cancel (only historical / already-cancelled rows, or never subscribed). 402 (the
+same money-error family as ``InsufficientCredits`` / ``QuotaExceeded``) so the
+client renders a "not subscribed" state rather than a 404-style missing resource.
+
+Changed 2026-07-08 (feat/billing-smb-caps): added ``PocketLimitError`` (402,
+``billing.pocket_limit``) and ``ConnectorLimitError`` (402,
+``billing.connector_limit``) — the pocket-create and connector-enable siblings of
+``SeatLimitError``. Same 402 money-adjacent family; distinct codes so the UI can
+prompt a plan upgrade. Both enforce at create/enable time only (never retroactive)
+and only when ``billing_enforced`` is on.
 """
 
 from __future__ import annotations
@@ -52,6 +77,21 @@ class ConflictError(CloudError):
         super().__init__(409, code, message)
 
 
+class PreconditionFailed(CloudError):
+    """A conditional request precondition failed (412).
+
+    Standard HTTP ``If-Match`` optimistic-concurrency semantics: the caller
+    supplied an ``If-Match`` etag (here the file's ``content_version``) that no
+    longer matches the current resource, so the write is refused. Distinct from
+    ``ConflictError`` (409, a generic resource conflict) — a stale ``If-Match``
+    is precisely a 412. Added by FL-2 (file-version spine, port of #1193) so a
+    stale-etag PUT/revert returns 412.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(412, code, message)
+
+
 class ValidationError(CloudError):
     """Validation failure (422)."""
 
@@ -59,11 +99,104 @@ class ValidationError(CloudError):
         super().__init__(422, code, message)
 
 
+class BadRequest(CloudError):
+    """Malformed / untrusted request (400).
+
+    Distinct from ``ValidationError`` (422, a well-formed request that fails a
+    field-level rule): a 400 is for a request that can't be trusted at all — a
+    webhook whose signature doesn't verify, a body that isn't parseable. Used by
+    the billing webhook so an unverifiable Dodo delivery returns 400, not 422.
+    """
+
+    def __init__(self, code: str, message: str = "Bad request") -> None:
+        super().__init__(400, code, message)
+
+
 class SeatLimitError(CloudError):
     """Seat/billing limit reached (402)."""
 
     def __init__(self, seats: int) -> None:
         super().__init__(402, "billing.seat_limit", f"Seat limit of {seats} reached")
+
+
+class PocketLimitError(CloudError):
+    """Workspace hit its plan's pocket cap (402).
+
+    Sibling of ``SeatLimitError`` for the pocket-create seam: the workspace holds
+    its plan's ``max_pockets`` and a new create would exceed it. 402 (same
+    money-adjacent family) with a distinct ``billing.pocket_limit`` code so the UI
+    can prompt a plan upgrade. Enforced at CREATE time only — never removes an
+    existing pocket — and only when ``billing_enforced`` is on.
+    """
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(402, "billing.pocket_limit", f"Pocket limit of {limit} reached")
+
+
+class ConnectorLimitError(CloudError):
+    """Workspace hit its plan's connector cap (402).
+
+    Sibling of ``SeatLimitError`` for the connector-enable seam: the workspace
+    already has its plan's ``max_connectors`` enabled and enabling another would
+    exceed it. 402 with a distinct ``billing.connector_limit`` code so the UI can
+    prompt a plan upgrade. Enforced at ENABLE time only — never disables an
+    already-enabled connector — and only when ``billing_enforced`` is on.
+    """
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(402, "billing.connector_limit", f"Connector limit of {limit} reached")
+
+
+class InsufficientCredits(CloudError):
+    """Credit wallet has too few credits for the requested debit (402)."""
+
+    def __init__(self, requested: int, available: int) -> None:
+        super().__init__(
+            402,
+            "credits.insufficient",
+            f"Insufficient credits: requested {requested}, available {available}",
+        )
+
+
+class QuotaExceeded(CloudError):
+    """Workspace hit its monthly credit ceiling for the period (402).
+
+    Distinct from ``InsufficientCredits`` (the wallet is empty): the wallet may
+    still hold credits, but the workspace has spent up to its plan's monthly cap
+    (the ``monthly_ceiling`` entitlement, extended by any purchased top-ups in the
+    period). Same 402 status as ``InsufficientCredits`` so the client treats both
+    as "can't spend right now", but a distinct machine code so the UI can prompt a
+    plan upgrade / top-up rather than just a balance refill. ``ceiling`` is the
+    EFFECTIVE cap (plan ceiling + period top-ups) and ``spent`` is the
+    month-to-date spend that met or crossed it.
+    """
+
+    def __init__(self, ceiling: int, spent: int) -> None:
+        self.ceiling = ceiling
+        self.spent = spent
+        super().__init__(
+            402,
+            "credits.quota_exceeded",
+            f"Monthly credit quota exceeded: spent {spent} of {ceiling} this month",
+        )
+
+
+class NoActiveSubscription(CloudError):
+    """Workspace has no active recurring subscription to act on (402).
+
+    Raised by the cancel path when a workspace asks to cancel but has no ``active``
+    subscription row — only historical / already-cancelled rows, or it never
+    subscribed. 402 (the same family as ``InsufficientCredits`` / ``QuotaExceeded``,
+    "you can't do the money action right now") so the client prompts a
+    not-subscribed state rather than treating it as a 404-style missing resource.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            402,
+            "billing.no_active_subscription",
+            "No active subscription to cancel for this workspace",
+        )
 
 
 class RateLimited(CloudError):
@@ -93,11 +226,18 @@ def with_cause(error: CloudError, cause: BaseException) -> CloudError:
 
 
 __all__ = [
+    "BadRequest",
     "CloudError",
     "ConflictError",
+    "ConnectorLimitError",
     "Forbidden",
+    "InsufficientCredits",
     "Internal",
+    "NoActiveSubscription",
     "NotFound",
+    "PocketLimitError",
+    "PreconditionFailed",
+    "QuotaExceeded",
     "RateLimited",
     "SeatLimitError",
     "ValidationError",

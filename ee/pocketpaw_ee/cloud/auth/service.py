@@ -48,6 +48,7 @@ def _to_domain(doc: _UserDoc) -> AuthUser:
         workspaces=tuple(_membership_to_domain(m) for m in doc.workspaces),
         is_verified=doc.is_verified,
         is_superuser=doc.is_superuser,
+        mfa_enabled=doc.mfa_enabled,
     )
 
 
@@ -173,10 +174,38 @@ async def suggest_workspace_members(workspace_id: str, q: str, *, limit: int = 8
     ]
 
 
+async def resolve_display_names(user_ids: set[str]) -> dict[str, str]:
+    """Batch-resolve a set of user ids → display names in one query.
+
+    Name preference: ``full_name`` → ``email`` → the id. A non-ObjectId id
+    (an agent name, or a sentinel like ``"external_action"`` /
+    ``"admin_action"``) is skipped, and an id with no matching user simply
+    isn't in the returned map — in both cases the caller's ``.get(id, id)``
+    fallback keeps the raw id. Resolves across the whole user set, not just
+    current members, so a proposer who has since left still renders as a
+    name. Callers (e.g. the Mission Control façade) route through here so the
+    façade layer never touches the Beanie user model directly.
+    """
+    object_ids: list[PydanticObjectId] = []
+    for uid in user_ids:
+        try:
+            object_ids.append(PydanticObjectId(uid))
+        except Exception:
+            continue
+    if not object_ids:
+        return {}
+    docs = await _UserDoc.find({"_id": {"$in": object_ids}}).to_list()
+    return {
+        str(u.id): ((u.full_name or "").strip() or (u.email or "").strip() or str(u.id))
+        for u in docs
+    }
+
+
 __all__ = [
     "claim_home_pocket_id",
     "get_home_pocket_id",
     "get_profile",
+    "resolve_display_names",
     "set_active_workspace",
     "set_avatar_path",
     "suggest_workspace_members",

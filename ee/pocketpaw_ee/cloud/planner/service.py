@@ -29,6 +29,51 @@
 #   ``preconditions`` from each OSS TaskSpec onto the cloud Task it
 #   creates, so completion-time verification (pocketpaw#1162) can read
 #   machine-checkable criteria off the materialized Task.
+# Updated: 2026-07-10 (feat/verify-mode-shadow) — three-position
+#   ``verify_mode`` at the cloud terminal: ``_run_one`` now resolves
+#   ``effective_cloud_plan_verify_mode()`` ONCE (off | shadow | enforce;
+#   the legacy ``cloud_plan_verify_loop_enabled`` bool resolves to ENFORCE
+#   for back-compat) and passes it to ``_verify_plan_task_outcome``. off ⇒
+#   byte-for-byte today's default. shadow ⇒ the verdict is stamped on
+#   ``Task.verify['verdict']`` plus ``verify['mode']='shadow'`` and
+#   ``verify['would_have']=<done|requeued|escalated>`` (what enforce WOULD
+#   have decided, computed READ-ONLY — no requeue_count bump, no feedback
+#   growth, no status change) with a ``verify shadow mode: would_have=...``
+#   log line; the helper returns "done" so every DONE side-effect (output
+#   file, artifact upload, auto-complete) runs exactly as today. enforce ⇒
+#   the prior flag-on behaviour, unchanged. The rejected-attempt feedback
+#   block in the run instructions renders ONLY in enforce — shadow must not
+#   alter the run itself.
+# Updated: 2026-07-02 (feat/svl-5-cloud-verify) — Self-Verifying Loop at
+#   the CLOUD planner terminal (SVL-5), behind
+#   ``cloud_plan_verify_loop_enabled`` (default False ⇒ byte-for-byte
+#   today's behaviour). ``_run_one`` now judges each finished run's
+#   output against the Task's ``success_criteria`` via the OSS
+#   ``DeterministicVerdictProvider`` BEFORE any DONE side-effect fires
+#   (``_verify_plan_task_outcome``): SOLVED / UNKNOWN stamp the verdict
+#   on ``Task.verify`` and complete exactly as today; PARTIAL /
+#   NOT_SOLVED is REQUEUED — unmet criteria appended to the cumulative
+#   ``verify.feedback`` record, a verify counter (SEPARATE from error
+#   retries) bumped, status back to ``proposed`` so the EXISTING
+#   dispatch path re-runs it (``_execute_ready_plan_tasks`` tail-calls
+#   itself when a batch requeued anything; no new dispatch machinery).
+#   The re-run's instructions carry a "Why the last attempt was
+#   rejected" section mirroring the OSS executor's prompt block. A
+#   no-progress guard (unmet-criteria frozenset repeats or count
+#   non-decreasing across two consecutive attempts) escalates EARLY;
+#   exhausting ``cloud_plan_verify_max_requeues`` escalates too — both
+#   terminate as ``failed`` (the existing terminal that already
+#   unblocks dependents here) with ``verify.escalation_reason`` stamped
+#   (``no_progress`` | ``budget_exhausted``) and emit TaskResolved so
+#   the dependent-dispatch cascade still fires. A requeued or escalated
+#   attempt never saves its output file, uploads artifacts, or
+#   auto-completes.
+# Updated: 2026-07-08 (feat/billing-enforce-gate) — ``_execute_ready_plan_tasks``
+#   now runs the shared run-start BILLING gate
+#   (``credits.guards.over_billing_limit``) after it finds ready tasks and BEFORE
+#   the claim + ``pool.run`` batch, so an over-budget tenant makes NO model call
+#   on the planner path. Tasks stay ``proposed`` and execute on a later tick once
+#   budget frees. Flag-gated no-op unless ``billing_enforced``.
 """Planner entity — business logic service.
 
 Public API (all module-level ``async def``):
@@ -83,6 +128,35 @@ from pocketpaw_ee.cloud.planner.dto import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _record_deep_work_audit(
+    workspace_id: str,
+    actor_id: str,
+    action: str,
+    target_type: str,
+    target_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Fire-and-forget audit recording for deep work operations.
+
+    Never raises — failures are logged and swallowed so an audit outage
+    cannot block a legitimate operation.
+    """
+    import asyncio
+
+    from pocketpaw_ee.cloud.deep_work_log import service as _dw_log_service
+
+    asyncio.ensure_future(
+        _dw_log_service.record(
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            metadata=metadata or {},
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +255,22 @@ async def agent_plan_project(ctx: RequestContext, body: PlanProjectRequest) -> P
         )
     except Exception:
         logger.exception("failed to kick off plan task execution")
+
+    _record_deep_work_audit(
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.plan.generated",
+        target_type="plan_session",
+        target_id=session.id,
+        metadata={
+            "project_id": project.id,
+            "project_name": project.name,
+            "task_count": len(session.task_ids),
+            "agent_gap_count": len(session.agent_gaps),
+            "prd_file_id": session.prd_file_id,
+            "deep_research": body.deep_research,
+        },
+    )
 
     return _session_to_dto(session)
 
@@ -1175,9 +1265,31 @@ async def _execute_ready_plan_tasks(
         return
     logger.info("_execute_ready_plan_tasks: %d ready task(s)", len(ready))
 
+    # Run-start BILLING gate — the planner is a background (non-HTTP) executor, so
+    # reject BEFORE claiming/running any task rather than starting work an
+    # over-budget tenant can't pay for. Gating here (after we know there is work,
+    # before the claim + ``pool.run`` batch) means NO model call fires while over
+    # budget; the tasks stay ``proposed`` and execute on a later tick once budget
+    # frees. Flag-gated no-op unless ``billing_enforced``; there is no user-facing
+    # stream on this path, so a warning log is the terminal signal.
+    from pocketpaw_ee.cloud.credits.guards import over_billing_limit
+
+    billing_reject = await over_billing_limit(workspace_id)
+    if billing_reject is not None:
+        logger.warning(
+            "_execute_ready_plan_tasks: workspace %s over billing limit (%s) — "
+            "skipping execution of %d ready task(s) for project %s",
+            workspace_id,
+            billing_reject.code,
+            len(ready),
+            project_id,
+        )
+        return
+
     from types import SimpleNamespace
 
     from pocketpaw.agents.pool import get_agent_pool
+    from pocketpaw.config import get_settings
     from pocketpaw_ee.cloud.tasks.dto import ClaimTaskRequest
     from pocketpaw_ee.cloud.tasks.service import agent_claim_task as cloud_claim_task
 
@@ -1211,6 +1323,11 @@ async def _execute_ready_plan_tasks(
 
     # Run all concurrently
     async def _run_one(tid, aid, d):
+        # Resolve the three-position verify mode ONCE per run (off | shadow
+        # | enforce — the legacy cloud_plan_verify_loop_enabled bool resolves
+        # to 'enforce' via effective_cloud_plan_verify_mode()). Everything
+        # verify-related below keys off this single resolution.
+        verify_mode = get_settings().effective_cloud_plan_verify_mode()
         instr = "You are executing a task from a project plan.\\n\\n"
         instr += "## Task: " + d.title + "\\n\\n"
         instr += d.summary + "\\n\\n"
@@ -1218,6 +1335,36 @@ async def _execute_ready_plan_tasks(
             instr += "## Success Criteria\\n"
             for i, sc in enumerate(d.success_criteria, 1):
                 instr += str(i) + ". " + sc + "\\n"
+        # SVL-5: if a prior attempt was rejected by the verify loop,
+        # surface the SPECIFIC unmet criteria — cumulative, most recent
+        # first — so the re-dispatched agent sees exactly what to fix
+        # rather than a bare "try again". Mirrors the OSS executor's
+        # ``_build_task_prompt`` "Why the last attempt was rejected"
+        # block. ENFORCE-only: off renders today's instructions
+        # byte-for-byte even if old feedback is on the doc, and shadow
+        # must be observe-only — it never writes feedback itself, and
+        # rendering leftovers from a prior enforce phase would change the
+        # run in a mode that promises zero behavioural delta.
+        if verify_mode == "enforce":
+            feedback = (getattr(d, "verify", None) or {}).get("feedback") or []
+            if feedback:
+                instr += "\\n## Why the last attempt was rejected\\n"
+                instr += (
+                    "A previous attempt did NOT meet the success criteria below. "
+                    "Address each unmet criterion in your work this time:\\n"
+                )
+                for record in reversed(feedback):
+                    attempt = record.get("attempt")
+                    summary = record.get("summary", "")
+                    if attempt:
+                        instr += "Attempt " + str(attempt) + " (" + summary + "):\\n"
+                    else:
+                        instr += summary + ":\\n"
+                    for item in record.get("unmet_criteria", []):
+                        line = "- " + item.get("criterion", "")
+                        if item.get("detail"):
+                            line += " — " + item.get("detail", "")
+                        instr += line + "\\n"
         instr += "\\n## Workflow\\n"
         instr += "1. Review the task and create the required output.\\n"
         instr += "2. When done, call the MCP tool complete_task\\n"
@@ -1239,6 +1386,30 @@ async def _execute_ready_plan_tasks(
                     pass
             full_output = "".join(output_chunks)[:50000] if output_chunks else ""
             logger.info("agent done task=%s output_len=%d", tid, len(full_output))
+
+            # SVL-5 (Self-Verifying Loop, cloud planner terminal): judge
+            # the run's output against the Task's success_criteria BEFORE
+            # any DONE side-effect fires. "done" = SOLVED / UNKNOWN, mode
+            # off, or SHADOW mode (which stamps the verdict + would_have
+            # and always passes through) — fall through to today's
+            # completion path untouched. "requeued" / "escalated"
+            # (enforce only) = the verify helper already moved the task
+            # (back to ``proposed`` / to ``failed``) and stamped why; a
+            # rejected attempt must NOT save its output file, upload
+            # artifacts, or auto-complete — returning here is what
+            # enforces that invariant.
+            resolution = "done"
+            if verify_mode != "off":
+                resolution = await _verify_plan_task_outcome(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    task_id=tid,
+                    full_output=full_output,
+                    mode=verify_mode,
+                )
+            if resolution != "done":
+                return resolution
+
             if full_output:
                 await _save_task_output_file(workspace_id, tid, d.title, full_output, project_id)
                 uf = await _scan_and_upload_agent_files(
@@ -1256,10 +1427,26 @@ async def _execute_ready_plan_tasks(
                 project_id,
                 result_summary=full_output[:2000],
             )
+            return "done"
         except Exception as e:
             logger.exception("agent exec failed for task %s: %s", tid, e)
+            return "error"
 
-    await asyncio.gather(*[_run_one(tid, aid, d) for tid, aid, d in batch])
+    results = await asyncio.gather(*[_run_one(tid, aid, d) for tid, aid, d in batch])
+
+    # SVL-5: a verify-requeued task is back to ``proposed`` with feedback
+    # stamped, but nothing emits TaskResolved for it — so re-enter the
+    # EXISTING dispatch path (this very function, same as the
+    # ``on_plan_task_resolved`` cascade does) to claim and re-run it.
+    # Bounded: each pass either solves, requeues within the budget, or
+    # escalates to ``failed``, so the recursion depth is capped by
+    # ``cloud_plan_verify_max_requeues``. Flag off ⇒ every result is
+    # "done"/"error" and this never fires.
+    if any(r == "requeued" for r in results):
+        await _execute_ready_plan_tasks(
+            workspace_id=workspace_id,
+            project_id=project_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1331,6 +1518,229 @@ async def _reassign_task(workspace_id: str, task_id: str, agent_id: str, agent_n
     except Exception as e:
         logger.warning("_reassign_task: failed for %s: %s", task_id, e)
         return False
+
+
+def _plan_task_event_payload(doc: Any, workspace_id: str, project_id: str) -> dict:
+    """Event payload for a planner-terminal task write (SVL-5).
+
+    Same shape ``_auto_complete_task`` hand-builds for TaskResolved —
+    ``cascade_plan_tasks`` reads ``workspace_id`` + ``task.project_id``
+    off it — with ``status`` taken from the doc's CURRENT state so a
+    requeue ships ``proposed`` and an escalation ships ``failed``.
+    """
+    return {
+        "task_id": str(doc.id),
+        "workspace_id": workspace_id,
+        "project_id": project_id,
+        "task": {
+            "id": str(doc.id),
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "title": doc.title,
+            "summary": doc.summary,
+            "status": doc.status,
+            "assignee": {
+                "kind": doc.assignee.kind,
+                "id": doc.assignee.id,
+                "name": doc.assignee.name,
+            },
+        },
+    }
+
+
+async def _verify_plan_task_outcome(
+    *,
+    workspace_id: str,
+    project_id: str,
+    task_id: str,
+    full_output: str,
+    mode: str = "enforce",
+) -> str:
+    """SVL-5 verify hook — judge a finished plan-task run before completion.
+
+    Called from ``_run_one`` only when the resolved
+    ``effective_cloud_plan_verify_mode()`` is non-'off', after the agent
+    run produced ``full_output`` and BEFORE any DONE side-effect. The
+    verifier is the OSS ``DeterministicVerdictProvider`` — external to the
+    agent that produced the output.
+
+    ``mode`` is the caller's resolved verify mode:
+
+      - ``"shadow"`` — observe-only rollout rung. The verdict is stamped
+        on ``verify['verdict']`` together with ``verify['mode']='shadow'``
+        and ``verify['would_have']=<done|requeued|escalated>`` (what
+        enforce WOULD have decided, computed READ-ONLY — no
+        ``requeue_count`` bump, no ``feedback`` growth, no status change),
+        a ``verify shadow mode: would_have=...`` line is logged, and the
+        helper ALWAYS returns ``"done"`` so every DONE side-effect runs
+        exactly as today.
+      - ``"enforce"`` — the full loop below.
+
+    Returns the resolution the caller must honour:
+
+      - ``"done"`` — SOLVED / UNKNOWN (or the task doc vanished): a
+        passing or uncheckable result is NEVER requeued or mutated. The
+        verdict is stamped on ``Task.verify['verdict']``; the caller
+        completes exactly as today.
+      - ``"requeued"`` — PARTIAL / NOT_SOLVED, still progressing and
+        within budget: this attempt's unmet criteria (criterion +
+        detail) are APPENDED to the cumulative ``verify['feedback']``
+        record, the verify counter (``verify['requeue_count']``,
+        SEPARATE from any error-retry counter) is bumped, and status
+        goes back to ``proposed`` so the existing claim/dispatch path
+        re-runs it.
+      - ``"escalated"`` — the no-progress guard tripped (this attempt's
+        unmet-criteria frozenset equals the previous attempt's, or its
+        count is non-decreasing) OR the requeue budget is exhausted:
+        status flips to ``failed`` — the existing terminal that already
+        unblocks dependents in ``_execute_ready_plan_tasks`` — with
+        ``verify['escalation_reason']`` stamped (``no_progress`` |
+        ``budget_exhausted``). Emits TaskResolved so the same cascade
+        that dispatches dependents after a completion fires here too.
+
+    Mirrors the OSS executor's SVL-2/SVL-3 semantics at this seam.
+    """
+    from pocketpaw.config import get_settings
+    from pocketpaw.instinct.models import OutcomeStatus
+    from pocketpaw.instinct.verdict_provider import DeterministicVerdictProvider
+    from pocketpaw_ee.cloud._core.realtime.emit import emit
+    from pocketpaw_ee.cloud._core.realtime.events import TaskResolved, TaskUpdated
+    from pocketpaw_ee.cloud.models.task import Task as _TaskDoc
+
+    doc = await _TaskDoc.get(task_id)
+    if not doc or doc.workspace_id != workspace_id:
+        # Tenant guard on the read. A vanished / foreign doc falls
+        # through to the caller's normal completion path, which
+        # re-checks existence itself — same posture as today.
+        return "done"
+
+    verdict = DeterministicVerdictProvider().verify(full_output, list(doc.success_criteria or []))
+    verify_state = dict(doc.verify or {})
+    verify_state["verdict"] = verdict.model_dump()
+    logger.info(
+        "task %s verify verdict: %s (%s)",
+        task_id,
+        verdict.status,
+        verdict.summary,
+    )
+
+    if verdict.status not in (OutcomeStatus.PARTIAL, OutcomeStatus.NOT_SOLVED):
+        # SOLVED / UNKNOWN — stamp the verdict and pass through.
+        if mode == "shadow":
+            # Shadow telemetry covers every completion, not just the
+            # failing ones: enforce would have passed this through too.
+            verify_state["mode"] = "shadow"
+            verify_state["would_have"] = "done"
+            logger.info(
+                "verify shadow mode: would_have=done verdict=%s task=%s",
+                verdict.status.value,
+                task_id,
+            )
+        doc.verify = verify_state
+        await doc.save()
+        # no-event: the TaskResolved emitted by _auto_complete_task
+        # moments later announces this same completion; a separate
+        # TaskUpdated here would double-fire the feed for one logical
+        # completion write.
+        return "done"
+
+    unmet = [cr for cr in verdict.criteria_results if not cr.met]
+    n = int(verify_state.get("requeue_count", 0))
+    max_requeues = get_settings().cloud_plan_verify_max_requeues
+
+    # No-progress / oscillation guard (mirrors OSS SVL-3), checked
+    # BEFORE the budget: compare THIS attempt's unmet set against the
+    # PREVIOUS attempt's. Exact same criteria still failing, or the
+    # unmet count not shrinking — escalate early instead of burning the
+    # whole requeue budget circling a dead end.
+    prior_feedback = verify_state.get("feedback") or []
+    no_progress = False
+    if prior_feedback:
+        current = frozenset(cr.criterion for cr in unmet)
+        prev = frozenset(item["criterion"] for item in prior_feedback[-1].get("unmet_criteria", []))
+        no_progress = current == prev or len(current) >= len(prev)
+
+    if mode == "shadow":
+        # SHADOW: record what enforce WOULD have decided (no-progress vs
+        # budget vs requeue — computed read-only above) WITHOUT mutating
+        # anything the loop acts through: no status change, no
+        # requeue_count bump, no feedback growth. Returning "done" lets
+        # every DONE side-effect run exactly as today — the would_have
+        # stamp + log line are the rollout telemetry a tenant reads
+        # before daring enforce.
+        if no_progress:
+            would_have = "escalated"
+            would_reason = "no_progress"
+        elif n < max_requeues:
+            would_have = "requeued"
+            would_reason = ""
+        else:
+            would_have = "escalated"
+            would_reason = "budget_exhausted"
+        verify_state["mode"] = "shadow"
+        verify_state["would_have"] = would_have
+        doc.verify = verify_state
+        await doc.save()
+        logger.info(
+            "verify shadow mode: would_have=%s%s verdict=%s task=%s",
+            would_have,
+            f" reason={would_reason}" if would_reason else "",
+            verdict.status.value,
+            task_id,
+        )
+        return "done"
+
+    if not no_progress and n < max_requeues:
+        # REQUEUE: append this attempt's rejections to the CUMULATIVE
+        # feedback log (attempt N's instructions carry 1..N-1), bump the
+        # verify counter, and put the task back where the existing
+        # dispatch machinery picks it up.
+        verify_state["feedback"] = [
+            *prior_feedback,
+            {
+                "attempt": n + 1,
+                "status": verdict.status.value,
+                "summary": verdict.summary,
+                "unmet_criteria": [
+                    {"criterion": cr.criterion, "detail": cr.detail} for cr in unmet
+                ],
+            },
+        ]
+        verify_state["requeue_count"] = n + 1
+        doc.verify = verify_state
+        doc.status = "proposed"
+        await doc.save()
+        await emit(TaskUpdated(data=_plan_task_event_payload(doc, workspace_id, project_id)))
+        logger.info(
+            "task %s failed verify (%s); requeue %d/%d with %d unmet criterion(s)",
+            task_id,
+            verdict.status,
+            n + 1,
+            max_requeues,
+            len(unmet),
+        )
+        return "requeued"
+
+    # ESCALATE: ``failed`` is the existing terminal — it already
+    # unblocks dependents in ``_execute_ready_plan_tasks``'s resolved
+    # set, and it surfaces in the operator's Snags. Stamp WHY so the
+    # operator sees the cause, and emit TaskResolved so the
+    # dependent-dispatch cascade fires exactly as it would after a
+    # completion.
+    reason = "no_progress" if no_progress else "budget_exhausted"
+    verify_state["escalation_reason"] = reason
+    doc.verify = verify_state
+    doc.status = "failed"
+    await doc.save()
+    await emit(TaskResolved(data=_plan_task_event_payload(doc, workspace_id, project_id)))
+    logger.info(
+        "task %s failed verify (%s) after %d requeue(s); escalating to failed (%s)",
+        task_id,
+        verdict.status,
+        n,
+        reason,
+    )
+    return "escalated"
 
 
 async def _auto_complete_task(

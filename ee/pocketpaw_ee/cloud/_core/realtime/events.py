@@ -31,6 +31,21 @@
 #   (edges_fired / blocked / escalated / errors / sweep_duration_ms) so
 #   audit + dashboards listen to one event per dispatch rather than N
 #   per-row events, the same shape ``BulkActionDispatched`` uses.
+# Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — added
+#   ``WorkspaceJobQueued`` (type="workspace_job.queued") and
+#   ``WorkspaceJobUpdated`` (type="workspace_job.updated") for the workspace
+#   jobs primitive. Queued is emitted at dispatch; Updated on a terminal
+#   transition by the ARQ worker. Worker-side emits route over the xproc
+#   bridge to the web bus, the same path ``PocketUpdated`` uses.
+# Updated: 2026-06-20 (feat/szd-slice2-discovery, S2-R1) — added
+#   ``RuleCreated`` (type="instinct.rule.created") and ``RuleArchived``
+#   (type="instinct.rule.archived") for the discovered-rules entity. Emitted by
+#   ``rules.service`` on every state-mutating call per cloud rule 9 (emit on
+#   every write).
+# Updated: 2026-06-28 (feat/aiam-agent-revoke, AW-4) — added ``AgentDisabled``
+#   (type="agent.disabled") and ``AgentEnabled`` (type="agent.enabled") for the
+#   agent soft-disable / revoke-everywhere flow. Emitted by ``agents.service``
+#   on disable / enable, mirroring ``AgentDeleted``'s payload shape.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -380,6 +395,21 @@ class AgentDeleted(Event):
 
 
 @dataclass
+class AgentDisabled(Event):
+    # Soft-disable (AW-4): the agent is revoked everywhere at once — the run
+    # pool refuses to resolve it on any path until re-enabled. Mirrors
+    # AgentDeleted's payload shape so audit/analytics listeners can key off it.
+    EVENT_TYPE: ClassVar[str] = "agent.disabled"
+
+
+@dataclass
+class AgentEnabled(Event):
+    # Re-enable (AW-4): clears the soft-disable flag; the pool resolves the
+    # agent again on the next get() (the disable already invalidated the cache).
+    EVENT_TYPE: ClassVar[str] = "agent.enabled"
+
+
+@dataclass
 class AgentScopeUpdated(Event):
     EVENT_TYPE: ClassVar[str] = "agent.scope_updated"
 
@@ -424,6 +454,79 @@ class PocketOutcomeEvent(Event):
     EVENT_TYPE: ClassVar[str] = "pocket.outcome"
 
 
+# Workspace jobs — pp#1459 (feat/workspace-jobs). A pocket job is a named,
+# server-side async callable run in the ARQ worker under the synthetic
+# `system:workspace_job` identity. `WorkspaceJobQueued` is emitted at dispatch
+# (the action route's kind=="job" branch); `WorkspaceJobUpdated` is emitted on
+# a terminal transition (done / failed) by the worker. Both ride the same
+# xproc bridge as `PocketUpdated` — worker-side emits route through
+# `publish_bus_envelope` to the web bus.
+#
+# Payload (`data`) for both:
+#   job_id, workspace_id, pocket_id, action, job_name
+#   status — present on WorkspaceJobUpdated only (done | failed)
+@dataclass
+class WorkspaceJobQueued(Event):
+    EVENT_TYPE: ClassVar[str] = "workspace_job.queued"
+
+
+@dataclass
+class WorkspaceJobUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "workspace_job.updated"
+
+
+# Credit ledger (BC-1, the Ledger primitive). Emitted by
+# ``credits.service`` after EVERY successful grant / debit on a workspace's
+# credit wallet (EE cloud rule 9 — emit on every write). A no-op idempotent
+# replay does NOT re-emit (the movement was already applied + emitted on the
+# first call). Listeners (billing dashboard, low-balance alerts, usage meter)
+# key off this single event per movement.
+#
+# Payload (carried under ``Event.data``):
+#   workspace_id      — tenancy.
+#   kind              — genesis | grant | spend | transfer.
+#   amount_delta      — signed credits this movement applied (+grant / -spend).
+#   balance_after     — the wallet balance once this movement landed.
+#   cause             — business reason (top_up | compute_spend | promo | ...).
+#   idempotency_key   — the caller's exactly-once key for this movement.
+@dataclass
+class CreditMovement(Event):
+    EVENT_TYPE: ClassVar[str] = "credits.movement"
+
+
+# Billing — top-up payment captured (BC-2, the Gateway primitive). Emitted by
+# ``billing.service`` after a VERIFIED ``payment.succeeded`` webhook drove a
+# credit grant. data: {workspace_id, gateway, gateway_ref, event_id,
+# amount_credits, currency}. Fires once per delivery (a replayed webhook is a
+# no-op grant, so it does NOT re-emit).
+@dataclass
+class BillingTopupCaptured(Event):
+    EVENT_TYPE: ClassVar[str] = "billing.topup.captured"
+
+
+# Billing — subscription renewal grant (BC-7, the Subscription primitive).
+# Emitted by ``billing.service`` after a VERIFIED ``subscription.active`` /
+# ``subscription.renewed`` webhook drove a credit grant of the tier's monthly
+# allotment. The grant is ADDITIVE (unused credits roll over), keyed on the
+# per-renewal webhook event id. data: {workspace_id, gateway, event_id,
+# plan_key, subscription_id, amount_credits, balance_after}. Fires once per
+# delivery (a replayed renewal is a no-op grant, so it does NOT re-emit).
+@dataclass
+class BillingSubscriptionGranted(Event):
+    EVENT_TYPE: ClassVar[str] = "billing.subscription.granted"
+
+
+# Sites — a pocket was published as a live Paw Site on a per-site annual plan
+# (BC-9, the per-site plan layer). Emitted by ``sites.service.publish_pocket``
+# after the Site doc is inserted/upserted with its ``plan_tier`` stamped. Fires
+# once per publish. data: {workspace_id, site_id, pocket_id, owner, plan_tier}.
+# Listeners (billing dashboard, site-plan analytics, BC-10 Cloudflare
+# provisioner) key off this to react to a new published site at a tier.
+@dataclass
+class SitePublished(Event):
+    EVENT_TYPE: ClassVar[str] = "site.published"
+
+
 # Tasks (Mission Control work-item primitive)
 @dataclass
 class TaskProposed(Event):
@@ -464,6 +567,11 @@ class NotificationRead(Event):
 @dataclass
 class NotificationCleared(Event):
     EVENT_TYPE: ClassVar[str] = "notification.cleared"
+
+
+@dataclass
+class NotificationDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "notification.deleted"
 
 
 # Cycles — Mission Control time-boxed work windows.
@@ -740,6 +848,34 @@ class ConnectorSyncRecorded(Event):
     EVENT_TYPE: ClassVar[str] = "connector.sync_recorded"
 
 
+# Member ingest — VIP Onboarding Phase B. Fired when the per-user ingest
+# worker finishes a member's Gmail/Calendar → private-KB sync (backfill or
+# incremental). data: workspace_id, member_id, scope, mode, status, documents.
+@dataclass
+class MemberIngestCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "member_ingest.completed"
+
+
+# member_ingest.purged — fan-out when a member's Phase B per-user data is
+# deleted (member disconnected their accounts, or was offboarded from the
+# workspace). data: workspace_id, member_id, scope, status, and the per-store
+# delete counts (kb_cleared, tokens_deleted, connectors_deleted,
+# ingest_state_deleted). Downstream consumers (soul memory, the member's home
+# surface, search index) react by dropping anything keyed on that scope.
+@dataclass
+class MemberDataPurged(Event):
+    EVENT_TYPE: ClassVar[str] = "member_ingest.purged"
+
+
+# Fabric ingest — generic Firestore→Fabric mirror worker. Fired when the
+# per-source ingest worker finishes mirroring one Firestore collection into
+# Fabric objects (backfill or incremental). data: workspace_id, source_id,
+# object_type_id, mode, status, objects_ingested, cursor.
+@dataclass
+class FabricIngestCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "fabric_ingest.completed"
+
+
 # Calls — call.notes_posted. The lifecycle events (call.started / call.ended)
 # are defined above with the rest of the LiveKit group-call types; this is the
 # post-call notes fan-out, audience = the group's members.
@@ -775,6 +911,20 @@ class InstinctApprovalRejected(Event):
     EVENT_TYPE: ClassVar[str] = "instinct.approval.rejected"
 
 
+# Layered/learning Instinct gate (2026-06-18 design / T3). Emitted by
+# ``instinct_approvals.service.auto_approve`` when the AUTO lane decides a
+# write WITHOUT a human — a row is created already-decided
+# (status="auto_approved"). Distinct from ``InstinctApprovalApproved``,
+# which fires only on a human's approve action; this one always carries
+# ``actor="system:triager"`` so the UI renders it with a robot icon and the
+# human-pending tray (which filters on status="pending") never shows it.
+# ``data`` carries the approval id + workspace/pocket context plus
+# ``trust_score``, ``triager_reasoning`` and ``lane`` for the audit trail.
+@dataclass
+class InstinctApprovalAutoApproved(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.approval.auto_approved"
+
+
 # Bulk action dispatch (RFC 03 v2 / Wave 3b). Emitted by
 # ``pockets.service.dispatch_bulk_action`` after a fan-out call resolves —
 # one event per dispatch, regardless of how many rows were processed.
@@ -787,6 +937,21 @@ class InstinctApprovalRejected(Event):
 @dataclass
 class BulkActionDispatched(Event):
     EVENT_TYPE: ClassVar[str] = "pocket.bulk_action.dispatched"
+
+
+# Discovered governed rules (SZD slice-2 / S2-R1). Emitted by
+# ``rules.service`` on every state-mutating call — ``created`` when an approved
+# rule lands, ``archived`` when one is retired/superseded. ``data`` carries the
+# rule id + workspace + owner so a downstream WS fan-out can refresh the
+# workspace's rule list without re-reading the doc.
+@dataclass
+class RuleCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.rule.created"
+
+
+@dataclass
+class RuleArchived(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.rule.archived"
 
 
 # Outcome event emission (RFC 03 v2 / Wave 3c). Fires AFTER a write
@@ -845,3 +1010,25 @@ class OutcomeEmitted(Event):
 @dataclass
 class TemporalSweepCompleted(Event):
     EVENT_TYPE: ClassVar[str] = "pocket.temporal_sweep_completed"
+
+
+# Belt & Pulley station run lifecycle (feat/belt-console-backend, SC-2).
+# Fired on every Belt code-change run state transition so the /belt console
+# refreshes a run's status / stage / PR link WITHOUT polling. The transitions
+# happen ASYNCHRONOUSLY relative to the chat turn — propose lands during the
+# turn, but approve (in the Tray) and the executed / failed terminals fire long
+# after the turn's per-session SSE drain is gone — so this MUST ride the
+# workspace realtime bus (the same path Tray / Mission Control events take) to
+# reach the page. Workspace-scoped: the audience resolver fans it out to every
+# workspace member (the /belt console is a per-workspace view).
+#
+# Payload (carried under ``Event.data``):
+#   workspace_id  — tenancy (drives the workspace fan-out).
+#   action_id     — the Instinct code-change Action id (the run id).
+#   status        — proposed | approved | rejected | landed | failed.
+#   stage         — gate | done.
+#   pr_url        — the opened PR url (only on the landed terminal); omitted
+#                   otherwise so the wire stays minimal.
+@dataclass
+class BeltRunUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "belt_run_updated"

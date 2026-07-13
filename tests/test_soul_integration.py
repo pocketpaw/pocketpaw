@@ -138,3 +138,127 @@ class TestSoulIntegration:
         assert (tmp_path / "corrupt.soul.corrupt").exists()
 
         _reset_manager()
+
+    async def test_bootstrap_recall_requests_procedural_and_semantic(self):
+        """SVL-4: the bootstrap auto-recall must request BOTH SEMANTIC and
+        PROCEDURAL memory types, and surface whatever recall returns into the
+        knowledge context.
+
+        Minted correction-rules (CorrectionSoulBridge writes them as
+        ``type="procedural"`` → ``MemoryType.PROCEDURAL``) and session-learned
+        how-tos were previously excluded by a ``types=[SEMANTIC]``-only filter,
+        so they could never reach the bootstrap system prompt.
+
+        This test drives the seam deterministically by stubbing ``soul.recall``:
+        it asserts (1) PROCEDURAL is now in the requested ``types`` set, and
+        (2) a returned PROCEDURAL entry's content surfaces in ``ctx.knowledge``
+        alongside a SEMANTIC one (no regression). It does NOT depend on the
+        underlying store's relevance scoring — see
+        ``test_bootstrap_empty_query_recall_is_inert`` for the separate,
+        pre-existing limitation that the empty query returns nothing from the
+        real BM25 store.
+        """
+        from unittest.mock import AsyncMock
+
+        from soul_protocol import MemoryEntry, MemoryType, Soul
+
+        from pocketpaw.soul import SoulBootstrapProvider
+
+        soul = await Soul.birth(
+            name="RecallFilterTest",
+            archetype="Test Agent",
+            persona="I am a test agent.",
+        )
+
+        semantic_entry = MemoryEntry(
+            type=MemoryType.SEMANTIC,
+            content="The user's company is named Acme Corp.",
+            importance=8,
+        )
+        procedural_entry = MemoryEntry(
+            type=MemoryType.PROCEDURAL,
+            content="Always greet the user by their first name.",
+            importance=7,
+        )
+
+        recall_mock = AsyncMock(return_value=[semantic_entry, procedural_entry])
+        soul.recall = recall_mock  # type: ignore[method-assign]
+
+        provider = SoulBootstrapProvider(soul)
+        ctx = await provider.get_context()
+
+        # (1) The auto-recall must request PROCEDURAL alongside SEMANTIC.
+        recall_mock.assert_awaited()
+        requested_types = recall_mock.await_args.kwargs["types"]
+        assert MemoryType.PROCEDURAL in requested_types, (
+            "bootstrap recall no longer requests PROCEDURAL memories — "
+            "minted correction-rules would be structurally excluded again"
+        )
+        assert MemoryType.SEMANTIC in requested_types, (
+            "bootstrap recall dropped SEMANTIC memories — regression"
+        )
+
+        # (2) Both surface in the knowledge context.
+        knowledge_blob = "\n".join(ctx.knowledge)
+        assert "Always greet the user by their first name." in knowledge_blob, (
+            "PROCEDURAL memory did not surface in bootstrap context"
+        )
+        assert "The user's company is named Acme Corp." in knowledge_blob, (
+            "SEMANTIC memory did not surface in bootstrap context"
+        )
+
+    async def test_bootstrap_empty_query_recall_is_inert(self):
+        """Documents a pre-existing limitation discovered in SVL-4.
+
+        ``get_context`` recalls with ``query=""``. In soul-protocol 0.4.0 the
+        memory stores are BM25/token-overlap based and only return entries
+        whose relevance score is > 0. An empty query produces zero tokens, so
+        recall returns NOTHING regardless of memory type — the SEMANTIC-only
+        filter was never actually surfacing memories either.
+
+        The SVL-4 ``types`` fix is necessary (PROCEDURAL is no longer excluded)
+        but not sufficient on its own: until the empty-query path is addressed
+        (a captain-scoped change to the query/retrieval strategy), neither
+        SEMANTIC nor PROCEDURAL memories reach the bootstrap from the real
+        store. This test locks in that observed behavior so a future fix that
+        makes the empty query return results will flip it and prompt a review.
+        """
+        from soul_protocol import MemoryType, Soul
+
+        soul = await Soul.birth(
+            name="EmptyQueryProbe",
+            archetype="Test Agent",
+            persona="I am a test agent.",
+        )
+        await soul.remember(
+            "The user's company is named Acme Corp.",
+            type=MemoryType.SEMANTIC,
+            importance=8,
+        )
+        await soul.remember(
+            "Always greet the user by their first name.",
+            type=MemoryType.PROCEDURAL,
+            importance=7,
+        )
+
+        # Empty query == the literal call get_context makes today.
+        empty = await soul.recall(
+            query="",
+            types=[MemoryType.SEMANTIC, MemoryType.PROCEDURAL],
+            limit=5,
+        )
+        assert empty == [], (
+            "empty-query recall now returns results — the SVL-4 follow-up "
+            "(non-empty bootstrap query) may have landed; revisit get_context"
+        )
+
+        # A token-bearing query DOES surface both, confirming the data is there
+        # and only the empty query is the blocker.
+        hit = await soul.recall(
+            query="company greet user",
+            types=[MemoryType.SEMANTIC, MemoryType.PROCEDURAL],
+            limit=5,
+        )
+        contents = {m.content for m in hit}
+        assert "The user's company is named Acme Corp." in contents
+        assert "Always greet the user by their first name." in contents

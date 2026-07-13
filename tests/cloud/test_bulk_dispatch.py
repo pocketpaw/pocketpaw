@@ -1,4 +1,10 @@
 # tests/cloud/test_bulk_dispatch.py
+# Updated: 2026-07-02 (AW-7 follow-up — security) — added the AW-7
+#   TEMPLATE-level deny-on-no-match section pinning the EE wiring end-to-end:
+#   flag ON + an uncovered MUTATING (POST) bulk action PARKS into one batch
+#   approval (nothing fires); flag ON + a read_only GET binding still FIRES;
+#   flag OFF (default) is unchanged. The flag is toggled by monkeypatching
+#   ``resolve_workspace_template_default_deny`` (mirrors the temporal tests).
 # Created: 2026-05-28 (feat/wave-3b-action-pipeline) — pins the
 # Wave 3b bulk action dispatch pipeline. This is the EE-side library
 # wrapper around the OSS ``plan_bulk_execution`` planner.
@@ -432,3 +438,145 @@ async def test_service_emits_bulk_action_dispatched_once(stub_run_action, record
     assert payload["action_name"] == "mark_done"
     assert payload["total_rows"] == 2
     assert payload["workspace_id"] == "w1"
+
+
+# ---------------------------------------------------------------------------
+# AW-7 — TEMPLATE-level deny-on-no-match (bulk security hole fix)
+# ---------------------------------------------------------------------------
+#
+# Added: 2026-07-02 (AW-7 follow-up — security). The bulk fan-out ran the
+# gate ONCE per row via the planner and fired ``plan.executions`` un-re-gated,
+# so with the per-workspace ``instinct_template_default_deny`` flag ON an
+# uncovered MUTATING bulk action (no matching rule → EXECUTE/auto) executed
+# ungated while the router + temporal paths parked. ``dispatch_bulk`` now
+# resolves the flag and computes ``is_mutating`` from the pocket's parsed
+# binding, threading both into ``plan_bulk_execution``. These tests pin the
+# EE wiring end-to-end (flag toggled by monkeypatching the resolver, mirroring
+# the temporal-dispatcher tests):
+#   * flag ON + MUTATING (POST) + no rule  → PARKS (batch approval, never fires)
+#   * flag ON + a read_only GET binding    → FIRES (a read has nothing to govern)
+#   * flag OFF (default)                   → UNCHANGED (rows fire)
+
+
+def _stub_deny(monkeypatch, value: bool) -> None:
+    """Drive the AW-7 flag without touching a Workspace document."""
+
+    async def _deny(_ws: str) -> bool:
+        return value
+
+    monkeypatch.setattr(pockets_service, "resolve_workspace_template_default_deny", _deny)
+
+
+def _readonly_ripple_spec(action_name: str = "mark_done") -> dict[str, Any]:
+    """RippleSpec with a single SAFE read_only GET binding (AW-6)."""
+    return {
+        "actions": {
+            action_name: {
+                "kind": "write_binding",
+                "method": "GET",
+                "path": "/items",
+                "read_only": True,
+            }
+        }
+    }
+
+
+async def _make_pocket_with_spec(ripple_spec: dict[str, Any], *, workspace: str = "w1") -> str:
+    doc = _PocketDoc(
+        workspace=workspace,
+        name="test pocket",
+        owner="u1",
+        rippleSpec=ripple_spec,
+        visibility="workspace",
+        widgets=[],
+    )
+    await doc.insert()
+    return str(doc.id)
+
+
+async def test_aw7_flag_on_uncovered_mutating_bulk_parks(
+    stub_run_action, recording_bus, monkeypatch
+) -> None:
+    """THE BULK HOLE, CLOSED. Flag ON + a MUTATING (POST) bulk action + a
+    bound template with NO matching rule ⇒ every row PARKS into ONE batch
+    approval and NOTHING fires through run_action. Mirrors the router +
+    temporal deny-by-default tests."""
+    pocket_id = await _make_pocket()  # rippleSpec: POST /items (mutating)
+    await _make_backend(pocket_id=pocket_id)
+    template = _template(instinct_policy="auto")  # no rules → EXECUTE/auto per row
+    _stub_deny(monkeypatch, True)
+
+    rows = [{"id": "r1", "value": 1}, {"id": "r2", "value": 2}]
+    result = await bulk_dispatch.dispatch_bulk(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        template=template,
+        action_name="mark_done",
+        selected_rows=rows,
+        now=FROZEN_NOW,
+    )
+
+    # Nothing fired — every uncovered mutating row parked.
+    assert result.executions == []
+    assert result.blocked == []
+    assert len(stub_run_action) == 0
+    # ONE batch approval covers both rows.
+    assert result.batch_approval_id is not None
+    assert sorted(result.approval_row_ids) == ["r1", "r2"]
+    approvals = await approvals_service.list_approvals("w1", "u1", {})
+    assert len(approvals) == 1
+    assert approvals[0]["id"] == result.batch_approval_id
+    # Exactly one approval-created event.
+    created = [e for e in recording_bus.events if isinstance(e, InstinctApprovalCreated)]
+    assert len(created) == 1
+
+
+async def test_aw7_flag_on_read_only_bulk_still_fires(stub_run_action, monkeypatch) -> None:
+    """Flag ON but the binding is a SAFE read_only GET (is_mutating=False)
+    ⇒ every row still FIRES. A read has nothing to govern, so the
+    deny-by-default flip never gates it."""
+    pocket_id = await _make_pocket_with_spec(_readonly_ripple_spec())
+    await _make_backend(pocket_id=pocket_id)
+    template = _template(instinct_policy="auto")
+    _stub_deny(monkeypatch, True)
+
+    rows = [{"id": "r1", "value": 1}, {"id": "r2", "value": 2}]
+    result = await bulk_dispatch.dispatch_bulk(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        template=template,
+        action_name="mark_done",
+        selected_rows=rows,
+        now=FROZEN_NOW,
+    )
+
+    assert len(result.executions) == 2
+    assert result.batch_approval_id is None
+    assert result.approval_row_ids == []
+    assert len(stub_run_action) == 2
+
+
+async def test_aw7_flag_off_bulk_is_unchanged(stub_run_action, monkeypatch) -> None:
+    """Flag OFF (the default) ⇒ an uncovered mutating bulk action fires as
+    before AW-7. The zero-behavior-change day-one path."""
+    pocket_id = await _make_pocket()  # POST /items (mutating)
+    await _make_backend(pocket_id=pocket_id)
+    template = _template(instinct_policy="auto")
+    _stub_deny(monkeypatch, False)
+
+    rows = [{"id": "r1", "value": 1}, {"id": "r2", "value": 2}]
+    result = await bulk_dispatch.dispatch_bulk(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        template=template,
+        action_name="mark_done",
+        selected_rows=rows,
+        now=FROZEN_NOW,
+    )
+
+    assert len(result.executions) == 2
+    assert result.batch_approval_id is None
+    assert len(stub_run_action) == 2

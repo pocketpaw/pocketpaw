@@ -12,6 +12,11 @@
 #   machine-verifiable criteria the planner emits on each TaskSpec.
 #   Read-only on the frozen dataclass; the service maps them from the
 #   Beanie doc. Unblocks completion-time verification (pocketpaw#1162).
+# Updated: 2026-07-02 (feat/svl-5-cloud-verify) — added ``verify``
+#   (dict, default empty): read-only Self-Verifying Loop state (verdict,
+#   feedback, requeue_count, escalation_reason) stamped by the cloud
+#   planner terminal (SVL-5). Mapped from the Beanie doc; not writable
+#   through any Task endpoint.
 """Domain value objects for the Tasks entity.
 
 Pure-Python frozen dataclasses. ``tasks/service.py`` owns the
@@ -104,6 +109,7 @@ class Task:
     blocked_by: tuple[str, ...] = ()
     success_criteria: tuple[str, ...] = ()
     preconditions: tuple[str, ...] = ()
+    verify: dict[str, Any] = field(default_factory=dict)
     due_at: datetime | None = None
     blocked_reason: str | None = None
     created_at: datetime | None = None

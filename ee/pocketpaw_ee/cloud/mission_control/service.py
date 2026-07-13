@@ -28,6 +28,136 @@
 # — the single-owner rule (only ``ee.cloud.cycles.service`` may write to
 # the Cycle Beanie doc) is enforced by an import-linter forbidden
 # contract; the MC façade can never bypass it.
+# Updated: 2026-06-10 (W4c — scope instinct reads to workspace) — closes the
+# residual cross-tenant read surface W4a left open on the INTERNAL caller side.
+# W4a workspace-scoped the public instinct router endpoints + the store reads,
+# but this façade still called the (shared, global) instinct store WITHOUT a
+# ``workspace_id``, so on shared infra it read every tenant's Nudges/audit
+# before the pocket-visibility filter ran (and ``agent_outcomes_summary`` is
+# NOT pocket-filtered at the store, only in Python). The three instinct reads
+# — ``store.pending`` / ``store.list_actions`` in ``agent_list_work_items`` and
+# ``store.list_actions`` in ``agent_outcomes_summary`` — now thread the caller's
+# ``ctx.workspace_id`` (already resolved by ``_require_workspace``) into the
+# store so the SQL restricts to the tenant's own rows (plus legacy NULL rows)
+# BEFORE the existing pocket filter. ``workspace_id`` crosses to the OSS store
+# as a PLAIN str; this is a read FILTER only and never touches the W2b audit
+# hash chain. The bulk-approve / bulk-reject WRITE paths already gate on
+# ``_visible_pocket_ids`` (pocket-layer tenancy), so they are unchanged.
+# Updated: 2026-06-10 (fix/mc-bulk-approve-strands-writes — W0c) — fixed
+# two defects in ``agent_bulk_approve`` that together stranded every write
+# a manager bulk-approved, undermining the Instinct governance moat:
+#   (1) Routing regression — a prior commit routed ids through
+#       ``_classify_task_id``, whose forward-compat default classifies a
+#       BARE id as a Task. Bulk-approving a Nudge by its bare id (the shape
+#       the frontend + every existing test send) was misrouted to the
+#       Tasks branch, failed ``agent_complete_task``, and landed in
+#       ``missing`` — the Nudge was never even approved. Routing is now by
+#       explicit prefix (``task:`` → Tasks; ``nudge:`` / bare → Instinct
+#       Nudge, prefix stripped), consistent with ``agent_bulk_reject``.
+#   (2) Stranded writes — even once a Nudge approved, the façade called
+#       ``store.bulk_approve`` and stopped, never firing the parked
+#       ``_pocket_write``, so the write stalled at ``approved`` forever
+#       (no execution, no audit/chain emit). The façade now mirrors the
+#       single-/bulk-approve HTTP path
+#       (``ee.instinct.router.bulk_approve_actions``): for each approved
+#       Nudge it emits ``human.corrected(accepted)`` +
+#       ``policy.evaluated(passed=True)`` and fires
+#       ``instinct_bridge.execute_approved_write`` (which lands the write
+#       and closes the chain), reusing the router's helpers rather than
+#       forking the chain logic. New ``_execute_bulk_approved_nudge`` runs
+#       one item with per-item error isolation; the response carries an
+#       ``executed`` list of per-item outcomes so one failing write can't
+#       silently drop the rest.
+# Updated: 2026-06-10 (sov/r2a FIX 3) — ``_execute_bulk_approved_nudge`` now
+# imports the chain-emit helpers (``_emit_human_corrected`` /
+# ``_emit_policy_evaluated_approved`` / ``_pocket_write_blob``) from the new
+# shared ``ee.instinct.chain_emitters`` module instead of reaching into the
+# Instinct router's private internals. Behavior is identical (same helpers,
+# same call order) — the façade no longer couples to the router.
+# Updated: 2026-06-12 (fix/tray-workspace-scoped-nudges) — workspace-scoped
+# nudges now reach The Tray. External-action proposals stamp
+# ``Action.pocket_id = workspace_id`` (they aren't pocket-bound — see
+# ``external_actions/propose.py``), but ``agent_list_work_items`` dropped any
+# action whose ``pocket_id`` wasn't a visible POCKET id, so every gated
+# external action sat pending without ever surfacing in the feed. The
+# per-action filter now also admits ``a.pocket_id == workspace_id`` (the
+# caller's own workspace only — the W4c store-level scope still keeps other
+# tenants' rows out in SQL), the instinct block runs even when the workspace
+# has zero visible pockets, and a workspace-scoped item projects with
+# pocket_name "Workspace" instead of leaking the raw workspace hex id.
+# Pocket-bound nudges keep the exact same visibility filter as before.
+# Updated: 2026-07-04 (fix/approval-resolution) — closed the list-vs-approve
+# tenancy mismatch that made a workspace-scoped nudge (``pocket_id ==
+# workspace_id`` — ``_admin_action`` / ``_external_action`` proposals) LIST in
+# The Tray but report ``missing`` on bulk-approve, leaving the proposal pending
+# forever. TWO fixes: (1) ``_split_ids_by_tenancy`` now admits ``pocket_id ==
+# workspace_id`` — the SAME clause ``agent_list_work_items`` uses — so a nudge
+# that lists also resolves; the store read is already tenant-scoped, so this
+# only ever admits the caller's own workspace. (2) ``_execute_bulk_approved_nudge``
+# now dispatches EVERY gated blob kind's executor (new
+# ``_execute_gated_bulk_approved_nudge`` mirrors the router's per-kind dispatch
+# for ``_admin_action`` / ``_external_action`` / ``_code_change`` /
+# ``_fabric_objects`` / ``_pocket_create`` / ``_instinct_rule`` / ``_belt_plan``
+# / ``_artifact_change``), not just ``_pocket_write`` — so a bulk-approved admin
+# action actually EXECUTES (e.g. ``billing.manage`` produces its Dodo checkout
+# url) instead of flipping to ``approved`` and stranding the write. The router's
+# approve/executor logic is unchanged; the façade reuses its blob accessors +
+# executors.
+# Updated: 2026-07-04 (fix/approval-resolution) — two projection fixes so The
+# Tray shows human names and honors its status filter:
+#   (1) Actor NAME resolution — a gated proposal's ``trigger.source`` is the
+#       PROPOSER user id (a raw ObjectId hex — see ``admin_proposals/propose.py``
+#       and ``external_actions/propose.py``, both ``trigger.type == "agent"``).
+#       ``_action_to_work_item`` projected that raw id into ``agent_name`` /
+#       ``assignee_name``, so the approval tray rendered ``6a47…`` instead of a
+#       person. ``agent_list_work_items`` now collects the unique trigger.source
+#       ids across all projected actions and batch-resolves them ONCE via a
+#       single ``_UserDoc.find({"_id": {"$in": ...}})`` (the ripple_sources /
+#       group_service pattern, mirroring how ``_pocket_name_map`` builds its map
+#       once), then passes an ``actor_name_map`` into ``_action_to_work_item``.
+#       Name preference: ``full_name`` → ``email`` → the id (never raises; a
+#       malformed / non-ObjectId source or an unknown user falls back to the id).
+#   (2) ``status`` filter — the ``/items`` endpoint accepted ``section`` but not
+#       the ``status`` it documents, so ``GET /items?status=pending`` was
+#       silently ignored and terminal (done/failed) items leaked into the
+#       awaiting-approval feed. ``agent_list_work_items`` now filters the
+#       assembled items by ``body.status`` when set, with ``"pending"`` aliased
+#       to ``WorkItemStatus.AWAITING_APPROVAL`` (the projection already maps
+#       ``ActionStatus.PENDING`` → that). ``status=None`` returns everything as
+#       before; ``status`` composes with the section/agent/pocket filters.
+# Updated: 2026-07-04 (fix/deep-work-feed-500-created-at-sort) — fixed a 500 on
+# the unfiltered Deep Work feed (``GET /items`` with no section). The final
+# ``items.sort`` compared ``(created_at, id)`` tuples across two projections
+# whose ``created_at`` types disagree: a Nudge carries ``Action.created_at`` —
+# a tz-NAIVE ``datetime`` — while a Task carries ``TaskResponse.created_at`` —
+# an ISO ``str`` (``iso_utc``). When both coexisted in one list, ``datetime <
+# str`` raised ``TypeError`` and the endpoint returned 500. Section-filtered
+# fetches (tray = nudges only, agents = tasks only) stayed homogeneous and
+# never crashed, so operators saw an EMPTY main feed but a populated in-flight
+# tab. Fixed at BOTH points: (1) ``_task_to_work_item`` now coerces
+# ``created_at`` / ``updated_at`` str→datetime, mirroring the existing
+# ``due_at`` coercion, so the projection is homogeneous; (2) the sort key is a
+# new module-level ``_sort_created_at`` that normalises ANY input — str, naive
+# datetime, aware datetime, or None — to a single tz-aware datetime, so the sort
+# can never raise regardless of caller (also fixes the naive-vs-aware case).
+# Sort semantics are unchanged (newest-first, ``id`` tiebreak); the fix restores
+# the full feed including completed/approved (Pawprints) items alongside pending.
+# Updated: 2026-07-05 (fix/mission-control-resolver-consistency) — two resolver
+# consistency fixes so the counters and the agent filter agree with the list:
+#   (A) ``agent_outcomes_summary`` now admits ``a.pocket_id == workspace_id`` in
+#       its in-window predicate, matching ``agent_list_work_items`` and
+#       ``_split_ids_by_tenancy``. Before, the summary filtered ``pocket_id in
+#       visible`` ONLY, so workspace-scoped nudges (every ``_admin_action`` /
+#       ``_external_action`` / connector proposal, whose ``pocket_id`` IS the
+#       workspace id) were DROPPED from the counters even though they list in
+#       Pawprints/Snags — the summary undercounted vs the list.
+#   (C) The ``?agent=`` filter in ``agent_list_work_items`` now matches BOTH the
+#       raw ``trigger.source`` id AND its resolved display name. The feed
+#       projects ``agent_name`` as the RESOLVED display name, but the filter
+#       compared ``body.agent`` to the raw ``trigger.source`` ObjectId hex only,
+#       so filtering by the visible name matched zero items. The collect →
+#       resolve-names → filter order was reordered so the display name is
+#       available when the filter runs (still ONE batched name-resolution query).
 """Mission Control façade service.
 
 Every function is module-level ``async def`` per ee/cloud rule #5. The
@@ -39,11 +169,20 @@ Tenancy:
   - Service signature is ``(ctx, body)`` — the workspace lives on
     ``ctx.workspace_id``. We never accept ``workspace_id`` as a
     standalone arg (rule #5).
-  - The instinct store is workspace-agnostic at its schema, but we filter
-    via the pocket layer: a Nudge surfaces in Mission Control only if
-    its pocket is visible to the caller's workspace. The pockets
-    service's ``list_pockets`` already enforces this so we can rely on
-    it as the chokepoint.
+  - Two layers of tenancy, both scoped to ``ctx.workspace_id``:
+      1. Store-level (W4c): every instinct read threads the caller's
+         ``workspace_id`` into the store, so the global shared SQLite DB
+         restricts rows to this tenant (plus legacy NULL rows) in SQL —
+         before anything reaches Python. This closes the cross-tenant
+         leak on shared infra; it is the load-bearing isolation.
+      2. Pocket-level: a Nudge additionally only surfaces if its pocket
+         is visible to the caller's workspace. ``pockets_service.list_pockets``
+         enforces this as the chokepoint. This stays as a second filter
+         (owner / shared_with / visibility within the tenant), layered on
+         top of the store scope, not in place of it. Workspace-scoped
+         nudges (``pocket_id == workspace_id``, e.g. external-action
+         proposals) bypass only this pocket layer — the store scope in
+         (1) is still what isolates them per tenant.
 
 No Beanie writes here — the façade is read-only against Instinct + the
 activity buffer. Bulk-approve / bulk-reject delegate to
@@ -71,6 +210,7 @@ from pocketpaw_ee.api import get_instinct_store
 from pocketpaw_ee.cloud._core.context import RequestContext
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.activity.buffer import ActivityEvent, get_buffer
+from pocketpaw_ee.cloud.auth import service as auth_service
 from pocketpaw_ee.cloud.mission_control.domain import (
     AssigneeKind,
     WorkItem,
@@ -87,8 +227,10 @@ from pocketpaw_ee.cloud.mission_control.dto import (
     AttachCycleItemsResponse,
     BulkActionRequest,
     BulkReassignRequest,
+    BulkRevertRequest,
     BulkSnoozeRequest,
     CreateCycleRequest,
+    DetachCycleItemsResponse,
     ListActivityRequest,
     ListPlanSessionsRequest,
     ListWorkItemsRequest,
@@ -126,6 +268,35 @@ def _require_workspace(ctx: RequestContext) -> str:
     return ctx.workspace_id
 
 
+def _record_deep_work_audit(
+    workspace_id: str,
+    actor_id: str,
+    action: str,
+    target_type: str,
+    target_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Fire-and-forget audit recording for deep work operations.
+
+    Never raises — failures are logged and swallowed so an audit outage
+    cannot block a legitimate operation.
+    """
+    import asyncio
+
+    from pocketpaw_ee.cloud.deep_work_log import service as _dw_log_service
+
+    asyncio.ensure_future(
+        _dw_log_service.record(
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            metadata=metadata or {},
+        )
+    )
+
+
 async def _visible_pocket_ids(ctx: RequestContext, *, project_id: str | None = None) -> set[str]:
     """Return the set of pocket ids the caller can see in their workspace.
 
@@ -154,6 +325,29 @@ async def _pocket_name_map(ctx: RequestContext, *, project_id: str | None = None
     return {p["_id"]: p.get("name", p["_id"]) for p in pockets if p.get("_id")}
 
 
+async def _resolve_actor_names(source_ids: set[str]) -> dict[str, str]:
+    """Batch-resolve a set of trigger.source user ids → display names.
+
+    A gated proposal's ``trigger.source`` is the proposer user id (a raw
+    ObjectId hex — see ``admin_proposals/propose.py`` /
+    ``external_actions/propose.py``). This maps each to a human display
+    name so The Tray never renders the raw id.
+
+    Built ONCE per ``agent_list_work_items`` call from the union of all
+    projected actions' sources, mirroring how ``_pocket_name_map`` resolves
+    pocket names once. Routes through ``auth_service.resolve_display_names``
+    (a single ``User.find`` over the id set) rather than touching the Beanie
+    user model here — the façade layer must not read models directly (the
+    "Mission Control — no Beanie touches from façade layer" contract).
+
+    Name preference (``full_name`` → ``email`` → the id) and the skip/
+    fallback behavior for a non-ObjectId source or an id with no matching
+    user both live in ``resolve_display_names``; the caller's
+    ``.get(source, source)`` fallback keeps unresolved ids as the raw id.
+    """
+    return await auth_service.resolve_display_names(source_ids)
+
+
 def _status_to_section_status(s: ActionStatus) -> tuple[WorkItemSection, WorkItemStatus]:
     """Map Instinct ``ActionStatus`` to the (section, status) pair Mission
     Control consumes."""
@@ -172,18 +366,34 @@ def _status_to_section_status(s: ActionStatus) -> tuple[WorkItemSection, WorkIte
     return WorkItemSection.SNAGS, WorkItemStatus.BLOCKED
 
 
-def _action_to_work_item(action: Action, workspace_id: str, pocket_name: str = "") -> WorkItem:
+def _action_to_work_item(
+    action: Action,
+    workspace_id: str,
+    pocket_name: str = "",
+    actor_name_map: dict[str, str] | None = None,
+) -> WorkItem:
     """Project an Instinct ``Action`` into a Mission Control ``WorkItem``.
 
     The assignee field on Instinct is optional — when missing we surface
     the trigger source as the implicit assignee so The Tray still shows
     "who needs to act". This matches the operator mental model better
     than an empty avatar slot.
+
+    ``actor_name_map`` maps a ``trigger.source`` user id → the user's
+    display name (built once by ``agent_list_work_items`` — see
+    ``_resolve_actor_names``). For a gated proposal ``trigger.source`` is
+    the PROPOSER user id (a raw ObjectId hex), so we render the name
+    instead of leaking the id into ``agent_name`` / ``assignee_name``.
+    When the source isn't in the map (unknown user, malformed id) we fall
+    back to the id — the same non-leaking behavior the map's builder uses.
     """
+    name_map = actor_name_map or {}
     section, status = _status_to_section_status(action.status)
     assignee_id = action.assignee or _trigger_assignee(action) or ""
     agent_id = action.trigger.source if action.trigger.type == "agent" else None
-    agent_name = action.trigger.source if action.trigger.type == "agent" else ""
+    agent_name = name_map.get(agent_id, agent_id) if agent_id else ""
+    assignee_name_raw = _trigger_assignee_name(action) or assignee_id
+    assignee_name = name_map.get(assignee_name_raw, assignee_name_raw)
     return WorkItem(
         id=f"nudge:{action.id}",
         workspace_id=workspace_id,
@@ -193,7 +403,7 @@ def _action_to_work_item(action: Action, workspace_id: str, pocket_name: str = "
         description=action.description or action.recommendation or "",
         assignee_kind=AssigneeKind.USER,
         assignee_id=assignee_id,
-        assignee_name=_trigger_assignee_name(action) or assignee_id,
+        assignee_name=assignee_name,
         agent_id=agent_id,
         agent_name=agent_name,
         pocket_id=action.pocket_id,
@@ -228,6 +438,16 @@ def _trigger_assignee_name(action: Action) -> str | None:
     if action.assignee:
         return action.assignee
     return None
+
+
+# Aliases the ``status`` query param accepts on top of the raw
+# ``WorkItemStatus`` values. The frontend calls ``/items?status=pending``
+# for the awaiting-approval feed; map it to the canonical status so the
+# filter matches the projected items (which carry
+# ``WorkItemStatus.AWAITING_APPROVAL``, not "pending").
+_STATUS_FILTER_ALIASES: dict[str, str] = {
+    "pending": WorkItemStatus.AWAITING_APPROVAL.value,
+}
 
 
 # Status maps for projecting Tasks into the unified WorkItem shape.
@@ -278,6 +498,32 @@ def _task_to_work_item(task: Any, workspace_id: str, pocket_name: str = "") -> W
     section = _task_section(task.status, assignee.kind)
     blocked_by_raw = getattr(task, "blocked_by", None) or ()
     blocked_by = tuple(f"task:{dep_id}" for dep_id in blocked_by_raw)
+    due_at = getattr(task, "due_at", None)
+    # The task may be a domain Task (due_at is datetime | None) or a
+    # TaskResponse DTO (due_at is str | None). Normalise to datetime.
+    if isinstance(due_at, str):
+        try:
+            due_at = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            due_at = None
+    # Same normalisation for created_at / updated_at. TaskResponse serialises
+    # both to ISO strings (``iso_utc``) while a domain Task keeps datetimes;
+    # the WorkItem model types them ``datetime | None``, and the unified feed
+    # sorts on ``created_at`` alongside Nudge WorkItems (whose created_at is a
+    # datetime). Leaving them as str crashes that sort with a TypeError when a
+    # Nudge and a Task coexist. Coerce here so the projection is homogeneous.
+    created_at = getattr(task, "created_at", None)
+    if isinstance(created_at, str):
+        try:
+            created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            created_at = None
+    updated_at = getattr(task, "updated_at", None)
+    if isinstance(updated_at, str):
+        try:
+            updated_at = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            updated_at = None
     return WorkItem(
         id=f"task:{task.id}",
         workspace_id=workspace_id,
@@ -295,11 +541,47 @@ def _task_to_work_item(task: Any, workspace_id: str, pocket_name: str = "") -> W
         source_kind="task",
         source_id=task.id,
         priority=task.priority,
-        created_at=task.created_at,
-        updated_at=task.updated_at,
+        due_at=due_at,
+        created_at=created_at,
+        updated_at=updated_at,
         fabric_refs=(),
         blocked_by=blocked_by,
     )
+
+
+# A tz-aware floor for WorkItems that have no ``created_at`` — they sort last
+# under newest-first ordering. Kept tz-aware so it never re-introduces the
+# naive-vs-aware comparison the sort key is designed to avoid.
+_CREATED_AT_FLOOR = datetime.min.replace(tzinfo=UTC)
+
+
+def _sort_created_at(it: WorkItem) -> datetime:
+    """Return a mutually-comparable, tz-aware ``created_at`` for sorting.
+
+    The unified feed mixes WorkItems projected from two sources with
+    inconsistent ``created_at`` shapes:
+      - Nudges carry ``Action.created_at`` — a tz-NAIVE ``datetime``
+        (``datetime.now`` default).
+      - Tasks carry ``TaskResponse.created_at`` — an ISO ``str`` (``iso_utc``).
+    Sorting ``(created_at, id)`` tuples across the two raised
+    ``TypeError: '<' not supported between 'datetime' and 'str'`` (and would
+    likewise fail on naive-vs-aware datetimes). ``_task_to_work_item`` already
+    coerces str→datetime, but this is the last line of defence: it normalises
+    ANY input — str, naive datetime, aware datetime, or None — to a single
+    tz-aware datetime so the sort key can never raise regardless of caller.
+    """
+    value = it.created_at
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return _CREATED_AT_FLOOR
+    if value is None:
+        return _CREATED_AT_FLOOR
+    if value.tzinfo is None:
+        # Attach UTC to a naive datetime so all keys are mutually comparable.
+        return value.replace(tzinfo=UTC)
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -324,34 +606,76 @@ async def agent_list_work_items(
 
     items: list[WorkItem] = []
 
-    # --- Instinct Nudges (pocket-scoped) -----------------------------------
-    # Nudges always live inside a pocket, so an empty visible set means
-    # there are no Nudges to show. Tasks below have their own workspace-
-    # level tenancy and are NOT gated by pocket visibility.
-    if visible:
-        store = get_instinct_store()
-        pending = await store.pending(pocket_id=body.pocket)
-        resolved = await store.list_actions(pocket_id=body.pocket, limit=200)
+    # --- Instinct Nudges (pocket- or workspace-scoped) ----------------------
+    # Most Nudges live inside a pocket and only surface when that pocket is
+    # visible. External-action proposals are the exception: they stamp
+    # ``pocket_id = workspace_id`` (see ``external_actions/propose.py``), so
+    # they're admitted by workspace identity instead — which also means the
+    # block must run even when the workspace has zero visible pockets. Tasks
+    # below have their own workspace-level tenancy and are NOT gated by
+    # pocket visibility.
+    # ISO: HTTP path (no ``current_workspace`` ContextVar) — scope the store
+    # file to the caller's workspace (the W4c in-row filter below is additive).
+    store = get_instinct_store(workspace_id=workspace_id or None)
+    # W4c — scope the instinct reads to the caller's workspace (plus legacy
+    # NULL rows) at the store/SQL layer so a tenant never reads another
+    # tenant's Nudges off the shared DB. The pocket-visibility filter below
+    # is a second, intra-tenant layer (owner / shared_with / visibility);
+    # the store scope is also what keeps OTHER tenants' workspace-scoped
+    # nudges out — ``a.pocket_id == workspace_id`` below can only ever match
+    # the caller's own rows.
+    pending = await store.pending(pocket_id=body.pocket, workspace_id=workspace_id)
+    resolved = await store.list_actions(pocket_id=body.pocket, limit=200, workspace_id=workspace_id)
 
-        actions: list[Action] = []
-        seen: set[str] = set()
-        for a in (*pending, *resolved):
-            if a.id in seen:
-                continue
-            if a.pocket_id not in visible:
-                continue
-            if body.agent and a.trigger.source != body.agent:
-                continue
-            seen.add(a.id)
-            actions.append(a)
-        items.extend(
-            _action_to_work_item(
-                a,
-                workspace_id,
-                pocket_name=name_map.get(a.pocket_id, a.pocket_id or ""),
-            )
-            for a in actions
+    # Collect every tenancy-visible action FIRST, then resolve actor names,
+    # then apply the agent filter. The agent filter has to run after name
+    # resolution because the feed renders ``agent_name`` as the RESOLVED
+    # display name (not the raw ``trigger.source`` id), so ``?agent=<name>``
+    # must match the rendered value — see the agent-filter block below.
+    visible_actions: list[Action] = []
+    seen: set[str] = set()
+    for a in (*pending, *resolved):
+        if a.id in seen:
+            continue
+        if a.pocket_id not in visible and a.pocket_id != workspace_id:
+            continue
+        seen.add(a.id)
+        visible_actions.append(a)
+    # Batch-resolve every trigger.source (the proposer user id on a gated
+    # Nudge) to a display name ONCE — a single _UserDoc.find over the union
+    # of source ids, mirroring how name_map resolves pockets once — so The
+    # Tray renders a person, not a raw ObjectId hex.
+    actor_name_map = await _resolve_actor_names(
+        {a.trigger.source for a in visible_actions if a.trigger and a.trigger.source}
+    )
+    # Agent filter — the feed projects ``agent_name`` as the RESOLVED display
+    # name, so filtering must accept EITHER the raw ``trigger.source`` id OR
+    # its resolved display name. Comparing only against the raw id (as before)
+    # matched ZERO items when the operator filtered by the visible name.
+    if body.agent:
+        actions = [
+            a
+            for a in visible_actions
+            if a.trigger.source == body.agent
+            or actor_name_map.get(a.trigger.source, a.trigger.source) == body.agent
+        ]
+    else:
+        actions = visible_actions
+    items.extend(
+        _action_to_work_item(
+            a,
+            workspace_id,
+            # A workspace-scoped nudge has no pocket — show "Workspace"
+            # rather than leaking the raw workspace hex id as a name.
+            pocket_name=(
+                "Workspace"
+                if a.pocket_id == workspace_id
+                else name_map.get(a.pocket_id, a.pocket_id or "")
+            ),
+            actor_name_map=actor_name_map,
         )
+        for a in actions
+    )
 
     # --- Tasks (workspace-scoped) ------------------------------------------
     # Lazy import keeps the façade installable on forks that haven't
@@ -382,9 +706,225 @@ async def agent_list_work_items(
 
     if body.section is not None:
         items = [it for it in items if it.section == body.section]
+    # Honor the endpoint's documented ``status`` filter. Composes with the
+    # section/agent/pocket filters above. ``"pending"`` is the frontend's
+    # alias for the awaiting-approval state (the projection maps
+    # ``ActionStatus.PENDING`` → ``WorkItemStatus.AWAITING_APPROVAL`` via
+    # ``_status_to_section_status``), so it excludes terminal (done/failed)
+    # items. ``status=None`` returns everything, unchanged.
+    if body.status is not None:
+        target = _STATUS_FILTER_ALIASES.get(body.status, body.status)
+        items = [it for it in items if it.status.value == target]
     # Stable order: newest first by created_at, falling back to id.
-    items.sort(key=lambda it: (it.created_at or datetime.min, it.id), reverse=True)
+    # ``_sort_created_at`` normalises every key to a tz-aware datetime so the
+    # tuple comparison can never raise on a mixed datetime/str or naive/aware
+    # feed (Nudge created_at is a naive datetime; Task created_at arrives as an
+    # ISO str). See the helper docstring for the full failure mode.
+    items.sort(key=lambda it: (_sort_created_at(it), it.id), reverse=True)
     return [work_item_to_response(it) for it in items[: body.limit]]
+
+
+async def _execute_gated_bulk_approved_nudge(action: Any, *, ctx: RequestContext) -> bool:
+    """Fire the apply-on-approve executor for a non-pocket-write gated Nudge.
+
+    The 8 non-pocket-write gated proposal kinds (``_code_change`` /
+    ``_external_action`` / ``_fabric_objects`` / ``_pocket_create`` /
+    ``_instinct_rule`` / ``_belt_plan`` / ``_artifact_change`` /
+    ``_admin_action``) each park a write that only lands when its OWN executor
+    fires. The single-/bulk-approve HTTP path
+    (``ee.instinct.router.bulk_approve_actions``) dispatches these per blob
+    kind; the Mission Control façade must do the same or a bulk-approved
+    admin / external / etc. Nudge flips to ``approved`` and STRANDS the write
+    (no billing checkout url, no connector call, no admin write) — the exact
+    execution gap the pocket-write path already closes.
+
+    We reuse the router's blob accessors + the shared
+    ``_code_change_proposed_event_id`` causation helper (lazy import — no
+    module-top instinct→mission_control coupling) and each kind's own
+    executor, which OWNS its Decision-Graph chain close. This mirrors the
+    router's dispatch, it does not fork the executor logic (the executors are
+    unchanged). Emits the per-item ``human.corrected(accepted)`` first
+    (bulk-approve has no edit surface, so disposition is always ``accepted``),
+    threading the ``agent.proposed`` id as causation, exactly like the router.
+
+    Returns True when a gated (non-pocket-write) executor was dispatched,
+    False when the Action carries no such blob (so the caller can fall through
+    to the pocket-write path). Raising is left to the caller's per-item
+    isolation wrapper.
+    """
+    from pocketpaw_ee.instinct.chain_emitters import _code_change_proposed_event_id
+    from pocketpaw_ee.instinct.router import (
+        _admin_action_blob,
+        _artifact_change_blob,
+        _belt_plan_blob,
+        _code_change_blob,
+        _emit_human_corrected,
+        _external_action_blob,
+        _fabric_objects_blob,
+        _instinct_rule_blob,
+        _pocket_create_blob,
+    )
+
+    workspace_id = ctx.workspace_id or ""
+
+    # (blob-accessor, "module path", "executor attr") — same order + executors
+    # the router's bulk_approve_actions dispatch uses. Lazy-imported per hit so
+    # the façade keeps no module-top dependency on the executor packages.
+    dispatch: list[tuple[Any, str, str]] = [
+        (_code_change_blob, "pocketpaw_ee.cloud.belt.executor", "execute_approved_change"),
+        (
+            _external_action_blob,
+            "pocketpaw_ee.cloud.external_actions.executor",
+            "execute_approved_external_action",
+        ),
+        (
+            _fabric_objects_blob,
+            "pocketpaw_ee.cloud.fabric_proposals.executor",
+            "execute_approved_fabric_objects",
+        ),
+        (
+            _pocket_create_blob,
+            "pocketpaw_ee.cloud.pocket_proposals.executor",
+            "execute_approved_pocket_create",
+        ),
+        (
+            _instinct_rule_blob,
+            "pocketpaw_ee.cloud.instinct_rule_proposals.executor",
+            "execute_approved_instinct_rule",
+        ),
+        (_belt_plan_blob, "pocketpaw_ee.cloud.mandates.executor", "execute_approved_plan"),
+        (
+            _artifact_change_blob,
+            "pocketpaw_ee.versions.instinct_executor",
+            "execute_approved_change",
+        ),
+        (
+            _admin_action_blob,
+            "pocketpaw_ee.cloud.admin_proposals.executor",
+            "execute_approved_admin_action",
+        ),
+    ]
+
+    for blob_of, module_path, executor_attr in dispatch:
+        blob = blob_of(action)
+        if blob is None:
+            continue
+        import importlib
+
+        human_event_id = _emit_human_corrected(
+            blob=blob,
+            action=action,
+            user_id=ctx.user_id,
+            workspace_id=workspace_id,
+            disposition="accepted",
+            note=None,
+            causation_override=_code_change_proposed_event_id(blob),
+        )
+        executor = getattr(importlib.import_module(module_path), executor_attr)
+        await executor(action, human_event_id=human_event_id)
+        return True
+
+    return False
+
+
+async def _execute_bulk_approved_nudge(action: Any, *, ctx: RequestContext) -> dict[str, Any]:
+    """Execute one bulk-approved Nudge's parked write + emit chain.
+
+    Mirrors the single-/bulk-approve HTTP path
+    (``ee.instinct.router.bulk_approve_actions``) for ONE approved Action.
+    Two families of gated proposal park a write that only lands when its
+    executor fires:
+
+      * the pocket-write bridge (``_pocket_write``) — emit
+        ``human.corrected(accepted)`` + ``policy.evaluated(passed=True)`` then
+        fire ``instinct_bridge.execute_approved_write`` (the bridge owns the
+        chain close);
+      * every OTHER gated kind (``_admin_action`` / ``_external_action`` /
+        ``_code_change`` / ``_fabric_objects`` / ``_pocket_create`` /
+        ``_instinct_rule`` / ``_belt_plan`` / ``_artifact_change``) —
+        dispatched by ``_execute_gated_bulk_approved_nudge`` to that kind's own
+        executor, which owns its chain close.
+
+    Handling ALL gated kinds (not just pocket-write) is what makes a
+    bulk-approved admin / external / etc. Nudge actually EXECUTE (e.g. a
+    ``billing.manage`` admin action produces its Dodo checkout url) instead of
+    flipping to ``approved`` and stranding the write forever.
+
+    We reuse the shared chain-emit helpers + the router's blob accessors (lazy
+    import — no module-top instinct→mission_control coupling) so the chain
+    logic is shared, not forked, and the façade no longer reaches into the
+    router's internals.
+
+    Returns a per-item outcome dict ``{"id", "executed", "error"}``:
+      - Actions with no parked write of any gated kind report
+        ``executed=False`` with no error (flipping to ``approved`` is the
+        whole action);
+      - a gated Action reports ``executed=True`` on a clean dispatch, or
+        ``executed=False`` + ``error`` when the execution raised.
+
+    Error isolation: every executor is best-effort by contract (it records
+    failures on the Action and never raises), but we still wrap the whole body
+    so one item's unexpected crash can't strand the rest of the batch.
+    """
+    from pocketpaw_ee.cloud.pockets import instinct_bridge
+    from pocketpaw_ee.instinct.chain_emitters import (
+        _emit_human_corrected,
+        _emit_policy_evaluated_approved,
+        _pocket_write_blob,
+    )
+
+    action_id = str(getattr(action, "id", "") or "")
+    workspace_id = ctx.workspace_id or ""
+
+    # Every non-pocket-write gated kind dispatches to its own executor first,
+    # exactly like the router's bulk-approve dispatch. On a hit the executor
+    # ran (and owns its chain close) — report executed and stop.
+    try:
+        if await _execute_gated_bulk_approved_nudge(action, ctx=ctx):
+            return {"id": action_id, "executed": True, "error": None}
+    except Exception as exc:  # noqa: BLE001 — per-item isolation
+        logger.exception(
+            "mission_control.bulk_approve: gated execution failed for %s",
+            action_id,
+        )
+        return {"id": action_id, "executed": False, "error": str(exc)}
+
+    blob = _pocket_write_blob(action)
+    if blob is None:
+        # No parked write of any gated kind — the approval flip is the entire
+        # effect. Nothing to execute, nothing to chain-emit.
+        return {"id": action_id, "executed": False, "error": None}
+
+    try:
+        # Chain symmetry with the HTTP approve path: human.corrected first,
+        # then a passing policy.evaluated whose causation points at it.
+        human_event_id = _emit_human_corrected(
+            blob=blob,
+            action=action,
+            user_id=ctx.user_id,
+            workspace_id=workspace_id,
+            disposition="accepted",
+            note=None,
+        )
+        _emit_policy_evaluated_approved(
+            blob=blob,
+            action=action,
+            user_id=ctx.user_id,
+            workspace_id=workspace_id,
+            causation_event_id=human_event_id,
+        )
+        # The bridge owns the chain close (``_emit_bridge_chain_close``)
+        # after the post-approval write lands. It never raises by contract,
+        # but the wrapper below keeps one bad item from dropping the rest.
+        await instinct_bridge.execute_approved_write(action)
+    except Exception as exc:  # noqa: BLE001 — per-item isolation
+        logger.exception(
+            "mission_control.bulk_approve: pocket-write execution failed for %s",
+            action_id,
+        )
+        return {"id": action_id, "executed": False, "error": str(exc)}
+
+    return {"id": action_id, "executed": True, "error": None}
 
 
 async def agent_bulk_approve(
@@ -393,30 +933,62 @@ async def agent_bulk_approve(
     """Approve N pending items in one call.
 
     Works for both Nudges (Instinct store) and Tasks (Tasks service).
-    Items prefixed with ``task:`` are routed to the Tasks service's
-    ``agent_complete_task``; everything else goes through the Instinct
-    store's ``bulk_approve``. The shared ``bulk_id`` lives in every
-    audit row's ``context.bulk_id`` so the operator can recover the
-    bulk transaction.
+    Routing is by id prefix, matching the heterogeneous WorkItem feed:
+      - ``task:<id>``   → Tasks service's ``agent_complete_task``;
+      - ``nudge:<id>``  → Instinct store's ``bulk_approve`` (prefix stripped);
+      - bare ``<id>``   → Instinct store as a Nudge (mirrors
+        ``agent_bulk_reject``, which passes bare ids straight through).
+
+    The shared ``bulk_id`` lives in every audit row's ``context.bulk_id``
+    so the operator can recover the bulk transaction.
+
+    W0c fix — TWO defects:
+
+    1. Routing regression — bare action ids were misrouted to the Tasks
+       branch via ``_classify_task_id`` (whose forward-compat default
+       treats a bare id as a Task). Bulk-approving a Nudge by its bare id
+       (the shape the frontend + every existing test send) therefore
+       never reached ``store.bulk_approve`` and silently landed in
+       ``missing`` — the Nudge was never even approved. Routing is now by
+       explicit prefix so bare ids approve as Nudges again, consistent
+       with ``agent_bulk_reject``.
+
+    2. Stranded writes — even once a Nudge approved, its parked pocket
+       write never fired: the façade recorded the approval and stopped,
+       never calling the Instinct bridge, so bulk-approved writes stalled
+       at ``approved`` forever (no execution, no audit/chain emit) — the
+       exact gap the single-approve path closes via
+       ``execute_approved_write``. We now mirror that per item: each
+       approved Nudge runs through ``_execute_bulk_approved_nudge`` (same
+       chain emits + bridge call as ``ee.instinct.router.bulk_approve_actions``),
+       with per-item error isolation so one failing write can't drop the
+       rest. The per-item outcomes are reported under ``executed`` for the
+       operator console.
     """
     from uuid import uuid4
 
     body = BulkActionRequest.model_validate(body)
-    _require_workspace(ctx)
+    workspace_id = _require_workspace(ctx)
 
     bulk_id = uuid4().hex
     approved: list[dict] = []
     missing: list[str] = []
+    executed: list[dict] = []
 
-    # Split IDs into nudges and tasks
-    nudge_ids: list[str] = []
+    # Split IDs by prefix. ``task:`` → Tasks; ``nudge:`` or bare → Instinct
+    # Nudge. ``nudge_id_map`` recovers the original wire id (with prefix)
+    # for the ``missing`` report so the operator sees what they sent, while
+    # the store receives the bare action id it stores rows under.
     task_ids: list[str] = []
+    nudge_store_ids: list[str] = []
+    nudge_id_map: dict[str, str] = {}
     for raw_id in body.ids:
-        tid = _classify_task_id(raw_id)
-        if tid is not None:
+        if raw_id.startswith("task:"):
             task_ids.append(raw_id)
-        else:
-            nudge_ids.append(raw_id)
+            continue
+        bare = raw_id[len("nudge:") :] if raw_id.startswith("nudge:") else raw_id
+        nudge_store_ids.append(bare)
+        nudge_id_map[bare] = raw_id
 
     # Handle tasks: call agent_complete_task for each
     if task_ids:
@@ -440,30 +1012,61 @@ async def agent_bulk_approve(
                 missing.append(raw_id)
 
     # Handle nudges via Instinct store
-    if nudge_ids:
+    if nudge_store_ids:
         visible = await _visible_pocket_ids(ctx)
-        store = get_instinct_store()
-        eligible, blocked = await _split_ids_by_tenancy(store, nudge_ids, visible)
+        # ISO: HTTP path (no ContextVar) — scope the store to the caller.
+        store = get_instinct_store(workspace_id=workspace_id or None)
+        eligible, blocked = await _split_ids_by_tenancy(
+            store, nudge_store_ids, visible, workspace_id
+        )
         nudge_approved, nudge_missing, _ = await store.bulk_approve(
             eligible, approver=ctx.user_id, note=body.note
         )
         approved.extend(a.model_dump(mode="json") for a in nudge_approved)
-        missing.extend(nudge_missing)
-        missing.extend(blocked)
+        # Report missing / blocked under the operator's original wire ids.
+        missing.extend(nudge_id_map.get(mid, mid) for mid in nudge_missing)
+        missing.extend(nudge_id_map.get(bid, bid) for bid in blocked)
 
-    return {"bulk_id": bulk_id, "approved": approved, "missing": missing}
+        # W0c — execute each approved Nudge's parked write + emit its chain,
+        # preserving the bulk_approve ordering and isolating per-item errors.
+        for action in nudge_approved:
+            executed.append(await _execute_bulk_approved_nudge(action, ctx=ctx))
+
+    _record_deep_work_audit(
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.item.approved",
+        target_type="bulk",
+        metadata={
+            "bulk_id": bulk_id,
+            "approved": approved,
+            "missing": missing,
+            "executed": executed,
+        },
+    )
+    return {
+        "bulk_id": bulk_id,
+        "approved": approved,
+        "missing": missing,
+        "executed": executed,
+    }
 
 
 async def agent_bulk_reject(
     ctx: RequestContext, body: BulkActionRequest | dict[str, Any]
 ) -> dict[str, Any]:
-    """Reject N pending Nudges in one call. ``reason`` is required.
+    """Reject N pending items in one call. ``reason`` is required.
 
-    Same tenancy semantics as ``agent_bulk_approve``. The reason text is
-    surfaced on every Action's ``rejected_reason`` AND on every audit
-    row's ``context.reason`` so the soul-bridge correction pipeline can
-    learn from bulk rejects the same way it learns from single-item
-    rejects.
+    Handles both Tasks (``task:`` prefix) and Instinct Nudges (bare or
+    ``nudge:`` prefix) — mirrors the same split that ``agent_bulk_approve``
+    performs. Tasks are blocked with the given reason so they surface in
+    the operator's Snags section; Nudges flow through the Instinct store's
+    native reject path.
+
+    The reason text is surfaced on every Action's ``rejected_reason`` AND
+    on every audit row's ``context.reason`` so the soul-bridge correction
+    pipeline can learn from bulk rejects the same way it learns from
+    single-item rejects.
     """
     body = BulkActionRequest.model_validate(body)
     if not body.reason:
@@ -471,23 +1074,79 @@ async def agent_bulk_reject(
             "mission_control.reason_required",
             "bulk-reject requires a reason — pass a non-empty string in ``reason``.",
         )
-    _require_workspace(ctx)
-    visible = await _visible_pocket_ids(ctx)
-    store = get_instinct_store()
-    eligible, blocked = await _split_ids_by_tenancy(store, list(body.ids), visible)
-    rejected, missing, bulk_id = await store.bulk_reject(
-        eligible, reason=body.reason, rejector=ctx.user_id
+    workspace_id = _require_workspace(ctx)
+
+    from uuid import uuid4
+
+    bulk_id = uuid4().hex
+    rejected: list[dict] = []
+    missing: list[str] = []
+
+    # Split IDs by prefix — same pattern as agent_bulk_approve
+    task_ids: list[str] = []
+    nudge_store_ids: list[str] = []
+    nudge_id_map: dict[str, str] = {}
+    for raw_id in body.ids:
+        if raw_id.startswith("task:"):
+            task_ids.append(raw_id)
+            continue
+        bare = raw_id[len("nudge:") :] if raw_id.startswith("nudge:") else raw_id
+        nudge_store_ids.append(bare)
+        nudge_id_map[bare] = raw_id
+
+    # Handle tasks: block each one so it surfaces in Snags
+    if task_ids:
+        from pocketpaw_ee.cloud.tasks import service as tasks_service
+        from pocketpaw_ee.cloud.tasks.dto import BlockTaskRequest
+
+        for raw_id in task_ids:
+            task_id = _classify_task_id(raw_id)
+            if task_id is None:
+                missing.append(raw_id)
+                continue
+            try:
+                result = await tasks_service.agent_block_task(
+                    ctx,
+                    task_id,
+                    BlockTaskRequest(reason=body.reason),
+                )
+                rejected.append(result.model_dump(mode="json"))
+            except Exception as e:
+                logger.info("bulk_reject: task %s failed: %s", raw_id, e)
+                missing.append(raw_id)
+
+    # Handle nudges via Instinct store
+    if nudge_store_ids:
+        visible = await _visible_pocket_ids(ctx)
+        # ISO: HTTP path (no ContextVar) — scope the store to the caller.
+        store = get_instinct_store(workspace_id=workspace_id or None)
+        eligible, blocked = await _split_ids_by_tenancy(
+            store, nudge_store_ids, visible, workspace_id
+        )
+        nudge_rejected, nudge_missing, _ = await store.bulk_reject(
+            eligible, reason=body.reason, rejector=ctx.user_id
+        )
+        rejected.extend(a.model_dump(mode="json") for a in nudge_rejected)
+        missing.extend(nudge_id_map.get(mid, mid) for mid in nudge_missing)
+        missing.extend(nudge_id_map.get(bid, bid) for bid in blocked)
+
+    # no-event: per-item block/reject inside the loops already emit events
+    _record_deep_work_audit(
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.item.rejected",
+        target_type="bulk",
+        metadata={"bulk_id": bulk_id, "rejected": rejected, "missing": missing},
     )
-    # no-event: per-item approve/reject inside the loop already emits the events
     return {
         "bulk_id": bulk_id,
-        "rejected": [a.model_dump(mode="json") for a in rejected],
-        "missing": [*missing, *blocked],
+        "rejected": rejected,
+        "missing": missing,
     }
 
 
 async def _split_ids_by_tenancy(
-    store: Any, ids: list[str], visible_pockets: set[str]
+    store: Any, ids: list[str], visible_pockets: set[str], workspace_id: str
 ) -> tuple[list[str], list[str]]:
     """Partition ``ids`` into (visible-to-caller, blocked).
 
@@ -496,6 +1155,18 @@ async def _split_ids_by_tenancy(
     of items the operator sees). Missing rows fall on the eligible side
     so Instinct's store returns them in its own ``missing`` slot and the
     bulk-action response carries a single deduplicated list.
+
+    Tenancy must match ``agent_list_work_items`` EXACTLY — the list path
+    admits an action if ``a.pocket_id in visible OR a.pocket_id ==
+    workspace_id``. The second clause is what surfaces WORKSPACE-SCOPED
+    nudges (``pocket_id == workspace_id`` — e.g. ``_admin_action`` /
+    ``_external_action`` proposals, which aren't pocket-bound). Without the
+    same clause here, a workspace-scoped nudge that LISTS in The Tray would
+    be pushed to ``blocked`` on approve and reported ``missing`` — the
+    proposal would stay pending forever. Admitting ``pocket_id ==
+    workspace_id`` can only ever match the CALLER'S own workspace: the
+    store read is already W4c/ISO-2 tenant-scoped, so another tenant's
+    workspace-scoped nudge never reaches this loop as an approvable row.
     """
     eligible: list[str] = []
     blocked: list[str] = []
@@ -507,7 +1178,7 @@ async def _split_ids_by_tenancy(
             # behavior the operator console expects.
             eligible.append(action_id)
             continue
-        if action.pocket_id in visible_pockets:
+        if action.pocket_id in visible_pockets or action.pocket_id == workspace_id:
             eligible.append(action_id)
         else:
             blocked.append(action_id)
@@ -526,18 +1197,34 @@ async def agent_outcomes_summary(
     in-process scan well under the 50ms TimingMiddleware budget.
     """
     body = OutcomesQueryRequest.model_validate(body)
-    _require_workspace(ctx)
+    workspace_id = _require_workspace(ctx)
     visible = await _visible_pocket_ids(ctx)
-    store = get_instinct_store()
+    # ISO: HTTP path (no ContextVar) — scope the store to the caller.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     cutoff = datetime.now() - _window_to_delta(body.window)
 
     # Pull a generous slice and filter in Python. ``list_actions`` does
     # ORDER BY created_at DESC LIMIT, so the slice is the newest N.
-    actions = await store.list_actions(limit=500)
+    # W4c — this read has NO pocket filter at the store, so before W4c the
+    # newest 500 rows on a shared DB could be entirely OTHER tenants' — both a
+    # cross-tenant leak AND a correctness bug (the caller's rows starved out of
+    # the window). Scope to ``workspace_id`` so the slice is this tenant's
+    # newest 500 (plus legacy NULL rows); the ``pocket_id in visible`` filter
+    # below stays as the intra-tenant layer.
+    actions = await store.list_actions(limit=500, workspace_id=workspace_id)
     in_window = [
         a
         for a in actions
-        if a.pocket_id in visible and (a.updated_at or a.created_at or datetime.min) >= cutoff
+        # Tenancy MUST match ``agent_list_work_items`` / ``_split_ids_by_tenancy``:
+        # admit an action if it's in a visible pocket OR it's workspace-scoped
+        # (``pocket_id == workspace_id`` — every ``_admin_action`` /
+        # ``_external_action`` / connector proposal). Without the second clause
+        # the summary DROPS workspace-scoped nudges that DO list in
+        # Pawprints/Snags, so the counters undercount vs the list. The store
+        # read is already tenant-scoped, so ``== workspace_id`` only ever
+        # matches the caller's own rows.
+        if (a.pocket_id in visible or a.pocket_id == workspace_id)
+        and (a.updated_at or a.created_at or datetime.min) >= cutoff
     ]
 
     counters: dict[str, int] = {s.value: 0 for s in ActionStatus}
@@ -672,6 +1359,13 @@ async def agent_bulk_reassign(
             skipped.append(raw_id)
 
     # no-event: per-item agent_reassign_task already emits TaskUpdated per row
+    _record_deep_work_audit(
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.item.reassigned",
+        target_type="bulk",
+        metadata={"bulk_id": bulk_id, "affected": affected, "skipped": skipped},
+    )
     return {"bulk_id": bulk_id, "affected": affected, "skipped": skipped}
 
 
@@ -725,6 +1419,68 @@ async def agent_bulk_snooze(
             skipped.append(raw_id)
 
     # no-event: per-item agent_update_task already emits TaskUpdated per row
+    _record_deep_work_audit(
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.item.snoozed",
+        target_type="bulk",
+        metadata={
+            "bulk_id": bulk_id,
+            "affected": affected,
+            "skipped": skipped,
+            "until_iso": body.until_iso,
+        },
+    )
+    return {"bulk_id": bulk_id, "affected": affected, "skipped": skipped}
+
+
+async def agent_bulk_revert(
+    ctx: RequestContext, body: BulkRevertRequest | dict[str, Any]
+) -> dict[str, Any]:
+    """Revert N Tasks from a terminal status back to in_progress.
+
+    Fans out per-id to ``tasks.service.agent_revert_task`` to flip the
+    task status from ``done``, ``reverted``, or ``failed`` back to
+    ``in_progress``. Ids that aren't Tasks land in ``skipped``.
+
+    This differs from ``agent_bulk_reject`` (which rejects pending
+    Nudges) — revert acts on *already-finished* work to un-mark it
+    as complete so the operator can resume work.
+    """
+    body = BulkRevertRequest.model_validate(body)
+    _require_workspace(ctx)
+
+    from uuid import uuid4
+
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+
+    bulk_id = uuid4().hex
+    affected: list[str] = []
+    skipped: list[str] = []
+
+    for raw_id in body.ids:
+        task_id = _classify_task_id(raw_id)
+        if task_id is None:
+            skipped.append(raw_id)
+            continue
+        try:
+            await tasks_service.agent_revert_task(ctx, task_id)
+            affected.append(raw_id)
+        except Exception:
+            logger.info(
+                "mission_control.bulk_revert: skipped id %s",
+                raw_id,
+                exc_info=True,
+            )
+            skipped.append(raw_id)
+
+    _record_deep_work_audit(
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.item.reverted",
+        target_type="bulk",
+        metadata={"bulk_id": bulk_id, "affected": affected, "skipped": skipped},
+    )
     return {"bulk_id": bulk_id, "affected": affected, "skipped": skipped}
 
 
@@ -942,7 +1698,16 @@ async def agent_create_cycle(ctx: RequestContext, body: CreateCycleRequest | dic
     # tenancy via ``_ensure_project_in_workspace`` (raises NotFound when
     # the project isn't in this workspace), and emits ``cycle.created``
     # — no second emit needed from here per Rule 9.
-    return await cycles_service.agent_create_cycle(ctx, cycles_body)
+    result = await cycles_service.agent_create_cycle(ctx, cycles_body)
+    _record_deep_work_audit(
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.cycle.created",
+        target_type="cycle",
+        target_id=str(result.id) if hasattr(result, "id") else body.name,
+        metadata={"name": body.name, "project_id": body.project_id, "scope": body.scope},
+    )
+    return result
 
 
 async def agent_attach_cycle_items(
@@ -975,13 +1740,83 @@ async def agent_attach_cycle_items(
     skipped: list[str] = []
     for task_id in body.item_ids:
         try:
-            await tasks_service.agent_set_task_cycle(ctx, task_id, cycle_id)
+            # The mission-control facade prefixes task IDs with ``task:``
+            # in ``_task_to_work_item`` — strip it before passing to the
+            # tasks service, which expects a raw MongoDB ObjectId hex string.
+            raw_id = task_id.removeprefix("task:")
+            await tasks_service.agent_set_task_cycle(ctx, raw_id, cycle_id)
             attached.append(task_id)
         except NotFound:
             skipped.append(task_id)
 
+    _record_deep_work_audit(
+        workspace_id=workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.cycle.items_attached",
+        target_type="cycle",
+        target_id=cycle_id,
+        metadata={"attached": attached, "skipped": skipped},
+    )
     return AttachCycleItemsResponse(
         attached=attached,
+        skipped=skipped,
+        cycle_id=cycle_id,
+    )
+
+
+async def agent_detach_cycle_items(
+    ctx: RequestContext,
+    cycle_id: str,
+    body: AttachCycleItemsRequest,
+) -> DetachCycleItemsResponse:
+    """Detach a batch of work items from a sprint.
+
+    Validates the sprint exists in the caller's workspace, then for each
+    item id calls ``tasks.service.agent_set_task_cycle`` with ``None``
+    to clear the cycle pointer. Items the caller can't see are reported
+    back as ``skipped`` rather than failing the whole batch.
+    """
+
+    body = AttachCycleItemsRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+
+    from pocketpaw_ee.cloud.cycles import service as cycles_service
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+
+    # Tenancy check on the cycle itself
+    await cycles_service._fetch_in_workspace(workspace_id, cycle_id)
+
+    detached: list[str] = []
+    skipped: list[str] = []
+    for task_id in body.item_ids:
+        try:
+            raw_id = task_id.removeprefix("task:")
+            await tasks_service.agent_set_task_cycle(ctx, raw_id, None)
+            detached.append(task_id)
+        except Exception:
+            skipped.append(task_id)
+
+    # Refresh counters on the cycle so scope/started/completed update
+    tasks = await cycles_service._tasks_for_cycle(ctx, cycle_id)
+    if tasks is not None:
+        scope, started, completed = cycles_service._counters_from_tasks(tasks)
+        doc = await cycles_service._fetch_in_workspace(workspace_id, cycle_id)
+        if (doc.scope, doc.started, doc.completed) != (scope, started, completed):
+            doc.scope = scope
+            doc.started = started
+            doc.completed = completed
+            await doc.save()
+
+    _record_deep_work_audit(
+        workspace_id=workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.cycle.items_detached",
+        target_type="cycle",
+        target_id=cycle_id,
+        metadata={"detached": detached, "skipped": skipped},
+    )
+    return DetachCycleItemsResponse(
+        detached=detached,
         skipped=skipped,
         cycle_id=cycle_id,
     )
@@ -1078,6 +1913,20 @@ async def agent_analytics(ctx: RequestContext, window: str = "7d") -> AnalyticsR
         for pid, count in sorted(pocket_map.items(), key=lambda x: -x[1])
     ]
 
+    # Outcome-verdict rollup (evals slice): bucket Task.verify["verdict"]["status"]
+    # (OutcomeStatus: solved/partial/not_solved/unknown; verify == {} when the
+    # verify loop is off or the task predates it → no verdict). solved_rate is
+    # solved / CHECKABLE (unknown excluded and reported separately, so low
+    # criteria coverage is visible instead of hiding inside a fake 100%);
+    # None = no checkable verdicts in the window (UI renders "—", not "0%").
+    verdict_counts = {"solved": 0, "partial": 0, "not_solved": 0, "unknown": 0}
+    for d in docs:
+        status = ((d.verify or {}).get("verdict") or {}).get("status")
+        if status in verdict_counts:
+            verdict_counts[status] += 1
+    checkable = verdict_counts["solved"] + verdict_counts["partial"] + verdict_counts["not_solved"]
+    solved_rate = round(verdict_counts["solved"] / checkable * 100, 1) if checkable else None
+
     return AnalyticsResponse(
         shipped=total_shipped,
         approval_rate=approval_rate,
@@ -1087,6 +1936,11 @@ async def agent_analytics(ctx: RequestContext, window: str = "7d") -> AnalyticsR
         per_day=per_day,
         by_agent=by_agent,
         by_pocket=by_pocket,
+        solved_rate=solved_rate,
+        solved_count=verdict_counts["solved"],
+        partial_count=verdict_counts["partial"],
+        not_solved_count=verdict_counts["not_solved"],
+        unknown_count=verdict_counts["unknown"],
     )
 
 
@@ -1096,6 +1950,7 @@ __all__ = [
     "agent_bulk_approve",
     "agent_bulk_reassign",
     "agent_bulk_reject",
+    "agent_bulk_revert",
     "agent_bulk_snooze",
     "agent_create_cycle",
     "agent_list_activity",

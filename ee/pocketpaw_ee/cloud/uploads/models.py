@@ -1,5 +1,28 @@
 """EE FileUpload document — Mongo metadata for blobs stored via StorageAdapter.
 
+2026-07-03 — FL-11b "hide-from-AI purge". Added ``kb_article_id`` and
+``kb_scope`` (both ``str | None``, default ``None``) so a row remembers the
+kb-go article it was ingested into. The FileReady listener records them after a
+successful ingest; the PATCH route reads them to purge that article when a file
+is later hidden from AI (``hide_from_ai`` flips false→true). Legacy rows read
+back ``None`` via the defaults — no migration needed (Beanie field-add). Not
+indexed: they're read only after resolving a row by ``file_id``.
+
+2026-07-03 — FL-1 "Library metadata". Added ``tags`` (list[str]),
+``collections`` (list[str]) and ``hide_from_ai`` (bool) so a file can carry
+library organization + an AI-visibility flag that persist and round-trip
+through the /files listing. Legacy rows without the fields read back as empty
+lists / False via the Pydantic defaults (no migration script needed — Beanie
+field-add with a default is backward compatible). ``tags`` and ``collections``
+each get a Mongo index so library filtering stays cheap. ``tags`` was already
+read defensively via ``getattr`` in ``mongo_store``; this formalizes it as a
+declared field alongside the two new ones.
+
+2026-06-26 — ART-1. Added ``content_version`` (default 0) so the
+``file_versions`` service can run optimistic-concurrency edits and archive
+each prior blob as a ``FileVersionDoc``. Legacy rows read as 0; ``write_file``
+stamps new rows at 1. Beanie field-add is backward compatible (no migration).
+
 2026-05-03 — Stage 3.E "Files as Knowledge". Added ``pocket_id`` so the
 unified Files panel and the FileReady listener can route a single upload
 into a pocket-scoped KB instead of the workspace pool. ``None`` is the
@@ -43,6 +66,24 @@ class FileUpload(TimestampedDocument):
     # Storage layout is unchanged — partitioning is metadata-only.
     pocket_id: str | None = None
     deleted_at: datetime | None = None
+    # Optimistic-concurrency counter for the file_versions edit pipeline
+    # (ART-1). Each successful inline edit bumps this and archives the prior
+    # blob as a ``FileVersionDoc``. 0 on legacy rows; ``write_file`` stamps 1.
+    content_version: int = 0
+    # Library metadata (FL-1). Free-form ``tags`` and named ``collections``
+    # organize the file in the library UI; ``hide_from_ai`` opts a file out of
+    # AI/KB visibility. Legacy rows without these read back as empty lists /
+    # False via the defaults — no migration script needed.
+    tags: list[str] = Field(default_factory=list)
+    collections: list[str] = Field(default_factory=list)
+    hide_from_ai: bool = False
+    # KB tracking (FL-11b). After a successful ingest the FileReady listener
+    # records the kb-go article id and the scope it landed in, so the file can
+    # be retroactively purged from the KB if it's later hidden from AI. ``None``
+    # means "not (currently) indexed" — a hide toggle then skips the purge, and
+    # a later re-index re-populates these. Legacy rows read ``None``.
+    kb_article_id: str | None = None
+    kb_scope: str | None = None
 
     class Settings:
         name = "file_uploads"
@@ -53,6 +94,9 @@ class FileUpload(TimestampedDocument):
             # Stage 3.E: pocket-scoped queries hit this index. Newest
             # first because the Files panel orders by ``created`` desc.
             [("workspace", 1), ("pocket_id", 1), ("createdAt", -1)],
+            # FL-1: library filtering by tag / collection within a workspace.
+            [("workspace", 1), ("tags", 1)],
+            [("workspace", 1), ("collections", 1)],
         ]
 
 

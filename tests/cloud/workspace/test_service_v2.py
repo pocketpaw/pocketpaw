@@ -35,13 +35,18 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     WorkspaceUpdated,
 )
 from pocketpaw_ee.cloud.models.invite import Invite as _InviteDoc
+from pocketpaw_ee.cloud.models.invite import hash_token
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
+from pocketpaw_ee.cloud.people import service as people_service
+from pocketpaw_ee.cloud.people.domain import PERSON_TYPE_ID, SOURCE_ADMIN_CONTEXT
 from pocketpaw_ee.cloud.workspace import service as workspace_service
 from pocketpaw_ee.cloud.workspace.dto import (
     BulkInviteRequest,
     CreateInviteRequest,
     CreateWorkspaceRequest,
+    InviteContextDTO,
     UpdateWorkspaceRequest,
+    invite_to_dto,
 )
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
@@ -99,6 +104,35 @@ def resolver_mock(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 @pytest.fixture
 async def owner() -> _UserDoc:
     return await _seed_user(email="owner@x.c", full_name="Owner")
+
+
+@pytest.fixture
+def person_store(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """Inject a throwaway journal-backed FabricJournalStore into the people
+    service so accept_invite materializes the Person against an isolated
+    tmp journal instead of opening the real org journal at ~/.soul/.
+    Returns the store so tests can read back the materialized Person.
+    """
+    from soul_protocol.engine.journal import open_journal
+
+    from pocketpaw.fabric.journal_store import FabricJournalStore
+
+    journal = open_journal(tmp_path / "people_journal.db")
+    store = FabricJournalStore(journal)
+    store.bootstrap()
+    monkeypatch.setattr(people_service, "_default_store", lambda: store)
+    yield store
+    journal.close()
+
+
+async def _materialized_people(store) -> list:
+    from pocketpaw.fabric.models import FabricQuery
+
+    result = await store.query(
+        FabricQuery(type_id=PERSON_TYPE_ID, limit=10_000),
+        requester_scopes=None,
+    )
+    return result.objects
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +363,99 @@ async def test_remove_member_allows_removing_one_of_many_owners(
 
 
 # ---------------------------------------------------------------------------
+# Owner-grant / owner-removal actor guard (FINDING A — privilege escalation)
+#
+# Granting OR removing the ``owner`` role requires the ACTOR to already hold
+# owner. Otherwise an ADMIN (gated at ``workspace.member.role_change``) could
+# promote any member — including themselves — to owner, or evict a sitting
+# owner. The actor-must-be-owner guard lives in the service so every caller
+# (the admin tool, the executor, a route) inherits it.
+# ---------------------------------------------------------------------------
+
+
+async def test_update_member_role_admin_cannot_grant_owner(owner) -> None:
+    """An ADMIN actor promoting a member to owner is Forbidden (escalation)."""
+    admin = await _seed_user(email="admin@x.c", full_name="Admin")
+    target = await _seed_user(email="target@x.c", full_name="Target")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    await workspace_service._add_member(ws.id, str(admin.id), role="admin")
+    await workspace_service._add_member(ws.id, str(target.id), role="member")
+
+    with pytest.raises(Forbidden) as exc:
+        await workspace_service.update_member_role(ws.id, str(target.id), "owner", str(admin.id))
+    assert exc.value.code == "workspace.owner_grant_requires_owner"
+    # The target was NOT promoted.
+    assert await workspace_service._get_member_role(ws.id, str(target.id)) == "member"
+
+
+async def test_update_member_role_admin_cannot_self_promote_to_owner(owner) -> None:
+    """An ADMIN cannot promote THEMSELVES to owner (the escalation-to-self case)."""
+    admin = await _seed_user(email="admin@x.c", full_name="Admin")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    await workspace_service._add_member(ws.id, str(admin.id), role="admin")
+
+    with pytest.raises(Forbidden) as exc:
+        await workspace_service.update_member_role(ws.id, str(admin.id), "owner", str(admin.id))
+    assert exc.value.code == "workspace.owner_grant_requires_owner"
+    assert await workspace_service._get_member_role(ws.id, str(admin.id)) == "admin"
+
+
+async def test_update_member_role_owner_can_grant_owner(
+    owner, recording_bus, resolver_mock
+) -> None:
+    """An OWNER actor CAN promote a member to owner (co-owner transfer)."""
+    target = await _seed_user(email="target@x.c", full_name="Target")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    await workspace_service._add_member(ws.id, str(target.id), role="member")
+
+    await workspace_service.update_member_role(ws.id, str(target.id), "owner", str(owner.id))
+
+    assert await workspace_service._get_member_role(ws.id, str(target.id)) == "owner"
+
+
+async def test_remove_member_admin_cannot_remove_owner(owner) -> None:
+    """An ADMIN actor removing a (non-doc-owner) owner is Forbidden.
+
+    Seeds a second owner so the last-owner guard is not what fires — the block
+    must come from the actor-not-owner check, proven by the error code.
+    """
+    admin = await _seed_user(email="admin@x.c", full_name="Admin")
+    co_owner = await _seed_user(email="co@x.c", full_name="Co")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    await workspace_service._add_member(ws.id, str(admin.id), role="admin")
+    await workspace_service._add_member(ws.id, str(co_owner.id), role="owner")
+
+    with pytest.raises(Forbidden) as exc:
+        await workspace_service.remove_member(ws.id, str(co_owner.id), str(admin.id))
+    assert exc.value.code == "workspace.owner_removal_requires_owner"
+    # co_owner is still a member with the owner role.
+    assert await workspace_service._get_member_role(ws.id, str(co_owner.id)) == "owner"
+
+
+async def test_remove_member_owner_can_remove_owner(
+    owner, recording_bus, captured_legacy_events, resolver_mock
+) -> None:
+    """An OWNER actor CAN remove another owner (still governed by last-owner)."""
+    co_owner = await _seed_user(email="co@x.c", full_name="Co")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    await workspace_service._add_member(ws.id, str(co_owner.id), role="owner")
+
+    await workspace_service.remove_member(ws.id, str(co_owner.id), str(owner.id))
+
+    assert await workspace_service._get_member_role(ws.id, str(co_owner.id)) is None
+
+
+# ---------------------------------------------------------------------------
 # Invites
 # ---------------------------------------------------------------------------
 
@@ -349,6 +476,98 @@ async def test_create_invite_seat_limit(owner, monkeypatch) -> None:
         await workspace_service.create_invite(
             _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="x@y.z")
         )
+
+
+# ---------------------------------------------------------------------------
+# feat/billing-smb-caps — the seat gate is PLAN-SOURCED (max(doc.seats, plan cap)).
+# ---------------------------------------------------------------------------
+
+
+async def test_effective_seat_limit_is_max_of_doc_seats_and_plan(owner) -> None:
+    """The enforced ceiling is max(doc.seats, plan.max_seats) — plan lifts it, and a
+    custom-higher doc.seats never regresses."""
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WSDoc
+
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    doc = await _WSDoc.get(ws.id)
+
+    # Free plan (max_seats=5) == the default doc.seats=5: no change.
+    assert await workspace_service._effective_seat_limit(doc) == 5
+
+    # Upgrade the plan to pro (max_seats=25): the ceiling rises to 25.
+    doc.plan = "pro"
+    await doc.save()
+    assert await workspace_service._effective_seat_limit(doc) == 25
+
+    # A workspace whose custom doc.seats already exceeds the plan cap keeps the
+    # higher number — enforcement never strips seats it already has.
+    doc.plan = "free"
+    doc.seats = 40
+    await doc.save()
+    assert await workspace_service._effective_seat_limit(doc) == 40
+
+    # An uncapped plan (enterprise, max_seats=None) defers to doc.seats.
+    doc.plan = "enterprise"
+    doc.seats = 12
+    await doc.save()
+    assert await workspace_service._effective_seat_limit(doc) == 12
+
+
+async def test_create_invite_uses_plan_seat_limit_not_flat_seats(owner, monkeypatch) -> None:
+    """A workspace saturated at its flat doc.seats but on a higher-cap plan can still
+    invite — the gate sources the limit from the plan, not doc.seats alone."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WSDoc
+
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    # Move to pro (max_seats=25) while doc.seats stays the default 5.
+    doc = await _WSDoc.get(ws.id)
+    doc.plan = "pro"
+    await doc.save()
+
+    # Fill past the OLD flat limit of 5 (owner + 5 members = 6 > 5).
+    for i in range(5):
+        u = await _seed_user(email=f"seat{i}@x.c")
+        await workspace_service._add_member(ws.id, str(u.id), role="member")
+
+    # Under the flat-seats rule this would raise; under the plan cap (25) it succeeds.
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="x@y.z")
+    )
+    assert invite.id
+
+
+async def test_raise_seats_for_plan_lifts_on_upgrade_only(owner) -> None:
+    """raise_seats_for_plan bumps doc.seats UP to the plan cap and never down."""
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WSDoc
+
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    # Default seats == 5. Upgrade to pro (25) lifts the stored cap.
+    new_seats = await workspace_service.raise_seats_for_plan(ws.id, "pro")
+    assert new_seats == 25
+    assert (await _WSDoc.get(ws.id)).seats == 25
+
+    # A "downgrade" to free (cap 5) must NOT strip the 25 seats it already has.
+    unchanged = await workspace_service.raise_seats_for_plan(ws.id, "free")
+    assert unchanged == 25
+    assert (await _WSDoc.get(ws.id)).seats == 25
+
+    # An uncapped plan (enterprise) is a no-op — returns None, leaves seats as-is.
+    ent_result = await workspace_service.raise_seats_for_plan(ws.id, "enterprise")
+    assert ent_result is None
+    assert (await _WSDoc.get(ws.id)).seats == 25
+
+    # An unknown plan key is a safe no-op (None), seats untouched.
+    assert await workspace_service.raise_seats_for_plan(ws.id, "bogus_tier") is None
+    assert (await _WSDoc.get(ws.id)).seats == 25
 
 
 async def test_create_invite_rejects_duplicate_pending(owner, monkeypatch) -> None:
@@ -457,6 +676,72 @@ async def test_accept_invite_rejects_revoked(owner, monkeypatch) -> None:
     assert exc.value.code == "invite.revoked"
 
 
+async def test_accept_invite_self_heals_missing_membership(owner, monkeypatch) -> None:
+    """An invite stamped accepted=True but with NO membership written (the
+    backend was restarted between the atomic claim and _add_member) must
+    converge on re-accept: the rightful invitee gets the membership instead
+    of an ``invite.already_accepted`` 409 that would lock them out forever.
+    """
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    # Simulate the burned invite: claimed (accepted=True) but the membership
+    # never landed, so the invitee has workspaces=[] and active_workspace=None.
+    invite_doc = _InviteDoc(
+        workspace=ws.id,
+        email="invitee@x.c",
+        role="member",
+        invited_by=str(owner.id),
+        token_hash=hash_token("tok-burned"),
+        accepted=True,
+        accepted_at=datetime.now(UTC),
+    )
+    await invite_doc.insert()
+    invitee = await _seed_user(email="invitee@x.c")
+    assert await workspace_service._get_member_role(ws.id, str(invitee.id)) is None
+
+    # Must NOT raise — it heals the missing membership.
+    await workspace_service.accept_invite(_ctx(str(invitee.id)), "tok-burned")
+
+    assert await workspace_service._get_member_role(ws.id, str(invitee.id)) == "member"
+    refreshed = await _UserDoc.get(invitee.id)
+    assert refreshed is not None
+    assert refreshed.active_workspace == ws.id
+
+
+async def test_accept_invite_genuine_duplicate_still_raises(owner, monkeypatch) -> None:
+    """A user who IS already a member re-accepting an accepted invite still
+    hits ``invite.already_accepted`` — the self-heal only fires when the
+    membership is actually missing, not for real duplicate accepts.
+    """
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    invite_doc = _InviteDoc(
+        workspace=ws.id,
+        email="invitee@x.c",
+        role="member",
+        invited_by=str(owner.id),
+        token_hash=hash_token("tok-dup"),
+        accepted=True,
+        accepted_at=datetime.now(UTC),
+    )
+    await invite_doc.insert()
+    invitee = await _seed_user(email="invitee@x.c")
+    # This user is already a member of the workspace.
+    await workspace_service._add_member(ws.id, str(invitee.id), role="member")
+
+    with pytest.raises(ConflictError) as exc:
+        await workspace_service.accept_invite(_ctx(str(invitee.id)), "tok-dup")
+    assert exc.value.code == "invite.already_accepted"
+
+
 async def test_revoke_invite_emits_invite_revoked(owner, recording_bus, monkeypatch) -> None:
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
@@ -519,7 +804,6 @@ async def test_create_invite_hashes_token_at_rest(
 
     # The DB row stores the HASH, not the plaintext.
     from pocketpaw_ee.cloud.models.invite import Invite as _D
-    from pocketpaw_ee.cloud.models.invite import hash_token
 
     row = await _D.find_one(_D.token_hash == hash_token(invite.token))
     assert row is not None
@@ -646,6 +930,282 @@ async def test_accept_invite_case_insensitive_email(mongo_db: Any, monkeypatch) 
 
 
 # ---------------------------------------------------------------------------
+# Invite admin context — optional VIP-onboarding payload (pp#1365)
+# ---------------------------------------------------------------------------
+
+
+async def test_create_invite_persists_admin_context(owner, monkeypatch) -> None:
+    """create_invite(...) with a context round-trips: the returned domain
+    object carries it AND the persisted row stores it."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(
+            email="vip@x.c",
+            context=InviteContextDTO(focus="Owns the Q3 pricing rollout", profile_pic="file_abc"),
+        ),
+    )
+
+    # Returned domain object carries the context.
+    assert invite.context is not None
+    assert invite.context.focus == "Owns the Q3 pricing rollout"
+    assert invite.context.profile_pic == "file_abc"
+
+    # The persisted row stores it too.
+    row = await _InviteDoc.find_one(_InviteDoc.id == PydanticObjectId(invite.id))
+    assert row is not None
+    assert row.context is not None
+    assert row.context.focus == "Owns the Q3 pricing rollout"
+    assert row.context.profile_pic == "file_abc"
+
+
+async def test_create_invite_context_surfaces_on_validate_dto(owner, monkeypatch) -> None:
+    """The context survives the read path: validate_invite -> invite_to_dto
+    returns it on the wire response (the shape paw-enterprise consumes)."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(
+            email="vip2@x.c",
+            context=InviteContextDTO(focus="Leads onboarding"),
+        ),
+    )
+
+    read_invite, _ws_name = await workspace_service.validate_invite(invite.token)
+    dto = invite_to_dto(read_invite)
+    assert dto.context is not None
+    assert dto.context.focus == "Leads onboarding"
+    assert dto.context.profile_pic is None
+
+
+async def test_accept_invite_context_readable(owner, resolver_mock, monkeypatch) -> None:
+    """At accept time the invite's admin context is readable for the
+    downstream VIP-onboarding flow."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    invitee = await _seed_user(email="acceptctx@x.c")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(
+            email="acceptctx@x.c",
+            context=InviteContextDTO(focus="Drives the design system", profile_pic="pic_xyz"),
+        ),
+    )
+
+    await workspace_service.accept_invite(_ctx(str(invitee.id)), invite.token)
+
+    # The accepted row still carries the context — readable in the accept
+    # path / by any downstream onboarding consumer.
+    row = await _InviteDoc.find_one(_InviteDoc.id == PydanticObjectId(invite.id))
+    assert row is not None
+    assert row.accepted is True
+    assert row.context is not None
+    assert row.context.focus == "Drives the design system"
+    assert row.context.profile_pic == "pic_xyz"
+
+
+# ---------------------------------------------------------------------------
+# accept_invite → Fabric Person materialization (pp#1366)
+# ---------------------------------------------------------------------------
+
+
+async def test_accept_invite_materializes_person(
+    owner, resolver_mock, person_store, monkeypatch
+) -> None:
+    """Accepting an invite materializes a standalone Fabric Person holding
+    the member's identity + the invite's admin context, provenance-tracked."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    invitee = await _seed_user(email="newhire@x.c", full_name="New Hire")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(
+            email="newhire@x.c",
+            role="admin",
+            context=InviteContextDTO(focus="Owns onboarding", profile_pic="pic_42"),
+        ),
+    )
+
+    await workspace_service.accept_invite(_ctx(str(invitee.id)), invite.token)
+
+    people = await _materialized_people(person_store)
+    assert len(people) == 1
+    obj = people[0]
+    assert obj.id == f"person-{ws.id}-{invitee.id}"
+    props = obj.properties
+    # Identity — from the member's own profile.
+    assert props["name"] == "New Hire"
+    assert props["email"] == "newhire@x.c"
+    # Role + onboarding — from the invite's admin context.
+    assert props["role"] == "admin"
+    assert props["focus"] == "Owns onboarding"
+    assert props["profile_pic"] == "pic_42"
+    # Provenance.
+    assert props["invited_by"] == str(owner.id)
+    assert props["source"] == SOURCE_ADMIN_CONTEXT
+    assert obj.source_connector == SOURCE_ADMIN_CONTEXT
+    assert obj.source_id == str(invitee.id)
+
+
+async def test_accept_invite_no_context_still_materializes_person(
+    owner, resolver_mock, person_store, monkeypatch
+) -> None:
+    """An invite with no admin context still produces a Person from the
+    member's identity — focus / profile_pic just empty."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    invitee = await _seed_user(email="plainhire@x.c", full_name="Plain Hire")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="B", slug="b")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="plainhire@x.c")
+    )
+
+    await workspace_service.accept_invite(_ctx(str(invitee.id)), invite.token)
+
+    people = await _materialized_people(person_store)
+    assert len(people) == 1
+    props = people[0].properties
+    assert props["name"] == "Plain Hire"
+    assert props["focus"] == ""
+    assert props["profile_pic"] == ""
+    assert props["source"] == SOURCE_ADMIN_CONTEXT
+
+
+async def test_accept_invite_person_is_idempotent_no_duplicate(
+    owner, resolver_mock, person_store, monkeypatch
+) -> None:
+    """Re-materializing the same member (e.g. a second invite + accept)
+    UPDATES the existing Person — one row, never a duplicate."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    invitee = await _seed_user(email="dup@x.c", full_name="Dup User")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="C", slug="c")
+    )
+
+    # First invite + accept.
+    invite1 = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(
+            email="dup@x.c",
+            context=InviteContextDTO(focus="First focus"),
+        ),
+    )
+    await workspace_service.accept_invite(_ctx(str(invitee.id)), invite1.token)
+
+    # Re-materialize directly with a revised invite context (same member /
+    # workspace) — simulates a re-run of the onboarding flow. Going through
+    # accept_invite a second time would 409 on the consumed token, so this
+    # exercises the materializer's upsert path head-on.
+    from pocketpaw_ee.cloud.workspace.domain import Invite, InviteContext
+
+    revised = Invite(
+        id=invite1.id,
+        workspace_id=ws.id,
+        email="dup@x.c",
+        role="member",
+        invited_by=str(owner.id),
+        token=None,
+        group_id=None,
+        accepted=True,
+        revoked=False,
+        expired=False,
+        expires_at=datetime.now(UTC),
+        context=InviteContext(focus="Second focus"),
+    )
+    await people_service.materialize_person_from_invite(
+        workspace_id=ws.id,
+        user_id=str(invitee.id),
+        name="Dup User",
+        email="dup@x.c",
+        avatar="",
+        invite=revised,
+    )
+
+    people = await _materialized_people(person_store)
+    assert len(people) == 1  # still one — not duplicated.
+    assert people[0].properties["focus"] == "Second focus"
+
+
+async def test_accept_invite_survives_person_materialization_failure(
+    owner, resolver_mock, monkeypatch
+) -> None:
+    """A Fabric/journal hiccup during materialization must NOT roll back an
+    accepted invite — membership is the source of truth."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+
+    async def _boom(**_kwargs):
+        raise RuntimeError("journal exploded")
+
+    monkeypatch.setattr(people_service, "materialize_person_from_invite", _boom)
+
+    invitee = await _seed_user(email="resilient@x.c", full_name="Resilient")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="D", slug="d")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="resilient@x.c")
+    )
+
+    # Should not raise despite the materialization failure.
+    await workspace_service.accept_invite(_ctx(str(invitee.id)), invite.token)
+
+    refreshed = await _UserDoc.get(invitee.id)
+    assert refreshed is not None
+    assert any(m.workspace == ws.id for m in refreshed.workspaces)
+
+
+async def test_create_invite_without_context_is_unchanged(owner, monkeypatch) -> None:
+    """Omitting context behaves exactly as before — no context stored,
+    no context on the returned domain object or DTO."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="plain@x.c")
+    )
+
+    assert invite.context is None
+    assert invite_to_dto(invite).context is None
+
+    row = await _InviteDoc.find_one(_InviteDoc.id == PydanticObjectId(invite.id))
+    assert row is not None
+    assert row.context is None
+
+
+# ---------------------------------------------------------------------------
 # preview_invite — typed state for the accept UI
 # ---------------------------------------------------------------------------
 
@@ -751,6 +1311,52 @@ async def test_preview_invite_revoked_expired_accepted(
     out = await workspace_service.preview_invite(accepted_invite.token, viewer_user_id=None)
     assert out["state"] == "already_accepted"
     assert out["email"] == "acc@x.c"
+
+
+async def test_preview_invite_surfaces_admin_context(owner, monkeypatch) -> None:
+    """preview_invite exposes the invite's admin context to the member-facing
+    accept UI so the downstream VIP-onboarding flow can carry the invitee's
+    focus + profile_pic forward (pp#1365)."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="VP", slug="vp")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(
+            email="vippreview@x.c",
+            context=InviteContextDTO(focus="Owns the launch checklist", profile_pic="file_vip"),
+        ),
+    )
+
+    out = await workspace_service.preview_invite(invite.token, viewer_user_id=None)
+    assert out["state"] == "ready_new"
+    assert out["context"] is not None
+    assert out["context"]["focus"] == "Owns the launch checklist"
+    assert out["context"]["profile_pic"] == "file_vip"
+
+
+async def test_preview_invite_no_context_is_absent(owner, monkeypatch) -> None:
+    """An invite minted without admin context previews with context None —
+    no regression to the existing preview shape for the common case."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="VN", slug="vn")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(email="plainpreview@x.c", role="member"),
+    )
+
+    out = await workspace_service.preview_invite(invite.token, viewer_user_id=None)
+    assert out["state"] == "ready_new"
+    assert out["context"] is None
 
 
 async def test_create_invite_cleans_up_expired_rows(owner, monkeypatch) -> None:
@@ -1071,8 +1677,6 @@ async def test_resend_invite_returns_new_plaintext(owner, monkeypatch) -> None:
     new_plaintext = result["token"]
     assert isinstance(new_plaintext, str) and len(new_plaintext) >= 32
     assert new_plaintext != original.token
-
-    from pocketpaw_ee.cloud.models.invite import hash_token
 
     row = await _InviteDoc.get(PydanticObjectId(original.id))
     assert row is not None

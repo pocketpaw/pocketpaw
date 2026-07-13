@@ -15,7 +15,7 @@ def test_workspace_is_frozen() -> None:
         name="Acme",
         slug="acme",
         owner="u1",
-        plan="team",
+        plan="go",
         seats=5,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
@@ -29,7 +29,7 @@ def test_workspace_default_member_count_zero() -> None:
         name="A",
         slug="a",
         owner="u1",
-        plan="team",
+        plan="go",
         seats=5,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )

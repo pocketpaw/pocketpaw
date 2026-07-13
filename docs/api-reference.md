@@ -23,6 +23,55 @@ the authoring agent stops hallucinating endpoints.
 Updated: 2026-05-22 (feat/catalog-allowlist, Increment 5) — documented
 the catalog-as-allowlist ingest gate, the two escape-hatch widgets
 (`model-viewer` + `embed`), and the `embed` URL/host policy.
+
+Updated: 2026-06-11 (gap-3 outcome VALUE metering) — documented the
+Outcome Metering section: the binding-level `outcome` / `outcome_value` /
+`outcome_unit` declaration, the existing `GET /outcomes` count surface,
+and the new `GET /outcomes/meter` aggregation surface that sums billable
+value by unit per workspace over a since/until window. Invoicing /
+payment / pricing-rules / clawback remain deferred.
+
+Updated: 2026-06-15 (feat/invoke-tool-v1) — documented the now-live
+POST /pockets/{id}/tools/run (was a fail-closed stub) and the new
+owner-only PUT /pockets/{id}/backend/tool-policy. The backend summary now
+carries `allowed_tools` (the per-pocket tool allowlist) alongside
+`allowed_writes`.
+Updated: 2026-06-15 (feat/invoke-tool-v1, v2) — the WRITE path is now live.
+A connector READ tool still fires immediately; a WRITE tool is no longer
+refused with `code: blocked` — it is PROPOSED for human approval through the
+Instinct gate and returns `code: instinct_pending` with a `proposed_action_id`
+(the write fires only when a human approves it in The Tray).
+
+Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — documented the
+workspace jobs primitive: the `kind: "job"` variant of
+POST /pockets/{id}/actions/run that enqueues a server-side async job
+instead of firing an HTTP write, and the new
+GET /workspaces/{ws}/jobs/{job_id} status poll. Jobs run on the shared ARQ
+worker under the synthetic `system:workspace_job` identity and merge their
+results back into the pocket's `state` over the live update bridge.
+
+Updated: 2026-06-26 (ART-1) — documented the Files — Versioned Writes
+section: POST /files/write, PUT /files/{id}, and the two version-history
+reads (GET /files/{id}/versions[/{vid}]). The write path archives each
+prior blob as a FileVersionDoc and bumps a per-file content_version counter;
+every read is workspace-scoped.
+Updated: 2026-06-26 (ART-4) — documented the Agent Artifact Delivery
+(deliver_artifact) in-process MCP tool: routes a built file/dir through the
+workspace upload pipeline (file as-is, dir zipped) and returns a presigned
+download URL; jail-scoped path safety; POCKETPAW_DELIVER_MAX_MB cap.
+Updated: 2026-07-02 (NE-4b / NE-5b) — documented the Sites — Native Editing
+section: POST /sites/by-pocket/{id}/leaf-edits (splice editor edits into the
+svelte source via the apply-leaf-edit CLI and persist as a Branch draft, no
+rebuild — dynamic-source split + input-keyspace confinement) and GET
+/sites/by-pocket/{id}/native-artifact (serve the armed build's body_html + css
+for shadow render — per-GET arm-build cost, path-traversal-guarded CSS reader).
+
+Updated: 2026-07-11 (feat/real-pipeline-s1) — documented the Fabric — Transform
+Mappings section: GET/POST/DELETE /fabric/ingest/mappings (author the
+workspace's source→Fabric mappings, now with a "connector" source_kind that
+dispatches through the OSS FABRIC_INGESTORS registry — gcalendar first) and
+POST /fabric/ingest/run (run one mapping immediately; misconfiguration reports
+status="error" in the body, never a 5xx).
 -->
 
 # Cloud REST API Reference
@@ -61,14 +110,18 @@ Response `200`:
   "base_url": "https://api.example.com",
   "auth_type": "bearer",
   "configured": true,
-  "allowed_writes": []
+  "allowed_writes": [],
+  "allowed_tools": []
 }
 ```
 
 The token is never echoed back. A non-https or internal `base_url` yields
 a `400`. `allowed_writes` is the per-pocket write allowlist (RFC 05 M2a) —
 empty by default, so no write action can fire until an owner sets a policy
-via `PUT /pockets/{id}/backend/write-policy`.
+via `PUT /pockets/{id}/backend/write-policy`. `allowed_tools` is the
+per-pocket tool allowlist (feat/invoke-tool-v1) — also empty by default, so
+no `invoke_tool` can fire until an owner sets a policy via
+`PUT /pockets/{id}/backend/tool-policy`.
 
 For `basic` auth, send `auth_token` as the raw `user:pass` credential —
 the server base64-encodes it into the `Authorization: Basic` header. Do
@@ -87,13 +140,15 @@ Response `200`:
   "base_url": "https://api.example.com",
   "auth_type": "bearer",
   "configured": true,
-  "allowed_writes": [{ "method": "POST", "path_pattern": "/leases/*/renew" }]
+  "allowed_writes": [{ "method": "POST", "path_pattern": "/leases/*/renew" }],
+  "allowed_tools": [{ "tool": "connector:github:list_issues" }]
 }
 ```
 
 Returns `404` when the pocket has no backend configured. The token is
 never included in the response. `allowed_writes` carries the current
-write allowlist (RFC 05 M2a).
+write allowlist (RFC 05 M2a); `allowed_tools` carries the current tool
+allowlist (feat/invoke-tool-v1).
 
 ### `DELETE /pockets/{pocket_id}/backend`
 
@@ -242,6 +297,289 @@ and a write-specific rate limit — 20 writes per `(pocket, user)` per
 minute, a **separate** counter from the read budget. Every run (including
 every rejection) is written to the audit log; the credential token is
 never logged.
+
+## Pockets — Tool Invocations (`invoke_tool`)
+
+feat/invoke-tool-v1. `invoke_tool` is the click-driven tool verb for pocket
+FLOW-BUTTONs. A button fires `{action: "invoke_tool", tool, args}`; Ripple
+resolves the `args` client-side and the host POSTs to the route below. Like
+write actions, it carries a per-pocket allowlist that lives **outside**
+`rippleSpec` — a human authorizes which tools a pocket may run, so a
+compromised or hallucinated spec cannot grant itself a tool.
+
+A grant's `tool` is one of:
+
+- a connector action, `connector:<name>:<action>` (e.g.
+  `connector:github:list_issues`), or
+- a built-in tool name (e.g. `web_fetch`) — reserved; the built-in registry
+  dispatch is a v1.x follow-up, so a built-in grant currently returns
+  `code: unknown_tool`.
+
+**Read/write split.** A connector grant is dispatched through the shared
+connector executor (`connectors.service.execute`). A **read** action
+(`trust=auto`) fires immediately and returns its data. A **write** action
+(`trust=confirm`/`restricted`) **never** runs inline — it is **proposed for
+human approval** through the Instinct gate. The route files a pending Instinct
+Action (via `propose_external_action`) and returns `code: instinct_pending`
+with a `proposed_action_id`; the connector write fires only when a human
+approves the Action in The Tray, at which point the instinct router runs the
+existing execute-on-approve path (`execute_approved_external_action` →
+`connectors.service.execute`, re-validated for workspace + params + idempotency).
+The client's `on_success` handler branches on `code == "instinct_pending"` to
+show a "sent for approval" state and can watch the `proposed_action_id`.
+
+### `PUT /pockets/{pocket_id}/backend/tool-policy`
+
+Set the pocket's tool allowlist. Requires pocket **owner** access.
+
+Request body:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `allowed_tools` | array | List of `{tool}` grants. Replaces the whole list. An empty list is valid — it revokes every tool (fail-closed). |
+
+Each grant: `tool` is a built-in tool name or a connector action
+`connector:<name>:<action>` (`min_length=1`). Omitting a tool means that
+tool can never fire.
+
+Response `200`: the backend summary, including the updated `allowed_tools`.
+
+Returns `400` when the pocket has no backend configured — a tool policy with
+no backend to apply it to is meaningless. The change is audit-logged
+(`pocket.backend.tool_policy`).
+
+### `POST /pockets/{pocket_id}/tools/run`
+
+Invoke a named tool with the resolved args. Access is **owner or explicit
+`shared_with` only** — a tool invocation has the same blast radius as a write
+binding, so a workspace-visible pocket does **not** grant run access.
+
+Request body:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `tool` | string | Required (`min_length=1`). The tool name — a built-in name or `connector:<name>:<action>`. |
+| `args` | object | Optional. The resolved tool arguments (Ripple's `{...}` resolver runs client-side at click time). |
+
+The allowlist is read server-side off the backend-credential row, never from
+the spec. A pocket with no backend, no grants, or a tool not on the list
+returns `code: not_allowed` — fail-closed.
+
+Response `200` (connector read fired):
+
+```json
+{
+  "ok": true,
+  "tool": "connector:github:list_issues",
+  "status": 200,
+  "response": [{ "number": 1, "title": "first issue" }],
+  "on_success": [],
+  "on_error": []
+}
+```
+
+Response `202` (write proposed for approval):
+
+```json
+{
+  "ok": true,
+  "tool": "connector:github:create_issue",
+  "status": 202,
+  "code": "instinct_pending",
+  "proposed_action_id": "act-7f3c…",
+  "response": {
+    "action_id": "act-7f3c…",
+    "proposed_action_id": "act-7f3c…",
+    "status": "pending_approval",
+    "connector": "github",
+    "action": "create_issue"
+  }
+}
+```
+
+The write does **not** run at this point. The pending Action appears in The
+Tray; on approve, the instinct router fires the connector write through the
+existing execute-on-approve path. On reject, the write never runs.
+
+Other rejection codes (`ok: false`): `not_allowed` (tool not on the
+allowlist / no backend), `not_reachable` (connector not bound to this
+pocket), `unknown_tool` (the connector has no such action, or a built-in
+grant has no registry implementation yet), `bad_grant` (malformed
+`connector:` grant), `propose_failed` (the write could not be filed for
+approval — e.g. the Instinct store was unavailable; the write is **not** run
+inline as a fallback), plus any connector-side `CloudError` code. The result
+is delivered **in this response body** — there is no `pocket_mutation` SSE
+emit; the client applies the `on_success` / `on_error` reconcile handlers.
+
+Returns `403` when the caller is neither the owner nor in `shared_with`;
+`404` when the pocket is not in the caller's scope.
+
+**Security.** A connector grant re-checks the pocket/workspace bind
+(`is_connector_bound_to_pocket`, the tenant boundary) and the action's trust
+level before any call leaves PocketPaw; the connector path's outbound URL is
+bounded by the connector definition, not by a spec-supplied URL. A
+URL-taking built-in tool, when that path lands, must route through the same
+`_http_guard` SSRF boundary the read/write executors use.
+
+## Pockets — Jobs
+
+pp#1459. A read (a source) fetches data into the canvas and a write (an
+action) sends one HTTP call. A **job** is the third kind: a named,
+server-side async unit of work that runs for minutes, computes a result,
+and merges it back into the pocket's `state` so an open canvas updates
+live. Because a job runs on the shared ARQ worker rather than in the
+request, it survives the user closing the browser, and it emits its update
+over the same cross-process bridge the resumable chat runs use.
+
+A job is declared as an action with `kind: "job"` in `rippleSpec.actions`:
+
+```json
+{
+  "actions": {
+    "score_applications": {
+      "kind": "job",
+      "job": "score_applications",
+      "params": { "batch_size": 20, "connector": "snctm-api" },
+      "label": "Score Next Batch",
+      "requires_instinct": false
+    }
+  }
+}
+```
+
+The `job` value is the name of a callable registered in the workspace job
+registry. An action with no `kind` keeps the existing write-action
+behavior, so jobs are additive.
+
+### Trigger: `POST /pockets/{pocket_id}/actions/run` with `kind: "job"`
+
+The same endpoint and the same owner-or-`shared_with` access as a write
+action. When the named action's `kind` is `"job"`, the route enqueues the
+job instead of making an HTTP call.
+
+Behavior:
+
+- An unknown job name returns `400 job.unknown`.
+- The server reads the params from the **persisted action declaration**, not
+  from the request. A non-empty client `params` is rejected with
+  `400 job.params_not_accepted` so a click can never widen a job's scope.
+- A param key that looks credential-bearing (it contains `token`, `api_key`,
+  `secret`, and the like, at any nesting depth) is rejected with
+  `400 job.params_forbidden`. Jobs read workspace credentials server-side and
+  never accept tokens through params.
+- `requires_instinct: true` is rejected with
+  `400 job.instinct_not_yet_supported`. The Instinct approval path for jobs
+  lands in a later version; until then a job that asks to be gated refuses
+  rather than run ungated.
+
+Response `200` (enqueued):
+
+```json
+{ "ok": true, "code": "job_enqueued", "job_id": "665a1f2e9c3b4a0012ab34cd" }
+```
+
+The client polls the status endpoint below. The result arrives on the canvas
+as a live `state` update when the job finishes; it is not in this response
+body.
+
+### `GET /api/v1/workspaces/{workspace_id}/jobs/{job_id}`
+
+Poll a job's status. Requires workspace membership. The job document is
+re-fetched by id and its workspace is re-checked, so a job id from another
+workspace returns `404` rather than leaking its existence.
+
+Response `200`:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `job_id` | string | The job document id. |
+| `status` | string | `queued`, `running`, `done`, or `failed`. |
+| `error` | string \| null | The failure message when `status` is `failed`. |
+| `created_at` / `started_at` / `ended_at` | string \| null | Lifecycle timestamps. |
+
+The computed result is not returned here. On success the worker has already
+merged it into the pocket's `state`; on failure it writes a
+`{action}_status: "failed"` marker into `state` so the triggering button
+stops spinning without a poll.
+
+**Security.** Every job runs under the hardcoded synthetic identity
+`system:workspace_job`, never the triggering user, and that identity is not
+addressable from any request. A job result may write **only** `state`; a
+result that touches `ui`, `actions`, `sources`, or `shape` is rejected and
+the job is marked failed, so a job can never rewrite the template it runs
+under. The writeback re-asserts that the target pocket belongs to the job's
+workspace before it writes (fail-closed), and the worker enforces a timeout
+(`POCKETPAW_JOB_TIMEOUT_SECONDS`, default `900`); a timed-out job writes the
+same failed-state marker. Enqueue and failure are written to the audit log.
+
+## Pockets — Template Reconcile
+
+A pocket created from a template stores its `template_slug`. Re-running an
+install/deploy script re-applies the template and **clobbers instance edits**.
+Reconcile fixes that: it re-applies only the **template-owned** regions of the
+source template while preserving the **instance-owned** regions.
+
+| Region | Owner | Reconcile behavior |
+|--------|-------|--------------------|
+| `rippleSpec.ui` | template | overwritten from the template |
+| `rippleSpec.actions` | template | overwritten from the template |
+| `rippleSpec.sources` | template | overwritten from the template |
+| `rippleSpec.shape` | template | overwritten from the template |
+| `rippleSpec.state` (rows, `selected_id`, `pending_proposal`, …) | instance | never touched |
+| pocket name / owner / team / visibility | instance | never touched |
+
+Both endpoints accept standard cookie / bearer auth, or the loopback
+internal-token bypass (the same one `GET /pockets/{id}` and `/spec/merge`
+accept) so the `pocketpaw pocket reconcile` CLI can authenticate locally. The
+service re-checks read (preview) / edit (apply) access on the resolved
+identity.
+
+### `POST /pockets/{pocket_id}/reconcile/preview`
+
+Dry-run a reconcile — report what **would** change, write nothing. No
+`PocketUpdated` event is emitted.
+
+Response `200`:
+
+```json
+{
+  "pocket_id": "663...",
+  "template_slug": "applications-triage",
+  "template_owned_regions": ["ui", "actions", "sources", "shape"],
+  "changed_regions": ["ui"],
+  "unchanged_regions": ["actions", "sources", "shape"],
+  "preserved_regions": ["state"],
+  "has_changes": true
+}
+```
+
+Returns `422` (`reconcile.no_template`) when the pocket has no `template_slug`,
+`422` (`reconcile.template_unresolved`) when the slug no longer resolves on
+disk, `403` when the caller can't read the pocket, `404` for a missing /
+cross-tenant pocket.
+
+### `POST /pockets/{pocket_id}/reconcile/apply`
+
+Apply the reconcile — re-write the template-owned regions, preserve the
+instance-owned regions, persist through the same spec write path as a normal
+edit (so the spec is normalized + validated and a `PocketUpdated` event fires).
+**Edit access required.**
+
+Response `200`:
+
+```json
+{
+  "ok": true,
+  "skipped": false,
+  "diff": { "...": "the same diff shape as preview" },
+  "pocket": { "...": "the updated pocket wire dict" }
+}
+```
+
+When the pocket already matches its template the write is **skipped**
+(`"skipped": true`, no `pocket` field, no event). Error codes mirror the
+preview route, plus `403` when the caller lacks edit access — enforced even on
+the skipped no-write path so a non-editor cannot probe sync state.
 
 ## Skills — Per-Backend API Skills
 
@@ -556,3 +894,376 @@ enforces:
 Every ingested spec that contains an `embed` node is audit-logged
 (category `pocket_embed`) with the embed count and URLs — never the
 iframe contents.
+
+## Outcome Metering
+
+RFC 05 M2b.2 + gap-3. When a governed write action succeeds, the pocket's
+binding can declare a named `outcome` and an optional billable value/unit.
+Each one appends a row to a workspace-scoped, append-only JSONL ledger.
+Two read surfaces sit over the ledger; both take tenancy from the auth
+context and **reject** a `workspace_id` query param (a caller cannot read
+another workspace's ledger).
+
+### Declaring an outcome on a binding
+
+A write binding in `rippleSpec.actions` declares the metering fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `outcome` | string \| null | The named business event (`meeting_booked`, `ticket_resolved`, …). `null` → the write is not metered. |
+| `outcome_value` | number \| null | The billable value the operator assigns this outcome. Requires `outcome_unit` AND a non-null `outcome` — a half-declared pair is rejected at parse time. |
+| `outcome_unit` | string \| null | The unit the value is denominated in (`usd`, `ticket_resolved`, …). Requires `outcome_value`. |
+
+Declaring `outcome` with no value/unit is the **count-only** binding (the
+prior behaviour). Declaring all three turns the count into a billable
+figure.
+
+### `GET /outcomes`
+
+Count this workspace's recorded outcomes, grouped by name and pocket.
+Requires the `outcomes.read` action.
+
+Query params: `pocket_id` (narrow to one pocket), `since` (inclusive
+ISO-8601 lower bound on `occurred_at`). Both optional.
+
+Response `200`:
+
+```json
+{ "total": 12, "by_outcome": { "ticket_resolved": 9, "meeting_booked": 3 },
+  "by_pocket": { "p_support": 9, "p_sales": 3 } }
+```
+
+### `GET /outcomes/meter`
+
+Aggregate this workspace's **billable** outcomes into a queryable figure —
+the "pay for governed outcomes" read primitive. Requires the
+`outcomes.read` action.
+
+Query params: `pocket_id`, `since` (inclusive lower bound), `until`
+(**exclusive** upper bound, so adjacent periods never double-count a
+boundary outcome). All optional.
+
+Response `200`:
+
+```json
+{ "total_outcomes": 12, "metered_count": 9,
+  "by_unit": {
+    "usd": { "unit": "usd", "count": 6, "total_value": 7200.0 },
+    "ticket_resolved": { "unit": "ticket_resolved", "count": 3, "total_value": 3.0 }
+  } }
+```
+
+`total_outcomes` counts every matching row (including count-only ones);
+`metered_count` counts only the rows carrying a whole value/unit pair;
+`by_unit` sums `outcome_value` per unit over the window.
+
+**Deferred (not in this surface):** invoicing, payment, currency
+conversion, a pricing-rules engine, and disputes / clawback. This endpoint
+returns a raw sum of declared values — the queryable figure those layers
+will build on later (see `outcome-spec.md`).
+
+## Files — Versioned Writes
+
+The `file_versions` entity layers a versioned write path over the uploads
+storage adapter. A file's live (current) content lives in the
+StorageAdapter; each edit archives the prior blob as a `FileVersionDoc` row
+and bumps a per-file `content_version` counter on the `FileUpload` record.
+All four routes share the `/files` prefix with the listing router (`GET
+/files`, `/files/tree`, `/files/browse`) without collision, require a valid
+license, and are workspace-scoped — every read is filtered to the caller's
+workspace.
+
+### `POST /files/write`
+
+Create a file, or overwrite an existing one in place (versioned). Used for
+first-save and programmatic writes.
+
+Request body:
+
+```json
+{ "path": "<file id or path>", "content": "<full content>", "filename": "<optional display name>" }
+```
+
+Response `201`:
+
+```json
+{ "fileId": "<id>", "version": 1, "sizeBytes": 42 }
+```
+
+When a file already exists for `path`, the content is updated through the
+PUT path instead and `version` reflects the bumped counter.
+
+### `PUT /files/{file_id}`
+
+Replace a text file's content inline with optimistic concurrency. Body:
+
+```json
+{ "content": "<new text>", "expectedVersion": 3 }
+```
+
+`expectedVersion` (or the `If-Match: <version>` header, which takes
+precedence) guards against lost updates. Response `200`:
+
+```json
+{ "fileId": "<id>", "newVersion": 4, "sizeBytes": 57, "contentHash": "<sha256>" }
+```
+
+Returns `404` if the file is missing, `409` on a version conflict, and
+`422` if the file's mime type is not editable inline.
+
+### `GET /files/{file_id}/versions`
+
+List archived versions for a file (oldest first, content omitted). Returns
+only versions in the caller's workspace:
+
+```json
+[ { "id": "<oid>", "fileId": "<id>", "versionNumber": 2, "sizeBytes": 42,
+    "editorKind": "human", "editorId": "<user id>", "createdAt": "<iso>" } ]
+```
+
+### `GET /files/{file_id}/versions/{version_id}`
+
+Fetch a single archived version with its full content (for revert preview /
+diff). Workspace-scoped — a version id from another workspace returns `404`.
+
+## Agent Artifact Delivery (`deliver_artifact`)
+
+`deliver_artifact` is a cloud-only in-process MCP tool the chat agent calls to
+hand the user a **downloadable** result. The cloud agent works inside a
+per-tenant jail (ART-2) the user can't reach, so a file the agent "wrote to
+`./out.pdf`" — or a preview server it started on `127.0.0.1` — is invisible to
+them. This tool lands the artifact in the tenant's blob storage and returns a
+real, short-lived download URL.
+
+It is registered cloud-gated via the `pocketpaw.mcp_servers` entry point
+(`pocketpaw_deliver` → `mcp__pocketpaw_deliver__deliver_artifact`), ambient on
+the default chat surface (OSS never sees it). Source:
+`ee/pocketpaw_ee/agent/mcp_servers/deliver.py`.
+
+**Input:** `{ "path": "<file or directory inside the agent's workspace>" }`.
+
+**Routing:** a single file is uploaded as-is (mime guessed from the filename); a
+directory is zipped (`application/zip`) and the zip is uploaded. Both go through
+`EEUploadService.upload` — the same workspace-scoped pipeline as `POST /uploads`
+— so a delivered artifact emits `FileReady` (→ KB) and appears in the tenant's
+`GET /files` listing, and the returned URL is the storage adapter's presigned
+download (S3) or the authenticated `/api/v1/uploads/{id}` path (local adapter).
+
+**Result (JSON in the MCP text payload):**
+
+```json
+{ "ok": true, "filename": "report.pdf", "url": "<download URL>",
+  "file_id": "<id>", "size": 12345, "mime": "application/pdf",
+  "expires_in_seconds": 300 }
+```
+
+On failure the tool returns `is_error` with a plain reason (missing identity,
+path escapes the jail, file missing / over the size cap, or the upload failed) —
+the agent surfaces the reason rather than fabricating a link.
+
+**Security:** the path must resolve to inside the caller's own jail
+(`~/.pocketpaw/workspaces/<workspace_id>/...`); `..` traversal, absolute paths
+out, symlinks pointing out (including symlinks nested inside a delivered
+directory), and another tenant's jail are all rejected (reusing ART-2's
+path-segment guard). Size is capped by `POCKETPAW_DELIVER_MAX_MB` (default
+`100`). Because the upload relaxes the mime allowlist, a delivered artifact
+whose mime is not in `INLINE_MIMES` (HTML, SVG, JS, …) is served with
+`Content-Disposition: attachment` on the presigned download — it downloads, it
+does not render inline on the storage origin. Inline-safe types (images, pdf,
+plain text) still embed as before. The whole tool is gated on
+`is_multi_tenant_cloud()`.
+
+## Sites — Native Editing
+
+NE-4b / NE-5b. The **native site editor** renders a svelte Paw Site directly in
+the dashboard — the built page's markup is injected into a shadow root rather
+than framed in an iframe — and persists in-place text / prop edits by splicing
+them back into the pocket's component source as a **reviewable Branch draft**.
+Two endpoints back it: one serves the render, one persists the edits. Source:
+`ee/pocketpaw_ee/sites/router.py`.
+
+Both require an authenticated workspace context, the `fabric.write` action, and
+the `sites` plan feature (the whole sites router is gated on it). Both operate
+on a **svelte** Paw Site — a pocket with `engine: "svelte"` and a `source`
+component map; a ripple-engine or non-site pocket is a `422`
+(`pocket.not_svelte_site`). A missing or access-denied pocket surfaces as `404`
+(`pocket.not_found`) / `403` (`pocket.access_denied`) from the pockets service,
+exactly like every other `by-pocket` route. All work is tenant-scoped on the
+request context (`workspace_id`, `user_id`).
+
+### `POST /sites/by-pocket/{pocket_id}/leaf-edits`
+
+Persist a batch of native-editor leaf edits as a Branch draft. The editor has
+already rendered each edit optimistically; this splices them into the pocket's
+svelte source and writes the draft — **there is no rebuild**. Skipping the
+per-edit iframe rebuild is the UX win over the older `edit_svelte_component`
+path; an approved review is what later takes the draft live.
+
+Request body:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `edits` | array | Required, non-empty. Each entry is one leaf edit. An empty list is a `422` (`site_leaf_edit.empty_edits`). |
+
+Each edit:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `uid` | string | The stable id of the edited leaf, e.g. `"Hero:headline:0"`. |
+| `op` | object | The change. One of `{ "kind": "setText", "html": "<new inner HTML>" }` or `{ "kind": "setProp", "name": "<prop>", "value": <any> }`. The `op` shape is validated downstream by the `apply-leaf-edit` CLI, not at the request boundary. |
+
+Response `200`:
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "results": [
+    { "uid": "Hero:headline:0", "applied": true, "reason": null },
+    { "uid": "Pricing:cta:2", "applied": false, "reason": "uid not found in current source" }
+  ]
+}
+```
+
+One verdict per submitted edit, in submission order. `applied` is whether the
+splice landed; `reason` (CLI-produced) explains a rejection and is `null` on
+success. The caller keeps the whole-file re-author path for any leaf that comes
+back `applied: false`.
+
+**How it persists.** Edits apply **in order** through the paw-sites
+`apply-leaf-edit` CLI — a pure source transform, no build or workerd. Only the
+files whose contents actually changed are persisted (each write auto-writes the
+Branch-draft snapshot), so a rejected edit churns no draft. A **dynamic** svelte
+site carries its live-data bindings (`objects` / `sources` / `actions` / `auth`)
+as sibling keys of the `{path: contents}` file map; the service splits those out
+before the splice (the CLI treats every source key as a file) and **confines the
+persist loop to the original file keyspace** — a binding key, or a brand-new
+path the CLI might echo, is never written back as a component file.
+
+Errors:
+
+| HTTP | Code | When |
+|------|------|------|
+| 422 | `site_leaf_edit.empty_edits` | The `edits` list is empty. |
+| 422 | `pocket.not_svelte_site` | The pocket is not a svelte Paw Site (no component source map). |
+| 404 | `pocket.not_found` | Unknown pocket id. |
+| 403 | `pocket.access_denied` | The caller lacks access to the pocket. |
+| 500 | `sites.leaf_edit_failed` | The `apply-leaf-edit` CLI exited non-zero, timed out, or returned unparseable output. |
+
+### `GET /sites/by-pocket/{pocket_id}/native-artifact`
+
+Serve the armed svelte build's body markup and CSS so the native editor can
+shadow-render the site.
+
+Response `200`:
+
+```json
+{
+  "pocket_id": "p_abc123",
+  "body_html": "<div data-uid=\"Hero:root:0\">…<script id=\"paw-edit-manifest\">…</script></div>",
+  "css": "/* concatenated stylesheets */"
+}
+```
+
+- `body_html` is the built page's `<body>` **inner** HTML — the `data-uid`-stamped
+  editable leaves plus the embedded `<script id="paw-edit-manifest">`. The
+  frontend injects it into a shadow root.
+- `css` is the built stylesheet(s) — inline `<style>` blocks plus every linked
+  stylesheet — concatenated into one string, injected as a single `<style>`.
+
+**Auth is `fabric.write`, not a read scope,** because the GET **arms a build**:
+it (re)builds the pocket with a builder origin set so the generator stamps
+`data-uid` on the editable leaves and embeds the edit manifest. The builder
+origin is resolved from the request's `Origin` header, falling back to the
+configured `PAW_SITES_BUILDER_ORIGIN` when absent (the same precedence as
+`/editable` and `/dev-preview`), so the call works with no header. **Every GET
+rebuilds** — the arm build runs on each request. The build is keyed on
+`pocket_id` in a stable directory, so `node_modules` / `bun install` stay cached
+across requests, but the compile still runs on each call; treat this as a
+heavier read. The arm build skips the SSR smoke fail-gate (`smoke=False`) but
+still emits the static output that is read.
+
+**CSS reader is path-traversal-guarded.** Stylesheet `href`s from the built
+`index.html` are resolved against the build tree (relative `./_app/…` and
+absolute `/_app/…` hrefs both) and each resolved path is checked to be contained
+inside the tree before it is read — a `../` traversal in a hand-authored
+component's `<link>` is refused.
+
+Errors:
+
+| HTTP | Code | When |
+|------|------|------|
+| 422 | `pocket.not_svelte_site` | The pocket is not a svelte Paw Site (no component build to render). |
+| 404 | `pocket.not_found` | Unknown pocket id. |
+| 403 | `pocket.access_denied` | The caller lacks access to the pocket. |
+| 500 | `sites.generator_failed` | The arm build failed (missing toolchain, non-zero build, or smoke-gate failure). |
+
+## Fabric — Transform Mappings (source→Fabric ingest)
+
+The transform surface over the per-workspace `FabricIngestConfig`: which
+sources land as typed Fabric objects, and how. A mapping's `source_kind`
+picks the pipeline:
+
+- `"firestore"` (default) — the original reader path: mirror a Firestore
+  collection, keyed on the doc path, with a real high-water cursor.
+- `"connector"` — pull records through the OSS connector→Fabric ingestor
+  registry (`pocketpaw.connectors.fabric_ingest.FABRIC_INGESTORS`;
+  `gcalendar` is the first registered adopter). By convention `collection`
+  holds the connector name (it stays the routing key everywhere);
+  `connector_id` overrides it when they differ. The run resolves the
+  workspace's **enabled** `WorkspaceConnector` row and calls the ingestor
+  with that row's `user_id`, so a user-scoped connector reads with that
+  member's OAuth token bucket (`null` = the shared/workspace bucket).
+
+All routes are license + plan-feature `fabric` gated (business tier and up).
+Reads require `fabric.read`, mutations (author, delete, run-now) require
+`fabric.write`; the workspace is always the caller's active workspace — it
+never travels in a request body.
+
+### `GET /fabric/ingest/mappings`
+
+Returns `{"mappings": [...]}` — the caller's workspace's authored mappings
+(empty list when nothing is configured yet). Shown regardless of the config's
+`enabled` flag so a paused pipeline is still visible.
+
+### `POST /fabric/ingest/mappings`
+
+Author one mapping — create-or-replace, keyed on `collection` (201). Body:
+
+```json
+{
+  "collection": "gcalendar",
+  "object_type_id": "ot-calendar-event",
+  "source_kind": "connector",
+  "connector_id": null,
+  "field_map": {},
+  "cursor_field": "",
+  "link_rules": []
+}
+```
+
+A malformed mapping (blank `collection` / `object_type_id`, blank field-map
+entries) is rejected with 422 before anything is stored.
+
+### `DELETE /fabric/ingest/mappings?collection=<key>`
+
+Remove the mapping keyed on `collection` (204; 404 when it doesn't exist).
+The key rides a query param, not a path segment — Firestore collection paths
+can contain `/`.
+
+### `POST /fabric/ingest/run`
+
+Run one mapping's ingest immediately. Body: `{"collection": "<key>"}`.
+Returns the ingest result envelope:
+
+```json
+{
+  "workspace_id": "…", "source_id": "gcalendar", "status": "ok",
+  "mode": "backfill", "objects": 3, "cursor": "", "errors": []
+}
+```
+
+Misconfiguration — no mapping for the key, connector not connected or
+disabled, no ingestor registered under the connector id — reports
+`status: "error"` with the reason in `errors` (HTTP 200, matching the
+background sweep's never-raise, per-source isolation contract). Re-runs are
+idempotent: objects upsert by `(source_connector, source_id)`.

@@ -5,6 +5,10 @@ mirrors this domain ``AgentConfigSpec`` field-for-field; the repository
 converts. We keep the duplication for now because eliminating the
 Beanie sub-model would require touching every caller of
 ``Agent.config.<field>``.
+
+Updated: 2026-06-28 (feat/aiam-agent-revoke, AW-4) — added ``Agent.disabled``
+mirroring the new top-level flag on the Beanie doc, so callers (and the wire
+dict) can read whether an agent has been soft-disabled / revoked.
 """
 
 from __future__ import annotations
@@ -48,6 +52,7 @@ class Agent:
     config: AgentConfigSpec
     created_at: datetime
     updated_at: datetime
+    disabled: bool = False  # soft-disable / revoke-everywhere (AW-4)
 
 
 __all__ = ["Agent", "AgentConfigSpec"]

@@ -6,7 +6,22 @@
 # identity (the same ``current_workspace_id`` / ``current_user_id`` accessors in
 # ``ee.cloud.chat.agent_service`` the pocket specialist + tasks servers read).
 # Tool ids namespace as ``mcp__pocketpaw_sites_manager__<tool>`` so the Claude
-# Code allowlist machinery matches them.
+# Code allowlist machinery matches them. The create tools (create_landing_site /
+# create_svelte_site / create_dynamic_site) register on this SAME server object
+# via sites_create.py — a second create_sdk_mcp_server under this name would
+# clobber it (claude_sdk keys servers by name).
+#
+# Updated 2026-06-17 (feat/sites-svelte-component-edit, SE-2): the
+# ``edit_svelte_component`` tool also registers on this SAME server (built via
+# the factory in sites_create.py). It rewrites ONE file of a published svelte
+# site's source map and republishes — so the create → publish → edit hops sit on
+# one allowlisted server. Its id rides ``SITES_TOOL_IDS``, so the per-surface
+# allowlist (extensions.py + surface/service.py) picks it up automatically.
+#
+# Updated 2026-06-14 (feat/dynamic-sites-authoring, RFC 12 A2): the
+# ``create_dynamic_site`` tool also registers on this SAME server. Dynamic sites
+# are ripple-engine sites whose spec carries live-data bindings; publish carries
+# those through to the paw-sites generator.
 """Agent-side MCP surface for publishing a PocketPaw pocket as a Paw Site.
 
 A site is published FROM a pocket: the chat agent identifies the pocket to
@@ -39,6 +54,8 @@ import json
 import logging
 from typing import Any
 
+from ._audit import record_tool_call
+
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "pocketpaw_sites_manager"
@@ -52,8 +69,21 @@ CREATE_LANDING_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_landing_site"
 # The svelte-track create tool also registers on this SAME server (see
 # sites_create.py).
 CREATE_SVELTE_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_svelte_site"
+# The targeted svelte-component edit tool — also registers on this SAME server
+# (see sites_create.py).
+EDIT_SVELTE_COMPONENT_TOOL_ID = f"mcp__{SERVER_NAME}__edit_svelte_component"
+# The dynamic-track create tool (RFC 12 A2) also registers on this SAME server
+# (see sites_create.py). Dynamic sites are ripple-engine sites whose spec carries
+# live-data bindings; publish carries those through to the paw-sites generator.
+CREATE_DYNAMIC_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_dynamic_site"
 
-SITES_TOOL_IDS = (PUBLISH_TOOL_ID, CREATE_LANDING_SITE_TOOL_ID, CREATE_SVELTE_SITE_TOOL_ID)
+SITES_TOOL_IDS = (
+    PUBLISH_TOOL_ID,
+    CREATE_LANDING_SITE_TOOL_ID,
+    CREATE_SVELTE_SITE_TOOL_ID,
+    EDIT_SVELTE_COMPONENT_TOOL_ID,
+    CREATE_DYNAMIC_SITE_TOOL_ID,
+)
 
 
 def _error_response(message: str) -> dict[str, Any]:
@@ -102,6 +132,15 @@ async def _publish_handler(args: dict) -> dict:
         return _error_response(
             "publish requires workspace and user context (call from a cloud chat session)."
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites_manager",
+        tool_name="_publish",
+        status="ok",
+        ok=True,
+    )
 
     pocket_id = args.get("pocket_id")
     if not isinstance(pocket_id, str) or not pocket_id:
@@ -209,26 +248,43 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     # separate create_sdk_mcp_server) because the claude_sdk registration loop
     # keys servers by name and a second server under this name would clobber it.
     from pocketpaw_ee.agent.mcp_servers.sites_create import (
+        make_create_dynamic_site_tool,
         make_create_landing_site_tool,
         make_create_svelte_site_tool,
+        make_edit_svelte_component_tool,
     )
 
     create_landing_site = make_create_landing_site_tool(tool)
     # The svelte-track create tool — same server, so the author-source-map →
     # create_svelte_site → publish hops sit on one allowlisted server.
     create_svelte_site = make_create_svelte_site_tool(tool)
+    # The targeted svelte-component edit tool — same server, so the
+    # create → publish → edit hops sit on one allowlisted server.
+    edit_svelte_component = make_edit_svelte_component_tool(tool)
+    # The dynamic-track create tool (RFC 12 A2) — same server, so the
+    # author-spec → create_dynamic_site → publish hops sit on one allowlisted
+    # server. Publish carries the spec's dynamic blocks through to the generator.
+    create_dynamic_site = make_create_dynamic_site_tool(tool)
 
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[publish, create_landing_site, create_svelte_site],
+        tools=[
+            publish,
+            create_landing_site,
+            create_svelte_site,
+            edit_svelte_component,
+            create_dynamic_site,
+        ],
     )
     return SERVER_NAME, server
 
 
 __all__ = [
+    "CREATE_DYNAMIC_SITE_TOOL_ID",
     "CREATE_LANDING_SITE_TOOL_ID",
     "CREATE_SVELTE_SITE_TOOL_ID",
+    "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "PUBLISH_TOOL_ID",
     "SERVER_NAME",
     "SITES_TOOL_IDS",

@@ -39,6 +39,7 @@ from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.notifications import service as notifications_service
 from pocketpaw_ee.cloud.realtime.emit import emit
 from pocketpaw_ee.cloud.realtime.events import (
+    GroupUpdated,
     MessageDeleted,
     MessageEdited,
     MessageNew,
@@ -393,7 +394,10 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
         )
 
     if group.archived:
-        raise Forbidden("group.archived", "Cannot send messages to an archived group")
+        # Unarchive the group so the user can resume the conversation
+        # (DM "delete" only hides/archives, not permanently blocks).
+        await group_service._update_group_fields(group_id, archived=False)
+        await emit(GroupUpdated(data={"group_id": group_id, "archived": False}))
 
     domain_msg = await _create_group_message_doc(
         group_id=group_id,
@@ -466,9 +470,9 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
         title = (
             f"New message from {sender_name}"
             if is_dm
-            else f"New message in #{group_name}"
+            else f"{sender_name} in #{group_name}"
             if group_name
-            else "New message"
+            else sender_name
         )
 
         notif_tasks = [
@@ -478,6 +482,7 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
                 kind="message",
                 title=title,
                 body=body.content[:200],
+                actor_id=user_id,
                 source=NotificationSource(
                     type="message",
                     id=domain_msg.id,
@@ -511,6 +516,7 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
             kind="mention",
             title=(f"You were mentioned in #{group_name}" if group_name else "You were mentioned"),
             body=body.content[:200],
+            actor_id=user_id,
             source=NotificationSource(
                 type="message",
                 id=domain_msg.id,
@@ -636,6 +642,7 @@ async def toggle_reaction(message_id: str, user_id: str, emoji: str) -> dict:
             kind="reaction",
             title=f"{emoji} on your message",
             body=(domain_msg.content or "")[:200],
+            actor_id=user_id,
             source=NotificationSource(
                 type="message",
                 id=domain_msg.id,

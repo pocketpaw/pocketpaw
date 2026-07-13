@@ -1,5 +1,75 @@
 """Pockets domain — FastAPI router.
 
+Updated: 2026-06-28 (AW-7 — template gate deny-on-no-match) — ``run_pocket_action``
+resolves the workspace's TEMPLATE-level deny-by-default
+(``resolve_workspace_template_default_deny`` → per-workspace field → global
+config default → False) WHEN a template governs the action, and threads it into
+``run_action`` as ``template_default_deny``. When ON and the bound template
+declares no rule matching a MUTATING action, the executor's gate parks the write
+for a human instead of firing; reads stay ungated. Resolved only when a template
+governs the action (same condition as ``approval_level``), so a non-template
+write is byte-identical to before. OFF by default.
+Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — ``run_pocket_action`` now
+branches on ``raw_action["kind"] == "job"`` BEFORE the path-resolution +
+``action_executor.run_action`` HTTP-write path. A job action enqueues a named
+server-side job (``_dispatch_job`` → ``jobs.service.dispatch_job``) that runs in
+the ARQ worker under the synthetic ``system:workspace_job`` identity, and
+returns ``{ok:true, code:"job_enqueued", job_id}``. A missing ``kind`` falls
+through unchanged (back-compat); ``requires_instinct:true`` on a job is rejected
+with ``job.instinct_not_yet_supported`` (deferred to v1.1).
+Updated: 2026-06-20 (review fix MINOR A) — ``_dispatch_job`` now REJECTS any
+non-empty client ``params`` on a ``kind:"job"`` run with
+``job.params_not_accepted`` (400). A job is parameterized only by its declared
+author-time params, so accepting per-click input would let a clicker widen the
+job's scope — the rejection makes that guarantee explicit instead of a silent
+drop.
+
+Updated: 2026-06-15 (feat/invoke-tool-v1) — UNLOCKED ``POST /{id}/tools/run``.
+Added the owner-only ``PUT /{id}/backend/tool-policy`` route (the tool-allowlist
+analog of write-policy) and rewired ``run_pocket_tool`` to read the per-pocket
+``allowed_tools`` off the credential row (via
+``pockets_service.get_pocket_backend_for_executor``, 9th tuple element) and pass
+the tool NAMES to ``tool_executor.run_tool`` by parameter — never from the spec.
+A pocket with no backend / no grants reads as an empty allowlist (fail-closed).
+
+Updated: 2026-06-13 (feat/pocket-template-reconcile, P2.4) — added the
+Template Reconcile REST adapter: ``POST /{id}/reconcile/preview`` (dry-run
+diff) and ``POST /{id}/reconcile/apply`` (re-apply template-owned regions,
+preserve instance state). Both are THIN — they resolve identity and call
+``pockets.reconcile`` (the typed service); all reconcile logic lives there,
+not here. The apply route carries the ``require_pocket_edit`` guard so it
+fails closed at the boundary; the service re-checks too (the canonical
+"primitive = service + thin adapters" reference shape). Additive — no
+existing route touched.
+
+Updated: 2026-06-10 (W2a — deny-by-default Instinct governance) — the
+single-action ``POST /{id}/actions/run`` route now THREADS the pocket's
+RFC 03 v2 template into ``action_executor.run_action`` so the template-
+level CEL Instinct rules (gate 1.5) finally evaluate on this path (before
+W2a only the bulk + temporal dispatchers gated; the direct single-action
+run silently skipped CEL). The template is threaded only when it DECLARES
+the action being run — ``resolve_instinct`` 404s on an undeclared action,
+and a ``rippleSpec.actions`` write binding need not be a template action,
+so threading unconditionally would 404 legitimate non-template writes.
+When the template does not cover the action, ``template=None`` and the
+binding-level deny-by-default gate (gate 7, now defaulting on) governs.
+The ``instinct_pending`` handler now distinguishes the two park shapes:
+a template-CEL escalation (carries ``approval_id`` — already persisted)
+surfaces that id directly, while a binding-level park (no ``approval_id``)
+is routed through ``instinct_bridge.propose_pocket_write`` as before. A new
+``instinct_blocked`` branch surfaces a clean blocked response.
+
+Updated: 2026-06-08 (fix/pocket-sources-run-400) — ``POST /{id}/sources/run``
+no longer 400s when the pocket has no backend configured. The frontend runs
+declared sources on every ``pocket_open``, so a blank/starter pocket (no
+backend, nothing to fetch) was 400ing on open — surfacing as a noisy
+``pocket_open sources run failed: HttpError: Bad Request``. The route now
+computes the selected sources first (via ``source_executor.selected_source_keys``)
+and returns a clean ``{"ran": [], "errors": []}`` 200 when nothing is
+selected; when a runnable source IS authored but no backend is bound it
+returns per-source ``pocket_backend.not_configured`` errors (200), matching
+the soft/non-fatal handling every other source-run call site already uses.
+
 Updated: 2026-06-03 (Sites fix A) — the desktop ``GET /pockets`` gallery
 route now hides pockets that have been published as Paw Sites (they show
 under ``/sites`` instead). It calls ``sites_service.site_pocket_ids`` (a
@@ -150,17 +220,22 @@ from pocketpaw_ee.cloud.pockets.dto import (
     BulkDispatchResponse,
     CreatePocketRequest,
     DispatchBulkRequest,
+    GrantPocketConnectorRequest,
     HomePocketResponse,
     MergeSpecRequest,
     PocketBackendConfigRequest,
     PocketBackendConfigResponse,
+    PocketConnectorPermissionsOut,
     ReorderWidgetsRequest,
+    RevokePocketConnectorRequest,
     RunActionRequest,
     RunActionResponse,
     RunSourcesRequest,
     RunToolRequest,
     RunToolResponse,
     SetApprovalRouteRequest,
+    SetPocketConnectorPermissionsRequest,
+    SetToolPolicyRequest,
     SetWritePolicyRequest,
     ShareLinkRequest,
     UpdatePocketRequest,
@@ -593,10 +668,13 @@ async def set_pocket_backend(
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> PocketBackendConfigResponse:
-    """Bind this pocket to one external backend (base URL + auth credential).
+    """Bind this pocket to one external backend.
 
-    The token is encrypted server-side; the response never echoes it back.
-    A bad base URL (non-https, internal host) yields a 400.
+    ``backend_type="http"`` (the default) binds a base URL + auth credential;
+    the token is encrypted server-side and never echoed back, and a bad base
+    URL (non-https, internal host) yields a 400. ``backend_type="connector"``
+    binds an existing workspace connector by ``connector_name`` (no base_url
+    needed); an unknown / not-enabled connector yields a 400.
     """
     result = await pockets_service.set_pocket_backend(
         workspace_id,
@@ -606,6 +684,8 @@ async def set_pocket_backend(
         body.auth_type,
         body.auth_token,
         body.auth_header,
+        backend_type=body.backend_type,
+        connector_name=body.connector_name,
     )
     return PocketBackendConfigResponse(**result)
 
@@ -673,18 +753,49 @@ async def run_pocket_sources(
     pocket = await pockets_service.get(pocket_id, user_id)
     ripple_spec = pocket.get("rippleSpec") or {}
 
+    from pocketpaw_ee.cloud.pockets import source_executor
+
     creds = await pockets_service.get_pocket_backend_for_executor(workspace_id, pocket_id)
     if creds is None:
-        raise CloudError(
-            400,
-            "pocket_backend.not_configured",
-            "This pocket has no backend configured — set one via PUT /pockets/{id}/backend",
+        # No backend bound. The frontend runs declared sources on EVERY
+        # pocket_open, so a blank/starter pocket (no backend, nothing to
+        # fetch) hits this path on every open. Don't 400 it — that surfaced
+        # as a noisy "pocket_open sources run failed: HttpError: Bad Request"
+        # in the browser. Decide by whether anything would actually run:
+        #   * nothing selected  -> clean no-op (200, empty result)
+        #   * source(s) selected -> a real misconfiguration: a runnable source
+        #     was authored but no backend is bound. Report it as a per-source
+        #     error (200), matching every other source-run call site
+        #     (agent pocket_router, temporal_dispatcher, bulk_dispatch) which
+        #     treat "no backend" as soft/non-fatal — never a hard 400.
+        selected = source_executor.selected_source_keys(
+            ripple_spec, trigger=body.trigger, only_source=body.source
         )
+        return {
+            "ran": [],
+            "errors": [
+                {
+                    "source": key,
+                    "error": "This pocket has no backend configured",
+                    "code": "pocket_backend.not_configured",
+                }
+                for key in selected
+            ],
+        }
     # M2b.1 — the executor-creds tuple gained `allowed_writes` (M2a) and
-    # `approval_route` (M2b.1); read-only source runs need neither.
-    base_url, auth_type, auth_header, token, _allowed_writes, _approval_route = creds
-
-    from pocketpaw_ee.cloud.pockets import source_executor
+    # `approval_route` (M2b.1); read-only source runs need neither. The
+    # connector-backend feature appended `backend_type` / `connector_name`,
+    # which the run DOES need to pick the http vs connector transport.
+    (
+        base_url,
+        auth_type,
+        auth_header,
+        token,
+        _allowed_writes,
+        _approval_route,
+        backend_type,
+        connector_name,
+    ) = creds
 
     # no-event: source hydration is response-body delivery, not persisted
     return await source_executor.run_sources(
@@ -698,6 +809,8 @@ async def run_pocket_sources(
         trigger=body.trigger,
         only_source=body.source,
         workspace_id=workspace_id,
+        backend_type=backend_type,
+        connector_name=connector_name,
     )
 
 
@@ -863,6 +976,36 @@ async def set_pocket_write_policy(
 
 
 @router.put(
+    "/{pocket_id}/backend/tool-policy",
+    dependencies=[Depends(require_pocket_owner)],
+)
+async def set_pocket_tool_policy(
+    pocket_id: str,
+    body: SetToolPolicyRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> PocketBackendConfigResponse:
+    """Set this pocket's tool allowlist (feat/invoke-tool-v1). Owner-only.
+
+    Replaces the whole ``allowed_tools`` list — an empty list revokes every
+    tool (fail-closed). The policy lives on the backend-credential row,
+    OUTSIDE the spec, so the agent that authors the spec cannot grant itself
+    a tool (the same blast-radius invariant ``allowed_writes`` enforces). A
+    grant's ``tool`` is a built-in tool name or a connector action
+    ``connector:<name>:<action>``. Returns ``400`` when the pocket has no
+    backend configured — a tool policy with no backend to apply to is
+    meaningless.
+    """
+    result = await pockets_service.set_pocket_tool_policy(
+        workspace_id,
+        user_id,
+        pocket_id,
+        [grant.model_dump() for grant in body.allowed_tools],
+    )
+    return PocketBackendConfigResponse(**result)
+
+
+@router.put(
     "/{pocket_id}/backend/approval-route",
     dependencies=[Depends(require_pocket_owner)],
 )
@@ -889,6 +1032,89 @@ async def set_pocket_approval_route(
         route,
     )
     return PocketBackendConfigResponse(**result)
+
+
+async def _dispatch_job(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    user_id: str,
+    action: str,
+    raw_action: dict,
+    request_params: dict,
+) -> RunActionResponse:
+    """Enqueue a ``kind:"job"`` action as a workspace job (pp#1459).
+
+    Merges the action's DECLARED params (the trusted, author-time spec data)
+    with no client params — a job's params come from the binding, not the
+    click — looks the job up in the registry, persists a queued status doc,
+    enqueues the ARQ job, and returns ``{ok:true, code:"job_enqueued",
+    job_id}``. The client polls ``GET /workspaces/{ws}/jobs/{job_id}``.
+
+    ``requires_instinct:true`` is rejected with ``job.instinct_not_yet_supported``
+    (DEFAULT #2 — the Instinct path is untested for jobs, deferred to v1.1; do
+    NOT silently fire an ungated job that declared it wanted a gate).
+
+    Client-supplied ``params`` are REJECTED with ``job.params_not_accepted``
+    (400) — a job is parameterized only by its DECLARED (author-time) params,
+    so accepting per-click input would let a clicker widen the job's scope.
+    Enforcing the rejection makes the scope guarantee explicit rather than a
+    silent drop. The normal (non-job) action path is unaffected: it never
+    reaches this function — the ``kind:"job"`` branch returns first.
+    """
+    from pocketpaw_ee.cloud.jobs import service as jobs_service
+    from pocketpaw_ee.cloud.jobs.registry import JobError
+
+    if raw_action.get("requires_instinct"):
+        raise CloudError(
+            400,
+            "job.instinct_not_yet_supported",
+            "requires_instinct is not yet supported for jobs (deferred to v1.1)",
+        )
+
+    # A clicker cannot widen a job's scope: a job's params come from the
+    # binding (declared, author-time), never from per-click input. Reject any
+    # non-empty client params rather than silently dropping them.
+    if request_params:
+        raise CloudError(
+            400,
+            "job.params_not_accepted",
+            "a job action does not accept client params — its params are fixed by the binding",
+        )
+
+    job_name = raw_action.get("job")
+    if not isinstance(job_name, str) or not job_name:
+        raise CloudError(
+            400,
+            "job.unknown",
+            f"action '{action}' is kind=job but declares no job name",
+        )
+
+    # The job's params are the action's DECLARED params (author-time, trusted).
+    # Client-sent params are ignored for jobs — a job is parameterized by the
+    # binding, not by per-click input, so a client cannot widen a job's scope.
+    declared_params = raw_action.get("params")
+    params = declared_params if isinstance(declared_params, dict) else {}
+
+    try:
+        result = await jobs_service.dispatch_job(
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            action=action,
+            job_name=job_name,
+            params=params,
+            triggered_by=user_id,
+        )
+    except JobError as exc:
+        # Registry miss / credential-bearing param → the contracted 400s.
+        raise CloudError(exc.status, exc.code, exc.message) from exc
+
+    return RunActionResponse(
+        ok=True,
+        action=action,
+        code=result["code"],
+        job_id=result["job_id"],
+    )
 
 
 @router.post(
@@ -944,6 +1170,41 @@ async def run_pocket_action(
             code="bad_binding",
         )
 
+    # Workspace jobs (pp#1459) — a ``kind:"job"`` action does NOT fire an HTTP
+    # write. It enqueues a named server-side job that runs in the ARQ worker
+    # under the synthetic workspace identity. Branch BEFORE the path resolution
+    # + ``action_executor.run_action`` path below: a job action carries no
+    # ``path`` (it's not an HTTP call), so it would otherwise be rejected by
+    # the path check. A missing ``kind`` falls through unchanged (back-compat).
+    if raw_action.get("kind") == "job":
+        return await _dispatch_job(
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            user_id=user_id,
+            action=body.action,
+            raw_action=raw_action,
+            request_params=body.params,
+        )
+
+    # Resolve the request path. The read-time normalizer rewrites an inline
+    # write `api` handler into a PATHLESS `call_binding` handler (it has no
+    # request context to carry a path), so the normal client fires with
+    # `{action, params}` and no `path`. The path is author-time data already
+    # persisted on the binding (the spec must carry it to know the HTTP
+    # method), so fall back to it. A client that DID send a resolved path —
+    # a row-scoped binding whose stored path holds an unresolved `{item.id}`
+    # template, resolved client-side — keeps precedence; the binding path is
+    # only the fallback. The executor still matches the final (method, path)
+    # against the owner's allowlist, so the fallback cannot widen blast radius.
+    resolved_path = body.path or raw_action.get("path")
+    if not isinstance(resolved_path, str) or not resolved_path:
+        return RunActionResponse(
+            ok=False,
+            action=body.action,
+            error=f"action '{body.action}' has no path — send one or declare it on the binding",
+            code="bad_binding",
+        )
+
     creds = await pockets_service.get_pocket_backend_for_executor(workspace_id, pocket_id)
     if creds is None:
         raise CloudError(
@@ -951,9 +1212,57 @@ async def run_pocket_action(
             "pocket_backend.not_configured",
             "This pocket has no backend configured — set one via PUT /pockets/{id}/backend",
         )
-    base_url, auth_type, auth_header, token, allowed_writes, approval_route = creds
+    # Write-action run: the trailing `backend_type` / `connector_name` (added
+    # by the connector-backend feature) don't apply to the http write executor,
+    # so they're ignored here.
+    base_url, auth_type, auth_header, token, allowed_writes, approval_route, *_ = creds
 
     from pocketpaw_ee.cloud.pockets import action_executor
+
+    # W2a — thread the pocket's RFC 03 v2 template so the template-level
+    # CEL Instinct rules (gate 1.5) actually FIRE on the single-action run.
+    # Before W2a this path never passed a template, so a pocket's CEL rules
+    # (block / require_approval / notify) silently never evaluated on a
+    # direct `/actions/run` — the bulk + temporal paths gated, this one did
+    # not. `resolve_pocket_template` returns `None` for a pocket with no
+    # `template_slug`, an unknown slug, or an unloadable template (never an
+    # error — same contract bulk/temporal rely on), so a pocket with no
+    # template is byte-identical to the pre-W2a behavior on this line.
+    #
+    # We thread the template ONLY when it actually DECLARES the action being
+    # run. `resolve_instinct` raises (→ 404) on an action absent from the
+    # template's `actions[]`; a `rippleSpec.actions` write binding need not
+    # correspond to a template action, so threading unconditionally would
+    # 404 every legitimate non-template write. When the template does not
+    # cover this action we pass `template=None` and the binding-level
+    # deny-by-default gate (gate 7) governs — which now parks an agent-
+    # authored write rather than firing it.
+    template = await pockets_service.resolve_pocket_template(workspace_id, pocket_id)
+    if template is not None and not any(a.name == body.action for a in template.actions):
+        template = None
+
+    # Layered/learning gate (T6) — resolve the workspace's triager activation
+    # level (per-workspace field → global config default → "ASK") and the
+    # global dry-run flag, and thread them into the executor's gate 1.5. When
+    # the workspace has not opted in, the level is "ASK" and the gate behaves
+    # exactly as before — every escalate parks for a human. The level is only
+    # read when a template actually governs this action (otherwise the gate
+    # never runs), so a non-template write is byte-identical to before.
+    approval_level = "ASK"
+    dry_run_mode = False
+    # AW-7 — TEMPLATE-level deny-on-no-match. Resolved alongside approval_level,
+    # under the same "only when a template governs this action" guard: a
+    # non-template write never runs the template gate, so its behavior is
+    # unchanged. Per-workspace field → global config default → False.
+    template_default_deny = False
+    if template is not None:
+        approval_level = await pockets_service.resolve_workspace_approval_level(workspace_id)
+        from pocketpaw.config import get_settings
+
+        dry_run_mode = bool(get_settings().instinct_dry_run_mode)
+        template_default_deny = await pockets_service.resolve_workspace_template_default_deny(
+            workspace_id
+        )
 
     # no-event: the write result is response-body delivery, not persisted.
     result = await action_executor.run_action(
@@ -962,7 +1271,7 @@ async def run_pocket_action(
         user_id=user_id,
         action=body.action,
         raw_action=raw_action,
-        path=body.path,
+        path=resolved_path,
         params=body.params,
         base_url=base_url,
         auth_type=auth_type,
@@ -970,13 +1279,63 @@ async def run_pocket_action(
         token=token,
         allowed_writes=allowed_writes,
         idempotency_key=body.idempotency_key,
+        template=template,
+        approval_level=approval_level,
+        dry_run_mode=dry_run_mode,
+        template_default_deny=template_default_deny,
     )
 
-    # M2b.1 — a `requires_instinct` write was PARKED, not fired. The
-    # executor validated it (a write the allowlist rejects already came
-    # back `ok:false`); `_park` carries the resolved write. Route it into
-    # an Instinct Action and return the pending response.
+    # W2a — a template-level CEL rule BLOCKED this write (gate 1.5). It
+    # only fires when a template that declares this action is threaded
+    # (see the threading above). The executor returned `ok:false,
+    # code:"instinct_blocked"` and carries a `reason` the wire model does
+    # not declare — surface a clean blocked response without the internal
+    # `reason`/`_park` keys (`RunActionResponse` is `extra="forbid"`).
+    if result.get("code") == "instinct_blocked":
+        return RunActionResponse(
+            ok=False,
+            action=body.action,
+            code="instinct_blocked",
+            error="action blocked by an Instinct rule",
+        )
+
+    # Layered/learning gate (T7/T-31) — a DRY_RUN write. The executor
+    # resolved + audited the write but made NO backend call and persisted no
+    # approval row. It carries the resolved write under `_park`, which MUST
+    # NOT reach the client wire (the same constraint as `instinct_pending`).
+    # Surface a clean dry-run acknowledgement; the resolved write is visible
+    # only in the audit log, never the response.
+    if result.get("code") == "instinct_dry_run":
+        return RunActionResponse(
+            ok=True,
+            action=body.action,
+            code="instinct_dry_run",
+        )
+
+    # M2b.1 / W2a — a write was PARKED, not fired. There are TWO park
+    # shapes the executor can return, both `code:"instinct_pending"`:
+    #
+    #   * gate 1.5 (template CEL → ESCALATE_APPROVAL) already PERSISTED an
+    #     `InstinctApproval` row and carries its id on `approval_id`. Do
+    #     NOT re-propose — `propose_pocket_write` would create a SECOND,
+    #     unrelated park in a different store. Surface the existing id.
+    #   * gate 7 (binding-level deny-by-default) parked WITHOUT persisting;
+    #     it carries the resolved write under `_park` and no `approval_id`.
+    #     Route it into an Instinct Action via `propose_pocket_write`.
+    #
+    # The executor validated the write before either park (a write the
+    # allowlist rejects already came back `ok:false`).
     if result.get("code") == "instinct_pending":
+        approval_id = result.get("approval_id")
+        if approval_id is not None:
+            # Template-CEL escalation — the approval row already exists.
+            return RunActionResponse(
+                ok=True,
+                action=body.action,
+                code="instinct_pending",
+                proposed_action_id=approval_id,
+            )
+
         from pocketpaw_ee.cloud.pockets import instinct_bridge
 
         proposed_id = await instinct_bridge.propose_pocket_write(
@@ -1010,6 +1369,9 @@ async def run_pocket_action(
             actor=user_id,
             via_instinct=False,
             instinct_action_id=None,
+            # gap-3 — billable value/unit for the direct (non-gated) write.
+            outcome_value=result.get("outcome_value"),
+            outcome_unit=result.get("outcome_unit"),
         )
 
     # Strip executor-internal keys (`_park`, `outcome`) the wire model
@@ -1019,8 +1381,33 @@ async def run_pocket_action(
     # assertion below catches a strip that drifts out of sync with the
     # executor's result keys; `RunActionResponse` is also `extra="forbid"`
     # so a missed key fails construction rather than leaking.
-    wire = {k: v for k, v in result.items() if k not in ("_park", "outcome")}
+    # Layered/learning gate (T10) — map the executor-internal optimistic
+    # handle id onto the PUBLIC wire field before the strip below removes the
+    # underscored key. Only set on an OPTIMISTIC-lane write that declared a
+    # compensate; absent otherwise.
+    optimistic_id = result.get("_optimistic_compensation_id")
+
+    wire = {
+        k: v
+        for k, v in result.items()
+        # gap-3 — strip the metering keys too: `outcome_value`/`outcome_unit`
+        # join `outcome` as executor-internal fields the wire model
+        # (`extra="forbid"`) does not carry. They were already consumed by
+        # the `emit_pocket_outcome` call above. `_optimistic_compensation_id`
+        # is the executor-internal key for the optimistic handle — re-exposed
+        # below as the public `optimistic_compensation_id` field.
+        if k
+        not in (
+            "_park",
+            "outcome",
+            "outcome_value",
+            "outcome_unit",
+            "_optimistic_compensation_id",
+        )
+    }
     assert "_park" not in wire, "executor `_park` blob must be stripped before the wire response"
+    if optimistic_id:
+        wire["optimistic_compensation_id"] = optimistic_id
     return RunActionResponse(**wire)
 
 
@@ -1094,7 +1481,7 @@ async def dispatch_bulk_action_route(
 
 
 # ---------------------------------------------------------------------------
-# Pocket tool invocation (#1206 part a — invoke_tool wire)
+# Pocket tool invocation (#1206 — invoke_tool; UNLOCKED in feat/invoke-tool-v1)
 # ---------------------------------------------------------------------------
 
 
@@ -1120,12 +1507,15 @@ async def run_pocket_tool(
     has the same blast radius as a write binding, so a workspace-visible
     pocket does NOT grant run access.
 
-    Part (a) is intentionally fail-closed: the per-pocket allowlist is
-    empty (see :func:`tool_executor.get_pocket_allowed_tools`), so every
-    tool name returns ``ok:false, code:"not_allowed"``. The wire shape +
-    DTOs land here so part (b) (the home-grid ``onEvent`` wiring) has
-    somewhere to POST to. Part (c) adds Composio / WebFetch routing
-    through the real tool registry behind the allowlist.
+    The per-pocket tool allowlist (feat/invoke-tool-v1) lives on the
+    backend-credential row, OUTSIDE the spec — read here via
+    ``get_pocket_backend_for_executor`` and passed to the executor BY
+    PARAMETER, never sourced from ``rippleSpec``. A pocket with no backend
+    (or no grants) reads as an EMPTY allowlist → every tool returns
+    ``ok:false, code:"not_allowed"`` (fail-closed). A ``connector:<name>:
+    <action>`` grant for a READ action fires through
+    ``connectors.service.execute``; a WRITE action returns ``code="blocked"``
+    (approval lands in v2 via Instinct).
 
     The result is delivered in THIS response body — there is no
     ``pocket_mutation`` SSE emit, because the run endpoint is a
@@ -1139,7 +1529,15 @@ async def run_pocket_tool(
 
     from pocketpaw_ee.cloud.pockets import tool_executor
 
-    allowed_tools = await tool_executor.get_pocket_allowed_tools(workspace_id, pocket_id)
+    # Read the allowlist off the per-pocket backend credential row. The 9th
+    # tuple element is `allowed_tools` (a list of `{tool}` wire dicts). A
+    # pocket with no backend configured → `None` → empty allowlist, so the
+    # fail-closed `not_allowed` path holds with no special-casing. The
+    # executor stays Beanie-free — it only ever sees the flat list of names.
+    creds = await pockets_service.get_pocket_backend_for_executor(workspace_id, pocket_id)
+    allowed_tools: list[str] = []
+    if creds is not None:
+        allowed_tools = [grant["tool"] for grant in creds[8]]
 
     # no-event: the tool result is response-body delivery, not persisted.
     result = await tool_executor.run_tool(
@@ -1206,8 +1604,14 @@ async def add_team_member(
     pocket_id: str,
     body: dict,
     user_id: str = Depends(current_user_id),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> dict:
-    return await pockets_service.add_team_member(pocket_id, user_id, body["member_id"])
+    return await pockets_service.add_team_member(
+        pocket_id,
+        user_id,
+        body["member_id"],
+        actor_workspace_id=workspace_id,
+    )
 
 
 @router.delete("/{pocket_id}/team/{member_id}", status_code=204)
@@ -1215,8 +1619,51 @@ async def remove_team_member(
     pocket_id: str,
     member_id: str,
     user_id: str = Depends(current_user_id),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> Response:
-    await pockets_service.remove_team_member(pocket_id, user_id, member_id)
+    await pockets_service.remove_team_member(
+        pocket_id,
+        user_id,
+        member_id,
+        actor_workspace_id=workspace_id,
+    )
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Members — frontend-facing aliases for team management
+# Uses workspace admin/owner check for private pockets.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{pocket_id}/members")
+async def add_pocket_member(
+    pocket_id: str,
+    body: dict,
+    user_id: str = Depends(current_user_id),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    return await pockets_service.add_team_member(
+        pocket_id,
+        user_id,
+        body.get("userId", body.get("member_id")),
+        actor_workspace_id=workspace_id,
+    )
+
+
+@router.delete("/{pocket_id}/members/{member_id}", status_code=204)
+async def remove_pocket_member(
+    pocket_id: str,
+    member_id: str,
+    user_id: str = Depends(current_user_id),
+    workspace_id: str = Depends(current_workspace_id),
+) -> Response:
+    await pockets_service.remove_team_member(
+        pocket_id,
+        user_id,
+        member_id,
+        actor_workspace_id=workspace_id,
+    )
     return Response(status_code=204)
 
 
@@ -1353,3 +1800,207 @@ async def list_pocket_sessions(
     ctx = sessions_service.legacy_ctx(user_id)
     items = await sessions_service.list_for_pocket(ctx, pocket_id)
     return [session_to_wire_dict(s) for s in items]
+
+
+# ---------------------------------------------------------------------------
+# Template Reconcile (P2.4) — thin REST adapter over ``pockets.reconcile``.
+#
+# Re-apply a pocket's source-template-owned regions (ui/actions/sources/shape)
+# while preserving instance-owned regions (state, name, owner, sharing).
+# ``preview`` is a dry-run diff; ``apply`` writes through the spec path.
+# Both delegate to the service — no reconcile logic lives in the router.
+#
+# Auth mirrors ``get_pocket`` / ``/spec/merge``: standard cookie/bearer JWT,
+# OR the loopback internal-token bypass (so the ``pocketpaw pocket reconcile``
+# CLI — an operator action run on the same box — can authenticate with the
+# process-local token + workspace/user headers). The service re-checks
+# read/edit access on the resolved identity, so a forged header can't escalate.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_reconcile_identity(
+    request: Request,
+    *,
+    user: Any,
+    internal_header: str | None,
+    internal_token: str | None,
+    workspace_header: str | None,
+    user_header: str | None,
+) -> tuple[str, str]:
+    """Resolve ``(workspace_id, user_id)`` for a reconcile request.
+
+    Tries the loopback internal bypass first (operator CLI / local
+    subprocess), then falls through to the authenticated session user. Raises
+    ``CloudError(401)`` when neither path yields an identity. Shared by the
+    preview + apply routes so the two stay in lockstep.
+    """
+    if _loopback_bypass_active(
+        request,
+        internal_header=internal_header,
+        internal_token=internal_token,
+        workspace_header=workspace_header,
+        user_header=user_header,
+    ):
+        return workspace_header, user_header  # type: ignore[return-value]
+    if user is not None:
+        if not getattr(user, "active_workspace", None):
+            raise CloudError(
+                400,
+                "workspace.not_set",
+                "No active workspace. Create or join a workspace first.",
+            )
+        return user.active_workspace, str(user.id)
+    raise CloudError(401, "auth.required", "Authentication required.")
+
+
+@router.post("/{pocket_id}/reconcile/preview")
+async def preview_pocket_reconcile(
+    pocket_id: str,
+    request: Request,
+    user: Any = Depends(current_optional_user),
+    x_pocketpaw_internal: str | None = Header(default=None, alias="X-PocketPaw-Internal"),
+    x_pocketpaw_internal_token: str | None = Header(default=None, alias=INTERNAL_TOKEN_HEADER),
+    x_pocketpaw_workspace_id: str | None = Header(default=None, alias="X-PocketPaw-Workspace-Id"),
+    x_pocketpaw_user_id: str | None = Header(default=None, alias="X-PocketPaw-User-Id"),
+) -> dict:
+    """Dry-run a template reconcile — report what WOULD change, write nothing.
+
+    Returns the reconcile diff (``changed_regions`` / ``unchanged_regions`` /
+    ``preserved_regions``). A pocket with no ``template_slug`` or an
+    unresolvable template returns 422 via the service's ``ValidationError``;
+    a caller without read access gets a 403.
+    """
+    from pocketpaw_ee.cloud.pockets import reconcile as reconcile_service
+
+    workspace_id, user_id = _resolve_reconcile_identity(
+        request,
+        user=user,
+        internal_header=x_pocketpaw_internal,
+        internal_token=x_pocketpaw_internal_token,
+        workspace_header=x_pocketpaw_workspace_id,
+        user_header=x_pocketpaw_user_id,
+    )
+    return await reconcile_service.preview_reconcile(pocket_id, workspace_id, user_id)
+
+
+@router.post("/{pocket_id}/reconcile/apply")
+async def apply_pocket_reconcile(
+    pocket_id: str,
+    request: Request,
+    user: Any = Depends(current_optional_user),
+    x_pocketpaw_internal: str | None = Header(default=None, alias="X-PocketPaw-Internal"),
+    x_pocketpaw_internal_token: str | None = Header(default=None, alias=INTERNAL_TOKEN_HEADER),
+    x_pocketpaw_workspace_id: str | None = Header(default=None, alias="X-PocketPaw-Workspace-Id"),
+    x_pocketpaw_user_id: str | None = Header(default=None, alias="X-PocketPaw-User-Id"),
+) -> dict:
+    """Apply a template reconcile — re-write template-owned regions, preserve
+    instance state, persist through the existing spec write path.
+
+    Edit access is enforced INSIDE the service (``apply_reconcile`` raises
+    ``Forbidden`` for a non-editor — including on the idempotent no-write
+    path). Returns ``{ok, skipped, diff, pocket?}``; when the pocket already
+    matches its template the write is skipped (``skipped: true``) and no
+    ``PocketUpdated`` event is emitted.
+    """
+    from pocketpaw_ee.cloud.pockets import reconcile as reconcile_service
+
+    workspace_id, user_id = _resolve_reconcile_identity(
+        request,
+        user=user,
+        internal_header=x_pocketpaw_internal,
+        internal_token=x_pocketpaw_internal_token,
+        workspace_header=x_pocketpaw_workspace_id,
+        user_header=x_pocketpaw_user_id,
+    )
+    return await reconcile_service.apply_reconcile(pocket_id, workspace_id, user_id)
+
+
+# ---------------------------------------------------------------------------
+# Per-pocket connector permissions
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/{pocket_id}/connector-permissions",
+    response_model=PocketConnectorPermissionsOut,
+    dependencies=[Depends(require_pocket_edit)],
+)
+async def get_pocket_connector_permissions(
+    pocket_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> PocketConnectorPermissionsOut:
+    """Read this pocket's connector allowlist.
+
+    Returns ``allowed_connectors: null`` when the pocket inherits all
+    workspace connectors (default / no restrictions). Returns an empty
+    list when the pocket is restricted but has nothing allowed.
+    """
+    allowed = await pockets_service.get_pocket_connector_permissions(pocket_id)
+    return PocketConnectorPermissionsOut(allowed_connectors=allowed)
+
+
+@router.put(
+    "/{pocket_id}/connector-permissions",
+    dependencies=[Depends(require_pocket_edit)],
+)
+async def set_pocket_connector_permissions(
+    pocket_id: str,
+    body: SetPocketConnectorPermissionsRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> PocketConnectorPermissionsOut:
+    """Set this pocket's connector allowlist.
+
+    Pass ``allowed_connectors: null`` to inherit all workspace connectors
+    (clear restrictions). Pass ``allowed_connectors: []`` to restrict the
+    pocket but allow nothing — the pocket sees no connectors.
+    """
+    await pockets_service.set_pocket_connector_permissions(pocket_id, body.allowed_connectors)
+    return PocketConnectorPermissionsOut(allowed_connectors=body.allowed_connectors)
+
+
+@router.post(
+    "/{pocket_id}/connector-permissions/grant",
+    dependencies=[Depends(require_pocket_edit)],
+    status_code=204,
+)
+async def grant_pocket_connector(
+    pocket_id: str,
+    body: GrantPocketConnectorRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> Response:
+    """Grant one connector to this pocket (additive).
+
+    If the pocket currently inherits all connectors (``allowed_connectors``
+    is ``None``), granting creates an explicit allowlist starting with
+    this connector — effectively restricting the pocket to just this one.
+    Idempotent: granting an already-allowed connector is a no-op.
+    """
+    await pockets_service.grant_pocket_connector(pocket_id, body.connector_name)
+    return Response(status_code=204)
+
+
+@router.post(
+    "/{pocket_id}/connector-permissions/revoke",
+    dependencies=[Depends(require_pocket_edit)],
+    status_code=204,
+)
+async def revoke_pocket_connector(
+    pocket_id: str,
+    body: RevokePocketConnectorRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> Response:
+    """Revoke one connector from this pocket.
+
+    If the pocket inherits all connectors (``allowed_connectors`` is
+    ``None``), revoke is a no-op — there are no explicit restrictions to
+    remove from. When the last connector is revoked, the pocket's list
+    becomes empty (``[]``), meaning the pocket sees no connectors.
+    Idempotent: revoking a connector that is not in the allowlist is a
+    no-op.
+    """
+    await pockets_service.revoke_pocket_connector(pocket_id, body.connector_name)
+    return Response(status_code=204)

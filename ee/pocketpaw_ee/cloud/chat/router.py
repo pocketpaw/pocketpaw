@@ -17,6 +17,27 @@ only broadcasts presence deltas, not the current set.
 workspace-wide message search that delegates to
 ``message_service.search_workspace_messages`` and inherits its per-group
 scope filter.
+
+2026-06-10 (security W0e): the WS JWT handler now verifies tokens with the
+single resolved signing secret (``auth.core.SECRET``) instead of re-reading
+``AUTH_SECRET`` with the insecure public default. core.SECRET fail-fasts in
+prod and is an ephemeral random value in dev, so re-reading the default here
+would (a) reintroduce the forgeable-token hole and (b) fail to verify
+dev-signed cookies.
+
+2026-06-10 (REVIEW-4): the WS handler gained a third auth path — a
+first-message ``{"type":"auth","ticket"|"token":"..."}`` frame. It runs ONLY
+when the client supplied no ``?token=`` and no ``paw_auth`` cookie. The point
+is to keep the auth secret out of the URL (URL query strings leak into access
+logs, browser history, and proxies). Because a frame can only be received
+after the handshake completes, Path 3 calls ``websocket.accept()`` *before*
+authenticating, then reads the first frame under a 5s timeout
+(``asyncio.wait_for``); on timeout, a malformed frame, a non-auth frame, or a
+failed credential it closes 4001 and an unauthenticated socket never reaches
+the message loop. The existing URL-ticket and cookie paths (Paths 1 & 2) are
+unchanged and still accept *after* auth — ``accept()`` is called exactly once
+on every path, tracked by the ``accepted`` flag. The handshake auth frame is
+consumed during the handshake and never reaches the ``WsInbound`` loop.
 """
 
 from __future__ import annotations
@@ -24,7 +45,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
@@ -62,6 +82,7 @@ from pocketpaw_ee.cloud.shared.deps import (
     current_workspace_id,
     require_group_action,
 )
+from pocketpaw_ee.cloud.shared.errors import CloudError
 from pocketpaw_ee.cloud.shared.errors import Forbidden as CloudForbidden
 from pocketpaw_ee.cloud.workspace import service as workspace_service
 from pocketpaw_ee.guards.deps import check_workspace_action
@@ -527,8 +548,22 @@ def _normalize_ws_inbound(payload: Any) -> Any:
 async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(None)):
     """Cloud WebSocket -- authenticate via short-lived ws_ticket (browser
     SPA, single-use), HttpOnly paw_auth cookie (same-origin / older clients),
-    or long-lived session JWT in ?token= (Tauri / native). Then handle
-    typed JSON messages."""
+    long-lived session JWT in ?token= (Tauri / native), or a first-message
+    ``{"type":"auth","ticket"|"token":"..."}`` frame (keeps the credential out
+    of the URL). Then handle typed JSON messages.
+
+    Auth paths, in order:
+
+    * Path 1 — single-use ws_ticket in ``?token=``  (pre-accept).
+    * Path 2 — ``paw_auth`` cookie OR long-lived JWT in ``?token=`` (pre-accept).
+    * Path 3 — first-message auth frame, used ONLY when there is no ``?token=``
+      and no ``paw_auth`` cookie. Accepts the socket first (a frame can only be
+      received after the handshake), then reads one frame under a 5s timeout.
+
+    ``websocket.accept()`` is called exactly once on every path; the
+    ``accepted`` flag below tracks whether Path 3 already accepted so the shared
+    post-auth section doesn't double-accept.
+    """
     import jwt as pyjwt
 
     from pocketpaw_ee.cloud.auth.ws_tickets import consume_ws_ticket
@@ -539,40 +574,85 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
         await websocket.close(code=4003, reason="Enterprise license required")
         return
 
-    user_id: str | None = None
+    def _decode_session_jwt(jwt_token: str) -> str | None:
+        """Verify a long-lived session JWT and return its ``sub`` (user_id),
+        or ``None`` on any failure. Shared by Path 2 (cookie / URL JWT) and the
+        Path 3 first-frame JWT case so both use identical verification."""
+        from pocketpaw_ee.cloud.auth.core import SECRET as _auth_secret
 
-    # Path 1 — single-use ticket (cross-origin SPA). Try first because it
-    # only succeeds when the client explicitly minted one for this connect.
-    if token:
-        user_id = await consume_ws_ticket(token)
-
-    # Path 2 — HttpOnly cookie or long-lived JWT in ?token=. Same-origin
-    # browsers and Tauri use this. Skipped if a ticket already authenticated.
-    if user_id is None:
-        jwt_token = websocket.cookies.get("paw_auth") or token
-        if not jwt_token:
-            await websocket.close(code=4001, reason="Missing token")
-            return
-        secret = os.environ.get("AUTH_SECRET", "change-me-in-production-please")
         try:
             payload = pyjwt.decode(
                 jwt_token,
-                secret,
+                _auth_secret,
                 algorithms=["HS256"],
                 audience=["fastapi-users:auth"],
             )
-            user_id = payload.get("sub")
+        except Exception:
+            return None
+        sub = payload.get("sub")
+        return sub if sub else None
+
+    user_id: str | None = None
+    accepted = False  # True once websocket.accept() has been called.
+
+    cookie_token = websocket.cookies.get("paw_auth")
+
+    if token or cookie_token:
+        # Backward-compat / overlap window: URL ticket-then-JWT and cookie.
+        # These authenticate BEFORE accept(), exactly as before.
+
+        # Path 1 — single-use ticket (cross-origin SPA). Try first because it
+        # only succeeds when the client explicitly minted one for this connect.
+        if token:
+            user_id = await consume_ws_ticket(token)
+
+        # Path 2 — HttpOnly cookie or long-lived JWT in ?token=. Same-origin
+        # browsers and Tauri use this. Skipped if a ticket already authenticated.
+        if user_id is None:
+            jwt_token = cookie_token or token
+            if not jwt_token:
+                await websocket.close(code=4001, reason="Missing token")
+                return
+            user_id = _decode_session_jwt(jwt_token)
             if not user_id:
                 await websocket.close(code=4001, reason="Invalid token")
                 return
+    else:
+        # Path 3 — no URL token, no cookie. Authenticate from the first frame so
+        # the credential never travels in the URL. We MUST accept() before we
+        # can receive, and the 5s timeout stops a half-open socket from holding
+        # resources while we wait for a credential that may never come.
+        await websocket.accept()
+        accepted = True
+        try:
+            raw = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+            frame = json.loads(raw)
         except Exception:
+            # Timeout, disconnect, or non-JSON first frame.
+            await websocket.close(code=4001, reason="Missing auth")
+            return
+
+        if not isinstance(frame, dict) or frame.get("type") != "auth":
+            await websocket.close(code=4001, reason="Missing auth")
+            return
+
+        ticket = frame.get("ticket")
+        jwt_token = frame.get("token")
+        if isinstance(ticket, str) and ticket:
+            user_id = await consume_ws_ticket(ticket)
+        elif isinstance(jwt_token, str) and jwt_token:
+            user_id = _decode_session_jwt(jwt_token)
+
+        if not user_id:
             await websocket.close(code=4001, reason="Invalid token")
             return
 
     # Accept and register connection. If this was the user's first active
     # socket, announce them as online so every workspace peer's UI flips
-    # the presence dot immediately.
-    await websocket.accept()
+    # the presence dot immediately. Path 3 already accepted above; the
+    # ``accepted`` flag keeps accept() exactly-once.
+    if not accepted:
+        await websocket.accept()
     was_offline_before = not manager.is_online(user_id)
     await manager.connect(websocket, user_id)
     if was_offline_before:
@@ -596,6 +676,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
             raw = await websocket.receive_text()
             try:
                 data = json.loads(raw)
+                # Heartbeat: clients ping to keep the socket warm through idle-
+                # closing edge proxies (e.g. Cloudflare drops idle WebSockets
+                # after ~100s). Reply pong and skip the message-handling path.
+                if isinstance(data, dict) and data.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+                    continue
                 msg = WsInbound.model_validate(_normalize_ws_inbound(data))
             except Exception:
                 await websocket.send_json(
@@ -689,36 +775,52 @@ async def _schedule_presence_offline(user_id: str) -> None:
 
 
 async def _handle_ws_message(websocket: WebSocket, user_id: str, msg: WsInbound) -> None:
-    """Dispatch validated WebSocket message to the appropriate handler."""
-    if msg.type == "message.send":
-        await _ws_message_send(user_id, msg)
-    elif msg.type == "message.edit":
-        await _ws_message_edit(user_id, msg)
-    elif msg.type == "message.delete":
-        await _ws_message_delete(user_id, msg)
-    elif msg.type == "message.react":
-        await _ws_message_react(user_id, msg)
-    elif msg.type == "typing.start":
-        await _ws_typing(user_id, msg, active=True)
-    elif msg.type == "typing.stop":
-        await _ws_typing(user_id, msg, active=False)
-    elif msg.type == "presence.update":
-        pass  # Will be wired in Task 19
-    elif msg.type == "read.ack":
-        await _ws_read_ack(user_id, msg)
-    elif msg.type == "thread.create":
-        await _ws_thread_create(user_id, msg)
-    elif msg.type == "thread.close":
-        await _ws_thread_close(user_id, msg)
-    elif msg.type == "thread.send":
-        await _ws_thread_send(user_id, msg)
-    elif msg.type == "room.join":
+    """Dispatch validated WebSocket message to the appropriate handler.
+
+    Catches ``CloudError`` (Forbidden, NotFound, etc.) from service calls and
+    sends an error response to the client so the user sees a toast rather than
+    the message being silently swallowed.
+    """
+    try:
+        if msg.type == "message.send":
+            await _ws_message_send(user_id, msg)
+        elif msg.type == "message.edit":
+            await _ws_message_edit(user_id, msg)
+        elif msg.type == "message.delete":
+            await _ws_message_delete(user_id, msg)
+        elif msg.type == "message.react":
+            await _ws_message_react(user_id, msg)
+        elif msg.type == "typing.start":
+            await _ws_typing(user_id, msg, active=True)
+        elif msg.type == "typing.stop":
+            await _ws_typing(user_id, msg, active=False)
+        elif msg.type == "presence.update":
+            pass  # Will be wired in Task 19
+        elif msg.type == "read.ack":
+            await _ws_read_ack(user_id, msg)
+        elif msg.type == "thread.create":
+            await _ws_thread_create(user_id, msg)
+        elif msg.type == "thread.close":
+            await _ws_thread_close(user_id, msg)
+        elif msg.type == "thread.send":
+            await _ws_thread_send(user_id, msg)
+        elif msg.type == "room.join":
+            if msg.group_id:
+                members = await group_service.list_member_ids(msg.group_id)
+                if user_id in members:
+                    manager.join_room(websocket, msg.group_id)
+        elif msg.type == "room.leave":
+            manager.leave_room(websocket)
+    except CloudError as e:
+        extra: dict[str, Any] = {}
         if msg.group_id:
-            members = await group_service.list_member_ids(msg.group_id)
-            if user_id in members:
-                manager.join_room(websocket, msg.group_id)
-    elif msg.type == "room.leave":
-        manager.leave_room(websocket)
+            extra["group_id"] = msg.group_id
+        await websocket.send_json(
+            WsOutbound(
+                type="error",
+                data={"code": e.code, "message": e.message, **extra},
+            ).model_dump(mode="json")
+        )
 
 
 async def _ws_message_send(user_id: str, msg: WsInbound) -> None:

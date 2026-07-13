@@ -1,4 +1,21 @@
 # ee/pocketpaw_ee/cloud/foresight/service.py
+# Updated: 2026-06-10 (W4c — scope instinct reads to workspace) — closes the
+# residual cross-tenant read surface W4a left open on the foresight caller side.
+# The Foresight → Instinct fan-out + listing both touched the (shared, global)
+# instinct store WITHOUT a ``workspace_id``:
+#   - ``_fan_to_instinct_proposal`` now stamps ``domain_pd.workspace_id`` on the
+#     spawned ``store.propose`` row, and its dedupe read
+#     (``_existing_dedupe_keys``) is scoped to that same workspace — so the
+#     idempotence check only ever sees this tenant's rows (plus legacy NULL),
+#     never another tenant's foresight rows that happen to share the synthetic
+#     ``foresight:run:<id>`` pocket namespace.
+#   - ``list_instinct_proposals_for_run`` now threads the caller's
+#     ``ctx.workspace_id`` (already resolved by ``_require_workspace`` + the
+#     ``_fetch_in_workspace`` 404-collapse guard) into ``store.list_actions``,
+#     so the read is workspace-scoped at the SQL layer as defense-in-depth, not
+#     just gated by the run-level workspace check.
+# ``workspace_id`` crosses to the OSS instinct store as a PLAIN str; this is a
+# read FILTER only (W4a semantics) and never touches the W2b audit hash chain.
 # Updated: 2026-05-26 (feat/foresight-v10-insights-llm) — RFC 08 v1.0.
 # LLM-driven insights synthesizer + per-workspace synthesizer toggle:
 #   - ``get_insights(ctx)`` extended — reads the workspace's
@@ -2017,7 +2034,9 @@ def _foresight_pocket_id(run_id: str) -> str:
     return f"{_FORESIGHT_POCKET_PREFIX}{run_id}" if run_id else f"{_FORESIGHT_POCKET_PREFIX}unknown"
 
 
-async def _existing_dedupe_keys(store: Any, pocket_id: str) -> set[str]:
+async def _existing_dedupe_keys(
+    store: Any, pocket_id: str, *, workspace_id: str | None = None
+) -> set[str]:
     """Read the dedupe keys already stamped on Instinct rows for one
     Foresight run.
 
@@ -2026,8 +2045,13 @@ async def _existing_dedupe_keys(store: Any, pocket_id: str) -> set[str]:
     ``_foresight.dedupe_key`` field (e.g. a hand-crafted Action that
     happens to land in the same pocket-id namespace) are skipped —
     we only dedupe against our own provenance block.
+
+    W4c — ``workspace_id`` scopes the read to the run's tenant (plus legacy
+    NULL rows) so the dedupe check on the shared instinct DB can't see, or
+    collide with, another tenant's foresight rows in the same synthetic
+    pocket namespace. ``None`` leaves the read unscoped (the OSS/CLI path).
     """
-    actions = await store.list_actions(pocket_id=pocket_id, limit=500)
+    actions = await store.list_actions(pocket_id=pocket_id, limit=500, workspace_id=workspace_id)
     keys: set[str] = set()
     for act in actions:
         params = getattr(act, "parameters", {}) or {}
@@ -2082,8 +2106,15 @@ async def _fan_to_instinct_proposal(
     )
     dedupe_key = proposal.parameters.get("_foresight", {}).get("dedupe_key", "")
 
-    store = get_instinct_store()
-    existing = await _existing_dedupe_keys(store, proposal.pocket_id)
+    # ISO: the foresight engine runs inline inside the HTTP run handler (no
+    # ``current_workspace`` ContextVar) — scope the store file to the run's
+    # tenant (the W4c in-row filter below is additive).
+    store = get_instinct_store(workspace_id=domain_pd.workspace_id or None)
+    # W4c — scope the dedupe read to the run's tenant so the idempotence check
+    # only sees this workspace's rows (plus legacy NULL) on the shared store.
+    existing = await _existing_dedupe_keys(
+        store, proposal.pocket_id, workspace_id=domain_pd.workspace_id
+    )
     if dedupe_key in existing:
         # Idempotent skip — a re-emit of the same (ws, run, tick,
         # anchor, persona) bucket already has a row in The Tray.
@@ -2120,6 +2151,10 @@ async def _fan_to_instinct_proposal(
         priority=priority,
         parameters=proposal.parameters,
         assignee=proposal.assignee,
+        # W4c — stamp the run's tenant on the spawned row (and its audit rows)
+        # so later workspace-scoped reads (the dedupe check above + the
+        # proposals listing) correctly isolate this tenant's foresight rows.
+        workspace_id=domain_pd.workspace_id,
     )
 
     await emit(
@@ -2181,13 +2216,19 @@ async def list_instinct_proposals_for_run(
     synthetic ``pocket_id`` (``foresight:run:<run_id>``) and returns
     the rows whose ``parameters._foresight.run_id`` matches.
 
-    Cross-tenant safety: this function calls ``_fetch_in_workspace``
-    first so an unknown / cross-tenant run id surfaces as ``NotFound``
-    *before* the Instinct query runs. That keeps the 404-collapse rule
-    consistent with the projection-list endpoint — existence is never
-    leakable across tenants. The Instinct store itself does not carry
-    a ``workspace_id`` column (it's OSS-runtime SQLite), so the
-    workspace check has to happen at the run level here.
+    Cross-tenant safety (two layers):
+      1. ``_fetch_in_workspace`` first, so an unknown / cross-tenant run
+         id surfaces as ``NotFound`` *before* the Instinct query runs.
+         That keeps the 404-collapse rule consistent with the
+         projection-list endpoint — existence is never leakable across
+         tenants.
+      2. W4c — the Instinct read itself is now workspace-scoped: the
+         store carries a ``workspace_id`` column (added by W4a), so we
+         thread the caller's workspace into ``list_actions`` as
+         defense-in-depth. Even if a future caller reached this read
+         without the run-level guard, the SQL would restrict rows to this
+         tenant (plus legacy NULL rows). This is a read FILTER only — it
+         never touches the W2b audit hash chain.
 
     Pagination is offset-based for parity with the projection-list
     endpoint. ``total`` is computed locally over the pocket-scoped
@@ -2213,12 +2254,16 @@ async def list_instinct_proposals_for_run(
     # at module top would touch the disk on every cloud module load.
     from pocketpaw.stores import get_instinct_store
 
-    store = get_instinct_store()
+    # ISO: HTTP path (no ContextVar) — scope the store to the caller (the W4c
+    # in-row filter below is additive).
+    store = get_instinct_store(workspace_id=workspace_id or None)
     pocket_id = _foresight_pocket_id(run_id)
     # Pull a generous slice (Instinct's max page size is 500) and
     # filter to the rows our own provenance stamped, in case a future
     # caller drops an Action into the same pocket-id namespace by hand.
-    raw = await store.list_actions(pocket_id=pocket_id, limit=500)
+    # W4c — scope the read to the caller's workspace (plus legacy NULL rows)
+    # as defense-in-depth behind the run-level _fetch_in_workspace guard.
+    raw = await store.list_actions(pocket_id=pocket_id, limit=500, workspace_id=workspace_id)
     matching = [
         a
         for a in raw

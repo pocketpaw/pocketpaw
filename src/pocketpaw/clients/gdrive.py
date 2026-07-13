@@ -1,6 +1,8 @@
 # Google Drive Client — HTTP client for Drive API using OAuth tokens.
 # Created: 2026-02-09
 # Part of Phase 4 Media Integrations
+# 2026-06-08: DriveClient takes an optional user_id so each member can use their
+#   OWN Drive token (VIP Onboarding Phase B). Default None = shared bucket.
 
 from __future__ import annotations
 
@@ -34,16 +36,18 @@ class DriveClient:
     Uses OAuth bearer tokens from the token store.
     """
 
-    def __init__(self):
+    def __init__(self, user_id: str | None = None):
         self._oauth = OAuthManager(TokenStore())
+        self._user_id = user_id
 
     async def _get_token(self) -> str:
-        """Get a valid OAuth access token for Drive."""
+        """Get a valid OAuth access token for Drive (scoped to this client's user)."""
         settings = get_settings()
         token = await self._oauth.get_valid_token(
             service="google_drive",
             client_id=settings.google_oauth_client_id or "",
             client_secret=settings.google_oauth_client_secret or "",
+            user_id=self._user_id,
         )
         if not token:
             raise RuntimeError(

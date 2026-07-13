@@ -4,11 +4,21 @@
 #   test_sites_mcp_server layout: registration assertions (server name, tool
 #   ids, build, provider allowlist publication, ambient-not-opt-in) plus
 #   per-handler tests that mock the identity ContextVars + the connectors
-#   service and inspect the MCP envelope the SDK returns. The handler tests
-#   prove the v1 contract: read (auto-trust) actions reach service.execute,
-#   write (confirm-trust) actions are blocked WITHOUT calling execute,
-#   connectors not bound to the pocket are rejected, and a missing pocket /
-#   workspace ContextVar (called off-stream) yields a clear error.
+#   service and inspect the MCP envelope the SDK returns.
+# Updated: 2026-06-15 (feat/invoke-tool-v1, v2) — the WRITE branch of
+#   ``connector_execute`` now PROPOSES through Instinct instead of refusing
+#   ("coming in v2" stub retired), making this chat-agent surface symmetric with
+#   the flow-button surface (``cloud.pockets.tool_executor``). The old "write →
+#   blocked, execute never called" test is replaced by the v2 security rule: a
+#   WRITE-trust action calls ``propose_external_action`` (right kwargs), does
+#   NOT call ``connectors.service.execute`` inline, and returns
+#   status="pending_approval" with an ``action_id``. ``list_connector_actions``
+#   now reports write actions under ``write_actions_need_approval`` flagged
+#   "needs approval — proposes to your Tray". The handler tests prove the
+#   contract: read (auto-trust) actions reach service.execute, write (confirm-
+#   trust) actions PROPOSE without ever calling execute inline, connectors not
+#   bound to the pocket are rejected, and a missing pocket / workspace
+#   ContextVar (called off-stream) yields a clear error.
 """MCP server registration + handler tests for connector execution."""
 
 from __future__ import annotations
@@ -171,14 +181,17 @@ class TestListConnectorActionsHandler:
         assert gh["connector"] == "github"
         # Read action listed as runnable.
         assert [a["action"] for a in gh["read_actions"]] == ["list_issues"]
-        # Write action listed but flagged blocked.
-        assert len(gh["write_actions_blocked"]) == 1
-        assert gh["write_actions_blocked"][0]["action"] == "create_issue"
-        assert "v2" in gh["write_actions_blocked"][0]["status"]
+        # Write action listed but flagged as needing approval (proposes to Tray),
+        # NOT blocked — v2 routes writes through Instinct.
+        assert len(gh["write_actions_need_approval"]) == 1
+        assert gh["write_actions_need_approval"][0]["action"] == "create_issue"
+        assert "approval" in gh["write_actions_need_approval"][0]["status"]
         mock_list.assert_awaited_once_with("ws_1", "pk_1")
 
     @pytest.mark.asyncio
-    async def test_no_pocket_returns_clear_message(self) -> None:
+    async def test_no_pocket_falls_through_to_workspace_scope(self) -> None:
+        """Unanchored chats (pocket_id=None) query the service with pocket ""
+        so workspace-scoped connectors stay reachable from any chat."""
         from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
 
         ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", None)
@@ -188,15 +201,15 @@ class TestListConnectorActionsHandler:
             pocket_patch,
             patch(
                 "pocketpaw_ee.cloud.connectors.service.list_pocket_connectors",
-                new=AsyncMock(),
+                new=AsyncMock(return_value=[]),
             ) as mock_list,
         ):
             out = await connectors_mcp._list_connector_actions_handler({})
 
         body = _decode_payload(out)
         assert body["connectors"] == []
-        assert "isn't anchored to a pocket" in body["message"]
-        mock_list.assert_not_awaited()
+        assert "No connectors are reachable" in body["message"]
+        mock_list.assert_awaited_once_with("ws_1", "")
 
     @pytest.mark.asyncio
     async def test_no_connectors_returns_clear_message(self) -> None:
@@ -216,7 +229,7 @@ class TestListConnectorActionsHandler:
 
         body = _decode_payload(out)
         assert body["connectors"] == []
-        assert "No connectors are bound" in body["message"]
+        assert "No connectors are reachable" in body["message"]
 
     @pytest.mark.asyncio
     async def test_no_workspace_is_error(self) -> None:
@@ -298,9 +311,135 @@ class TestConnectorExecuteHandler:
         assert req.pocket_id == "pk_1"
 
     @pytest.mark.asyncio
-    async def test_write_action_blocked_without_calling_execute(self) -> None:
-        """A confirm-trust (write) action is refused and service.execute is
-        NEVER called."""
+    async def test_write_action_proposes_via_instinct_and_never_executes_inline(self) -> None:
+        """THE v2 security rule — a confirm-trust (write) action is PROPOSED
+        through Instinct and ``connectors.service.execute`` is NEVER called
+        inline. The human gates the write in The Tray; only their approval (via
+        the instinct router → ``execute_approved_external_action``) fires it.
+
+        This is the chat-agent twin of
+        ``test_tool_executor.test_write_grant_proposes_via_instinct_and_never_executes_inline``
+        — both connector-write surfaces now route through ``propose_external_action``.
+        """
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        write_trust = ConnectorActionInfo(
+            name="create_issue",
+            description="Create an issue",
+            trust_level="confirm",
+            execution_mode="cloud",
+            is_read=False,
+        )
+        proposed_id = "act-pending-777"
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.is_connector_bound_to_pocket",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.get_action_trust",
+                new=AsyncMock(return_value=write_trust),
+            ),
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.execute",
+                new=AsyncMock(),
+            ) as mock_execute,
+            patch(
+                "pocketpaw_ee.cloud.external_actions.propose.propose_external_action",
+                new=AsyncMock(return_value=proposed_id),
+            ) as mock_propose,
+        ):
+            out = await connectors_mcp._connector_execute_handler(
+                {
+                    "connector_name": "github",
+                    "action": "create_issue",
+                    "params": {"title": "needs a human"},
+                }
+            )
+
+        # Assertion #1 — the write was PROPOSED with the right kwargs (resolved
+        # from the per-stream ContextVars), not fired.
+        mock_propose.assert_awaited_once()
+        kw = mock_propose.await_args.kwargs
+        assert kw["workspace_id"] == "ws_1"
+        assert kw["connector_name"] == "github"
+        assert kw["action"] == "create_issue"
+        assert kw["params"] == {"title": "needs a human"}
+        assert kw["requested_by"] == "u_1"
+        assert kw["scope"] == "pocket"
+        assert kw["pocket_id"] == "pk_1"
+
+        # Assertion #2 — execute() was NEVER awaited inline. THE security rule.
+        mock_execute.assert_not_awaited()
+
+        # Assertion #3 — pending-shaped success carrying the proposed action_id.
+        assert not out.get("is_error")
+        body = _decode_payload(out)
+        assert body["executed"] is False
+        assert body["status"] == "pending_approval"
+        assert body["action_id"] == proposed_id
+        assert body["connector"] == "github"
+        assert body["action"] == "create_issue"
+        assert "Tray" in body["message"]
+
+    @pytest.mark.asyncio
+    async def test_write_action_unanchored_proposes_workspace_scope(self) -> None:
+        """A write proposed from an UNANCHORED chat (pocket_id=None) proposes a
+        ``workspace``-scoped call — matching the credentials the eventual
+        approved execute resolves. Still never fires execute inline."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        write_trust = ConnectorActionInfo(
+            name="gmail_send",
+            description="Send an email",
+            trust_level="confirm",
+            execution_mode="cloud",
+            is_read=False,
+        )
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", None)
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.is_connector_bound_to_pocket",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.get_action_trust",
+                new=AsyncMock(return_value=write_trust),
+            ),
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.execute",
+                new=AsyncMock(),
+            ) as mock_execute,
+            patch(
+                "pocketpaw_ee.cloud.external_actions.propose.propose_external_action",
+                new=AsyncMock(return_value="act-ws-1"),
+            ) as mock_propose,
+        ):
+            out = await connectors_mcp._connector_execute_handler(
+                {"connector_name": "gmail", "action": "gmail_send", "params": {"to": "x@y.z"}}
+            )
+
+        mock_propose.assert_awaited_once()
+        kw = mock_propose.await_args.kwargs
+        assert kw["scope"] == "workspace"
+        assert kw["pocket_id"] is None
+        mock_execute.assert_not_awaited()
+        assert not out.get("is_error")
+
+    @pytest.mark.asyncio
+    async def test_write_action_propose_failure_is_clean_error_not_inline_execute(self) -> None:
+        """If ``propose_external_action`` raises (store down, etc.) the handler
+        returns a clean MCP error envelope and STILL never fires execute — a
+        propose failure must not fall through to an inline write."""
         from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
 
         write_trust = ConnectorActionInfo(
@@ -328,17 +467,17 @@ class TestConnectorExecuteHandler:
                 "pocketpaw_ee.cloud.connectors.service.execute",
                 new=AsyncMock(),
             ) as mock_execute,
+            patch(
+                "pocketpaw_ee.cloud.external_actions.propose.propose_external_action",
+                new=AsyncMock(side_effect=RuntimeError("instinct store unavailable")),
+            ),
         ):
             out = await connectors_mcp._connector_execute_handler(
                 {"connector_name": "github", "action": "create_issue", "params": {}}
             )
 
-        assert not out.get("is_error")
-        body = _decode_payload(out)
-        assert body["executed"] is False
-        assert body["blocked"] is True
-        assert "needs approval" in body["reason"]
-        assert "v2" in body["reason"]
+        assert out.get("is_error") is True
+        assert "for approval" in out["content"][0]["text"]
         mock_execute.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -616,15 +755,27 @@ class TestSenseTools:
     @pytest.mark.asyncio
     async def test_sense_execute_guards_and_validation(self) -> None:
         from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+        from pocketpaw_ee.cloud.senses.resolver import SenseExecutionResult
 
-        # No pocket → refused.
+        # No pocket → flows through with pocket_id=None (workspace-scoped
+        # providers stay reachable from unanchored chats, matching list_senses).
         ws_p, u_p, pk_p = _patch_identity("ws_1", "u_1", None)
-        with ws_p, u_p, pk_p:
+        mock_exec = AsyncMock(
+            return_value=SenseExecutionResult(
+                ok=True, sense_id="paw.email.v1", action="gmail_search"
+            )
+        )
+        with (
+            ws_p,
+            u_p,
+            pk_p,
+            patch("pocketpaw_ee.cloud.senses.resolver.execute_sense", new=mock_exec),
+        ):
             out = await connectors_mcp._sense_execute_handler(
                 {"sense": "paw.email.v1", "action": "gmail_search"}
             )
-        assert out.get("is_error") is True
-        assert "pocket" in out["content"][0]["text"]
+        assert out.get("is_error") is not True
+        assert mock_exec.await_args.kwargs["pocket_id"] is None
 
         # Missing sense → refused.
         ws_p, u_p, pk_p = _patch_identity("ws_1", "u_1", "pk_1")

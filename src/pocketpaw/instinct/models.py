@@ -1,5 +1,14 @@
 # Instinct data models — decision pipeline types.
 # Created: 2026-03-28
+# Updated: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) — added an
+#   ADDITIVE, nullable ``Action.scope_type`` so an Action can be scoped to a
+#   GENERIC artifact (pocket / site / dashboard / …) instead of being implicitly
+#   pocket-scoped. ``scope_type=None`` reads as the legacy "pocket" scope: every
+#   pre-BP-3 row (and every caller that does not set it) keeps working unchanged,
+#   with ``pocket_id`` reused as the pocket-scope id. When ``scope_type`` is set,
+#   ``pocket_id`` carries the scope id within that scope_type. Nothing was
+#   renamed — this is purely additive so the existing pocket-scoped pipeline is
+#   untouched.
 # Updated: 2026-05-21 (feat/instinct-outcome-verification) — issue #1162:
 #   Action.outcome can now hold a structured OutcomeVerdict (status +
 #   per-criterion results) instead of only a free-text "what happened"
@@ -117,6 +126,13 @@ class Action(BaseModel):
     """A proposed action from the agent, waiting for approval."""
 
     id: str = Field(default_factory=lambda: _gen_id("act"))
+    # ``scope_type`` (BP-3) makes the Action artifact-GENERIC. ``None`` is the
+    # legacy default and reads as "pocket": pre-BP-3 rows and every caller that
+    # does not set it stay pocket-scoped with ``pocket_id`` as the pocket-scope
+    # id. When set (e.g. "site"), ``pocket_id`` carries the scope id within that
+    # scope_type. Purely additive — nothing was renamed, so the pocket pipeline
+    # is unchanged.
+    scope_type: str | None = None
     pocket_id: str
     title: str
     description: str

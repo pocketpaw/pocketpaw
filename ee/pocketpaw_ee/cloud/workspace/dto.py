@@ -10,17 +10,43 @@ existing wire shape consumed by paw-enterprise:
 Changes: added the slug rule single-source-of-truth (``SLUG_RE`` +
 ``RESERVED_SLUGS``) and the ``SlugAvailabilityOut`` response so the create
 UI can check a slug live; ``validate_slug`` now reuses ``SLUG_RE``.
+2026-06-14 (WB-1): added ``BrandingPatch`` (request, with ``accent_color``
+format validation) + ``BrandingOut`` (response), an optional ``branding``
+field on ``UpdateWorkspaceRequest``, a ``branding`` field on ``WorkspaceOut``,
+and the ``Branding`` -> ``BrandingOut`` mapping in ``workspace_to_dto``.
+2026-06-19 (feat/instinct-gate-integration, security-review FIX 1): added
+``SetApprovalLevelRequest`` — the closed-enum body for the OWNER-only route
+that activates the layered Instinct gate's triager for a workspace.
+2026-07-10 (compliance-starter): added ``SetRetentionRequest`` (positive-or-
+null ``retention_days``, ``extra="forbid"``) + ``RetentionOut`` for the
+dedicated per-workspace data-retention endpoint.
+2026-07-08 (chore/decisions-feed-rename): renamed the Instinct decision-feed
+route key in ``VALID_ROUTES`` to ``decisions`` — mirrors the atlas surface
+``surface:decisions`` (route ``/decisions``), the org-wide feed of recent
+Instinct corrections (sibling to ``/decisions-graph``).
 """
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from pocketpaw_ee.cloud._core.time import iso_utc
-from pocketpaw_ee.cloud.workspace.domain import Invite, VerifiedDomain, Workspace, WorkspaceMember
+from pocketpaw_ee.cloud.workspace.domain import (
+    Branding,
+    Invite,
+    InviteContext,
+    VerifiedDomain,
+    Workspace,
+    WorkspaceMember,
+)
 from pocketpaw_ee.cloud.workspace.slug import SLUG_RE
+
+# Hex accent color, e.g. "#1A2B3C". Anchored — rejects "blue", "#ZZZ",
+# short/long hex, and a missing leading "#".
+ACCENT_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 # ---------------------------------------------------------------------------
 # Requests (preserved from schemas.py)
@@ -39,19 +65,103 @@ class CreateWorkspaceRequest(BaseModel):
         return v
 
 
+class BrandingPatch(BaseModel):
+    """Per-tenant white-label branding patch (WB-1), carried on
+    ``UpdateWorkspaceRequest.branding``.
+
+    All fields optional. ``accent_color`` is format-validated here (must be
+    ``#RRGGBB``) so a malformed value is a 422 at the route boundary, before
+    the service runs. Asset ownership (``logo_asset`` / ``favicon_asset``
+    must belong to the target workspace) is a DB-backed check enforced in the
+    service, not here."""
+
+    logo_asset: str | None = None
+    favicon_asset: str | None = None
+    display_name: str | None = None
+    tab_title: str | None = None
+    accent_color: str | None = None
+    show_paw_mark: bool = True
+
+    @field_validator("accent_color")
+    @classmethod
+    def validate_accent_color(cls, v: str | None) -> str | None:
+        if v is not None and not ACCENT_COLOR_RE.match(v):
+            raise ValueError("accent_color must be a hex color like #RRGGBB")
+        return v
+
+
 class UpdateWorkspaceRequest(BaseModel):
     name: str | None = None
     settings: dict | None = None
+    # Per-tenant white-label branding (WB-1). Owner/admin-gated at the route
+    # via the same ``workspace.update`` action as the rename path.
+    branding: BrandingPatch | None = None
+
+
+class InviteContextDTO(BaseModel):
+    """Optional admin-provided onboarding hints carried on an invite (pp#1365).
+
+    The same ``{focus, profile_pic}`` shape on both the create request and the
+    invite response. ``focus`` is a one-line description of what the new member
+    will own; ``profile_pic`` is a reference (e.g. an uploaded file id) to a
+    suggested avatar. Both optional — supply either, both, or neither. Consumed
+    by the downstream VIP-onboarding flow."""
+
+    focus: str | None = Field(default=None, max_length=280)
+    profile_pic: str | None = Field(default=None, max_length=512)
 
 
 class CreateInviteRequest(BaseModel):
     email: str
     role: str = Field(default="member", pattern="^(admin|member)$")
     group_id: str | None = None
+    context: InviteContextDTO | None = None
 
 
 class UpdateMemberRoleRequest(BaseModel):
     role: str = Field(pattern="^(owner|admin|member)$")
+
+
+class SetApprovalLevelRequest(BaseModel):
+    """PATCH /workspaces/{id}/instinct/approval-level request (security FIX 1).
+
+    The body for the OWNER-only switch that activates the layered Instinct
+    gate's triager for a workspace. ``level`` is a closed enum
+    (``ASK`` | ``TRIAGE`` | ``TRUSTED``) so the route boundary 422s on any
+    other value — a typo can never silently land a junk level on the workspace
+    document (which the gate would then read and route ASK on, masking the
+    misconfiguration). ``extra="forbid"`` rejects stray fields. The service
+    re-validates against the canonical ``ApprovalLevel`` enum (defense in
+    depth, and so direct service callers get the same guarantee)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    level: Literal["ASK", "TRIAGE", "TRUSTED"]
+
+
+class SetRetentionRequest(BaseModel):
+    """PUT /workspaces/{id}/retention request (compliance-starter).
+
+    The dedicated, no-clobber writer for the per-workspace data-retention
+    policy. ``retention_days`` is ``None`` to keep records forever, or a
+    POSITIVE day count (``ge=1``) after which audit records are purged. A 0 /
+    negative value is a 422 at the route boundary; ``extra="forbid"`` rejects
+    stray fields so this can never smuggle another settings key onto the
+    document.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    retention_days: int | None = Field(default=None, ge=1)
+
+
+class RetentionOut(BaseModel):
+    """GET/PUT /workspaces/{id}/retention response — the current policy.
+
+    ``retention_days`` is ``None`` when the workspace keeps records forever.
+    """
+
+    retention_days: int | None = None
 
 
 class BulkInviteRequest(BaseModel):
@@ -78,8 +188,27 @@ class BulkInviteSkip(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class BrandingOut(BaseModel):
+    """Per-tenant white-label branding on the workspace read (WB-1).
+
+    Mirrors ``BrandingPatch`` minus the validators — it's a read shape. The
+    frontend applies the Paw default for any field that's ``None``."""
+
+    logo_asset: str | None = None
+    favicon_asset: str | None = None
+    display_name: str | None = None
+    tab_title: str | None = None
+    accent_color: str | None = None
+    show_paw_mark: bool = True
+
+
 class WorkspaceOut(BaseModel):
-    """GET /workspaces/{id} response."""
+    """GET /workspaces/{id} response.
+
+    Also the shape the shell reads at load for the active workspace (there is
+    no separate ``/workspaces/active`` route — the shell fetches the active
+    workspace via ``GET /workspaces/{id}`` using the id from the profile), so
+    ``branding`` here is enough for the shell to theme on first paint."""
 
     id: str = Field(serialization_alias="_id")
     name: str
@@ -89,6 +218,7 @@ class WorkspaceOut(BaseModel):
     seats: int
     createdAt: str | None  # noqa: N815 - camelCase wire key
     memberCount: int  # noqa: N815 - camelCase wire key
+    branding: BrandingOut | None = None  # per-tenant white-label branding (WB-1)
 
     model_config = {"populate_by_name": True}
 
@@ -131,6 +261,7 @@ class InviteOut(BaseModel):
     revoked: bool
     expired: bool
     expiresAt: str | None  # noqa: N815 - camelCase wire key
+    context: InviteContextDTO | None = None  # optional admin onboarding hints (pp#1365)
 
     model_config = {"populate_by_name": True}
 
@@ -192,6 +323,73 @@ class VerifiedDomainOut(BaseModel):
     created_at: str | None = None
 
 
+class RoutePermissionsOut(BaseModel):
+    """GET /workspaces/{id}/route-permissions response.
+
+    A map of user_id → list of allowed route keys. An empty list or missing
+    entry means the user has full access (no route restrictions).
+    """
+
+    permissions: dict[str, list[str]]
+
+
+class SetMemberRoutePermissionsRequest(BaseModel):
+    """PUT /workspaces/{id}/route-permissions/{user_id} request.
+
+    An empty routes list grants full access (clears restrictions).
+    """
+
+    routes: list[str] = Field(default_factory=list)
+
+    @field_validator("routes")
+    @classmethod
+    def validate_routes(cls, v: list[str]) -> list[str]:
+        VALID_ROUTES = {
+            "studio",
+            "chat",
+            "code",
+            "agents",
+            "pockets",
+            "deep-work",
+            "calendar",
+            "activity",
+            "files",
+            "meetings",
+            "mission-control",
+            "knowledge",
+            "decisions-graph",
+            "foresight",
+            "sites",
+            "belt",
+            "decisions",
+            "audit",
+            "settings",
+        }
+        for route in v:
+            if route not in VALID_ROUTES:
+                raise ValueError(f"Invalid route key: {route}")
+        return v
+
+
+class ConnectorPermissionsOut(BaseModel):
+    """GET /workspaces/{id}/connector-permissions response.
+
+    A map of user_id → list of allowed connector names. An empty list or
+    missing entry means the user has full access (no connector restrictions).
+    """
+
+    permissions: dict[str, list[str]]
+
+
+class SetMemberConnectorPermissionsRequest(BaseModel):
+    """PUT /workspaces/{id}/connector-permissions/{user_id} request.
+
+    An empty connectors list grants full access (clears restrictions).
+    """
+
+    connectors: list[str] = Field(default_factory=list)
+
+
 class InvitePreviewResponse(BaseModel):
     """Typed preview of an invite token for the accept UI.
 
@@ -220,6 +418,23 @@ class InvitePreviewResponse(BaseModel):
     group: str | None = None
     group_name: str | None = None
     viewer_email: str | None = None
+    # Optional admin onboarding hints (pp#1365), surfaced on ready_* previews so
+    # the member-facing accept UI can carry focus + profile_pic into the
+    # downstream VIP-onboarding welcome. None/absent when the invite has none.
+    context: InviteContextDTO | None = None
+
+
+def _branding_to_dto(b: Branding | None) -> BrandingOut | None:
+    if b is None:
+        return None
+    return BrandingOut(
+        logo_asset=b.logo_asset,
+        favicon_asset=b.favicon_asset,
+        display_name=b.display_name,
+        tab_title=b.tab_title,
+        accent_color=b.accent_color,
+        show_paw_mark=b.show_paw_mark,
+    )
 
 
 def workspace_to_dto(ws: Workspace) -> WorkspaceOut:
@@ -232,6 +447,7 @@ def workspace_to_dto(ws: Workspace) -> WorkspaceOut:
         seats=ws.seats,
         createdAt=iso_utc(ws.created_at),
         memberCount=ws.member_count,
+        branding=_branding_to_dto(ws.branding),
     )
 
 
@@ -246,6 +462,12 @@ def member_to_dto(m: WorkspaceMember) -> MemberOut:
     )
 
 
+def _context_to_dto(ctx: InviteContext | None) -> InviteContextDTO | None:
+    if ctx is None:
+        return None
+    return InviteContextDTO(focus=ctx.focus, profile_pic=ctx.profile_pic)
+
+
 def invite_to_dto(inv: Invite) -> InviteOut:
     return InviteOut(
         id=inv.id,
@@ -257,6 +479,7 @@ def invite_to_dto(inv: Invite) -> InviteOut:
         revoked=inv.revoked,
         expired=inv.expired,
         expiresAt=iso_utc(inv.expires_at),
+        context=_context_to_dto(inv.context),
     )
 
 
@@ -282,6 +505,7 @@ def invite_to_validate_dto(inv: Invite, workspace_name: str) -> ValidateInviteOu
         revoked=inv.revoked,
         expired=inv.expired,
         expiresAt=iso_utc(inv.expires_at),
+        context=_context_to_dto(inv.context),
         valid=not (inv.accepted or inv.revoked or inv.expired),
         workspace_name=workspace_name,
     )
@@ -289,14 +513,23 @@ def invite_to_validate_dto(inv: Invite, workspace_name: str) -> ValidateInviteOu
 
 __all__ = [
     "AddDomainRequest",
+    "BrandingOut",
+    "BrandingPatch",
     "BulkInviteRequest",
     "BulkInviteResponse",
     "BulkInviteSkip",
+    "ConnectorPermissionsOut",
     "CreateInviteRequest",
     "CreateWorkspaceRequest",
+    "InviteContextDTO",
     "InviteOut",
     "InvitePreviewResponse",
     "MemberOut",
+    "RetentionOut",
+    "RoutePermissionsOut",
+    "SetMemberConnectorPermissionsRequest",
+    "SetMemberRoutePermissionsRequest",
+    "SetRetentionRequest",
     "SlugAvailabilityOut",
     "UpdateDomainRequest",
     "UpdateMemberRoleRequest",

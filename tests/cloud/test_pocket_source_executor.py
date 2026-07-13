@@ -12,6 +12,17 @@
 # unwrapped .data.data payload to state in the same {source,bind,value} row
 # shape; an ok=False result lands in the errors aggregation with the
 # resolver's stable code/message and does NOT abort a sibling http source.
+# Updated: 2026-06-12 (feat/connector-as-pocket-backend) — coverage for the
+# CONNECTOR backend + the source TRANSFORM. With backend_type="connector" each
+# non-sense source routes through a mocked connectors_service.execute (read-first:
+# only auto-trust actions run; a confirm/restricted/unknown action is refused
+# with `action_needs_approval` and execute is never called); the response's
+# `.data` binds in the same {source,bind,value} row shape; a failed connector
+# source is contained (sibling keeps running); the empty connector base_url
+# skips the SSRF validation. The transform (select+map+values+const+missing)
+# shapes the raw result before binding for BOTH http and connector sources; a
+# malformed transform fails that source cleanly (`bad_transform`). The http path
+# with no transform is asserted unchanged (regression).
 #
 # What this pins:
 #   - SSRF rejections: absolute-URL path, `..` traversal, path to a
@@ -904,3 +915,510 @@ async def test_sense_source_with_falsy_workspace_is_clear_bad_source(monkeypatch
     assert err["source"] == "inbox"
     assert err["code"] == "bad_source"
     assert "workspace" in err["error"]
+
+
+# ---------------------------------------------------------------------------
+# Connector backend (feat/connector-as-pocket-backend) — when the pocket's
+# backend is `backend_type="connector"`, each non-sense source runs against the
+# BOUND connector via connectors_service.execute (read-first: auto-trust only).
+# The connectors service is mocked; no real connectors are needed.
+# ---------------------------------------------------------------------------
+
+
+class _FakeTrust:
+    """Stand-in for ConnectorActionInfo — only `is_read` / `trust_level` read."""
+
+    def __init__(self, is_read: bool, trust_level: str):
+        self.is_read = is_read
+        self.trust_level = trust_level
+
+
+class _FakeExecResp:
+    """Stand-in for ExecuteActionResponse — `success` / `data` / `error` read."""
+
+    def __init__(self, success=True, data=None, error=None):
+        self.success = success
+        self.data = data
+        self.error = error
+
+
+def _patch_connector_service(monkeypatch, *, trust, execute):
+    """Patch the lazily-imported connectors service used by the connector path.
+
+    `_run_connector_binding` does `from ...connectors import service` at call
+    time, so patching the attributes on that module is what takes effect.
+    `trust` fakes `get_action_trust`; `execute` fakes `execute`.
+    """
+    import pocketpaw_ee.cloud.connectors.service as cs
+
+    monkeypatch.setattr(cs, "get_action_trust", trust)
+    monkeypatch.setattr(cs, "execute", execute)
+
+
+async def test_connector_backend_source_executes_via_connector(monkeypatch):
+    """A connector-backed source routes each source through
+    connectors_service.execute and binds the response's `.data` payload in the
+    same `{source, bind, value}` row shape the http/sense paths return."""
+    captured = {}
+
+    async def _trust(name, action):
+        return _FakeTrust(is_read=True, trust_level="auto")
+
+    async def _execute(workspace_id, name, body, *, user_id=None):
+        captured.update(
+            workspace_id=workspace_id,
+            name=name,
+            action=body.action,
+            params=body.params,
+            user_id=user_id,
+            pocket_id=body.pocket_id,
+        )
+        return _FakeExecResp(success=True, data=[{"id": "app-1", "fullName": "Ada"}])
+
+    _patch_connector_service(monkeypatch, trust=_trust, execute=_execute)
+
+    spec = {
+        "sources": {
+            "apps": {
+                "type": "connector",
+                "action": "list_applications",
+                "params": {"status": "new"},
+                "bind": "state.apps",
+            }
+        }
+    }
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="runner-1",
+        ripple_spec=spec,
+        base_url="",  # a connector backend has no base_url
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name="snctm-admin",
+    )
+
+    assert result["errors"] == []
+    assert len(result["ran"]) == 1
+    ran = result["ran"][0]
+    assert ran["source"] == "apps"
+    assert ran["bind"] == "apps"  # `state.` stripped
+    assert ran["value"] == [{"id": "app-1", "fullName": "Ada"}]
+    # The pocket's bound connector + the binding's action/params were threaded.
+    assert captured["name"] == "snctm-admin"
+    assert captured["action"] == "list_applications"
+    assert captured["params"] == {"status": "new"}
+    assert captured["workspace_id"] == "ws-1"
+    assert captured["pocket_id"] == "p1"
+    assert captured["user_id"] == "runner-1"
+
+
+async def test_connector_backend_routes_plain_http_typed_source(monkeypatch):
+    """A source that omits `type` (defaults to "http") STILL routes through the
+    connector when the pocket's BACKEND is a connector — the backend, not the
+    source's type, selects the transport for non-sense sources."""
+
+    async def _trust(name, action):
+        return _FakeTrust(is_read=True, trust_level="auto")
+
+    async def _execute(workspace_id, name, body, *, user_id=None):
+        return _FakeExecResp(success=True, data={"ok": True})
+
+    _patch_connector_service(monkeypatch, trust=_trust, execute=_execute)
+
+    spec = {"sources": {"s": {"action": "ping", "bind": "state.s"}}}
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url="",
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name="snctm-admin",
+    )
+    assert result["errors"] == []
+    assert result["ran"][0]["value"] == {"ok": True}
+
+
+async def test_connector_backend_applies_transform(monkeypatch):
+    """The binding's transform shapes the connector response BEFORE it binds —
+    select drills, map reshapes (values + const + missing-field)."""
+
+    async def _trust(name, action):
+        return _FakeTrust(is_read=True, trust_level="auto")
+
+    async def _execute(workspace_id, name, body, *, user_id=None):
+        return _FakeExecResp(
+            success=True,
+            data={
+                "applications": [
+                    {"fullName": "Ada", "status": "new", "id": "x1"},
+                    {"fullName": "Bo", "status": "rejected", "id": "x2"},
+                ]
+            },
+        )
+
+    _patch_connector_service(monkeypatch, trust=_trust, execute=_execute)
+
+    spec = {
+        "sources": {
+            "apps": {
+                "type": "connector",
+                "action": "list_applications",
+                "bind": "state.apps",
+                "transform": {
+                    "select": "applications",
+                    "map": [
+                        {"to": "applicant", "from": "fullName"},
+                        {
+                            "to": "status_variant",
+                            "from": "status",
+                            "values": {"new": "warning", "rejected": "destructive"},
+                            "default": "muted",
+                        },
+                        {"to": "id", "from": "id"},
+                        {"to": "source", "const": "snctm-admin"},
+                        {"to": "missing", "from": "nope"},
+                    ],
+                },
+            }
+        }
+    }
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url="",
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name="snctm-admin",
+    )
+    assert result["errors"] == []
+    assert result["ran"][0]["value"] == [
+        {
+            "applicant": "Ada",
+            "status_variant": "warning",
+            "id": "x1",
+            "source": "snctm-admin",
+            "missing": None,
+        },
+        {
+            "applicant": "Bo",
+            "status_variant": "destructive",
+            "id": "x2",
+            "source": "snctm-admin",
+            "missing": None,
+        },
+    ]
+
+
+async def test_connector_backend_refuses_non_auto_trust_action(monkeypatch):
+    """READ-FIRST: a confirm/restricted action is refused with a clean
+    per-source error and execute is NEVER called."""
+    called = {"execute": False}
+
+    async def _trust(name, action):
+        return _FakeTrust(is_read=False, trust_level="confirm")
+
+    async def _execute(workspace_id, name, body, *, user_id=None):
+        called["execute"] = True
+        raise AssertionError("execute must not run for a non-auto action")
+
+    _patch_connector_service(monkeypatch, trust=_trust, execute=_execute)
+
+    spec = {
+        "sources": {
+            "danger": {
+                "type": "connector",
+                "action": "delete_application",
+                "bind": "state.danger",
+            }
+        }
+    }
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url="",
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name="snctm-admin",
+    )
+    assert called["execute"] is False
+    assert result["ran"] == []
+    assert len(result["errors"]) == 1
+    err = result["errors"][0]
+    assert err["source"] == "danger"
+    assert err["code"] == "action_needs_approval"
+
+
+async def test_connector_backend_unknown_action_refused(monkeypatch):
+    """An action the connector doesn't expose (get_action_trust -> None) is
+    refused at the read-first gate — execute is never called."""
+
+    async def _trust(name, action):
+        return None
+
+    async def _execute(workspace_id, name, body, *, user_id=None):
+        raise AssertionError("execute must not run for an unknown action")
+
+    _patch_connector_service(monkeypatch, trust=_trust, execute=_execute)
+
+    spec = {"sources": {"s": {"type": "connector", "action": "nope", "bind": "state.s"}}}
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url="",
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name="snctm-admin",
+    )
+    assert result["ran"] == []
+    assert result["errors"][0]["code"] == "action_needs_approval"
+
+
+async def test_connector_backend_execute_failure_is_per_source_error(monkeypatch):
+    """A connector action that returns success=False lands in the errors
+    aggregation — it does NOT crash the run."""
+
+    async def _trust(name, action):
+        return _FakeTrust(is_read=True, trust_level="auto")
+
+    async def _execute(workspace_id, name, body, *, user_id=None):
+        return _FakeExecResp(success=False, data=None, error="upstream 500")
+
+    _patch_connector_service(monkeypatch, trust=_trust, execute=_execute)
+
+    spec = {"sources": {"s": {"type": "connector", "action": "list", "bind": "state.s"}}}
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url="",
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name="snctm-admin",
+    )
+    assert result["ran"] == []
+    assert result["errors"][0]["source"] == "s"
+    assert result["errors"][0]["code"] == "connector_error"
+
+
+async def test_connector_backend_failed_source_does_not_abort_sibling(monkeypatch):
+    """A refused connector source is contained — a sibling auto-trust source in
+    the same run still completes."""
+
+    async def _trust(name, action):
+        # `ok_action` is auto; `bad_action` is confirm (refused).
+        if action == "ok_action":
+            return _FakeTrust(is_read=True, trust_level="auto")
+        return _FakeTrust(is_read=False, trust_level="confirm")
+
+    async def _execute(workspace_id, name, body, *, user_id=None):
+        return _FakeExecResp(success=True, data={"ran": body.action})
+
+    _patch_connector_service(monkeypatch, trust=_trust, execute=_execute)
+
+    spec = {
+        "sources": {
+            "good": {"type": "connector", "action": "ok_action", "bind": "state.good"},
+            "bad": {"type": "connector", "action": "bad_action", "bind": "state.bad"},
+        }
+    }
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url="",
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name="snctm-admin",
+    )
+    ran_sources = {r["source"] for r in result["ran"]}
+    err_sources = {e["source"] for e in result["errors"]}
+    assert ran_sources == {"good"}
+    assert err_sources == {"bad"}
+
+
+async def test_connector_backend_missing_connector_name_is_bad_source(monkeypatch):
+    """A connector backend with no connector_name fails the source cleanly —
+    get_action_trust / execute are never reached."""
+
+    async def _boom(*a, **k):
+        raise AssertionError("connector service must not be reached")
+
+    _patch_connector_service(monkeypatch, trust=_boom, execute=_boom)
+
+    spec = {"sources": {"s": {"type": "connector", "action": "list", "bind": "state.s"}}}
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url="",
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name=None,  # backend is connector but names no connector
+    )
+    assert result["ran"] == []
+    assert result["errors"][0]["code"] == "bad_source"
+
+
+async def test_connector_backend_skips_base_url_ssrf_validation(monkeypatch):
+    """A connector backend has an empty base_url — run_sources must NOT run the
+    SSRF base-URL validation (which would reject "") for a connector backend."""
+
+    async def _trust(name, action):
+        return _FakeTrust(is_read=True, trust_level="auto")
+
+    async def _execute(workspace_id, name, body, *, user_id=None):
+        return _FakeExecResp(success=True, data={"ok": True})
+
+    _patch_connector_service(monkeypatch, trust=_trust, execute=_execute)
+
+    spec = {"sources": {"s": {"type": "connector", "action": "ping", "bind": "state.s"}}}
+    # base_url="" would raise ValueError under validate_external_url_strict on
+    # the http path; the connector path must skip that validation entirely.
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url="",
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name="snctm-admin",
+    )
+    assert result["errors"] == []
+    assert result["ran"][0]["value"] == {"ok": True}
+
+
+async def test_http_backend_unchanged_with_no_transform(monkeypatch):
+    """Regression: the http path with no transform behaves byte-for-byte as
+    before — the connector-backend / transform additions are transparent."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"id": 1, "title": "PR one"}])
+
+    _mock_client_patch(monkeypatch, handler)
+
+    spec = {"sources": {"prs": {"method": "GET", "path": "/pulls", "bind": "state.prs"}}}
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="runner-1",
+        ripple_spec=spec,
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-test",
+        # backend_type defaults to "http" — explicitly here for clarity.
+        backend_type="http",
+    )
+    assert result["errors"] == []
+    assert result["ran"][0]["value"] == [{"id": 1, "title": "PR one"}]
+
+
+async def test_http_backend_applies_transform(monkeypatch):
+    """An http source can ALSO carry a transform — it shapes the parsed JSON
+    before binding, exactly like the connector path."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": {"rows": [{"name": "Ada", "state": "open"}]}},
+        )
+
+    _mock_client_patch(monkeypatch, handler)
+
+    spec = {
+        "sources": {
+            "items": {
+                "method": "GET",
+                "path": "/list",
+                "bind": "state.items",
+                "transform": {
+                    "select": "data.rows",
+                    "map": [
+                        {"to": "label", "from": "name"},
+                        {
+                            "to": "variant",
+                            "from": "state",
+                            "values": {"open": "success"},
+                            "default": "muted",
+                        },
+                    ],
+                },
+            }
+        }
+    }
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+    )
+    assert result["errors"] == []
+    assert result["ran"][0]["value"] == [{"label": "Ada", "variant": "success"}]
+
+
+async def test_bad_transform_is_per_source_error(monkeypatch):
+    """A transform outside the v1 grammar fails THAT source cleanly with a
+    `bad_transform` code — it does not crash the run or a sibling."""
+    _mock_client_patch(monkeypatch, lambda r: httpx.Response(200, json={"x": 1}))
+
+    spec = {
+        "sources": {
+            "broken": {
+                "method": "GET",
+                "path": "/x",
+                "bind": "state.broken",
+                "transform": {"map": [{"to": "a"}]},  # field needs from/const
+            },
+            "fine": {"method": "GET", "path": "/y", "bind": "state.fine"},
+        }
+    }
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+    )
+    err_by_source = {e["source"]: e for e in result["errors"]}
+    ran_sources = {r["source"] for r in result["ran"]}
+    assert "broken" in err_by_source
+    assert err_by_source["broken"]["code"] == "bad_transform"
+    assert ran_sources == {"fine"}

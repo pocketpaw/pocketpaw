@@ -10,6 +10,17 @@ contract enforces it.
 Each Protocol documents the entry-point group that carries its implementations.
 An entry-point points at a zero-arg callable (usually the class itself) that
 the registry instantiates once and caches.
+
+Updated: 2026-06-12 (connector-store-unification CS-3) — added
+``ConnectorStateStoreProvider`` (group ``pocketpaw.connector_state_stores``)
+so EE can back the ConnectorRegistry's durable state with the cloud DB
+instead of the file store.
+
+Updated: 2026-06-26 (ISO-1 — workspace-keyed store factory) — activated the
+previously-dormant ``StoreProvider`` seam: ``pocketpaw.stores.get_fabric_store``
+now consults it, and ``get_store`` gained a ``workspace_id`` keyword so a future
+EE provider can return a per-workspace / cloud-backed Fabric store. The EE
+registration is a later task; core only consults the seam here.
 """
 
 from __future__ import annotations
@@ -77,11 +88,24 @@ class AuthProvider(Protocol):
 class StoreProvider(Protocol):
     """Entry-point group: ``pocketpaw.stores``
 
-    Overrides the default singleton store factories (instinct, fabric, …).
-    Core ships local SQLite-backed defaults; EE swaps in cloud-backed ones.
+    Overrides the default store factories (instinct, fabric, …). Core ships
+    local SQLite-backed defaults; EE swaps in cloud-backed ones.
+
+    Activated by ISO-1 (2026-06-26): ``pocketpaw.stores.get_fabric_store``
+    consults this seam before building its own store, so EE can later register a
+    workspace-keyed / cloud-backed Fabric store without core importing EE. The
+    EE registration itself is a LATER task — core merely consults the seam now.
+
+    ``get_store`` takes the logical store *name* (``"fabric"``, ``"instinct"``,
+    …) and the resolved ``workspace_id`` (``None`` for the single-tenant /
+    unscoped path). A provider returns the store it wants core to use, or
+    ``None`` to decline that name (core then builds its local default).
+    Implementations should accept ``workspace_id`` as a keyword so the core
+    factory can pass it; the factory tolerates a legacy no-``workspace_id``
+    signature for back-compat.
     """
 
-    def get_store(self, name: str) -> Any: ...
+    def get_store(self, name: str, *, workspace_id: str | None = None) -> Any: ...
 
 
 @runtime_checkable
@@ -178,6 +202,17 @@ class AgentExtension(Protocol):
         context is active (the common OSS / out-of-stream case)."""
         ...
 
+    def agent_cwd(self) -> str | None:
+        """Per-run working directory for the agent, or ``None`` to use
+        ``settings.file_jail_path``. The cloud product returns a
+        per-workspace/session jail so a tenant's file operations never
+        co-mingle in the shared home dir, and RAISES when a cloud run has
+        no resolvable workspace (fail-closed — never silently land in
+        ``~``). An OSS install registers no provider, so the core keeps
+        its ``file_jail_path`` default. Optional: a provider predating
+        this method simply isn't consulted (the core uses ``getattr``)."""
+        ...
+
 
 @runtime_checkable
 class PocketWriter(Protocol):
@@ -199,6 +234,27 @@ class PocketWriter(Protocol):
         """Create the pocket + linked session. Returns the new pocket id,
         or ``None`` on failure."""
         ...
+
+
+@runtime_checkable
+class ConnectorStateStoreProvider(Protocol):
+    """Entry-point group: ``pocketpaw.connector_state_stores``
+
+    Supplies the durable ``ConnectorStateStore`` that backs
+    ``ConnectorRegistry`` when no explicit store is passed. Core ships the
+    file-backed default (``~/.pocketpaw/connectors/state/``); the cloud
+    product swaps in a store backed by the ``WorkspaceConnector`` document
+    so connector config rehydrates from the tenant database after a
+    process restart.
+
+    The returned store satisfies
+    ``pocketpaw.connectors.state_store.ConnectorStateStore``. Its
+    ``get``/``set``/``delete`` methods may be async (return awaitables) —
+    the registry awaits awaitable results; ``list`` must stay sync (it is
+    called from the registry's sync ``status()``).
+    """
+
+    def get_state_store(self) -> Any: ...
 
 
 @runtime_checkable

@@ -1,5 +1,226 @@
 # ee/instinct/router.py — FastAPI router for the Instinct decision pipeline API.
 # Created: 2026-03-28 — Propose, approve/reject, list pending, query audit.
+# Updated: 2026-07-10 (FST-6 — _fabric_conflict proposal type) — wired the
+#   conflict-stewardship gate kind into the FOUR-path dispatch.
+#   ``_fabric_conflict_blob`` + ``_assert_fabric_conflict_workspace`` are the
+#   peers of the existing blob accessors + tenancy guards. The blob
+#   (``Action.parameters._fabric_conflict``) carries the un-rankable Fabric
+#   conflict's subject (top-level ``workspace_id`` / ``object_id`` /
+#   ``property`` — immutable), the read-only ``choices`` (competing values +
+#   provenance), and the ONE editable sub-dict
+#   ``resolution.chosen_statement_id`` (defaults to the policy winner; the
+#   approve-with-edits path may re-point it at a staged rival). On APPROVE the
+#   router emits ``human.corrected`` then fires
+#   ``fabric_conflicts.executor.execute_approved_fabric_conflict`` (which
+#   validates the choice against the staged set and PINs it via the OSS
+#   steward verb ``FabricStore.pin_statement`` on the workspace-scoped store,
+#   and OWNS the chain close). On REJECT the router emits ``human.corrected``
+#   + ``decision.completed(rejected)`` itself (the executor never runs — NO
+#   statement changes; the policy's provisional winner stands). The
+#   ``_assert_fabric_conflict_workspace`` 403 runs in ALL FOUR locations
+#   (approve / bulk-approve / reject / bulk-reject) BEFORE any mutation. Same
+#   exactly-one-terminal discipline as the instinct-rule gate (the precedent
+#   this kind mirrors); the other 9 kinds are unchanged.
+# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-2 — _admin_action proposal
+#   type) — added the 8th gated proposal kind: a gated workspace-admin write.
+#   ``_admin_action_blob`` + ``_assert_admin_action_workspace`` are the peers of
+#   the existing blob accessors + tenancy guards. The blob
+#   (``Action.parameters._admin_action``) carries {action=RBAC key, args,
+#   proposer_user_id, params_hash, idempotency_key, workspace_id}. On APPROVE the
+#   router emits ``human.corrected`` then fires
+#   ``admin_proposals.executor.execute_approved_admin_action`` — which whitelists
+#   the RBAC action, RE-CHECKS the PROPOSER's CURRENT workspace role (a demoted /
+#   removed proposer fails closed — the write never fires), then calls the seeded
+#   workspace-admin service (member.role_change → workspace.service.
+#   update_member_role) and OWNS the chain close. On REJECT the router emits
+#   ``human.corrected`` + ``decision.completed(rejected)`` itself (the executor
+#   never runs on reject — no admin write happens). The
+#   ``_assert_admin_action_workspace`` 403 runs in ALL FOUR locations (approve /
+#   bulk-approve / reject / bulk-reject) BEFORE any mutation — asymmetric tenant
+#   scope is no tenant scope (pocketpaw#1183 / #1250). Same exactly-one-terminal
+#   discipline as the external-action gate; the other 7 kinds are unchanged.
+# Updated: 2026-06-26 (ISO-2 — physical per-workspace isolation) — the store is
+#   no longer one shared ``~/.pocketpaw/instinct.db``. ``_store`` now takes the
+#   caller's ``workspace_id`` and routes through
+#   ``pocketpaw.stores.get_instinct_store(workspace_id=...)``, so every action +
+#   audit read/write hits that tenant's OWN
+#   ``~/.pocketpaw/workspaces/<id>/instinct.db`` — and therefore that tenant's
+#   own audit hash-chain. The audit ``verify`` and ``corrections`` endpoints,
+#   which previously took no workspace, now resolve ``current_workspace_id`` so
+#   ``verify_audit_chain`` checks the CALLER'S per-tenant chain (not a global
+#   chain spanning tenants — the correct multi-tenant model). The internal
+#   helpers ``_forward_to_soul`` and ``_fetch_current_fabric`` take
+#   ``workspace_id`` from their endpoint callers (the latter also threads it into
+#   the per-workspace Fabric store so it doesn't fail closed on a cloud path).
+#   The per-endpoint W4a ``workspace_id`` filter args are UNCHANGED — physical
+#   file isolation is additive defense-in-depth on top of the in-row filter.
+# Updated: 2026-06-21 (F4 — edit-in-review PATCH proposal endpoint) — added
+#   ``PATCH /instinct/actions/{action_id}/proposal`` (``edit_proposal``). It lets a
+#   reviewer MUTATE the editable sub-fields of a PENDING discovery proposal (rename an
+#   inferred type, drop a spurious link, fix an inferred key, tighten a discovered rule's
+#   CEL) BEFORE approving — turning the gate from approve/reject-only into review-EDIT-
+#   approve. The edit NEVER flips status (Approve stays a separate click), so the chain
+#   lands ``agent.proposed → human.corrected(edited)`` with NO ``decision.completed`` (it
+#   stays OPEN for the eventual approve). Handler order: load + 404; 409 if not PENDING;
+#   tenancy gate FIRST (``_assert_*_workspace`` on the CURRENT blob); resolve the editable
+#   sub-field by blob kind (422 on kind mismatch); IMMUTABILITY PIN — copy the stored blob,
+#   overwrite ONLY the editable sub-key, force every immutable field back from the stored
+#   blob. The SECURITY CRUX: tenancy is DUPLICATED on an ``_instinct_rule`` blob — the
+#   top-level ``workspace_id`` AND the SECOND copy at ``rule_spec.scope.workspace_id``
+#   (the executor scopes the rule by the second one) — so BOTH are pinned and a client
+#   mismatch on EITHER is a 403. Re-validate per kind (``RuleDraft`` /
+#   ``CreatePocketRequest`` / fabric shape — 422, never persist broken), persist via the
+#   new status-preserving ``store.update_parameters``, then ``record_correction`` +
+#   ``_emit_human_corrected(disposition="edited")``. Returns ``{action, correction}``.
+# Updated: 2026-06-20 (S2-R4 — _instinct_rule proposal type) — wired the
+#   governed-rule-create gate kind into the FOUR-path dispatch. ``_instinct_rule_blob``
+#   + ``_assert_instinct_rule_workspace`` are the peers of the existing blob accessors
+#   + tenancy guards. The blob (``Action.parameters._instinct_rule``) carries the
+#   editable ``rule_spec`` plus, as SEPARATE top-level fields, the originating
+#   ``workspace_id`` and the owner ``user_id`` (kept OUT of the editable spec so the
+#   correction flow can't move tenancy/owner). On APPROVE the router emits
+#   ``human.corrected`` then fires
+#   ``instinct_rule_proposals.executor.execute_approved_instinct_rule`` (which persists
+#   the rule via the workspace-scoped ``rules.service.create_rule`` after a
+#   ``RuleDraft.model_validate`` at entry, and OWNS the chain close). On REJECT the
+#   router emits ``human.corrected`` + ``decision.completed(rejected)`` itself (the
+#   executor never runs on reject — no rule is created). The
+#   ``_assert_instinct_rule_workspace`` 403 runs in ALL FOUR locations (approve /
+#   bulk-approve / reject / bulk-reject) BEFORE any mutation — asymmetric tenant scope
+#   is no tenant scope (pocketpaw#1183 / #1250). Same exactly-one-terminal discipline
+#   as the Pocket-create gate.
+# Updated: 2026-06-19 (SZD-5b — _pocket_create proposal type) — added a gated
+#   starter-Pocket-create proposal kind (TENANCY GATE). ``_pocket_create_blob`` +
+#   ``_assert_pocket_create_workspace`` are the peers of the existing blob
+#   accessors + tenancy guards. The blob (``Action.parameters._pocket_create``)
+#   carries the staged ``pocket_spec`` plus, as SEPARATE top-level fields, the
+#   originating ``workspace_id`` and the owner ``user_id`` (kept OUT of the
+#   editable spec so the correction flow can't move tenancy/owner). On APPROVE the
+#   router emits ``human.corrected`` then fires
+#   ``pocket_proposals.executor.execute_approved_pocket_create`` (which creates the
+#   Pocket via the workspace-scoped ``pockets.service.create`` after a
+#   ``CreatePocketRequest.model_validate`` at entry, and OWNS the chain close). On
+#   REJECT the router emits ``human.corrected`` + ``decision.completed(rejected)``
+#   itself (the executor never runs on reject — no Pocket is created). The
+#   ``_assert_pocket_create_workspace`` 403 runs in ALL FOUR locations (approve /
+#   bulk-approve / reject / bulk-reject) BEFORE any mutation — asymmetric tenant
+#   scope is no tenant scope (pocketpaw#1183 / #1250). Same exactly-one-terminal
+#   discipline as the Fabric-objects gate.
+# Updated: 2026-06-19 (SZD-5a — _fabric_objects proposal type) — added a gated
+#   Fabric-ontology proposal kind. ``_fabric_objects_blob`` +
+#   ``_assert_fabric_objects_workspace`` are the peers of the existing blob
+#   accessors + tenancy guards. The blob (``Action.parameters._fabric_objects``)
+#   carries {object_types[], objects[], links[], workspace_id}. On APPROVE the
+#   router emits ``human.corrected`` then fires
+#   ``fabric_proposals.executor.execute_approved_fabric_objects`` (which
+#   materialises the ontology via the workspace-scoped, idempotent
+#   ``connectors.fabric_ingest.ingest_records`` upsert loop and OWNS the chain
+#   close). On REJECT the router emits ``human.corrected`` +
+#   ``decision.completed(rejected)`` itself (the executor never runs on reject —
+#   no Fabric write happens). The ``_assert_fabric_objects_workspace`` 403 runs
+#   in ALL FOUR locations (approve / bulk-approve / reject / bulk-reject) BEFORE
+#   any mutation — asymmetric tenant scope is no tenant scope (pocketpaw#1183 /
+#   #1250). Same exactly-one-terminal discipline as the external-action gate.
+# Updated: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) — added the
+#   FIFTH gated proposal kind: the Branch-primitive artifact-change MERGE GATE.
+#   ``_artifact_change_blob`` + ``_assert_artifact_change_workspace`` are the
+#   peers of the four existing blob accessors + tenancy guards. The blob
+#   (``Action.parameters._artifact_change``) carries {scope_type, scope_id,
+#   branch, from_version_id, to_version_id, workspace, user_id}. On APPROVE the
+#   router emits ``human.corrected`` then fires
+#   ``versions.instinct_executor.execute_approved_change`` (MERGE = publish the
+#   candidate version via versions.publish + mark it merged + deploy via BP-2's
+#   sites.publish_pocket for pocket/site scope; the executor owns the
+#   executed/failed terminal). On REJECT the router emits ``human.corrected`` +
+#   ``decision.completed(rejected)`` itself then fires
+#   ``versions.instinct_executor.discard_rejected_change`` (DISCARD = flip the
+#   candidate to reverted; the PUBLISHED pointer is left untouched). The
+#   ``_assert_artifact_change_workspace`` 403 runs in ALL FOUR locations
+#   (approve / bulk-approve / reject / bulk-reject) BEFORE any mutation —
+#   asymmetric tenant scope is no tenant scope (pocketpaw#1183 / #1250). Part A
+#   of BP-3 also added an additive ``scope_type`` to ``ProposeRequest`` /
+#   ``propose_action`` so an Action can be scoped to a generic artifact.
+#   TODO(BP-4): revert/discard semantics deepen in the executor + a history view.
+# Updated: 2026-06-16 (feat/instinct-smart-triage) — ``propose_action`` now runs
+#   a smart-approval auto-triage hook (``_run_auto_triage``) synchronously after
+#   ``store.propose`` succeeds and BEFORE the response returns. The hook calls
+#   the cheap-model classifier in ``ee.instinct.auto_triage``; on an APPROVE
+#   verdict it auto-approves the Action via ``store.auto_approve`` (writing the
+#   hash-chained ``action_auto_approved`` ledger row with the triager's verdict +
+#   reasoning, ``actor="system:triager"``) and emits the same Decision-Graph
+#   chain events a human approval emits, then returns the auto-approved Action so
+#   the human is not notified. Otherwise the original proposal is returned
+#   unchanged and the route falls through to the existing human path
+#   byte-for-byte. The feature is OFF BY DEFAULT: the approval level defaults to
+#   ``ASK`` (triager not invoked) until a workspace opts in to TRIAGE / TRUSTED.
+#   The hook is fail-safe (any triager error / low confidence → ESCALATE; v1 has
+#   no auto-reject, so a bad action is escalated, never silently killed) and
+#   best-effort — a wiring failure can never break the propose response, and an
+#   audit-ledger failure (``AuditChainError``) is logged LOUD at ERROR and leaves
+#   the proposal PENDING. The classifier reuses the mandate-foreman
+#   ``ClaudeCliLlm`` shell-out pattern (``claude -p --output-format json``) —
+#   agent mode has NO ANTHROPIC_API_KEY, so ``AsyncAnthropic`` is deliberately
+#   NOT used. KNOWN LIMITATION (v1): the ``rule_flagged`` safety signal is read
+#   from a caller-supplied ``Action.parameters._triage`` hint (an internal-caller
+#   trust input), not re-resolved from the pocket's standing rules here — see the
+#   ``_run_auto_triage`` docstring for the rationale + the v2 TODO.
+# Updated: 2026-06-11 (feat/external-action-proposal) — added the THIRD gated
+#   proposal kind: a gated external-action connector call. ``_external_action_blob``
+#   + ``_assert_external_action_workspace`` are the peers of the ``_code_change``
+#   / ``_pocket_write`` blob accessor + tenancy guard. The four dispatch handlers
+#   (approve_action / bulk_approve_actions / reject_action / bulk_reject_actions)
+#   now also branch on an ``_external_action`` blob: on APPROVE the router emits
+#   ``human.corrected`` then fires ``external_actions.executor.
+#   execute_approved_external_action`` (which OWNS the chain close); on REJECT the
+#   router emits ``human.corrected`` + ``decision.completed(rejected)`` itself
+#   (the executor never runs on reject). The up-front tenancy assertion runs in
+#   all four locations. Same exactly-one-terminal discipline as the pocket-write
+#   bridge + belt executor — no double chain close. The blob's
+#   ``proposed_event_id`` (the chain-opening ``agent.proposed`` id) is the
+#   causation source, resolved via the generic ``_code_change_proposed_event_id``
+#   helper (it reads ``blob["proposed_event_id"]``, shared across the two kinds).
+#   Rebased over the paw-bar ``_customer_reply`` delivery hooks (gap2) — the
+#   external-action branches sit BEFORE the customer-reply hooks in approve /
+#   reject (all blob kinds are mutually exclusive; customer-reply keeps its
+#   last-before-return placement and its no-bulk / no-assert design unchanged).
+# Updated: 2026-06-11 (merge origin/dev into integration/sovereignty-waves —
+#   Belt code-change union) — reconciled the sovereignty extraction with dev's
+#   Belt feature. The chain-emit helpers (``_emit_human_corrected`` /
+#   ``_emit_decision_completed_rejected`` / ``_emit_policy_evaluated_approved``)
+#   plus ``_chain_actor_human`` / ``_parked_*`` / ``_pocket_write_blob`` /
+#   ``_code_change_proposed_event_id`` now live ONLY in
+#   ``ee.instinct.chain_emitters`` (single source of truth) and are imported
+#   here; their dev-side Belt logic (the ``causation_override`` param +
+#   ``_code_change_proposed_event_id``) was folded into that module. The
+#   ``_code_change_blob`` / ``_assert_code_change_workspace`` Belt blob helpers
+#   stay router-local (peers of ``_pocket_write_blob`` /
+#   ``_assert_pocket_write_workspace``).
+# Updated: 2026-06-10 (W4a — workspace-scope instinct reads) — closes a
+#   cross-tenant decision leak on shared deployments. The instinct store is
+#   GLOBAL (one shared DB) and list/pending/audit reads previously passed no
+#   workspace, so a workspace-A operator could read workspace-B's pending
+#   actions and audit trail. Now ``propose_action`` stamps the caller's active
+#   ``current_workspace_id`` on the new action (and its audit rows), and every
+#   per-tenant READ — ``pending_actions`` / ``list_actions`` / ``query_audit`` /
+#   ``export_audit`` / ``get_audit_entry`` — threads ``current_workspace_id``
+#   into the store so results are restricted to that tenant (plus legacy
+#   NULL-workspace rows). ``workspace_id`` crosses to the OSS store as a PLAIN
+#   str. ``/instinct/audit/verify`` stays GLOBAL on purpose — chain integrity is
+#   a property of the whole W2b ledger, and tenancy here is a read filter that
+#   never touches the hash chain. The pre-existing approve/reject/bulk
+#   ``_assert_pocket_write_workspace`` guard (PR #1183 / RFC 09 Slice 3) already
+#   bound the WRITE/escalation paths to the workspace; W4a closes the READ side.
+# Updated: 2026-06-10 (sov/w2-instinct — tamper-evident audit) — W2b: added
+#   GET /instinct/audit/verify, which walks the audit hash chain (built in
+#   pocketpaw.instinct.store) and reports intact / first-broken row so a
+#   customer or insurer can prove the ledger was not altered. Declared BEFORE
+#   /instinct/audit/{audit_id} to avoid the literal-vs-parameter route
+#   collision. GET /instinct/audit/export now also runs verification and
+#   stamps an ``X-Audit-Chain-Intact: true|false`` response header. The
+#   audit-ledger append in the store is now LOUD (raises AuditChainError on
+#   failure); the Decision-Graph chain emits in this router stay best-effort
+#   and are a separate concern (the journal, not this ledger, is their source
+#   of truth).
 # Updated: 2026-03-30 — Added GET /instinct/actions (list all with status filter),
 #   GET /instinct/audit/export (JSON export), switched to singleton from ee.api.
 # Updated: 2026-04-12 (Move 1 PR-A) — /approve now accepts optional edited fields.
@@ -88,6 +309,42 @@
 #     the per-item chain emits. No semantic change to the bulk-reject
 #     response shape (``BulkActionResponse`` with shared ``bulk_id``).
 #
+# Updated: 2026-06-10 (feat/belt-gate, BS-3 — Belt code-change dispatch) —
+#   ``approve_action`` / ``bulk_approve_actions`` now ALSO dispatch a Belt
+#   develop-station code change. When the approved Action carries a
+#   ``_code_change`` blob (the ``pocketpaw_belt`` MCP server stores it under
+#   ``Action.parameters._code_change``), the route lazy-imports
+#   ``ee.cloud.belt.executor`` and calls ``execute_approved_change`` — same
+#   best-effort / lazy-import / never-break-the-response shape as the
+#   pocket-write hook, keyed on a distinct parameters key so the two paths never
+#   cross. ``_assert_code_change_workspace`` (the code-change peer of
+#   ``_assert_pocket_write_workspace``) binds the Action to the approver's
+#   workspace on approve / reject / bulk paths. The executor applies the diff in
+#   a fresh worktree, commits, pushes, and opens a PR — it NEVER merges (the
+#   captain merges on GitHub; Instinct is the mid gate).
+#
+# Updated: 2026-06-10 (feat/belt-trace, BS-4 — Belt Decision-Graph chain) —
+#   the Belt code-change path now lands in the Decision Graph as ONE chain per
+#   station run, mirroring the pocket-write chain. The propose path (belt.py)
+#   mints the ``correlation_id`` + emits ``agent.proposed``; this router emits
+#   the human-action + terminal events:
+#     * approve / bulk-approve — emit ``human.corrected(accepted|edited)`` for
+#       the ``_code_change`` blob, threading the ``agent.proposed`` event id
+#       (from the blob's ``proposed_event_id``) as causation, then pass the
+#       emitted ``human.corrected`` id into ``execute_approved_change(...,
+#       human_event_id=...)`` so the executor's terminal ``decision.completed``
+#       chains back to it. The executor owns the CLOSE on the approve path
+#       (success → landed, failure → failed) — the router does NOT emit a
+#       terminal here, so there is no double close.
+#     * reject / bulk-reject — emit ``human.corrected(rejected)`` THEN
+#       ``decision.completed(passed=False, action_outcome="rejected")`` here
+#       (the executor never runs on reject, so the router owns the close), each
+#       chaining causation to the prior event. The reason text rides as the
+#       rejection comment on the terminal payload.
+#   ``_code_change_proposed_event_id`` is the code-change peer of
+#   ``_parked_policy_event_id``. All emits are best-effort (the chain folds via
+#   ``correlation_id`` even if a causation_id is missing).
+#
 # Updated: 2026-05-26 (RFC 09 Slice 4 — approve-side policy.evaluated emit) —
 #   * Captain Decision 12 (chain symmetry) follow-up — ``approve_action``
 #     and ``bulk_approve_actions`` now emit a second
@@ -132,32 +389,651 @@ from pocketpaw.instinct.models import (
     ActionTrigger,
     AuditEntry,
 )
+from pocketpaw.instinct.store import AuditChainError
 from pocketpaw.instinct.trace import FabricObjectSnapshot, ReasoningTrace
 from pocketpaw_ee.cloud._core.deps import (
     current_user,
     current_workspace_id,
     require_plan_feature,
 )
-from pocketpaw_ee.cloud._core.errors import Forbidden
+from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, ValidationError
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import require_action_any_workspace
+
+# Shared Decision-Graph chain-emit helpers — extracted here so the Mission
+# Control service can import the same primitives without coupling to this
+# router (sov/r2a FIX 3). Re-imported under their original names so the
+# router's call sites and the existing test monkeypatches that target
+# ``ee.instinct.router._emit_*`` keep working unchanged.
+from pocketpaw_ee.instinct.chain_emitters import (
+    _code_change_proposed_event_id,
+    _emit_decision_completed_rejected,
+    _emit_human_corrected,
+    _emit_policy_evaluated_approved,
+    _pocket_write_blob,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _pocket_write_blob(action: Any) -> dict[str, Any] | None:
-    """Return the ``_pocket_write`` blob on an Action, or ``None``.
+async def _run_auto_triage(action: Any, workspace_id: str) -> Any:
+    """Smart-approval auto-triage hook (feat/instinct-smart-triage).
 
-    The blob is the parked-write payload ``instinct_bridge`` stores under
-    ``Action.parameters._pocket_write`` (method/path/params/idempotency/
-    outcome + the originating ``workspace_id``). Anything that is not a
-    dict-of-dict shape is treated as "no parked write".
+    Sits between ``store.propose`` succeeding and the propose response. Runs the
+    cheap-model triager over the freshly proposed Action; on an APPROVE verdict
+    the Action is auto-approved AND audited (``store.auto_approve`` →
+    ``action_auto_approved`` ledger row), and the auto-approved Action is
+    returned so the route skips the human-notification path. On ESCALATE / DENY
+    (the common, safe case) the ORIGINAL Action is returned unchanged so the
+    route falls through to today's human path byte-for-byte.
+
+    SAFETY:
+      * ``ASK`` level → the triager is never invoked; today's behaviour exactly.
+        ASK is the DEFAULT (off-by-default per the PRD): with no workspace /
+        pocket / env opt-in ``resolve_approval_level`` returns ASK, so this hook
+        returns the original proposal untouched until a workspace turns it on.
+      * A ``_triage`` hint carrying ``rule_flagged=true`` (a template
+        ESCALATE_APPROVAL / BLOCK match) is NEVER auto-approved.
+      * Any triager failure fails SAFE to ESCALATE (handled inside the module).
+      * The whole hook is wrapped best-effort: a triager wiring failure must
+        NEVER break the propose response — it falls back to the human path with
+        the original Action.
+
+    The hint object the caller may attach under ``Action.parameters._triage``:
+      ``{"rule_flagged": bool, "instinct_rules": [...], "approval_level":
+      "ASK"|"TRIAGE"|"TRUSTED" (per-pocket override), "reasoning_trace": {...},
+      "fabric_snapshots": [...]}``. All optional.
+
+    KNOWN LIMITATION (v1) — the ``rule_flagged`` safety signal is HINT-DEPENDENT:
+    it is read from the caller-supplied ``_triage`` hint, not resolved here from
+    the pocket's standing rules. The generic ``propose_action`` endpoint receives
+    a free-form Action (title / description / recommendation / parameters) and
+    does NOT carry the template ``action_name`` + per-row ``row_context`` that
+    ``bundled_templates.resolve_instinct`` needs, so the router cannot cheaply
+    re-derive the verdict at this seam. The correct owner of the flag is the
+    PROPOSING path that already holds the template + verdict (e.g.
+    ``ee.cloud.pockets.instinct_dispatch.gate_action``), which should stamp
+    ``rule_flagged`` (and the matched ``instinct_rules``) onto the hint. This is
+    sound as long as that path is the only one that turns the level above ASK —
+    and ASK-by-default means an un-stamped proposal is never auto-approved
+    anyway. The hint is therefore a trust input from an INTERNAL caller, not from
+    the wire.
+    TODO(instinct-triage v2): resolve ``rule_flagged`` + ``instinct_rules``
+    directly from the store via ``action.pocket_id`` (load the pocket's template,
+    map the Action back to its template ``action_name`` + ``row_context``, call
+    ``resolve_instinct``) so the gate no longer trusts the caller. Tracked as the
+    follow-up to this slice.
+    """
+    try:
+        from pocketpaw_ee.instinct.auto_triage import (
+            TriageContext,
+            maybe_auto_approve,
+            resolve_approval_level,
+        )
+
+        params = getattr(action, "parameters", None)
+        params = params if isinstance(params, dict) else {}
+        hint = params.get("_triage")
+        hint = hint if isinstance(hint, dict) else {}
+
+        level = resolve_approval_level(pocket_level=hint.get("approval_level"))
+
+        # Resolve the parked-operation blob (one of the gated kinds), if any —
+        # it gives the triager the concrete method/path/params to judge and the
+        # Decision-Graph correlation id to close the chain on auto-approve.
+        parked_blob = (
+            _pocket_write_blob(action)
+            or _code_change_blob(action)
+            or _external_action_blob(action)
+            or {}
+        )
+
+        # The reasoning trace + fabric snapshots were attached at propose time
+        # and persisted into the audit row; surface what the caller passed on
+        # the params hint so the triager sees the same decision inputs.
+        reasoning_trace = hint.get("reasoning_trace")
+        fabric_snapshots = hint.get("fabric_snapshots")
+
+        context = TriageContext(
+            workspace_id=str(workspace_id or ""),
+            pocket_id=str(getattr(action, "pocket_id", "") or ""),
+            action_id=str(getattr(action, "id", "") or ""),
+            title=str(getattr(action, "title", "") or ""),
+            description=str(getattr(action, "description", "") or ""),
+            recommendation=str(getattr(action, "recommendation", "") or ""),
+            rule_flagged=bool(hint.get("rule_flagged", False)),
+            parked_blob=parked_blob if isinstance(parked_blob, dict) else {},
+            reasoning_trace=reasoning_trace if isinstance(reasoning_trace, dict) else {},
+            fabric_snapshots=fabric_snapshots if isinstance(fabric_snapshots, list) else [],
+            instinct_rules=(
+                hint.get("instinct_rules") if isinstance(hint.get("instinct_rules"), list) else []
+            ),
+        )
+
+        outcome = await maybe_auto_approve(
+            store=_store(workspace_id),
+            action=action,
+            context=context,
+            level=level,
+        )
+        if outcome.auto_approved:
+            logger.info(
+                "instinct auto-triage AUTO-APPROVED action=%s (workspace=%s, level=%s)",
+                context.action_id,
+                workspace_id,
+                level.value,
+            )
+        return outcome.action
+    except AuditChainError:
+        # The tamper-evident ledger append failed (``maybe_auto_approve`` already
+        # catches this in the common path, but a chain failure in a chain-emit
+        # import or a future store seam could still surface here). This is a
+        # ledger-integrity event, NOT a routine triager wiring failure — log
+        # LOUD at ERROR with a distinct message. Still fail-safe: return the
+        # original PENDING proposal so the human reviews it.
+        logger.error(
+            "instinct auto-triage hit an audit-ledger failure for action=%s — "
+            "ledger-integrity event (distinct from an LLM failure); leaving the "
+            "proposal PENDING for the human",
+            getattr(action, "id", "?"),
+            exc_info=True,
+        )
+        return action
+    except Exception:  # noqa: BLE001 — the hook must NEVER break propose
+        logger.warning(
+            "instinct auto-triage hook failed for action=%s — falling back to "
+            "the human path with the original proposal",
+            getattr(action, "id", "?"),
+            exc_info=True,
+        )
+        return action
+
+
+def _code_change_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_code_change`` blob on an Action, or ``None``.
+
+    The blob is the Belt develop-station payload the ``pocketpaw_belt`` MCP
+    server stores under ``Action.parameters._code_change`` (repo / base_branch /
+    diff / summary / task + the originating ``workspace_id``). This is the
+    code-change peer of ``_pocket_write_blob`` — the approve path dispatches the
+    apply-on-approve executor on its presence, exactly as it dispatches the
+    pocket-write bridge on ``_pocket_write``. Anything that is not a dict is
+    treated as "no code change".
     """
     params = getattr(action, "parameters", None)
     if not isinstance(params, dict):
         return None
-    blob = params.get("_pocket_write")
+    blob = params.get("_code_change")
     return blob if isinstance(blob, dict) else None
+
+
+def _external_action_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_external_action`` blob on an Action, or ``None``.
+
+    The blob is the gated external-action payload
+    ``ee.cloud.external_actions.propose`` stores under
+    ``Action.parameters._external_action`` (connector_name / scope / action /
+    params / params_hash / idempotency_key + the originating ``workspace_id``).
+    This is the third gated proposal kind — the approve path dispatches the
+    apply-on-approve executor on its presence, exactly as it dispatches the
+    pocket-write bridge on ``_pocket_write`` and the belt executor on
+    ``_code_change``. Anything that is not a dict is treated as "no external
+    action".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_external_action")
+    return blob if isinstance(blob, dict) else None
+
+
+def _artifact_change_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_artifact_change`` blob on an Action, or ``None``.
+
+    The blob is the Branch-primitive merge-gate payload a producer stores under
+    ``Action.parameters._artifact_change``:
+    ``{scope_type, scope_id, branch, from_version_id, to_version_id, workspace,
+    user_id}``. This is the FIFTH gated proposal kind (BP-3) — the peer of
+    ``_pocket_write`` / ``_code_change`` / ``_external_action`` / ``_belt_plan``.
+    On APPROVE the router dispatches the merge executor (publish the target
+    version + deploy); on REJECT it dispatches the discard. Anything not a dict
+    is treated as "no artifact change".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_artifact_change")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_artifact_change_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting an artifact change from another workspace.
+
+    SECURITY (BP-3) — the merge gate is the human REVIEW/MERGE gate over a
+    version candidate; approving it MOVES THE PUBLISHED POINTER and triggers a
+    DEPLOY. ``require_action_any_workspace("instinct.approve")`` only proves the
+    caller holds the role SOMEWHERE; this binds the artifact-change Action to the
+    caller's active workspace. The artifact's tenancy lives on the blob's
+    ``workspace`` (with ``workspace_id`` accepted as an alias). A blob whose
+    workspace differs from the caller's active workspace → 403, BEFORE any state
+    mutation, on BOTH the approve and the reject side (asymmetric tenant scope is
+    no tenant scope — pocketpaw#1183 / #1250). A non-artifact-change Action (no
+    blob) is unaffected.
+
+    FAIL-CLOSED on an empty claim — a blob whose workspace resolves to "" (the
+    key absent or null) is a HARD 403 (``instinct.missing_workspace_in_blob``),
+    not a pass-through. An artifact change's tenancy is mandatory; without it the
+    gate cannot verify the caller owns the artifact, so allowing it would let an
+    attacker propose a workspace-less blob targeting a victim's pocket and have
+    any operator approve (publish + DEPLOY) it. There is no legitimate
+    empty-workspace case here.
+    """
+    blob = _artifact_change_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace") or blob.get("workspace_id") or "")
+    # SECURITY — an absent/empty workspace claim is a HARD 403, never a
+    # pass-through. The old ``if blob_workspace and ...`` short-circuited: a blob
+    # whose workspace resolved to "" skipped the tenancy check entirely, so an
+    # attacker could propose an artifact change with workspace="" and
+    # scope_id=<victim pocket> and have ANY operator in ANY workspace approve
+    # (publish + DEPLOY) or reject (discard) it. There is no legitimate
+    # empty-workspace case for an artifact change — its tenancy is mandatory —
+    # so we fail closed before the equality check on both the approve and reject
+    # side.
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This artifact change has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This artifact change belongs to a different workspace",
+        )
+
+
+def _belt_plan_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_belt_plan`` blob on an Action, or ``None``.
+
+    The blob is the mandate FOREMAN's shift-plan payload
+    (``ee.cloud.mandates.service.trigger_shift`` stores it under
+    ``Action.parameters._belt_plan``: the PlanProposal + mandate/shift ids +
+    budget snapshot + chain correlation fields). The fourth peer of
+    ``_pocket_write`` / ``_code_change`` / ``_external_action`` — the approve
+    path dispatches the plan executor on its presence; reject closes the chain
+    here in the router. Anything that is not a dict is treated as "no plan".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_belt_plan")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_belt_plan_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving/rejecting a mandate shift plan from another workspace.
+
+    Mirror of ``_assert_code_change_workspace`` for the ``_belt_plan`` blob —
+    its tenancy lives entirely on the blob's ``workspace_id``.
+    """
+    blob = _belt_plan_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    # LOW-1 — an absent/empty workspace claim is a HARD 403, never a
+    # pass-through (matches _assert_artifact_change_workspace). Now that the
+    # executors resolve the store from the blob's workspace_id, an empty claim
+    # would otherwise approve-then-misfile onto the shared ledger / raise.
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This shift plan has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This shift plan belongs to a different workspace",
+        )
+
+
+def _belt_plan_proposed_event_id(blob: dict[str, Any]) -> Any:
+    """Pull the ``proposed_event_id`` off a ``_belt_plan`` blob (same field
+    contract as the code-change blob) for ``human.corrected`` causation."""
+    return _code_change_proposed_event_id(blob)
+
+
+async def _mark_plan_rejected_safe(action: Any, reason: str) -> None:
+    """Best-effort shift-record update for a rejected ``belt_plan`` Action.
+
+    The router owns the CHAIN close on reject (the executor never runs); this
+    lazy-imported hook only reflects the rejection onto the mandate's ShiftDoc
+    (state=done, outcome carries the reason) so the pawprints feed reads it.
+    Never breaks the reject response."""
+    try:
+        from pocketpaw_ee.cloud.mandates import executor as mandate_executor
+
+        await mandate_executor.mark_plan_rejected(action, reason)
+    except Exception:  # noqa: BLE001 — read-model nudge must never break reject
+        logger.debug("mandate: mark_plan_rejected hook failed (non-fatal)", exc_info=True)
+
+
+async def _emit_belt_run_updated_safe(
+    *, workspace_id: str, action_id: str, status: str, stage: str
+) -> None:
+    """Publish ``belt_run_updated`` for an approve / reject lifecycle change
+    (SC-2) on the WORKSPACE REALTIME BUS.
+
+    The bus is the required path: approve happens in the Tray AFTER the chat turn
+    ended, so there is no per-session SSE sink to drain into — only the
+    workspace-scoped bus fan-out reaches the /belt page. Lazy-imports the belt
+    console service so the instinct package keeps no module-top dependency on
+    ``ee.cloud.belt`` (same lazy-import discipline the executor / bridge hooks
+    use). Best-effort: a bus / import failure is swallowed so the approve /
+    reject response is never broken."""
+    try:
+        from pocketpaw_ee.cloud.belt.service import emit_belt_run_updated
+
+        await emit_belt_run_updated(
+            workspace_id=workspace_id, action_id=action_id, status=status, stage=stage
+        )
+    except Exception:  # noqa: BLE001 — emit must never break approve / reject
+        logger.debug("belt: belt_run_updated emit failed (non-fatal)", exc_info=True)
+
+
+def _assert_code_change_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving a Belt code change from another workspace.
+
+    Mirror of ``_assert_pocket_write_workspace`` for the ``_code_change`` blob.
+    ``require_action_any_workspace("instinct.approve")`` only proves the caller
+    holds the role SOMEWHERE; this binds the code-change Action to the caller's
+    active workspace. A code change carries no pocket the way a parked write
+    does, so its tenancy lives entirely on the blob's ``workspace_id``. A blob
+    whose ``workspace_id`` differs from the caller's active workspace → 403.
+    A non-code-change Action (no blob) is unaffected.
+    """
+    blob = _code_change_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    # LOW-1 — empty workspace claim fails closed (the executor resolves its
+    # store from this field; an empty one would misfile onto the shared ledger).
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This code change has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This code change belongs to a different workspace",
+        )
+
+
+def _assert_external_action_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting an external action from another workspace.
+
+    Mirror of ``_assert_code_change_workspace`` for the ``_external_action``
+    blob. ``require_action_any_workspace("instinct.approve")`` only proves the
+    caller holds the role SOMEWHERE; this binds the external-action Action to the
+    caller's active workspace. An external action carries no pocket the way a
+    parked write does, so its tenancy lives entirely on the blob's
+    ``workspace_id``. A blob whose ``workspace_id`` differs from the caller's
+    active workspace → 403. A non-external-action Action (no blob) is unaffected.
+    """
+    blob = _external_action_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    # LOW-1 — empty workspace claim fails closed (the executor resolves its
+    # store from this field; an empty one would misfile onto the shared ledger).
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This external action has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This external action belongs to a different workspace",
+        )
+
+
+def _admin_action_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_admin_action`` blob on an Action, or ``None``.
+
+    The blob is the gated workspace-admin-action payload
+    ``ee.cloud.admin_proposals.propose`` stores under
+    ``Action.parameters._admin_action`` (action=RBAC key / args / proposer_user_id
+    / params_hash / idempotency_key + the originating ``workspace_id``). This is
+    the 8th gated proposal kind (WA-2) — the approve path dispatches the
+    apply-on-approve executor on its presence, exactly as it dispatches the
+    external-action executor on ``_external_action``. On APPROVE the executor
+    RE-CHECKS the proposer's CURRENT RBAC role before firing the whitelisted
+    admin write; on REJECT the router closes the chain and nothing runs. Anything
+    that is not a dict is treated as "no admin action".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_admin_action")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_admin_action_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting an admin action from another workspace.
+
+    Mirror of ``_assert_external_action_workspace`` for the ``_admin_action``
+    blob. ``require_action_any_workspace("instinct.approve")`` only proves the
+    caller holds the role SOMEWHERE; this binds the admin-action Action to the
+    caller's active workspace. An admin action carries no pocket the way a parked
+    write does, so its tenancy lives entirely on the blob's ``workspace_id``. A
+    blob whose ``workspace_id`` differs from the caller's active workspace → 403,
+    on BOTH the approve and reject side (asymmetric tenant scope is no tenant
+    scope — pocketpaw#1183 / #1250). A non-admin-action Action (no blob) is
+    unaffected.
+
+    FAIL-CLOSED on an empty claim — an admin action's tenancy is mandatory; the
+    executor scopes the RBAC re-check + service call by this workspace, so an
+    empty one is a HARD 403, never a pass-through.
+    """
+    blob = _admin_action_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This admin action has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This admin action belongs to a different workspace",
+        )
+
+
+def _fabric_objects_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_fabric_objects`` blob on an Action, or ``None``.
+
+    The blob is the gated Fabric-ontology payload
+    ``ee.cloud.fabric_proposals.propose`` stores under
+    ``Action.parameters._fabric_objects`` (object_types / objects / links + the
+    originating ``workspace_id``). This is a peer gated proposal kind — the
+    approve path dispatches the apply-on-approve executor on its presence,
+    exactly as it dispatches the external-action executor on ``_external_action``.
+    Anything that is not a dict is treated as "no fabric objects".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_fabric_objects")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_fabric_objects_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting a Fabric-ontology write from another workspace.
+
+    Mirror of ``_assert_external_action_workspace`` for the ``_fabric_objects``
+    blob. ``require_action_any_workspace("instinct.approve")`` only proves the
+    caller holds the role SOMEWHERE; this binds the Fabric-objects Action to the
+    caller's active workspace. A Fabric write carries no pocket the way a parked
+    write does, so its tenancy lives entirely on the blob's ``workspace_id``. A
+    blob whose ``workspace_id`` differs from the caller's active workspace → 403,
+    on BOTH the approve and reject side (asymmetric tenant scope is no tenant
+    scope — pocketpaw#1183 / #1250). A non-fabric-objects Action (no blob) is
+    unaffected.
+    """
+    blob = _fabric_objects_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    # LOW-1 — empty workspace claim fails closed (the executor resolves its
+    # store from this field; an empty one would misfile onto the shared ledger).
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This fabric-objects write has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This fabric-objects write belongs to a different workspace",
+        )
+
+
+def _pocket_create_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_pocket_create`` blob on an Action, or ``None``.
+
+    The blob is the gated starter-Pocket-create payload
+    ``ee.cloud.pocket_proposals.propose`` stores under
+    ``Action.parameters._pocket_create`` (the staged ``pocket_spec`` +, as SEPARATE
+    top-level fields, the originating ``workspace_id`` and the owner ``user_id``).
+    This is a peer gated proposal kind — the approve path dispatches the
+    apply-on-approve executor on its presence, exactly as it dispatches the
+    Fabric-objects executor on ``_fabric_objects``. Anything that is not a dict is
+    treated as "no pocket create".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_pocket_create")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_pocket_create_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting a starter-Pocket create from another workspace.
+
+    Mirror of ``_assert_fabric_objects_workspace`` for the ``_pocket_create`` blob.
+    ``require_action_any_workspace("instinct.approve")`` only proves the caller
+    holds the role SOMEWHERE; this binds the Pocket-create Action to the caller's
+    active workspace. A proposed Pocket carries no EXISTING pocket the way a parked
+    write does, so its tenancy lives entirely on the blob's top-level
+    ``workspace_id`` (NEVER inside the editable ``pocket_spec``). A blob whose
+    ``workspace_id`` differs from the caller's active workspace → 403, on BOTH the
+    approve and reject side (asymmetric tenant scope is no tenant scope —
+    pocketpaw#1183 / #1250). A non-pocket-create Action (no blob) is unaffected.
+    """
+    blob = _pocket_create_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    # LOW-1 — empty workspace claim fails closed (the executor resolves its
+    # store from this field; an empty one would misfile onto the shared ledger).
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This pocket create has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This pocket create belongs to a different workspace",
+        )
+
+
+def _instinct_rule_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_instinct_rule`` blob on an Action, or ``None``.
+
+    The blob is the gated governed-rule-create payload
+    ``ee.cloud.instinct_rule_proposals.propose`` stores under
+    ``Action.parameters._instinct_rule`` (the editable ``rule_spec`` +, as SEPARATE
+    top-level fields, the originating ``workspace_id`` and the owner ``user_id``).
+    This is a peer gated proposal kind — the approve path dispatches the
+    apply-on-approve executor on its presence, exactly as it dispatches the
+    Pocket-create executor on ``_pocket_create``. Anything that is not a dict is
+    treated as "no instinct rule".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_instinct_rule")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_instinct_rule_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting a governed-rule create from another workspace.
+
+    Mirror of ``_assert_pocket_create_workspace`` for the ``_instinct_rule`` blob.
+    ``require_action_any_workspace("instinct.approve")`` only proves the caller
+    holds the role SOMEWHERE; this binds the rule-create Action to the caller's
+    active workspace. A proposed rule carries no EXISTING pocket the way a parked
+    write does, so its tenancy lives entirely on the blob's top-level
+    ``workspace_id`` (NEVER inside the editable ``rule_spec``). A blob whose
+    ``workspace_id`` differs from the caller's active workspace → 403, on BOTH the
+    approve and reject side (asymmetric tenant scope is no tenant scope —
+    pocketpaw#1183 / #1250). A non-instinct-rule Action (no blob) is unaffected.
+    """
+    blob = _instinct_rule_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    if blob_workspace and blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This instinct rule belongs to a different workspace",
+        )
+
+
+def _fabric_conflict_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_fabric_conflict`` blob on an Action, or ``None``.
+
+    The blob is the conflict-stewardship payload ``ee.cloud.fabric_conflicts.
+    propose`` stores under ``Action.parameters._fabric_conflict`` (FST-6): the
+    un-rankable conflict's subject (``workspace_id`` / ``object_id`` /
+    ``property`` as SEPARATE top-level fields), the read-only ``choices``, and
+    the editable ``resolution.chosen_statement_id``. A peer gated proposal
+    kind — the approve path dispatches the apply-on-approve executor (which
+    PINs the chosen statement) on its presence, exactly as it dispatches the
+    instinct-rule executor on ``_instinct_rule``. Anything that is not a dict
+    is treated as "no fabric conflict".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_fabric_conflict")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_fabric_conflict_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting a conflict stewardship from another workspace.
+
+    Mirror of ``_assert_instinct_rule_workspace`` for the ``_fabric_conflict``
+    blob (FST-6). Approving pins a statement in the tenant's Fabric, so the
+    cross-workspace gate is mandatory on BOTH the approve and reject side
+    (asymmetric tenant scope is no tenant scope — pocketpaw#1183 / #1250).
+    Tenancy lives on the blob's top-level ``workspace_id`` (NEVER inside the
+    editable ``resolution``). A non-conflict Action (no blob) is unaffected.
+    """
+    blob = _fabric_conflict_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    if blob_workspace and blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This fabric conflict belongs to a different workspace",
+        )
 
 
 def _assert_pocket_write_workspace(action: Any, current_workspace: str) -> None:
@@ -183,249 +1059,17 @@ def _assert_pocket_write_workspace(action: Any, current_workspace: str) -> None:
     if blob is None:
         return
     blob_workspace = str(blob.get("workspace_id") or "")
-    if blob_workspace and blob_workspace != current_workspace:
+    # LOW-1 — empty workspace claim fails closed (the executor resolves its
+    # store from this field; an empty one would misfile onto the shared ledger).
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This action's pocket write has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This action's pocket write belongs to a different workspace",
-        )
-
-
-# ---------------------------------------------------------------------------
-# RFC 09 Slice 3 — Decision-Graph chain emit helpers
-# ---------------------------------------------------------------------------
-# The approve / reject endpoints emit ``human.corrected`` per item; the
-# reject endpoints additionally emit ``decision.completed(rejected)`` to
-# close the chain. The bridge owns the chain close on the approve path
-# (``instinct_bridge._emit_bridge_chain_close`` fires from
-# ``execute_approved_write`` after the post-approval HTTP call). Both
-# helpers below are best-effort — a Decision-Graph wiring failure must
-# never break an approval or rejection (the journal write is the source
-# of truth; the Slice 4 reconciler is the safety net).
-#
-# ``_chain_actor_human`` shape: ``kind="user"`` (this is the human
-# approver acting, not the agent that proposed). ``id`` is the
-# authenticated user id with a ``user:`` prefix so the projection's
-# ``_fold_corrected`` can attribute the ApproverRef to the human.
-# ``scope_context`` carries the approver's active workspace + the
-# action's pocket so visibility filters narrow correctly.
-
-
-def _chain_actor_human(*, user_id: str, workspace_id: str, pocket_id: str) -> Any:
-    """Build the Actor recorded on a ``human.corrected`` / reject-path
-    ``decision.completed`` chain event."""
-    from soul_protocol.spec.journal import Actor
-
-    return Actor(
-        kind="user",
-        id=f"user:{user_id or 'unknown'}",
-        scope_context=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
-    )
-
-
-def _parked_policy_event_id(blob: dict[str, Any]) -> Any:
-    """Pull the ``parked_policy_event_id`` UUID off a schema-2 blob, or
-    ``None`` if missing / malformed. The Slice 3 bridge writes this back
-    onto the Action after ``store.propose`` succeeds; using it as the
-    ``causation_id`` on the next ``human.corrected`` event gives the
-    chain a clean policy → human cause-arrow."""
-    from uuid import UUID
-
-    raw = blob.get("parked_policy_event_id")
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        return UUID(raw)
-    except ValueError:
-        return None
-
-
-def _parked_correlation_id(blob: dict[str, Any]) -> Any:
-    """Pull the chain ``correlation_id`` off a schema-2 blob, or
-    ``None`` if missing / malformed. Without a correlation_id the emit
-    is skipped — there's no chain to fold into."""
-    from uuid import UUID
-
-    raw = blob.get("correlation_id")
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        return UUID(raw)
-    except ValueError:
-        return None
-
-
-def _emit_human_corrected(
-    *,
-    blob: dict[str, Any],
-    action: Any,
-    user_id: str,
-    workspace_id: str,
-    disposition: str,
-    note: str | None,
-) -> Any | None:
-    """Best-effort ``human.corrected`` emit for an approve / reject /
-    bulk-approve / bulk-reject item.
-
-    ``disposition`` is one of ``accepted`` / ``edited`` / ``rejected``.
-    ``note`` is the operator-supplied reason text (reject path) or
-    correction note (edit path); ``None`` for a plain approve.
-
-    Skipped silently when the blob carries no ``correlation_id`` — a
-    blob-without-chain-id is a defensive guard (Slice 2 always populates
-    it from the executor's mint; a None means a future code path parked
-    a write without minting one). The Slice 4 reconciler / abandon
-    sweeper will deal with the orphan.
-
-    Returns the emitted event id (``UUID``) on success, or ``None`` when
-    the emit was skipped (missing correlation_id) or raised. Slice 4's
-    approve-side ``policy.evaluated`` emit uses this as its
-    ``causation_id`` so the chain ``policy(fail) → human → policy(pass)
-    → completed`` walks a clean causal arrow.
-    """
-    from pocketpaw_ee.cloud.decisions.journal_writer import record_human_corrected
-
-    correlation_id = _parked_correlation_id(blob)
-    if correlation_id is None:
-        return None
-
-    pocket_id = str(getattr(action, "pocket_id", "") or "")
-    causation = _parked_policy_event_id(blob)
-    payload: dict[str, Any] = {
-        "disposition": disposition,
-        "action_id": str(getattr(action, "id", "") or ""),
-    }
-    if note:
-        payload["note"] = note
-
-    try:
-        entry = record_human_corrected(
-            correlation_id=correlation_id,
-            actor=_chain_actor_human(
-                user_id=user_id, workspace_id=workspace_id, pocket_id=pocket_id
-            ),
-            scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
-            payload=payload,
-            causation_id=causation,
-        )
-    except Exception:  # noqa: BLE001 — chain emit is best-effort
-        logger.warning(
-            "instinct human.corrected emit failed for correlation_id=%s "
-            "(disposition=%s) — Slice 4 reconciler will catch up",
-            correlation_id,
-            disposition,
-            exc_info=True,
-        )
-        return None
-    return entry.id
-
-
-def _emit_decision_completed_rejected(
-    *,
-    blob: dict[str, Any],
-    action: Any,
-    user_id: str,
-    workspace_id: str,
-    reason: str,
-) -> None:
-    """Best-effort ``decision.completed(passed=False, action_outcome=
-    "rejected")`` chain-close for a reject / bulk-reject item.
-
-    Same skip-on-missing-correlation-id semantics as
-    ``_emit_human_corrected``. The reject path owns the close because
-    the bridge is never invoked on rejection — for the approve path the
-    bridge's ``_emit_bridge_chain_close`` owns the close instead.
-    """
-    from pocketpaw_ee.cloud.decisions.journal_writer import record_decision_completed
-
-    correlation_id = _parked_correlation_id(blob)
-    if correlation_id is None:
-        return
-
-    pocket_id = str(getattr(action, "pocket_id", "") or "")
-    payload: dict[str, Any] = {
-        "passed": False,
-        "action_outcome": "rejected",
-    }
-    if reason:
-        payload["reason"] = reason
-
-    try:
-        record_decision_completed(
-            correlation_id=correlation_id,
-            actor=_chain_actor_human(
-                user_id=user_id, workspace_id=workspace_id, pocket_id=pocket_id
-            ),
-            scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
-            payload=payload,
-        )
-    except Exception:  # noqa: BLE001 — chain close is best-effort
-        logger.warning(
-            "instinct decision.completed(rejected) emit failed for "
-            "correlation_id=%s — Slice 4 reconciler will catch up",
-            correlation_id,
-            exc_info=True,
-        )
-
-
-def _emit_policy_evaluated_approved(
-    *,
-    blob: dict[str, Any],
-    action: Any,
-    user_id: str,
-    workspace_id: str,
-    causation_event_id: Any | None,
-) -> None:
-    """Best-effort ``policy.evaluated(passed=True, policy="approve_per_row")``
-    emit after a human approval lands (Slice 4 — Captain Decision 12 follow-up).
-
-    The projection's ``_fold_policy`` keeps the LAST observed
-    ``policy.evaluated`` event for the chain. Without this emit, an
-    approved chain still reads ``Decision.instinct_policy_passed=False``
-    because the only policy event seen is the parked ``passed=False``
-    from ``instinct_bridge.propose_pocket_write``. Firing this AFTER the
-    ``human.corrected`` event and BEFORE the bridge's chain close gives
-    the projection a fresh policy-evaluated to fold into the closed
-    Decision row — chain symmetry with auto-approve chains, which carry
-    ``policy="auto", passed=True`` from the direct-success path in
-    ``action_executor``.
-
-    Causation: the natural cause is the ``human.corrected`` event that
-    just landed. The caller threads its emitted event id through
-    ``causation_event_id`` so the projection's edge graph can chain
-    policy → human → policy as a single causal sequence.
-
-    Same skip-on-missing-correlation-id semantics as the sibling helpers.
-    """
-    from pocketpaw_ee.cloud.decisions.journal_writer import record_policy_evaluated
-
-    correlation_id = _parked_correlation_id(blob)
-    if correlation_id is None:
-        return
-
-    pocket_id = str(getattr(action, "pocket_id", "") or "")
-    payload: dict[str, Any] = {
-        "policy": "approve_per_row",
-        "passed": True,
-        "reason": f"approved by user:{user_id or 'unknown'}",
-        "action_id": str(getattr(action, "id", "") or ""),
-        "evaluator": "instinct",
-    }
-    try:
-        record_policy_evaluated(
-            correlation_id=correlation_id,
-            actor=_chain_actor_human(
-                user_id=user_id, workspace_id=workspace_id, pocket_id=pocket_id
-            ),
-            scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
-            payload=payload,
-            causation_id=causation_event_id,
-        )
-    except Exception:  # noqa: BLE001 — chain emit is best-effort
-        logger.warning(
-            "instinct policy.evaluated(passed=True) emit failed for "
-            "correlation_id=%s — Slice 4 reconciler will catch up",
-            correlation_id,
-            exc_info=True,
         )
 
 
@@ -435,10 +1079,20 @@ router = APIRouter(
 )
 
 
-def _store():
-    from pocketpaw_ee.api import get_instinct_store
+def _store(workspace_id: str):
+    """Return the InstinctStore for ``workspace_id`` (ISO-2 — physical isolation).
 
-    return get_instinct_store()
+    Routes through the workspace-keyed factory so every Instinct action +
+    audit-ledger read/write in this router hits the caller's OWN
+    ``~/.pocketpaw/workspaces/<id>/instinct.db`` file — and therefore that
+    tenant's own audit hash-chain. ``workspace_id`` is the caller's active
+    workspace, already resolved by ``current_workspace_id`` on each endpoint. The
+    W4a in-row ``workspace_id`` read-filter the endpoints already pass STAYS — the
+    physical file split is additive defense-in-depth on top of it.
+    """
+    from pocketpaw.stores import get_instinct_store
+
+    return get_instinct_store(workspace_id=workspace_id)
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +1102,10 @@ def _store():
 
 class ProposeRequest(BaseModel):
     pocket_id: str
+    # BP-3 — optional generic scope. ``None`` (the default) is the legacy
+    # pocket scope; set it (e.g. "site") to scope the Action to another
+    # artifact type, with ``pocket_id`` carrying the scope id within it.
+    scope_type: str | None = None
     title: str
     description: str = ""
     recommendation: str = ""
@@ -491,6 +1149,30 @@ class ApproveRequest(BaseModel):
     category: ActionCategory | None = None
     priority: ActionPriority | None = None
     parameters: dict[str, Any] | None = None
+
+
+class EditProposalRequest(BaseModel):
+    """Body for ``PATCH /instinct/actions/{action_id}/proposal`` (F4 — edit-in-review).
+
+    Each field is the editable sub-shape for ONE discovery proposal kind; the handler
+    edits ONLY the sub-field matching the action's blob kind and pins every immutable
+    field (tenancy, owner, schema, chain ids) back from the stored blob. Exactly one
+    of the three editable fields should be set; a payload kind that doesn't match the
+    action's blob kind is a 422.
+
+    SECURITY: ``workspace_id`` here is NOT an editable tenancy field — it exists only so
+    a client that smuggles a foreign top-level ``workspace_id`` is caught and refused
+    with 403 (mismatch). The handler always pins tenancy from the stored blob; it never
+    moves a proposal to another workspace. For ``_instinct_rule`` the SECOND tenancy copy
+    (``rule_spec.scope.workspace_id``) is pinned the same way — a mismatch there is also a
+    403 (the executor scopes the persisted rule by that copy).
+    """
+
+    rule_spec: dict[str, Any] | None = None  # _instinct_rule editable sub-shape
+    pocket_spec: dict[str, Any] | None = None  # _pocket_create editable sub-shape
+    fabric: dict[str, Any] | None = None  # _fabric_objects: {object_types?, objects?, links?}
+    # NOT editable — present only to catch a smuggled foreign tenancy (→ 403).
+    workspace_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -580,14 +1262,34 @@ class BulkActionResponse(BaseModel):
     status_code=201,
     dependencies=[Depends(require_action_any_workspace("instinct.propose"))],
 )
-async def propose_action(req: ProposeRequest):
+async def propose_action(
+    req: ProposeRequest,
+    workspace_id: str = Depends(current_workspace_id),
+):
     """Propose a new action for human approval.
 
     Optional `reasoning_trace` and `fabric_snapshots` let callers attach the
     agent's decision inputs at propose time. They are persisted into the
     resulting audit row for later hydration via `/audit/{id}?hydrate=1`.
+
+    W4a — the proposed action (and its audit rows) are stamped with the
+    caller's active workspace so the cross-tenant decision leak is closed at
+    the write side: later list/pending/audit reads scoped to a tenant only
+    surface that tenant's actions.
+
+    Smart-approval auto-triage (feat/instinct-smart-triage) — after the
+    proposal is created, a cheap-model classifier runs synchronously (the
+    ``_run_auto_triage`` hook). On an APPROVE verdict the Action is
+    auto-approved AND written to the hash-chained audit ledger
+    (``action_auto_approved``, ``actor="system:triager"``), and the
+    auto-approved Action is returned (the human is not notified). On
+    ESCALATE / DENY — and at the ``ASK`` approval level, where the triager is
+    never invoked — the original proposal is returned unchanged and the route
+    behaves exactly as before. The hook is fail-safe and best-effort: any
+    triager failure escalates to the human, and a wiring failure can never
+    break this propose response.
     """
-    return await _store().propose(
+    action = await _store(workspace_id).propose(
         pocket_id=req.pocket_id,
         title=req.title,
         description=req.description,
@@ -598,7 +1300,10 @@ async def propose_action(req: ProposeRequest):
         parameters=req.parameters,
         reasoning_trace=req.reasoning_trace,
         fabric_snapshots=list(req.fabric_snapshots) if req.fabric_snapshots else None,
+        workspace_id=workspace_id,
+        scope_type=req.scope_type,
     )
+    return await _run_auto_triage(action, workspace_id)
 
 
 @router.get(
@@ -617,9 +1322,16 @@ async def pending_actions(
             "unchanged from before — every pending item is returned."
         ),
     ),
+    workspace_id: str = Depends(current_workspace_id),
 ):
-    """List actions waiting for human approval."""
-    return await _store().pending(pocket_id=pocket_id, assignee=assignee)
+    """List actions waiting for human approval.
+
+    W4a — scoped to the caller's active workspace (plus legacy NULL-workspace
+    rows) so The Tray for tenant A never surfaces tenant B's pending decisions.
+    """
+    return await _store(workspace_id).pending(
+        pocket_id=pocket_id, assignee=assignee, workspace_id=workspace_id
+    )
 
 
 @router.get(
@@ -633,14 +1345,20 @@ async def list_actions(
         None, description="Filter by status: pending|approved|rejected|executed|failed"
     ),
     limit: int = Query(50, ge=1, le=500, description="Max actions to return"),
+    workspace_id: str = Depends(current_workspace_id),
 ):
-    """List all actions with optional status and pocket filters."""
-    store = _store()
+    """List all actions with optional status and pocket filters.
+
+    W4a — scoped to the caller's active workspace (plus legacy NULL-workspace
+    rows) so a tenant can't enumerate another tenant's actions.
+    """
+    store = _store(workspace_id)
     status_enum = ActionStatus(status) if status else None
     actions = await store.list_actions(
         pocket_id=pocket_id,
         status=status_enum,
         limit=limit,
+        workspace_id=workspace_id,
     )
     return ActionsListResponse(actions=actions, total=len(actions))
 
@@ -682,7 +1400,7 @@ async def bulk_approve_actions(
       * SHOULD-FIX 1 — the audit actor is the authenticated user id, not
         the free-text ``req.approver`` field.
     """
-    store = _store()
+    store = _store(workspace_id)
     approver_id = str(user.id)
 
     # BLOCKER 1 — verify tenancy on every requested action up front. A
@@ -692,6 +1410,15 @@ async def bulk_approve_actions(
         action = await store.get_action(action_id)
         if action is not None:
             _assert_pocket_write_workspace(action, workspace_id)
+            _assert_code_change_workspace(action, workspace_id)
+            _assert_external_action_workspace(action, workspace_id)
+            _assert_fabric_objects_workspace(action, workspace_id)
+            _assert_pocket_create_workspace(action, workspace_id)
+            _assert_instinct_rule_workspace(action, workspace_id)
+            _assert_fabric_conflict_workspace(action, workspace_id)
+            _assert_belt_plan_workspace(action, workspace_id)
+            _assert_artifact_change_workspace(action, workspace_id)
+            _assert_admin_action_workspace(action, workspace_id)
 
     approved, missing, bulk_id = await store.bulk_approve(
         list(req.ids), approver=approver_id, note=req.note
@@ -709,6 +1436,296 @@ async def bulk_approve_actions(
     # the bulk bar). The bridge owns the chain close on the approve
     # path so we do NOT emit ``decision.completed`` here.
     for action in approved:
+        # BS-3/BS-4 — a Belt ``_code_change`` Action fires the apply-on-approve
+        # executor. BS-4: it now carries a Decision-Graph chain
+        # (``correlation_id`` minted at propose). Emit the per-item
+        # ``human.corrected(accepted)`` here (bulk-approve has no edit surface,
+        # so disposition is always ``accepted``), thread its event id into the
+        # executor so the terminal ``decision.completed`` chains its causation
+        # back to the human approval, then run the executor (which owns the
+        # chain close). Same best-effort shape as the pocket-write hook.
+        code_change_blob = _code_change_blob(action)
+        if code_change_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=code_change_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(code_change_blob),
+            )
+            # SC-2 — same approved/gate nudge as the single-approve path; the
+            # executor publishes the terminal (landed / failed) afterwards.
+            await _emit_belt_run_updated_safe(
+                workspace_id=workspace_id,
+                action_id=str(action.id),
+                status="approved",
+                stage="gate",
+            )
+            try:
+                from pocketpaw_ee.cloud.belt import executor as belt_executor
+
+                await belt_executor.execute_approved_change(action, human_event_id=human_event_id)
+            except Exception:
+                logger.exception(
+                    "bulk-approve belt code-change execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # A gated ``_external_action`` Action fires the apply-on-approve
+        # connector executor. Mirrors the code-change branch above: per-item
+        # ``human.corrected(accepted)`` (bulk-approve has no edit surface), the
+        # ``agent.proposed`` event id (off the blob's ``proposed_event_id``) as
+        # causation, then the executor (which owns the chain close). Same
+        # best-effort shape; matched BEFORE the pocket-write branch and
+        # ``continue``d so the two never cross.
+        external_action_blob = _external_action_blob(action)
+        if external_action_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=external_action_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(external_action_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.external_actions import (
+                    executor as external_action_executor,
+                )
+
+                await external_action_executor.execute_approved_external_action(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve external-action execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # A bulk-approved gated ``_fabric_objects`` Action materialises its
+        # proposed ontology in Fabric. Mirrors the external-action branch above:
+        # per-item ``human.corrected(accepted)`` (bulk-approve has no edit
+        # surface), the ``agent.proposed`` event id (off the blob's
+        # ``proposed_event_id``) as causation, then the executor (which owns the
+        # chain close). Matched BEFORE the pocket-write fallthrough and
+        # ``continue``d so the kinds never cross.
+        fabric_objects_blob = _fabric_objects_blob(action)
+        if fabric_objects_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=fabric_objects_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(fabric_objects_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.fabric_proposals import (
+                    executor as fabric_objects_executor,
+                )
+
+                await fabric_objects_executor.execute_approved_fabric_objects(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve fabric-objects execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # A bulk-approved gated ``_pocket_create`` Action creates its proposed
+        # starter Pocket. Mirrors the Fabric-objects branch above: per-item
+        # ``human.corrected(accepted)`` (bulk-approve has no edit surface), the
+        # ``agent.proposed`` event id (off the blob's ``proposed_event_id``) as
+        # causation, then the executor (which owns the chain close). Matched BEFORE
+        # the pocket-write fallthrough and ``continue``d so the kinds never cross.
+        pocket_create_blob = _pocket_create_blob(action)
+        if pocket_create_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=pocket_create_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(pocket_create_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.pocket_proposals import (
+                    executor as pocket_create_executor,
+                )
+
+                await pocket_create_executor.execute_approved_pocket_create(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve pocket-create execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # A bulk-approved gated ``_instinct_rule`` Action persists its proposed
+        # governed rule. Mirrors the Pocket-create branch above: per-item
+        # ``human.corrected(accepted)`` (bulk-approve has no edit surface), the
+        # ``agent.proposed`` event id (off the blob's ``proposed_event_id``) as
+        # causation, then the executor (which owns the chain close). Matched BEFORE
+        # the pocket-write fallthrough and ``continue``d so the kinds never cross.
+        instinct_rule_blob = _instinct_rule_blob(action)
+        if instinct_rule_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=instinct_rule_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(instinct_rule_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.instinct_rule_proposals import (
+                    executor as instinct_rule_executor,
+                )
+
+                await instinct_rule_executor.execute_approved_instinct_rule(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve instinct-rule execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # FST-6 — a bulk-approved ``_fabric_conflict`` Action PINs its chosen
+        # statement (the staged default — bulk-approve has no edit surface, so
+        # disposition is always ``accepted`` and the choice is the policy
+        # winner). Mirrors the instinct-rule branch above: per-item
+        # ``human.corrected(accepted)``, the ``agent.proposed`` event id as
+        # causation, then the executor (which owns the chain close). Matched
+        # BEFORE the pocket-write fallthrough and ``continue``d so the kinds
+        # never cross.
+        fabric_conflict_blob = _fabric_conflict_blob(action)
+        if fabric_conflict_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=fabric_conflict_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(fabric_conflict_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.fabric_conflicts import (
+                    executor as fabric_conflict_executor,
+                )
+
+                await fabric_conflict_executor.execute_approved_fabric_conflict(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve fabric-conflict execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # MANDATES — a bulk-approved ``_belt_plan`` Action fires the plan
+        # executor, exactly like the single-approve hook (disposition is always
+        # ``accepted`` — bulk-approve has no edit surface). The executor owns
+        # the chain close.
+        belt_plan_blob = _belt_plan_blob(action)
+        if belt_plan_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=belt_plan_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_belt_plan_proposed_event_id(belt_plan_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.mandates import executor as mandate_executor
+
+                await mandate_executor.execute_approved_plan(action, human_event_id=human_event_id)
+            except Exception:
+                logger.exception(
+                    "bulk-approve belt_plan execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # BP-3 — a bulk-approved ``_artifact_change`` Action MERGES its candidate
+        # (publish + deploy), exactly like the single-approve hook. Disposition
+        # is always ``accepted`` (bulk-approve has no edit surface). The executor
+        # marks the Action executed/failed; matched BEFORE the pocket-write
+        # fallthrough and ``continue``d so the kinds never cross.
+        artifact_change_blob = _artifact_change_blob(action)
+        if artifact_change_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=artifact_change_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(artifact_change_blob),
+            )
+            try:
+                from pocketpaw_ee.versions import instinct_executor as artifact_executor
+
+                await artifact_executor.execute_approved_change(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve artifact-change merge failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # WA-2 — a bulk-approved gated ``_admin_action`` Action fires the
+        # whitelisted workspace-admin write (with an execute-time RBAC re-check
+        # inside the executor). Mirrors the external-action branch above: per-item
+        # ``human.corrected(accepted)`` (bulk-approve has no edit surface), the
+        # ``agent.proposed`` event id (off the blob's ``proposed_event_id``) as
+        # causation, then the executor (which owns the chain close). Matched BEFORE
+        # the pocket-write fallthrough and ``continue``d so the kinds never cross.
+        admin_action_blob = _admin_action_blob(action)
+        if admin_action_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=admin_action_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(admin_action_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.admin_proposals import (
+                    executor as admin_action_executor,
+                )
+
+                await admin_action_executor.execute_approved_admin_action(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve admin-action execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
         action_blob = _pocket_write_blob(action)
         if action_blob is None:
             continue
@@ -772,7 +1789,7 @@ async def bulk_reject_actions(
     item would hide a cross-tenant rejection-escalation attempt
     (mirror of bulk-approve's BLOCKER 1 behaviour).
     """
-    store = _store()
+    store = _store(workspace_id)
     rejector_id = str(user.id)
 
     # Touch-time security fix — verify tenancy on every requested
@@ -783,35 +1800,286 @@ async def bulk_reject_actions(
         action = await store.get_action(action_id)
         if action is not None:
             _assert_pocket_write_workspace(action, workspace_id)
+            _assert_code_change_workspace(action, workspace_id)
+            _assert_external_action_workspace(action, workspace_id)
+            _assert_fabric_objects_workspace(action, workspace_id)
+            _assert_pocket_create_workspace(action, workspace_id)
+            _assert_instinct_rule_workspace(action, workspace_id)
+            _assert_fabric_conflict_workspace(action, workspace_id)
+            _assert_belt_plan_workspace(action, workspace_id)
+            _assert_artifact_change_workspace(action, workspace_id)
+            _assert_admin_action_workspace(action, workspace_id)
 
     rejected, missing, bulk_id = await store.bulk_reject(
         list(req.ids), reason=req.reason, rejector=rejector_id
     )
 
-    # RFC 09 Slice 3 — per-item ``human.corrected`` + ``decision.
+    # RFC 09 Slice 3 / BS-4 — per-item ``human.corrected`` + ``decision.
     # completed(rejected)`` emit loop. The store's bulk_reject already
     # iterates per item internally for the audit log; this loop adds
-    # the chain emits. Non-pocket-write Actions (no blob) skip both
-    # emits — there's no chain to close.
+    # the chain emits. An item carries EITHER a ``_pocket_write`` blob OR
+    # a ``_code_change`` blob (BS-4) — both close their chain on reject
+    # here (the executor never runs on reject). An Action with neither
+    # blob has no chain to close and is skipped.
     for action in rejected:
         action_blob = _pocket_write_blob(action)
-        if action_blob is None:
+        if action_blob is not None:
+            _emit_human_corrected(
+                blob=action_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+            )
+            _emit_decision_completed_rejected(
+                blob=action_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+            )
             continue
-        _emit_human_corrected(
-            blob=action_blob,
-            action=action,
-            user_id=rejector_id,
-            workspace_id=workspace_id,
-            disposition="rejected",
-            note=req.reason or None,
-        )
-        _emit_decision_completed_rejected(
-            blob=action_blob,
-            action=action,
-            user_id=rejector_id,
-            workspace_id=workspace_id,
-            reason=req.reason,
-        )
+
+        code_change_blob = _code_change_blob(action)
+        if code_change_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=code_change_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(code_change_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=code_change_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            # SC-2 — terminal event for a bulk-rejected belt run.
+            await _emit_belt_run_updated_safe(
+                workspace_id=workspace_id,
+                action_id=str(action.id),
+                status="rejected",
+                stage="done",
+            )
+            continue
+
+        # A bulk-rejected gated ``_external_action`` Action closes its chain
+        # HERE (the executor never runs on reject — the router owns the close).
+        # Mirrors the code-change reject branch. Matched AFTER pocket-write +
+        # code-change and ``continue``d so the three never cross.
+        external_action_blob = _external_action_blob(action)
+        if external_action_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=external_action_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(external_action_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=external_action_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            continue
+
+        # A bulk-rejected gated ``_fabric_objects`` Action closes its chain HERE
+        # (the executor never runs on reject — the router owns the close). NO
+        # Fabric write happens. Mirrors the external-action reject branch.
+        # Matched AFTER pocket-write + code-change + external-action and
+        # ``continue``d so the kinds never cross.
+        fabric_objects_blob = _fabric_objects_blob(action)
+        if fabric_objects_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=fabric_objects_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(fabric_objects_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=fabric_objects_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            continue
+
+        # A bulk-rejected gated ``_pocket_create`` Action closes its chain HERE
+        # (the executor never runs on reject — the router owns the close). NO
+        # Pocket is created. Mirrors the Fabric-objects reject branch. Matched
+        # AFTER pocket-write + code-change + external-action + fabric-objects and
+        # ``continue``d so the kinds never cross.
+        pocket_create_blob = _pocket_create_blob(action)
+        if pocket_create_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=pocket_create_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(pocket_create_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=pocket_create_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            continue
+
+        # A bulk-rejected gated ``_instinct_rule`` Action closes its chain HERE
+        # (the executor never runs on reject — the router owns the close). NO
+        # governed rule is created. Mirrors the Pocket-create reject branch.
+        # Matched AFTER pocket-write + code-change + external-action +
+        # fabric-objects + pocket-create and ``continue``d so the kinds never cross.
+        instinct_rule_blob = _instinct_rule_blob(action)
+        if instinct_rule_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=instinct_rule_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(instinct_rule_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=instinct_rule_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            continue
+
+        # FST-6 — a bulk-rejected ``_fabric_conflict`` Action closes its chain
+        # HERE (the executor never runs on reject — the router owns the close).
+        # NO statement changes: the policy's provisional winner stands. Mirrors
+        # the instinct-rule reject branch. Matched AFTER the earlier kinds and
+        # ``continue``d so the kinds never cross.
+        fabric_conflict_blob = _fabric_conflict_blob(action)
+        if fabric_conflict_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=fabric_conflict_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(fabric_conflict_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=fabric_conflict_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            continue
+
+        # MANDATES — a bulk-rejected ``_belt_plan`` Action closes its chain
+        # here (the plan executor never runs on reject), mirroring the
+        # code-change branch above.
+        belt_plan_blob = _belt_plan_blob(action)
+        if belt_plan_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=belt_plan_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_belt_plan_proposed_event_id(belt_plan_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=belt_plan_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            await _mark_plan_rejected_safe(action, req.reason)
+            continue
+
+        # BP-3 — a bulk-rejected ``_artifact_change`` Action DISCARDS its
+        # candidate and closes its chain HERE (the merge executor never runs on
+        # reject). The published pointer is left untouched. Mirrors the
+        # code-change reject branch.
+        artifact_change_blob = _artifact_change_blob(action)
+        if artifact_change_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=artifact_change_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(artifact_change_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=artifact_change_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            try:
+                from pocketpaw_ee.versions import instinct_executor as artifact_executor
+
+                await artifact_executor.discard_rejected_change(action)
+            except Exception:
+                logger.exception(
+                    "bulk-reject artifact-change discard failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # WA-2 — a bulk-rejected gated ``_admin_action`` Action closes its chain
+        # HERE (the executor never runs on reject — the router owns the close). NO
+        # admin write happens. Mirrors the external-action reject branch above.
+        admin_action_blob = _admin_action_blob(action)
+        if admin_action_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=admin_action_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(admin_action_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=admin_action_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            continue
 
     return BulkActionResponse(bulk_id=bulk_id, affected=rejected, missing=missing)
 
@@ -839,7 +2107,7 @@ async def approve_action(
       * SHOULD-FIX 1 — the audit actor + outcome actor are the
         authenticated user id, never the free-text ``req.approver``.
     """
-    store = _store()
+    store = _store(workspace_id)
     before = await store.get_action(action_id)
     if not before:
         raise HTTPException(404, "Action not found")
@@ -849,6 +2117,44 @@ async def approve_action(
     # caller holds ``instinct.approve`` somewhere; this binds the Action
     # to the caller's workspace.
     _assert_pocket_write_workspace(before, workspace_id)
+    # Same tenancy gate for a Belt code-change Action (BS-3) — its
+    # ``_code_change`` blob carries the workspace, not a pocket.
+    _assert_code_change_workspace(before, workspace_id)
+    # Same tenancy gate for a gated external-action Action — its
+    # ``_external_action`` blob carries the workspace, not a pocket.
+    _assert_external_action_workspace(before, workspace_id)
+    # Same tenancy gate for a gated Fabric-objects Action — its
+    # ``_fabric_objects`` blob carries the workspace, not a pocket. Approving it
+    # writes typed objects into the tenant's Fabric, so the cross-workspace gate
+    # is mandatory here.
+    _assert_fabric_objects_workspace(before, workspace_id)
+    # Same tenancy gate for a gated Pocket-create Action — its ``_pocket_create``
+    # blob carries the workspace (and owner) on SEPARATE top-level fields, not a
+    # pocket. Approving it creates a Pocket in the tenant's workspace, so the
+    # cross-workspace gate is mandatory here.
+    _assert_pocket_create_workspace(before, workspace_id)
+    # Same tenancy gate for a gated governed-rule-create Action — its
+    # ``_instinct_rule`` blob carries the workspace (and owner) on SEPARATE
+    # top-level fields, not a pocket. Approving it creates an active governed rule
+    # in the tenant's workspace, so the cross-workspace gate is mandatory here.
+    _assert_instinct_rule_workspace(before, workspace_id)
+    # FST-6 — same tenancy gate for a conflict-stewardship Action — its
+    # ``_fabric_conflict`` blob carries the workspace on a SEPARATE top-level
+    # field. Approving it PINs a statement in the tenant's Fabric, so the
+    # cross-workspace gate is mandatory here.
+    _assert_fabric_conflict_workspace(before, workspace_id)
+    # Same tenancy gate for a mandate shift-plan Action (belt_plan) — its
+    # ``_belt_plan`` blob carries the workspace.
+    _assert_belt_plan_workspace(before, workspace_id)
+    # BP-3 — same tenancy gate for an artifact-change merge (its
+    # ``_artifact_change`` blob carries the workspace). Approving it moves the
+    # published pointer + deploys, so the cross-workspace gate is mandatory here.
+    _assert_artifact_change_workspace(before, workspace_id)
+    # WA-2 — same tenancy gate for a gated workspace-admin Action — its
+    # ``_admin_action`` blob carries the workspace, not a pocket. Approving it
+    # fires a workspace-admin write (e.g. a member role change) after an
+    # execute-time RBAC re-check, so the cross-workspace gate is mandatory here.
+    _assert_admin_action_workspace(before, workspace_id)
 
     req = req or ApproveRequest()
     # SHOULD-FIX 1 — the audit actor is the authenticated identity, not
@@ -871,7 +2177,7 @@ async def approve_action(
             )
             await store.record_correction(correction)
             await _persist_edits(store, after, edited_fields)
-            await _forward_to_soul(correction, after)
+            await _forward_to_soul(correction, after, workspace_id)
 
     approved = await store.approve(action_id, approver=approver_id)
     if not approved:
@@ -925,11 +2231,357 @@ async def approve_action(
         except Exception:
             logger.exception("pocket-write execution after approval failed (non-fatal)")
 
+    # BS-3 — when the approved Action carries a Belt ``_code_change`` blob,
+    # apply the diff in a fresh worktree and open a PR. Same best-effort,
+    # lazy-import, never-break-the-approve-response shape as the pocket-write
+    # hook above; the executor records success / failure on the Action itself.
+    # A non-code-change Action skips this. The captain still merges on GitHub —
+    # this opens the PR, it does NOT merge.
+    #
+    # BS-4 — this is part of the Belt Decision-Graph chain. Emit the
+    # ``human.corrected`` event for the code-change approval HERE (the router
+    # owns the human-action emit on every approve path), then thread its event
+    # id into the executor so the terminal ``decision.completed`` chains its
+    # causation back to the approval: ``agent.proposed → human.corrected →
+    # decision.completed`` under one correlation_id. The executor owns the
+    # chain CLOSE (success or failure) — the router does NOT emit
+    # ``decision.completed`` for code_change, mirroring how the pocket-write
+    # bridge owns the close on its approve path. No double terminal.
+    code_change_blob = _code_change_blob(approved)
+    if code_change_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=code_change_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(code_change_blob),
+        )
+        # SC-2 — publish ``belt_run_updated`` (status=approved, stage=gate) on
+        # the workspace bus BEFORE the executor runs so the /belt page flips the
+        # run to "applying..." immediately. The executor then publishes the
+        # terminal (landed / failed).
+        await _emit_belt_run_updated_safe(
+            workspace_id=workspace_id, action_id=str(approved.id), status="approved", stage="gate"
+        )
+        try:
+            from pocketpaw_ee.cloud.belt import executor as belt_executor
+
+            await belt_executor.execute_approved_change(approved, human_event_id=human_event_id)
+        except Exception:
+            logger.exception("belt code-change execution after approval failed (non-fatal)")
+
+    # When the approved Action carries a gated ``_external_action`` blob, fire
+    # the connector call. Same best-effort, lazy-import, never-break-the-approve-
+    # response shape as the pocket-write + code-change hooks above; the executor
+    # records success / failure on the Action itself. A non-external-action
+    # Action skips this.
+    #
+    # The external action is part of its own Decision-Graph chain (the propose
+    # helper minted the ``correlation_id`` + emitted ``agent.proposed``). Emit
+    # the ``human.corrected`` event for the approval HERE (the router owns the
+    # human-action emit on every approve path), citing the ``agent.proposed``
+    # event id (stored on the blob as ``proposed_event_id`` — the same field the
+    # code-change path reads, so ``_code_change_proposed_event_id`` resolves it)
+    # as causation, then thread its event id into the executor so the terminal
+    # ``decision.completed`` chains back to the approval:
+    # ``agent.proposed → human.corrected → decision.completed`` under one
+    # correlation_id. The executor owns the chain CLOSE (success or failure) —
+    # the router does NOT emit ``decision.completed`` here, mirroring the
+    # pocket-write bridge + belt executor. No double terminal.
+    external_action_blob = _external_action_blob(approved)
+    if external_action_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=external_action_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(external_action_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.external_actions import executor as external_action_executor
+
+            await external_action_executor.execute_approved_external_action(
+                approved, human_event_id=human_event_id
+            )
+        except Exception:
+            logger.exception("external-action execution after approval failed (non-fatal)")
+
+    # When the approved Action carries a gated ``_fabric_objects`` blob,
+    # materialise the proposed ontology in Fabric (workspace-scoped, idempotent
+    # ingest). Same best-effort, lazy-import, never-break-the-approve-response
+    # shape as the external-action hook above; the executor records success /
+    # failure on the Action itself. A non-fabric-objects Action skips this.
+    #
+    # The Fabric-objects write is part of its own Decision-Graph chain (the
+    # propose helper minted the ``correlation_id`` + emitted ``agent.proposed``).
+    # Emit the ``human.corrected`` event for the approval HERE (the router owns
+    # the human-action emit on every approve path), citing the ``agent.proposed``
+    # event id (stored on the blob as ``proposed_event_id`` — the same field the
+    # external-action path reads, so ``_code_change_proposed_event_id`` resolves
+    # it) as causation, then thread its event id into the executor so the terminal
+    # ``decision.completed`` chains back to the approval. The executor owns the
+    # chain CLOSE (success or failure) — the router does NOT emit
+    # ``decision.completed`` here, mirroring the external-action executor. No
+    # double terminal.
+    fabric_objects_blob = _fabric_objects_blob(approved)
+    if fabric_objects_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=fabric_objects_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(fabric_objects_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.fabric_proposals import executor as fabric_objects_executor
+
+            await fabric_objects_executor.execute_approved_fabric_objects(
+                approved, human_event_id=human_event_id
+            )
+        except Exception:
+            logger.exception("fabric-objects execution after approval failed (non-fatal)")
+
+    # When the approved Action carries a gated ``_pocket_create`` blob, create the
+    # proposed starter Pocket via ``pockets.service.create`` (workspace-scoped,
+    # owned by the blob's top-level ``user_id``). Same best-effort, lazy-import,
+    # never-break-the-approve-response shape as the Fabric-objects hook above; the
+    # executor records success / failure on the Action itself. A non-pocket-create
+    # Action skips this.
+    #
+    # The Pocket create is part of its own Decision-Graph chain (the propose helper
+    # minted the ``correlation_id`` + emitted ``agent.proposed``). Emit the
+    # ``human.corrected`` event for the approval HERE (the router owns the
+    # human-action emit on every approve path), citing the ``agent.proposed`` event
+    # id (stored on the blob as ``proposed_event_id`` — the same field the
+    # Fabric-objects path reads, so ``_code_change_proposed_event_id`` resolves it)
+    # as causation, then thread its event id into the executor so the terminal
+    # ``decision.completed`` chains back to the approval. The executor owns the
+    # chain CLOSE (success or failure) — the router does NOT emit
+    # ``decision.completed`` here, mirroring the Fabric-objects executor. No double
+    # terminal.
+    pocket_create_blob = _pocket_create_blob(approved)
+    if pocket_create_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=pocket_create_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(pocket_create_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.pocket_proposals import executor as pocket_create_executor
+
+            await pocket_create_executor.execute_approved_pocket_create(
+                approved, human_event_id=human_event_id
+            )
+        except Exception:
+            logger.exception("pocket-create execution after approval failed (non-fatal)")
+
+    # When the approved Action carries a gated ``_instinct_rule`` blob, persist the
+    # proposed governed rule via ``rules.service.create_rule`` (workspace-scoped,
+    # owned by the blob's top-level ``user_id``). Same best-effort, lazy-import,
+    # never-break-the-approve-response shape as the Pocket-create hook above; the
+    # executor records success / failure on the Action itself. A non-instinct-rule
+    # Action skips this.
+    #
+    # The rule create is part of its own Decision-Graph chain (the propose helper
+    # minted the ``correlation_id`` + emitted ``agent.proposed``). Emit the
+    # ``human.corrected`` event for the approval HERE (the router owns the
+    # human-action emit on every approve path), citing the ``agent.proposed`` event
+    # id (stored on the blob as ``proposed_event_id`` — the same field the
+    # Pocket-create path reads, so ``_code_change_proposed_event_id`` resolves it)
+    # as causation, then thread its event id into the executor so the terminal
+    # ``decision.completed`` chains back to the approval. The executor owns the
+    # chain CLOSE (success or failure) — the router does NOT emit
+    # ``decision.completed`` here, mirroring the Pocket-create executor. No double
+    # terminal.
+    instinct_rule_blob = _instinct_rule_blob(approved)
+    if instinct_rule_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=instinct_rule_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(instinct_rule_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.instinct_rule_proposals import (
+                executor as instinct_rule_executor,
+            )
+
+            await instinct_rule_executor.execute_approved_instinct_rule(
+                approved, human_event_id=human_event_id
+            )
+        except Exception:
+            logger.exception("instinct-rule execution after approval failed (non-fatal)")
+
+    # FST-6 — when the approved Action carries a ``_fabric_conflict`` blob,
+    # PIN the chosen statement via the OSS steward verb (workspace-scoped
+    # Fabric store). Same best-effort, lazy-import, never-break-the-approve-
+    # response shape as the instinct-rule hook above; the executor records
+    # success / failure on the Action itself. The router owns the
+    # ``human.corrected`` emit (disposition ``edited`` when the approver
+    # adjusted the choice via the edit surface); the EXECUTOR owns the chain
+    # CLOSE — no ``decision.completed`` here, no double terminal.
+    fabric_conflict_blob = _fabric_conflict_blob(approved)
+    if fabric_conflict_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=fabric_conflict_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(fabric_conflict_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.fabric_conflicts import (
+                executor as fabric_conflict_executor,
+            )
+
+            await fabric_conflict_executor.execute_approved_fabric_conflict(
+                approved, human_event_id=human_event_id
+            )
+        except Exception:
+            logger.exception("fabric-conflict execution after approval failed (non-fatal)")
+
+    # MANDATES — when the approved Action carries a ``_belt_plan`` blob (the
+    # mandate foreman's shift plan), dispatch the plan executor. Same shape as
+    # the code-change hook: the router owns the ``human.corrected`` emit, the
+    # EXECUTOR owns the chain close (success or failure) — the router never
+    # emits ``decision.completed`` for belt_plan. Best-effort, lazy import,
+    # never breaks the approve response.
+    belt_plan_blob = _belt_plan_blob(approved)
+    if belt_plan_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=belt_plan_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_belt_plan_proposed_event_id(belt_plan_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.mandates import executor as mandate_executor
+
+            await mandate_executor.execute_approved_plan(approved, human_event_id=human_event_id)
+        except Exception:
+            logger.exception("belt_plan execution after approval failed (non-fatal)")
+
+    # BP-3 — when the approved Action carries an ``_artifact_change`` blob, MERGE
+    # the branch: promote the candidate version to published + (for pocket/site
+    # scope) trigger the deploy. The executor owns the merge state transitions +
+    # marks the Action executed/failed; the router owns the ``human.corrected``
+    # emit (citing ``agent.proposed`` as causation, same as the code-change /
+    # external-action paths — a merge proposal IS the chain origin). Same
+    # best-effort, lazy-import, never-break-the-approve-response shape as the
+    # hooks above. A non-artifact-change Action skips this.
+    artifact_change_blob = _artifact_change_blob(approved)
+    if artifact_change_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=artifact_change_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(artifact_change_blob),
+        )
+        try:
+            from pocketpaw_ee.versions import instinct_executor as artifact_executor
+
+            await artifact_executor.execute_approved_change(approved, human_event_id=human_event_id)
+        except Exception:
+            logger.exception("artifact-change merge after approval failed (non-fatal)")
+
+    # WA-2 — when the approved Action carries a gated ``_admin_action`` blob, fire
+    # the whitelisted workspace-admin write (e.g. a member role change) via
+    # ``admin_proposals.executor``. Same best-effort, lazy-import,
+    # never-break-the-approve-response shape as the external-action hook above; the
+    # executor RE-CHECKS the proposer's CURRENT RBAC role before firing and records
+    # success / failure on the Action itself. A non-admin-action Action skips this.
+    #
+    # The admin action is part of its own Decision-Graph chain (the propose helper
+    # minted the ``correlation_id`` + emitted ``agent.proposed``). The router owns
+    # the ``human.corrected`` emit HERE (citing ``agent.proposed`` off the blob's
+    # ``proposed_event_id`` as causation, same field the external-action path
+    # reads); the EXECUTOR owns the chain CLOSE (success or failure). The router
+    # does NOT emit ``decision.completed`` here — no double terminal.
+    admin_action_blob = _admin_action_blob(approved)
+    if admin_action_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=admin_action_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(admin_action_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.admin_proposals import executor as admin_action_executor
+
+            await admin_action_executor.execute_approved_admin_action(
+                approved, human_event_id=human_event_id
+            )
+        except Exception:
+            logger.exception("admin-action execution after approval failed (non-fatal)")
+
+    # gap2 — when the approved Action carries a ``_customer_reply`` blob (a
+    # paw-bar customer event awaiting a decision), deliver the owner's reply
+    # back to the customer surface. Same best-effort, lazy-import,
+    # never-break-the-approve-response shape as the hooks above. The operator's
+    # (possibly edited) recommendation is the wording the customer reads, so the
+    # edit path above feeds straight into the delivery.
+    try:
+        from pocketpaw_ee.paw_bar.decision_loop import (
+            customer_reply_blob,
+            deliver_customer_decision,
+        )
+
+        if customer_reply_blob(approved) is not None:
+            await deliver_customer_decision(approved, declined=False)
+    except Exception:
+        logger.exception("customer-decision delivery after approval failed (non-fatal)")
+
     return ApproveResponse(action=approved, correction=correction)
 
 
-async def _forward_to_soul(correction: Correction, action: Action) -> None:
-    """Hand off to the soul bridge — always best-effort, never breaks approval."""
+async def _forward_to_soul(correction: Correction, action: Action, workspace_id: str) -> None:
+    """Hand off to the soul bridge — always best-effort, never breaks approval.
+
+    ISO-2: takes the caller's ``workspace_id`` so the bridge's InstinctStore is
+    the tenant's own per-workspace file, not the shared one.
+    """
     try:
         from pocketpaw.instinct.correction_soul_bridge import CorrectionSoulBridge
         from pocketpaw.soul import get_soul_manager
@@ -937,7 +2589,7 @@ async def _forward_to_soul(correction: Correction, action: Action) -> None:
         manager = get_soul_manager()
         if manager is None:
             return
-        bridge = CorrectionSoulBridge(soul_manager=manager, store=_store())
+        bridge = CorrectionSoulBridge(soul_manager=manager, store=_store(workspace_id))
         await bridge.record(correction, action)
     except Exception:
         logger.exception("Correction soul-bridge failed (non-fatal)")
@@ -977,13 +2629,44 @@ async def reject_action(
          scope. The bridge is NOT invoked on reject so the router owns
          the chain close.
     """
-    store = _store()
+    store = _store(workspace_id)
     before = await store.get_action(action_id)
     if not before:
         raise HTTPException(404, "Action not found")
 
     # Touch-time security fix — same gate the approve path runs.
     _assert_pocket_write_workspace(before, workspace_id)
+    _assert_code_change_workspace(before, workspace_id)
+    _assert_external_action_workspace(before, workspace_id)
+    # Same tenancy gate for a gated Fabric-objects Action on the REJECT side —
+    # asymmetric tenant scope is no tenant scope: a cross-workspace reject must
+    # 403 before any mutation, exactly like the approve side.
+    _assert_fabric_objects_workspace(before, workspace_id)
+    # Same tenancy gate for a gated Pocket-create Action on the REJECT side —
+    # asymmetric tenant scope is no tenant scope: a cross-workspace reject must
+    # 403 before any mutation, exactly like the approve side.
+    _assert_pocket_create_workspace(before, workspace_id)
+    # Same tenancy gate for a gated governed-rule-create Action on the REJECT side —
+    # asymmetric tenant scope is no tenant scope: a cross-workspace reject must
+    # 403 before any mutation, exactly like the approve side.
+    _assert_instinct_rule_workspace(before, workspace_id)
+    # FST-6 — same tenancy gate for a conflict-stewardship Action on the REJECT
+    # side. Asymmetric tenant scope is no tenant scope: a cross-workspace reject
+    # (which would dismiss another tenant's conflict) must 403 before any
+    # mutation, exactly like the approve side.
+    _assert_fabric_conflict_workspace(before, workspace_id)
+    # Same tenancy gate for a mandate shift-plan Action (belt_plan) — its
+    # ``_belt_plan`` blob carries the workspace.
+    _assert_belt_plan_workspace(before, workspace_id)
+    # BP-3 — same tenancy gate for an artifact-change merge on the REJECT side.
+    # Asymmetric tenant scope is no tenant scope: a cross-workspace reject (which
+    # would discard another tenant's candidate) must 403 before any mutation,
+    # exactly like the approve side (pocketpaw#1183 / #1250).
+    _assert_artifact_change_workspace(before, workspace_id)
+    # WA-2 — same tenancy gate for a gated workspace-admin Action on the REJECT
+    # side. Asymmetric tenant scope is no tenant scope: a cross-workspace reject
+    # must 403 before any mutation, exactly like the approve side.
+    _assert_admin_action_workspace(before, workspace_id)
 
     reason = req.reason if req else ""
     rejector_id = str(user.id)
@@ -1013,7 +2696,566 @@ async def reject_action(
             reason=reason,
         )
 
+    # BS-4 — a rejected Belt ``_code_change`` Action closes its chain HERE
+    # (the executor never runs on reject). ``human.corrected(rejected)`` cites
+    # the ``agent.proposed`` event as causation; ``decision.completed(rejected,
+    # outcome=reason+comment)`` cites the human event so the chain reads
+    # ``agent.proposed → human.corrected → decision.completed`` cleanly. The
+    # reason text rides as the rejection comment on the terminal payload.
+    code_change_blob = _code_change_blob(action)
+    if code_change_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=code_change_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(code_change_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=code_change_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
+        # SC-2 — publish ``belt_run_updated`` (status=rejected, stage=done) on
+        # the workspace bus so the /belt page reflects the rejection live. No
+        # executor runs on reject, so this is the terminal event for a rejected
+        # run.
+        await _emit_belt_run_updated_safe(
+            workspace_id=workspace_id, action_id=str(action.id), status="rejected", stage="done"
+        )
+
+    # A rejected gated ``_external_action`` Action closes its chain HERE (the
+    # executor never runs on reject — the router owns the close, mirroring the
+    # code-change reject path). ``human.corrected(rejected)`` cites the
+    # ``agent.proposed`` event (off the blob's ``proposed_event_id``);
+    # ``decision.completed(rejected)`` cites the human event so the chain reads
+    # ``agent.proposed → human.corrected → decision.completed``.
+    external_action_blob = _external_action_blob(action)
+    if external_action_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=external_action_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(external_action_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=external_action_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
+
+    # A rejected gated ``_fabric_objects`` Action closes its chain HERE (the
+    # executor never runs on reject — the router owns the close, mirroring the
+    # external-action reject path). NO Fabric write happens.
+    # ``human.corrected(rejected)`` cites the ``agent.proposed`` event (off the
+    # blob's ``proposed_event_id``); ``decision.completed(rejected)`` cites the
+    # human event so the chain reads ``agent.proposed → human.corrected →
+    # decision.completed``.
+    fabric_objects_blob = _fabric_objects_blob(action)
+    if fabric_objects_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=fabric_objects_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(fabric_objects_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=fabric_objects_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
+
+    # A rejected gated ``_pocket_create`` Action closes its chain HERE (the
+    # executor never runs on reject — the router owns the close, mirroring the
+    # Fabric-objects reject path). NO Pocket is created.
+    # ``human.corrected(rejected)`` cites the ``agent.proposed`` event (off the
+    # blob's ``proposed_event_id``); ``decision.completed(rejected)`` cites the
+    # human event so the chain reads ``agent.proposed → human.corrected →
+    # decision.completed``.
+    pocket_create_blob = _pocket_create_blob(action)
+    if pocket_create_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=pocket_create_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(pocket_create_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=pocket_create_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
+
+    # A rejected gated ``_instinct_rule`` Action closes its chain HERE (the
+    # executor never runs on reject — the router owns the close, mirroring the
+    # Pocket-create reject path). NO governed rule is created.
+    # ``human.corrected(rejected)`` cites the ``agent.proposed`` event (off the
+    # blob's ``proposed_event_id``); ``decision.completed(rejected)`` cites the
+    # human event so the chain reads ``agent.proposed → human.corrected →
+    # decision.completed``.
+    instinct_rule_blob = _instinct_rule_blob(action)
+    if instinct_rule_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=instinct_rule_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(instinct_rule_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=instinct_rule_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
+
+    # FST-6 — a rejected ``_fabric_conflict`` Action closes its chain HERE
+    # (the executor never runs on reject — the router owns the close,
+    # mirroring the instinct-rule reject path). NO statement changes: the
+    # policy's provisional winner simply stands, and the sweep's
+    # reject-memory (the blob's ``conflict_signature``) keeps the same
+    # conflict from being re-staged until it materially changes.
+    fabric_conflict_blob = _fabric_conflict_blob(action)
+    if fabric_conflict_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=fabric_conflict_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(fabric_conflict_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=fabric_conflict_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
+
+    # MANDATES — a rejected ``_belt_plan`` Action closes its chain HERE (the
+    # plan executor never runs on reject), mirroring the code-change shape:
+    # ``human.corrected(rejected)`` cites ``agent.proposed``; the terminal
+    # cites the human event. The shift record is updated best-effort.
+    belt_plan_blob = _belt_plan_blob(action)
+    if belt_plan_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=belt_plan_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_belt_plan_proposed_event_id(belt_plan_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=belt_plan_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
+        await _mark_plan_rejected_safe(action, reason)
+
+    # BP-3 — a rejected ``_artifact_change`` Action DISCARDS its candidate (flips
+    # the candidate version to reverted) and closes its chain HERE (the merge
+    # executor never runs on reject — the router owns the close, mirroring the
+    # code-change reject path). The PUBLISHED pointer is left untouched: a
+    # rejection must never move what is live. ``human.corrected(rejected)`` cites
+    # ``agent.proposed``; the terminal cites the human event. The discard is a
+    # best-effort store nudge.
+    artifact_change_blob = _artifact_change_blob(action)
+    if artifact_change_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=artifact_change_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(artifact_change_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=artifact_change_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
+        try:
+            from pocketpaw_ee.versions import instinct_executor as artifact_executor
+
+            await artifact_executor.discard_rejected_change(action)
+        except Exception:
+            logger.exception("artifact-change discard after rejection failed (non-fatal)")
+
+    # WA-2 — a rejected gated ``_admin_action`` Action closes its chain HERE (the
+    # executor never runs on reject — the router owns the close, mirroring the
+    # external-action reject path). NO admin write happens.
+    # ``human.corrected(rejected)`` cites the ``agent.proposed`` event (off the
+    # blob's ``proposed_event_id``); ``decision.completed(rejected)`` cites the
+    # human event so the chain reads ``agent.proposed → human.corrected →
+    # decision.completed``.
+    admin_action_blob = _admin_action_blob(action)
+    if admin_action_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=admin_action_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(admin_action_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=admin_action_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
+
+    # gap2 — a rejected ``_customer_reply`` Action delivers a DECLINED decision
+    # (carrying the rejection reason) back to the customer surface. Same
+    # best-effort, lazy-import shape as the approve hook. The loop closes either
+    # way: the customer always gets an answer, approve or reject.
+    try:
+        from pocketpaw_ee.paw_bar.decision_loop import (
+            customer_reply_blob,
+            deliver_customer_decision,
+        )
+
+        if customer_reply_blob(action) is not None:
+            await deliver_customer_decision(action, declined=True)
+    except Exception:
+        logger.exception("customer-decision delivery after rejection failed (non-fatal)")
+
     return action
+
+
+# ---------------------------------------------------------------------------
+# F4 — edit-in-review PATCH endpoint
+# ---------------------------------------------------------------------------
+#
+# A reviewer mutates the editable sub-fields of a PENDING discovery proposal (rename an
+# inferred type, drop a spurious link, fix an inferred key, tighten a discovered rule's
+# CEL) BEFORE approving. The edit NEVER flips status — Approve stays a separate click,
+# so the Decision-Graph chain stays OPEN (``agent.proposed → human.corrected(edited)``
+# with NO ``decision.completed``).
+#
+# The security crux: tenancy is DUPLICATED on a discovery blob — the top-level
+# ``workspace_id`` (the gate reads this) AND, for ``_instinct_rule``, the SECOND copy at
+# ``rule_spec.scope.workspace_id`` (the executor scopes the persisted rule by this one).
+# The edit endpoint pins BOTH from the stored blob and refuses any client attempt to
+# change either (mismatch → 403). Miss the second copy and a tenant edits a proposal into
+# another workspace.
+
+
+def _pin_immutable(before_value: Any, request_value: Any) -> None:
+    """Raise 403 if a client tried to change an immutable (tenancy) field.
+
+    ``request_value`` is what the client sent for the field; ``before_value`` is the
+    stored value. A truthy ``request_value`` that differs from ``before_value`` is a
+    cross-workspace edit attempt — the same 403 + code the approve/reject gate raises.
+    A ``None`` / absent request value is fine: the caller pins ``before_value`` back.
+    """
+    if request_value is not None and str(request_value) != str(before_value):
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This proposal belongs to a different workspace",
+        )
+
+
+@router.patch(
+    "/instinct/actions/{action_id}/proposal",
+    response_model=ApproveResponse,
+    dependencies=[Depends(require_action_any_workspace("instinct.approve"))],
+)
+async def edit_proposal(
+    action_id: str,
+    req: EditProposalRequest,
+    user: Any = Depends(current_user),
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Edit the editable sub-fields of a PENDING discovery proposal before approving.
+
+    Mutates ONLY the editable blob sub-field matching the action's kind; does NOT flip
+    status. Steps:
+
+    1. Load + guard — 404 if missing, 409 if not PENDING (its chain is closed).
+    2. Tenancy gate FIRST — the matching ``_assert_*_workspace`` against the CURRENT
+       blob, before any mutation (the same chokepoint approve/reject use).
+    3. Resolve the editable sub-field by which blob key is present; 422 if the payload's
+       kind doesn't match the action's blob kind.
+    4. Immutability pin (the core security logic) — copy the stored blob, overwrite ONLY
+       the editable sub-key, force every immutable field back from the stored blob. For
+       ``_instinct_rule`` pin BOTH ``workspace_id`` AND ``rule_spec.scope.workspace_id``;
+       a client mismatch on either → 403.
+    5. Re-validate per blob type (422, never persist broken) — ``RuleDraft`` /
+       ``CreatePocketRequest`` model_validate; fabric shape-check.
+    6. Persist the mutated parameters via ``store.update_parameters`` (status-preserving).
+    7. Learning loop — ``compute_patches`` → ``Correction`` → ``record_correction`` →
+       ``_emit_human_corrected(disposition="edited")`` (NO ``decision.completed``).
+
+    Returns ``{action, correction}`` (the same shape as approve).
+    """
+    store = _store()
+    before = await store.get_action(action_id)
+    if not before:
+        raise HTTPException(404, "Action not found")
+
+    # 1 — only a PENDING proposal can be edited. An approved / rejected / executed
+    # action's chain is closed; an edit-in-review is meaningless after the gate flipped.
+    if before.status != ActionStatus.PENDING:
+        raise ConflictError(
+            "instinct.not_pending",
+            "Only a pending proposal can be edited",
+        )
+
+    # 2 — TENANCY GATE FIRST (before any mutation), against the CURRENT blob. The same
+    # cross-workspace chokepoint the approve / reject paths run. ``require_action_any_*``
+    # only proved the caller holds ``instinct.approve`` somewhere; this binds the Action
+    # to the caller's active workspace. Non-discovery blobs are unaffected (no-op).
+    _assert_fabric_objects_workspace(before, workspace_id)
+    _assert_pocket_create_workspace(before, workspace_id)
+    _assert_instinct_rule_workspace(before, workspace_id)
+
+    # 3 — resolve the ONE editable sub-field by which discovery blob the action carries.
+    params = dict(before.parameters or {})
+    blob_key, before_blob, editable, new_blob = _resolve_editable_blob(before, req)
+
+    # 5 — re-validate the proposed sub-shape (422; runs BEFORE persist so a broken blob
+    # never lands). The pin in _resolve already forced tenancy back / 403'd a mismatch.
+    _revalidate_blob(blob_key, new_blob)
+
+    # 6 — persist the mutated parameters bag (status-preserving).
+    params[blob_key] = new_blob
+    after = await store.update_parameters(action_id, params)
+    if after is None:
+        raise HTTPException(404, "Action not found")
+
+    # 7 — learning loop. compute_patches diffs the top-level parameters.<key>; a rule_spec
+    # edit yields a patch at parameters._instinct_rule. Record the Correction, then emit
+    # human.corrected(edited) — the SAME helper approve uses — citing the agent.proposed
+    # event as causation. We do NOT emit decision.completed: the chain stays OPEN for the
+    # eventual approve click.
+    actor_id = str(user.id)
+    correction: Correction | None = None
+    patches = compute_patches(before, after)
+    if patches:
+        correction = Correction(
+            action_id=before.id,
+            pocket_id=before.pocket_id,
+            actor=actor_id,
+            patches=patches,
+            context_summary=summarize_correction(before, patches),
+            action_title=before.title,
+        )
+        await store.record_correction(correction)
+        await _forward_to_soul(correction, after, workspace_id)
+
+    note = correction.context_summary if correction is not None else None
+    _emit_human_corrected(
+        blob=new_blob,
+        action=after,
+        user_id=actor_id,
+        workspace_id=workspace_id,
+        disposition="edited",
+        note=note,
+        causation_override=_code_change_proposed_event_id(new_blob),
+    )
+
+    return ApproveResponse(action=after, correction=correction)
+
+
+def _resolve_editable_blob(
+    before: Action, req: EditProposalRequest
+) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Resolve which discovery blob the action carries, validate the payload kind matches,
+    and return ``(blob_key, before_blob, editable_subfield, new_blob)`` with EVERY
+    immutable field already pinned from ``before_blob`` (a client mismatch → 403).
+
+    422 if the action carries no editable discovery blob, or the payload's kind does not
+    match the action's blob kind.
+    """
+    fabric_before = _fabric_objects_blob(before)
+    pocket_before = _pocket_create_blob(before)
+    rule_before = _instinct_rule_blob(before)
+
+    # --- _instinct_rule -----------------------------------------------------
+    if rule_before is not None:
+        if req.rule_spec is None:
+            raise ValidationError(
+                "instinct.edit_kind_mismatch",
+                "This proposal is an instinct rule; send rule_spec",
+            )
+        # The SECOND tenancy copy lives at rule_spec.scope.workspace_id — pin it. A
+        # foreign value here would re-scope the persisted rule into another workspace.
+        before_scope_ws = (rule_before.get("rule_spec") or {}).get("scope", {}).get("workspace_id")
+        incoming_spec = dict(req.rule_spec)
+        incoming_scope = dict(incoming_spec.get("scope") or {})
+        _pin_immutable(before_scope_ws, incoming_scope.get("workspace_id"))
+        incoming_scope["workspace_id"] = before_scope_ws
+        incoming_spec["scope"] = incoming_scope
+
+        # The top-level tenancy copy — pin it (and 403 a smuggled foreign value).
+        _pin_immutable(rule_before.get("workspace_id"), req.workspace_id)
+
+        new_blob = dict(rule_before)
+        new_blob["rule_spec"] = incoming_spec
+        # Force EVERY immutable top-level field back from the stored blob.
+        for key in (
+            "workspace_id",
+            "user_id",
+            "schema",
+            "kind",
+            "correlation_id",
+            "proposed_event_id",
+            "summary",
+        ):
+            if key in rule_before:
+                new_blob[key] = rule_before[key]
+        return ("_instinct_rule", rule_before, incoming_spec, new_blob)
+
+    # --- _pocket_create -----------------------------------------------------
+    if pocket_before is not None:
+        if req.pocket_spec is None:
+            raise ValidationError(
+                "instinct.edit_kind_mismatch",
+                "This proposal creates a pocket; send pocket_spec",
+            )
+        _pin_immutable(pocket_before.get("workspace_id"), req.workspace_id)
+        # Strip any sneaked workspace / owner keys out of the editable spec at the same
+        # chokepoint the propose path uses, then force the name back if the client dropped
+        # it (CreatePocketRequest requires it; the original carried it).
+        from pocketpaw_ee.cloud.pocket_proposals.propose import _normalize_pocket_spec
+
+        before_name = (pocket_before.get("pocket_spec") or {}).get("name", "")
+        normalized = _normalize_pocket_spec(
+            ripple_spec=req.pocket_spec.get("rippleSpec") or req.pocket_spec.get("ripple_spec"),
+            name=str(req.pocket_spec.get("name") or before_name),
+            template_slug=req.pocket_spec.get("templateSlug")
+            or req.pocket_spec.get("template_slug"),
+            extra={
+                k: v
+                for k, v in req.pocket_spec.items()
+                if k not in {"rippleSpec", "ripple_spec", "name", "templateSlug", "template_slug"}
+            },
+        )
+        new_blob = dict(pocket_before)
+        new_blob["pocket_spec"] = normalized
+        for key in (
+            "workspace_id",
+            "user_id",
+            "schema",
+            "kind",
+            "correlation_id",
+            "proposed_event_id",
+            "summary",
+        ):
+            if key in pocket_before:
+                new_blob[key] = pocket_before[key]
+        return ("_pocket_create", pocket_before, normalized, new_blob)
+
+    # --- _fabric_objects ----------------------------------------------------
+    if fabric_before is not None:
+        if req.fabric is None:
+            raise ValidationError(
+                "instinct.edit_kind_mismatch",
+                "This proposal writes fabric objects; send fabric",
+            )
+        _pin_immutable(fabric_before.get("workspace_id"), req.workspace_id)
+        new_blob = dict(fabric_before)
+        # Replace ONLY the three editable lists; everything else (workspace_id, schema,
+        # kind, chain ids, summary) is left exactly as stored.
+        for sub in ("object_types", "objects", "links"):
+            if sub in req.fabric:
+                new_blob[sub] = req.fabric[sub]
+        for key in (
+            "workspace_id",
+            "schema",
+            "kind",
+            "correlation_id",
+            "proposed_event_id",
+            "summary",
+        ):
+            if key in fabric_before:
+                new_blob[key] = fabric_before[key]
+        return ("_fabric_objects", fabric_before, new_blob, new_blob)
+
+    raise ValidationError(
+        "instinct.not_editable",
+        "This action carries no editable discovery proposal",
+    )
+
+
+def _revalidate_blob(blob_key: str, new_blob: dict[str, Any]) -> None:
+    """Re-validate the mutated sub-shape per blob kind (422 on failure, never persist).
+
+    ``_instinct_rule`` parses the CEL ``when`` (a tightened-but-malformed ``when`` fails
+    HERE, exactly as the executor would); ``_pocket_create`` re-parses the
+    ``CreatePocketRequest`` body; ``_fabric_objects`` shape-checks the editable lists.
+    """
+    if blob_key == "_instinct_rule":
+        from pocketpaw_ee.discovery.rule_models import RuleDraft
+
+        try:
+            RuleDraft.model_validate(new_blob.get("rule_spec") or {})
+        except Exception as exc:  # noqa: BLE001 — surface as a clean 422
+            raise ValidationError(
+                "instinct.invalid_rule_spec", f"Edited rule is invalid: {exc}"
+            ) from exc
+    elif blob_key == "_pocket_create":
+        from pocketpaw_ee.cloud.pockets.dto import CreatePocketRequest
+
+        try:
+            CreatePocketRequest.model_validate(new_blob.get("pocket_spec") or {})
+        except Exception as exc:  # noqa: BLE001
+            raise ValidationError(
+                "instinct.invalid_pocket_spec", f"Edited pocket spec is invalid: {exc}"
+            ) from exc
+    elif blob_key == "_fabric_objects":
+        for sub in ("object_types", "objects", "links"):
+            items = new_blob.get(sub)
+            if items is None:
+                continue
+            if not isinstance(items, list) or any(not isinstance(it, dict) for it in items):
+                raise ValidationError(
+                    "instinct.invalid_fabric_objects",
+                    f"Edited fabric '{sub}' must be a list of objects",
+                )
 
 
 def _apply_edits(before: Action, req: ApproveRequest) -> tuple[Action, set[str]]:
@@ -1093,9 +3335,14 @@ async def list_corrections(
     pocket_id: str | None = Query(None, description="Filter by pocket ID"),
     action_id: str | None = Query(None, description="Filter by action ID"),
     limit: int = Query(100, ge=1, le=500),
+    workspace_id: str = Depends(current_workspace_id),
 ):
-    """List corrections captured when humans edited proposed actions."""
-    store = _store()
+    """List corrections captured when humans edited proposed actions.
+
+    ISO-2: corrections live in the tenant's own ``instinct.db``, so resolving the
+    store by ``workspace_id`` keeps one tenant's corrections out of another's.
+    """
+    store = _store(workspace_id)
     if action_id:
         corrections = await store.get_corrections_for_action(action_id)
     elif pocket_id:
@@ -1131,8 +3378,14 @@ async def query_audit(
         ),
     ),
     limit: int = Query(100, ge=1, le=1000, description="Max entries to return"),
+    workspace_id: str = Depends(current_workspace_id),
 ):
     """Query instinct audit log entries with optional filters.
+
+    W4a — scoped to the caller's active workspace (plus legacy NULL-workspace
+    rows) so a tenant's auditor only reads that tenant's decision trail. The
+    scope is a READ FILTER on which rows come back; ``/instinct/audit/verify``
+    stays global because chain integrity is a property of the whole ledger.
 
     DEPRECATED: Cluster C / PR4 made ``/api/v1/runtime/audit`` the canonical
     audit surface with workspace rollup + FTS. This endpoint stays as the
@@ -1143,12 +3396,13 @@ async def query_audit(
     """
     response.headers["Deprecation"] = "true"
     response.headers["Link"] = '</api/v1/runtime/audit>; rel="successor-version"'
-    entries = await _store().query_audit(
+    entries = await _store(workspace_id).query_audit(
         pocket_id=pocket_id,
         category=category,
         event=event,
         actor=actor,
         limit=limit,
+        workspace_id=workspace_id,
     )
     return AuditListResponse(entries=entries, total=len(entries))
 
@@ -1165,24 +3419,93 @@ class HydratedAuditEntry(BaseModel):
     )
 
 
-# /instinct/audit/export must be declared BEFORE the parameterised
-# /instinct/audit/{audit_id} below — FastAPI routes match in registration
-# order, and a literal-vs-parameter collision would otherwise route
-# /audit/export to the {audit_id} handler and 404.
+class AuditChainBreak(BaseModel):
+    """The first row where the audit hash chain failed to verify."""
+
+    id: str = Field(description="Audit entry id of the first broken row.")
+    rowid: int = Field(description="SQLite rowid (insertion order) of the broken row.")
+    reason: str = Field(description="Why the row failed: content edit vs. prev-link break.")
+
+
+class AuditVerifyResponse(BaseModel):
+    """Result of walking the tamper-evident audit hash chain.
+
+    ``intact`` is the headline an auditor/insurer reads. ``broken_at`` is
+    present (non-null) only when ``intact`` is False, pointing at the first
+    row that fails to verify. ``legacy_unhashed`` counts pre-W2b rows that
+    predate the chain and are not enforced.
+    """
+
+    intact: bool
+    total: int
+    hashed: int
+    legacy_unhashed: int
+    checked: int
+    broken_at: AuditChainBreak | None = None
+
+
+# /instinct/audit/export and /instinct/audit/verify must be declared BEFORE the
+# parameterised /instinct/audit/{audit_id} below — FastAPI routes match in
+# registration order, and a literal-vs-parameter collision would otherwise
+# route /audit/export (or /audit/verify) to the {audit_id} handler and 404.
 @router.get(
     "/instinct/audit/export",
     dependencies=[Depends(require_action_any_workspace("instinct.audit"))],
 )
 async def export_audit(
     pocket_id: str | None = Query(None, description="Filter by pocket ID"),
+    workspace_id: str = Depends(current_workspace_id),
 ):
-    """Export the full instinct audit log as JSON for compliance."""
-    data = await _store().export_audit(pocket_id=pocket_id)
+    """Export the instinct audit log as JSON for compliance.
+
+    W4a — the exported BODY is scoped to the caller's active workspace (plus
+    legacy NULL-workspace rows) so a tenant's compliance export never carries
+    another tenant's decision trail. The ``X-Audit-Chain-Intact`` header still
+    reflects the WHOLE ledger's integrity (the chain is global by design), so a
+    downstream consumer that only handles the file body still learns whether
+    the ledger verified at export time. Call ``GET /instinct/audit/verify`` for
+    the full break-point detail.
+    """
+    store = _store(workspace_id)
+    data = await store.export_audit(pocket_id=pocket_id, workspace_id=workspace_id)
+    verdict = await store.verify_audit_chain()
     return Response(
         content=data,
         media_type="application/json",
-        headers={"Content-Disposition": 'attachment; filename="instinct_audit.json"'},
+        headers={
+            "Content-Disposition": 'attachment; filename="instinct_audit.json"',
+            "X-Audit-Chain-Intact": "true" if verdict["intact"] else "false",
+        },
     )
+
+
+@router.get(
+    "/instinct/audit/verify",
+    response_model=AuditVerifyResponse,
+    dependencies=[Depends(require_action_any_workspace("instinct.audit"))],
+)
+async def verify_audit_chain(workspace_id: str = Depends(current_workspace_id)):
+    """Verify the tamper-evident audit hash chain end to end.
+
+    Walks this workspace's ``instinct_audit`` ledger in insertion order,
+    recomputes each row's hash from its canonical content + the running previous
+    hash, and reports whether the chain is intact. Any insertion, edit, or
+    deletion of a hashed row surfaces as ``intact=false`` with ``broken_at``
+    pointing at the first failing row — proof an auditor or insurer can run
+    themselves.
+
+    ISO-2: the chain is now PER WORKSPACE. Each tenant has its own
+    ``instinct.db`` with its own genesis→…→head chain, so this endpoint verifies
+    the CALLER'S chain (resolved via ``current_workspace_id``), not a global
+    chain mixing tenants. That is the correct multi-tenant model — a tenant's
+    auditor verifies only that tenant's ledger, and one tenant's tampering can
+    never flip another tenant's verdict. The chain spans the whole (per-tenant)
+    file rather than a single pocket, so there is no pocket filter. Pre-W2b rows
+    without a hash are counted under ``legacy_unhashed`` and are not enforced —
+    see the store docstring for the genesis/legacy boundary.
+    """
+    verdict = await _store(workspace_id).verify_audit_chain()
+    return AuditVerifyResponse(**verdict)
 
 
 @router.get(
@@ -1193,6 +3516,7 @@ async def export_audit(
 async def get_audit_entry(
     audit_id: str,
     hydrate: int = Query(0, description="Pass 1 to expand referenced IDs"),
+    workspace_id: str = Depends(current_workspace_id),
 ):
     """Fetch a single audit entry, optionally hydrated with referenced content.
 
@@ -1201,10 +3525,18 @@ async def get_audit_entry(
     - `fabric_snapshots` — immutable snapshots captured at decision time
     - `fabric_current` — live state of the referenced objects (so a reviewer
       can compare what the agent saw against what the object is now)
+
+    W4a — the lookup is scoped to the caller's active workspace, so requesting
+    another tenant's audit id returns 404 (never leaking its existence or
+    content) rather than the row.
+
+    The lookup is a direct single-row fetch by id (``store.get_audit_entry``),
+    so an entry older than the audit query page size is still retrievable —
+    the prior path paged the most-recent rows and matched in Python, 404-ing on
+    valid ids past that window for a tenant with a large ledger.
     """
-    store = _store()
-    entries = await store.query_audit(limit=1000)
-    entry = next((e for e in entries if e.id == audit_id), None)
+    store = _store(workspace_id)
+    entry = await store.get_audit_entry(audit_id, workspace_id=workspace_id)
     if entry is None:
         raise HTTPException(404, "Audit entry not found")
 
@@ -1216,7 +3548,7 @@ async def get_audit_entry(
     current: list[dict[str, Any]] = []
     if trace is not None:
         snapshots = await store.get_snapshots_for_audit(audit_id)
-        current = await _fetch_current_fabric(trace.fabric_queries)
+        current = await _fetch_current_fabric(trace.fabric_queries, workspace_id)
 
     return HydratedAuditEntry(
         entry=entry,
@@ -1237,21 +3569,27 @@ def _decode_trace(entry: AuditEntry) -> ReasoningTrace | None:
         return None
 
 
-async def _fetch_current_fabric(object_ids: list[str]) -> list[dict[str, Any]]:
-    """Look up live Fabric objects by ID, tolerating a missing ee module."""
+async def _fetch_current_fabric(object_ids: list[str], workspace_id: str) -> list[dict[str, Any]]:
+    """Look up live Fabric objects by ID, tolerating a missing ee module.
+
+    ISO-2: takes the caller's ``workspace_id`` so the Fabric store is the
+    tenant's own per-workspace file (ISO-1). Passing it is also REQUIRED on a
+    cloud path — an unscoped Fabric-store fetch there now fails closed — and it
+    keeps the W4a in-row filter on ``get_object``.
+    """
     if not object_ids:
         return []
     try:
-        from pocketpaw_ee.api import get_fabric_store
+        from pocketpaw.stores import get_fabric_store
 
-        fabric = get_fabric_store()
+        fabric = get_fabric_store(workspace_id=workspace_id)
     except ImportError:
         return []
 
     results: list[dict[str, Any]] = []
     for oid in object_ids:
         try:
-            obj = await fabric.get_object(oid)
+            obj = await fabric.get_object(oid, workspace_id=workspace_id)
         except Exception:
             obj = None
         if obj is None:

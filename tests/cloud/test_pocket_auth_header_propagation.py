@@ -2,6 +2,13 @@
 # Created: 2026-05-24 — Runtime contract test for outbound auth header
 # propagation across BOTH pocket HTTP executors (read + write).
 #
+# Updated: 2026-06-10 (W2a — deny-by-default Instinct governance) — the
+# local write `_write_action()` helper now marks its binding EXPLICITLY
+# EXEMPT (`instinct_exempt=True, requires_instinct=False`); without it the
+# default-True `requires_instinct` would PARK the write at the gate and no
+# HTTP call (and so no auth header) would be sent, breaking these
+# propagation assertions.
+#
 # What this pins:
 #   `_http_guard._auth_headers` is unit-tested directly for header SHAPE
 #   (bearer / api_key / basic). What was missing — and what this file locks —
@@ -86,7 +93,19 @@ def _source_spec() -> dict:
 
 
 def _write_action(path: str = "/echo") -> dict:
-    return {"kind": "write_binding", "method": "POST", "path": path, "params": {}}
+    # W2a — deny-by-default: `ActionBinding.requires_instinct` defaults True,
+    # so a plain binding PARKS instead of firing. These tests assert on the
+    # auth header sent on the actual HTTP call, so the binding must be
+    # EXPLICITLY EXEMPT (`instinct_exempt=True, requires_instinct=False`) to
+    # reach gate 8 and fire.
+    return {
+        "kind": "write_binding",
+        "method": "POST",
+        "path": path,
+        "params": {},
+        "instinct_exempt": True,
+        "requires_instinct": False,
+    }
 
 
 def _allow(path_pattern: str = "/echo") -> list[dict]:

@@ -137,7 +137,7 @@ async def _refresh_one_pocket(pocket: dict) -> None:
             _last_run[(pocket_id, key)] = now
         logger.debug("refresh-scheduler: pocket %s has interval sources but no backend", pocket_id)
         return
-    base_url, auth_type, auth_header, token, _allowed, _route = creds
+    base_url, auth_type, auth_header, token, _allowed, _route, backend_type, connector_name = creds
     ripple_spec = await pockets_service.get_pocket_ripple_spec(workspace_id, pocket_id)
     if ripple_spec is None:
         return
@@ -164,6 +164,8 @@ async def _refresh_one_pocket(pocket: dict) -> None:
                 token=token,
                 only_source=key,
                 workspace_id=workspace_id,
+                backend_type=backend_type,
+                connector_name=connector_name,
             )
             if result.get("errors"):
                 logger.debug(
@@ -196,15 +198,35 @@ async def run_one_pass() -> int:
         logger.exception("refresh-scheduler: failed to list interval-source pockets")
         return 0
 
+    # Per-workspace opt-out (feat/external-alerting-c2c3): pockets in a workspace
+    # that turned its background sweeps off are skipped. One deduped check per
+    # unique workspace; fails OPEN so a config-read hiccup keeps the default.
+    from pocketpaw_ee.cloud.automations_status.service import (
+        filter_sweep_enabled_workspaces,
+    )
+
+    enabled_ws = await filter_sweep_enabled_workspaces(
+        {ws for p in pockets if (ws := p.get("workspace_id"))}
+    )
+
+    visited = 0
     for pocket in pockets:
+        if pocket.get("workspace_id") not in enabled_ws:
+            logger.debug(
+                "refresh-scheduler: workspace=%s opted out — skipping pocket %s",
+                pocket.get("workspace_id"),
+                pocket.get("pocket_id"),
+            )
+            continue
         try:
             await _refresh_one_pocket(pocket)
+            visited += 1
         except Exception:
             logger.exception(
                 "refresh-scheduler: pass failed for pocket %s",
                 pocket.get("pocket_id"),
             )
-    return len(pockets)
+    return visited
 
 
 async def _loop() -> None:

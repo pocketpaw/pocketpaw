@@ -8,6 +8,9 @@
 #     wrapper). Net = override + instructions + knowledge.
 #   * ``skill_names`` — forwarded to the backend's ``run`` ONLY when non-empty
 #     (withhold-when-empty, so the 6 non-Claude backends keep their signature).
+# Updated: 2026-07-08 (CS-13, feat/per-send-model-override) — adds coverage for
+#   ``model_override`` forwarding: reaches the backend verbatim when the client
+#   picked a model, WITHHELD when None (the same withhold-when-empty contract).
 
 from __future__ import annotations
 
@@ -129,4 +132,76 @@ async def test_skill_names_withheld_when_empty(monkeypatch):
     backend = await _run_with(monkeypatch)
     assert "skill_names" not in backend.last_kwargs, (
         "empty skill_names must be withheld so non-Claude backends keep their signature"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A2b — agent's OWN skill_refs materialize on every run path
+# ---------------------------------------------------------------------------
+
+
+def _instance_with_skill_refs(backend, refs):
+    inst = _instance_with(backend)
+    inst.config = {**inst.config, "skill_refs": refs}
+    return inst
+
+
+async def _run_with_instance(monkeypatch, inst, **run_kwargs):
+    pool = AgentPool()
+
+    async def _fake_get(agent_id):
+        return inst
+
+    monkeypatch.setattr(pool, "get", _fake_get)
+    await _drain(pool, **run_kwargs)
+
+
+async def test_agent_skill_refs_forwarded_without_explicit_skill_names(monkeypatch):
+    backend = _CapturingBackend()
+    inst = _instance_with_skill_refs(backend, ["snctm-vetting"])
+    await _run_with_instance(monkeypatch, inst)
+    # No skill_names passed by the caller (the DM/bridge path) — the agent's own
+    # skill_refs must still reach the backend.
+    assert backend.last_kwargs.get("skill_names") == frozenset({"snctm-vetting"})
+
+
+async def test_agent_skill_refs_union_with_explicit_skill_names(monkeypatch):
+    backend = _CapturingBackend()
+    inst = _instance_with_skill_refs(backend, ["snctm-vetting"])
+    await _run_with_instance(monkeypatch, inst, skill_names=frozenset({"github"}))
+    assert backend.last_kwargs.get("skill_names") == frozenset({"snctm-vetting", "github"})
+
+
+async def test_no_skill_refs_keeps_caller_skill_names(monkeypatch):
+    backend = _CapturingBackend()
+    inst = _instance_with(backend)  # no skill_refs
+    await _run_with_instance(monkeypatch, inst, skill_names=frozenset({"github"}))
+    assert backend.last_kwargs.get("skill_names") == frozenset({"github"})
+
+
+async def test_no_skill_refs_no_skill_names_withheld(monkeypatch):
+    backend = _CapturingBackend()
+    inst = _instance_with(backend)  # no skill_refs, no caller skill_names
+    await _run_with_instance(monkeypatch, inst)
+    assert "skill_names" not in backend.last_kwargs
+
+
+# ---------------------------------------------------------------------------
+# CS-13 — model_override forwarding (withhold-when-empty)
+# ---------------------------------------------------------------------------
+
+
+async def test_model_override_forwarded_when_set(monkeypatch):
+    """A per-send model choice reaches the backend's ``run`` verbatim so the
+    Claude SDK backend can make it win over its own model selection."""
+    backend = await _run_with(monkeypatch, model_override="claude-haiku-4-5-20251001")
+    assert backend.last_kwargs.get("model_override") == "claude-haiku-4-5-20251001"
+
+
+async def test_model_override_withheld_when_none(monkeypatch):
+    """No picker (None) must be WITHHELD so the 6 non-Claude backends keep their
+    narrower signature — the same contract as skill_names / deny_mcp_tool_ids."""
+    backend = await _run_with(monkeypatch)
+    assert "model_override" not in backend.last_kwargs, (
+        "None model_override must be withheld so non-Claude backends keep their signature"
     )

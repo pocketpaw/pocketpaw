@@ -1,5 +1,9 @@
 # Tests for Deep Work Dependency Scheduler
 # Created: 2026-02-12
+# Updated: 2026-06-23 (feat/svl-1-verify-stamp) — _make_task now accepts
+#   ``output`` and ``success_criteria`` kwargs so Self-Verifying-Loop tests
+#   (SVL-1 and later slices) can construct completed tasks carrying a result
+#   and their intake criteria.
 #
 # Covers:
 # - get_ready_tasks: blockers satisfied, excludes running tasks
@@ -64,8 +68,19 @@ def _make_task(
     task_type: str = "agent",
     assignee_ids: list[str] | None = None,
     title: str = "",
+    output: str | None = None,
+    success_criteria: list[str] | None = None,
 ) -> Task:
-    """Helper to create a Task with specific fields."""
+    """Helper to create a Task with specific fields.
+
+    ``output`` and ``success_criteria`` let Self-Verifying-Loop tests build a
+    completed task with a result and its intake criteria. ``success_criteria``
+    rides on ``metadata`` (the same key the planner stamps at intake), so the
+    verifier can be exercised against a constructed task.
+    """
+    metadata: dict = {}
+    if success_criteria is not None:
+        metadata["success_criteria"] = success_criteria
     return Task(
         id=task_id,
         title=title or f"Task {task_id}",
@@ -74,6 +89,8 @@ def _make_task(
         blocked_by=blocked_by or [],
         task_type=task_type,
         assignee_ids=assignee_ids or [],
+        output=output,
+        metadata=metadata,
     )
 
 

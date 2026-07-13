@@ -30,6 +30,25 @@
 #   listener so the test suite can pin the contract.
 #   `"decision.outcome_attached"` is used as a STRING LITERAL (the
 #   namespace registration in soul-protocol is parallel work — Slice 0).
+# Updated: 2026-06-11 (gap-3 outcome VALUE metering) — Layer 4 is no longer
+#   hardcoded `None`. `emit_pocket_outcome` now accepts `outcome_value` /
+#   `outcome_unit` (the author-time billable pair declared on the binding)
+#   and `record_outcome` persists them on the ledger row (via the defensive
+#   `_coerce_value` + whole-pair guard, so a torn half-pair degrades to a
+#   count-only row rather than corrupting the total). New `meter_outcomes`
+#   is the aggregation READ surface: it sums value BY unit over a
+#   since/until window per workspace and returns count + total_value per
+#   unit — the queryable "pay for governed outcomes" figure. Workspace-
+#   scoped with the same defense-in-depth tenant filter as `count_outcomes`.
+#   Deferred (NOT here): invoicing, payment, currency, pricing-rules engine,
+#   disputes/clawback (outcome-spec.md Decisions 4/5/7).
+# Updated: 2026-06-11 (gap-housekeeping) — `meter_outcomes` no longer compares
+#   the period window lexicographically on raw ISO strings. The new `_parse_ts`
+#   helper normalizes the stored `occurred_at` AND the since/until bounds to
+#   UTC-aware datetimes before comparing, so the same instant written as `...Z`,
+#   `...+00:00`, or an offset (`...-04:00`) sorts correctly into the window. The
+#   since-inclusive / until-exclusive contract is unchanged; a torn/unparseable
+#   timestamp falls back to the old byte-wise compare rather than crashing.
 from __future__ import annotations
 
 import json
@@ -42,7 +61,13 @@ from uuid import UUID, uuid4
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import PocketOutcomeEvent
 from pocketpaw_ee.cloud.outcomes.domain import OutcomeRecord
-from pocketpaw_ee.cloud.outcomes.dto import CountOutcomesRequest, OutcomeCountResponse
+from pocketpaw_ee.cloud.outcomes.dto import (
+    CountOutcomesRequest,
+    MeterOutcomesRequest,
+    MeterOutcomesResponse,
+    OutcomeCountResponse,
+    UnitMeter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +80,58 @@ def set_ledger_dir(path: str | Path) -> None:
     """Override the outcomes ledger directory (test seam)."""
     global _LEDGER_DIR
     _LEDGER_DIR = Path(path)
+
+
+def _parse_ts(raw: object) -> datetime | None:
+    """Parse an ISO-8601 timestamp to a timezone-aware UTC ``datetime``.
+
+    The stored ``occurred_at`` and the ``since`` / ``until`` bounds can each
+    arrive in a DIFFERENT textual form for the SAME instant — ``...Z``,
+    ``...+00:00``, or an offset like ``...-04:00``. A lexicographic string
+    compare sorts those wrong (``"...Z" > "...+00:00"`` byte-wise even though
+    they are equal instants, and an offset timestamp sorts on its local digits,
+    not its UTC instant). Parsing to a UTC-normalized ``datetime`` makes the
+    window comparison correct regardless of representation.
+
+    ``Z`` is rewritten to ``+00:00`` for ``fromisoformat`` (Python < 3.11 does
+    not accept ``Z``). A naive timestamp (no offset) is assumed UTC — the
+    producer stamps ``datetime.now(UTC)``, so a stored value is always
+    UTC-aware, and a hand-edited naive value is most safely read as UTC.
+    Returns ``None`` when the value is empty or unparseable, so the caller can
+    fall back to the byte-wise compare rather than crash on a torn row.
+    """
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _coerce_value(raw: object) -> float | None:
+    """Coerce a raw outcome value to ``float``, or ``None`` if it can't be.
+
+    The value arrives off a bus event payload (or, on count, off a JSON
+    ledger row), so it may be ``int``, ``float``, a numeric string, or
+    junk. A bool is rejected explicitly — ``bool`` is an ``int`` subclass
+    in Python and ``True`` would silently become ``1.0``. Anything that
+    does not parse drops the row to count-only rather than corrupting the
+    billable total.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def _ledger_path(workspace_id: str) -> Path:
@@ -78,26 +155,43 @@ async def emit_pocket_outcome(
     via_instinct: bool,
     instinct_action_id: str | None = None,
     decision_id: str | None = None,
+    outcome_value: float | None = None,
+    outcome_unit: str | None = None,
+    compensated: bool = False,
 ) -> None:
     """Emit a ``pocket.outcome`` event for a successful write action.
 
-    Called by the pockets router (a direct, non-gated write) and by
+    Called by the pockets router (a direct, non-gated write), by
     ``instinct_bridge.execute_approved_write`` (a write fired after
-    Instinct approval) AFTER ``run_action`` returns ``ok:true``.
+    Instinct approval), and by ``saga.run_action_sequence`` (a
+    compensating write fired on rollback) AFTER ``run_action`` returns
+    ``ok:true``.
 
     A binding that declared no ``outcome`` passes ``outcome=None`` — this
     is a NO-OP, no event is emitted. Only a named outcome produces an
     event. ``emit`` itself never raises, so a bus failure here can never
     break the write that already succeeded.
 
-    ``outcome_value`` / ``outcome_unit`` are emitted as ``None`` — Layer 4
-    (billing) is reserved and this build never assigns a monetary value.
+    ``outcome_value`` / ``outcome_unit`` are the gap-3 billable-value pair.
+    A producer that resolved a per-action value (from the binding's
+    author-time declaration) passes them here; they ride the event onto the
+    ledger row so the aggregation surface can sum value BY unit per
+    workspace. Both default to ``None`` — a count-only outcome (no monetary
+    value) leaves the meter exactly as it was before pricing. The binding
+    validator guarantees the pair is whole (both set or both ``None``) by
+    the time it reaches here, so the meter never sees a value with no unit.
 
     ``decision_id`` is the RFC 07 Slice 2 back-reference — pass the id
     of the Decision in the decision graph that this outcome resolved,
     when the caller has one in hand. ``None`` is fine for writers that
     don't yet know their Decision (legacy producers); the listener
     only fires the back-reference path when the id is present.
+
+    ``compensated`` (RFC 05 Saga Compensate) is ``True`` when this outcome
+    is a rollback — a compensating write fired because a later step in a
+    multi-step write sequence failed. The ledger records it so the meter
+    can net a refunded "renewal_completed" against the forward one instead
+    of over-counting. Defaults ``False`` (an ordinary forward outcome).
     """
     if not outcome:
         # No declared outcome — nothing to meter. The write still
@@ -114,11 +208,15 @@ async def emit_pocket_outcome(
                 "via_instinct": via_instinct,
                 "instinct_action_id": instinct_action_id,
                 "occurred_at": datetime.now(UTC).isoformat(),
-                # Layer 4 reserved — billing is not wired in this build.
-                "outcome_value": None,
-                "outcome_unit": None,
+                # gap-3 — the billable value/unit. `None`/`None` for a
+                # count-only outcome; a real figure when the binding
+                # declared one. The aggregation surface sums value by unit.
+                "outcome_value": outcome_value,
+                "outcome_unit": outcome_unit,
                 # RFC 07 Slice 2 — back-reference to the decision graph.
                 "decision_id": decision_id,
+                # RFC 05 Saga Compensate — True for a rollback outcome.
+                "compensated": compensated,
             }
         )
     )
@@ -148,6 +246,21 @@ async def record_outcome(event) -> None:  # type: ignore[no-untyped-def]
     decision_id_raw = data.get("decision_id")
     decision_id = str(decision_id_raw) if decision_id_raw else None
 
+    # gap-3 — the billable value/unit. The pair is whole or absent (the
+    # binding validator enforced it upstream), but `record_outcome` is the
+    # ledger's last gate and also runs on hand-published bus events, so be
+    # defensive: a value that does not coerce to float, or a value with no
+    # unit, is dropped to a count-only row rather than persisting a figure
+    # the aggregation cannot total.
+    outcome_value = _coerce_value(data.get("outcome_value"))
+    unit_raw = data.get("outcome_unit")
+    outcome_unit = str(unit_raw) if unit_raw else None
+    if outcome_value is None or outcome_unit is None:
+        # Half a pair (or none) → count-only row. Never persist a lone
+        # value or a lone unit; the rollup sums value strictly by unit.
+        outcome_value = None
+        outcome_unit = None
+
     record = OutcomeRecord(
         outcome=str(outcome),
         pocket_id=str(data.get("pocket_id") or ""),
@@ -157,11 +270,14 @@ async def record_outcome(event) -> None:  # type: ignore[no-untyped-def]
         via_instinct=bool(data.get("via_instinct")),
         instinct_action_id=data.get("instinct_action_id"),
         occurred_at=str(data.get("occurred_at") or ""),
-        # Layer 4 reserved — never set here.
-        outcome_value=None,
-        outcome_unit=None,
+        # gap-3 — persist the billable value/unit (replaces the hardcoded
+        # `None`). A count-only outcome leaves both `None`, the prior shape.
+        outcome_value=outcome_value,
+        outcome_unit=outcome_unit,
         # RFC 07 Slice 2 — back-reference into the decision graph.
         decision_id=decision_id,
+        # RFC 05 Saga Compensate — True for a rollback outcome.
+        compensated=bool(data.get("compensated")),
     )
     path = _ledger_path(record.workspace_id)
     try:
@@ -319,9 +435,118 @@ async def count_outcomes(
     return OutcomeCountResponse(total=total, by_outcome=by_outcome, by_pocket=by_pocket)
 
 
+async def meter_outcomes(
+    workspace_id: str,
+    body: MeterOutcomesRequest | dict | None = None,
+) -> MeterOutcomesResponse:
+    """Aggregate a workspace's governed outcomes into a billable figure.
+
+    This is the gap-3 "pay for governed outcomes" READ surface. It reads
+    the workspace JSONL ledger over the optional ``pocket_id`` /
+    ``since`` (inclusive) / ``until`` (EXCLUSIVE) window, then rolls the
+    value-bearing rows up BY unit: per unit it returns the count of
+    outcomes and the SUM of their ``outcome_value``. Count-only rows (no
+    value/unit) are tallied into ``total_outcomes`` but excluded from the
+    per-unit billable rollup — there is nothing to bill.
+
+    Workspace-scoped exactly like ``count_outcomes``: the file is keyed by
+    workspace, and a defense-in-depth filter drops any row whose
+    ``workspace_id`` does not match the caller's. A workspace with no
+    ledger returns a zeroed meter, not an error.
+
+    Deliberately NOT here: pricing rules, currency, invoicing, payment,
+    disputes/clawback. ``total_value`` is a raw sum of declared values, the
+    queryable primitive those layers will build on later.
+    """
+    body = MeterOutcomesRequest.model_validate(body or {})
+    path = _ledger_path(workspace_id)
+    if not workspace_id or not path.exists():
+        return MeterOutcomesResponse(total_outcomes=0, metered_count=0)
+
+    total_outcomes = 0
+    metered_count = 0
+    # Accumulate (count, summed_value) per unit before building the DTOs.
+    unit_count: dict[str, int] = {}
+    unit_value: dict[str, float] = {}
+    # Parse the window bounds ONCE to UTC-normalized datetimes so the per-row
+    # comparison is on instants, not raw ISO strings — a `Z`-vs-`+00:00`-vs-
+    # offset representation of the same instant compares correctly. When a bound
+    # is present but unparseable we keep its raw string for a defensive
+    # lexicographic fallback rather than dropping the bound entirely.
+    since_dt = _parse_ts(body.since) if body.since is not None else None
+    until_dt = _parse_ts(body.until) if body.until is not None else None
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                # Defense-in-depth tenant filter — same as count_outcomes.
+                if str(row.get("workspace_id") or "") != workspace_id:
+                    continue
+                if body.pocket_id is not None and row.get("pocket_id") != body.pocket_id:
+                    continue
+                occurred = str(row.get("occurred_at") or "")
+                occurred_dt = _parse_ts(occurred)
+                # `since` is INCLUSIVE, `until` EXCLUSIVE so back-to-back periods
+                # never double-count a boundary outcome. Compare as datetimes
+                # when BOTH sides parsed; otherwise fall back to the byte-wise
+                # string compare (a torn/hand-edited timestamp) so the row is
+                # still filtered rather than crashing the meter.
+                if body.since is not None:
+                    in_window = (
+                        occurred_dt >= since_dt
+                        if (occurred_dt is not None and since_dt is not None)
+                        else occurred >= body.since
+                    )
+                    if not in_window:
+                        continue
+                if body.until is not None:
+                    before_until = (
+                        occurred_dt < until_dt
+                        if (occurred_dt is not None and until_dt is not None)
+                        else occurred < body.until
+                    )
+                    if not before_until:
+                        continue
+
+                total_outcomes += 1
+
+                value = _coerce_value(row.get("outcome_value"))
+                unit_raw = row.get("outcome_unit")
+                unit = str(unit_raw) if unit_raw else None
+                # Only a WHOLE value/unit pair is billable. A count-only row
+                # (or a torn half-pair) contributes to total_outcomes only.
+                if value is None or unit is None:
+                    continue
+                metered_count += 1
+                unit_count[unit] = unit_count.get(unit, 0) + 1
+                unit_value[unit] = unit_value.get(unit, 0.0) + value
+    except OSError:
+        logger.warning("failed to read outcomes ledger %s", path, exc_info=True)
+        return MeterOutcomesResponse(total_outcomes=0, metered_count=0)
+
+    by_unit = {
+        unit: UnitMeter(unit=unit, count=count, total_value=unit_value[unit])
+        for unit, count in unit_count.items()
+    }
+    return MeterOutcomesResponse(
+        total_outcomes=total_outcomes,
+        metered_count=metered_count,
+        by_unit=by_unit,
+    )
+
+
 __all__ = [
     "emit_pocket_outcome",
     "record_outcome",
     "count_outcomes",
+    "meter_outcomes",
     "set_ledger_dir",
 ]

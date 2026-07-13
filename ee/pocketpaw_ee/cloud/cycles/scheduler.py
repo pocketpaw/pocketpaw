@@ -5,6 +5,10 @@
 #   CronJob, Celery beat, OS cron) leave the flag unset and dispatch
 #   ``snapshot_all_active`` from their platform scheduler — same callable,
 #   same idempotency.
+# Updated: 2026-07-11 (feat/external-alerting-c2c3) — the per-workspace pass now
+#   consults the automation opt-out (``sweeps_enabled_for_workspace``): a tenant
+#   that turned its background sweeps off is skipped. The gate fails OPEN, so a
+#   config-read hiccup keeps the always-on default.
 """In-process daily snapshot scheduler.
 
 For each active cycle in each active workspace, calls
@@ -33,6 +37,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI
 
+from pocketpaw_ee.cloud.automations_status.service import sweeps_enabled_for_workspace
 from pocketpaw_ee.cloud.cycles import service as cycles_service
 from pocketpaw_ee.cloud.cycles.snapshot_job import snapshot_all_active
 
@@ -79,6 +84,12 @@ async def _run_scheduler_loop() -> None:
             continue
 
         for ws in workspaces:
+            # Per-workspace opt-out (feat/external-alerting-c2c3): a tenant that
+            # turned its background sweeps off is skipped here. The gate fails
+            # OPEN, so a config-read hiccup keeps the always-on default.
+            if not await sweeps_enabled_for_workspace(ws):
+                logger.debug("cycle.scheduler: workspace=%s opted out — skipping", ws)
+                continue
             try:
                 count = await snapshot_all_active(ws)
                 logger.info("cycle.scheduler: workspace=%s snapshotted=%d", ws, count)

@@ -305,8 +305,37 @@ def _auth_headers():
     return {"Authorization": f"Bearer {_TEST_TOKEN}"}
 
 
+@pytest.fixture
+def _file_backed_memory_store(tmp_path):
+    """Point the global memory manager at a delete/title-capable FileMemoryStore.
+
+    The session REST routes resolve the store via ``get_memory_manager()._store``
+    and only support delete / rename / search when that store exposes
+    ``delete_session`` / ``update_session_title`` / ``_load_session_index``.
+    In an isolated process the default backend can be a non-file store (e.g.
+    the EE MongoMemoryStore), which lacks those methods, so the routes return
+    501 instead of the 404/200 the tests assert. Swap in a tmp-path
+    FileMemoryStore for the test's duration, then restore the original so we
+    never persist to or read from the real ``~/.pocketpaw``.
+    """
+    from pocketpaw.memory import FileMemoryStore, get_memory_manager
+
+    manager = get_memory_manager()
+    original_store = manager._store
+    manager._store = FileMemoryStore(base_path=tmp_path)
+    try:
+        yield manager._store
+    finally:
+        manager._store = original_store
+
+
 class TestSessionsRESTEndpoints:
     """Test dashboard REST endpoints for sessions."""
+
+    @pytest.fixture(autouse=True)
+    def _hermetic_store(self, _file_backed_memory_store):
+        """Ensure every REST endpoint test runs against the file-backed store."""
+        yield _file_backed_memory_store
 
     @pytest.fixture
     def client(self, _mock_auth):
@@ -371,6 +400,33 @@ class TestWebSocketSessionSwitching:
         ws_limiter._buckets.clear()
 
     @pytest.fixture
+    def _hermetic_home_store(self, tmp_path, monkeypatch):
+        """Redirect ``~`` and the global memory store under tmp_path.
+
+        ``dashboard_ws`` gates a resume on a file existing at the hardcoded
+        ``Path.home() / ".pocketpaw" / "memory" / "sessions"`` and then loads
+        history through ``get_memory_manager()._store``. Point both at the same
+        tmp-path location so the resume test stays fully isolated from the real
+        ``~/.pocketpaw`` while exercising the genuine resume-reads-persisted-
+        session path. Returns the swapped FileMemoryStore so the test can write
+        its session file under ``store.sessions_path``.
+        """
+        from pocketpaw.memory import FileMemoryStore, get_memory_manager
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("pathlib.Path.home", lambda: fake_home)
+
+        store = FileMemoryStore(base_path=fake_home / ".pocketpaw" / "memory")
+        manager = get_memory_manager()
+        original_store = manager._store
+        manager._store = store
+        try:
+            yield store
+        finally:
+            manager._store = original_store
+
+    @pytest.fixture
     def client(self, _mock_auth):
         from fastapi.testclient import TestClient
 
@@ -407,10 +463,15 @@ class TestWebSocketSessionSwitching:
             assert data["type"] == "session_history"
             assert data["messages"] == []
 
-    def test_websocket_resume_session(self, client):
-        """Test resume_session query parameter."""
-        # Create a session file
-        sessions_dir = Path.home() / ".pocketpaw" / "memory" / "sessions"
+    def test_websocket_resume_session(self, client, _hermetic_home_store):
+        """Test resume_session query parameter.
+
+        Writes the persisted session under the swapped store's sessions path
+        (which lives under a tmp-path fake home), so the resume path is
+        exercised end-to-end without reading or writing the real ~/.pocketpaw.
+        """
+        store = _hermetic_home_store
+        sessions_dir = store.sessions_path
         sessions_dir.mkdir(parents=True, exist_ok=True)
         test_id = str(uuid.uuid4())
         safe_key = f"websocket_{test_id}"

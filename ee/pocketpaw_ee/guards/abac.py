@@ -1,5 +1,26 @@
 # Attribute-based policy rules — plan gates, action-role mapping, tool whitelist.
 # Created: 2026-04-10
+# Updated: 2026-06-24 (integration/billing-credits, BC-6) — added a minimal
+#   ``free`` base tier to PLAN_FEATURES so the billing catalog and the
+#   entitlements resolver have an explicit floor to fall back to (a workspace
+#   with no/unknown plan resolves to ``free``). PLAN_FEATURES stays the single
+#   source of truth for which features a tier has; the billing catalog
+#   (``ee.cloud.billing.plans``) references it rather than duplicating it.
+# Updated 2026-06-25 (feat/consumer-plan-ladder) — rekeyed PLAN_FEATURES from the
+#   old {free, team, business, enterprise} tiers to the approved CONSUMER ladder
+#   {free, go, pro, pro_max, enterprise}. Mapping: team->go, business->pro, plus a
+#   new pro_max tier between pro and enterprise.
+# Updated 2026-06-25 (decouple-sites-from-fabric) — the ``fabric`` flag was
+#   OVERLOADED: it gated Sites, Leads, AND the enterprise-only Fabric ontology.
+#   The consumer ladder gives Paw Go a site, so Sites + Leads now gate on a NEW
+#   ENFORCED ``sites`` flag (present go onward), and ``fabric`` is kept for the
+#   Fabric ontology ONLY — now enterprise-ONLY. Consequence: the ladder is NO
+#   LONGER a strict superset on ``fabric`` — go/pro/pro_max carry ``sites`` but NOT
+#   ``fabric``; only enterprise carries ``fabric``. Intentional and correct (the
+#   ontology is an enterprise capability, not a step on the consumer ladder).
+#   Other display-only flags (studio, code, deep_work, chain_flow, fleet, belt,
+#   foresight) are surfaced to the UI but not yet enforced. ``automations`` stays
+#   on pro+; ``audit``/``sso``/``instinct``/``custom_roles`` stay enterprise-only.
 
 from __future__ import annotations
 
@@ -15,26 +36,87 @@ logger = logging.getLogger(__name__)
 # Plan feature gates
 # ---------------------------------------------------------------------------
 
+# The CONSUMER plan ladder. The paid tiers nest on capability EXCEPT the
+# ``fabric`` flag, which is enterprise-only (see below) — so go/pro/pro_max are a
+# superset chain among themselves, and enterprise adds the enterprise-only gates
+# on top. Two kinds of feature string live here:
+#   * ENFORCED flags — checked at a call site (the ABAC gate's ``_feature_for_action``,
+#     ``require_plan_feature``, the Sites/Leads ``sites`` gate). Keep them on the
+#     tiers that should have them: ``sites`` (Sites + Leads) on go+, ``automations``
+#     on pro+, ``fabric`` (the Fabric ONTOLOGY only) enterprise-only, and
+#     ``audit``/``sso``/``instinct``/``custom_roles`` enterprise-only.
+#   * DISPLAY-ONLY flags — surfaced to the billing UI to describe what a tier
+#     unlocks, not yet wired to any gate (studio, code, deep_work, chain_flow,
+#     fleet, belt, foresight). Adding one is safe: nothing enforces it.
 PLAN_FEATURES: dict[str, set[str]] = {
-    "team": {"pockets", "sessions", "agents", "memory"},
-    "business": {
+    # The base/free floor — a workspace with no paid plan (or an unknown plan)
+    # resolves here. Deliberately minimal: the core canvas (pockets) and the
+    # ability to run sessions, nothing that costs the platform a paid upstream.
+    "free": {"pockets", "sessions"},
+    # Paw Go — everyday: chat, pockets, agents, memory + Studio + Sites. ``sites``
+    # is ENFORCED here (go gets a site); ``fabric`` (the ontology) is NOT.
+    "go": {
         "pockets",
         "sessions",
         "agents",
         "memory",
-        "automations",
-        "fabric",
-        "knowledge_base",
+        "studio",
+        "sites",
     },
+    # Paw Pro — daily drivers. Adds automations + knowledge_base + display flags
+    # for the power surfaces (code, deep_work, chain_flow, fleet). Keeps ``sites``;
+    # does NOT carry ``fabric`` (the ontology is enterprise-only).
+    "pro": {
+        "pockets",
+        "sessions",
+        "agents",
+        "memory",
+        "studio",
+        "sites",
+        "automations",
+        "knowledge_base",
+        "code",
+        "deep_work",
+        "chain_flow",
+        "fleet",
+    },
+    # Paw Pro Max — uncapped power users. Everything in pro + belt + foresight.
+    # Still NO ``fabric`` (enterprise-only ontology).
+    "pro_max": {
+        "pockets",
+        "sessions",
+        "agents",
+        "memory",
+        "studio",
+        "sites",
+        "automations",
+        "knowledge_base",
+        "code",
+        "deep_work",
+        "chain_flow",
+        "fleet",
+        "belt",
+        "foresight",
+    },
+    # Enterprise — the full set: every consumer flag PLUS the enterprise-only
+    # gates (the ``fabric`` ONTOLOGY, instinct, audit, sso, custom_roles).
     "enterprise": {
         "pockets",
         "sessions",
         "agents",
         "memory",
+        "studio",
+        "sites",
         "automations",
+        "knowledge_base",
+        "code",
+        "deep_work",
+        "chain_flow",
+        "fleet",
+        "belt",
+        "foresight",
         "fabric",
         "instinct",
-        "knowledge_base",
         "audit",
         "sso",
         "custom_roles",

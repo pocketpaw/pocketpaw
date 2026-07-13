@@ -1,4 +1,64 @@
 # action_executor.py — Server-side executor for pocket WRITE actions.
+# Updated: 2026-06-28 (AW-7 — template gate deny-on-no-match) — `run_action`
+#   takes a new `template_default_deny: bool = False` and threads it into the
+#   gate-1.5 `gate_action` call ALONGSIDE an `is_mutating` flag the executor
+#   computes from the parsed binding (`method ∈ POST/PUT/PATCH/DELETE AND not
+#   read_only`). When the flag is ON and a bound template declares no rule
+#   matching a MUTATING action, the gate parks the write for a human instead of
+#   proceeding — finishing deny-by-default at the template layer. READS
+#   (read_only marker from AW-6, or GET/HEAD) are NOT mutating, so the flip
+#   never gates a legitimate read. AW-6 nuance carried forward: a read_only GET
+#   that skips the park still flows through the write-allowlist + gate-8
+#   executor; routing read_only to source_executor is a deeper refactor left
+#   out of scope here. Flag OFF (default) → byte-identical to the prior gate.
+# Updated: 2026-06-28 (AW-6 — read_only action marker) — `ActionBinding` gains
+#   a `read_only: bool = False` field that marks a genuinely SAFE, read-only
+#   action as gate-exempt BY DEFINITION. The `method` Literal is widened to
+#   accept GET / HEAD so a true read can be declared on this surface. A new
+#   `_read_only_is_safe` model_validator (mirrors `_exempt_is_consistent`)
+#   guards the widening BOTH ways so the write-only contract is preserved: a
+#   GET/HEAD binding WITHOUT `read_only=True` is still rejected (a bare read
+#   verb on the action surface stays a misconfiguration); and `read_only=True`
+#   is rejected on any mutating method (POST/PUT/PATCH/DELETE) or alongside an
+#   `instinct_policy` — a write can never be mislabeled safe. Gate 7 suppresses
+#   the Instinct park when `binding.read_only` is True, via its OWN path (NOT
+#   reusing `instinct_exempt`) so the audit trace stays truthful: a read
+#   proceeds ungated because there is nothing to govern, not because an author
+#   opted a write out. This is the marker AW-7 needs to flip the template
+#   default to deny without gating legitimate reads. No template-level gate or
+#   default is changed here.
+# Updated: 2026-06-11 (gap-housekeeping) — the
+#   `_outcome_value_pairs_with_unit` model_validator now also rejects a
+#   NEGATIVE `outcome_value`. The aggregation sums value by unit into a
+#   billable total, so a negative figure would silently subtract from a
+#   tenant's metered total (a credit/clawback the pricing layer owns, not an
+#   author-time binding). Zero is still allowed (a free but named+metered
+#   outcome). Caught at parse time so the ledger never sees it.
+# Updated: 2026-06-11 (gap-3 outcome VALUE metering) — `ActionBinding` now
+#   declares `outcome_value: float | None` and `outcome_unit: str | None`,
+#   the author-time billable-value pair that turns the count-only outcome
+#   meter into the "pay for governed outcomes" pricing primitive. A
+#   `model_validator` (`_outcome_value_pairs_with_unit`) rejects a half-
+#   declared pair (value without unit / unit without value) and a value
+#   with no `outcome` name, so a ledger row the aggregation can never total
+#   never gets persisted. Both fields ride the same path `outcome` already
+#   travels — the gate `park`, the `_park` sentinel, and the direct success
+#   result — so the producers can thread them to `emit_pocket_outcome`.
+# Updated: 2026-06-10 (W2a — deny-by-default Instinct governance) —
+#   `ActionBinding.requires_instinct` now DEFAULTS to True. Every write
+#   binding routes through the Instinct approval gate (parks at gate 7)
+#   unless EXPLICITLY exempted via the new `instinct_exempt` field or the
+#   call is an already-gated re-entry (`from_instinct=True` — post-approval
+#   replay + planner-approved bulk/temporal rows). Previously the default
+#   was False, so an agent-authored binding (which never sets the field)
+#   bypassed the gate — the moat's "every agent action routes through an
+#   audited approval gate" claim was opt-in. The exemption is declarative
+#   and auditable (a persisted spec field), not a silent code-path bypass;
+#   a `model_validator` rejects `instinct_exempt` set alongside an active
+#   `instinct_policy`. The RFC 09 direct-path decision-chain emits (gate-8
+#   success + failure close) are re-guarded on `not from_instinct` instead
+#   of `not binding.requires_instinct` so an exempt direct-fire still emits
+#   its own auto-approve close while the bridge re-entry stays suppressed.
 # Created: 2026-05-22 (RFC 05 M2a) — the write half of the pocket data
 #   layer. RFC 04's `source_executor.py` runs GET read bindings; this
 #   module runs POST/PUT/PATCH/DELETE write bindings declared in a pocket's
@@ -84,6 +144,20 @@
 #   correlation_id is THREADED through to ``_park`` so the bridge can stash
 #   it on the parked Instinct Action (schema-2 bump in ``instinct_bridge``).
 #
+# Updated: 2026-06-01 (RFC 05 Saga Compensate — first pass) — ``ActionBinding``
+#   gains an optional ``compensate`` field: a nested ``CompensateSpec``
+#   (method / path / params / outcome) declaring the inverse write that
+#   undoes this action ("charge→refund", "reserve→release"). The field is
+#   declaration-only HERE — ``run_action`` does NOT read or fire it, and a
+#   single write is unchanged byte-for-byte. The rollback runtime lives in
+#   the new ``saga.py`` module, which orchestrates a SEQUENCE of
+#   ``run_action`` calls, tracks the completed (fired) writes, and on a
+#   mid-sequence failure fires each completed write's ``compensate`` via
+#   ``run_action`` in REVERSE order. Keeping ``run_action`` a pure
+#   single-write executor preserves its contract for the three existing
+#   callers (direct route, bulk fan-out, Instinct re-entry); the saga is a
+#   wrapper, not a fork.
+#
 # A write has blast radius a read does not, so this executor adds three
 # concerns on TOP of the shared SSRF guards:
 #   1. The per-pocket WRITE ALLOWLIST (`allowed_writes`) — set by a human in
@@ -130,6 +204,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 from soul_protocol.spec.journal import Actor
 
 from pocketpaw.security.url_validators import validate_external_url_strict
+from pocketpaw_ee.agent.mcp_servers._audit import record_decision
 from pocketpaw_ee.cloud.decisions.journal_writer import (
     record_agent_proposed,
     record_decision_completed,
@@ -153,6 +228,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# The dormant, fail-safe triager level. When a caller threads no
+# `approval_level` into `run_action`, gate 1.5 passes this string and
+# `gate_action._coerce_approval_level` maps it onto ApprovalLevel.ASK — the
+# triager stays dormant and every escalate goes to a human (zero behavior
+# change). Kept as a bare string so this module does not import the
+# `instinct_triage` enum at module load (instinct_triage imports
+# `CompensateSpec` from HERE, so a top-level back-import would risk a cycle).
+_DEFAULT_APPROVAL_LEVEL = "ASK"
+
 # --- limits / policy --------------------------------------------------------
 _PER_ACTION_TIMEOUT_S = 10.0
 # Write budget per (pocket, user) per window. Separate from the read
@@ -164,6 +248,40 @@ _ACTION_RATE_LIMIT_WINDOW_S = 60.0
 # Per-(pocket, user) write timestamps. SEPARATE dict from
 # source_executor._run_log so reads and writes never share a budget.
 _action_log: dict[tuple[str, str], list[float]] = {}
+
+# --- optimistic compensation registry (layered/learning gate, T10) ----------
+# The OPTIMISTIC lane fires a reversible write BEFORE a human reviews it, on
+# the bet that it can be undone. The registry holds the inverse-write handle
+# until the client rolls it back OR the TTL hard-expires it (firing an ALERT
+# audit). A single process-wide instance keyed by config TTL; consulted only
+# by the same process that minted the handle (in-memory is correct for the
+# foundation — see instinct_compensation_registry).
+_optimistic_registry: Any = None
+
+
+def get_optimistic_registry():
+    """Return the process-wide ``OptimisticCompensationRegistry`` (lazy).
+
+    Lazily constructed so importing this module never reads config at import
+    time and so a test can swap the instance. The TTL comes from
+    ``instinct_optimistic_ttl_seconds`` (default 300s, hard-expiry, no
+    heartbeat — design Q2).
+    """
+    global _optimistic_registry
+    if _optimistic_registry is None:
+        from pocketpaw.config import get_settings
+        from pocketpaw_ee.cloud.pockets.instinct_compensation_registry import (
+            OptimisticCompensationRegistry,
+        )
+
+        ttl = 300
+        try:
+            ttl = int(get_settings().instinct_optimistic_ttl_seconds)
+        except Exception:  # noqa: BLE001 — fall back to the documented default
+            logger.warning("could not read instinct_optimistic_ttl_seconds; using 300s")
+        _optimistic_registry = OptimisticCompensationRegistry(ttl_seconds=ttl)
+    return _optimistic_registry
+
 
 # Guards the check-and-record on ``_action_log``. The read-filter-write is a
 # TOCTOU race under ``asyncio.gather``; the lock makes it atomic — the same
@@ -185,6 +303,46 @@ class _BackendHTTPError(Exception):
         self.status_code = status_code
 
 
+class CompensateSpec(BaseModel):
+    """The inverse write that undoes a forward action (RFC 05 Saga Compensate).
+
+    A forward write declares ``compensate`` to name the action that rolls
+    it back: ``charge`` → ``refund``, ``reserve`` → ``release``,
+    ``send_invite`` → ``revoke_invite``. When a multi-step write SEQUENCE
+    fails partway, the saga runtime (``saga.py``) fires the completed
+    writes' compensations in REVERSE order so the backend is left
+    consistent.
+
+    A compensation IS a write binding — it shares the executor with the
+    forward action and is subject to the SAME guards (allowlist, SSRF,
+    rate limit). The owner must allow-list the compensation's method+path
+    just like any other write, or the rollback is rejected at the gate.
+
+    Two fields are DELIBERATELY absent versus ``ActionBinding``:
+
+    * ``requires_instinct`` — a compensation fires AUTO. Pausing a rollback
+      for human approval would leave the backend in the inconsistent state
+      the rollback exists to repair (money charged, inventory reserved).
+      The forward write's gate is the human checkpoint; the compensation
+      is the automatic cleanup once a committed write must be undone. The
+      gated-compensation case is an explicit open question in the RFC.
+    * ``compensate`` — no nested compensation-of-a-compensation. A
+      compensation that itself fails is logged and surfaced for manual
+      reconciliation (saga policy), not auto-compensated recursively.
+
+    ``outcome`` is carried so a successful compensation emits its own named
+    outcome (e.g. ``renewal_refunded``) and the audit trail closes — a
+    rollback is a real business event, not a silent side effect.
+    """
+
+    model_config = {"extra": "ignore"}
+
+    method: Literal["POST", "PUT", "PATCH", "DELETE"]
+    path: str
+    params: dict = Field(default_factory=dict)
+    outcome: str | None = None
+
+
 class ActionBinding(BaseModel):
     """One write binding parsed from `rippleSpec.actions`.
 
@@ -196,32 +354,100 @@ class ActionBinding(BaseModel):
     M2b.1 promotes the three governance fields to REAL declared fields:
 
     * ``requires_instinct`` — when true the write is routed through the
-      Instinct approval surface instead of firing directly.
+      Instinct approval surface instead of firing directly. W2a flips the
+      DEFAULT to ``True`` (deny-by-default governance — see below).
     * ``instinct_policy`` — how Instinct batches the write
       (``approve_per_row`` is the only policy this build executes;
       ``approve_batch`` is reserved for M2b.3 and not yet implemented).
     * ``outcome`` — the named outcome a successful run emits as a
       ``pocket.outcome`` event (M2b.2). ``None`` means no emit.
+    * ``instinct_exempt`` — W2a's explicit, AUDITABLE exemption. When
+      ``True`` the binding declares (in the persisted spec) that it is
+      deliberately allowed to fire WITHOUT routing through the approval
+      gate. This is the only way to opt a binding out of the gate at
+      author time — there is no silent code-path bypass.
+
+    W2a — DENY-BY-DEFAULT. ``requires_instinct`` now defaults to ``True``:
+    every write binding routes through the Instinct approval gate unless it
+    is EXPLICITLY exempted (``instinct_exempt=True``) or the call is an
+    already-gated re-entry (``from_instinct=True`` — the post-approval
+    replay and the bulk/planner-approved paths). The moat claim is "every
+    agent action routes through an audited approval gate"; an agent-authored
+    binding never sets ``requires_instinct``, so under the old ``False``
+    default it bypassed the gate. Flipping the default closes that bypass at
+    the single chokepoint every author and the executor validate through.
+
+    Saga Compensate adds one optional field:
+
+    * ``compensate`` — a :class:`CompensateSpec`, the inverse write that
+      undoes this action if a later step in a write SEQUENCE fails. The
+      executor does NOT read it on a single ``run_action`` call; the saga
+      runtime (``saga.py``) fires it on rollback. ``None`` (the default)
+      means this action has no declared undo — a saga that has to roll
+      back past it records the gap instead of silently dropping it.
 
     A ``model_validator`` rejects an ``instinct_policy`` set WITHOUT
     ``requires_instinct`` — a policy with no gate to apply to is a
     misconfiguration, and silently ignoring it would hide the author's
-    intent.
+    intent. A second ``model_validator`` rejects ``instinct_exempt`` set
+    together with ``requires_instinct`` explicitly true / a policy — the two
+    are contradictory (exempt means "no gate", a policy means "gate this
+    way"), so the contradiction is caught at parse time rather than letting
+    one silently win.
     """
 
     model_config = {"extra": "ignore"}
 
     kind: Literal["write_binding"] = "write_binding"
-    method: Literal["POST", "PUT", "PATCH", "DELETE"]
+    # AW-6: GET / HEAD are accepted here ONLY so a genuinely read-only action
+    # can be declared on the write surface and marked `read_only=True` (the
+    # safe-by-definition exemption below). A mutating verb stays the common
+    # case; `_read_only_is_safe` rejects `read_only=True` on any mutating
+    # method, so the read-only flag can never label a write as safe.
+    method: Literal["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]
     path: str
     params: dict = Field(default_factory=dict)
     confirm: bool = False
     on_success: list[dict] = Field(default_factory=list)
     on_error: list[dict] = Field(default_factory=list)
     # --- M2b governance / metering fields (RFC 05 M2b.1) ----------------
-    requires_instinct: bool = False
+    # W2a: deny-by-default. A binding routes through the Instinct approval
+    # gate unless explicitly exempted (`instinct_exempt`) or the call is an
+    # already-gated re-entry (`from_instinct=True`).
+    requires_instinct: bool = True
     instinct_policy: Literal["approve_per_row", "approve_batch"] | None = None
     outcome: str | None = None
+    # --- gap-3 outcome VALUE metering (the "pay for governed outcomes"
+    # pricing primitive) -------------------------------------------------
+    # A named `outcome` is the COUNT; `outcome_value` + `outcome_unit` turn
+    # the count into a billable FIGURE. They are author-time declarations on
+    # the binding (the per-action-type rule from outcome-spec.md Decision 6
+    # / Decision 7: the operator declares what the work is worth). When set
+    # they ride the same end-to-end path `outcome` already travels — park →
+    # propose → execute → emit → ledger row — and persist on the outcome
+    # record (replacing the hardcoded `None` Layer-4 slots). When absent the
+    # record's value/unit stay `None` and the meter is count-only, exactly
+    # as before. `_outcome_value_pairs_with_unit` keeps the ledger clean: a
+    # value without a unit (or vice versa) is uncountable in the aggregation
+    # rollup, so reject the half-declared shape at parse time.
+    outcome_value: float | None = None
+    outcome_unit: str | None = None
+    # W2a: explicit, auditable exemption. A binding the author deliberately
+    # allows to fire WITHOUT the gate sets this True in the persisted spec.
+    instinct_exempt: bool = False
+    # AW-6: SAFE-BY-DEFINITION read marker. A `read_only=True` binding is a
+    # genuine read (GET / HEAD, no `instinct_policy`) that proceeds UNGATED —
+    # not because the author opted a write out (`instinct_exempt`), but because
+    # there is nothing to govern. It rides its OWN gate-7 suppression path so
+    # the audit trace stays truthful (a read, not an exempted write).
+    # `_read_only_is_safe` rejects the flag on any mutating method or alongside
+    # an `instinct_policy`, so it can never silently un-gate a real write.
+    read_only: bool = False
+    # --- Saga Compensate (RFC 05) ---------------------------------------
+    # The inverse write that undoes this action on a mid-sequence rollback.
+    # Declaration-only here; ``saga.py`` reads + fires it. ``None`` means
+    # no declared undo for this action.
+    compensate: CompensateSpec | None = None
 
     @model_validator(mode="after")
     def _policy_needs_gate(self) -> ActionBinding:
@@ -236,6 +462,112 @@ class ActionBinding(BaseModel):
             raise ValueError(
                 "instinct_policy is set but requires_instinct is false — "
                 "a policy needs the instinct gate enabled"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _exempt_is_consistent(self) -> ActionBinding:
+        """W2a — ``instinct_exempt`` cannot coexist with an active gate.
+
+        An exempt binding says "fire me without approval"; an
+        ``instinct_policy`` says "gate me this way". The two contradict, so
+        a binding that sets both is a misconfiguration — reject it at parse
+        time rather than letting one silently override the other and hide
+        the author's intent. ``requires_instinct`` defaults to ``True``, so
+        an exempt binding must turn it off explicitly: the canonical exempt
+        shape is ``{instinct_exempt: True, requires_instinct: False}``.
+        """
+        if self.instinct_exempt and self.instinct_policy is not None:
+            raise ValueError(
+                "instinct_exempt is true but instinct_policy is set — an "
+                "exempt binding has no gate for a policy to apply to"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _read_only_is_safe(self) -> ActionBinding:
+        """AW-6 — a non-write verb is ONLY admissible as a declared read.
+
+        This surface is write-first by contract: ``method`` historically was
+        a write-verb Literal so a compromised client could never coax a read
+        through the action executor (reads belong to ``source_executor``). AW-6
+        widens the Literal to admit ``GET`` / ``HEAD`` for ONE purpose: a
+        genuinely safe, read-only action that proceeds ungated. So the
+        non-write verbs are gated behind the ``read_only`` flag, both ways:
+
+        * A ``GET`` / ``HEAD`` binding WITHOUT ``read_only=True`` is rejected —
+          preserving the original write-only invariant (a bare read verb on
+          the action surface is still a misconfiguration / probe).
+        * A ``read_only=True`` binding on a mutating verb
+          (``POST`` / ``PUT`` / ``PATCH`` / ``DELETE``) is rejected — labelling
+          a write "safe" would un-gate a real state change.
+        * A ``read_only=True`` binding carrying an ``instinct_policy`` is
+          rejected — "proceeds ungated" and "gate this way" contradict.
+
+        Caught at parse time so neither the gate-7 suppression nor the
+        executor ever has to second-guess a mislabeled binding.
+        """
+        # A non-write verb is only legal when explicitly declared read_only.
+        if self.method in ("GET", "HEAD") and not self.read_only:
+            raise ValueError(
+                f"method is {self.method} but read_only is not set — a "
+                "non-write verb is only admissible on the action surface as an "
+                "explicit read_only action; writes use POST/PUT/PATCH/DELETE"
+            )
+        if not self.read_only:
+            return self
+        if self.method not in ("GET", "HEAD"):
+            raise ValueError(
+                f"read_only is true but method is {self.method} — a mutating "
+                "method (POST/PUT/PATCH/DELETE) must not be labeled read_only; "
+                "read_only is only valid for GET/HEAD"
+            )
+        if self.instinct_policy is not None:
+            raise ValueError(
+                "read_only is true but instinct_policy is set — a read_only "
+                "action proceeds ungated, so a gate policy has nothing to "
+                "apply to"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _outcome_value_pairs_with_unit(self) -> ActionBinding:
+        """A billable value needs a unit, and a unit needs a value (gap-3).
+
+        ``outcome_value`` / ``outcome_unit`` are the metering pair: the
+        aggregation rollup sums value BY unit, so a value with no unit
+        (or a unit with no value) is uncountable. Reject the half-declared
+        shape at parse time rather than persisting a ledger row the meter
+        can never total. Declaring NEITHER is fine — that's the count-only
+        binding (``outcome`` set, no monetary value), the prior behaviour.
+        A value also requires a named ``outcome``: there is no business
+        event to attach the value to without one.
+        """
+        has_value = self.outcome_value is not None
+        has_unit = self.outcome_unit is not None
+        if has_value != has_unit:
+            raise ValueError(
+                "outcome_value and outcome_unit must be declared together — "
+                "a value with no unit (or a unit with no value) cannot be "
+                "summed by the outcome aggregation"
+            )
+        if has_value and not self.outcome:
+            raise ValueError(
+                "outcome_value is set but no `outcome` name is declared — "
+                "a billable value needs a named outcome to attach to"
+            )
+        # gap-housekeeping — a billable figure cannot be negative. The
+        # aggregation SUMS outcome_value by unit into a "pay for governed
+        # outcomes" total; a negative value would silently subtract from a
+        # tenant's billable figure (a credit/clawback the pricing layer owns,
+        # not an author-time binding). Reject it at parse time so a negative
+        # value never reaches the ledger. Zero is allowed (a free, but still
+        # named+metered, outcome).
+        if has_value and self.outcome_value < 0:
+            raise ValueError(
+                "outcome_value must not be negative — a billable figure cannot "
+                "be negative (credits/clawbacks are a pricing-layer concern, not "
+                "an action binding)"
             )
         return self
 
@@ -325,7 +657,7 @@ def _audit_action_run(
     """Write an audit-log entry for a write-action run.
 
     Mirrors ``source_executor._audit_source_run`` — category
-    ``pocket_backend_config``, severity WARNING. The token is NEVER passed;
+    ``pocket_action_run``, severity WARNING. The token is NEVER passed;
     ``base_url`` is query-stripped before it is logged. ``workspace_id`` is
     logged so write-action entries are tenant-filterable, the same way the
     backend-config audit entries already are. A rejected write (allowlist
@@ -354,13 +686,37 @@ def _audit_action_run(
                 action="pocket.actions.run",
                 target=pocket_id,
                 status=status,
-                category="pocket_backend_config",
+                category="pocket_action_run",
                 workspace_id=workspace_id,
                 **fields,
             )
         )
     except Exception:  # noqa: BLE001 — audit must never break the run
         logger.warning("pocket action-run audit-log write failed", exc_info=True)
+
+    # Also record to the workspace audit (MongoDB) so action executions
+    # appear in the rich-activity feed.
+    try:
+        import asyncio
+
+        from pocketpaw_ee.cloud.audit import service as _audit_service
+
+        asyncio.ensure_future(
+            _audit_service.record(
+                workspace_id=workspace_id,
+                actor_id=actor,
+                action="workspace.agent.action_executed",
+                target_type="pocket",
+                target_id=pocket_id,
+                metadata={
+                    "pocket_action": action,
+                    "status": status,
+                    "source": "pocket_page",
+                },
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the run
+        logger.warning("pocket action-run workspace-audit record failed", exc_info=True)
 
 
 def _error(action: str, message: str, code: str, on_error: list[dict]) -> dict:
@@ -470,6 +826,11 @@ async def run_action(
     workspace_context: dict[str, Any] | None = None,
     row_id: str = "",
     correlation_id: UUID | None = None,
+    optimistic_execute: bool = False,
+    dry_run: bool = False,
+    approval_level: Any = None,
+    dry_run_mode: bool = False,
+    template_default_deny: bool = False,
 ) -> dict:
     """Run ONE pocket write action against its configured backend.
 
@@ -496,6 +857,24 @@ async def run_action(
     Action's schema-2 ``_pocket_write`` blob). On the parked path the
     minted / supplied id rides on the ``_park`` dict so the bridge can
     stash it on the Instinct Action.
+
+    ``dry_run`` and ``optimistic_execute`` (the layered/learning gate
+    integration, T7) are NEW dedicated flags — neither reuses
+    ``from_instinct``:
+
+    * ``dry_run=True`` — a GOVERNANCE REHEARSAL. The executor runs every
+      security gate (2-6) as VALIDATION, then intercepts at gate 7 and
+      returns the ``instinct_dry_run`` sentinel carrying the resolved write
+      under ``_park`` — server-side only, NO HTTP call, NO approval row. An
+      off-policy write (allowlist miss, bad base-url) is still REJECTED by
+      the gates that run first; the dry-run intercept never runs for it
+      (the safety-critical ordering, T-30).
+    * ``optimistic_execute=True`` — a TRUSTED, REVERSIBLE write the triager
+      cleared for OPTIMISTIC execution. It sets ``optimistic_gate_cleared``
+      so gate 7's deny-by-default park does NOT fire; the write executes
+      NOW. ``from_instinct`` stays ``False`` (MF-4 — no semantic lie: this
+      is not a post-human-approval re-entry). The caller registers a bounded
+      compensation handle so the optimistic bet is time-limited.
 
     The result shape on a fired success::
 
@@ -568,6 +947,23 @@ async def run_action(
     on_error = binding.on_error
     method = binding.method
 
+    # W2a — set True only when the template-level CEL gate (1.5) ran AND
+    # returned `proceed` (verdict EXECUTE / NOTIFY_AND_EXECUTE). That
+    # verdict is an EXPLICIT, AUDITABLE adjudication of this exact write by
+    # the template's Instinct rules — the same approval surface gate 7
+    # enforces, just evaluated one layer up. So a write the template gate
+    # cleared must NOT be re-parked at gate 7 (which, under deny-by-default,
+    # would now park every binding that doesn't set `requires_instinct`).
+    # Double-gating the template path would silently park the temporal
+    # sweeper's already-planner-cleared rows and the bulk-dispatch fan-out.
+    # This is NOT a bypass: the gate ran, recorded its verdict, and said
+    # proceed. A template that is BOUND but DECLARES no rule for this action
+    # yields EXECUTE (resolve_instinct's default), so a template-bound
+    # pocket with no rule for the action still rides the template-gate path
+    # — which is the correct read of "this template governs this action and
+    # imposed no constraint", not "no governance".
+    template_gate_cleared = False
+
     # ── 1.5. RFC 03 v2 template-level Instinct gate ─────────────────────
     # When a template is threaded through (and we're not re-entering
     # post-approval), evaluate `resolve_instinct` via the dispatch
@@ -589,7 +985,15 @@ async def run_action(
             "params": params,
             "idempotency_key": idempotency_key,
             "outcome": binding.outcome,
+            # gap-3 — the billable value/unit ride alongside `outcome` so
+            # the post-approval emit carries them to the ledger row.
+            "outcome_value": binding.outcome_value,
+            "outcome_unit": binding.outcome_unit,
         }
+        # The binding's declared inverse rides on `park` so the triage
+        # router (classify_lane) can read reversibility for the lane decision.
+        if binding.compensate is not None:
+            park["compensate"] = binding.compensate.model_dump()
         gate = await instinct_dispatch.gate_action(
             workspace_id=workspace_id,
             user_id=user_id,
@@ -600,6 +1004,31 @@ async def run_action(
             workspace_context=workspace_context,
             row_id=row_id,
             park=park,
+            # Layered/learning gate (T6). When the caller passes no
+            # `approval_level` (every legacy caller), `gate_action`'s own
+            # default ApprovalLevel.ASK applies — the triager stays dormant
+            # and every escalate becomes a human-pending row (zero behavior
+            # change). The router passes the workspace's level to activate it.
+            approval_level=approval_level
+            if approval_level is not None
+            else _DEFAULT_APPROVAL_LEVEL,
+            dry_run_mode=dry_run_mode,
+            # AW-7 — TEMPLATE-level deny-on-no-match. When the workspace/global
+            # flag is ON and this binding is a MUTATING write that the bound
+            # template declares no matching rule for, the gate parks it for a
+            # human instead of proceeding. `is_mutating` is computed from the
+            # parsed binding HERE (the executor owns the binding) so the gate
+            # never re-parses: a read_only marker (AW-6) or a GET/HEAD verb is
+            # NOT mutating and always proceeds ungated — the template flip never
+            # gates a legitimate read. NOTE (AW-6 nuance): a read_only GET that
+            # skips the park still flows through the write-allowlist + gate-8
+            # executor; routing read_only to source_executor is a deeper
+            # refactor left out of scope — what matters here is only that the
+            # default-deny flip does not gate it.
+            template_default_deny=template_default_deny,
+            is_mutating=(
+                binding.method in ("POST", "PUT", "PATCH", "DELETE") and not binding.read_only
+            ),
         )
         if gate.next_step == "blocked":
             _audit_action_run(
@@ -637,9 +1066,38 @@ async def run_action(
                 "on_success": [],
                 "on_error": [],
             }
-        # gate.next_step == "proceed" — fall through into the existing
-        # gate stack. Notify rules are dropped on the floor here; Wave
-        # 3c wires the side-effect dispatcher.
+        if gate.next_step == "dry_run":
+            # The triager routed this escalate to the DRY_RUN lane. Set the
+            # local dry-run flag so gate 7a returns the `instinct_dry_run`
+            # sentinel AFTER the security gates validate the write. No
+            # approval row was persisted (the gate's DRY_RUN branch persists
+            # nothing). template_gate_cleared so gate 7's park does not also
+            # fire.
+            dry_run = True
+            template_gate_cleared = True
+        elif gate.next_step == "auto_approved":
+            # AUTO lane — the gate already wrote a DECIDED (auto_approved)
+            # approval row; the write now FIRES. template_gate_cleared
+            # suppresses gate 7's deny-by-default park so the HTTP call runs.
+            template_gate_cleared = True
+        elif gate.next_step == "optimistic_proceed":
+            # OPTIMISTIC lane — the gate wrote a decided row; the write fires
+            # NOW and registers a bounded compensation handle (gate 8 success
+            # path). `optimistic_execute` clears gate 7's park and triggers
+            # the handle registration.
+            optimistic_execute = True
+            template_gate_cleared = True
+        else:
+            # gate.next_step == "proceed" — EXECUTE / NOTIFY_AND_EXECUTE.
+            # Fall through into the existing gate stack. Notify rules are
+            # dropped on the floor here; Wave 3c wires the side-effect
+            # dispatcher.
+            #
+            # W2a — the template gate EXPLICITLY adjudicated this write and
+            # said proceed. Mark it so gate 7's deny-by-default park does not
+            # double-gate it (see the `template_gate_cleared` definition above
+            # and the gate-7 condition below).
+            template_gate_cleared = True
 
     # ── 2. write rate limit ─────────────────────────────────────────────
     if await _action_rate_limited(pocket_id, user_id):
@@ -766,8 +1224,20 @@ async def run_action(
                 },
             },
         )
-
-    # ── 6. DNS pre-resolve ──────────────────────────────────────────────
+        # Also fire a workspace audit event so this decision appears in the
+        # activity feed under the "decisions" filter.
+        record_decision(
+            workspace_id=workspace_id,
+            actor_id=user_id or "agent",
+            pocket_id=pocket_id,
+            decision_action="agent.proposed",
+            outcome="proposed",
+            metadata={
+                "intent": f"{method} {path_decoded} via pocket {pocket_id}",
+                "correlation_id": str(correlation_id),
+                "action_name": action,
+            },
+        )
     try:
         await _assert_host_external(urllib.parse.urlsplit(url).hostname or "")
     except _GuardError as exc:
@@ -781,16 +1251,109 @@ async def run_action(
         )
         return _error(action, exc.message, exc.code, on_error)
 
+    # The resolved-write blob — built once so the dry-run sentinel and the
+    # gate-7 park return BYTE-IDENTICAL `_park` dicts. The router strips
+    # `_park` from both sentinels the same way (it must never reach the
+    # wire), so the two shapes must match exactly (T-31).
+    park_blob = {
+        "action": action,
+        "method": method,
+        "path": path,
+        "params": params,
+        "idempotency_key": idempotency_key,
+        "outcome": binding.outcome,
+        # gap-3 — billable value/unit ride on _park so the bridge stashes
+        # them on the persisted parked-write blob and the post-approval
+        # emit threads them to the ledger row.
+        "outcome_value": binding.outcome_value,
+        "outcome_unit": binding.outcome_unit,
+        # RFC 09 Slice 2 — correlation_id rides on _park so the bridge can
+        # stash it on the parked Action's schema-2 _pocket_write blob.
+        "correlation_id": str(correlation_id),
+    }
+
+    # ── 7a. DRY-RUN intercept (layered/learning gate, T7) ───────────────
+    # Placed AFTER the security gates (2-6) so they run as VALIDATION first:
+    # an off-policy write (allowlist miss, SSRF, bad base-url) was ALREADY
+    # rejected above and never reaches this point (T-30). A dry-run is a
+    # governance REHEARSAL — the write is resolved + auditable but NEVER
+    # sent to the backend and NEVER persisted as an approval row. The
+    # `instinct_dry_run` sentinel stays server-side: the router strips
+    # `_park` exactly as it does for `instinct_pending`, so the resolved
+    # write never reaches the client wire (T-31). dry_run never overrides a
+    # BLOCK — a BLOCK short-circuited at gate 1.5 before reaching here.
+    if dry_run:
+        _audit_action_run(
+            actor=user_id,
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            action=action,
+            status="instinct-dry-run",
+            base_url=base_url,
+        )
+        return {
+            "ok": True,
+            "code": "instinct_dry_run",
+            "action": action,
+            "_park": park_blob,
+            "on_success": [],
+            "on_error": [],
+        }
+
     # ── 7. instinct park ────────────────────────────────────────────────
-    # A binding that requires instinct, on a direct (not post-approval)
-    # run, is PARKED — not fired. Gates 2-6 already ran as VALIDATION, so a
-    # write the allowlist would reject was rejected above, NOT parked: an
-    # off-policy write must never reach the approval surface looking
-    # legitimate. The executor stays pure — it just returns the resolved
-    # write under `_park` and signals `instinct_pending`. The router hands
-    # `_park` to `instinct_bridge.propose_pocket_write`, which builds the
-    # Instinct Action. NO HTTP call is made here.
-    if binding.requires_instinct and not from_instinct:
+    # W2a — DENY-BY-DEFAULT. `binding.requires_instinct` now defaults True
+    # (see ActionBinding), so EVERY write parks here unless one of FOUR
+    # explicit, auditable conditions holds:
+    #   * `binding.instinct_exempt` — the author declared (in the persisted
+    #     spec) that this binding is deliberately allowed to fire without
+    #     approval. The only author-time opt-out; there is no silent bypass.
+    #   * `from_instinct` — an already-gated re-entry: the post-approval
+    #     replay from `instinct_bridge.execute_approved_write`. Re-parking
+    #     it would loop / double-gate the write a human already approved.
+    #   * `template_gate_cleared` — the template-level CEL gate (1.5) ran
+    #     and returned `proceed` (verdict EXECUTE / NOTIFY_AND_EXECUTE).
+    #     That verdict IS an explicit, auditable adjudication of this write
+    #     by the template's Instinct rules — the same approval surface this
+    #     gate enforces, one layer up. Re-parking here would double-gate the
+    #     temporal sweeper's planner-cleared rows and the bulk fan-out (both
+    #     thread `template` with `from_instinct=False`), silently parking
+    #     writes the template already cleared. The template gate is the
+    #     governance for template-bound pockets; the binding-level gate is
+    #     the deny-by-default backstop for everything else.
+    #   * `optimistic_execute` — the layered/learning gate (T7) cleared this
+    #     write for OPTIMISTIC execution: trusted + reversible, the triager
+    #     bet the write can be undone if wrong. It fires NOW instead of
+    #     parking, and the caller registers a bounded compensation handle so
+    #     the bet is time-limited. A DEDICATED flag, not `from_instinct`
+    #     (MF-4): this is NOT a post-human-approval re-entry, so reusing
+    #     `from_instinct` would be a semantic lie that also wrongly
+    #     suppresses the direct-path chain close. The optimistic write OWNS
+    #     its chain close like any other direct fire.
+    #
+    # A binding that requires instinct, on a direct (not post-approval, not
+    # exempt, not template-cleared, not optimistic) run, is PARKED — not
+    # fired. Gates 2-6 already ran as VALIDATION, so a write the allowlist
+    # would reject was rejected above, NOT parked: an off-policy write must
+    # never reach the approval surface looking legitimate. The executor
+    # stays pure — it just returns the resolved write under `_park` and
+    # signals `instinct_pending`. The router hands `_park` to
+    # `instinct_bridge.propose_pocket_write`, which builds the Instinct
+    # Action. NO HTTP call is made here.
+    #   * `binding.read_only` (AW-6) — a genuine read (GET / HEAD, no policy;
+    #     enforced by `_read_only_is_safe`) is SAFE BY DEFINITION and proceeds
+    #     ungated. It rides its OWN suppression here rather than reusing
+    #     `instinct_exempt`, so the audit trace stays truthful: this is a read,
+    #     not an author-exempted write. This is what lets a later task (AW-7)
+    #     flip the template default to deny without gating legitimate reads.
+    optimistic_gate_cleared = optimistic_execute
+    if (
+        binding.requires_instinct
+        and not binding.instinct_exempt
+        and not binding.read_only
+        and not from_instinct
+        and not template_gate_cleared
+        and not optimistic_gate_cleared
+    ):
         _audit_action_run(
             actor=user_id,
             workspace_id=workspace_id,
@@ -803,21 +1366,7 @@ async def run_action(
             "ok": True,
             "code": "instinct_pending",
             "action": action,
-            "_park": {
-                "action": action,
-                "method": method,
-                "path": path,
-                "params": params,
-                "idempotency_key": idempotency_key,
-                "outcome": binding.outcome,
-                # RFC 09 Slice 2 — correlation_id rides on _park so the
-                # bridge can stash it on the parked Action's schema-2
-                # _pocket_write blob. The Instinct router reads it back
-                # at approve/reject time to chain policy.evaluated +
-                # human.corrected + decision.completed under the same
-                # correlation as the agent.proposed we already emitted.
-                "correlation_id": str(correlation_id),
-            },
+            "_park": park_blob,
             "on_success": [],
             "on_error": [],
         }
@@ -966,14 +1515,23 @@ async def run_action(
     # RFC 09 Slice 2 — direct-path (non-Instinct) close: emit the
     # auto-approve `policy.evaluated(passed=True)` for chain symmetry
     # with the parked-then-approved path, then the `decision.completed`
-    # terminal. Guarded by `not binding.requires_instinct` so the
-    # Instinct re-entry path (where `from_instinct=True` AND
-    # `binding.requires_instinct=True`) does NOT double-emit with the
-    # bridge at `instinct_bridge.execute_approved_write` site (b). The
-    # captain's brief: "if there's a path that doesn't go through
-    # Instinct's human approval flow, emit policy.evaluated(passed=True)
-    # AND decision.completed(landed) in sequence."
-    if not binding.requires_instinct:
+    # terminal. The captain's brief: "if there's a path that doesn't go
+    # through Instinct's human approval flow, emit
+    # policy.evaluated(passed=True) AND decision.completed(landed) in
+    # sequence."
+    #
+    # W2a — the guard is now `not from_instinct` (was `not
+    # binding.requires_instinct`). Reaching gate 8 with `from_instinct`
+    # False means gate 7 did NOT park, which (under deny-by-default) can
+    # only happen when the gate was inapplicable — an `instinct_exempt`
+    # binding or an explicitly `requires_instinct=False` binding fired
+    # DIRECTLY, so it owns its own auto-approve close. When `from_instinct`
+    # is True this is the Instinct re-entry; the bridge at
+    # `instinct_bridge.execute_approved_write` site (b) owns the close, so
+    # we suppress here to avoid a doubled chain terminal. The old
+    # `not binding.requires_instinct` guard silently dropped the close for
+    # exempt direct-fires once the default flipped to True.
+    if not from_instinct:
         actor = _chain_actor(user_id=user_id, workspace_id=workspace_id, pocket_id=pocket_id)
         scope = _chain_scope(workspace_id=workspace_id, pocket_id=pocket_id)
         policy_event_id = _safe_record(
@@ -998,8 +1556,32 @@ async def run_action(
             },
             causation_id=policy_event_id,
         )
+        # Workspace audit events for the decision activity feed.
+        record_decision(
+            workspace_id=workspace_id,
+            actor_id=user_id or "agent",
+            pocket_id=pocket_id,
+            decision_action="policy.evaluated",
+            outcome="approved",
+            metadata={
+                "policy": "auto",
+                "passed": True,
+                "correlation_id": str(correlation_id),
+            },
+        )
+        record_decision(
+            workspace_id=workspace_id,
+            actor_id=user_id or "agent",
+            pocket_id=pocket_id,
+            decision_action="decision.completed",
+            outcome="completed",
+            metadata={
+                "action_outcome": "landed",
+                "correlation_id": str(correlation_id),
+            },
+        )
 
-    return {
+    success = {
         "ok": True,
         "action": action,
         "status": result["status"],
@@ -1008,9 +1590,42 @@ async def run_action(
         # `pocket.outcome` event. `None` when the binding declares none;
         # the emit helper treats `None` as a no-op.
         "outcome": binding.outcome,
+        # gap-3 — the billable value/unit for the direct (non-gated) path.
+        # `None`/`None` when the binding declares no monetary value, leaving
+        # the meter count-only as before.
+        "outcome_value": binding.outcome_value,
+        "outcome_unit": binding.outcome_unit,
         "on_success": binding.on_success,
         "on_error": on_error,
     }
+
+    # ── OPTIMISTIC compensation registration (layered/learning gate, T10) ─
+    # An OPTIMISTIC write fired BEFORE a human reviewed it, on the bet it's
+    # reversible. If the binding declares a `compensate` inverse, register a
+    # bounded handle so (a) the client can roll it back via the optimistic
+    # rollback endpoint and (b) the TTL sweeper hard-expires the bet with an
+    # ALERT if it's never rolled back. No `compensate` → no handle (nothing
+    # to undo). Best-effort: a registry hiccup must never break the write
+    # that already succeeded. The id rides back on `_optimistic_compensation_id`
+    # which the router passes to the client and strips from the wire model.
+    if optimistic_execute and binding.compensate is not None:
+        try:
+            cid = get_optimistic_registry().register(
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                action=action,
+                compensate=binding.compensate,
+            )
+            success["_optimistic_compensation_id"] = cid
+        except Exception:  # noqa: BLE001 — registration must never break the write
+            logger.warning(
+                "optimistic compensation registration failed for action=%s pocket=%s",
+                action,
+                pocket_id,
+                exc_info=True,
+            )
+
+    return success
 
 
 def _emit_direct_path_failure(
@@ -1026,14 +1641,21 @@ def _emit_direct_path_failure(
 ) -> None:
     """Emit ``decision.completed(failed)`` for the direct (non-Instinct) path.
 
-    Same guard as the success emit: only fires when the binding is NOT
-    Instinct-gated. The Instinct re-entry failure path closes the chain
-    from ``instinct_bridge.execute_approved_write`` site (d) instead, so
-    we'd double-emit if we fired here too. ``error_class`` is the Python
+    Same guard as the success emit: only fires when this is a DIRECT
+    (not re-entry) call. The Instinct re-entry failure path closes the
+    chain from ``instinct_bridge.execute_approved_write`` site (d) instead,
+    so we'd double-emit if we fired here too. ``error_class`` is the Python
     exception type name (TimeoutError / BackendHTTPError / GuardError /
     type(exc).__name__) for the narrator's "why did this fail" story.
+
+    W2a — the guard is ``from_instinct`` (was ``binding.requires_instinct``)
+    to match the success-path close: under deny-by-default a binding that
+    reaches the HTTP call on a direct run is an exempt / auto-fire write
+    that owns its own chain close, so suppressing it on
+    ``binding.requires_instinct`` (now default True) would silently drop
+    the failure terminal for every exempt direct-fire.
     """
-    if binding.requires_instinct:
+    if from_instinct:
         return
     _safe_record(
         record_decision_completed,
@@ -1045,6 +1667,21 @@ def _emit_direct_path_failure(
             "action_outcome": "failed",
             "error_class": error_class,
             "reason": reason,
+        },
+    )
+    # Workspace audit event for the decision activity feed.
+    record_decision(
+        workspace_id=workspace_id,
+        actor_id=user_id or "agent",
+        pocket_id=pocket_id,
+        decision_action="decision.completed",
+        outcome="failed",
+        metadata={
+            "passed": False,
+            "action_outcome": "failed",
+            "error_class": error_class,
+            "reason": reason,
+            "correlation_id": str(correlation_id),
         },
     )
 
@@ -1115,4 +1752,9 @@ async def _do_request(
     return {"status": resp.status_code, "response": response}
 
 
-__all__ = ["ActionBinding", "run_action"]
+__all__ = [
+    "ActionBinding",
+    "CompensateSpec",
+    "get_optimistic_registry",
+    "run_action",
+]

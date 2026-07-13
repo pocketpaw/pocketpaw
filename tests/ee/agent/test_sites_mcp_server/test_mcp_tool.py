@@ -25,8 +25,10 @@ pytest.importorskip("pocketpaw_ee")
 class TestSitesMcpServerRegistration:
     def test_server_name_and_tool_id(self) -> None:
         from pocketpaw_ee.agent.mcp_servers.sites import (
+            CREATE_DYNAMIC_SITE_TOOL_ID,
             CREATE_LANDING_SITE_TOOL_ID,
             CREATE_SVELTE_SITE_TOOL_ID,
+            EDIT_SVELTE_COMPONENT_TOOL_ID,
             PUBLISH_TOOL_ID,
             SERVER_NAME,
             SITES_TOOL_IDS,
@@ -35,16 +37,23 @@ class TestSitesMcpServerRegistration:
         assert SERVER_NAME == "pocketpaw_sites_manager"
         # Allowlist entries must use the exact ``mcp__<server>__<tool>`` form.
         assert PUBLISH_TOOL_ID == "mcp__pocketpaw_sites_manager__publish"
-        # The deterministic create tools register on the SAME server (two
-        # create_sdk_mcp_server calls under one name would clobber each other),
-        # so all ids ride the one ``pocketpaw_sites_manager`` server: the ripple
-        # landing tool + the svelte-track tool sit beside publish.
+        # The deterministic create tools + the targeted edit tool register on the
+        # SAME server (two create_sdk_mcp_server calls under one name would clobber
+        # each other), so all ids ride the one ``pocketpaw_sites_manager`` server:
+        # the ripple landing tool, the svelte-track tool, the component-edit tool,
+        # and the dynamic-track tool sit beside publish.
         assert CREATE_LANDING_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__create_landing_site"
         assert CREATE_SVELTE_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__create_svelte_site"
+        assert (
+            EDIT_SVELTE_COMPONENT_TOOL_ID == "mcp__pocketpaw_sites_manager__edit_svelte_component"
+        )
+        assert CREATE_DYNAMIC_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__create_dynamic_site"
         assert PUBLISH_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_LANDING_SITE_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_SVELTE_SITE_TOOL_ID in SITES_TOOL_IDS
-        assert len(SITES_TOOL_IDS) == 3
+        assert EDIT_SVELTE_COMPONENT_TOOL_ID in SITES_TOOL_IDS
+        assert CREATE_DYNAMIC_SITE_TOOL_ID in SITES_TOOL_IDS
+        assert len(SITES_TOOL_IDS) == 5
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk

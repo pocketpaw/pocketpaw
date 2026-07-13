@@ -1,4 +1,10 @@
 # knowledge.py — Agent knowledge service via the kb-go binary.
+# Updated: 2026-07-03 — FL-11b "hide-from-AI purge". Added
+#   KnowledgeService.remove_article(scope, article_id) → `kb delete
+#   <article_id> --scope <scope>`, mirroring get_article. Resilient: logs and
+#   swallows subprocess errors (returns False) like the other kb calls, so a
+#   purge failure never propagates back into the PATCH handler that hides a
+#   file. kb-go's `delete` is idempotent (deleting a missing id is a no-op).
 # Updated: 2026-04-30 — Stage 1.B of "Files as Knowledge". Added
 #   ingest_text_to_scope so callers (notably the FileReady listener) can
 #   target arbitrary kb-go scopes (workspace:{wid}, pocket:{pid}) without
@@ -158,6 +164,32 @@ class KnowledgeService:
         """Fetch a single article's full body."""
         result = await asyncio.to_thread(_kb, "show", article_id, "--scope", f"agent:{agent_id}")
         return result if isinstance(result, dict) else {"content": str(result)}
+
+    @staticmethod
+    async def remove_article(scope: str, article_id: str) -> bool:
+        """Delete a single article from a kb-go scope (FL-11b purge path).
+
+        Mirrors :meth:`get_article` but calls ``kb delete``. Used to
+        retroactively purge a file's KB content when it's hidden from AI after
+        having been indexed. Resilient like the other kb calls: any subprocess
+        error is logged and swallowed (returns ``False``) so a purge failure
+        never breaks the caller (the hide flag is still applied; a sweeper can
+        re-purge). kb-go's ``delete`` is idempotent — deleting a missing id is a
+        no-op. Returns ``True`` when the subprocess call completed without
+        raising.
+        """
+        try:
+            await asyncio.to_thread(_kb, "delete", article_id, "--scope", scope)
+            return True
+        except Exception:
+            logger.warning(
+                "kb delete failed for article_id=%s scope=%s; KB content may "
+                "still be retrievable (retry/sweeper can re-purge)",
+                article_id,
+                scope,
+                exc_info=True,
+            )
+            return False
 
     @staticmethod
     async def search(agent_id: str, query: str, limit: int = 5) -> list[str]:

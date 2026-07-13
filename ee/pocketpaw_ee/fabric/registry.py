@@ -6,6 +6,12 @@
 # Mutations stay on the store; the registry stays read-only by design
 # so wiring code can keep one Protocol type in its signatures and the
 # call-site stays simple (``WorkspaceFabricRegistry(store, ws_id)``).
+# 2026-06-10: added ``list_entity_types()`` pass-through — the registry
+# exposed exists/properties but no way to enumerate the workspace
+# ontology without reaching around to the store.
+# 2026-07-02 (feat/atlas-fabric, AT-7): added ``list_entity_links()``
+# pass-through so the atlas Fabric introspector can enumerate a type's
+# declared links when describing the workspace schema. Read-only.
 """Concrete ``FabricRegistry`` implementation backed by
 :class:`WorkspaceFabricStore`.
 
@@ -89,6 +95,28 @@ class WorkspaceFabricRegistry:
         # so callers can mutate the returned value without affecting
         # the store. We return it directly to avoid a redundant copy.
         return self._store.get_properties(self._workspace_id, name)
+
+    def list_entity_types(self) -> list[str]:
+        """Names of every entity type registered in this workspace.
+
+        Pass-through to ``WorkspaceFabricStore.list_entity_types`` with
+        the bound ``workspace_id``. Completes the read surface: callers
+        holding a registry could check a known name or fetch its
+        properties, but had no way to enumerate the workspace ontology
+        without reaching around the wrapper to the store.
+        """
+        return self._store.list_entity_types(self._workspace_id)
+
+    def list_entity_links(self, name: str) -> list[dict[str, str]]:
+        """Every declared link touching entity type ``name`` (either end)
+        in this workspace, as ``{"name", "from_type", "to_type"}`` dicts.
+
+        Pass-through to ``WorkspaceFabricStore.list_entity_links`` with
+        the bound ``workspace_id``. Added for the atlas Fabric
+        introspector (AT-7) — describing a type's schema needs its links
+        enumerated, not just existence-checked.
+        """
+        return self._store.list_entity_links(self._workspace_id, name)
 
 
 __all__ = [

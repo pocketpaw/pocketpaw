@@ -18,6 +18,31 @@ User-message attachments ride the ``message.sent`` payload so channel
 agents see the same filename/mime/size context DM agents already get —
 appended to the user prompt as an ``Attached files:`` block before
 ``pool.run`` (matching ``src/pocketpaw/agents/loop.py``'s DM shape).
+
+Updated 2026-06-12: ``_run_agent_response`` now binds the agent's
+workspace/user identity (``attach_agent_identity``) around ``pool.run`` so
+in-process MCP tools that resolve scope from ContextVars (fabric, instinct,
+decisions, connectors) work on the group/DM bridge path. The SSE chat path
+already did this in ``run_core``; the bridge path skipped it, so every
+scoped tool returned "requires workspace context".
+
+Updated 2026-06-28 (feat/aiam-agent-revoke, AW-4): ``_run_agent_response``
+catches ``AgentDisabled`` from ``pool.get`` explicitly and SKIPS the agent
+(returns None, no error to the channel) — a soft-disabled agent simply stops
+responding in groups/DMs until re-enabled.
+
+Updated 2026-07-08 (feat/billing-enforce-gate): ``_dispatch_agent_responses``
+now runs the shared run-start billing gate (``credits.guards.over_billing_limit``)
+ABOVE the respond-mode evaluation — before ``_smart_relevance_check``'s Haiku
+pre-classifier call and before ``pool.run`` — so an over-budget tenant triggers
+NO model call on the group/DM auto-response path. On rejection it emits one
+``agent.error`` to the group and returns.
+Updated 2026-07-11 (ART-1): ``_run_agent_response`` binds a per-run
+delivered-artifact collector around ``pool.run`` and drains it into a
+``{type:"artifact", meta}`` attachment per successful ``deliver_artifact`` call,
+so a group/DM agent that delivers a file persists the structured signal too.
+This path has no run-transport SSE stream, so it emits no ``artifact`` event —
+that applies only to the streaming ``run_core`` path.
 """
 
 from __future__ import annotations
@@ -31,6 +56,7 @@ from typing import Any
 
 from pocketpaw_ee.cloud.realtime.emit import emit
 from pocketpaw_ee.cloud.realtime.events import (
+    AgentError,
     AgentStreamChunk,
     AgentStreamEnd,
     AgentStreamStart,
@@ -104,6 +130,40 @@ async def _dispatch_agent_responses(data: dict) -> None:
         len(group.agents),
         [(a.agent_id, a.respond_mode) for a in group.agents],
     )
+
+    # Run-start BILLING gate — placed ABOVE the respond-mode evaluation so an
+    # over-budget tenant makes NO model call at all. Critically this sits before
+    # ``_should_agent_respond`` -> ``_smart_relevance_check``: that pre-classifier
+    # is itself a (cheap Haiku) model call, so gating only before ``pool.run``
+    # would still let an over-budget workspace spend on the relevance check. The
+    # shared guard is flag-gated (a no-op unless ``billing_enforced``) and runs
+    # both the empty-wallet and monthly-ceiling assertions; on rejection we emit a
+    # single terminal ``agent.error`` to the group (best-effort — no run_id /
+    # stream transport on this event-bus path) and return without dispatching any
+    # agent. An empty ``workspace_id`` is a no-op (no wallet to attribute).
+    from pocketpaw_ee.cloud.credits.guards import over_billing_limit
+
+    billing_reject = await over_billing_limit(workspace_id)
+    if billing_reject is not None:
+        logger.warning(
+            "Agent bridge: workspace %s over billing limit (%s) — skipping all agents in group %s",
+            workspace_id,
+            billing_reject.code,
+            group_id,
+        )
+        try:
+            await emit(
+                AgentError(
+                    data={
+                        "group_id": group_id,
+                        "code": billing_reject.code,
+                        "message": str(billing_reject),
+                    },
+                )
+            )
+        except Exception:
+            logger.debug("billing agent.error emit failed for group %s", group_id, exc_info=True)
+        return
 
     agents_to_run: list[str] = []
     for group_agent in group.agents:
@@ -405,8 +465,15 @@ async def _run_agent_response(
     ``meta``). They're formatted into ``user_message`` before ``pool.run`` so
     the agent sees filename/mime/size the same way it does on the DM path.
     """
+    from pocketpaw.agents.errors import AgentDisabled
     from pocketpaw.agents.pool import get_agent_pool
     from pocketpaw_ee.cloud.chat import message_service
+    from pocketpaw_ee.cloud.chat.agent_service import (
+        attach_agent_identity,
+        attach_delivered_artifacts_collector,
+        detach_agent_identity,
+        detach_delivered_artifacts_collector,
+    )
 
     pool = get_agent_pool()
     session_key = f"cloud:{group_id}:{agent_id}"
@@ -420,6 +487,12 @@ async def _run_agent_response(
 
     try:
         instance = await pool.get(agent_id)
+    except AgentDisabled:
+        # Soft-disabled / revoked (AW-4): SKIP this agent in the group/DM
+        # dispatch — no error to the channel, no 500. A disabled agent simply
+        # does not respond until re-enabled.
+        logger.info("Skipping disabled agent %s in group %s", agent_id, group_id)
+        return None
     except Exception:
         logger.error("Failed to get agent instance %s", agent_id, exc_info=True)
         return None
@@ -470,6 +543,23 @@ async def _run_agent_response(
     error_summary = ""
     last_emit_ts = 0.0
     STREAM_CHUNK_THROTTLE_S = 0.2
+    # Bind the agent's workspace/user identity for the duration of the run so
+    # in-process MCP tools that resolve scope from ContextVars (fabric,
+    # instinct, decisions, connectors, …) can reach the store. The SSE chat
+    # path does this in ``run_core.attach_agent_identity``; the group/DM bridge
+    # path (this function) calls ``pool.run`` directly and previously skipped
+    # it, so every ContextVar-scoped tool returned "requires workspace context
+    # (call from a cloud chat session)". ``user_id`` is the agent itself — it is
+    # the actor on this path, matching the cloud MCP tests' setup.
+    identity_tokens = attach_agent_identity(workspace_id=workspace_id, user_id=agent_id)
+    # ART-1: bind a per-run collector so a ``deliver_artifact`` call on THIS
+    # (group/DM) path lands a ``{type:"artifact", meta}`` attachment on the agent
+    # message. This path has no run-transport SSE stream, so it persists the
+    # attachment only — no ``artifact`` event (that applies to the streaming
+    # ``run_core`` path). The list is bound before ``pool.run`` so the descendant
+    # SDK task's tool appends onto the same object this function drains below.
+    delivered_artifacts: list[dict[str, Any]] = []
+    delivered_token = attach_delivered_artifacts_collector(delivered_artifacts)
     try:
         async for event in pool.run(
             agent_id, user_message, session_key, history, knowledge_context=knowledge_context
@@ -526,12 +616,18 @@ async def _run_agent_response(
     except Exception:
         logger.exception("Agent %s response failed in group %s", agent_id, group_id)
         full_text = full_text or "[Agent response failed]"
+    finally:
+        detach_agent_identity(identity_tokens)
+        detach_delivered_artifacts_collector(delivered_token)
 
     if saw_error_event and not full_text.strip():
         details = f": {error_summary}" if error_summary else ""
         full_text = f"[Agent encountered an error and could not produce a full response{details}]"
 
-    if not full_text.strip():
+    # ART-1: an empty reply that nonetheless DELIVERED artifacts must not be
+    # dropped — the files landed in blob storage, so fall through to persist a
+    # message carrying the ``{type:"artifact"}`` attachments (empty text is fine).
+    if not full_text.strip() and not delivered_artifacts:
         return None
 
     # Check for ripple spec in response
@@ -550,6 +646,12 @@ async def _run_agent_response(
                 full_text = full_text.strip()
     except Exception:
         pass
+
+    # ART-1: persist one ``{type:"artifact", meta}`` attachment per successful
+    # delivery on this path too (alongside any ripple attachment). No SSE event —
+    # the group/DM bridge has no run transport stream.
+    for meta in delivered_artifacts:
+        attachment_dicts.append({"type": "artifact", "meta": meta})
 
     # Auto-create pocket from ripple spec
     pocket_id = None

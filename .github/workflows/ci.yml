@@ -10,6 +10,20 @@
 # Updated: 2026-05-25 — Triggers added for feat/*-integration branches so
 # sub-PRs in a multi-PR RFC rollout get full CI coverage during integration.
 # Stale `ee` branch reference dropped (the ee branch was deprecated 2026-05-21).
+# Updated: 2026-06-10 — deploy-coolify job: pushes to dev that pass every CI
+# job now fire the Coolify deploy hook for the cloud backend stack (defined
+# in qbtrix/paw-workspace deploy/coolify/, which clones this repo's dev at
+# image-build time). Lives in this workflow (not workflow_run) because the
+# repo's default branch is main — workflow_run triggers only fire from the
+# default branch's file, and main lags dev.
+# Updated: 2026-06-27 — CI speed: the `test` job now runs the full 3.11/3.12/
+# 3.13 matrix only on push to dev/main; PRs test 3.12 alone (the prod version,
+# per the Dockerfile), so version-specific breaks are still caught at the merge
+# gate. The duplicate full-suite run in tests.yaml was removed in the same pass.
+# Updated: 2026-07-02 — lint job gains the `atlas build --check` freshness
+# gate (AT-4): the compiled atlas artifact (src/pocketpaw/atlas/data/
+# atlas.json) must match a fresh compile of authored entries + connector/
+# senses extraction, or the step fails with a diff summary.
 name: CI
 
 on:
@@ -44,6 +58,12 @@ jobs:
 
       - name: Ruff format check
         run: uv run ruff format --check .
+
+      # AT-4 — the checked-in atlas artifact is compiled (lockfile-style);
+      # fail with a diff summary when it lags the authored files or the
+      # connector YAMLs. Cheap: compiles to memory, byte-compare only.
+      - name: Atlas artifact freshness (atlas build --check)
+        run: uv run pocketpaw atlas build --check
 
   build:
     name: Build wheels
@@ -153,7 +173,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        # PRs test only the prod version (3.12, per the Dockerfile) for speed;
+        # the full 3.11/3.12/3.13 matrix runs on push to dev/main so version-
+        # specific breaks are still caught at the merge gate.
+        python-version: ${{ (github.event_name == 'push') && fromJSON('["3.11", "3.12", "3.13"]') || fromJSON('["3.12"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -209,3 +232,45 @@ jobs:
       # repo root (where import-linter is installed) against the EE config.
       - name: import-linter (enterprise)
         run: uv run lint-imports --config ee/pyproject.toml
+
+  deploy-coolify:
+    # Auto-deploy the cloud backend after a green dev push. The Coolify app
+    # (qbtrix/paw-workspace deploy/coolify/) clones this repo's dev branch at
+    # image-build time, and its Dockerfile cache-busts on the dev tip — so a
+    # plain (cached) deploy rebuilds exactly the commit this run validated.
+    # Requires two repo secrets:
+    #   COOLIFY_DEPLOY_HOOK — the app's deploy-hook URL (Coolify → Webhooks)
+    #   COOLIFY_API_TOKEN   — a Coolify API token with deploy permission
+    # While the secrets are unset the job warns and exits green, so dev CI
+    # doesn't go red before the one-time Coolify setup is done.
+    #
+    # Paw Sites toolchain (feat/paw-sites-prod-deploy, DEP-4): Dockerfile.enterprise
+    # bundles bun + the paw-sites generator + the @ripple-ui/svelte tarball so a live
+    # publish works. The vendored trees (deploy/paw-sites/, deploy/ripple/) are
+    # gitignored, so they are NOT in Coolify's clone — the Coolify app's build config
+    # MUST set the CLONE source for both:
+    #     PAW_SITES_SOURCE=clone   RIPPLE_SOURCE=clone
+    # (Coolify owns the docker build; this job only fires the webhook, so the args
+    # live in Coolify's app settings, not here.) See deploy/README-build.md.
+    name: Deploy to Coolify
+    runs-on: ubuntu-latest
+    needs: [lint, build, test-oss, test, import-linter]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    steps:
+      - name: Fire Coolify deploy hook
+        env:
+          HOOK: ${{ secrets.COOLIFY_DEPLOY_HOOK }}
+          TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
+        run: |
+          if [ -z "$HOOK" ] || [ -z "$TOKEN" ]; then
+            echo "::warning::COOLIFY_DEPLOY_HOOK / COOLIFY_API_TOKEN secrets not set — skipping backend deploy."
+            exit 0
+          fi
+          code=$(curl -sS -o resp.json -w '%{http_code}' \
+            -H "Authorization: Bearer $TOKEN" "$HOOK")
+          cat resp.json; echo
+          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+            echo "::error::Coolify deploy hook returned HTTP $code"
+            exit 1
+          fi
+          echo "Coolify deploy queued for \`$GITHUB_SHA\`" >> "$GITHUB_STEP_SUMMARY"

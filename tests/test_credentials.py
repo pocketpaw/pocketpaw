@@ -3,6 +3,8 @@
 # Created: 2026-02-06
 # Tests: CredentialStore, config save/load separation, plaintext migration,
 #         file permissions, and log secret scrubbing.
+# Updated 2026-06-24: expected SECRET_FIELDS now includes the Dodo billing
+#         secrets (dodo_payments_api_key, dodo_webhook_secret).
 
 import json
 import logging
@@ -540,8 +542,20 @@ class TestSecretFieldsList:
             "litellm_api_key",
             "claude_code_oauth_token",
             "status_api_key",
+            "dodo_payments_api_key",
+            "dodo_webhook_secret",
+            "shield_api_token",
         }
         assert SECRET_FIELDS == expected
+
+    def test_shield_api_token_is_secret(self):
+        """The shield control-API bearer token must be a SECRET_FIELD so it is
+        stored encrypted and never returned over REST (regression: it was added
+        to config as a plain field, which would have leaked it via
+        Settings.save() -> config.json and GET /api/v1/settings)."""
+        assert "shield_api_token" in SECRET_FIELDS
+        # The socket PATH is not a secret and must stay excluded.
+        assert "shield_api_socket" not in SECRET_FIELDS
 
     def test_non_secrets_excluded(self):
         """Common non-secret fields must NOT be in SECRET_FIELDS."""

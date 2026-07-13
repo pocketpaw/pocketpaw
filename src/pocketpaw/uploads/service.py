@@ -1,12 +1,15 @@
-"""UploadService — validates, stores, and persists metadata."""
+"""UploadService — validates, stores, persists metadata, and generates thumbnails."""
 
 from __future__ import annotations
 
+import io
+import logging
 import os
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 
 from fastapi import UploadFile
@@ -23,6 +26,20 @@ from pocketpaw.uploads.errors import (
 )
 from pocketpaw.uploads.file_store import FileRecord, JSONLFileStore
 from pocketpaw.uploads.keys import new_storage_key
+
+logger = logging.getLogger(__name__)
+
+# ── Thumbnail constants ────────────────────────────────────────────────
+_THUMB_MAX_DIM = 2048
+_THUMB_MAX_SOURCE = 50 * 1024 * 1024  # 50 MiB
+_THUMB_CACHE_LIMIT_MB = 500
+_THUMB_DEFAULT_Q = 80
+_THUMB_FORMATS: dict[str, tuple[str, str, str]] = {
+    "webp": ("WEBP", "image/webp", ".webp"),
+    "jpeg": ("JPEG", "image/jpeg", ".jpg"),
+    "jpg": ("JPEG", "image/jpeg", ".jpg"),
+    "png": ("PNG", "image/png", ".png"),
+}
 
 _SNIFF_BYTES = 512
 
@@ -210,6 +227,34 @@ class UploadService:
         url = await self._adapter.presigned_get(rec.storage_key, ttl_seconds)
         return rec, url
 
+    # ── Thumbnail ────────────────────────────────────────────────────
+
+    async def thumbnail(
+        self,
+        file_id: str,
+        requester_id: str,
+        *,
+        width: int = 0,
+        height: int = 0,
+        quality: int = _THUMB_DEFAULT_Q,
+        fmt: str = "webp",
+    ) -> tuple[FileRecord, str, AsyncIterator[bytes]]:
+        """Return ``(record, mime_type, chunk_iterator)`` for a resized thumbnail."""
+        rec = self._meta.get(file_id)
+        if rec is None:
+            raise NotFound()
+        if rec.owner_id != requester_id:
+            raise NotFound()
+        return await generate_thumbnail(
+            self._adapter,
+            rec,
+            self._cfg.local_root,
+            width=width,
+            height=height,
+            quality=quality,
+            fmt=fmt,
+        )
+
     async def delete(self, file_id: str, requester_id: str) -> None:
         rec = self._meta.get(file_id)
         if rec is None:
@@ -236,3 +281,177 @@ def _raise(code: FailCode, reason: str) -> None:
         "storage_error": StorageFailure,
     }
     raise mapping[code](reason)
+
+
+# ── Shared thumbnail generator ────────────────────────────────────────
+
+
+async def generate_thumbnail(
+    adapter: StorageAdapter,
+    record: FileRecord,
+    cache_root: Path | None = None,
+    *,
+    width: int = 0,
+    height: int = 0,
+    quality: int = _THUMB_DEFAULT_Q,
+    fmt: str = "webp",
+) -> tuple[FileRecord, str, AsyncIterator[bytes]]:
+    """Fetch *record*'s original from *adapter*, resize, cache, and stream.
+
+    This is a module-level function so both ``UploadService`` (OSS) and
+    ``EEUploadService`` can call it after their own auth + metadata lookup.
+    """
+
+    mime = (record.mime or "").lower()
+    if not mime.startswith("image/"):
+        raise NotFound("file is not an image")
+
+    w = min(max(width, 0), _THUMB_MAX_DIM)
+    h = min(max(height, 0), _THUMB_MAX_DIM)
+    if w == 0 and h == 0:
+        w = 256
+    q = min(max(quality, 1), 100)
+    fmt_key = fmt.lower() if fmt.lower() in _THUMB_FORMATS else "webp"
+    pil_fmt, out_mime, _out_ext = _THUMB_FORMATS[fmt_key]
+
+    cache_dir = (
+        (cache_root / "_thumbs")
+        if cache_root
+        else (Path.home() / ".pocketpaw" / "uploads" / "_thumbs")
+    )
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    flat_key = record.storage_key.replace("/", "_").replace("\\", "_")
+    cache_file = cache_dir / f"{flat_key}_{w}x{h}_q{q}.{fmt_key}"
+
+    # Cache hit — stream from disk.
+    if cache_file.exists():
+        try:
+            os.utime(cache_file, None)
+        except OSError:
+            pass
+        return record, out_mime, _stream_file(cache_file)
+
+    # Evict if needed.
+    await _evict_thumb_cache(cache_dir, _THUMB_CACHE_LIMIT_MB * 1024 * 1024)
+
+    # Fetch, resize.
+    thumb_bytes = await _resize_from_adapter(adapter, record.storage_key, w, h, q, pil_fmt, fmt_key)
+
+    # Write-through cache (atomic).
+    tmp = cache_file.with_suffix(cache_file.suffix + ".tmp")
+    try:
+        import aiofiles as aio
+
+        async with aio.open(tmp, "wb") as fh:
+            await fh.write(thumb_bytes)
+        await aio.os.replace(str(tmp), str(cache_file))
+    except Exception:
+        try:
+            os.remove(str(tmp))
+        except FileNotFoundError:
+            pass
+
+    return record, out_mime, _bytes_iter(thumb_bytes)
+
+
+async def _resize_from_adapter(
+    adapter: StorageAdapter,
+    storage_key: str,
+    w: int,
+    h: int,
+    q: int,
+    pil_fmt: str,
+    fmt_key: str,
+) -> bytes:
+    """Fetch original bytes, resize with Pillow, return result."""
+    import asyncio
+
+    from PIL import Image as PILImage
+
+    buf = io.BytesIO()
+    total = 0
+    try:
+        async for chunk in adapter.open(storage_key):
+            total += len(chunk)
+            if total > _THUMB_MAX_SOURCE:
+                raise TooLarge(f"source exceeds {_THUMB_MAX_SOURCE} bytes")
+            buf.write(chunk)
+    except (NotFound, TooLarge):
+        raise
+    except Exception as exc:
+        raise NotFound("cannot read source") from exc
+    if total == 0:
+        raise NotFound("empty source")
+    buf.seek(0)
+
+    def _resize() -> bytes:
+        img = PILImage.open(buf)
+        if fmt_key in ("jpeg", "jpg", "webp"):
+            if img.mode in ("RGBA", "P", "LA"):
+                img = img.convert("RGB")
+        elif img.mode == "P":
+            img = img.convert("RGBA")
+        size = (w, h) if (w and h) else ((w, w) if w else (h, h))
+        img.thumbnail(size, PILImage.LANCZOS)
+        out = io.BytesIO()
+        kwargs: dict = {"format": pil_fmt}
+        if fmt_key != "png":
+            kwargs["quality"] = q
+        else:
+            kwargs["optimize"] = True
+        img.save(out, **kwargs)
+        return out.getvalue()
+
+    try:
+        return await asyncio.to_thread(_resize)
+    except Exception as exc:
+        raise NotFound("cannot resize") from exc
+
+
+async def _stream_file(path: Path) -> AsyncIterator[bytes]:
+    import aiofiles
+
+    async with aiofiles.open(path, "rb") as fh:
+        while True:
+            chunk = await fh.read(64 * 1024)
+            if not chunk:
+                break
+            yield chunk
+
+
+async def _bytes_iter(data: bytes) -> AsyncIterator[bytes]:
+    yield data
+
+
+async def _evict_thumb_cache(cache_dir: Path, limit_bytes: int) -> None:
+    import asyncio
+
+    def _scan_and_evict() -> None:
+        entries: list[tuple[float, Path, int]] = []
+        total = 0
+        try:
+            for entry in cache_dir.iterdir():
+                if entry.is_file() and not entry.name.endswith(".tmp"):
+                    try:
+                        st = entry.stat()
+                        entries.append((st.st_atime, entry, st.st_size))
+                        total += st.st_size
+                    except OSError:
+                        pass
+        except OSError:
+            return
+        if total <= limit_bytes:
+            return
+        entries.sort(key=lambda e: e[0])
+        to_free = total - limit_bytes
+        freed = 0
+        for _, path, size in entries:
+            if freed >= to_free:
+                break
+            try:
+                os.remove(str(path))
+                freed += size
+            except (FileNotFoundError, OSError):
+                pass
+
+    await asyncio.to_thread(_scan_and_evict)

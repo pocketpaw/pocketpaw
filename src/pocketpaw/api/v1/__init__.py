@@ -13,6 +13,14 @@
 # Updated: 2026-06-07 (feat/plugin-installer-skills) — Added the Plugins
 #   router (POST /api/v1/plugins/install) for the .claude-plugin installer
 #   (skills slice). Non-critical: mounts best-effort like the rest.
+# Updated: 2026-06-10 (feat/link-unfurl) — Added the Unfurl router
+#   (GET /api/v1/unfurl?url=...) so the paw-enterprise composer can render
+#   OG link previews. Serves in both OSS and cloud since the core mount runs
+#   in both; the path is collision-free with ee/cloud's /files/* routes.
+#
+# Updated: 2026-06-22 (feat/code/cloud) — Added the Cloud Projects router
+#   (POST /api/v1/cloud/projects) for creating S3-backed project folders
+#   from the /code route's "New Cloud Project" card.
 #
 # mount_v1_routers(app) registers all domain routers at /api/v1/ (canonical).
 # Existing dashboard.py endpoints at /api/ remain as backward-compat aliases.
@@ -48,6 +56,7 @@ _V1_ROUTERS: list[tuple[str, str, str]] = [
     ("pocketpaw.api.v1.reminders", "router", "Reminders"),
     ("pocketpaw.api.v1.intentions", "router", "Intentions"),
     ("pocketpaw.api.v1.files", "router", "Files"),
+    ("pocketpaw.api.v1.unfurl", "router", "Unfurl"),
     ("pocketpaw.api.v1.plan_mode", "router", "Plan Mode"),
     ("pocketpaw.api.v1.remote", "router", "Remote"),
     ("pocketpaw.api.v1.telegram", "router", "Telegram"),
@@ -64,6 +73,9 @@ _V1_ROUTERS: list[tuple[str, str, str]] = [
     ("pocketpaw.api.v1.tools", "router", "Tools"),
     ("pocketpaw.api.v1.oauth_integrations", "router", "OAuth Integrations"),
     ("pocketpaw.api.v1.uploads", "router", "Uploads"),
+    # Media serving moved to EE: pocketpaw_ee.cloud.media.router
+    ("pocketpaw.api.v1.terminal", "router", "Terminal"),
+    ("pocketpaw.api.v1.cloud_projects", "router", "Cloud Projects"),
     ("pocketpaw.audit.router", "router", "Audit"),
     # Cluster C / PR4 — canonical runtime audit surface. `/audit` stays as
     # a deprecated alias in audit.router and `/instinct/audit` stays in

@@ -29,6 +29,11 @@
 # without coercion. The service derives ``status`` from the dates
 # relative to ``now`` (``upcoming`` vs ``active``); ``completed`` is set
 # by a separate workflow.
+# Updated: 2026-07-04 (fix/approval-resolution) — added ``status`` to
+# ``ListWorkItemsRequest`` so ``GET /mission-control/items?status=pending``
+# is honored (it was silently ignored, leaking terminal items into the
+# awaiting-approval feed). Accepts a ``WorkItemStatus`` value or the
+# ``"pending"`` alias for the awaiting-approval feed; ``None`` = all statuses.
 """Mission Control wire DTOs.
 
 The audit doc (``docs/internal/2026-05-mission-control-backend-audit.md``,
@@ -46,6 +51,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.mission_control.domain import (
     AssigneeKind,
     WorkItem,
@@ -79,6 +85,14 @@ class ListWorkItemsRequest(BaseModel):
     project_id: str | None = Field(
         default=None,
         description="Filter by project id; empty string narrows to 'Unassigned'.",
+    )
+    status: str | None = Field(
+        default=None,
+        description=(
+            "Filter by WorkItem status. Accepts a WorkItemStatus value "
+            "(e.g. 'awaiting_approval', 'done') or the 'pending' alias for "
+            "the awaiting-approval feed. None returns every status."
+        ),
     )
     limit: int = Field(default=50, ge=1, le=500)
 
@@ -130,6 +144,17 @@ class BulkSnoozeRequest(BaseModel):
 
     ids: list[str] = Field(min_length=1)
     until_iso: str = Field(description="ISO-8601 timestamp to snooze until")
+
+
+class BulkRevertRequest(BaseModel):
+    """Body for ``POST /mission-control/items/bulk-revert``.
+
+    Reverts N Tasks from a terminal status (done, reverted, failed) back
+    to ``in_progress`` via ``tasks.service.agent_update_task``. Ids that
+    aren't Tasks come back in ``skipped``.
+    """
+
+    ids: list[str] = Field(min_length=1)
 
 
 class OutcomesQueryRequest(BaseModel):
@@ -198,6 +223,23 @@ class AttachCycleItemsResponse(BaseModel):
     cycle_id: str
 
 
+DetachCycleItemsRequest = AttachCycleItemsRequest
+
+
+class DetachCycleItemsResponse(BaseModel):
+    """Result of a bulk-detach call.
+
+    Same partial-success posture as ``AttachCycleItemsResponse``.
+    ``detached`` lists ids that were successfully removed from the
+    sprint; ``skipped`` lists ids the caller couldn't see or that
+    weren't in this sprint.
+    """
+
+    detached: list[str]
+    skipped: list[str] = Field(default_factory=list)
+    cycle_id: str
+
+
 class CreateCycleRequest(BaseModel):
     """Body for ``POST /mission-control/cycles``.
 
@@ -262,6 +304,7 @@ class WorkItemResponse(BaseModel):
     pocket_name: str = ""  # display name
     fabric_refs: list[str] = Field(default_factory=list)
     blocked_by: list[str] = Field(default_factory=list)
+    due_at: str | None = None
 
 
 def work_item_to_response(item: WorkItem) -> WorkItemResponse:
@@ -287,6 +330,7 @@ def work_item_to_response(item: WorkItem) -> WorkItemResponse:
         pocket_name=item.pocket_name,
         fabric_refs=list(item.fabric_refs),
         blocked_by=list(item.blocked_by),
+        due_at=iso_utc(item.due_at),
     )
 
 
@@ -400,15 +444,29 @@ class AnalyticsResponse(BaseModel):
     per_day: list[AnalyticsDayDTO]
     by_agent: list[AnalyticsAgentDTO]
     by_pocket: list[AnalyticsPocketDTO]
+    # Outcome-verdict rollup (evals slice). ``solved_rate`` = solved / checkable
+    # (checkable = solved + partial + not_solved; ``unknown`` reported separately
+    # so low criteria coverage stays visible). None = no checkable verdicts in
+    # the window — the UI renders an em dash, never a fake 0% or 100%.
+    solved_rate: float | None = None  # 0-100
+    solved_count: int = 0
+    partial_count: int = 0
+    not_solved_count: int = 0
+    unknown_count: int = 0
 
 
 __all__ = [
     "ActivityEventResponse",
     "AnalyticsResponse",
+    "AttachCycleItemsRequest",
+    "AttachCycleItemsResponse",
     "BulkActionRequest",
     "BulkReassignRequest",
+    "BulkRevertRequest",
     "BulkSnoozeRequest",
     "CreateCycleRequest",
+    "DetachCycleItemsRequest",
+    "DetachCycleItemsResponse",
     "ListActivityRequest",
     "ListPlanSessionsRequest",
     "ListWorkItemsRequest",

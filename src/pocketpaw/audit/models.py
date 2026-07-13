@@ -12,7 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 # Valid categories for audit entries
-AuditCategory = Literal["decision", "data", "config", "security"]
+AuditCategory = Literal["decision", "data", "config", "security", "tool"]
 
 # Valid status values
 AuditStatus = Literal["completed", "approved", "rejected", "pending"]
@@ -41,7 +41,7 @@ class AuditEntry(BaseModel):
     @field_validator("category")
     @classmethod
     def validate_category(cls, v: str) -> str:
-        valid = {"decision", "data", "config", "security"}
+        valid = {"decision", "data", "config", "security", "tool"}
         if v not in valid:
             raise ValueError(f"category must be one of {valid}, got {v!r}")
         return v

@@ -25,6 +25,12 @@
 #   AUTO-refresh: they re-run a source with no human in the loop, so they
 #   are metered by the per-pocket budget in `_refresh_budget.py` —
 #   SEPARATE from the manual per-(pocket, user) `_run_log` limiter here.
+# Updated: 2026-06-08 (fix/pocket-sources-run-400) — added the public
+#   `selected_source_keys()` helper (reuses `_parse_bindings` +
+#   `_select_sources`) so a caller can ask "would this (trigger, only_source)
+#   request run anything?" without a backend call. The `sources/run` route
+#   uses it to turn the implicit on-open run of a blank/starter pocket (no
+#   backend bound, nothing to fetch) into a clean no-op instead of a hard 400.
 #
 # SSRF BOUNDARY. The outbound-HTTP defenses now live in `_http_guard.py` —
 # the ONE canonical guard module both executors import. Every defense from
@@ -57,6 +63,34 @@
 #   with a `_SourceError(code="bad_source")` so a missing workspace context
 #   lands in the errors aggregation as a CLEAR error (mirrors the http-no-path
 #   guard), never a silent no-provider.
+# Updated: 2026-06-12 (feat/connector-as-pocket-backend) — two additions.
+#   (1) CONNECTOR BACKEND: `run_sources` gained `backend_type` ("http" default
+#   | "connector") + `connector_name`. When the pocket's backend is a connector,
+#   each non-sense source runs against the BOUND connector via
+#   `_run_connector_binding` → `connectors_service.execute` (the SAME read-first
+#   path senses use: only `auto`-trust actions run; confirm/restricted is
+#   refused per-source). The binding's `action`/`params` name the connector
+#   action. `base_url` is unused and the SSRF re-validation is skipped for a
+#   connector backend. http/sense paths are byte-for-byte unchanged when
+#   `backend_type="http"`. (2) SOURCE TRANSFORM: `SourceBinding.transform` (a
+#   small declarative `{select, map}` spec, interpreted by the pure
+#   `_source_transform.apply_transform`) shapes the RAW result of ANY source
+#   type before it binds — applied in the shared `_shape_result` row builder. A
+#   malformed transform fails THAT source cleanly (`bad_transform`), never a
+#   sibling. `SourceBinding.type` gained the `"connector"` literal.
+#
+# IMPORT-LINTER: still must NOT import `pocketpaw_ee.cloud.models.*`. The new
+# `_source_transform` helper is pure (no imports beyond typing); the connectors
+# service is imported LAZILY inside `_run_connector_binding` (same pattern as
+# the sense resolver import) so the static graph stays clean and cycle-free.
+# Updated: 2026-06-19 (feat/typed-ripplespec-phase2) — DUAL-PATH READER. The
+#   spec-reading entry points (`_parse_bindings`, `selected_source_keys`,
+#   `run_sources`) now accept `RippleSpec | dict | None`. A new `_sources_block`
+#   helper reads `spec.sources` from a typed RippleSpec or `.get("sources")`
+#   from a legacy flat dict — so a stored legacy dict and a promoted typed spec
+#   both run identically (no migration, promote-on-read). The OSS-only
+#   `pocketpaw.bundled_templates.schema` import keeps the import-linter contract
+#   clean (no `models.*` dependency).
 
 from __future__ import annotations
 
@@ -64,11 +98,12 @@ import asyncio
 import logging
 import time
 import urllib.parse
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
+from pocketpaw.bundled_templates.schema import RippleSpec
 from pocketpaw.security.url_validators import validate_external_url_strict
 from pocketpaw_ee.cloud.pockets._http_guard import (
     _HTTP_TIMEOUT,
@@ -79,6 +114,7 @@ from pocketpaw_ee.cloud.pockets._http_guard import (
     _resolve_url,
     _strip_query,
 )
+from pocketpaw_ee.cloud.pockets._source_transform import TransformError, apply_transform
 
 logger = logging.getLogger(__name__)
 
@@ -123,20 +159,31 @@ class SourceBinding(BaseModel):
     honored. ``None`` means "use the floor as the interval".
     """
 
-    type: Literal["http", "sense"] = "http"
+    type: Literal["http", "sense", "connector"] = "http"
     method: Literal["GET"] = "GET"
-    # ``path`` is required for http sources, unused for sense sources. Kept
-    # optional here so a sense entry survives parse; the http path raises a
-    # clean per-source error if a misconfigured http source has no path.
+    # ``path`` is required for http sources, unused for sense/connector sources.
+    # Kept optional here so a sense/connector entry survives parse; the http
+    # path raises a clean per-source error if a misconfigured http source has
+    # no path.
     path: str | None = None
     bind: str
     refresh: list[RefreshTrigger] = Field(default_factory=lambda: _DEFAULT_REFRESH.copy())
     refresh_interval_seconds: int | None = Field(default=None, ge=1)
-    # Sense-source fields (type == "sense"). ``params`` are STATIC in v1 —
-    # passed through to the Sense resolver as-is (no ``{state.x}`` evaluation).
+    # Sense/connector-source fields. ``params`` are STATIC in v1 — passed
+    # through to the Sense resolver / connector as-is (no ``{state.x}``
+    # evaluation). For ``type == "sense"`` the resolver picks the connector via
+    # ``sense_id``; for ``type == "connector"`` the pocket's bound connector is
+    # used and only ``action``/``params`` matter (the binding does not name the
+    # connector — the backend does).
     sense_id: str | None = None
     action: str | None = None
     params: dict | None = None
+    # Optional declarative transform applied to the RAW fetch result before it
+    # is bound to state — for ALL source types. v1 grammar: ``{"select": ...}``
+    # (drill a dotted path) and/or ``{"map": [...]}`` (reshape a list row by
+    # row). Interpreted by the pure ``_source_transform.apply_transform``; a
+    # spec outside the grammar fails the source cleanly (never a sibling).
+    transform: dict | None = None
 
 
 def _normalize_bind(bind: str) -> str:
@@ -145,6 +192,23 @@ def _normalize_bind(bind: str) -> str:
     ``state.prs`` and ``prs`` both target the ``prs`` key of pocket state.
     """
     return bind[len("state.") :] if bind.startswith("state.") else bind
+
+
+def _shape_result(*, key: str, binding: SourceBinding, raw: object) -> dict:
+    """Apply the binding's transform (if any) to ``raw`` and build the row.
+
+    The ONE place every source type (http / sense / connector) funnels its
+    raw result through before binding to state. With no ``transform`` it
+    returns the raw value unchanged — today's behavior for http/sense.
+    A ``transform`` outside the v1 grammar raises ``_SourceError`` (mapped from
+    the pure transformer's ``TransformError``) so a hallucinated/ malformed
+    transform fails THIS source cleanly without touching a sibling.
+    """
+    try:
+        value = apply_transform(raw, binding.transform)
+    except TransformError as exc:
+        raise _SourceError(f"source transform is invalid: {exc}", code="bad_transform") from exc
+    return {"source": key, "bind": _normalize_bind(binding.bind), "value": value}
 
 
 async def _rate_limited(pocket_id: str, user_id: str) -> bool:
@@ -187,7 +251,7 @@ def _audit_source_run(
                 action="pocket.sources.run",
                 target=pocket_id,
                 status=status,
-                category="pocket_backend_config",
+                category="pocket_source_run",
                 pocket_id=pocket_id,
                 base_url=_strip_query(base_url),
                 ran=ran,
@@ -230,13 +294,62 @@ def _select_sources(
     return dict(bindings)
 
 
-def _parse_bindings(ripple_spec: dict) -> tuple[dict[str, SourceBinding], list[dict]]:
+def _sources_block(ripple_spec: RippleSpec | dict | None) -> dict[str, Any]:
+    """Return the ``sources`` block from a ``RippleSpec | dict | None`` reader input.
+
+    Phase-2 dual-path: when handed a typed ``RippleSpec`` read its ``sources``
+    field; when handed a legacy flat dict use the existing ``.get("sources")``
+    path. ``None`` / a non-dict ``sources`` value yields an empty dict, exactly
+    as the prior ``(ripple_spec or {}).get("sources") or {}`` expression did.
+    """
+    if isinstance(ripple_spec, RippleSpec):
+        raw = ripple_spec.sources
+    elif isinstance(ripple_spec, dict):
+        raw = ripple_spec.get("sources")
+    else:
+        raw = None
+    return raw if isinstance(raw, dict) else {}
+
+
+def selected_source_keys(
+    ripple_spec: RippleSpec | dict | None,
+    *,
+    trigger: str | None = None,
+    only_source: str | None = None,
+) -> list[str]:
+    """Return the source keys a ``(trigger, only_source)`` request would run.
+
+    Reuses the same ``_parse_bindings`` + ``_select_sources`` logic the run
+    path uses, so callers can answer "is there anything to run?" WITHOUT
+    making a backend call or duplicating the selection rules. Malformed
+    entries (which ``_parse_bindings`` turns into parse errors, not bindings)
+    are correctly excluded — they are never runnable.
+
+    Accepts a typed ``RippleSpec`` or a legacy flat dict (Phase-2 dual-path).
+
+    Used by the ``sources/run`` route to decide, when no backend is
+    configured, whether the request is a benign no-op (nothing selected →
+    empty result) or a real misconfiguration (a runnable source was authored
+    but the pocket has no backend bound).
+    """
+    bindings, _parse_errors = _parse_bindings(ripple_spec)
+    selected = _select_sources(bindings, trigger=trigger, only_source=only_source)
+    return list(selected.keys())
+
+
+def _parse_bindings(
+    ripple_spec: RippleSpec | dict | None,
+) -> tuple[dict[str, SourceBinding], list[dict]]:
     """Parse ``rippleSpec.sources`` into SourceBinding objects.
 
     Returns ``(valid_bindings, parse_errors)``. A malformed entry becomes a
     parse error rather than aborting the whole run.
+
+    Phase-2 dual-path: accepts a typed ``RippleSpec`` (reads ``spec.sources``)
+    or a legacy flat dict (the existing ``.get("sources")`` path). Either way a
+    malformed / absent ``sources`` block yields no bindings.
     """
-    raw = (ripple_spec or {}).get("sources") or {}
+    raw = _sources_block(ripple_spec)
     bindings: dict[str, SourceBinding] = {}
     errors: list[dict] = []
     if not isinstance(raw, dict):
@@ -301,9 +414,97 @@ async def _run_sense_binding(
         )
 
     # result.data is the ExecuteActionResponse; result.data.data is the
-    # payload that should land in pocket state.
+    # payload that should land in pocket state. The binding's transform (if
+    # any) shapes that payload before it binds.
     payload = getattr(result.data, "data", None)
-    return {"source": key, "bind": _normalize_bind(binding.bind), "value": payload}
+    return _shape_result(key=key, binding=binding, raw=payload)
+
+
+async def _run_connector_binding(
+    *,
+    key: str,
+    binding: SourceBinding,
+    connector_name: str | None,
+    workspace_id: str | None,
+    pocket_id: str,
+    user_id: str,
+) -> dict:
+    """Run a source against the pocket's BOUND connector (backend_type="connector").
+
+    The pocket's backend names the connector; the binding's ``action`` /
+    ``params`` name which connector action to call. Routes through the SAME
+    ``connectors_service.execute`` path senses use — read-first (v1): the
+    action's ``trust_level`` must be exactly ``"auto"``; a confirm / restricted
+    / unknown action is REFUSED here with a clean per-source error and
+    ``execute`` is never called (so a sibling source keeps running).
+
+    Returns the SAME ``{source, bind, value}`` row shape the http/sense paths
+    return, with the connector's ``ExecuteActionResponse.data`` payload shaped
+    by the binding's transform before it binds. ``params`` are STATIC in v1
+    (no ``{state.x}`` evaluation).
+    """
+    if not workspace_id:
+        # Mirror the sense-path guard: a connector executes FOR a workspace; a
+        # falsy workspace context would mis-scope the execute. Loud per-source
+        # error instead of a silent mis-resolution.
+        raise _SourceError("connector source requires a workspace context", code="bad_source")
+    if not connector_name:
+        # The pocket's backend is supposed to name the connector. A connector
+        # backend with no name is a misconfiguration — fail this source clearly.
+        raise _SourceError("connector backend has no connector_name", code="bad_source")
+    if not binding.action:
+        raise _SourceError("connector source has no action", code="bad_source")
+
+    # Lazy import — keeps the SSRF/http core importable without the connectors
+    # subsystem and avoids a top-level import cycle (the connectors service
+    # imports pockets.service, which the source executor lives alongside).
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+    from pocketpaw_ee.cloud.connectors.dto import ExecuteActionRequest
+
+    # READ-FIRST GATE — identical policy to the sense resolver: only an
+    # ``auto``-trust action runs. Anything else is refused BEFORE execute.
+    trust_info = await connectors_service.get_action_trust(connector_name, binding.action)
+    if trust_info is None or not getattr(trust_info, "is_read", False):
+        trust = getattr(trust_info, "trust_level", None) if trust_info else None
+        raise _SourceError(
+            f"action {binding.action!r} on {connector_name!r} is not auto-trust "
+            f"(trust_level={trust!r}) — refused in v1 (read-first)",
+            code="action_needs_approval",
+        )
+
+    try:
+        response = await connectors_service.execute(
+            workspace_id,
+            connector_name,
+            ExecuteActionRequest(
+                action=binding.action,
+                params=binding.params or {},
+                pocket_id=pocket_id,
+            ),
+            user_id=user_id,
+        )
+    except Exception as exc:
+        # connectors_service raises CloudError/NotFound for an unknown
+        # connector/action, a local-runtime-unavailable action, etc. Contain
+        # it as a per-source error — never let it abort a sibling source.
+        logger.warning(
+            "connector source %s: execute on %s failed: %s",
+            key,
+            connector_name,
+            type(exc).__name__,
+        )
+        raise _SourceError("connector action execution failed", code="connector_error") from exc
+
+    # A connector action can fail at the adapter without raising — surface that
+    # as a per-source error too, mirroring the sense resolver's ok=False path.
+    if not getattr(response, "success", False):
+        raise _SourceError(
+            getattr(response, "error", None) or "connector action returned an error",
+            code="connector_error",
+        )
+
+    payload = getattr(response, "data", None)
+    return _shape_result(key=key, binding=binding, raw=payload)
 
 
 async def _run_one(
@@ -316,18 +517,39 @@ async def _run_one(
     workspace_id: str | None,
     pocket_id: str,
     user_id: str,
+    backend_type: str = "http",
+    connector_name: str | None = None,
 ) -> dict:
     """Fetch a single source. Returns a ``ran`` row; raises ``_GuardError``
     (the shared guard rejections) or its ``_SourceError`` subclass (the
     read executor's own per-source failures).
 
-    Branches on ``binding.type``: a ``"sense"`` source resolves via the
-    Sense resolver (``_run_sense_binding``); the default ``"http"`` source
-    runs the SSRF-guarded GET below, unchanged."""
+    Dispatch order:
+      1. A ``type="sense"`` binding ALWAYS resolves via the Sense resolver
+         (``_run_sense_binding``) — sense sources are backend-agnostic, so the
+         pocket's backend type never changes how they run.
+      2. Otherwise, when the pocket's backend is ``backend_type="connector"``,
+         the source runs against the BOUND connector via
+         ``_run_connector_binding`` (action surface, not an HTTP GET).
+      3. Otherwise (the default ``backend_type="http"``) it runs the
+         SSRF-guarded GET below, unchanged.
+
+    The transform (if any) is applied inside whichever runner builds the row,
+    so it composes with all three transports."""
     if binding.type == "sense":
         return await _run_sense_binding(
             key=key,
             binding=binding,
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            user_id=user_id,
+        )
+
+    if binding.type == "connector" or backend_type == "connector":
+        return await _run_connector_binding(
+            key=key,
+            binding=binding,
+            connector_name=connector_name,
             workspace_id=workspace_id,
             pocket_id=pocket_id,
             user_id=user_id,
@@ -368,14 +590,16 @@ async def _run_one(
     except ValueError as exc:
         raise _SourceError("backend response is not valid JSON", code="bad_json") from exc
 
-    return {"source": key, "bind": _normalize_bind(binding.bind), "value": value}
+    # The binding's transform (if any) shapes the parsed JSON before it binds;
+    # with no transform this is the raw value — today's behavior, unchanged.
+    return _shape_result(key=key, binding=binding, raw=value)
 
 
 async def run_sources(
     *,
     pocket_id: str,
     user_id: str,
-    ripple_spec: dict,
+    ripple_spec: RippleSpec | dict | None,
     base_url: str,
     auth_type: str,
     auth_header: str | None,
@@ -383,6 +607,8 @@ async def run_sources(
     trigger: str | None = None,
     only_source: str | None = None,
     workspace_id: str,
+    backend_type: str = "http",
+    connector_name: str | None = None,
 ) -> dict:
     """Run the pocket's selected read-only sources and return the results.
 
@@ -402,6 +628,13 @@ async def run_sources(
     workspace, and a None would silently mis-resolve to "no provider". All
     callers already pass a real value, so a caller that omits it raises a loud
     TypeError rather than running a mis-resolved sense.
+
+    ``backend_type`` / ``connector_name`` select the transport for non-sense
+    sources. ``"http"`` (the default) fetches each source with the SSRF-guarded
+    GET against ``base_url`` — unchanged. ``"connector"`` routes each non-sense
+    source through the pocket's bound connector (``connector_name``) via
+    ``connectors_service.execute``; ``base_url`` is then unused (and not
+    validated, since a connector backend has none).
     """
     # D16 — per-(pocket, user) rate limit. On breach, return a source-level
     # error for every selected source without making any call.
@@ -426,19 +659,22 @@ async def run_sources(
         }
 
     # D6/D15 — re-validate the base URL at call time even though config-time
-    # validation already ran. Defense in depth against a tampered row.
-    try:
-        validate_external_url_strict(base_url)
-    except ValueError:
-        _audit_source_run(
-            actor=user_id,
-            pocket_id=pocket_id,
-            status="rejected",
-            base_url=base_url,
-            ran=0,
-            errors=0,
-        )
-        raise
+    # validation already ran. Defense in depth against a tampered row. A
+    # connector backend has no base_url (it routes through the connector action
+    # surface, not an HTTP GET), so the SSRF re-validation does not apply.
+    if backend_type != "connector":
+        try:
+            validate_external_url_strict(base_url)
+        except ValueError:
+            _audit_source_run(
+                actor=user_id,
+                pocket_id=pocket_id,
+                status="rejected",
+                base_url=base_url,
+                ran=0,
+                errors=0,
+            )
+            raise
 
     bindings, parse_errors = _parse_bindings(ripple_spec)
     selected = _select_sources(bindings, trigger=trigger, only_source=only_source)
@@ -476,6 +712,8 @@ async def run_sources(
                         workspace_id=workspace_id,
                         pocket_id=pocket_id,
                         user_id=user_id,
+                        backend_type=backend_type,
+                        connector_name=connector_name,
                     ),
                     timeout=_PER_SOURCE_TIMEOUT_S,
                 )
@@ -517,4 +755,4 @@ async def run_sources(
     return {"ran": ran, "errors": errors}
 
 
-__all__ = ["run_sources", "SourceBinding", "RefreshTrigger"]
+__all__ = ["run_sources", "selected_source_keys", "SourceBinding", "RefreshTrigger"]

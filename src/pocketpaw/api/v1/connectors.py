@@ -3,6 +3,13 @@
 # Updated: 2026-04-19 (Cluster C / PR2) — Added GET /connectors/{kind}/status
 #   returning a structured {connected, last_sync, cred_state, scope} payload
 #   for the ConnectorCard UI. Gap C5 in docs/plans/FEATURE-HARDENING-PLAN.md.
+# Updated: 2026-06-12 (connector-store-unification CS-6) — Endpoints stop
+#   lying after a restart. /status and the list/detail status fields derive
+#   "connected" from the registry's durable state (definition + persisted
+#   config) instead of the in-process adapter map; /execute calls
+#   registry.ensure_connected() so a configured connector works without a
+#   prior /connect in the same process; the list endpoint surfaces orphaned
+#   state rows (config persisted, definition gone) as "definition_missing".
 
 from __future__ import annotations
 
@@ -15,6 +22,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from pocketpaw.api.deps import require_scope
+from pocketpaw.connectors.protocol import ConnectorStatus
 from pocketpaw.connectors.registry import ConnectorRegistry
 
 logger = logging.getLogger(__name__)
@@ -120,6 +128,121 @@ class ConnectorStatusResponse(BaseModel):
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 
+# Map OAuth service names to connector names for auto-connect reconciliation.
+_OAUTH_SVC_TO_CONNECTOR: dict[str, str] = {
+    "google_gmail": "gmail",
+    "google_calendar": "gcalendar",
+    "google_drive": "google_drive",
+    "google_docs": "gdocs",
+    "spotify": "spotify",
+}
+
+
+async def _auto_connect_if_oauth(
+    reg: ConnectorRegistry,
+    connector_name: str,
+    pocket_id: str,
+) -> bool:
+    """Check if *connector_name* has valid OAuth tokens and register it.
+
+    Returns True if the connector was newly connected by this call, False
+    if it was already connected or no OAuth tokens exist.
+
+    This bridges the gap between the OAuth TokenStore (used by the Tools
+    tab) and the connector registry's state store (used by the Data Sources
+    tab and agent tools). Existing tokens saved before the auto-connect
+    feature get picked up on the first status query.
+    """
+    # Find the OAuth service name that maps to this connector.
+    svc = None
+    for oauth_svc, conn_name in _OAUTH_SVC_TO_CONNECTOR.items():
+        if conn_name == connector_name:
+            svc = oauth_svc
+            break
+    if svc is None:
+        return False  # Not an OAuth-backed connector
+
+    # Check if registry already has it connected.
+    statuses = reg.status(pocket_id)
+    already = any(
+        s["name"] == connector_name and s["status"] == ConnectorStatus.CONNECTED for s in statuses
+    )
+    if already:
+        return False
+
+    # Check the OAuth token store AND verify the token is actually usable.
+    #
+    # IMPORTANT: We must NOT call reg.connect() with a bad token — the
+    # registry is write-through: connect() saves config, then calls the
+    # adapter's connect(), which tries _get_token() → refresh. If the
+    # refresh fails (400 Bad Request = revoked/expired refresh token),
+    # the adapter returns failure and the registry *deletes* the persisted
+    # row. This creates a fail-delete loop on every status query.
+    #
+    # Instead, we verify the token is valid FIRST by calling
+    # OAuthManager.get_valid_token() (which attempts a refresh). Only
+    # if we get a live token back do we register the connector.
+    try:
+        from pocketpaw.clients.oauth import OAuthManager
+        from pocketpaw.clients.token_store import TokenStore
+        from pocketpaw.config import Settings
+
+        store = TokenStore()
+        tokens = store.load(svc)
+        if not tokens or not tokens.access_token:
+            return False
+        if (
+            tokens.expires_at
+            and tokens.expires_at < __import__("time").time()
+            and not tokens.refresh_token
+        ):
+            return False  # expired with no refresh path
+
+        # Try to get a valid token (triggers refresh if expired). This is
+        # the acid test — if the refresh token is invalid/revoked the
+        # provider returns 400 and we bail without touching the registry.
+        settings = Settings.load()
+        is_google = svc.startswith("google_")
+        provider = "google" if is_google else svc
+        if is_google:
+            client_id = settings.google_oauth_client_id or ""
+            client_secret = settings.google_oauth_client_secret or ""
+        else:
+            client_id = getattr(settings, f"{svc}_client_id", "") or ""
+            client_secret = getattr(settings, f"{svc}_client_secret", "") or ""
+
+        if not client_id or not client_secret:
+            return False  # OAuth not configured
+
+        mgr = OAuthManager(store)
+        live_token = await mgr.get_valid_token(
+            service=svc,
+            client_id=client_id,
+            client_secret=client_secret,
+            provider=provider,
+        )
+        if not live_token:
+            logger.info(
+                "OAuth token for %s is expired and cannot be refreshed — user must re-authorize",
+                svc,
+            )
+            return False  # Token exists but can't be refreshed
+
+        # Token is live — connect the connector in the registry.
+        scope_str = " ".join(tokens.scopes) if tokens.scopes else svc
+        result = await reg.connect(pocket_id, connector_name, {"scope": scope_str})
+        if result and result.success:
+            logger.info(
+                "Auto-connected %s from existing OAuth tokens (%s)",
+                connector_name,
+                svc,
+            )
+            return True
+    except Exception as exc:
+        logger.debug("OAuth auto-connect failed for %s: %s", connector_name, exc)
+    return False
+
+
 # Per-pocket connector status side-table. Kept in memory because the
 # status is an ephemeral snapshot — the adapter instance map in the
 # registry is the source of truth for "connected" and this layer just
@@ -178,8 +301,23 @@ async def get_connector_status(
 
         raise HTTPException(status_code=404, detail=f"Connector '{connector_name}' not found")
 
-    adapter = reg.get_adapter(pocket_id, connector_name)
-    connected = adapter is not None
+    # Sync: if this connector is backed by OAuth tokens, check whether
+    # valid tokens exist in the TokenStore and auto-register them with
+    # the connector registry. This bridges the gap between the OAuth
+    # token store and the registry state store so existing tokens (saved
+    # before the auto-connect fix) show as "connected" here too.
+    try:
+        await _auto_connect_if_oauth(reg, connector_name, pocket_id)
+    except Exception:
+        pass  # Best-effort — don't break status reporting
+
+    # Derive "connected" from the registry's durable state (definition +
+    # persisted config), not from the in-process adapter map — a configured
+    # connector stays connected across restarts (CS-6).
+    connected = any(
+        s["name"] == connector_name and s["status"] == ConnectorStatus.CONNECTED
+        for s in reg.status(pocket_id)
+    )
 
     extras = _STATUS_EXTRAS.get(_extras_key(pocket_id, connector_name), {})
     cred_state = extras.get("cred_state") or ("valid" if connected else "missing")
@@ -198,11 +336,28 @@ async def get_connector_status(
 
 @router.get("/connectors", response_model=list[ConnectorInfo])
 async def list_connectors(pocket_id: str = "default"):
-    """List all available connectors with their connection status."""
-    reg = _get_registry()
-    status_map = {s["name"]: s["status"].value for s in reg.status(pocket_id)}
+    """List all available connectors with their connection status.
 
-    return [
+    Status comes from ``registry.status()``, which derives "connected" from
+    durable state, so the list is truthful after a restart. Orphaned state
+    rows (config persisted but the YAML definition is gone) are appended
+    with status ``definition_missing`` rather than silently dropped.
+
+    Before building the response, known OAuth-backed connectors are synced
+    from the TokenStore so any connector with valid OAuth tokens reports
+    as "connected" even without a prior /connectors/connect call.
+    """
+    reg = _get_registry()
+    # Sync all OAuth-backed connectors from the token store.
+    for conn_name in set(_OAUTH_SVC_TO_CONNECTOR.values()):
+        try:
+            await _auto_connect_if_oauth(reg, conn_name, pocket_id)
+        except Exception:
+            continue
+    reg_status = reg.status(pocket_id)
+    status_map = {s["name"]: s["status"].value for s in reg_status}
+
+    infos = [
         ConnectorInfo(
             name=c["name"],
             display_name=c["display_name"],
@@ -212,6 +367,19 @@ async def list_connectors(pocket_id: str = "default"):
         )
         for c in reg.available
     ]
+    known = {c["name"] for c in reg.available}
+    infos.extend(
+        ConnectorInfo(
+            name=s["name"],
+            display_name=s["display_name"],
+            type="unknown",
+            icon=s.get("icon", "plug"),
+            status=s["status"].value,
+        )
+        for s in reg_status
+        if s["name"] not in known and s["status"] == ConnectorStatus.DEFINITION_MISSING
+    )
+    return infos
 
 
 @router.get("/connectors/{connector_name}", response_model=ConnectorDetailResponse)
@@ -255,6 +423,36 @@ async def get_connector_detail(connector_name: str, pocket_id: str = "default"):
         actions=actions,
         credentials=credentials,
     )
+
+
+@router.get("/connectors/{connector_name}/actions")
+async def get_connector_actions(connector_name: str):
+    """List available actions for a connector.
+
+    The agent uses this path to discover what actions a connector supports.
+    Returns a flat list of actions (same shape as inside ConnectorDetailResponse)
+    without the rest of the detail payload.
+    """
+    reg = _get_registry()
+    defn = reg.get_definition(connector_name)
+    if not defn:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=f"Connector '{connector_name}' not found")
+
+    actions = []
+    for act in defn.actions:
+        actions.append(
+            {
+                "name": act["name"],
+                "description": act.get("description", ""),
+                "method": act.get("method", "GET"),
+                "params": list(act.get("params", {}).keys()) + list(act.get("body", {}).keys()),
+                "trust_level": act.get("trust_level", "confirm"),
+            }
+        )
+
+    return {"connector": connector_name, "actions": actions}
 
 
 @router.post("/connectors/connect", response_model=ConnectResponse)
@@ -307,11 +505,17 @@ async def disconnect_connector(req: DisconnectRequest):
 
 @router.post("/connectors/execute", response_model=ExecuteResponse)
 async def execute_connector_action(req: ExecuteRequest):
-    """Execute an action on a connected data source."""
+    """Execute an action on a connected data source.
+
+    Uses ``registry.ensure_connected()`` instead of assuming a prior
+    /connect in the same process: if the adapter isn't live but config is
+    persisted in the state store (e.g. after a restart), the registry
+    reconnects on the fly (CS-6).
+    """
     from datetime import datetime
 
     reg = _get_registry()
-    adapter = reg.get_adapter(req.pocket_id, req.connector_name)
+    adapter = await reg.ensure_connected(req.connector_name, req.pocket_id)
     if not adapter:
         return ExecuteResponse(
             success=False,

@@ -7,6 +7,9 @@
 # round-trip, cascade delete, workspace isolation, and a smoke test
 # wiring the populated store through ``WorkspaceFabricRegistry`` into
 # the Wave 4b validator against ``lease-renewal-v2.yaml``.
+# Updated: 2026-07-02 (feat/atlas-fabric, AT-7) — coverage for the new
+# ``list_entity_links()`` (either-end enumeration, stable order,
+# workspace isolation) backing the atlas Fabric introspector.
 """Tests for ``pocketpaw_ee.fabric.storage.WorkspaceFabricStore``.
 
 The store is the write-side; ``WorkspaceFabricRegistry`` (covered in
@@ -121,6 +124,23 @@ def test_register_link_is_idempotent(store: WorkspaceFabricStore) -> None:
     store.register_link("ws-a", "lease_tenant", "Lease", "Tenant")
     # Sanity — single row, still exists.
     assert store.link_exists("ws-a", "lease_tenant", "Lease", "Tenant") is True
+
+
+def test_list_entity_links_enumerates_both_ends(store: WorkspaceFabricStore) -> None:
+    """AT-7: links touching a type on EITHER end are enumerated, ordered
+    by (name, from_type, to_type); other workspaces stay invisible."""
+    store.register_link("ws-a", "lease_tenant", "Lease", "Tenant")
+    store.register_link("ws-a", "renewed_as", "Lease", "Lease")
+    store.register_link("ws-a", "manages", "Agent", "Property")  # no Lease end
+    store.register_link("ws-b", "lease_tenant", "Lease", "Tenant")  # other ws
+    assert store.list_entity_links("ws-a", "Lease") == [
+        {"name": "lease_tenant", "from_type": "Lease", "to_type": "Tenant"},
+        {"name": "renewed_as", "from_type": "Lease", "to_type": "Lease"},
+    ]
+    assert store.list_entity_links("ws-a", "Tenant") == [
+        {"name": "lease_tenant", "from_type": "Lease", "to_type": "Tenant"},
+    ]
+    assert store.list_entity_links("ws-a", "Ghost") == []
 
 
 # ---------------------------------------------------------------------------

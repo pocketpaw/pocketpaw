@@ -255,6 +255,11 @@
             "icon": "lucide:repeat"
           },
           {
+            "label": "Agent Lifecycle",
+            "href": "/concepts/agent-lifecycle",
+            "icon": "lucide:power"
+          },
+          {
             "label": "Health Engine",
             "href": "/concepts/health-engine",
             "icon": "lucide:activity"
@@ -898,6 +903,11 @@
             "label": "Docker",
             "href": "/deployment/docker",
             "icon": "lucide:container"
+          },
+          {
+            "label": "Sovereign Tenant (Enterprise)",
+            "href": "/deployment/sovereign-tenant",
+            "icon": "lucide:building-2"
           },
           {
             "label": "Discord Docker",

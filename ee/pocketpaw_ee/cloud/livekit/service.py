@@ -3,6 +3,15 @@
 Uses the ``livekit-api`` Python SDK to talk to LiveKit Cloud.
 Requires ``LIVEKIT_URL``, ``LIVEKIT_API_KEY``, ``LIVEKIT_API_SECRET``
 environment variables.
+
+Change log:
+- Fix duplicate call-bot spawn race: ``create_room()`` now guards the agent
+  spawn with a per-group ``asyncio.Lock`` (``_spawn_locks`` / ``_spawn_lock_for``)
+  so two concurrent joins for the same group can't both pass the
+  check→spawn→insert window and start two "call-bot" subprocesses. The deploy
+  runs a single worker, so this in-process lock fully covers it; true
+  cross-replica dedupe is out of scope here (see the LiveKit Agents migration
+  design doc).
 """
 
 from __future__ import annotations
@@ -41,6 +50,31 @@ logger = logging.getLogger(__name__)
 from pocketpaw_ee.cloud.livekit.types import MeetingAgentProtocol  # noqa: E402
 
 _active_agents: dict[str, MeetingAgentProtocol] = {}
+
+# Per-group spawn locks. create_room() holds the lock for a group across the
+# check→spawn→insert sequence so two concurrent joins for the SAME group can't
+# both pass the "_active_agents" check and start duplicate call-bot
+# subprocesses. Intentionally never popped: an asyncio.Lock is tiny and the key
+# set is bounded by the groups that ever start a call, so leaving entries costs
+# nothing and avoids the re-mint race a concurrent pop-vs-_spawn_lock_for (e.g.
+# a reap/end_room popping a lock another create_room is mid-flight holding)
+# would cause — which would reopen the very double-spawn this guards against.
+_spawn_locks: dict[str, asyncio.Lock] = {}
+
+
+def _spawn_lock_for(group_id: str) -> asyncio.Lock:
+    """Get-or-create the per-group spawn lock.
+
+    Safe without its own lock: on a single-threaded event loop there is no
+    ``await`` between the ``get`` and the ``set``, so two coroutines can't
+    interleave here and mint two different locks for the same group.
+    """
+    lock = _spawn_locks.get(group_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _spawn_locks[group_id] = lock
+    return lock
+
 
 # Collected meeting-notes payloads from agent subprocesses.
 # Populated by _collect_agent_notes (background reader on stdout pipe)
@@ -115,16 +149,16 @@ class _SubprocessAgentRef:
         pass
 
     async def stop(self) -> None:
-        """Send SIGTERM and wait up to 10 s for graceful exit."""
+        """Send SIGTERM and wait up to 30 s for graceful exit."""
         if self._process.returncode is not None:
             return  # already terminated
         try:
             self._process.terminate()
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=10)
+                await asyncio.wait_for(self._process.wait(), timeout=30)
             except TimeoutError:
                 logger.warning(
-                    "Agent subprocess for room %s did not exit in 10s, killing",
+                    "Agent subprocess for room %s did not exit in 30s, killing",
                     self.room_name,
                 )
                 self._process.kill()
@@ -168,6 +202,17 @@ async def _spawn_agent_process(
     # the server output.  The background task reads the pipe so the
     # subprocess never blocks on a full buffer.
     asyncio.create_task(_forward_agent_stderr(proc, room_name))
+
+    # Bump the stdout StreamReader limit from the default 64 KiB to 256 KiB.
+    # The agent writes a JSON payload to stdout at call end which can exceed
+    # 64 KiB for long meetings (the transcript alone can be ~50 KiB after
+    # truncation). Without this, readline() raises LimitOverrunError
+    # ("Separator is found, but chunk is longer than limit") and the meeting
+    # notes payload is silently dropped.
+    try:
+        proc.stdout._limit = 256 * 1024  # 256 KiB
+    except AttributeError:
+        pass  # graceful if internal API changes
 
     # Collect meeting notes from stdout.
     # The agent writes a JSON payload to stdout when the call ends.
@@ -234,6 +279,16 @@ async def _collect_agent_notes(
                     )
             except json.JSONDecodeError:
                 pass  # ignore non-JSON output (shouldn't happen)
+    except asyncio.exceptions.LimitOverrunError as exc:
+        # Should not happen since both the bump to 256 KiB and the agent-side
+        # truncation (40 KiB transcript cap) keep the line under the limit.
+        logger.error(
+            "LimitOverrunError reading agent stdout for room %s — line exceeds "
+            "%d-byte limit. Meeting notes payload lost: %s",
+            room_name,
+            getattr(proc.stdout, "_limit", 65536),
+            exc,
+        )
     except Exception as exc:
         logger.warning("Error reading agent stdout for %s: %s", room_name, exc)
 
@@ -628,24 +683,37 @@ async def create_room(
 
     # Start the meeting notes agent as a managed subprocess so it does not
     # block the server event loop with WebRTC / Deepgram STT processing.
-    if group_id not in _active_agents:
-        proc = await _spawn_agent_process(
-            group_id=group_id,
-            room_name=room_name,
-            bot_token=bot_token,
-        )
-        agent_ref = _SubprocessAgentRef(
-            group_id=group_id,
-            room_name=room_name,
-            process=proc,
-        )
-        _active_agents[group_id] = agent_ref
+    #
+    # The check -> spawn -> insert below would race without the lock: the
+    # ``await _spawn_agent_process`` yields the event loop between the
+    # membership check and the insert, so two concurrent joins (two
+    # POST /livekit/rooms for the same group) could each pass the check and
+    # spawn a second "call-bot" that fights the first over the shared identity.
+    # The per-group asyncio.Lock makes check -> spawn -> insert atomic. The
+    # deploy runs a single worker so this fully dedupes it; cross-replica dedupe
+    # (only if the API is ever run multi-replica) is the LiveKit Agents
+    # migration's job, not a best-effort participant poll here.
+    async with _spawn_lock_for(group_id):
+        if group_id not in _active_agents:
+            proc = await _spawn_agent_process(
+                group_id=group_id,
+                room_name=room_name,
+                bot_token=bot_token,
+            )
+            agent_ref = _SubprocessAgentRef(
+                group_id=group_id,
+                room_name=room_name,
+                process=proc,
+            )
+            _active_agents[group_id] = agent_ref
 
-        # Background task: wait for the subprocess to finish, then clean
-        # up the registry so we don't leak agent references.
-        asyncio.create_task(_reap_agent_process(group_id, proc, workspace_id))
+            # Background task: wait for the subprocess to finish, then clean
+            # up the registry so we don't leak agent references.
+            asyncio.create_task(_reap_agent_process(group_id, proc, workspace_id))
 
-        logger.info("Started meeting agent subprocess for group %s (room %s)", group_id, room_name)
+            logger.info(
+                "Started meeting agent subprocess for group %s (room %s)", group_id, room_name
+            )
 
     await emit(CallStarted(data={"group_id": group_id, "room_name": room_name}))
 

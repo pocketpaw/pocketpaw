@@ -22,6 +22,49 @@
 #   chain_map trees and do NOT fake a flow with a single `set`-stepped spec
 #   — that anti-pattern renders step 1 and never advances. Wired into the
 #   assembled prompt + the final self-check.
+# Modified: 2026-06-15 (feat/chain-flow-v2) — rewrote `_MULTI_STEP_FLOW_RULE`
+#   for CHAIN FLOW v2. The rule now teaches STATE-TRANSITION authoring ("think
+#   in states, not screens"): the agent describes a FLAT step-graph to
+#   `start_flow` (a `flow` id, an `entry`, and a `steps` list where each step
+#   points at the next by id via `next` / `branch`), and the builder owns the
+#   nesting + deep-validation. Dropped the 2-template ceiling and the
+#   "no-template-fit → ask-user-questions" fallback (there is no fixed template
+#   list anymore — describe the graph the request needs). Appended a
+#   state-grammar primitives block and two copy-paste flat-descriptor skeletons
+#   (a branching intake and an action-rich mini-app). `invoke_tool` is marked as
+#   possibly-unavailable until the tool registry ships; call_binding /
+#   create_pocket / api / emit / navigate are the actions that work now.
+# Modified: 2026-06-15 (feat/chain-flow-v2 — REAL-SCENARIO SKELETONS) — the
+#   genesis "biggest lever": added an ACTION GRAMMAR callout block (a terminal
+#   `complete` uses `action:` not `type:`/`kind:`; approve/reject/fulfill/take-
+#   action means a `call_binding` ACTION BUTTON, never a yes/no select; use
+#   `call_binding` for backend/connector data, not the possibly-unavailable
+#   `invoke_tool`) and three copy-paste skeletons for the captain's real
+#   internal-team scenarios, each ending in a REAL action (not Q&A): APPROVE /
+#   REJECT (call_binding buttons), FULFILL ORDER (collect → confirm with a
+#   call_binding action), and ACT ON CONNECTOR/BACKEND DATA (call_binding
+#   against the pocket's backend, explicitly NOT invoke_tool). Kept the two
+#   existing skeletons (A branching intake, B action-rich mini-app).
+# Modified: 2026-06-15 (feat/invoke-tool-v1, v2) — refreshed the two
+#   `invoke_tool` notes now that the verb is live. It is no longer
+#   "possibly-unavailable until the tool registry ships": a connector READ
+#   grant fires immediately; a connector WRITE grant is PROPOSED for the user's
+#   approval (it lands in their Instinct Tray and fires on approve) rather than
+#   running inline. `call_binding` remains the first reach for backend/connector
+#   data; `invoke_tool` is for a named tool/connector grant the owner allow-listed.
+# Modified: 2026-06-16 (feat/invoke-tool-v1 — close the in-chat approval loop)
+#   — added `_INSTINCT_TRAY_RULE`: when the agent renders the pending-Instinct-
+#   approvals view (the items `instinct_pending` returns), the Approve / Reject
+#   buttons MUST be bound to the backend Instinct decision routes as `api`
+#   actions — POST /api/v1/instinct/actions/{id}/approve and .../reject — so the
+#   HUMAN's click finalizes the decision directly (the backend re-validates
+#   workspace + params_hash + idempotency and fires the connector write via
+#   execute_approved_external_action). Explicitly NOT an `emit`/`chat.send`
+#   round-trip and NOT an autonomous agent verb — the user's click IS the
+#   approval, which is the whole point of the gate. Also teaches the Tray route:
+#   the pending-approvals list is at /deep-work, surfaced via a `navigate`
+#   button + referenced in the text guidance. Spliced into the assembled prompt
+#   after `_MULTI_STEP_FLOW_RULE` and added to the final self-check.
 
 from pocketpaw.ripple._design import USE_THE_WIDGET_RULE, WIDGET_CATALOG
 
@@ -313,35 +356,245 @@ true), `nextLabel`, `layout` ("inline" | "stacked", default inline).
 
 
 _MULTI_STEP_FLOW_RULE = """\
-# MULTI-STEP FLOWS — CALL start_flow, DO NOT HAND-AUTHOR
+# MULTI-STEP FLOWS & MINI-APPS — DESCRIBE A STEP-GRAPH via start_flow
 
-For ANY multi-step flow — a wizard, an intake form, a survey, an
-onboarding sequence, a step-by-step or collect-then-act flow where the
-user moves through more than one screen before you act — call the
-`start_flow` tool. Pass ONLY a tiny descriptor: a `flow_type` template
-(plus optional `domain` / `config`). The tool returns the ENTIRE nested
-flow as a `{version, ui}` doc; drop that doc VERBATIM into your `ui-spec`
-fence. The flow then advances entirely client-side — no further model
-calls between steps.
+For ANY multi-step flow OR interactive mini-app — a wizard, an intake, a
+survey, an onboarding sequence, a "collect details then DO something"
+flow, or a small app that calls a tool / API and finishes by creating a
+pocket — call `start_flow`. You describe the flow as a FLAT step-graph;
+the tool materializes the nested, validated tree and returns a
+{version, ui} doc. Drop that doc VERBATIM into your `ui-spec` fence. The
+flow then advances entirely client-side — no model calls between steps.
 
-DO NOT hand-author the flow yourself. Specifically, NEVER:
-- write a nested `chain` / `chain_map` step tree by hand — these are
-  recursively nested and fragile to author; a single misplaced key and
-  the flow renders step 1 and silently never advances.
-- fake a multi-step flow with ONE `set`-stepped single spec (a spec that
-  tries to swap its own content via `set` actions). That is the exact
-  anti-pattern `start_flow` exists to prevent: it renders the first step
-  and dead-ends.
+HOW TO AUTHOR (think in states, not screens):
+  steps: a list. Each step has an `id`, a `kind`
+    (select | form | confirm | info), a title, its content
+    (options / fields / review rows), and where it goes next:
+      - `next: "<id>"`        → linear next step
+      - `branch: { "<optId>": "<id>" }` → branch on the picked option
+    A step with neither `next` nor `branch` is the TERMINAL step and
+    carries `complete` (what to do with the answers).
 
-`ask-user-questions` (above) is for a SHORT stepped Q&A that gathers a
-few answers in one bubble. `start_flow` is for a real branching,
-multi-screen flow with its own step tree. When in doubt for anything
-wizard-shaped, reach for `start_flow` — the descriptor is ~3 fields and
-Python owns the tree, so it renders correctly on the first try.
+  Actions make it a real mini-app, not just Q&A:
+    - per-step `actions`: buttons that call a tool/API mid-flow
+      (verb: call_binding | api | invoke_tool) without leaving the step.
+    - terminal `complete.action`:
+        chat        → hand the collected answers back to you (default)
+        call_binding→ write to the backend
+        create_pocket → materialize a permanent pocket from the answers
+        navigate / emit → go somewhere / raise an event
+        invoke_tool → run a named tool with the answers
+                      (connector reads fire; connector writes are
+                       proposed for the user's approval — the Tray)
 
-If no `flow_type` template fits the request, say so plainly and gather
-the requirements with `ask-user-questions` instead — do NOT fall back to
-hand-authoring a chain tree.
+  Reference earlier answers with `{stepId.field}` (e.g.
+  `{pick_goal.label}`, `{enter_details.company}`) in review rows and
+  action args. The tool rewrites them correctly — you never write the
+  raw `{state.…_selection/_formData}` form.
+
+DO NOT hand-write a nested `chain` / `chain_map` tree, and do NOT fake a
+flow with a single `set`-stepped spec (that anti-pattern renders step 1
+and dead-ends). You describe the FLAT graph; Python owns the nesting and
+DEEP-VALIDATES it (it rejects dead-ends, dangling transitions, missing
+terminals, and unknown verbs with a precise error you can fix and retry).
+A flat graph cannot mis-nest — that is the whole point.
+
+`ask-user-questions` is ONLY for a trivial one-bubble Q&A (one or two
+quick questions, no branching, no actions, no DOING anything with the
+answers beyond reading them). The MOMENT the request has more than one
+screen, branches, an action, or a "then do X" — use `start_flow`.
+There is no longer a fixed template list to fit; describe the graph the
+request needs.
+
+STATE GRAMMAR — the primitives every flow composes from:
+  browse → select → collect → review → complete
+    select  : the user picks one option; branch the next state on it.
+    collect : a form gathers fields into the flow's accumulated answers.
+    review  : a confirm step plays the answers back before the hand-off.
+    complete: the terminal state DOES something with the answers.
+  Never dead-end a state with text: every non-terminal state has a
+  transition, every terminal state has a `complete`. (You can't violate
+  this even if you try — the builder repairs or rejects it.)
+
+ACTION GRAMMAR — the rules that turn a flow into a real tool, not Q&A:
+  - A terminal `complete` uses `action:` (chat | navigate | emit |
+    call_binding | create_pocket) — NEVER `type:`/`kind:`. (If you slip and
+    write `type:`/`kind:`, the builder coerces it, but author `action:`.)
+  - When the user says approve / reject / fulfill / take action / do X —
+    that is a `call_binding` ACTION BUTTON wired to the verb, NOT a yes/no
+    select. Never leave an action flow as plain Q&A.
+  - To act on backend / connector data, use `call_binding` (works today).
+    `invoke_tool` runs a named tool the owner allow-listed on the pocket:
+    a connector READ fires immediately; a connector WRITE is proposed for
+    the user's approval (it lands in their Instinct Tray, fires on approve)
+    rather than running inline. Reach for `call_binding` first; use
+    `invoke_tool` when the action is a named tool/connector grant.
+
+SKELETON A — branching intake (collect, then hand answers to you):
+```
+{
+  "flow": "intake", "entry": "stage",
+  "steps": [
+    { "id": "stage", "kind": "select", "title": "Pick the stage",
+      "options": [ {"id":"early","label":"Early"}, {"id":"growth","label":"Growth"} ],
+      "branch": { "early": "fin", "growth": "fin" } },
+    { "id": "fin", "kind": "form", "slot": "financials", "title": "Snapshot",
+      "fields": [ {"id":"headline","label":"Headline metric","type":"text","required":true} ],
+      "next": "review" },
+    { "id": "review", "kind": "confirm", "title": "Review",
+      "review": [ {"label":"Stage","value":"{stage.label}"},
+                  {"label":"Metric","value":"{financials.headline}"} ],
+      "complete": { "action": "chat",
+                    "message": "Intake complete — please summarize." } }
+  ]
+}
+```
+
+SKELETON B — action-rich mini-app (validate mid-flow, create a pocket):
+```
+{
+  "flow": "client_setup", "entry": "plan",
+  "steps": [
+    { "id": "plan", "kind": "select", "title": "Plan",
+      "options": [ {"id":"starter","label":"Starter"}, {"id":"pro","label":"Pro"} ],
+      "next": "details" },
+    { "id": "details", "kind": "form", "title": "Company details",
+      "fields": [ {"id":"company","label":"Company","type":"text","required":true},
+                  {"id":"domain","label":"Domain","type":"url","required":true} ],
+      "actions": [ { "id":"verify","label":"Verify domain","verb":"call_binding",
+                     "binding":"dns_check","path":"/dns/check",
+                     "params":{"domain":"{details.domain}"} } ],
+      "next": "review" },
+    { "id": "review", "kind": "confirm", "title": "Confirm",
+      "review": [ {"label":"Company","value":"{details.company}"} ],
+      "complete": { "action": "create_pocket", "name": "{details.company} — Client",
+                    "template": "tracker", "seed_from_flow": true,
+                    "then": { "action": "navigate", "url": "/pockets/{result.id}" } } }
+  ]
+}
+```
+
+SKELETON C — APPROVE / REJECT (the buttons ARE the action, not a select):
+```
+{
+  "flow": "approve_request", "entry": "decide",
+  "steps": [
+    { "id": "decide", "kind": "confirm", "title": "Approve this request?",
+      "review": [ {"label":"Request","value":"{flow.payload.title}"} ],
+      "actions": [
+        { "id":"approve","label":"Approve","verb":"call_binding",
+          "binding":"requests","path":"/requests/{flow.payload.id}/approve",
+          "on_success":[{"verb":"toast","message":"Approved","variant":"success"}] },
+        { "id":"reject","label":"Reject","verb":"call_binding",
+          "binding":"requests","path":"/requests/{flow.payload.id}/reject",
+          "on_success":[{"verb":"toast","message":"Rejected","variant":"warning"}] }
+      ],
+      "complete": { "action": "chat", "message": "Decision recorded." } }
+  ]
+}
+```
+
+SKELETON D — FULFILL ORDER (collect → confirm with a call_binding action):
+```
+{
+  "flow": "fulfill_order", "entry": "lookup",
+  "steps": [
+    { "id": "lookup", "kind": "form", "title": "Which order?",
+      "fields": [ {"id":"order_id","label":"Order ID","type":"text","required":true} ],
+      "next": "confirm" },
+    { "id": "confirm", "kind": "confirm", "title": "Fulfill this order?",
+      "review": [ {"label":"Order","value":"{lookup.order_id}"} ],
+      "actions": [
+        { "id":"fulfill","label":"Fulfill order","verb":"call_binding",
+          "binding":"orders","path":"/orders/{lookup.order_id}/fulfill",
+          "on_success":[{"verb":"toast","message":"Order fulfilled","variant":"success"}] }
+      ],
+      "complete": { "action": "chat", "message": "Order fulfillment requested." } }
+  ]
+}
+```
+
+SKELETON E — ACT ON CONNECTOR / BACKEND DATA (call_binding, NOT invoke_tool):
+```
+{
+  "flow": "act_on_item", "entry": "pick",
+  "steps": [
+    { "id": "pick", "kind": "form", "title": "Target record",
+      "fields": [ {"id":"record_id","label":"Record ID","type":"text","required":true} ],
+      "next": "act" },
+    { "id": "act", "kind": "confirm", "title": "Take action on this record",
+      "review": [ {"label":"Record","value":"{pick.record_id}"} ],
+      "actions": [
+        { "id":"archive","label":"Archive","verb":"call_binding",
+          "binding":"crm","path":"/records/{pick.record_id}/archive",
+          "params":{"reason":"flow"},
+          "on_success":[{"verb":"toast","message":"Archived","variant":"success"}] }
+      ],
+      "complete": { "action": "chat", "message": "Action applied to the record." } }
+  ]
+}
+```
+
+---
+"""
+
+
+_INSTINCT_TRAY_RULE = """\
+# PENDING INSTINCT APPROVALS — BIND THE APPROVE BUTTON TO THE APPROVE ROUTE
+
+When you render the pending-approvals view (the items `instinct_pending`
+returns — connector writes and other actions awaiting the user's
+decision in the Instinct gate, a.k.a. The Tray), the Approve / Reject
+buttons MUST fire the decision DIRECTLY when the HUMAN clicks them. Do
+NOT wire them to `emit` / `chat.send` — a chat round-trip does not
+finalize anything (it just sends you a message), and there is NO agent
+verb that approves on its own. The user's click IS the approval; that is
+the whole point of the gate. You render the button; the human fires it.
+
+Each pending action has an `id`. Render its buttons as `api` actions to
+the backend Instinct routes (backend-relative paths — the `api` verb
+prepends the host + mints CSRF, so a `/api/v1/...` path is correct and an
+external URL would NOT work):
+
+  - Approve → POST `/api/v1/instinct/actions/{id}/approve`
+  - Reject  → POST `/api/v1/instinct/actions/{id}/reject`
+
+On approve, the backend re-validates the action (workspace + params_hash
++ idempotency) and fires the connector write itself — so a single human
+click finalizes it. Approve button shape (substitute the real action id):
+
+```
+{
+  "type": "button",
+  "props": { "label": "Approve", "variant": "primary" },
+  "on_click": {
+    "action": "api",
+    "url": "/api/v1/instinct/actions/{id}/approve",
+    "method": "POST",
+    "on_success": [
+      { "action": "toast", "message": "Approved — firing now", "variant": "success" }
+    ]
+  }
+}
+```
+
+Reject is the same with `url` ending `/reject` and a `warning` toast
+(e.g. "Rejected"). Render one Approve + one Reject per pending action
+(e.g. a row per item in a `flex`), each carrying that item's own id.
+
+THE TRAY LIVES AT /deep-work. When you offer an "Open Tray" / "see the
+full list" affordance, render it as a navigate button — NOT chat.send —
+and mention the route in your text so the user knows where the queue is:
+
+```
+{ "type": "button", "props": { "label": "Open Tray", "variant": "outline" },
+  "on_click": { "action": "navigate", "url": "/deep-work" } }
+```
+
+So the stance is: render an Approve button bound to the approve route so
+the user clicks to finalize, and point them to the Tray at /deep-work for
+the full list. Never tell the user you "can't approve from chat" and
+never approve on their behalf — bind the button and let them click.
 
 ---
 """
@@ -370,6 +623,8 @@ Final self-check before sending:
 ✔ flex/grid `gap` is tight for inline — numeric 2 or 4, not 10/12+
 ✔ Used a core widget, or called `get_inline_widget_help` BEFORE emitting the type
 ✔ Multi-step / wizard / intake flow → called `start_flow`, not a hand-authored or `set`-stepped spec
+✔ Pending Instinct approvals → Approve/Reject buttons `api`-POST the route, NOT chat.send
+✔ Open Tray affordance navigates to /deep-work (not a chat.send)
 ✔ Leads to a clear next step
 ✔ No static lists for open-ended queries
 ✔ Valid JSON, concrete values, one fence
@@ -386,6 +641,8 @@ INLINE_RIPPLE_SYSTEM_PROMPT = (
     + _INLINE_CORE_CATALOG
     + "\n"
     + _MULTI_STEP_FLOW_RULE
+    + "\n"
+    + _INSTINCT_TRAY_RULE
     + "\n"
     + _INLINE_RULES
 )

@@ -135,6 +135,42 @@ async def test_setup_when_already_enabled_returns_409(app_client: AsyncClient) -
 
 
 # ---------------------------------------------------------------------------
+# Profile reflects MFA state (regression: /auth/me must expose mfa_enabled so
+# the Settings UI can show "Enable" vs "Disable" correctly). Without it the UI
+# always shows "Enable" and clicking setup 409s with mfa_already_enabled.
+# ---------------------------------------------------------------------------
+
+
+async def test_profile_reports_mfa_disabled_by_default(app_client: AsyncClient) -> None:
+    resp = await app_client.get("/api/v1/auth/me")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["mfa_enabled"] is False
+
+
+async def test_profile_reports_mfa_enabled_after_enrollment(app_client: AsyncClient) -> None:
+    setup = (await app_client.post("/api/v1/auth/mfa/setup")).json()
+    await app_client.post("/api/v1/auth/mfa/verify", json={"code": _code_for(setup["secret"])})
+
+    resp = await app_client.get("/api/v1/auth/me")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["mfa_enabled"] is True
+
+
+async def test_profile_reports_mfa_disabled_after_disable(app_client: AsyncClient) -> None:
+    setup = (await app_client.post("/api/v1/auth/mfa/setup")).json()
+    secret = setup["secret"]
+    await app_client.post("/api/v1/auth/mfa/verify", json={"code": _code_for(secret)})
+    await app_client.post(
+        "/api/v1/auth/mfa/disable",
+        json={"password": _PASSWORD, "code": _code_for(secret)},
+    )
+
+    resp = await app_client.get("/api/v1/auth/me")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["mfa_enabled"] is False
+
+
+# ---------------------------------------------------------------------------
 # Disable
 # ---------------------------------------------------------------------------
 

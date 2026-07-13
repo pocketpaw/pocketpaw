@@ -3,6 +3,12 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Updated: 2026-07-08 (CS-13, feat/per-send-model-override) — ``run`` accepts an
+  optional ``model_override: str | None`` (the client's per-send model choice) and
+  forwards it to the backend's ``run`` ONLY when non-None (the same
+  withhold-when-empty idiom as ``deny_mcp_tool_ids`` / ``skill_names``). Only the
+  Claude SDK backend consumes it, where it wins over smart-routing /
+  ``claude_sdk_model``. ``None`` = the unchanged legacy path.
 Updated: 2026-05-21 — ``_build`` now translates an agent's ``config.tools``
   entries that name an opt-in in-process MCP server (see
   ``pocketpaw.tools.policy.OPT_IN_MCP_SERVERS``) into a per-agent
@@ -39,6 +45,40 @@ Updated: 2026-06-07 (feat/entity-pocket-profile-field, entity-rooms A1/A2) —
      the Claude SDK backend (withhold-when-empty, same idiom as deny/allow). The
      SDK backend materializes those skills into a throwaway local plugin so ONLY
      the named skills are surfaced. Empty = legacy all-skills behavior.
+Updated: 2026-06-13 (feat/claude-sdk-prewarm) — added ``prewarm``, which eagerly
+  warms the agent's CLI subprocess for a session before its first turn (only the
+  Claude SDK backend has one; no-op elsewhere). ``run``'s system-prompt assembly
+  was factored into a shared ``_assemble_system_prompt`` so ``prewarm`` builds
+  the IDENTICAL prompt the first turn will — the backend's warm-client cache key
+  hashes the prompt's stable behavioral prefix, so a divergent prefix would make
+  turn 1 evict the prewarmed client. ``prewarm`` folds in the agent's own skills
+  (``skill_refs`` + enabled-plugin skills) exactly as ``run`` does so the plugin
+  digest matches too. Fire-and-forget: never raises (the backend's ``prewarm``
+  swallows its own errors; this guards instance load + prompt assembly). The EE
+  trigger fires it as a background task in ``run_core.execute_run``.
+Updated: 2026-06-26 (feat/mcg-3-pool-route-model) — ``_build`` now routes the
+  per-agent ``config.model`` onto the correct backend Settings field via
+  ``pocketpaw.llm.providers.base.route_model`` instead of the old brittle
+  ``"claude" in backend`` / ``"openai" in backend`` / ``"google" in backend``
+  substring chain. That chain silently dropped the per-agent model for
+  ``codex_cli``, ``opencode``, ``deep_agents``, ``copilot_sdk`` and
+  ``langchain_react`` (and even wrote OpenAI Agents' model to the wrong field,
+  ``openai_model`` instead of ``openai_agents_model``). ``route_model`` is
+  driven by ``_BACKEND_MODEL_ATTR`` (+ the langchain_react->deep_agents_model
+  alias) so it covers every registered backend and preserves the composite
+  ``provider:model`` / ``provider/model`` formats verbatim. Legacy backend names
+  are resolved through ``_LEGACY_BACKENDS`` before routing so old agent docs
+  still map to the right field. Empty model stays a no-op (backend default).
+Updated: 2026-06-28 (feat/aiam-agent-revoke, AW-4) — soft-disable enforcement.
+  ``get`` now raises ``AgentDisabled`` whenever the resolved agent doc carries
+  ``disabled=True``, on BOTH the cached-instance path (checked before the
+  staleness branch, re-raised past the broad DB-error guard so it fails closed)
+  and the cold-build path. A disabled agent is therefore unresolvable on every
+  run path at once — chat SSE, group/DM bridge, planner — while in-flight runs
+  keep their already-resolved instance. Added ``invalidate(agent_id)`` for the
+  service to drop a cached instance the instant the flag flips (immediate
+  revoke; the staleness check is only a fallback). ``invalidate`` does not tear
+  down the backend so a live run is not aborted mid-stream.
 """
 
 from __future__ import annotations
@@ -50,10 +90,16 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from pocketpaw.agents.errors import AgentBackendUnavailable, AgentNotFound
+from pocketpaw.agents.errors import (
+    AgentBackendUnavailable,
+    AgentDisabled,
+    AgentNotFound,
+)
 
 if TYPE_CHECKING:
-    from pocketpaw.agents.backend import AgentBackend
+    from collections.abc import Callable
+
+    from pocketpaw.agents.backend import AgentBackend, LeasedClient, SessionHandle
     from pocketpaw.soul import SoulManager
 
 logger = logging.getLogger(__name__)
@@ -141,6 +187,14 @@ class AgentPool:
                 agent_doc = (
                     await agent_model.get(PydanticObjectId(agent_id)) if agent_model else None
                 )
+                # Soft-disable / revoke-everywhere (AW-4): a disabled agent is
+                # unresolvable on every NEW request even if an instance is
+                # cached. Checked BEFORE the staleness branch so a cached
+                # instance is never handed back for a disabled agent; the
+                # ``disable()`` service call also evicts the cache explicitly,
+                # this is the defense-in-depth check for any path that didn't.
+                if agent_doc is not None and getattr(agent_doc, "disabled", False):
+                    raise AgentDisabled(agent_id)
                 if (
                     agent_doc
                     and agent_doc.updatedAt
@@ -162,6 +216,11 @@ class AgentPool:
                     await self._teardown(inst)
                     del self._instances[agent_id]
                     return await self._build(agent_doc)
+            except AgentDisabled:
+                # Must NOT be swallowed by the broad DB-error guard below — a
+                # disabled agent has to fail closed, not fall back to the
+                # cached instance.
+                raise
             except Exception:
                 pass  # Use cached instance on DB errors
             return inst
@@ -173,6 +232,10 @@ class AgentPool:
         agent_doc = await agent_model.get(PydanticObjectId(agent_id)) if agent_model else None
         if not agent_doc:
             raise AgentNotFound(agent_id)
+        # Soft-disable / revoke-everywhere (AW-4): the same fail-closed check on
+        # the cold-build path so a disabled agent can never be instantiated.
+        if getattr(agent_doc, "disabled", False):
+            raise AgentDisabled(agent_id)
 
         async with self._build_lock:
             # Double-check after acquiring lock
@@ -182,6 +245,203 @@ class AgentPool:
             if len(self._instances) >= self._max_instances:
                 await self._evict_oldest()
             return await self._build(agent_doc)
+
+    async def invalidate(self, agent_id: str) -> None:
+        """Drop any cached instance for ``agent_id`` so the next ``get`` rebuilds.
+
+        Used by the agents service on soft-disable / enable (AW-4) for IMMEDIATE
+        cache invalidation — the staleness check in ``get`` is a fallback, but a
+        disabled agent must be revoked the instant the flag flips, not on the
+        next config-bump-detecting request. Idempotent: a no-op if uncached.
+        Does NOT tear down the backend (no ``_teardown``) so an instance with an
+        in-flight run is not aborted mid-stream — the entry is simply removed
+        from the cache and the live ``run`` retains its own reference until it
+        completes; the NEXT ``get`` rebuilds (or raises ``AgentDisabled``).
+        """
+        self._instances.pop(agent_id, None)
+
+    async def _assemble_system_prompt(
+        self,
+        instance: AgentInstance,
+        *,
+        agent_id: str,
+        message: str,
+        instructions: str,
+        knowledge_context: str,
+        system_message_override: str | None,
+    ) -> str | None:
+        """Build the agent's system prompt from soul/persona + override +
+        instructions + per-message soul recall + knowledge wrapper.
+
+        Factored out of ``run`` (feat/claude-sdk-prewarm) so ``prewarm`` builds
+        the IDENTICAL prompt the first real turn will. The Claude SDK warm-client
+        cache key hashes the prompt's STABLE behavioral prefix (soul/persona +
+        override + ``instructions``); the volatile tail this also appends
+        (``## Relevant Past Memories`` soul recall, ``## Your Knowledge Base``)
+        is stripped before hashing, so a prewarm that passes ``message=""`` /
+        ``knowledge_context=""`` still hashes to the SAME prefix as the run that
+        passes the real values — which is exactly what makes the prewarmed client
+        reused rather than evicted on turn 1.
+        """
+        # Build system prompt via soul bootstrap if available
+        system_prompt = None
+        if instance.soul_manager and instance.soul_manager.bootstrap_provider:
+            try:
+                ctx = await instance.soul_manager.bootstrap_provider.get_context()
+                system_prompt = ctx.identity
+                # Append soul-level knowledge (semantic memories, bond info, etc.)
+                # into the identity block so the agent carries persistent context.
+                if ctx.knowledge:
+                    knowledge_lines = "\n".join(f"- {k}" for k in ctx.knowledge)
+                    system_prompt = f"{system_prompt}\n\n# Key Knowledge\n{knowledge_lines}"
+            except Exception:
+                logger.warning("Failed to build soul prompt for agent %s", agent_id)
+
+        # Fall back to config system_prompt or persona
+        if not system_prompt:
+            persona = instance.config.get("soul_persona", "")
+            extra = instance.config.get("system_prompt", "")
+            system_prompt = f"{persona}\n\n{extra}".strip() if persona or extra else ""
+
+        # Per-entity system-message override (entity-rooms A1): SWAP the base,
+        # KEEP the layers. Everything assembled ABOVE this point is the base
+        # persona/soul identity — exactly what the override replaces. The
+        # downstream layers (authoritative ``instructions`` incl. the ripple LAW,
+        # the soul-memory recall, the knowledge wrapper) are appended BELOW, so
+        # they still ride on top of the override. ``None`` leaves the base
+        # untouched (legacy path). Applied here so a backend never needs to know
+        # the override exists — it rides the existing ``system_prompt`` channel.
+        if system_message_override is not None:
+            system_prompt = system_message_override
+
+        # Authoritative behavior rules — injected BEFORE the knowledge
+        # wrapper so the model reads them as instructions, not reference.
+        if instructions:
+            system_prompt = f"{system_prompt}\n\n{instructions}" if system_prompt else instructions
+
+        # Query-specific soul memory recall — inject relevant past interactions
+        # so the agent can reference cross-session memories. This complements
+        # the general semantic facts already injected by SoulBootstrapProvider.
+        # Skipped on an empty message (e.g. prewarm) — and stripped from the
+        # cache key's behavioral prefix regardless, so it never affects reuse.
+        if instance.soul_manager and instance.soul_manager.soul and message.strip():
+            try:
+                soul_ctx = await instance.soul_manager.soul.context_for(
+                    message,
+                    max_memories=5,
+                    include_state=False,
+                    include_self_model=False,
+                )
+                if soul_ctx:
+                    memory_block = (
+                        "## Relevant Past Memories\n"
+                        "Below are memories from previous conversations that "
+                        "are relevant to the current question. Use them to "
+                        "provide continuity and a personalized response.\n\n"
+                        f"{soul_ctx}"
+                    )
+                    if system_prompt:
+                        system_prompt = f"{system_prompt}\n\n{memory_block}"
+                    else:
+                        system_prompt = memory_block
+            except Exception:
+                logger.debug("Soul context_for() failed for agent %s", agent_id)
+
+        # Inject knowledge context directly into system prompt
+        if knowledge_context:
+            system_prompt = (
+                f"{system_prompt}\n\n"
+                "## Your Knowledge Base\n"
+                "Use the following information from your knowledge base to answer questions. "
+                "Always reference this data when relevant instead of "
+                "making things up or using tools to search.\n\n"
+                f"{knowledge_context}"
+            )
+
+        return system_prompt
+
+    async def prewarm(
+        self,
+        agent_id: str,
+        session_key: str,
+        *,
+        instructions: str = "",
+        deny_mcp_tool_ids: frozenset[str] = frozenset(),
+        allow_sdk_tools: frozenset[str] = frozenset(),
+        allow_mcp_tool_ids: frozenset[str] | None = None,
+        system_message_override: str | None = None,
+        skill_names: frozenset[str] = frozenset(),
+    ) -> None:
+        """Eagerly warm the agent's CLI subprocess for ``session_key`` before its
+        first turn, so the first ``run`` reuses it instead of paying the cold
+        ~12s ``connect()`` (feat/claude-sdk-prewarm).
+
+        Only the Claude SDK backend has a warm-client subprocess, so this no-ops
+        on every other backend (it checks for a ``prewarm`` attribute). It
+        assembles the SAME system prompt and folds in the SAME agent-own skills
+        (``skill_refs`` + enabled-plugin skills) that ``run`` will, so the
+        backend computes a matching cache key — a mismatched key would make the
+        first turn EVICT the prewarmed client (a net loss).
+
+        FIRE-AND-FORGET: the call is designed to be wrapped in
+        ``asyncio.create_task`` by the caller. It NEVER raises — the backend's
+        ``prewarm`` swallows its own errors, and this method guards instance load
+        + prompt assembly in try/except. A failed prewarm leaves the next ``run``
+        to pay the cold connect it would have paid anyway (no regression).
+
+        IMPORTANT: the caller must only invoke this when the first turn's model
+        is message-INDEPENDENT (smart routing OFF). With smart routing ON the
+        model is classified from the message, which prewarm doesn't have, so a
+        prewarm could warm the wrong model tier and cause evict-churn. The
+        run_core trigger gates on this.
+        """
+        try:
+            instance = await self.get(agent_id)
+        except Exception:
+            logger.debug("prewarm: could not load agent %s (skipped)", agent_id)
+            return
+
+        # Only the Claude SDK backend has a warm subprocess to prewarm.
+        backend_prewarm = getattr(instance.backend, "prewarm", None)
+        if backend_prewarm is None:
+            return
+
+        # Fold the agent's OWN skills into the set, mirroring ``run`` exactly so
+        # the plugin digest (and thus the cache key) matches the first turn.
+        cfg = getattr(instance, "config", None) or {}
+        own_skills = (
+            frozenset(cfg.get("skill_refs", []) or []) if isinstance(cfg, dict) else frozenset()
+        )
+        effective_skills = skill_names | own_skills
+
+        try:
+            system_prompt = await self._assemble_system_prompt(
+                instance,
+                agent_id=agent_id,
+                message="",  # no turn yet — the volatile tail is stripped anyway
+                instructions=instructions,
+                knowledge_context="",  # stripped from the cache-key prefix
+                system_message_override=system_message_override,
+            )
+        except Exception:
+            logger.debug("prewarm: prompt assembly failed for %s (skipped)", agent_id)
+            return
+
+        # The backend's prewarm swallows ALL of its own errors, so this is
+        # already safe; the outer guards above cover instance/prompt failures.
+        prewarm_kwargs: dict[str, Any] = {
+            "session_key": session_key,
+            "system_prompt": system_prompt,
+        }
+        if deny_mcp_tool_ids:
+            prewarm_kwargs["deny_mcp_tool_ids"] = deny_mcp_tool_ids
+        if allow_sdk_tools:
+            prewarm_kwargs["allow_sdk_tools"] = allow_sdk_tools
+        if allow_mcp_tool_ids is not None:
+            prewarm_kwargs["allow_mcp_tool_ids"] = allow_mcp_tool_ids
+        if effective_skills:
+            prewarm_kwargs["skill_names"] = effective_skills
+        await backend_prewarm(**prewarm_kwargs)
 
     async def run(
         self,
@@ -196,6 +456,10 @@ class AgentPool:
         allow_mcp_tool_ids: frozenset[str] | None = None,
         system_message_override: str | None = None,
         skill_names: frozenset[str] = frozenset(),
+        session_handle: SessionHandle | None = None,
+        warm_client: LeasedClient | None = None,
+        on_client_built: Callable[[Any, str, Callable], None] | None = None,
+        model_override: str | None = None,
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -239,82 +503,50 @@ class AgentPool:
         their narrower signature). The Claude SDK backend materializes exactly
         those skills into a throwaway local plugin so ONLY the named skills are
         surfaced to the agent for this run. Empty = legacy all-skills behavior.
+
+        ``warm_client`` / ``on_client_built`` (feat/warm-reuse WH-1) let the
+        SessionSupervisor (WH-2/WH-3) drive the turn against a caller-LEASED warm
+        client. They ride the SAME withhold-when-empty contract as the kwargs
+        above — forwarded to the backend's ``run`` ONLY when set, so the 6
+        non-Claude backends keep their narrower signature and only the Claude SDK
+        backend acts on them. Both unset (the default) = the unchanged legacy
+        warm-client path.
+
+        ``model_override`` (CS-13) is the client's per-send model choice. It rides
+        the SAME withhold-when-empty contract as the kwargs above — forwarded to the
+        backend's ``run`` ONLY when set, so the 6 non-Claude backends keep their
+        narrower signature and only the Claude SDK backend acts on it (where it wins
+        over smart-routing / ``claude_sdk_model``). ``None`` = the unchanged path.
         """
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
 
-        # Build system prompt via soul bootstrap if available
-        system_prompt = None
-        if instance.soul_manager and instance.soul_manager.bootstrap_provider:
-            try:
-                ctx = await instance.soul_manager.bootstrap_provider.get_context()
-                system_prompt = ctx.identity
-                # Append soul-level knowledge (semantic memories, bond info, etc.)
-                # into the identity block so the agent carries persistent context.
-                if ctx.knowledge:
-                    knowledge_lines = "\n".join(f"- {k}" for k in ctx.knowledge)
-                    system_prompt = f"{system_prompt}\n\n# Key Knowledge\n{knowledge_lines}"
-            except Exception:
-                logger.warning("Failed to build soul prompt for agent %s", agent_id)
+        # An agent's OWN declared skills (config.skill_refs) must materialize on
+        # EVERY run path, not only entity-room runs that thread skill_names in.
+        # The SSE chat path resolves this upstream and passes skill_names; the
+        # group/DM bridge (agent_bridge) calls run() without it, so a deployment
+        # agent with skill_refs got none of its skills. Union the agent's own
+        # skill_refs here so run() is the single source of truth for them; the
+        # passed-in skill_names stays an additive per-entity subset.
+        cfg = getattr(instance, "config", None) or {}
+        own_skills = (
+            frozenset(cfg.get("skill_refs", []) or []) if isinstance(cfg, dict) else frozenset()
+        )
+        if own_skills:
+            skill_names = skill_names | own_skills
 
-        # Fall back to config system_prompt or persona
-        if not system_prompt:
-            persona = instance.config.get("soul_persona", "")
-            extra = instance.config.get("system_prompt", "")
-            system_prompt = f"{persona}\n\n{extra}".strip() if persona or extra else ""
-
-        # Per-entity system-message override (entity-rooms A1): SWAP the base,
-        # KEEP the layers. Everything assembled ABOVE this point is the base
-        # persona/soul identity — exactly what the override replaces. The
-        # downstream layers (authoritative ``instructions`` incl. the ripple LAW,
-        # the soul-memory recall, the knowledge wrapper) are appended BELOW, so
-        # they still ride on top of the override. ``None`` leaves the base
-        # untouched (legacy path). Applied here so a backend never needs to know
-        # the override exists — it rides the existing ``system_prompt`` channel.
-        if system_message_override is not None:
-            system_prompt = system_message_override
-
-        # Authoritative behavior rules — injected BEFORE the knowledge
-        # wrapper so the model reads them as instructions, not reference.
-        if instructions:
-            system_prompt = f"{system_prompt}\n\n{instructions}" if system_prompt else instructions
-
-        # Query-specific soul memory recall — inject relevant past interactions
-        # so the agent can reference cross-session memories. This complements
-        # the general semantic facts already injected by SoulBootstrapProvider.
-        if instance.soul_manager and instance.soul_manager.soul and message.strip():
-            try:
-                soul_ctx = await instance.soul_manager.soul.context_for(
-                    message,
-                    max_memories=5,
-                    include_state=False,
-                    include_self_model=False,
-                )
-                if soul_ctx:
-                    memory_block = (
-                        "## Relevant Past Memories\n"
-                        "Below are memories from previous conversations that "
-                        "are relevant to the current question. Use them to "
-                        "provide continuity and a personalized response.\n\n"
-                        f"{soul_ctx}"
-                    )
-                    if system_prompt:
-                        system_prompt = f"{system_prompt}\n\n{memory_block}"
-                    else:
-                        system_prompt = memory_block
-            except Exception:
-                logger.debug("Soul context_for() failed for agent %s", agent_id)
-
-        # Inject knowledge context directly into system prompt
-        if knowledge_context:
-            system_prompt = (
-                f"{system_prompt}\n\n"
-                "## Your Knowledge Base\n"
-                "Use the following information from your knowledge base to answer questions. "
-                "Always reference this data when relevant instead of "
-                "making things up or using tools to search.\n\n"
-                f"{knowledge_context}"
-            )
+        # Assemble the system prompt (factored into ``_assemble_system_prompt``
+        # so ``prewarm`` builds the SAME prompt this run will — the warm-client
+        # cache key hashes the prompt's stable behavioral prefix, so a divergent
+        # prefix would make the first turn evict the prewarmed client).
+        system_prompt = await self._assemble_system_prompt(
+            instance,
+            agent_id=agent_id,
+            message=message,
+            instructions=instructions,
+            knowledge_context=knowledge_context,
+            system_message_override=system_message_override,
+        )
 
         # Mark this instance as actively running for the duration of the
         # stream. ``last_active`` alone isn't enough because the LLM can have
@@ -357,6 +589,32 @@ class AgentPool:
             # non-empty. Empty = legacy all-skills advertise behavior.
             if skill_names:
                 run_kwargs["skill_names"] = skill_names
+            # Native-resume handle (feat/session-supervisor SS-1). Same
+            # withhold-when-empty rule as the kwargs above: only the Claude SDK
+            # backend accepts ``session_handle`` (it passes a non-None
+            # ``cli_session_id`` as ``ClaudeAgentOptions.resume`` and routes the
+            # turn down the fresh-launch path); the other backends keep the
+            # narrower signature, so the handle is forwarded ONLY when non-None.
+            # None = legacy warm-client path, unchanged for every existing run.
+            if session_handle is not None:
+                run_kwargs["session_handle"] = session_handle
+            # Leased warm-client seam (feat/warm-reuse WH-1). Same
+            # withhold-when-empty rule: only the Claude SDK backend accepts
+            # ``warm_client`` / ``on_client_built`` (it drives the turn against the
+            # leased client or hands the supervisor a freshly-built one); the other
+            # backends keep the narrower signature, so each is forwarded ONLY when
+            # set. Both unset = the unchanged legacy warm-client path.
+            if warm_client is not None:
+                run_kwargs["warm_client"] = warm_client
+            if on_client_built is not None:
+                run_kwargs["on_client_built"] = on_client_built
+            # Per-send model override (CS-13). Same withhold-when-empty rule as
+            # the kwargs above: only the Claude SDK backend accepts
+            # ``model_override``; the other backends keep the narrower signature,
+            # so the override is forwarded ONLY when the client chose a model for
+            # this turn. None = legacy path, unchanged for every existing run.
+            if model_override is not None:
+                run_kwargs["model_override"] = model_override
             async for event in instance.backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
                 yield event
@@ -376,8 +634,9 @@ class AgentPool:
     async def _build(self, agent_doc: Any) -> AgentInstance:
         """Build a new AgentInstance from an Agent document."""
         from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
-        from pocketpaw.agents.registry import get_backend_class
+        from pocketpaw.agents.registry import _LEGACY_BACKENDS, get_backend_class
         from pocketpaw.config import Settings
+        from pocketpaw.llm.providers.base import route_model
         from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy
 
         agent_id = str(agent_doc.id)
@@ -387,15 +646,21 @@ class AgentPool:
         settings = Settings.load()
         settings.agent_backend = config.get("backend", "claude_agent_sdk")
 
-        # Map model to the correct settings field based on backend
+        # Map the per-agent model onto the Settings field the chosen backend
+        # actually reads, for EVERY registered backend — the old ``"claude" in
+        # backend`` substring routing silently dropped the model for codex_cli /
+        # opencode / deep_agents / copilot_sdk / langchain_react. ``route_model``
+        # is the single source of truth (driven by ``_BACKEND_MODEL_ATTR`` +
+        # the langchain_react->deep_agents alias) and preserves the composite
+        # ``provider:model`` / ``provider/model`` formats verbatim. An empty
+        # model is a no-op, so the backend falls through to its own default.
+        # Catalog existence-validation is NOT done here — it lives upstream in
+        # the picker / EE catalog layer (MCG-1/4); OSS can't import EE.
+        # Resolve legacy backend names to their canonical key first so an old
+        # agent doc (e.g. ``claude_code``) still routes to the right field.
         model = config.get("model", "")
-        if model:
-            if "claude" in settings.agent_backend:
-                settings.claude_sdk_model = model
-            elif "openai" in settings.agent_backend:
-                settings.openai_model = model
-            elif "google" in settings.agent_backend:
-                settings.google_adk_model = model
+        canonical_backend = _LEGACY_BACKENDS.get(settings.agent_backend, settings.agent_backend)
+        route_model(settings, canonical_backend, model)
 
         # Instantiate backend
         backend_cls = get_backend_class(settings.agent_backend)

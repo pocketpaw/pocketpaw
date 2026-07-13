@@ -200,6 +200,34 @@ pocketpaw logs --json
 
 The audit log is stored at `~/.pocketpaw/audit.jsonl`.
 
+## Pockets
+
+```bash
+# Preview a template reconcile (dry-run diff — DEFAULT, writes nothing)
+pocketpaw pocket reconcile <pocket-id>
+
+# Apply the reconcile (re-applies the template's ui/actions/sources/shape,
+# preserves the pocket's instance state)
+pocketpaw pocket reconcile <pocket-id> --apply
+
+# Provide identity explicitly (otherwise read from POCKETPAW_WORKSPACE_ID /
+# POCKETPAW_USER_ID)
+pocketpaw pocket reconcile <pocket-id> --workspace <ws-id> --user <user-id>
+
+# JSON output for scripting
+pocketpaw pocket reconcile <pocket-id> --json
+```
+
+`reconcile` re-applies the **template-owned** regions of the template a pocket
+was installed from (`ui`, `actions`, `sources`, `shape`) while preserving the
+**instance-owned** regions (`state` rows, the current selection, pending
+proposals, and the pocket's name / sharing). It solves the "re-running the
+install script wiped my hand-edit" problem.
+
+Requires a running PocketPaw dashboard on the same host (the command calls its
+reconcile API over loopback and authenticates with the process-local
+`POCKETPAW_INTERNAL_TOKEN` the dashboard exports on boot).
+
 ## Provider Diagnostics
 
 ```bash
@@ -241,4 +269,25 @@ pocketpaw update
 | `--host HOST` | Bind web server to specific host |
 | `--port PORT` | Web server port (default: 8888) |
 | `--dev` | Development mode with auto-reload |
+| `--apply` | Write the change (for `pocket reconcile`; default is a dry-run diff) |
+| `--workspace ID` | Workspace id (for `pocket reconcile`; or `POCKETPAW_WORKSPACE_ID`) |
+| `--user ID` | User id (for `pocket reconcile`; or `POCKETPAW_USER_ID`) |
 | `--version` | Show version |
+
+## The `paw` Command
+
+Alongside `pocketpaw`, the package installs `paw` — a companion CLI for the project-resident soul (`init`, `ask`, `chat`, `status`, `doctor`) plus remote reads against a running PocketPaw server:
+
+```bash
+# Ontology reads over HTTP (works against any running PocketPaw server)
+paw fabric stats                          # ontology counts for your workspace
+paw fabric types                          # object types you can see
+paw fabric query --type-name Customer     # run a Fabric query
+
+# Point it at a server + credential (flags or env)
+paw fabric stats --base-url https://cloud.example.com --api-key paw_xxxx
+export PAW_BASE_URL=https://cloud.example.com
+export PAW_API_KEY=paw_xxxx
+```
+
+The `--api-key` value is a bearer credential — a `paw_...` API key or a login JWT. Output is JSON, so the commands pipe cleanly into `jq`. For programmatic access from Python, the same route contracts are wrapped by `pocketpaw.paw.client.PawClient`.

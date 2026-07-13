@@ -10,6 +10,14 @@
 #   returns a list of rows yet; the DTO is shipped now so future
 #   `GET /api/v1/outcomes?detail=rows` lookups have a stable wire
 #   contract and the back-reference is visible on the lint surface.
+# Updated: 2026-06-11 (gap-3 outcome VALUE metering) — added the
+#   aggregation surface DTOs: `MeterOutcomesRequest` (the `since`/`until`
+#   period window for `GET /api/v1/outcomes/meter`), `UnitMeter` (one
+#   billable unit's count + summed value), and `MeterOutcomesResponse`
+#   (the workspace's metered total: count of value-bearing outcomes plus a
+#   per-unit rollup). This is the "pay for governed outcomes" read
+#   primitive — a queryable billable figure per workspace per period. It
+#   is NOT invoicing/payment (deferred).
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -65,4 +73,63 @@ class OutcomeResponse(BaseModel):
     decision_id: str | None = None
 
 
-__all__ = ["CountOutcomesRequest", "OutcomeCountResponse", "OutcomeResponse"]
+class MeterOutcomesRequest(BaseModel):
+    """Validated period window for ``GET /api/v1/outcomes/meter``.
+
+    ``workspace_id`` is taken from the auth context, never the query — the
+    router rejects a ``workspace_id`` query param. ``pocket_id`` narrows to
+    one pocket. ``since`` / ``until`` are ISO-8601 bounds on
+    ``occurred_at``: ``since`` is an inclusive lower bound, ``until`` an
+    EXCLUSIVE upper bound so adjacent periods (e.g. month boundaries) don't
+    double-count the same outcome. All optional — an unbounded meter sums
+    the whole ledger.
+    """
+
+    pocket_id: str | None = None
+    since: str | None = None
+    until: str | None = None
+
+
+class UnitMeter(BaseModel):
+    """One billable unit's rollup — how many outcomes and their total value.
+
+    ``count`` is the number of value-bearing outcomes carrying this unit;
+    ``total_value`` is their summed ``outcome_value``. A unit only appears
+    in the meter when at least one outcome declared it (count-only outcomes
+    — no value/unit — are excluded from the per-unit rollup entirely).
+    """
+
+    unit: str
+    count: int
+    total_value: float
+
+
+class MeterOutcomesResponse(BaseModel):
+    """The metered (billable) view of a workspace's governed outcomes.
+
+    ``metered_count`` is the number of outcomes that carried a real
+    value/unit pair in the window — the count-only outcomes are NOT
+    included here (they have no billable figure). ``by_unit`` is the
+    per-unit rollup (count + summed value) keyed by unit name.
+    ``total_outcomes`` is every matching ledger row including count-only
+    ones, so an operator can see metered vs total coverage.
+
+    This is the queryable "pay for governed outcomes" figure. It is a READ
+    surface only — turning ``total_value`` into an invoice, a charge, or a
+    rev-share split is deferred (outcome-spec.md Decisions 5/7 — pricing
+    rules, clawback, disputes).
+    """
+
+    total_outcomes: int
+    metered_count: int
+    by_unit: dict[str, UnitMeter] = Field(default_factory=dict)
+
+
+__all__ = [
+    "CountOutcomesRequest",
+    "OutcomeCountResponse",
+    "OutcomeResponse",
+    "MeterOutcomesRequest",
+    "UnitMeter",
+    "MeterOutcomesResponse",
+]

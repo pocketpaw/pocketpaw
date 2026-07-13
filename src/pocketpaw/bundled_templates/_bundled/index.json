@@ -64,6 +64,54 @@
       "pattern": "landing",
       "keywords": ["landing page", "landing site", "marketing page", "marketing site", "sales page", "website for", "site for", "website", "homepage", "home page", "portfolio site", "personal site", "personal website", "about page"],
       "connectors_hint": []
+    },
+    {
+      "slug": "applications-triage",
+      "title": "Applications Triage",
+      "shape": "custom",
+      "pattern": "app",
+      "keywords": ["triage", "application queue", "applications", "review queue", "approval queue", "intake", "applicants", "submissions", "approve reject", "vetting", "screening", "queue"],
+      "connectors_hint": []
+    },
+    {
+      "slug": "member-360",
+      "title": "Member 360",
+      "shape": "custom",
+      "pattern": "viewer",
+      "keywords": ["member", "member 360", "member profile", "customer 360", "member view", "single view", "profile view", "member record", "membership", "account profile", "customer profile"],
+      "connectors_hint": []
+    },
+    {
+      "slug": "events-board",
+      "title": "Events Board",
+      "shape": "custom",
+      "pattern": "app",
+      "keywords": ["events", "event", "events board", "sell-through", "sell through", "ticket sales", "tickets", "capacity", "attendees", "run of show", "event calendar", "shows", "performances", "bookings"],
+      "connectors_hint": []
+    },
+    {
+      "slug": "renewals-radar",
+      "title": "Renewals Radar",
+      "shape": "custom",
+      "pattern": "app",
+      "keywords": ["renewals", "renewal", "renewals radar", "expiring", "churn", "churn risk", "retention", "lapsed", "memberships expiring", "subscription renewal", "renew", "at risk", "grace period"],
+      "connectors_hint": []
+    },
+    {
+      "slug": "orders-fulfillment",
+      "title": "Orders Fulfillment",
+      "shape": "kanban",
+      "pattern": "app",
+      "keywords": ["orders", "order", "fulfillment", "fulfilment", "shipping", "ship", "shipped", "delivered", "refund", "refunds", "order queue", "to ship", "shipments", "tracking", "warehouse"],
+      "connectors_hint": []
+    },
+    {
+      "slug": "revenue-pulse",
+      "title": "Revenue Pulse",
+      "shape": "chart",
+      "pattern": "dashboard",
+      "keywords": ["revenue", "revenue pulse", "executive dashboard", "exec dashboard", "mrr", "revenue dashboard", "financials", "sales dashboard", "income", "revenue trend", "by category", "approval rate", "business overview"],
+      "connectors_hint": []
     }
   ]
 }

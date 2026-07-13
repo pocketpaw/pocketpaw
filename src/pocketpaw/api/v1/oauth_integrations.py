@@ -1,12 +1,20 @@
 # OAuth Integration routes — authorize + callback for Google, Spotify, etc.
 # Created: 2026-03-31
 # Extracted from dashboard.py so these work in both dashboard and serve modes.
+# 2026-06-08: authorize accepts an optional user_id and embeds it in the OAuth
+#   ``state`` (provider:service:user_id); the callback parses it back out and
+#   stores tokens in that user's bucket (VIP Onboarding Phase B). Omitting
+#   user_id keeps the shared single-user flow (state stays provider:service).
+# 2026-06-16: callback now auto-connects the corresponding connector in the
+#   registry so the connector shows up as "connected" after OAuth completes.
+#   Also added OAUTH_TO_CONNECTOR mapping so the correct connector_name is used.
 
 from __future__ import annotations
 
 import logging
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +39,29 @@ OAUTH_SCOPES: dict[str, list[str]] = {
     ],
 }
 
+# Map OAuth service names to connector names in the registry.
+# When OAuth completes for a service, the corresponding connector is
+# auto-connected so the registry knows it's active.
+OAUTH_TO_CONNECTOR: dict[str, str] = {
+    "google_gmail": "gmail",
+    "google_calendar": "gcalendar",
+    "google_drive": "google_drive",
+    "google_docs": "gdocs",
+    "spotify": "spotify",
+}
+
 
 @router.get("/oauth/integrations/authorize")
-async def oauth_authorize(service: str = Query("google_gmail")):
-    """Start OAuth flow — redirects user to provider consent screen."""
+async def oauth_authorize(
+    service: str = Query("google_gmail"),
+    user_id: str = Query(""),
+):
+    """Start OAuth flow — redirects user to provider consent screen.
+
+    ``user_id`` (optional) scopes the resulting token to a single member so
+    each person connects their own account (VIP Onboarding Phase B). When
+    omitted, tokens land in the shared single-user bucket.
+    """
     from fastapi.responses import RedirectResponse
 
     from pocketpaw.config import Settings
@@ -66,7 +93,10 @@ async def oauth_authorize(service: str = Query("google_gmail")):
 
     manager = OAuthManager()
     redirect_uri = f"http://localhost:{settings.web_port}/api/v1/oauth/integrations/callback"
-    state = f"{provider}:{service}"
+    # Carry an optional user_id as a third state segment so the callback can
+    # store the token in that member's bucket. Stays provider:service when
+    # no user_id is supplied (back-compat with the single-user flow).
+    state = f"{provider}:{service}:{user_id}" if user_id else f"{provider}:{service}"
 
     auth_url = manager.get_auth_url(
         provider=provider,
@@ -84,7 +114,12 @@ async def oauth_callback(
     state: str = Query(""),
     error: str = Query(""),
 ):
-    """OAuth callback — exchanges auth code for tokens."""
+    """OAuth callback — exchanges auth code for tokens and auto-connects the connector.
+
+    After saving tokens, the corresponding connector is registered in the
+    connector registry (via ``registry.connect()``) so it shows as "connected"
+    in the UI and the agent can use it without a separate connect step.
+    """
     from fastapi.responses import HTMLResponse
 
     if error:
@@ -101,9 +136,11 @@ async def oauth_callback(
         settings = Settings.load()
         manager = OAuthManager(TokenStore())
 
-        parts = state.split(":", 1)
+        # state shape: "provider:service" (legacy) or "provider:service:user_id".
+        parts = state.split(":", 2)
         provider = parts[0] if parts else "google"
         service = parts[1] if len(parts) > 1 else "google_gmail"
+        user_id = parts[2] if len(parts) > 2 and parts[2] else None
 
         redirect_uri = f"http://localhost:{settings.web_port}/api/v1/oauth/integrations/callback"
         scopes = OAUTH_SCOPES.get(service, [])
@@ -123,7 +160,27 @@ async def oauth_callback(
             client_secret=client_secret,
             redirect_uri=redirect_uri,
             scopes=scopes,
+            user_id=user_id,
         )
+
+        # Auto-connect the corresponding connector in the registry so the
+        # connector shows as "connected" without a separate /connectors/connect
+        # call. This bridges the gap between the OAuth token store and the
+        # connector registry's state store.
+        connector_name = OAUTH_TO_CONNECTOR.get(service)
+        if connector_name:
+            try:
+                from pocketpaw.api.v1.connectors import _get_registry
+
+                reg = _get_registry()
+                await reg.connect("default", connector_name, {"scope": " ".join(scopes)})
+            except Exception as exc:
+                logger.warning(
+                    "Auto-connect failed for %s (connector %s): %s",
+                    service,
+                    connector_name,
+                    exc,
+                )
 
         return HTMLResponse(
             "<h2>Authorization Successful</h2>"
@@ -134,3 +191,48 @@ async def oauth_callback(
     except Exception as e:
         logger.error("OAuth callback error: %s", e)
         return HTMLResponse(f"<h2>OAuth Error</h2><p>{e}</p>")
+
+
+class OAuthDisconnectRequest(BaseModel):
+    """Request to disconnect an OAuth service."""
+
+    service: str
+    pocket_id: str = "default"
+
+
+@router.post("/oauth/integrations/disconnect")
+async def oauth_disconnect(req: OAuthDisconnectRequest):
+    """Disconnect an OAuth service — delete tokens + disconnect the connector.
+
+    Returns the oauth_status dict so the frontend can update immediately.
+    """
+    if req.service not in OAUTH_SCOPES:
+        raise HTTPException(status_code=400, detail=f"Unknown service: {req.service}")
+
+    try:
+        from pocketpaw.clients.token_store import TokenStore
+
+        # Delete OAuth tokens.
+        store = TokenStore()
+        store.delete(req.service)
+
+        # Disconnect the corresponding connector from the registry.
+        connector_name = OAUTH_TO_CONNECTOR.get(req.service)
+        if connector_name:
+            try:
+                from pocketpaw.api.v1.connectors import _get_registry
+
+                reg = _get_registry()
+                await reg.disconnect(req.pocket_id, connector_name)
+            except Exception as exc:
+                logger.warning(
+                    "OAuth disconnect: failed to disconnect connector %s: %s",
+                    connector_name,
+                    exc,
+                )
+
+        logger.info("Disconnected OAuth service %s", req.service)
+        return {"success": True, "service": req.service}
+    except Exception as e:
+        logger.error("OAuth disconnect error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e

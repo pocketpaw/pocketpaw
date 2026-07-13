@@ -27,6 +27,30 @@
 #   un-discriminated consumers keep working byte-for-byte and the
 #   coarse ``PocketUpdated`` realtime event remains the refetch fallback
 #   for clients that ignore ``kind`` entirely.
+# Changes: 2026-07-03 (FL-5, port of dewani12's #1193) — added the
+#   ``editor_blocks`` / ``spreadsheet_snapshot`` / ``slides_data`` transport
+#   carriers: when a chat is scoped to an open file editor, the client attaches
+#   the current Editor.js blocks / Univer snapshot / reveal.js deck so the agent
+#   can round-trip a structural edit. In #1193 the (now-removed) inline
+#   ``_run_agent_stream`` injected these into the agent's system prompt via
+#   ``build_*_prompt_context`` before running the agent inline. On current dev the
+#   chat run path is a ``RunSpec`` submitted to an out-of-process executor, so the
+#   router-time prompt injection has no counterpart yet — these fields are the
+#   minimal transport shim (they parse + round-trip on the request); threading
+#   them through ``RunSpec`` → executor → worker prompt assembly is a follow-up.
+#   The primary FL-5 editor round-trip today runs through the REST ai-edit +
+#   ``*-context`` routes on the file_versions router (which still use the inline
+#   ``pool.run`` path) and the registered ``EditDocumentTool`` family (which edit
+#   a Library file by id and write a revertable version).
+# Changes: 2026-07-08 (CS-13, feat/per-send-model-override) — added the optional
+#   ``model`` field: a per-send model override id chosen by the client's composer
+#   picker for THIS turn only. Validated (``max_length=100`` + a strict character
+#   pattern) because it lands in a subprocess launch arg downstream; a bad value
+#   fails as a 422 rather than reaching the shell. ``None`` (the default / what
+#   every older client sends) leaves model selection entirely to the backend's
+#   existing smart-routing / ``claude_sdk_model`` logic — behavior byte-identical.
+#   It rides ``RunSpec.model_override`` → ``ScopeContext`` → ``AgentPool.run`` to
+#   the Claude SDK backend, where it wins over ALL other model sources.
 """Request and SSE-event payload schemas for the enterprise agent chat endpoint.
 
 The endpoint lives at ``POST /cloud/chat/{scope}/{scope_id}/agent`` and streams
@@ -89,6 +113,31 @@ class CloudAgentChatRequest(BaseModel):
     # / etc. Validated downstream by ``SurfaceMetaRequest``; unknown
     # fields are dropped. ``None`` is treated as an empty dict.
     surface_meta: dict[str, Any] | None = None
+    # FL-5 file-editor transport carriers (port of #1193). Set by the client when
+    # the chat is scoped to an open file editor so the agent can round-trip a
+    # structural edit. See the module docstring note: on current dev these carry
+    # on the request but are not yet threaded into the out-of-process run prompt
+    # (a follow-up); the working editor round-trip runs through the REST ai-edit
+    # routes and the registered edit_* tools.
+    #
+    # Editor.js blocks from an open document editor.
+    editor_blocks: list[dict[str, Any]] | None = None
+    # Univer workbook snapshot from an open spreadsheet editor.
+    spreadsheet_snapshot: dict[str, Any] | None = None
+    # reveal.js deck JSON from an open slides editor.
+    slides_data: dict[str, Any] | None = None
+    # CS-13 — per-send model override. The composer's model picker stamps the
+    # model id to run THIS turn on (e.g. ``claude-haiku-4-5-20251001``); it is
+    # the user's explicit choice for this one send and takes precedence over the
+    # backend's smart-routing / ``claude_sdk_model`` selection. ``None`` (the
+    # default, and what every older client sends) leaves model selection to the
+    # backend, byte-identical to today. Validated at the edge — ``max_length``
+    # plus a strict pattern (letters, digits, ``. _ : / -``) — because the value
+    # is threaded into the Claude CLI subprocess launch options downstream; the
+    # pattern rejects whitespace and shell metacharacters, so a hostile or
+    # malformed id fails as a 422 instead of reaching the process spawn. The
+    # pattern's ``+`` also rejects the empty string.
+    model: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9._:/-]+$")
 
     @field_validator("intent")
     @classmethod
@@ -121,6 +170,9 @@ class SseEventName(StrEnum):
     POCKET_MUTATION = "pocket_mutation"
     POCKET_EXECUTION = "pocket_execution"
     ASK_USER_QUESTION = "ask_user_question"
+    # Per-run token metering (W3a): the backend's reported prompt / completion /
+    # cached token counts, surfaced mid-stream and folded into ``stream_end.usage``.
+    TOKEN_USAGE = "token_usage"
     STREAM_END = "stream_end"
     ERROR = "error"
 

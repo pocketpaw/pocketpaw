@@ -17,6 +17,15 @@ class StoredObject:
     mime: str
 
 
+@dataclass
+class StorageItem:
+    """One entry in a directory listing returned by ``browse``."""
+
+    name: str
+    is_dir: bool
+    size: int = 0
+
+
 class StorageAdapter(Protocol):
     """Abstract byte storage. Knows nothing about metadata, auth, or mime logic.
 
@@ -48,11 +57,53 @@ class StorageAdapter(Protocol):
         ``None`` — the caller should fall back to streaming via ``open``.
         """
 
-    async def presigned_get(self, key: str, ttl_seconds: int) -> str | None:
+    async def presigned_get(
+        self,
+        key: str,
+        ttl_seconds: int,
+        response_content_disposition: str | None = None,
+    ) -> str | None:
         """Return a time-limited public URL for reading ``key``.
 
         Adapters that natively support presigning (S3, GCS) return an
         absolute URL the browser can fetch without an Authorization header.
         Adapters that don't (local disk) return ``None``; the caller should
         fall back to its own signing scheme.
+
+        ``response_content_disposition`` (when set) is forwarded so the served
+        response carries that ``Content-Disposition`` — callers pass
+        ``attachment; filename="…"`` to force a download for content that must
+        not render inline on the storage origin (e.g. delivered HTML/SVG). The
+        local adapter ignores it (it never presigns); ``None`` preserves the
+        adapter/object default disposition.
         """
+
+    async def list_prefix(self, prefix: str) -> list[str]:
+        """List every key that starts with ``prefix`` (non-recursive, one level).
+
+        Returns the unique "sub-directory" names (the next path segment after
+        ``prefix``). S3 adapters return the CommonPrefixes from a
+        delimiter'd ``list_objects_v2``. Local adapters return the child
+        file/directory names.
+
+        Adapters that don't support prefix listing return ``[]``.
+        """
+
+    async def browse(self, prefix: str) -> list[StorageItem]:
+        """List one directory level. Returns both files and sub-folders.
+
+        Each item carries its name, whether it is a directory, and the file
+        size in bytes (zero for directories). The default (no-op)
+        implementation returns empty — adapters override to provide actual
+        listing.
+        """
+        return []
+
+    async def rename_key(self, old_key: str, new_key: str) -> None:
+        """Rename (move) a key from ``old_key`` to ``new_key``.
+
+        The default raises ``NotImplementedError``. Adapters that support
+        rename must implement this so the cloud project file endpoints can
+        rename files and directories.
+        """
+        raise NotImplementedError("rename_key not supported by this adapter")

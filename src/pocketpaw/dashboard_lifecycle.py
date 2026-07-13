@@ -7,6 +7,11 @@ Extracted from dashboard.py — contains:
 - ``shutdown_event()`` — tears down all services
 
 Changes:
+- 2026-07-11 (feat/external-alerting-c2c3): ``startup_event`` now autostarts the
+  ``AutomationEvaluator`` (background threshold/data-change rule loop) when
+  ``settings.automation_evaluator_autostart`` is true (the default) — the OSS
+  always-on automation switch. Same best-effort + ``_register_lifecycle``
+  shutdown pattern as AlertManager, so a clean shutdown cancels the loop.
 - 2026-05-22: ``startup_event`` also mirrors the built-in pocket
   templates into ``~/.pocketpaw/templates/`` via the
   ``bundled_templates`` installer — same best-effort, catch-and-log
@@ -332,6 +337,24 @@ async def startup_event(
         logger.info("AlertManager started")
     except Exception as e:
         logger.warning("Failed to start AlertManager: %s", e)
+
+    # Start the AutomationEvaluator (background loop that fires threshold /
+    # data-change automation rules). Default-ON via
+    # ``automation_evaluator_autostart`` so external-alerting automations run
+    # without a manual POST /automations/evaluator/start — the OSS always-on
+    # switch. Same best-effort, register-shutdown pattern as AlertManager so a
+    # clean shutdown cancels the loop (mirrors the alert_manager lifecycle). A
+    # fresh install with no enabled rules just sleeps, so the default is safe.
+    if settings.automation_evaluator_autostart:
+        try:
+            from pocketpaw.automations.evaluator import get_evaluator
+
+            evaluator = get_evaluator()
+            evaluator.start()
+            _register_lifecycle("automation_evaluator", shutdown=evaluator.stop)
+            logger.info("AutomationEvaluator started")
+        except Exception as e:
+            logger.warning("Failed to start AutomationEvaluator: %s", e)
 
     # Start ChannelHealthStore (connects/disconnects uptime tracking)
     try:

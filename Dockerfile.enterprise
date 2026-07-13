@@ -1,0 +1,360 @@
+# Dockerfile.enterprise — sovereign per-tenant PocketPaw Enterprise image.
+# Created: 2026-06-10 (sov/w1a-deploy).
+#
+# WHY a separate Dockerfile (vs the root Dockerfile): the root image is the
+# OSS-default single-user build. This one ships the FSL enterprise layer
+# (POCKETPAW_EDITION=enterprise) AND bundles the `kb` binary the cloud
+# knowledge-base features expect (POCKETPAW_KB_BIN) — neither of which belongs
+# in the lean OSS image. Everything the root Dockerfile hardened is PRESERVED:
+#   * POCKETPAW_ENV=production (W0e fail-fast on the default AUTH_SECRET / the
+#     legacy admin123 password),
+#   * POCKETPAW_LOCALHOST_AUTH_BYPASS=false,
+#   * non-root pocketpaw user, 0.0.0.0:8888 bind, healthcheck.
+#
+# Changes:
+#   - 2026-06-25 (feat/paw-sites-prod-deploy, DEP-1 + DEP-2): the Paw Sites publish
+#     path shells out to the paw-sites generator (`paw-sites-gen`) + `bun` at
+#     publish time, and a generated ripple-track site installs `@ripple-ui/svelte`.
+#     This image previously shipped NONE of that toolchain, so every publish 500'd.
+#     Now bundled:
+#       * `bun` — COPY'd from the pinned `oven/bun:1.2-debian` image (no curl|bash),
+#         on PATH in the runtime stage.
+#       * `paw-sites-gen` — built in a `paw-sites` stage (vendor prebuilt tree, or
+#         clone+build) and COPY'd to /opt/paw-sites, symlinked at
+#         /usr/local/bin/paw-sites-gen. The generator is pure-Node (stdlib + local
+#         modules), so dist/ + templates/ + package.json is all it needs (no
+#         node_modules); it runs via `node`. On the CLONE path its package.json pins
+#         @ripple-ui/svelte = "file:../ripple" (absent in that stage), so the stage
+#         rewrites that one dep to the 0.5.0 tarball the `ripple` stage builds before
+#         `bun install` — the generator never imports ripple (string literals only),
+#         so this just satisfies the installer.
+#       * `@ripple-ui/svelte` tarball — built+packed in a `ripple` stage (vendor
+#         prebuilt .tgz, or clone+build+pack) and COPY'd to
+#         /opt/ripple-ui-svelte-0.5.0.tgz. Baked into
+#         `PAW_SITES_RIPPLE_DEP=file:/opt/ripple-ui-svelte-0.5.0.tgz` so the publish
+#         path rewrites the generated site's dep to a resolvable source, plus
+#         `PAW_SITES_MOTION_DEP` in lockstep with ripple's motion pin.
+#     Both sibling repos live OUTSIDE the pocketpaw build context, so each has a
+#     vendor/clone source switch (mirrors paw-enterprise/deploy/Dockerfile):
+#       * PAW_SITES_SOURCE / RIPPLE_SOURCE = `vendor` (default) COPYs a prebuilt
+#         tree from the build context (deploy/paw-sites/, deploy/ripple/), produced
+#         by scripts/vendor-paw-sites.sh + scripts/vendor-ripple-tarball.sh.
+#       * = `clone` (internal CI / Coolify, which HAS repo access) clones
+#         PAW_SITES_REPO / RIPPLE_REPO and builds in-image. The vendored trees are
+#         gitignored artifacts, so Coolify (which clones pocketpaw dev) MUST pass
+#         `--build-arg PAW_SITES_SOURCE=clone --build-arg RIPPLE_SOURCE=clone`.
+#         See deploy/README-build.md.
+#   - 2026-06-10 (sov/w1a-deploy): Added an ENTRYPOINT
+#     (docker-entrypoint.enterprise.sh) that generates + persists a stable
+#     AUTH_SECRET on first run, so the production-posture auth gate (W0e) is
+#     satisfied by a plain `docker compose up` with no hand-crafted secrets.
+#     CMD stays `pocketpaw` so the command is still overridable. Bundled the kb
+#     binary + POCKETPAW_KB_BIN, and the FSL enterprise layer.
+# Build:
+#   # Vendor the generator + ripple tarball into the build context first (once):
+#   scripts/vendor-paw-sites.sh && scripts/vendor-ripple-tarball.sh
+#   docker compose -f docker-compose.enterprise.yml build
+#   # or directly:
+#   docker build -f Dockerfile.enterprise -t pocketpaw-ee .
+#   # Internal CI / Coolify (has private-repo access — no vendoring needed):
+#   docker build -f Dockerfile.enterprise \
+#     --build-arg PAW_SITES_SOURCE=clone --build-arg RIPPLE_SOURCE=clone \
+#     -t pocketpaw-ee .
+
+# ---- kb-go binary stage ----
+# The cloud KB / member-ingest features shell out to the `kb` binary
+# (ee/cloud/agents/knowledge.py::_resolve_kb_bin). Build it here from the
+# pinned kb-go release so the runtime image has it on PATH without a manual
+# `go install` on the host. Pinned (not @latest) for reproducible builds; bump
+# KB_GO_VERSION to upgrade.
+FROM golang:1.25-bookworm AS kb
+ARG KB_GO_VERSION=v0.1.0
+# Produces /go/bin/kb-go; we expose it as `kb` (the name the resolver prefers).
+RUN go install github.com/qbtrix/kb-go@${KB_GO_VERSION} && \
+    cp /go/bin/kb-go /usr/local/bin/kb
+
+# ---- Node.js stage ----
+# Copy Node.js from the official image instead of curl|bash from NodeSource
+FROM node:22.14.0-slim AS node
+
+# Pre-install CLI-based agent backends so they're cached in this layer
+RUN npm install -g @anthropic-ai/claude-code @openai/codex && \
+    npm cache clean --force
+
+# ---- bun stage ----
+# Pin the bun image so the runtime stage can COPY a known bun binary (no
+# curl|bash). 1.2+ is required to parse the text-format bun.lock used by ripple +
+# generated sites (same pin as paw-enterprise/deploy/Dockerfile). The paw-sites /
+# ripple builder stages below FROM this image so their `bun install`/`bun run
+# build`/`bun pm pack` all use the same bun.
+FROM oven/bun:1.2-debian AS bun
+
+# ---- ripple tarball stage ----
+# Produce the @ripple-ui/svelte npm tarball a generated ripple-track site installs
+# (its dep is rewritten to file:/opt/ripple-ui-svelte-0.5.0.tgz at publish time).
+# Defined BEFORE the paw-sites stage because that stage COPYs --from=ripple (the
+# clone path installs the generator's @ripple-ui/svelte dep from this tarball) — a
+# COPY --from must reference an earlier-defined stage.
+# ripple is also a SIBLING repo outside the context, so the same vendor/clone
+# switch applies:
+#   vendor (default) — COPY the prebuilt deploy/ripple/ripple-ui-svelte-0.5.0.tgz
+#                      (produced by scripts/vendor-ripple-tarball.sh).
+#   clone            — git clone RIPPLE_REPO@RIPPLE_REF, build, and `bun pm pack`.
+# Either way the tarball lands at /out/ripple-ui-svelte-0.5.0.tgz.
+FROM bun AS ripple
+ARG RIPPLE_SOURCE=vendor
+ARG RIPPLE_REPO=https://github.com/qbtrix/ripple-iui.git
+ARG RIPPLE_REF=main
+# Must match scripts/vendor-ripple-tarball.sh + @ripple-ui/svelte@0.5.0.
+ARG RIPPLE_TARBALL=ripple-ui-svelte-0.5.0.tgz
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+RUN mkdir -p /out
+# COPY the build-context dir unconditionally (always present via a tracked
+# .gitkeep, even in Coolify's clone where the tarball is gitignored/absent). On
+# vendor it carries the prebuilt .tgz; on clone it carries only .gitkeep and the
+# branch below builds + packs a fresh tarball into /out instead.
+COPY deploy/ripple/ /build/ripple-vendor/
+RUN if [ "$RIPPLE_SOURCE" = "clone" ]; then \
+      echo "RIPPLE_SOURCE=clone — building + packing ripple from $RIPPLE_REPO @ $RIPPLE_REF" && \
+      ( git clone --depth=1 --branch "$RIPPLE_REF" "$RIPPLE_REPO" /build/ripple \
+        || ( git clone "$RIPPLE_REPO" /build/ripple && cd /build/ripple && git checkout "$RIPPLE_REF" ) ) && \
+      cd /build/ripple && bun install --frozen-lockfile && bun run build && \
+      bun pm pack --destination /out >/dev/null && \
+      packed="$(ls -1 /out/*.tgz | head -n1)" && \
+      [ "$(basename "$packed")" = "$RIPPLE_TARBALL" ] || mv "$packed" "/out/$RIPPLE_TARBALL" ; \
+    else \
+      echo "RIPPLE_SOURCE=vendor — using prebuilt ripple tarball from build context" && \
+      test -f "/build/ripple-vendor/$RIPPLE_TARBALL" \
+        || ( echo "ERROR: deploy/ripple/$RIPPLE_TARBALL not found. Run scripts/vendor-ripple-tarball.sh first." && exit 1 ) && \
+      cp "/build/ripple-vendor/$RIPPLE_TARBALL" "/out/$RIPPLE_TARBALL" ; \
+    fi && \
+    test -f "/out/$RIPPLE_TARBALL" || ( echo "ERROR: ripple tarball missing after stage." && exit 1 )
+
+# ---- paw-sites generator stage ----
+# Build (or vendor) the paw-sites generator so /usr/local/bin/paw-sites-gen is on
+# PATH in the runtime image. paw-sites is a SIBLING repo OUTSIDE the build context,
+# so it has a vendor/clone source switch (mirrors the FE's RIPPLE_SOURCE):
+#   vendor (default) — COPY the prebuilt deploy/paw-sites/ tree from the build
+#                      context (produced by scripts/vendor-paw-sites.sh). PUBLIC
+#                      path: no private-repo access needed.
+#   clone            — git clone PAW_SITES_REPO@PAW_SITES_REF and build in-image.
+#                      INTERNAL path (CI / Coolify with repo access).
+# The output at /out is the minimal runtime tree: dist/ (the compiled generator,
+# pure Node stdlib + local modules — NO external runtime deps) + templates/ (read
+# at runtime as a sibling of dist/) + package.json.
+FROM bun AS paw-sites
+ARG PAW_SITES_SOURCE=vendor
+ARG PAW_SITES_REPO=https://github.com/qbtrix/paw-sites.git
+ARG PAW_SITES_REF=main
+# Must match the `ripple` stage's tarball name (the clone path installs the
+# generator's @ripple-ui/svelte dep from it).
+ARG RIPPLE_TARBALL=ripple-ui-svelte-0.5.0.tgz
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# The generator's package.json pins @ripple-ui/svelte = "file:../ripple". On the
+# CLONE path ../ripple does NOT exist in this stage, so `bun install` can't resolve
+# that file: dep and fails. The generator only references @ripple-ui/svelte as
+# STRING LITERALS (an allowlist version const + template text it emits into
+# generated sites) — it has NO real import of it — so `tsc` does not need it
+# resolved; only `bun install` chokes. Fix: install the dep from the real 0.5.0
+# tarball the `ripple` stage already builds. COPY it in (a no-op cost on the vendor
+# path, which never touches it).
+COPY --from=ripple /out/${RIPPLE_TARBALL} /opt/${RIPPLE_TARBALL}
+
+WORKDIR /build
+# COPY the build-context dir unconditionally (it always exists — a tracked
+# .gitkeep keeps it present even in Coolify's clone, where the vendored artifacts
+# are gitignored and absent). On vendor it carries the prebuilt tree; on clone it
+# carries only .gitkeep and the branch below rm's + re-clones over it.
+COPY deploy/paw-sites/ /build/paw-sites/
+RUN if [ "$PAW_SITES_SOURCE" = "clone" ]; then \
+      echo "PAW_SITES_SOURCE=clone — building generator from $PAW_SITES_REPO @ $PAW_SITES_REF" && \
+      rm -rf /build/paw-sites && \
+      ( git clone --depth=1 --branch "$PAW_SITES_REF" "$PAW_SITES_REPO" /build/paw-sites \
+        || ( git clone "$PAW_SITES_REPO" /build/paw-sites && cd /build/paw-sites && git checkout "$PAW_SITES_REF" ) ) && \
+      cd /build/paw-sites && \
+      # Rewrite the unresolvable file:../ripple dep to the bundled 0.5.0 tarball so
+      # `bun install` resolves. Drop --frozen-lockfile (package.json now differs from
+      # the committed lock by exactly this one key). tsc doesn't need ripple, so this
+      # only satisfies the installer.
+      bun -e 'const f="package.json";const p=JSON.parse(require("fs").readFileSync(f));p.dependencies["@ripple-ui/svelte"]="file:/opt/'"$RIPPLE_TARBALL"'";require("fs").writeFileSync(f,JSON.stringify(p,null,2));' && \
+      bun install && bun run build ; \
+    else \
+      echo "PAW_SITES_SOURCE=vendor — using prebuilt generator from build context" && \
+      test -f /build/paw-sites/dist/cli.js \
+        || ( echo "ERROR: deploy/paw-sites/dist not found. Run scripts/vendor-paw-sites.sh first." && exit 1 ) ; \
+    fi && \
+    mkdir -p /out && \
+    cp -R /build/paw-sites/dist /out/dist && \
+    cp -R /build/paw-sites/templates /out/templates && \
+    cp /build/paw-sites/package.json /out/package.json && \
+    test -d /out/templates || ( echo "ERROR: generator templates/ missing — runtime generate would fail." && exit 1 )
+
+# ---- Builder stage ----
+FROM python:3.12-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc python3-dev git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy only what's needed for the build
+COPY pyproject.toml README.md LICENSE ./
+COPY src/ src/
+
+# Create venv and install all extras
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --no-cache-dir '.[all]'
+
+# Enterprise edition: ALWAYS install the FSL enterprise layer here (this is the
+# enterprise image — unlike the root Dockerfile, there is no oss/enterprise
+# build-arg switch).
+COPY ee/ ee/
+# Source protection: the Cython compile is gated OFF by default (ee/pyproject.toml),
+# so a plain `pip install ./ee` would now install READABLE .py source — defeating
+# per-tenant IP protection. Build the COMPILED + source-stripped wheel instead
+# (compile ON via HATCH_BUILD_HOOK_ENABLE_CYTHON, then a post-build source strip)
+# and install THAT, so this image carries only .so, no readable enterprise source.
+# gcc/python3-dev/git are installed in the builder base above; add uv (build
+# front-end) + wheel (RECORD-safe repack) for the release script. `rm -rf ee/dist`
+# drops any wheel that rode in from the build context so the glob matches one.
+RUN pip install --no-cache-dir uv wheel
+RUN rm -rf ee/dist \
+    && bash ee/scripts/build_compiled_wheel.sh \
+    && pip install --no-cache-dir ee/dist/pocketpaw_ee-*.whl
+
+# Install Playwright Chromium browser
+RUN playwright install chromium
+
+# ---- Runtime stage ----
+FROM python:3.12-slim
+
+# Runtime system deps: tesseract for OCR, curl for healthcheck,
+# shared libs required by Playwright Chromium
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr \
+    curl \
+    # Playwright Chromium shared libs
+    libnss3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libasound2 \
+    libxshmfence1 \
+    libx11-xcb1 \
+    fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the kb binary from the kb-go stage. The resolver finds it on PATH as
+# `kb`; we also pin POCKETPAW_KB_BIN below so it's unambiguous.
+COPY --from=kb /usr/local/bin/kb /usr/local/bin/kb
+
+# Copy Node.js + globally-installed CLI backends from the official node image
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx && \
+    ln -s /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js /usr/local/bin/claude && \
+    ln -s /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex
+
+# --- Paw Sites publish toolchain (DEP-1 + DEP-2) ---
+# bun: the Sites publish path runs `bun install` + `bun run build` on the generated
+# SvelteKit project. COPY the pinned bun binary (no curl|bash) so it's on PATH.
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
+# paw-sites generator: the runtime tree (dist/ + templates/ + package.json). The
+# generator is pure Node (stdlib + local modules), so it needs NO node_modules.
+# Expose it as the `paw-sites-gen` bin the publish path execs by default
+# (PAW_SITES_GEN_CMD left unset). cli.js carries NO shebang, and the publish path
+# execs the bin directly (asyncio.create_subprocess_exec, no shell), so a bare
+# symlink would hit "exec format error". Instead install a tiny wrapper WITH a
+# shebang that execs Node on the real entry. Node resolves `import.meta.url`
+# through to /opt/paw-sites/dist/cli.js, so the generator's runtime
+# `join(dirname(import.meta.url), '..', 'templates')` correctly finds
+# /opt/paw-sites/templates.
+COPY --from=paw-sites /out /opt/paw-sites
+RUN printf '#!/bin/sh\nexec node /opt/paw-sites/dist/cli.js "$@"\n' > /usr/local/bin/paw-sites-gen && \
+    chmod 0755 /usr/local/bin/paw-sites-gen
+# ripple tarball: a generated ripple-track site installs @ripple-ui/svelte from the
+# `file:` spec baked into PAW_SITES_RIPPLE_DEP below.
+COPY --from=ripple /out/ripple-ui-svelte-0.5.0.tgz /opt/ripple-ui-svelte-0.5.0.tgz
+
+# Copy venv from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy Playwright browsers from builder
+COPY --from=builder /root/.cache/ms-playwright /home/pocketpaw/.cache/ms-playwright
+
+# First-run secret bootstrap. Generates + persists a stable AUTH_SECRET on
+# first boot (W0e refuses to start in production posture without one), so the
+# deploy is a plain `docker compose up` with no hand-crafted secrets. See the
+# script header for the full rationale. Copied before the USER switch so it
+# lands root-owned + world-executable.
+COPY docker-entrypoint.enterprise.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
+
+# Create non-root user
+RUN groupadd --system pocketpaw && \
+    useradd --system --gid pocketpaw --create-home pocketpaw && \
+    mkdir -p /home/pocketpaw/.pocketpaw /home/pocketpaw/workspace && \
+    chown -R pocketpaw:pocketpaw /home/pocketpaw
+
+USER pocketpaw
+WORKDIR /home/pocketpaw
+
+# Bind to 0.0.0.0 so the container port is reachable from the host
+ENV POCKETPAW_WEB_HOST=0.0.0.0
+ENV POCKETPAW_WEB_PORT=8888
+# Disable localhost auth bypass — Docker bridge networking means requests
+# arrive from 172.x.x.x, not 127.0.0.1, so the bypass would never trigger.
+ENV POCKETPAW_LOCALHOST_AUTH_BYPASS=false
+# Production posture (security W0e): PRESERVED from the root image. With this
+# set, the cloud auth boot REFUSES to start unless AUTH_SECRET is a real value,
+# the initial admin password is generated/operator-supplied (never admin123),
+# AND (W1a) the license layer refuses to verify against the bypassable DEV
+# public key — set POCKETPAW_LICENSE_PUBLIC_KEY to your own key.
+ENV POCKETPAW_ENV=production
+# Point the cloud KB features at the bundled binary explicitly.
+ENV POCKETPAW_KB_BIN=/usr/local/bin/kb
+# Agent-created files land here — bind-mount to access them on the host
+ENV POCKETPAW_FILE_JAIL_PATH=/home/pocketpaw/workspace
+
+# --- Paw Sites publish toolchain config (DEP-2) ---
+# A generated ripple-track site pins an unpublished @ripple-ui/svelte; the publish
+# path rewrites that dep to PAW_SITES_RIPPLE_DEP before `bun install`. Point it at
+# the bundled tarball so the install resolves with no registry / private-repo
+# access. PAW_SITES_MOTION_DEP must stay in LOCKSTEP with ripple's motion pin
+# (ripple/package.json -> "motion": "^12.40.0") — ripple lazy-loads motion via a
+# client-only dynamic import, so the generated site declares it directly.
+# PAW_SITES_GEN_CMD is deliberately UNSET: the `paw-sites-gen` wrapper is on PATH.
+ENV PAW_SITES_RIPPLE_DEP=file:/opt/ripple-ui-svelte-0.5.0.tgz
+ENV PAW_SITES_MOTION_DEP=^12.40.0
+
+EXPOSE 8888
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8888/ || exit 1
+
+# ENTRYPOINT bootstraps the AUTH_SECRET (and surfaces the license-key warning)
+# before exec'ing the app. CMD stays `pocketpaw` so operators can still override
+# the command (e.g. run the arq worker) while keeping the secret bootstrap.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["pocketpaw"]

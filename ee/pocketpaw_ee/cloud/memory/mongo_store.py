@@ -10,6 +10,12 @@ this adapter is the sole write path for chat turns. It also auto-creates a
 ``Session`` doc for a new ``session_key`` so the "start chatting → session
 appears in the sidebar" UX works without a prior ``POST /sessions``.
 
+Recent change: ``_resolve_or_create_session`` now threads the pocket id out
+of ``entry.metadata`` (``pocket_context.id`` or the flat ``pocket_id``
+fallback) into ``auto_create_pocket_session`` so OSS-path home/widget chats
+get stamped with both the pocket id and the workspace's default agent —
+required for them to surface in the PocketPaw DM room.
+
 Tenant scope
 ------------
 Every row is stamped with a ``workspace_id`` so multi-tenant ee deployments
@@ -426,14 +432,25 @@ async def _resolve_or_create_session(
     """
     from pocketpaw_ee.cloud.sessions import service as sessions_service
 
-    md_ws = (entry.metadata or {}).get("workspace_id")
+    md = entry.metadata or {}
+    md_ws = md.get("workspace_id")
     md_ws = md_ws if isinstance(md_ws, str) and md_ws else None
+
+    # Pocket id lives at metadata["pocket_context"]["id"] for the OSS pocket
+    # chat path; fall back to a flat metadata["pocket_id"] when present.
+    pocket_ctx = md.get("pocket_context")
+    md_pocket = pocket_ctx.get("id") if isinstance(pocket_ctx, dict) else None
+    if not md_pocket:
+        md_pocket = md.get("pocket_id")
+    md_pocket = md_pocket if isinstance(md_pocket, str) and md_pocket else None
 
     session = await sessions_service.find_by_session_id(session_key)
     if session is not None:
         return session, md_ws or session.workspace
 
-    session = await sessions_service.auto_create_pocket_session(session_key, workspace_id=md_ws)
+    session = await sessions_service.auto_create_pocket_session(
+        session_key, workspace_id=md_ws, pocket_id=md_pocket
+    )
     if session is None:
         return None, md_ws
 

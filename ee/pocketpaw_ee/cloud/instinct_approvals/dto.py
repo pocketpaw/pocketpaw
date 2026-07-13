@@ -38,12 +38,21 @@ class CreateApprovalRequest(BaseModel):
 
 
 class ListApprovalsRequest(BaseModel):
-    """Filter parameters for the list endpoint."""
+    """Filter parameters for the list endpoint.
+
+    ``action_name`` + ``row_id`` are server-side dedup filters (not exposed by
+    the public list route): the gate's BATCH dedup pushes them into the query
+    so a pocket with more pending rows than ``limit`` cannot bury a duplicate
+    match past the page boundary (security-review FIX 3). They default to None
+    so every existing caller is unaffected.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     status: str | None = None
     pocket_id: str | None = None
+    action_name: str | None = None
+    row_id: str | None = None
     limit: int = Field(default=50, ge=1, le=200)
 
 

@@ -3,6 +3,12 @@
 # machine-readable `code` emitted on denial. Tests iterate ACTIONS to
 # guarantee every guarded operation is covered.
 #
+# Updated: 2026-07-11 (feat/external-alerting-c2c3) — registered
+# ``automations.read`` (MEMBER) and ``automations.manage`` (ADMIN) for the
+# always-on automation status surface (ee.cloud.automations_status.router): view
+# the sweep registry / rules / per-workspace enable state, and flip the
+# per-workspace opt-out.
+#
 # Updated: 2026-04-19 (fix/fleet-install-auth-guard) — registered
 # ``fleet.install`` at ``WorkspaceRole.ADMIN`` with deny code
 # ``workspace.insufficient_role``. This lets the fleet router call
@@ -29,6 +35,26 @@
 # Updated: 2026-05-22 (RFC 05 M2b.2) — added ``outcomes.read`` (MEMBER) so
 # the pocket-outcomes count router (ee.cloud.outcomes) can guard
 # ``GET /api/v1/outcomes``.
+#
+# Updated: 2026-06-19 (feat/instinct-gate-integration, security-review FIX 1) —
+# added ``instinct.activate`` (OWNER) gating the workspace route that sets a
+# workspace's ``instinct_approval_level``. A non-ASK level turns on
+# auto-approval of agent WRITE actions workspace-wide, so the switch is
+# OWNER-only — the most restrictive workspace tier.
+#
+# Updated: 2026-06-10 (feat/belt-console-backend, SC-1) — added ``belt.read``
+# (MEMBER) and ``belt.manage`` (ADMIN) so the Belt console router
+# (ee.cloud.belt.router) can guard its read routes (repos list, runs list, run
+# detail) and its add-repo route. ``belt.manage`` is ADMIN because adding a repo
+# root extends the code-change security boundary workspace-wide — it must not be
+# open to every member (mirrors connector.manage / skills.manage).
+#
+# Updated: 2026-07-01 (feat/sec-5-security-proxy, SEC-5) — added
+# ``security.manage`` (OWNER) gating EVERY route on the shield control-plane
+# proxy (ee.cloud.security.router). OWNER because the proxy fronts shield's
+# ban-capable writes (resolve a decision, PATCH the egress deny/allow config)
+# AND its read feed exposes who-tried-to-egress-what; the whole surface is
+# owner-only, mirroring workspace.delete / billing.manage / instinct.activate.
 
 from __future__ import annotations
 
@@ -155,12 +181,17 @@ ACTIONS: dict[str, ActionRule] = {
     # authenticated caller could install into any workspace
     # (docs/plans/cluster-D-reality.md#106-112, P0 fix 2026-04-19).
     "fleet.install": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
-    # Fabric — ontology read/write.
-    # Both tiers are MEMBER so any workspace member can query and author objects.
-    # Type/schema management intentionally stays MEMBER for now; tighten to ADMIN
-    # once a Fabric admin tier is validated with clients.
+    # Fabric — ontology read/write + schema authoring.
+    # read/write are MEMBER so any workspace member can query objects and author
+    # object DATA (create/update objects, add links). SCHEMA authoring — defining
+    # object types, adding typed properties, declaring link types, and versioning
+    # a type (ontology-operator-ux, the /fabric/schema surface) — is the more
+    # privileged "operator" tier and is ADMIN: changing the ontology reshapes
+    # write-time enforcement for the whole workspace, so it sits above the member
+    # data tier (mirrors connector.manage / rules.manage / skills.manage).
     "fabric.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "fabric.write": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "fabric.admin": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Instinct — human-in-the-loop decision pipeline.
     # Propose and read are MEMBER (agents and analysts can propose + view actions).
     # Approve/reject and audit are ADMIN — governance actions with downstream
@@ -169,6 +200,28 @@ ACTIONS: dict[str, ActionRule] = {
     "instinct.propose": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "instinct.approve": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     "instinct.audit": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Activating the layered Instinct gate's triager (setting a workspace's
+    # ``instinct_approval_level`` to a non-ASK value) turns ON AUTO-APPROVAL of
+    # agent WRITE actions for the whole workspace — the single most sensitive
+    # governance switch in the gate. OWNER-only, the most restrictive workspace
+    # tier (mirrors workspace.delete / billing.manage): a mere admin must not
+    # be able to disable the human-in-the-loop for everyone.
+    "instinct.activate": ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
+    # Governed rules — the UI-authored guardrail surface (ee.cloud.rules.router:
+    # create / list / archive a rule + the per-workspace enforcement toggle).
+    # ADMIN, mirroring the other governance write surfaces (instinct.approve /
+    # audit.read): authoring a rule and flipping enforcement change workspace-wide
+    # governance and can only ADD blocks/escalations (never relax the template
+    # floor), so an admin bar — not the OWNER-only bar reserved for
+    # instinct.activate (which turns OFF the human-in-the-loop) — is correct.
+    "rules.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Automations status — the always-on automation surface (external-alerting C3).
+    # read is MEMBER (any team member can view which sweeps/rules are running and
+    # the per-workspace enable state). manage is ADMIN because flipping the
+    # per-workspace opt-out turns the always-on background sweeps ON/OFF for the
+    # whole workspace (mirrors rules.manage / connector.manage).
+    "automations.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "automations.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Connector — workspace-level connector lifecycle.
     # execute is MEMBER so any team member can run actions against enabled connectors.
     # manage (enable/disable/config) is ADMIN because it changes workspace-wide state
@@ -202,6 +255,31 @@ ACTIONS: dict[str, ActionRule] = {
     # pocket produced), with no credentials or decision payloads — any
     # workspace member may view it, mirroring instinct.read.
     "outcomes.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    # Belt console — the develop-station read + repo-admin surface
+    # (ee.cloud.belt.router, feat/belt-console-backend SC-1). read is MEMBER so
+    # any team member can list discoverable repos + their own station runs.
+    # manage is ADMIN because adding a repo root EXTENDS the code-change security
+    # boundary workspace-wide (an admin authorizing where the agent may apply
+    # diffs), mirroring connector.manage / skills.manage.
+    "belt.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "belt.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Notifications external-delivery config (ee.cloud.notifications.router,
+    # feat/external-alerting-delivery). ADMIN because the config sets where the
+    # server POSTs on EVERY notification (a Slack / generic webhook URL) — it
+    # extends the workspace's egress surface, mirroring connector.manage /
+    # belt.manage. There is no separate read action: the config is admin-only to
+    # view too (it holds the webhook URLs), so GET reuses ``notifications.manage``.
+    "notifications.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Security — the shield control-plane proxy (ee.cloud.security.router,
+    # SEC-5). OWNER-only, the most restrictive workspace tier (mirrors
+    # workspace.delete / billing.manage / instinct.activate). shield fronts the
+    # ban-capable write endpoints (resolve a decision, PATCH the deny/allow
+    # config) and IS the workspace's egress security gate, so read AND write
+    # must both be owner-gated: a mere admin must not be able to see the
+    # decision stream or flip the security posture for everyone. A single
+    # action guards every route (reads included) because the decision feed
+    # itself carries who-tried-to-egress-what, which is sensitive.
+    "security.manage": ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
 }
 
 

@@ -332,7 +332,7 @@ class TestWriteFile:
 
     @patch("pocketpaw.tools.fetch.is_safe_path", return_value=True)
     @patch("pocketpaw.config.get_settings")
-    def test_write_nonexistent_file_rejected(self, mock_settings, mock_safe, client, tmp_path):
+    def test_write_creates_new_file(self, mock_settings, mock_safe, client, tmp_path):
         settings = MagicMock()
         settings.file_jail_path = tmp_path
         mock_settings.return_value = settings
@@ -340,11 +340,13 @@ class TestWriteFile:
         resp = client.post(
             "/api/v1/files/write",
             json={
-                "path": str(tmp_path / "missing.txt"),
-                "content": "data",
+                "path": str(tmp_path / "new.txt"),
+                "content": "brand new",
             },
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert (tmp_path / "new.txt").read_text() == "brand new"
 
     @patch("pocketpaw.tools.fetch.is_safe_path", return_value=False)
     @patch("pocketpaw.config.get_settings")

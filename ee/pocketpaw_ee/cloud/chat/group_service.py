@@ -833,6 +833,7 @@ async def add_members(
             kind="group_invite",
             title=f"You were added to {group_name}" if group_name else "You were added to a group",
             body="",
+            actor_id=user_id,
             source=NotificationSource(
                 type="message",
                 id=group_id,
@@ -967,13 +968,26 @@ async def remove_agent(group_id: str, user_id: str, agent_id: str) -> None:
 
 
 async def get_or_create_dm(workspace_id: str, user_id: str, target_user_id: str) -> dict:
-    """Find an existing DM between two users, or create one."""
+    """Find an existing DM between two users, or create one.
+
+    If an archived DM already exists (the other party archived it or the
+    requester did) the DM is unarchived and a ``GroupCreated`` event is
+    emitted so both users' sidepanels update without a manual refresh.
+    """
     from pocketpaw_ee.cloud.chat.dto import group_to_wire_dict
 
     members = sorted([user_id, target_user_id])
 
     existing = await _find_dm_between_users(workspace_id, members)
     if existing is not None:
+        if existing.archived:
+            # Re-opening an archived DM: unarchive and emit GroupCreated so
+            # the other party's sidebar receives the room without refresh.
+            updated = await _update_group_fields(existing.id, archived=False)
+            users_by_id, agents_by_id = await _populate_lookups_for_domain_groups([updated])
+            resp = group_to_wire_dict(updated, users_by_id=users_by_id, agents_by_id=agents_by_id)
+            await emit(GroupCreated(data={**resp, "member_ids": list(updated.members)}))
+            return resp
         users_by_id, agents_by_id = await _populate_lookups_for_domain_groups([existing])
         return group_to_wire_dict(existing, users_by_id=users_by_id, agents_by_id=agents_by_id)
 
