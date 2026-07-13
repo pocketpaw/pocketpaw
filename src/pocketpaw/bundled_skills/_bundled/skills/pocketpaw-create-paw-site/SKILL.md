@@ -4,11 +4,13 @@ description: |
   Build a marketing landing page as a Paw Site — a real, standalone
   website composed by conversion role (navbar, hero, services, social
   proof, pricing, CTA, lead form, footer) and rendered statically to the
-  edge. Invoke when the user describes a BRAND-NEW marketing / landing
-  site: "build a dentist landing site", "make a marketing page for my
-  bakery", "a landing page for my SaaS", or when the create-site flow
-  routes a new-site request here. This is the marketing-first authoring
-  brain — it composes a sales page, NOT a dashboard. You provide the COPY
+  edge. This is the DEFAULT landing-site brain: use it for ANY brand-new
+  marketing / landing site — "build a dentist landing site", "make a
+  marketing page for my bakery", "a landing page for my SaaS", or when the
+  create-site flow routes a new-site request here — UNLESS the Svelte
+  engine is explicitly selected (the "Use Svelte pages" toggle → then use
+  pocketpaw-create-svelte-site instead). This is the marketing-first
+  authoring brain — it composes a sales page, NOT a dashboard. You provide the COPY
   only; a deterministic tool assembles the page structure and stamps the
   pocket with type="site" + pattern="landing" so the published page
   renders as a landing page. For publishing an EXISTING pocket as a site,
