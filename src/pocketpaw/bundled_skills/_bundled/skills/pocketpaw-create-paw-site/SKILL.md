@@ -4,18 +4,21 @@ description: |
   Build a marketing landing page as a Paw Site — a real, standalone
   website composed by conversion role (navbar, hero, services, social
   proof, pricing, CTA, lead form, footer) and rendered statically to the
-  edge. This is the DEFAULT landing-site brain: use it for ANY brand-new
-  marketing / landing site — "build a dentist landing site", "make a
-  marketing page for my bakery", "a landing page for my SaaS", or when the
-  create-site flow routes a new-site request here — UNLESS the Svelte
-  engine is explicitly selected (the "Use Svelte pages" toggle → then use
-  pocketpaw-create-svelte-site instead). This is the marketing-first
-  authoring brain — it composes a sales page, NOT a dashboard. You provide the COPY
-  only; a deterministic tool assembles the page structure and stamps the
-  pocket with type="site" + pattern="landing" so the published page
-  renders as a landing page. For publishing an EXISTING pocket as a site,
-  use pocketpaw-create-site (Path A). Loading this skill keeps the chat
-  agent's always-on system prompt small while still delivering the full
+  edge. This is the DEFAULT landing-site brain and the right choice for the
+  COMMON case — a static, content-first marketing / landing page: "build a
+  dentist landing site", "make a marketing page for my bakery", "a landing
+  page for my SaaS", or when the create-site flow routes a new-site request
+  here. Reach for pocketpaw-create-svelte-site INSTEAD only when the site
+  genuinely needs framework-level interactivity or the user explicitly asks
+  for Svelte. This is the marketing-first authoring brain — it composes a sales
+  page, NOT a dashboard. You provide the COPY only; a deterministic tool
+  assembles the page structure and stamps the pocket with type="site" +
+  pattern="landing" so the published page renders as a landing page. (Need a
+  bespoke hand-written HTML/CSS page instead of the composed structure — e.g.
+  the user asks for plain HTML or a highly custom one-off layout? This skill's
+  raw-HTML track covers that; see the body.) For publishing an EXISTING pocket
+  as a site, use pocketpaw-create-site (Path A). Loading this skill keeps the
+  chat agent's always-on system prompt small while still delivering the full
   marketing brain when a landing site is actually requested.
 ---
 

@@ -3,23 +3,25 @@ name: pocketpaw-create-svelte-site
 description: |
   Build a marketing landing page as a Paw Site on the SVELTE TRACK — a
   real, standalone website you author as premium hand-written SvelteKit
-  components, prerendered statically to the edge. Use this ONLY when the
-  Svelte engine is EXPLICITLY selected — the "Use Svelte pages" toggle is
-  on, i.e. engine="svelte". A plain landing-site request is NOT a signal to
-  use this: if the user just says "build a dentist landing page", "a
-  marketing page for my bakery", or "a landing page for my SaaS" and the
-  Svelte engine is NOT on, this is the WRONG skill — use
-  pocketpaw-create-paw-site (the default landing brain) instead. Do NOT
-  pick this skill from the topic alone; the Svelte engine must already be
-  selected. When it IS selected: YOU write the Svelte sections (Hero,
-  Pricing, Faq, ...) at the quality bar of the proven spike, assemble them
-  into a source map, and a deterministic tool persists the pocket stamped
+  components, prerendered statically to the edge. Decide by the REQUIREMENT:
+  reach for this when the site genuinely needs what a component framework
+  gives — real client-side interactivity, complex or multi-view stateful UI,
+  app-like behaviour — OR when the user EXPLICITLY asks for Svelte / SvelteKit
+  ("build it in Svelte", "use SvelteKit"). Do NOT default to it for a plain
+  static marketing/landing page ("build a dentist landing page", "a marketing
+  page for my bakery", "a landing page for my SaaS") that has no real
+  interactivity — that is the common case and belongs to
+  pocketpaw-create-paw-site (the default landing brain, which can also emit a
+  plain hand-written HTML page). Pick Svelte on need or explicit request, not
+  from the topic alone. When you DO use it: YOU write the Svelte sections
+  (Hero, Pricing, Faq, ...) at the quality bar of the proven spike, assemble
+  them into a source map, and a deterministic tool persists the pocket stamped
   type="site" + pattern="landing" + engine="svelte" so the published page
-  renders from your components. You do NOT compose a rippleSpec, do NOT
-  call get_widget_spec, do NOT use the pocket specialist. For publishing an
-  EXISTING pocket use pocketpaw-create-site. Loading this skill keeps the
-  chat agent's always-on system prompt small while still delivering the
-  full Svelte authoring brain when the Svelte engine is actually selected.
+  renders from your components. You do NOT compose a rippleSpec, do NOT call
+  get_widget_spec, do NOT use the pocket specialist. For publishing an EXISTING
+  pocket use pocketpaw-create-site. Loading this skill keeps the chat agent's
+  always-on system prompt small while still delivering the full Svelte
+  authoring brain when a site actually needs Svelte.
 ---
 
 # Build a Paw Site — the Svelte-track authoring brain
