@@ -1323,7 +1323,9 @@ async def _deploy_site_doc(
     cloudflare: Any | None = None,
     bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
     local_deploy: Callable[[str, str], str] | None = None,
-    workers_deploy: Callable[[str, str], Any] | None = None,
+    # HE-4: the workers deployer is engine-aware (``deploy_workers(site_id,
+    # project_dir, *, engine=..., d1_database_id=...)``), so the seam takes kwargs.
+    workers_deploy: Callable[..., Any] | None = None,
 ) -> _SiteDoc:
     """Generate, smoke-gate, deploy, and UPSERT the LIVE canonical Site doc.
 
@@ -1456,7 +1458,9 @@ async def _deploy_site_doc(
         from pocketpaw_ee.sites import workers_deploy as workers_deploy_mod
 
         deploy_w = workers_deploy or workers_deploy_mod.deploy_workers
-        url = await deploy_w(site_id, build.project_dir)
+        # HE-4: pass the engine so an html site deploys as an assets-only Worker
+        # (no server script), while ripple/svelte keep the SvelteKit-worker config.
+        url = await deploy_w(site_id, build.project_dir, engine=engine)
     else:  # "wfp"
         cf = cloudflare or _cf_client()
         bundle = bundle_reader(build.project_dir)
