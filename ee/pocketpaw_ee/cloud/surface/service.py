@@ -306,6 +306,7 @@ def _meta_from_request(req: SurfaceMetaRequest) -> SurfaceMeta:
         project_name=req.project_name,
         storage_root=req.storage_root,
         is_cloud_storage=req.is_cloud_storage,
+        workspace_vm=req.workspace_vm,
     )
 
 

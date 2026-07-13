@@ -393,6 +393,82 @@ async def provision_workspace_vm(
     )
 
 
+@router.get("/workspace/vm/config")
+async def get_workspace_vm_config(
+    http_request: Request,
+) -> dict:
+    """Return the current workspace VM configuration (cpu, memory, disk, etc.)
+    without touching the sandbox.  Returns defaults when no config exists."""
+    workspace_id = _resolve_workspace_id(http_request)
+    from pocketpaw_ee.cloud.daytona.store import get_workspace_vm_config
+
+    config = get_workspace_vm_config(workspace_id)
+    return {"ok": True, "config": config}
+
+
+class UpdateWorkspaceVmConfigRequest(BaseModel):
+    """Partial config update — every field optional."""
+
+    cpu: int | None = None
+    memory: int | None = None  # GB
+    disk: int | None = None  # GB
+    root_dir: str | None = None
+    auto_stop_interval: int | None = None  # seconds
+
+
+@router.patch("/workspace/vm/config")
+async def update_workspace_vm_config(
+    req: UpdateWorkspaceVmConfigRequest,
+    http_request: Request,
+) -> dict:
+    """Update the workspace VM configuration WITHOUT re-provisioning.
+
+    Changes take effect on the NEXT provision — the running VM is not
+    resized.  To apply changes, stop and re-provision the VM.
+    """
+    workspace_id = _resolve_workspace_id(http_request)
+    from pocketpaw_ee.cloud.daytona.store import (
+        get_workspace_vm_config,
+        update_workspace_vm_config,
+    )
+
+    updates = req.model_dump(exclude_none=True)
+    if updates:
+        update_workspace_vm_config(workspace_id, updates)
+
+    config = get_workspace_vm_config(workspace_id)
+    return {"ok": True, "config": config}
+
+
+@router.post("/workspace/vm/stop")
+async def stop_workspace_vm(
+    http_request: Request,
+) -> dict:
+    """Stop the workspace VM without destroying it.
+
+    The sandbox is paused — data on the VM disk is preserved.  Use
+    GET /workspace/vm to resume (auto-provisions on next access if
+    the auto-stop interval hasn't elapsed yet, or POST
+    /workspace/vm/provision to force a fresh VM).
+    """
+    workspace_id = _resolve_workspace_id(http_request)
+
+    from pocketpaw_ee.cloud.daytona.store import get_workspace_vm_sandbox_id
+
+    sandbox_id = get_workspace_vm_sandbox_id(workspace_id)
+    if not sandbox_id:
+        return {"ok": True, "message": "No workspace VM to stop"}
+
+    try:
+        client = await _require_daytona()
+        await client.stop_sandbox(sandbox_id)
+    except Exception as exc:
+        logger.warning("Failed to stop workspace VM %s: %s", sandbox_id, exc)
+        raise HTTPException(status_code=500, detail=f"Stop failed: {exc}") from exc
+
+    return {"ok": True, "message": "Workspace VM stopped", "state": "stopped"}
+
+
 @router.delete("/workspace/vm")
 async def delete_workspace_vm(
     http_request: Request,

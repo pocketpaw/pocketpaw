@@ -64,11 +64,13 @@ class SurfaceMetaRequest(BaseModel):
     # SurfaceMetaProvider. ``current_dir`` is the working directory;
     # ``project_name`` is the project name; ``storage_root`` is the cloud
     # storage key prefix; ``is_cloud_storage`` is ``"true"`` for S3-only
-    # projects (no local filesystem path). All optional.
+    # projects (no local filesystem path). ``workspace_vm`` is ``"true"``
+    # when the project runs inside a shared Daytona sandbox. All optional.
     current_dir: str | None = None
     project_name: str | None = None
     storage_root: str | None = None
     is_cloud_storage: str | None = None
+    workspace_vm: str | None = None
 
 
 class SurfaceRequest(BaseModel):
