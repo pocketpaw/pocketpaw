@@ -128,6 +128,12 @@ provide:
 Format your response as JSON with keys 'summary' (string) and \
 'action_items' (list of strings).
 
+For each action item, prefix the item with \"@Name:\" where Name is the \
+person responsible (use participant names from the transcript). \
+Example: \"@Alice: Schedule follow-up meeting with the design team\".
+
+If no clear owner is mentioned in the transcript, omit the @Name prefix.
+
 Transcript:
 {transcript}"""
 
@@ -238,6 +244,12 @@ provide:
 
 Format your response as JSON with keys 'summary' (string) and \
 'action_items' (list of strings).
+
+For each action item, prefix the item with \"@Name:\" where Name is the \
+person responsible (use participant names from the transcript). \
+Example: \"@Alice: Schedule follow-up meeting with the design team\".
+
+If no clear owner is mentioned in the transcript, omit the @Name prefix.
 
 Transcript:
 {transcript}"""
