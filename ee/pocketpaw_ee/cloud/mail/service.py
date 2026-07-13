@@ -233,3 +233,98 @@ async def send_meeting_scheduled_email(
             title,
             exc_info=True,
         )
+
+
+async def send_feedback_email(
+    user_email: str,
+    user_name: str,
+    subject: str,
+    message: str,
+    workspace_name: str = "",
+) -> None:
+    """Send user feedback via Mailtrap to the configured feedback inbox.
+
+    The destination address is read from ``POCKETPAW_FEEDBACK_EMAIL``
+    (required).  Failures are logged at WARNING level — the caller must
+    NOT let a mail blip abort the feedback submission.
+    """
+
+    feedback_email = os.environ.get("POCKETPAW_FEEDBACK_EMAIL")
+    if not feedback_email:
+        logger.warning("POCKETPAW_FEEDBACK_EMAIL is not set — skipping feedback email")
+        return
+
+    mail_subject = f"[Feedback] {subject}"
+    if workspace_name:
+        mail_subject += f" — {workspace_name}"
+
+    text_body = (
+        f"New feedback submission\n\nFrom:    {user_name} ({user_email})\nSubject: {subject}\n"
+    )
+    if workspace_name:
+        text_body += f"Workspace: {workspace_name}\n"
+    text_body += f"\nMessage:\n{message}\n\n— Sent via PocketPaw Feedback"
+
+    html_body = _render_feedback_html(
+        user_name=user_name,
+        user_email=user_email,
+        subject=subject,
+        message=message,
+        workspace_name=workspace_name,
+    )
+
+    try:
+        client = await asyncio.to_thread(_get_client)
+    except RuntimeError:
+        logger.warning("Mailtrap not configured — skipping feedback email from %s", user_email)
+        return
+    except Exception:
+        logger.warning("Failed to initialise Mailtrap client for feedback email", exc_info=True)
+        return
+
+    try:
+        mail = mt.Mail(
+            sender=mt.Address(email=_SENDER_EMAIL, name=_SENDER_NAME),
+            to=[mt.Address(email=feedback_email)],
+            subject=mail_subject,
+            text=text_body,
+            html=html_body,
+        )
+        await asyncio.to_thread(client.send, mail)
+        logger.info("Feedback email sent from %s to %s", user_email, feedback_email)
+    except Exception:
+        logger.warning(
+            "Failed to send feedback email from %s",
+            user_email,
+            exc_info=True,
+        )
+
+
+def _render_feedback_html(
+    *,
+    user_name: str,
+    user_email: str,
+    subject: str,
+    message: str,
+    workspace_name: str = "",
+) -> str:
+    """Render a simple HTML feedback email (inline, no template file needed)."""
+    ws_line = f"<p><strong>Workspace:</strong> {workspace_name}</p>" if workspace_name else ""
+    # escape angle brackets for safety
+    safe_message = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return (
+        '<!doctype html><html><head><meta charset="UTF-8"></head>'
+        '<body style="font-family: -apple-system, BlinkMacSystemFont, '
+        "'Segoe UI', Roboto, sans-serif;\">"
+        '<div style="max-width: 560px; margin: 0 auto; padding: 32px 24px;">'
+        '<h2 style="margin-top: 0;">📬 New Feedback</h2>'
+        f"<p><strong>From:</strong> {user_name} &lt;{user_email}&gt;</p>"
+        f"{ws_line}"
+        f"<p><strong>Subject:</strong> {subject}</p>"
+        '<hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 20px 0;">'
+        f'<pre style="white-space: pre-wrap; font-family: inherit; '
+        f'font-size: 14px; line-height: 1.6;">{safe_message}</pre>'
+        '<hr style="border: 0; border-top: 1px solid #e5e7eb; margin: 20px 0;">'
+        '<p style="color: #6b7280; font-size: 13px;">Sent via PocketPaw Feedback</p>'
+        "</div></body></html>"
+    )

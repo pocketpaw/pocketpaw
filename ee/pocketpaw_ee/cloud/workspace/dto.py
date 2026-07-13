@@ -511,6 +511,27 @@ def invite_to_validate_dto(inv: Invite, workspace_name: str) -> ValidateInviteOu
     )
 
 
+class FeedbackRequest(BaseModel):
+    """POST /workspaces/{id}/feedback request.
+
+    ``subject`` is a short summary (required, capped at 200 chars).
+    ``message`` is the full body (required, capped at 5000 chars).
+    Both fields are validated at the route boundary; ``extra="forbid"``
+    rejects stray fields.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject: str = Field(..., min_length=1, max_length=200)
+    message: str = Field(..., min_length=1, max_length=5000)
+
+
+class FeedbackOut(BaseModel):
+    """POST /workspaces/{id}/feedback response."""
+
+    sent: bool = True
+
+
 __all__ = [
     "AddDomainRequest",
     "BrandingOut",
@@ -521,6 +542,8 @@ __all__ = [
     "ConnectorPermissionsOut",
     "CreateInviteRequest",
     "CreateWorkspaceRequest",
+    "FeedbackOut",
+    "FeedbackRequest",
     "InviteContextDTO",
     "InviteOut",
     "InvitePreviewResponse",

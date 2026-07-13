@@ -2,7 +2,11 @@
 
 Usage::
 
-    from pocketpaw_ee.cloud.mail import send_invite_email, send_meeting_scheduled_email
+    from pocketpaw_ee.cloud.mail import (
+        send_feedback_email,
+        send_invite_email,
+        send_meeting_scheduled_email,
+    )
 
     await send_invite_email(
         to_email="bob@example.com",
@@ -20,10 +24,22 @@ Usage::
         provider="Zoom",
         creator_name="Alice",
     )
+
+    await send_feedback_email(
+        user_email="alice@example.com",
+        user_name="Alice",
+        subject="Feature request",
+        message="I would love to see...",
+        workspace_name="Acme Corp",
+    )
 """
 
 from __future__ import annotations
 
-from pocketpaw_ee.cloud.mail.service import send_invite_email, send_meeting_scheduled_email
+from pocketpaw_ee.cloud.mail.service import (
+    send_feedback_email,
+    send_invite_email,
+    send_meeting_scheduled_email,
+)
 
-__all__ = ["send_invite_email", "send_meeting_scheduled_email"]
+__all__ = ["send_feedback_email", "send_invite_email", "send_meeting_scheduled_email"]

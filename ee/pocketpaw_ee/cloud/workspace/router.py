@@ -45,6 +45,8 @@ from pocketpaw_ee.cloud.workspace.dto import (
     ConnectorPermissionsOut,
     CreateInviteRequest,
     CreateWorkspaceRequest,
+    FeedbackOut,
+    FeedbackRequest,
     InviteOut,
     InvitePreviewResponse,
     MemberOut,
@@ -578,3 +580,47 @@ async def resend_invite_route(
     moment the plaintext exists outside the original email link.
     """
     return await workspace_service.resend_invite(ctx, workspace_id, invite_id)
+
+
+# ---------------------------------------------------------------------------
+# Feedback
+# ---------------------------------------------------------------------------
+
+_feedback_router = APIRouter(prefix="/feedback", tags=["Feedback"])
+
+
+@_feedback_router.post("", response_model=FeedbackOut)
+async def submit_feedback(
+    body: FeedbackRequest,
+    ctx: RequestContext = Depends(request_context),
+    user: User = Depends(current_user),
+) -> FeedbackOut:
+    """Send user feedback to the configured feedback email address.
+
+    The user's display name, email, and active workspace name are pulled from
+    the authenticated context and attached to the feedback email. The
+    destination address is read from ``POCKETPAW_FEEDBACK_EMAIL`` — unset
+    means the email is silently skipped (logged at WARNING).
+    """
+    from pocketpaw_ee.cloud.mail import send_feedback_email
+
+    ws_name = ""
+    if ctx.workspace_id:
+        try:
+            ws = await workspace_service.get(ctx, ctx.workspace_id)
+            ws_name = ws.name
+        except Exception:
+            pass
+
+    await send_feedback_email(
+        user_email=user.email or "",
+        user_name=user.full_name or user.email or "Someone",
+        subject=body.subject,
+        message=body.message,
+        workspace_name=ws_name,
+    )
+    return FeedbackOut()
+
+
+# Register alongside the main workspace router
+router.include_router(_feedback_router)
