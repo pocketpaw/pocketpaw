@@ -63,8 +63,8 @@
 # branches (keyed on `pocket_id`) are untouched.
 # Updated: 2026-07-06 (feat/sites-crew-taste, SC-TASTE) — the crew svelte
 # `build_step` now instructs the agent to author the components with the bundled
-# `design-taste-svelte` skill (premium, anti-slop, static-safe styling) on top of
-# the design system's tokens. Svelte-only: the ripple `build_step` is unchanged.
+# `pocketpaw-design-taste` skill (premium, anti-slop, static-safe styling) on top
+# of the design system's tokens. Svelte-only: the ripple `build_step` is unchanged.
 # Updated: 2026-07-06 (feat/sites-crew-frontend-brief, SC-2) — added
 # `_frontend_preamble(meta, brief)`, the ADDITIVE brief-driven twin of
 # `_create_preamble`. It renders the Frontend stage's build instructions FROM a
@@ -167,7 +167,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "BUILD via the `pocketpaw-create-svelte-site` skill — invoke it by "
             "intent (no slash command). YOU write premium hand-written SvelteKit "
             "components (Hero, Pricing, Faq, …) at the design quality bar, "
-            "authoring them with the `design-taste-svelte` skill for premium, "
+            "authoring them with the `pocketpaw-design-taste` skill for premium, "
             "non-generic styling on top of the chosen design system's tokens, "
             "THEME them with those tokens + your asset URLs, and it persists the "
             'source pocket `type="site"` + `pattern="landing"` + `engine="svelte"` '

@@ -14,10 +14,12 @@
 # for the new pocketpaw-create-paw-site marketing brain: it ships in the
 # mirror AND the local plugin, and carries its load-bearing SSR guardrails
 # (flat lead form, tiers pricing, no accordion, anchor CTAs, marketing hero).
-# Updated: 2026-07-06 (feat/sites-crew-taste, SC-TASTE) — added coverage for the
-# new design-taste-svelte skill: it ships in the mirror, keeps its frontmatter,
-# the 3 dials, the static-prerender resting-state rule, MIT attribution, and is
-# Svelte-adapted (runes, no stray "use client" RSC directive).
+# Updated: 2026-07-14 (fix/sites-unified-create-preamble) — the svelte-only
+# design-taste-svelte skill was merged into the engine-agnostic
+# pocketpaw-design-taste skill (2026 Creative Director system + the folded-in
+# Svelte track). Coverage now asserts pocketpaw-design-taste ships in the mirror
+# with its frontmatter, the 3 dials, the Vision Ledger / Trend Engine, and the
+# static-prerender resting-state rule.
 """Tests for ``pocketpaw.bundled_skills.installer.install_bundled_skills``.
 
 Each test installs into a tmp_path destination (no touching the user's
@@ -55,7 +57,7 @@ def test_install_creates_skill_files_in_destination(tmp_path: Path) -> None:
     # ---- create skill: frontmatter + STEP 1 marker ----
     create_file = tmp_path / "pocketpaw-create-pocket" / "SKILL.md"
     assert create_file.is_file()
-    create_body = create_file.read_text()
+    create_body = create_file.read_text(encoding="utf-8")
     assert "name: pocketpaw-create-pocket" in create_body
     assert "STEP 1 — Pick the pattern" in create_body
 
@@ -65,7 +67,7 @@ def test_install_creates_skill_files_in_destination(tmp_path: Path) -> None:
     # every edit through the wrong shape of specialist call.
     edit_file = tmp_path / "pocketpaw-edit-pocket" / "SKILL.md"
     assert edit_file.is_file()
-    edit_body = edit_file.read_text()
+    edit_body = edit_file.read_text(encoding="utf-8")
     assert "name: pocketpaw-edit-pocket" in edit_body
     assert "Type A — Simple state edit" in edit_body
     assert "Type B — Structural" in edit_body
@@ -104,7 +106,7 @@ def test_install_updates_when_destination_content_drifts(tmp_path: Path) -> None
 
     assert pocket_result.status == "updated"
     # Stale content is overwritten with the bundled body.
-    body = skill_file.read_text()
+    body = skill_file.read_text(encoding="utf-8")
     assert "stale content" not in body
     assert "name: pocketpaw-create-pocket" in body
 
@@ -170,7 +172,7 @@ def test_install_includes_create_site(tmp_path: Path) -> None:
     install_bundled_skills(destination_root=tmp_path)
     site_file = tmp_path / "pocketpaw-create-site" / "SKILL.md"
     assert site_file.is_file()
-    assert "name: pocketpaw-create-site" in site_file.read_text()
+    assert "name: pocketpaw-create-site" in site_file.read_text(encoding="utf-8")
 
 
 def test_install_includes_create_paw_site(tmp_path: Path) -> None:
@@ -182,7 +184,7 @@ def test_install_includes_create_paw_site(tmp_path: Path) -> None:
 
     skill_file = tmp_path / "pocketpaw-create-paw-site" / "SKILL.md"
     assert skill_file.is_file()
-    assert "name: pocketpaw-create-paw-site" in skill_file.read_text()
+    assert "name: pocketpaw-create-paw-site" in skill_file.read_text(encoding="utf-8")
 
 
 def test_create_paw_site_is_copy_only_deterministic_brain(tmp_path: Path) -> None:
@@ -194,7 +196,7 @@ def test_create_paw_site_is_copy_only_deterministic_brain(tmp_path: Path) -> Non
     spec-drafting or the specialist route would bring the downgrade back. We pin
     discriminating tokens, not prose, so wording can evolve."""
     install_bundled_skills(destination_root=tmp_path)
-    body = (tmp_path / "pocketpaw-create-paw-site" / "SKILL.md").read_text()
+    body = (tmp_path / "pocketpaw-create-paw-site" / "SKILL.md").read_text(encoding="utf-8")
 
     # The site identity it stamps (the published page renders as a landing page).
     assert 'pattern="landing"' in body
@@ -227,33 +229,33 @@ def test_create_paw_site_is_copy_only_deterministic_brain(tmp_path: Path) -> Non
     assert "on_click" in body
 
 
-def test_install_includes_design_taste_svelte(tmp_path: Path) -> None:
-    """The Svelte design-taste skill ships in the mirror. The crew svelte build
-    references it by name for premium, anti-slop styling — a dropped skill would
-    leave that reference dangling and every crew-built svelte site back on
-    generic "AI landing page" output."""
+def test_install_includes_design_taste(tmp_path: Path) -> None:
+    """The merged engine-agnostic design-taste skill ships in the mirror. The
+    create + svelte builds reference it by name for premium, anti-slop styling —
+    a dropped skill would leave that reference dangling and every built site back
+    on generic "AI landing page" output."""
     results = install_bundled_skills(destination_root=tmp_path)
-    assert any(r.name == "design-taste-svelte" for r in results)
+    assert any(r.name == "pocketpaw-design-taste" for r in results)
 
-    skill_file = tmp_path / "design-taste-svelte" / "SKILL.md"
+    skill_file = tmp_path / "pocketpaw-design-taste" / "SKILL.md"
     assert skill_file.is_file()
     body = skill_file.read_text(encoding="utf-8")
 
     # Frontmatter identity.
-    assert "name: design-taste-svelte" in body
+    assert "name: pocketpaw-design-taste" in body
 
     # The three dials (the anti-slop calibration core) survive.
     assert "DESIGN_VARIANCE" in body
     assert "MOTION_INTENSITY" in body
     assert "VISUAL_DENSITY" in body
 
-    # The static-prerender resting-state rule is reinforced (taste must not
-    # fight the prerender contract create-svelte-site enforces).
+    # The Creative Director engine + Trend Engine identities are present.
+    assert "Vision Ledger" in body
+    assert "Tactile Brutalism" in body
+
+    # The static-prerender resting-state rule survives (folded-in Svelte track).
     assert "onMount" in body
     assert "resting" in body.lower()
-
-    # Attribution to the MIT source is retained.
-    assert "Leonxlnx/taste-skill" in body
 
     # Svelte-adapted, not a stray React skill: runes named, no RSC directive
     # presented as authoritative.

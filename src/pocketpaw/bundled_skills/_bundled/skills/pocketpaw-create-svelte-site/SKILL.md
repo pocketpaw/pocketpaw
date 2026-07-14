@@ -76,10 +76,11 @@ distinctive type, a bespoke animated hero graphic, real testimonials, a
 priced pricing table, a native FAQ, a lead form. **Match that bar.** Use
 the design skills to get there:
 
-- **Run `design-taste-svelte` FIRST — before you author a line.** It is the
-  Svelte-specific, static-safe taste brain, and its opening steps are what
-  stop every site looking the same: (1) read the room and declare a one-line
-  **Design Read** (business kind, audience, vibe), (2) pick an aesthetic
+- **Run `pocketpaw-design-taste` FIRST — before you author a line.** It is the
+  engine-agnostic, static-safe taste brain (with the Svelte-track specifics
+  folded in), and its opening steps are what stop every site looking the same:
+  (1) declare the Vision Ledger and a one-line **Design Read** (business kind,
+  audience, vibe), (2) pick a Trend Engine identity and an aesthetic
   **direction/family** (clean-tech / soft-premium / editorial-luxury /
   warm-minimalist / brutalist / dark-tech) that sets the palette, type,
   materiality, and motion, (3) set the three dials from the read. THEN author

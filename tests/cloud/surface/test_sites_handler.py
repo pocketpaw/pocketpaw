@@ -275,9 +275,9 @@ async def test_create_mode_engine_svelte_prefers_create_svelte_site_skill() -> N
     # The shared clarity gate runs on every engine.
     assert "phase 1" in lower
 
-    # The dedicated Svelte-track authoring skill + the design-taste helper.
+    # The dedicated Svelte-track authoring skill + the merged design-taste helper.
     assert "pocketpaw-create-svelte-site" in preamble
-    assert "design-taste-svelte" in preamble
+    assert "pocketpaw-design-taste" in preamble
     # MCP fallback points at the svelte create tool + publish.
     assert "mcp__pocketpaw_sites_manager__create_svelte_site" in preamble
     assert "mcp__pocketpaw_sites_manager__publish" in preamble
