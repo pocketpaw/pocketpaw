@@ -578,69 +578,6 @@ def _sse(event: str, data: dict[str, Any], *, entry_id: str | None = None) -> by
     return f"{head}event: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
 
-async def _concierge_run_would_expose_connectors(workspace_id: str, pocket_id: str) -> bool:
-    """Fail-CLOSED guard: True when a concierge run bound to
-    ``(workspace_id, pocket_id)`` could expose ANY connector / composio tool to
-    the public, anonymous agent — in which case the run must be refused.
-
-    Why this exists: the CONCIERGE SurfaceProfile hard-denies the web + code /
-    write / subagent tools, but it CANNOT strip the tenant's connectors. The
-    composio server sits in the OSS backend's ``ALWAYS_ALLOWED_MCP_SERVERS`` (it
-    survives ANY per-surface allow-list), and native connectors bind at pocket /
-    workspace scope. A prompt-injected anonymous visitor on a concierge pocket
-    that HAS connectors could reach the tenant's Gmail / Slack / etc. This is the
-    residual gap the SurfaceProfile can't close, so the run is refused outright.
-
-    Two sources, checked at the granularity that actually governs the agent's
-    connector access:
-
-      * ``connectors.service.list_pocket_connectors(ws, pocket)`` — the enabled
-        connectors bound to THIS pocket OR workspace-wide. This is the PRIMARY
-        risk: native connectors execute with WORKSPACE/POCKET-scoped credentials
-        (a real tenant-data leak), and this is the exact read the connector-
-        execution MCP server uses to decide what a room can call. Matching both
-        ``scope="pocket"`` and ``scope="workspace"`` rows mirrors that server, so
-        a workspace-wide connector (reachable from every pocket) is caught too.
-      * ``composio.service.is_enabled()`` — the deployment's composio direct /
-        meta tools, the ``ALWAYS_ALLOWED`` surface that survives the profile.
-        NOTE: composio acts as ``enterprise:ctx.user_id`` = the VISITOR's handle,
-        not the tenant's, so it is lower-risk than native connectors — but the
-        pilot posture is deterministic fail-closed, so an enabled deployment
-        refuses concierge until the GA lockdown lands.
-
-    Fail CLOSED: any error determining connector state → refuse (return True) —
-    a public agent must never run when we cannot prove it has no connector reach.
-
-    TODO(GA-blocker): replace this refuse-guard with an untrusted/public lockdown
-    mode in ``claude_sdk`` — a ``ScopeKind.CONCIERGE`` run skips the universal
-    grant (``POCKET_CREATION_GRANT`` / ``WIDGET`` / ``ATLAS``) AND the
-    ``ALWAYS_ALLOWED_MCP_SERVERS`` bypass, so connectors are stripped for real and
-    a concierge pocket CAN safely have connectors. Touches shared tool-gating →
-    full-suite + flag-mode validation.
-    """
-    try:
-        from pocketpaw_ee.cloud.composio import service as composio_service
-
-        if composio_service.is_enabled():
-            return True
-    except Exception:
-        logger.warning(
-            "concierge connector guard: composio state undeterminable — refusing", exc_info=True
-        )
-        return True
-
-    try:
-        from pocketpaw_ee.cloud.connectors import service as connectors_service
-
-        bound = await connectors_service.list_pocket_connectors(workspace_id, pocket_id or "")
-        return bool(bound)
-    except Exception:
-        logger.warning(
-            "concierge connector guard: connector state undeterminable — refusing", exc_info=True
-        )
-        return True
-
-
 @router.post("/paw-bar/chat")
 async def concierge_chat(body: ConciergeChatRequest, request: Request) -> StreamingResponse:
     """Stream a concierge reply for a public visitor's message.
