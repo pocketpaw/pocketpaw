@@ -152,6 +152,19 @@ _SITES_SVELTE_CREATE_DENY: frozenset[str] = frozenset(
     }
 )
 
+# Built-in SDK tools the /sites agent never needs. It authors sites through the
+# sites_manager + design MCP tools (the source map / copy is a tool ARGUMENT), so
+# it never touches the file system or a shell — a dedicated sites agent should not
+# carry Bash / file R-W / subagent spawning. These bare tool NAMES cross to the OSS
+# backend in the SAME ``deny_mcp_tool_ids`` set as the mcp__ ids: the backend's deny
+# filter subtracts ANY matching id from the launch allow-list, built-ins included, so
+# naming them here physically removes them before the SDK starts. WebSearch / WebFetch
+# / Skill are deliberately NOT denied (the agent still researches a business for real
+# copy and loads the create-site skills).
+_SITES_BUILTIN_DENY: frozenset[str] = frozenset(
+    {"Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"}
+)
+
 # The Instinct gate tool the /belt develop station proposes its diff through.
 # Spelled as a LITERAL because its canonical constant
 # (``BELT_PROPOSE_CHANGE_TOOL_ID`` / ``BELT_TOOL_IDS``) lives in a SIBLING
@@ -328,11 +341,18 @@ def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
     if meta.pocket_id is None and meta.engine == "svelte":
         return SurfaceProfile(
             ripple_mode="off",
-            deny_mcp_tool_ids=_SITES_SVELTE_CREATE_DENY,
+            deny_mcp_tool_ids=_SITES_SVELTE_CREATE_DENY | _SITES_BUILTIN_DENY,
             allow_mcp_tool_ids=sites_allow,
             skill_names=frozenset({"create-svelte-site"}),
         )
-    return SurfaceProfile(ripple_mode="on", allow_mcp_tool_ids=sites_allow)
+    # Ripple-create + refine: keep ripple + the sites tool scope, but still drop the
+    # file/shell built-ins — no /sites mode authors on disk (refine edits the ripple
+    # spec through the pocket MCP tools, not the file system).
+    return SurfaceProfile(
+        ripple_mode="on",
+        allow_mcp_tool_ids=sites_allow,
+        deny_mcp_tool_ids=_SITES_BUILTIN_DENY,
+    )
 
 
 # One row per surface that currently has a handler registered in

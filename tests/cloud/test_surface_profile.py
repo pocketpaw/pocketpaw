@@ -54,7 +54,7 @@ def test_sites_profile_declares_deny_set_and_skill():
             "mcp__pocketpaw_sites_manager__create_landing_site",
             "mcp__pocketpaw_pocket_specialist__create",
         }
-    )
+    ) | _SITES_BUILTIN_DENY
     assert "create-svelte-site" in profile.skill_names
 
 
@@ -105,6 +105,11 @@ _RIPPLE_CREATE_DENY = frozenset(
     }
 )
 
+# Every /sites mode also drops the file/shell built-ins (a dedicated sites agent
+# authors through MCP tools, never the file system). Mirrors
+# surface_registry._SITES_BUILTIN_DENY.
+_SITES_BUILTIN_DENY = frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"})
+
 
 def test_resolve_profile_sites_svelte_create_disables_ripple():
     """GUARD (passes today): the svelte-CREATE mode (engine="svelte", no
@@ -113,7 +118,7 @@ def test_resolve_profile_sites_svelte_create_disables_ripple():
     ONLY /sites mode that loses ripple."""
     profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="svelte"))
     assert profile.ripple_mode == "off"
-    assert profile.deny_mcp_tool_ids == _RIPPLE_CREATE_DENY
+    assert profile.deny_mcp_tool_ids == _RIPPLE_CREATE_DENY | _SITES_BUILTIN_DENY
     assert "create-svelte-site" in profile.skill_names
 
 
@@ -126,8 +131,8 @@ def test_resolve_profile_sites_ripple_create_keeps_ripple():
     for meta in (SurfaceMeta(engine=None), SurfaceMeta(engine="ripple")):
         profile = resolve_profile(SurfaceKind.SITES, meta)
         assert profile.ripple_mode == "on", f"ripple-create meta {meta!r} must keep ripple"
-        assert profile.deny_mcp_tool_ids == frozenset(), (
-            f"ripple-create meta {meta!r} must deny nothing — it authors a ripple page"
+        assert profile.deny_mcp_tool_ids == _SITES_BUILTIN_DENY, (
+            f"ripple-create meta {meta!r} denies only the file/shell built-ins"
         )
 
 
@@ -144,8 +149,8 @@ def test_resolve_profile_sites_refine_keeps_ripple():
     ):
         profile = resolve_profile(SurfaceKind.SITES, meta)
         assert profile.ripple_mode == "on", f"refine meta {meta!r} must keep ripple"
-        assert profile.deny_mcp_tool_ids == frozenset(), (
-            f"refine meta {meta!r} must deny nothing — it edits an existing ripple spec"
+        assert profile.deny_mcp_tool_ids == _SITES_BUILTIN_DENY, (
+            f"refine meta {meta!r} keeps the ripple/pocket tools, drops only the built-ins"
         )
 
 

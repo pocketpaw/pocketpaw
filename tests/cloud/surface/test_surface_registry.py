@@ -30,6 +30,10 @@ _SITES_SVELTE_CREATE_DENY = frozenset(
     }
 )
 
+# The file/shell built-ins every /sites mode drops (a dedicated sites agent has no
+# reason to touch the file system or a shell). Mirrors surface_registry._SITES_BUILTIN_DENY.
+_SITES_BUILTIN_DENY = frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"})
+
 
 # ---------------------------------------------------------------------------
 # Completeness assertion (the SR design's "keep the enum + assert" answer).
@@ -79,29 +83,48 @@ def test_sites_svelte_create_drops_ripple_and_denies():
     profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="svelte"))
     assert isinstance(profile, SurfaceProfile)
     assert profile.ripple_mode == "off"
-    assert profile.deny_mcp_tool_ids == _SITES_SVELTE_CREATE_DENY
+    # svelte-create denies the two ripple-create tools AND the file/shell built-ins.
+    assert profile.deny_mcp_tool_ids == _SITES_SVELTE_CREATE_DENY | _SITES_BUILTIN_DENY
     assert "create-svelte-site" in profile.skill_names
 
 
 def test_sites_ripple_create_keeps_ripple():
-    """ripple-create (engine None/"ripple", no pocket_id) → ripple ON, no deny."""
+    """ripple-create (engine None/"ripple", no pocket_id) → ripple ON. Denies only the
+    file/shell built-ins (no ripple-create tool deny)."""
     for meta in (SurfaceMeta(), SurfaceMeta(engine="ripple")):
         profile = resolve_profile(SurfaceKind.SITES, meta)
         assert profile.ripple_mode == "on", f"{meta!r} must keep ripple"
-        assert profile.deny_mcp_tool_ids == frozenset(), f"{meta!r} must deny nothing"
+        assert profile.deny_mcp_tool_ids == _SITES_BUILTIN_DENY, f"{meta!r}"
 
 
 def test_sites_refine_keeps_ripple_and_wins_over_engine():
-    """refine (pocket_id set) → ripple ON, no deny — and a pocket_id wins over
-    engine="svelte" (a published svelte site re-opened for refine still edits a
-    ripple spec)."""
+    """refine (pocket_id set) → ripple ON — and a pocket_id wins over engine="svelte"
+    (a published svelte site re-opened for refine still edits a ripple spec). Refine
+    keeps the ripple/pocket MCP tools (needed to edit the spec) but still drops the
+    file/shell built-ins."""
     for meta in (
         SurfaceMeta(pocket_id="pkt_1"),
         SurfaceMeta(pocket_id="pkt_1", engine="svelte"),
     ):
         profile = resolve_profile(SurfaceKind.SITES, meta)
         assert profile.ripple_mode == "on", f"refine {meta!r} must keep ripple"
-        assert profile.deny_mcp_tool_ids == frozenset(), f"refine {meta!r} must deny nothing"
+        assert profile.deny_mcp_tool_ids == _SITES_BUILTIN_DENY, f"refine {meta!r}"
+
+
+def test_sites_all_modes_drop_file_and_shell_builtins():
+    """A dedicated sites agent never authors on disk — every /sites mode drops
+    Bash/Read/Write/Edit/Glob/Grep/Agent, and NONE drop WebSearch/WebFetch/Skill
+    (the agent still researches copy + loads the create-site skills)."""
+    metas = (
+        SurfaceMeta(),  # ripple-create
+        SurfaceMeta(engine="svelte"),  # svelte-create
+        SurfaceMeta(pocket_id="pkt_1"),  # refine
+    )
+    kept = {"WebSearch", "WebFetch", "Skill"}
+    for meta in metas:
+        deny = resolve_profile(SurfaceKind.SITES, meta).deny_mcp_tool_ids
+        assert _SITES_BUILTIN_DENY <= deny, f"{meta!r}: file/shell built-ins must be denied"
+        assert kept.isdisjoint(deny), f"{meta!r}: must NOT deny {kept & deny}"
 
 
 # ---------------------------------------------------------------------------
