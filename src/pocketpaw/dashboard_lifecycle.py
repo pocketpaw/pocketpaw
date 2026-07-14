@@ -247,11 +247,13 @@ async def startup_event(
             skipped = sum(1 for r in results if r.status == "skipped")
             failed = [r for r in results if r.status == "failed"]
             logger.info(
-                "Bundled skills sync: %d installed / %d updated / %d skipped / %d failed",
+                "Bundled skills sync: %d installed / %d updated / %d skipped / %d failed "
+                "— skills: %s",
                 installed,
                 updated,
                 skipped,
                 len(failed),
+                ", ".join(sorted(r.name for r in results)) or "(none)",
             )
             for r in failed:
                 logger.warning("Skill %s failed to install: %s", r.name, r.error)
