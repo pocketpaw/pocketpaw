@@ -32,6 +32,17 @@
 # startup assertion (``_assert_registry_complete``, run at module import)
 # guarantees every ``SurfaceKind`` has exactly one row and no row names a bogus
 # kind — resolving the design's open question (keep the enum + assert).
+#
+# Changes: 2026-07-14 (Paw Bar concierge seam, T2) — registered the CONCIERGE
+# surface (/paw-bar — the public concierge widget). Its handler
+# (``concierge.build_preamble``) joins the row list and ``_concierge_profile``
+# gives it a ripple-OFF, PUBLIC-SAFE policy: ``_CONCIERGE_DENY`` hard-strips the
+# web + code/write/subagent + pocket-write tools (the real lockdown lever for a
+# public surface — ``allow_mcp_tool_ids`` alone can't, since the universal grant
+# + always-allowed servers survive it), and ``_concierge_allow_mcp`` is the
+# site-kind-parameterized MCP allow-list (foreign = site-scoped KB only; a hook
+# for dynamic sites' D1-read). The completeness assertion forced this row the
+# moment ``SurfaceKind.CONCIERGE`` was added.
 
 from __future__ import annotations
 
@@ -50,6 +61,7 @@ from pocketpaw_ee.cloud.surface.handlers import (
     belt,
     calendar,
     code,
+    concierge,
     files,
     generic,
     home,
@@ -285,6 +297,84 @@ def _belt_profile(_meta: SurfaceMeta) -> SurfaceProfile:
     )
 
 
+# --- Concierge (public Paw Bar widget) tool lockdown --------------------------
+#
+# The concierge is a PUBLIC, anonymous, prompt-injectable surface bound to a
+# per-tenant agent, so its tool surface must be locked down HARD. The existing
+# ``allow_mcp_tool_ids`` mechanism alone CANNOT do this: the OSS backend keeps
+# the universal pocket-creation grant + the always-allowed servers (composio
+# connectors, pocket lifecycle) through ANY allow-list, and ``allowed_sdk_tools``
+# is ADDITIVE — it never strips the base SDK tools (Bash/Write/Edit/Agent/…). So
+# the real lever for a public surface is ``deny_mcp_tool_ids``, which the backend
+# subtracts from the FINAL tool list (SDK names included) BEFORE the allow-grant
+# re-adds anything, so a denied id can't sneak back. This set is the public-safe
+# deny:
+#   * web tools (SSRF / exfil / unbounded browsing) — the T2 requirement;
+#   * code / filesystem / subagent SDK tools (a public caller must not run code,
+#     write in the tenant jail, or spawn subagents);
+#   * skill loading (pulls arbitrary capabilities);
+#   * the pocket write/create MCP tools that otherwise survive the universal
+#     grant + always-allowed ``pocketpaw_pocket*`` servers.
+# RESIDUAL GAP: composio CONNECTOR tool ids are dynamic/per-workspace and can't
+# be enumerated in a static deny set, and they survive the always-allowed
+# ``composio`` server — a concierge pocket with connectors bound could still
+# reach them. A concierge pocket must therefore have NO connectors bound until
+# the OSS backend grows a true "public/untrusted" lockdown mode (drop the
+# universal grants). Tracked as the T2 follow-up.
+_CONCIERGE_DENY: frozenset[str] = frozenset(
+    {
+        # Web (the explicit T2 requirement).
+        "WebSearch",
+        "WebFetch",
+        # Code / filesystem / subagent — a public caller must not execute or write.
+        "Bash",
+        "Write",
+        "Edit",
+        "Agent",
+        "Skill",
+        # Pocket write/create tools that survive the universal grant + the
+        # always-allowed pocket-lifecycle servers.
+        "mcp__pocketpaw_pocket_specialist__create",
+        "mcp__pocketpaw_pocket_specialist__edit",
+        "mcp__pocketpaw_pocket_planner__plan_pocket",
+        "mcp__pocketpaw_pocket__add_widget",
+    }
+)
+
+
+def _concierge_allow_mcp(site_kind: str = "foreign") -> frozenset[str]:
+    """Site-kind-parameterized MCP allow-list for the concierge (one guard, one
+    param, per the design's seam-ownership).
+
+    A FOREIGN site grounds on its site-scoped KB ALONE, which is injected into
+    the prompt as ``pocket:<id>`` knowledge context (NOT an MCP tool), so it
+    names NO specialized MCP tools — an empty allow keeps the surface lean
+    (general read tools like ``get_pocket`` still survive via the always-allowed
+    pocket-lifecycle server; the deny set above strips the dangerous ones). The
+    hook for our own DYNAMIC sites lands here later: ``site_kind == "dynamic"``
+    widens the returned set with the D1-read tool id(s).
+    """
+    if site_kind == "dynamic":
+        # Placeholder for the dynamic-sites D1-read tool — wired when that lands.
+        return frozenset()
+    return frozenset()
+
+
+def _concierge_profile(_meta: SurfaceMeta) -> SurfaceProfile:
+    """/paw-bar — the PUBLIC concierge widget. Ripple OFF (it answers questions,
+    never builds a dashboard) + the public-safe tool lockdown (``_CONCIERGE_DENY``
+    hard-strips web/code/write/subagent/pocket-write tools) + the site-scoped MCP
+    allow-list. KB grounding is locked to ``pocket:<id>`` by
+    ``ScopeKind.CONCIERGE`` in ``agent_service._kb_scopes_for_context`` — the
+    profile governs tools, the scope governs KB.
+    """
+    return SurfaceProfile(
+        ripple_mode="off",
+        deny_mcp_tool_ids=_CONCIERGE_DENY,
+        allow_mcp_tool_ids=_concierge_allow_mcp("foreign"),
+    )
+
+
 def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
     """/sites is META-AWARE — three modes, only svelte-CREATE loses ripple.
 
@@ -392,6 +482,12 @@ SURFACES: list[SurfaceSpec] = [
         _route_for(SurfaceKind.BELT),
         belt.build_preamble,
         profile_resolver=_belt_profile,
+    ),
+    SurfaceSpec(
+        SurfaceKind.CONCIERGE,
+        _route_for(SurfaceKind.CONCIERGE),
+        concierge.build_preamble,
+        profile_resolver=_concierge_profile,
     ),
     SurfaceSpec(SurfaceKind.GENERIC, _route_for(SurfaceKind.GENERIC), generic.build_preamble),
 ]

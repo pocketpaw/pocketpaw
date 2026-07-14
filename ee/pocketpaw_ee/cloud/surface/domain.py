@@ -61,6 +61,13 @@
 # so the belt handler's ``build_preamble`` injects them into the preamble and
 # tells the agent NOT to ask for the repo (and to pass exactly these into
 # ``belt_propose_change``). Absent → the handler keeps the ask-first behavior.
+# Changes: 2026-07-14 (Paw Bar concierge seam, T2) — added the ``CONCIERGE``
+# surface (/paw-bar — the public, origin-bound concierge widget). Its handler
+# (``handlers/concierge.build_preamble``) and its ripple-OFF, PUBLIC-SAFE profile
+# (``surface_registry._concierge_profile``: deny web + code/write/subagent tools,
+# lock the MCP surface) live beside the other rows. The run rides
+# ``chat.agent_service.ScopeKind.CONCIERGE``, which locks the KB read to the
+# Site's pocket.
 
 from __future__ import annotations
 
@@ -101,6 +108,13 @@ class SurfaceKind(StrEnum):
     STUDIO = "studio"  # /studio — describe→generate media (image + video)
     CODE = "code"  # /code — agent edits + runs code in the workspace
     BELT = "belt"  # /belt — the develop station (orient→develop→propose via gate)
+    # A PUBLIC, anonymous Paw Bar concierge chat (T2) — a foreign site's embedded
+    # widget, answering visitors grounded in the Site's pocket ONLY. Its profile
+    # (``surface_registry._concierge_profile``) is ripple-OFF and PUBLIC-SAFE: it
+    # denies the web + code/write/subagent tools and locks the MCP surface, so a
+    # prompt-injected anonymous caller can't run code, exfiltrate, or mutate the
+    # tenant. The run rides ``ScopeKind.CONCIERGE`` (KB locked to pocket:<id>).
+    CONCIERGE = "concierge"  # /paw-bar — public, origin-bound concierge widget
     GENERIC = "generic"  # any unknown surface — agent still gets a usable preamble
 
 
