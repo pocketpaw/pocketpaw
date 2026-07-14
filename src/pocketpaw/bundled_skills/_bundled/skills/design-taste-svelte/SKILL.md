@@ -96,10 +96,13 @@ Examples:
   confident and expressive, so I'm going soft-premium with off-black on silver
   and Clash Display."*
 
-### 0.C If the brief is genuinely ambiguous, ask ONE question — never guess
-Ask exactly one, only when the read truly forks. e.g. *"Should this feel
-closer to Linear-clean or bolder and more expressive?"* If you can confidently
-infer, do NOT ask — just declare the read and go.
+### 0.C Do NOT ask the user what look to use — infer it
+Choosing the visual direction is YOUR expertise; infer it from the business and
+audience and just declare the read and go. Do not ask "what style / theme /
+colors do you want?" — that is a question this skill forbids. Only ask the user
+about real-world FACTS you genuinely cannot know and cannot sensibly placeholder
+(a specific offering list, real contact details, real pricing), and even then
+prefer to proceed with a clearly-flagged placeholder over blocking.
 
 ### 0.D Anti-default discipline
 Do not reflexively reach for: AI-purple/indigo gradients, a centered hero over

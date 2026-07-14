@@ -392,16 +392,20 @@ async def test_create_clarify_uses_ask_user_tool_on_svelte() -> None:
     assert "ask-user-questions" not in out
 
 
-async def test_create_states_ask_dont_assume_principle() -> None:
-    """The create preamble carries the general ASK, DON'T ASSUME rule: ask the
-    user for any material gap, never fabricate real-world facts, and it is not
-    capped at a single round of questions."""
+async def test_create_decides_design_and_uses_taste_skill() -> None:
+    """The create preamble tells the agent to DECIDE the look itself (infer via
+    the pocketpaw-design-taste skill), NEVER ask the user for the theme, and
+    never fabricate real-world facts."""
     out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
     lower = out.lower()
-    assert "ask, don't assume" in lower
+    # Design is inferred via the taste skill, applied throughout the build.
+    assert "pocketpaw-design-taste" in out
+    assert "decide the design yourself" in lower
+    # Explicitly forbids asking the user what visual style / theme to use.
+    assert "never ask" in lower
+    assert "theme" in lower
+    # Facts are never fabricated.
     assert "fabricate" in lower
-    # The old one-round cap is gone — it may ask again as new gaps appear.
-    assert "not limited to one round" in lower
 
 
 async def test_refine_states_ask_dont_assume_principle() -> None:

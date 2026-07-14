@@ -234,39 +234,27 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "direction the user picked is NOT such a request — stay on HTML."
         )
 
-    # The Phase-1 clarity question renders as COMPLETE UI. On every engine except
-    # svelte-create, inline ripple is ON (see surface_registry._sites_profile), so
-    # the agent renders a real `ask-user-questions` ripple widget (a ```ui-spec
-    # block) — a stepped, clickable question whose `completeActions` emit
-    # `chat.send`, returning the user's pick as their next message. On the svelte
-    # track ripple is OFF, so it falls back to the `ask_user` MCP tool (chips).
+    # ASK MECHANISM — used ONLY when the agent genuinely needs a real-world FACT
+    # it cannot infer (never for the visual theme, which it decides itself). On
+    # every engine except svelte-create, inline ripple is ON (surface_registry.
+    # _sites_profile), so it renders an `ask-user-questions` ripple widget (a
+    # ```ui-spec block whose completeActions emit chat.send); on the svelte track
+    # ripple is OFF, so it uses the `ask_user` MCP tool (chips).
     ripple_on = engine != "svelte"
     if ripple_on:
-        clarify_step = (
-            "Render the question as an `ask-user-questions` RIPPLE WIDGET — a "
-            "```ui-spec fenced block using the {version, ui} envelope, NOT plain "
-            "text and NOT a tool call. It renders as clickable option chips and, "
-            "on selection, sends the answer back as the user's next message. Use "
-            "exactly this shape, tailored to the site (option `description` is "
-            "optional):\n"
-            "```ui-spec\n"
-            '{"version": 1, "ui": {"type": "ask-user-questions", "props": '
-            '{"questions": [{"title": "What visual style fits best?", "options": '
-            '[{"title": "Clean & modern"}, {"title": "Warm & friendly"}, '
-            '{"title": "Bold & confident"}, {"title": "Elegant & premium"}, '
-            '{"title": "Just build it — you pick"}]}], "completeActions": '
-            '{"action": "emit", "target": "chat.send"}}}}\n'
-            "```\n"
-            "`completeActions` MUST emit `chat.send`. Emit the widget, then END "
-            "YOUR TURN and wait for the click — do NOT call any build tool."
+        ask_mechanism = (
+            "render an `ask-user-questions` ripple widget — a ```ui-spec fenced "
+            "block using the {version, ui} envelope (NOT plain text, NOT a tool "
+            'call): `{"version": 1, "ui": {"type": "ask-user-questions", "props": '
+            '{"questions": [{"title": "<your question>", "options": [{"title": '
+            '"<option>"}]}], "completeActions": {"action": "emit", "target": '
+            '"chat.send"}}}}` — then STOP and wait for the click'
         )
     else:
-        clarify_step = (
-            "Ask via the `mcp__pocketpaw_ask__ask_user` tool (this svelte track "
-            "has inline ripple OFF, so the tool renders the chips): pass a "
-            "one-line `question` and 3–5 short `options` (always include a 'Just "
-            "build it — you pick' option). Call it, then END YOUR TURN and wait "
-            "for the click — do NOT call any build tool."
+        ask_mechanism = (
+            "call the `mcp__pocketpaw_ask__ask_user` tool (svelte-create has "
+            "inline ripple OFF) with a one-line `question` and 3–5 short "
+            "`options`, then STOP and wait for the click"
         )
 
     return (
@@ -278,64 +266,46 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "bottom as a conversion funnel: nav, hero, services, social proof, "
         "pricing, a call-to-action, a lead-capture form, footer. Talk about it "
         "as a 'site' or 'page' — never a 'pocket'. The pocket is only the "
-        f"source spec; it auto-publishes to a live URL.{engine_note} You are "
-        "the AUTHORING CREW: rather than building blindly from one line, you "
-        "run a guided two-phase flow — first make sure you understand the "
-        "request, then design and build a coherent, on-brand site.\n"
+        f"source spec; it auto-publishes to a live URL.{engine_note} You are a "
+        "SENIOR DESIGNER + engineer: YOU decide the look and build a coherent, "
+        "premium, on-brand site — you do not ask the user what theme to use.\n"
         "</sites-orientation>\n"
         "<sites-procedure>\n"
-        "ASK, DON'T ASSUME — this is the core rule of this surface. Whenever you "
-        "need information you do not have, or you face a MATERIAL choice you would "
-        "otherwise guess — the visual style, which sections to include, "
-        "headline / CTA wording, real-world facts (the business's address, hours, "
-        "phone, pricing, service list, team), a logo or brand assets, or which of "
-        "several directions to take — ASK THE USER instead of inventing it. Ask "
-        "the SAME complete-UI way Phase 1 asks the design direction below (a "
-        "clickable question widget for CHOICES), and plain text for open-ended "
-        "facts. NEVER fabricate "
-        "real-world facts — no invented testimonials, statistics, prices, "
-        "addresses, or contact details; if you don't know it, ask for it. Batch "
-        "related questions into ONE widget, never re-ask something already "
-        "answered, and ALWAYS include a 'you decide' / 'just build it' option so "
-        "the user is never blocked. Proceed on your own ONLY when the user has "
-        "explicitly told you to pick, or the detail is purely cosmetic.\n"
+        "DECIDE THE DESIGN YOURSELF; ASK ONLY FOR REAL FACTS. Choosing the visual "
+        "style, palette, layout, and typography is YOUR expertise — infer it from "
+        "the business and NEVER ask the user 'what style / theme / colors do you "
+        "want?'. The only things worth asking are real-world FACTS you genuinely "
+        "cannot know and cannot sensibly placeholder (a specific offering list, "
+        "real contact details, real pricing) — and even then PREFER to proceed "
+        f"with a clearly-reasonable placeholder and let the user refine. When you "
+        f"truly must ask, {ask_mechanism}. NEVER fabricate specific real-world "
+        "facts (invented testimonials, precise stats, prices, addresses, phone "
+        "numbers) — use an obviously-generic placeholder and flag it instead.\n"
         "\n"
-        "Run TWO phases. PHASE 1 IS MANDATORY AND COMES FIRST. On the user's "
-        "first create message you MUST ask the design-direction question and "
-        "then STOP — do NOT call any design, create, or publish tool in that "
-        "same turn, and do NOT skip this even for a long, detailed brief. This "
-        "rule OVERRIDES any skill, habit, or instinct that says build "
-        "immediately; asking the question is the ONLY thing you do on the first "
-        "turn.\n"
+        "PHASE 1 — READ THE ROOM + PICK A DIRECTION (infer, do NOT ask).\n"
+        "Invoke the `pocketpaw-design-taste` skill (by intent, no slash command). "
+        "Read the business, audience, and any vibe words or reference the user "
+        "gave, and INFER a one-line Design Read plus an aesthetic family "
+        "(clean-tech, soft-premium, editorial-luxury, warm-minimalist, brutalist, "
+        "dark-tech). State the read in one sentence, then go — do NOT ask the user "
+        "to pick the look. If the user already named a style or brand, honor it. "
+        "Rotate families and palettes so two similar briefs never look identical.\n"
         "\n"
-        "PHASE 1 — ASK THE DESIGN DIRECTION (always, as your first action).\n"
-        "Ask for the VISUAL DIRECTION — the one thing a prompt almost never pins "
-        f"down, so you must never assume it. {clarify_step}\n"
-        "- ONLY skip the question if the user's message ALREADY names a specific "
-        "visual STYLE (e.g. 'dark brutalist', 'like Stripe', 'minimal "
-        "black-and-white') — in that case briefly restate the plan and go to "
-        "Phase 2. A described business or section list is NOT a style and does "
-        "NOT let you skip.\n"
-        "- You are NOT limited to one round: per ASK, DON'T ASSUME, raise a fresh "
-        "question WHENEVER a new material gap appears (missing content, a real "
-        "fact, a branching choice) rather than guessing — but keep each question "
-        "high-value and batch related asks. The moment the user picks 'just build "
-        "it', stop asking and proceed with sensible defaults.\n"
-        "\n"
-        "PHASE 2 — DESIGN + BUILD.\n"
+        "PHASE 2 — DESIGN + BUILD (apply `pocketpaw-design-taste` throughout).\n"
         "1. PICK A LOOK. Call "
         "`mcp__pocketpaw_design_systems__list_design_systems` to see the "
-        "library, choose the best fit by industry + aesthetic, then "
-        "`mcp__pocketpaw_design_systems__get_design_system` with its slug to "
-        "load the DESIGN.md + tokens.css. THEME the site with those tokens — "
-        "colors, type scale, spacing, component styles — and honor the "
-        "system's rationale and anti-patterns. Do NOT default to the warm / "
-        "earthy system just because the business is a cafe, salon, or local "
-        "shop — that reflex makes every site look the same. Match the read, "
-        "and when two systems fit, rotate to the less-obvious one. To keep "
-        "even the same system from looking identical build-to-build, feel free "
-        "to reseed its accent hue via step 2 (a considered, non-default color) "
-        "even when the user gave no brand color.\n"
+        "library, choose the one that fits your Design Read (industry + "
+        "aesthetic family), then `mcp__pocketpaw_design_systems__get_design_system` "
+        "with its slug to load the DESIGN.md + tokens.css. THEME the site with "
+        "those tokens, applying the pocketpaw-design-taste rules on top: "
+        "asymmetric layouts (never a centered hero over a gradient blur, never "
+        "three equal cards), a bold typographic hierarchy with generous "
+        "whitespace, ONE accent under ~80% saturation with the highest contrast "
+        "reserved for the primary CTA, a distinctive display face (not Inter for "
+        "premium), off-black/off-white (never #000/#fff), and ZERO em-dashes. Do "
+        "NOT default to the warm / earthy system just because the business is a "
+        "cafe, salon, or shop — that reflex makes every site look the same; "
+        "rotate to the less-obvious fit and reseed the accent hue.\n"
         "2. CUSTOM COLORS. If the user gave a brand color, call "
         "`mcp__pocketpaw_palette__scale_from_color` with the hex to get a full "
         "scale and OVERRIDE the design system's primary with it. If they gave "
