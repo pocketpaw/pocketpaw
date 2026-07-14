@@ -132,9 +132,14 @@ async def test_create_default_engine_is_html() -> None:
     assert 'engine="html"' in preamble
     assert "mcp__pocketpaw_sites_manager__create_html_site" in preamble
     assert "mcp__pocketpaw_sites_manager__publish" in preamble
-    # Not the other engines' build brains.
-    assert "create-svelte-site" not in preamble
-    assert "mcp__pocketpaw_sites_manager__create_landing_site" not in preamble
+    # html is MANDATED — create_html_site is the persist tool and the preamble
+    # explicitly forbids switching engines for a normal create.
+    lower = preamble.lower()
+    assert "do not switch engines" in lower
+    assert "must use" in lower
+    # The svelte/ripple tools appear ONLY after the html one (i.e. in the
+    # do-not-use / explicit-exception context, never as the primary path).
+    assert preamble.index("create_html_site") < preamble.index("create_svelte_site")
 
 
 async def test_create_ripple_engine_uses_pocket_specialist_fallback() -> None:
@@ -303,11 +308,10 @@ async def test_create_engine_routing_diverges_by_engine() -> None:
         assert 'mode="create"' in out
         assert "phase 1" in out.lower()
 
-    # html default → the html tool is the PRIMARY build path (it names the
-    # svelte/dynamic tools only as an explicit-request pivot, after the html one).
+    # html default → the html tool is the PRIMARY/mandated build path (it names
+    # the svelte/dynamic tools only later, in the do-not-use / exception context).
     assert "mcp__pocketpaw_sites_manager__create_html_site" in html
     assert html.index("create_html_site") < html.index("create_svelte_site")
-    assert "create_landing_site" not in html
     # svelte → the svelte tool only, never the html one.
     assert "mcp__pocketpaw_sites_manager__create_svelte_site" in svelte
     assert "create_html_site" not in svelte

@@ -196,31 +196,42 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         )
     else:  # html (default)
         engine_note = (
-            " On this track YOU hand-author the page as a plain static HTML/CSS "
+            " On this track YOU hand-author the page as a premium static HTML/CSS "
             "bundle — no framework and no build step; publishing serves your "
             "`index.html` directly on the edge."
         )
         build_step = (
-            "BUILD the page yourself as a clean, premium static HTML/CSS bundle. "
-            "Author a root `index.html` (plus `styles.css`, and only the vanilla "
-            "JS a static page genuinely needs) at the design quality bar, THEME it "
-            "with the chosen design system's tokens + your asset URLs, then "
-            "persist it by calling `mcp__pocketpaw_sites_manager__create_html_site` "
-            'with the `source` map (it stamps the source pocket `type="site"` + '
-            '`pattern="landing"` + `engine="html"`), then '
-            "`mcp__pocketpaw_sites_manager__publish` with the returned pocket_id. "
-            "There is NO rippleSpec and NO widget catalog on this track — do "
-            "not draft a rippleSpec or call the pocket specialist; the HTML files "
-            "ARE the page. The lead-capture form must be a real `<form>` with FLAT "
-            "named `input`/`textarea` fields (name, email, phone, message) and a "
-            '`button type="submit"`. `index.html` MUST contain the full resting '
-            "state in markup (never rendered only by JS), since the visitor is "
-            "served static HTML. This static-HTML track is the DEFAULT; only if "
-            "the user EXPLICITLY asks for a Svelte/component build should you use "
-            "`mcp__pocketpaw_sites_manager__create_svelte_site` instead, or for a "
-            "live-data / dynamic app "
-            "`mcp__pocketpaw_sites_manager__create_dynamic_site` — otherwise stay "
-            "on static HTML."
+            "BUILD the page yourself as a PREMIUM, hand-crafted static HTML/CSS "
+            "bundle — this is the DEFAULT engine and the deliverable for this "
+            "create. Author a root `index.html` (plus `styles.css`, and only the "
+            "vanilla JS a static page genuinely needs) at the HIGHEST design "
+            "quality bar — treat HTML/CSS as first-class, not a lesser option; a "
+            "hand-written static page can look every bit as premium as a "
+            "component build. THEME it with the chosen design system's tokens + "
+            "your asset URLs, then persist it by calling "
+            "`mcp__pocketpaw_sites_manager__create_html_site` with the `source` "
+            'map (it stamps the source pocket `type="site"` + `pattern="landing"` '
+            '+ `engine="html"`), then `mcp__pocketpaw_sites_manager__publish` '
+            "with the returned pocket_id. There is NO rippleSpec and NO widget "
+            "catalog on this track — do not draft a rippleSpec or call the pocket "
+            "specialist; the HTML files ARE the page. The lead-capture form must "
+            "be a real `<form>` with FLAT named `input`/`textarea` fields (name, "
+            'email, phone, message) and a `button type="submit"`. `index.html` '
+            "MUST contain the full resting state in markup (never rendered only "
+            "by JS), since the visitor is served static HTML.\n"
+            "DO NOT switch engines. You MUST use "
+            "`mcp__pocketpaw_sites_manager__create_html_site` — do NOT call "
+            "`create_svelte_site`, `create_landing_site`, or the "
+            "`pocketpaw-create-svelte-site` / `pocketpaw-create-paw-site` skills, "
+            "and do NOT reach for Svelte just because you want a premium result "
+            "(build premium HTML instead). The ONLY exception: if the user's "
+            "message LITERALLY contains the word 'Svelte' (or explicitly asks for "
+            "a React/component build), THEN use "
+            "`mcp__pocketpaw_sites_manager__create_svelte_site`; a request for a "
+            "live-data / dynamic app (dashboards, per-user data) uses "
+            "`mcp__pocketpaw_sites_manager__create_dynamic_site`. A described "
+            "business, a desire for a 'nice' or 'modern' site, or the design "
+            "direction the user picked is NOT such a request — stay on HTML."
         )
 
     # The Phase-1 clarity question renders as COMPLETE UI. On every engine except
