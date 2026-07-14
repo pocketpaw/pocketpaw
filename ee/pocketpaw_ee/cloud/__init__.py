@@ -1,5 +1,10 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-07-11 (feat/real-pipeline-s1) — Mounts the fabric_ingest
+    transform-surface router (``/fabric/ingest/mappings`` CRUD +
+    ``/fabric/ingest/run`` run-now) next to the fabric router under
+    ``/api/v1``. Same gates as fabric: license + plan feature at the router,
+    fabric.read/fabric.write per route.
 Modified: 2026-07-03 (feat/files-share-links, FL-12b) — Mounts two share-link
     routers: ``share_router`` (owner + license gated POST/DELETE
     /files/{id}/share) and ``public_share_router`` (intentionally
@@ -226,6 +231,9 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.audit.router import router as audit_router
     from pocketpaw_ee.cloud.audit.router import workspace_router as audit_workspace_router
     from pocketpaw_ee.cloud.auth.router import router as auth_router
+    from pocketpaw_ee.cloud.automations_status.router import (
+        router as automations_status_router,
+    )
     from pocketpaw_ee.cloud.billing.router import router as billing_router
     from pocketpaw_ee.cloud.billing.webhooks import router as billing_webhooks_router
     from pocketpaw_ee.cloud.chat.router import router as chat_router
@@ -249,6 +257,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.pockets.router import router as pockets_router
     from pocketpaw_ee.cloud.projects.router import router as projects_router
     from pocketpaw_ee.cloud.request_log.router import router as request_log_router
+    from pocketpaw_ee.cloud.rules.router import router as rules_router
     from pocketpaw_ee.cloud.sessions.router import router as sessions_router
     from pocketpaw_ee.cloud.skills.router import router as skills_router
     from pocketpaw_ee.cloud.workspace.router import router as workspace_router
@@ -297,6 +306,14 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(planner_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
     app.include_router(cycles_router, prefix="/api/v1")
+    # Governed Instinct rules (feat/instinct-guardrail-rules) — the UI-authored
+    # guardrail surface: create / list / archive a governed rule + the
+    # per-workspace authored-rule enforcement toggle (GET/PUT /rules/enforcement).
+    # Admin-gated (rules.manage); the enforcement it toggles is the shipped gate
+    # path in ee.cloud.pockets.instinct_dispatch — this router adds no new
+    # enforcement logic.
+    app.include_router(rules_router, prefix="/api/v1")
+    app.include_router(automations_status_router, prefix="/api/v1")
     # Foresight — RFC 08 scenario-run surface (POST /foresight/scenarios,
     # GET /foresight/runs[/{id}]). Mounted alongside cycles so the
     # Mission Control rail can launch / inspect simulation runs from the
@@ -350,6 +367,7 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(pockets_journal_stream_router, prefix="/api/v1")
 
     from pocketpaw_ee.cloud.decisions.router import router as decisions_router
+    from pocketpaw_ee.cloud.fabric_ingest.router import router as fabric_ingest_router
     from pocketpaw_ee.cloud.instinct_approvals.router import router as instinct_approvals_router
     from pocketpaw_ee.cloud.kb.router import router as kb_router
     from pocketpaw_ee.cloud.leads.router import router as leads_router
@@ -584,6 +602,10 @@ def mount_cloud(app: FastAPI) -> None:
     # OSS core no longer mounts them. They ride along here, like paw_bar
     # above, instead of through the core's mount_v1_routers().
     app.include_router(fabric_router, prefix="/api/v1")
+    # Transform surface (feat/real-pipeline-s1): author/list/run-now the
+    # workspace's connector→Fabric ingest mappings. Rides next to fabric —
+    # same license + plan gates, fabric.read/write per route.
+    app.include_router(fabric_ingest_router, prefix="/api/v1")
     app.include_router(fleet_router, prefix="/api/v1")
     app.include_router(instinct_router, prefix="/api/v1")
 

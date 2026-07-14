@@ -40,6 +40,16 @@
 #   is returned to the app after paying), omit return_url when no base is available,
 #   and the service must thread an ``origin`` into the return_url. Rewired the
 #   existing criterion-1 mock from subscriptions.create to checkout_sessions.create.
+# Updated 2026-07-08 (feat/billing-cancel-downgrade): added the two money-management
+#   bug-fix tests. (A) CANCEL — ``billing.cancel`` calls the provider's
+#   cancel_subscription with the ACTIVE sub id (proven at the SDK edge:
+#   subscriptions.update(<id>, status="cancelled")), 402s
+#   ``billing.no_active_subscription`` when there is none, and NEVER selects a stale
+#   cancelled historical row; plus POST /billing/cancel route wiring (200 + 402). (B)
+#   DOWNGRADE — ``subscribe`` on a workspace with an active sub does cancel-then-create
+#   (opens exactly one new checkout AND cancels the old sub id), does NOT cancel when
+#   there's no active sub (or only a cancelled row), and stays event_id-idempotent on
+#   the new subscription's active-webhook replay.
 
 from __future__ import annotations
 
@@ -604,3 +614,338 @@ async def test_empty_subscription_id_does_not_corrupt_cross_tenant(mongo_db):
     # trail is never replaced by workspace B's.
     subs = await Subscription.find().to_list()
     assert subs == []
+
+
+# ---------------------------------------------------------------------------
+# feat/billing-cancel-downgrade — two money-management bug fixes.
+#
+# Fixtures / helpers here spy at the SDK-client EDGE (a REAL DodoProvider with a
+# mocked ``AsyncDodoPayments``), so the tests exercise the real provider paths:
+#   * cancel  -> DodoProvider.cancel_subscription -> subscriptions.update(<id>,
+#     status="cancelled")
+#   * switch  -> DodoProvider.create_subscription -> checkout_sessions.create
+#     AND DodoProvider.cancel_subscription -> subscriptions.update
+# ---------------------------------------------------------------------------
+
+import pytest_asyncio  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from httpx import ASGITransport, AsyncClient  # noqa: E402
+
+
+async def _seed_subscription(
+    workspace_id: str, *, subscription_id: str, status: str, plan_key: str = "pro"
+) -> Subscription:
+    """Insert a Subscription row directly (bypassing the webhook) to set up the
+    active / cancelled fixtures the cancel + switch paths select against."""
+    doc = Subscription(
+        workspace=workspace_id,
+        gateway="dodo",
+        gateway_subscription_id=subscription_id,
+        plan_key=plan_key,
+        product_id="prod_pro_recurring",
+        status=status,
+    )
+    await doc.insert()
+    return doc
+
+
+def _fake_switch_client(monkeypatch) -> MagicMock:
+    """SDK client mock for the cancel / plan-switch paths.
+
+    Exposes BOTH ``checkout_sessions.create`` (the new checkout) and
+    ``subscriptions.update`` (how the provider cancels — a status PATCH). A
+    regression back to ``subscriptions.create`` (the stranded path) still fails
+    loudly via the AssertionError side effect.
+    """
+    fake_session = MagicMock()
+    fake_session.session_id = SESSION_ID
+    fake_session.checkout_url = SESSION_CHECKOUT_URL
+
+    fake_client = MagicMock()
+    fake_client.checkout_sessions.create = AsyncMock(return_value=fake_session)
+    fake_client.subscriptions.update = AsyncMock(return_value=MagicMock())
+    fake_client.subscriptions.create = AsyncMock(
+        side_effect=AssertionError("must use checkout_sessions.create, not subscriptions.create")
+    )
+
+    import pocketpaw_ee.cloud.billing.providers.dodo as dodo_mod
+
+    monkeypatch.setattr(dodo_mod, "AsyncDodoPayments", MagicMock(return_value=fake_client))
+    return fake_client
+
+
+# ---- (A) cancel() -------------------------------------------------------- #
+
+
+async def test_cancel_calls_provider_with_active_subscription_id(mongo_db, monkeypatch):
+    """cancel() loads the ACTIVE sub and tells the gateway to stop billing IT."""
+    ws = await _make_workspace(plan="pro")
+    await _seed_subscription(ws, subscription_id=SUB_ID, status="active")
+    fake_client = _fake_switch_client(monkeypatch)
+
+    result = await billing.cancel(workspace_id=ws, provider=_provider())
+
+    assert result == {"ok": True}
+    # The real provider path cancels via the status PATCH on the ACTIVE sub id.
+    fake_client.subscriptions.update.assert_awaited_once_with(SUB_ID, status="cancelled")
+
+
+async def test_cancel_without_active_subscription_raises_402(mongo_db, monkeypatch):
+    """No subscription at all -> 402 billing.no_active_subscription, gateway untouched."""
+    ws = await _make_workspace(plan="free")
+    fake_client = _fake_switch_client(monkeypatch)
+    from pocketpaw_ee.cloud._core.errors import NoActiveSubscription
+
+    with pytest.raises(NoActiveSubscription) as exc:
+        await billing.cancel(workspace_id=ws, provider=_provider())
+    assert exc.value.status_code == 402
+    assert exc.value.code == "billing.no_active_subscription"
+    fake_client.subscriptions.update.assert_not_called()
+
+
+async def test_cancel_ignores_stale_cancelled_row(mongo_db, monkeypatch):
+    """A historical CANCELLED row must NOT be selected — cancel targets the ACTIVE
+    row's id (the (workspace) index is non-unique, so a naive first-match is wrong)."""
+    ws = await _make_workspace(plan="pro")
+    await _seed_subscription(ws, subscription_id="sub_old_cancelled", status="cancelled")
+    await _seed_subscription(ws, subscription_id="sub_current_active", status="active")
+    fake_client = _fake_switch_client(monkeypatch)
+
+    await billing.cancel(workspace_id=ws, provider=_provider())
+
+    fake_client.subscriptions.update.assert_awaited_once_with(
+        "sub_current_active", status="cancelled"
+    )
+
+
+async def test_cancel_with_only_cancelled_row_raises_402(mongo_db, monkeypatch):
+    """Only a stale cancelled row exists -> 402 (a naive first-match would wrongly
+    'cancel' the dead row; the status filter prevents that)."""
+    ws = await _make_workspace(plan="free")
+    await _seed_subscription(ws, subscription_id="sub_dead", status="cancelled")
+    fake_client = _fake_switch_client(monkeypatch)
+    from pocketpaw_ee.cloud._core.errors import NoActiveSubscription
+
+    with pytest.raises(NoActiveSubscription):
+        await billing.cancel(workspace_id=ws, provider=_provider())
+    fake_client.subscriptions.update.assert_not_called()
+
+
+# ---- (A) cancel() route wiring (httpx AsyncClient) ----------------------- #
+
+
+@pytest_asyncio.fixture
+async def billing_app_client() -> AsyncClient:
+    """A FastAPI app with ONLY the billing router mounted + auth/license overridden,
+    scoped to workspace ``w1`` — so the POST /billing/cancel wiring is exercised
+    without a real JWT / license (mirrors the shared cloud_app_client fixture)."""
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud.billing.router import router as billing_router
+    from pocketpaw_ee.cloud.license import require_license
+    from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
+
+    app = FastAPI()
+    add_error_handler(app)
+    app.include_router(billing_router)
+    app.dependency_overrides[current_user_id] = lambda: "u1"
+    app.dependency_overrides[current_workspace_id] = lambda: "w1"
+    app.dependency_overrides[require_license] = lambda: None
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        yield client
+
+
+async def test_cancel_route_cancels_active_subscription(mongo_db, billing_app_client, monkeypatch):
+    """POST /billing/cancel -> 200 {ok: true} and the gateway sub is cancelled."""
+    await _seed_subscription("w1", subscription_id=SUB_ID, status="active")
+    fake_client = _fake_switch_client(monkeypatch)
+    # The route uses the DEFAULT provider — point it at the test provider whose SDK
+    # client is mocked (no real Dodo settings / network needed).
+    monkeypatch.setattr(billing, "_default_provider", lambda: _provider())
+
+    resp = await billing_app_client.post("/billing/cancel")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    fake_client.subscriptions.update.assert_awaited_once_with(SUB_ID, status="cancelled")
+
+
+async def test_cancel_route_402_when_no_active_subscription(
+    mongo_db, billing_app_client, monkeypatch
+):
+    """POST /billing/cancel with no active sub -> 402 billing.no_active_subscription."""
+    monkeypatch.setattr(billing, "_default_provider", lambda: _provider())
+
+    resp = await billing_app_client.post("/billing/cancel")
+
+    assert resp.status_code == 402
+    assert resp.json()["error"]["code"] == "billing.no_active_subscription"
+
+
+# ---- (B) subscribe() switch guard --------------------------------------- #
+
+
+async def test_subscribe_with_active_sub_cancels_old_then_creates_new(
+    mongo_db, monkeypatch, patch_plan_products
+):
+    """A switch (workspace already has an active sub) opens exactly ONE new checkout
+    AND cancels the OLD subscription — never the blind double-create."""
+    ws = await _make_workspace(plan="pro")
+    await _seed_subscription(ws, subscription_id=SUB_ID, status="active", plan_key="pro")
+    fake_client = _fake_switch_client(monkeypatch)
+
+    result = await billing.subscribe(
+        workspace_id=ws, user_id="u1", plan_key="go", provider=_provider()
+    )
+    assert result == {"checkout_url": SESSION_CHECKOUT_URL}
+
+    # Exactly one NEW checkout was opened (no second parallel subscribe)...
+    fake_client.checkout_sessions.create.assert_awaited_once()
+    # ...and the OLD subscription was cancelled at the gateway. The pre-fix blind
+    # path (create WITHOUT cancel) would leave subscriptions.update un-called.
+    fake_client.subscriptions.update.assert_awaited_once_with(SUB_ID, status="cancelled")
+
+
+async def test_subscribe_without_active_sub_does_not_cancel(
+    mongo_db, monkeypatch, patch_plan_products
+):
+    """A fresh subscribe (no active sub) opens the checkout and cancels NOTHING."""
+    ws = await _make_workspace(plan="free")
+    fake_client = _fake_switch_client(monkeypatch)
+
+    await billing.subscribe(workspace_id=ws, user_id="u1", plan_key="pro", provider=_provider())
+
+    fake_client.checkout_sessions.create.assert_awaited_once()
+    fake_client.subscriptions.update.assert_not_called()
+
+
+async def test_subscribe_ignores_cancelled_row_and_does_not_cancel(
+    mongo_db, monkeypatch, patch_plan_products
+):
+    """A stale CANCELLED row is not 'active' — subscribe treats the workspace as
+    having no active sub and cancels nothing (no spurious gateway call)."""
+    ws = await _make_workspace(plan="free")
+    await _seed_subscription(ws, subscription_id="sub_dead", status="cancelled")
+    fake_client = _fake_switch_client(monkeypatch)
+
+    await billing.subscribe(workspace_id=ws, user_id="u1", plan_key="pro", provider=_provider())
+
+    fake_client.checkout_sessions.create.assert_awaited_once()
+    fake_client.subscriptions.update.assert_not_called()
+
+
+async def test_switch_then_new_active_webhook_is_idempotent(
+    mongo_db, monkeypatch, patch_plan_products
+):
+    """After a switch, the NEW subscription's active webhook grants exactly once — a
+    replay (same event_id) is a no-op, so the switch never breaks BC-1 replay-safety."""
+    ws = await _make_workspace(plan="pro")
+    await _seed_subscription(ws, subscription_id=SUB_ID, status="active", plan_key="pro")
+    _fake_switch_client(monkeypatch)
+
+    # Switch to go — opens a new checkout + cancels the old sub.
+    await billing.subscribe(workspace_id=ws, user_id="u1", plan_key="go", provider=_provider())
+
+    go_allotment = plans.get_plan("go").monthly_credit_allotment
+    assert go_allotment > 0
+    before = await credits.balance(ws)
+
+    # The NEW subscription's active webhook lands (fresh gateway sub id + event id).
+    body = _subscription_body(
+        event_type="subscription.active",
+        workspace_id=ws,
+        plan_key="go",
+        product_id="prod_go_recurring",
+        subscription_id="sub_new_go",
+    )
+    first = await billing.handle_webhook(
+        payload=body.encode(),
+        headers=_sign(body, msg_id="evt_switch_go_active"),
+        provider=_provider(),
+    )
+    assert first == {"ok": True, "granted": True}
+    assert await credits.balance(ws) == before + go_allotment
+
+    # Replay the SAME active event id — a no-op (BC-1 unique index); balance flat.
+    second = await billing.handle_webhook(
+        payload=body.encode(),
+        headers=_sign(body, msg_id="evt_switch_go_active"),  # SAME id
+        provider=_provider(),
+    )
+    assert second == {"ok": True, "granted": False}
+    assert await credits.balance(ws) == before + go_allotment
+
+
+# ---------------------------------------------------------------------------
+# fix/cancel-webhook-revert-guard — the subscription.cancelled plan revert must
+# NOT be unconditional. Under unordered / at-least-once delivery a
+# ``cancelled(old_sub)`` retry can land AFTER ``active(new_sub)`` during a plan
+# switch; reverting to free there strands a paying customer on free entitlements
+# (nothing self-heals it — only subscription.active re-sets the plan). The fix
+# marks THIS sub cancelled first, then reverts to free ONLY when no OTHER active
+# subscription still owns the workspace.
+# ---------------------------------------------------------------------------
+
+
+async def test_cancelled_does_not_revert_when_newer_active_sub_exists(mongo_db):
+    """Reordered delivery: active(new) already landed (workspace on pro, a NEW active
+    Subscription row owns it) when a stale cancelled(old) retry arrives. The plan
+    must STAY pro — the stale cancel must not downgrade the live subscription."""
+    ws = await _make_workspace(plan="pro")
+    # The newer subscription's active row already owns the workspace (as if its
+    # subscription.active landed first in the reordered delivery).
+    await _seed_subscription(ws, subscription_id="sub_new_active", status="active", plan_key="pro")
+    assert (await entitlements.resolve_entitlements(ws)).plan == "pro"
+
+    # A stale cancelled retry for a DIFFERENT (older) subscription lands now.
+    cancel_body = _subscription_body(
+        event_type="subscription.cancelled", workspace_id=ws, subscription_id="sub_old_cancelled"
+    )
+    result = await billing.handle_webhook(
+        payload=cancel_body.encode(),
+        headers=_sign(cancel_body, msg_id="evt_stale_cancel"),
+        provider=_provider(),
+    )
+
+    assert result == {"ok": True, "granted": False}
+    # The plan is NOT reverted to free — the newer active sub still owns the workspace.
+    assert (await entitlements.resolve_entitlements(ws)).plan == "pro"
+    # The newer subscription's row is untouched (still active).
+    still = await Subscription.find_one(
+        Subscription.gateway == "dodo",
+        Subscription.gateway_subscription_id == "sub_new_active",
+    )
+    assert still is not None
+    assert still.status == "active"
+
+
+async def test_cancelled_reverts_to_free_when_no_other_active_sub(mongo_db):
+    """The normal cancel: the ONLY subscription is the one being cancelled, so no
+    other active sub remains — the plan reverts to free (credits untouched)."""
+    ws = await _make_workspace(plan="pro")
+    await _seed_subscription(ws, subscription_id=SUB_ID, status="active", plan_key="pro")
+    # Give the wallet a balance to prove cancellation never claws it back.
+    await credits.grant(workspace=ws, amount=500, cause="seed", idempotency_key="seed_cancel")
+    assert await credits.balance(ws) == 500
+
+    cancel_body = _subscription_body(
+        event_type="subscription.cancelled", workspace_id=ws, subscription_id=SUB_ID
+    )
+    result = await billing.handle_webhook(
+        payload=cancel_body.encode(),
+        headers=_sign(cancel_body, msg_id="evt_solo_cancel"),
+        provider=_provider(),
+    )
+
+    assert result == {"ok": True, "granted": False}
+    # No other active sub -> plan reverts to free.
+    assert (await entitlements.resolve_entitlements(ws)).plan == "free"
+    # Credits preserved (no clawback).
+    assert await credits.balance(ws) == 500
+    # The cancelled subscription's row reflects the cancelled status.
+    sub = await Subscription.find_one(
+        Subscription.gateway == "dodo", Subscription.gateway_subscription_id == SUB_ID
+    )
+    assert sub is not None
+    assert sub.status == "cancelled"

@@ -20,6 +20,11 @@
 #   INR/USD monthly+annual prices) so the billing UI can render ChatGPT/Claude-style
 #   "usage" wording instead of raw credits. ``monthly_credit_allotment`` stays as a
 #   back-office field; ``enterprise`` prices serialize as null ("talk to us").
+# Updated 2026-07-08 (feat/billing-smb-caps): both ``PlanTierResponse`` and
+#   ``EntitlementsResponse`` now carry the SMB resource caps ``max_seats`` /
+#   ``max_pockets`` / ``max_connectors`` (the enforced ceilings the plan ladder
+#   added), so the plan cards can render real per-tier limits and the settings UI
+#   can show a workspace's resolved caps. ``None`` == uncapped (Enterprise).
 
 from __future__ import annotations
 
@@ -53,6 +58,9 @@ class PlanTierResponse(BaseModel):
     price_inr_annual: int | None = None
     price_usd_monthly: int | None = None
     price_usd_annual: int | None = None
+    max_seats: int | None = None
+    max_pockets: int | None = None
+    max_connectors: int | None = None
 
 
 class PlanCatalogResponse(BaseModel):
@@ -71,6 +79,9 @@ class EntitlementsResponse(BaseModel):
     plan: str
     monthly_credit_allotment: int
     features: list[str] = Field(default_factory=list)
+    max_seats: int | None = None
+    max_pockets: int | None = None
+    max_connectors: int | None = None
 
 
 def plan_tier_to_dto(tier: PlanTier) -> PlanTierResponse:
@@ -87,6 +98,9 @@ def plan_tier_to_dto(tier: PlanTier) -> PlanTierResponse:
         price_inr_annual=tier.price_inr_annual,
         price_usd_monthly=tier.price_usd_monthly,
         price_usd_annual=tier.price_usd_annual,
+        max_seats=tier.max_seats,
+        max_pockets=tier.max_pockets,
+        max_connectors=tier.max_connectors,
     )
 
 
@@ -97,6 +111,9 @@ def entitlements_to_dto(ent: Entitlements) -> EntitlementsResponse:
         plan=ent.plan,
         monthly_credit_allotment=ent.monthly_credit_allotment,
         features=sorted(ent.features),
+        max_seats=ent.max_seats,
+        max_pockets=ent.max_pockets,
+        max_connectors=ent.max_connectors,
     )
 
 

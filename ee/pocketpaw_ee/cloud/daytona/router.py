@@ -1,45 +1,43 @@
-"""Daytona workspace router — manage Daytona sandboxes for cloud projects.
+"""Daytona router — manage the workspace VM and project file operations.
 
-These endpoints are mounted at ``/api/v1/`` (alongside the other v1 routers)
-and provide a project-scoped API for provisioning, syncing, and managing
-Daytona sandboxes (VMs/containers) that back cloud project execution.
+Mounted at ``/api/v1/``. Endpoints:
 
-Every endpoint requires a cloud project to exist first (created via
-``POST /api/v1/cloud/projects`` or ``POST /api/v1/cloud/projects/clone``).
-The Daytona sandbox is an optional compute layer on top of the S3-backed
-project storage.
+**Workspace VM:**
+  GET    /workspace/vm                                     — Get VM status (auto-provision)
+  POST   /workspace/vm/provision                           — Force provision with config
+  DELETE /workspace/vm                                     — Destroy VM
+  GET    /workspace/vm/terminal                            — Get web terminal URL
 
-Endpoints:
+**Project-in-VM file operations:**
+  GET    /cloud/projects/{name}/vm/files/browse            — Browse project dir in VM
+  GET    /cloud/projects/{name}/vm/files/content           — Read file from project in VM
+  POST   /cloud/projects/{name}/vm/files/write             — Write file in project in VM
+  POST   /cloud/projects/{name}/vm/files/mkdir             — Create dir in project in VM
+  DELETE /cloud/projects/{name}/vm/files/delete            — Delete from project in VM
+  PATCH  /cloud/projects/{name}/vm/files/rename            — Rename in project in VM
 
-  POST   /cloud/projects/{name}/workspace    — Provision Daytona sandbox
-  GET    /cloud/projects/{name}/workspace     — Get sandbox status
-  DELETE /cloud/projects/{name}/workspace     — Destroy sandbox
-  POST   /cloud/projects/{name}/workspace/sync-to-sandbox   — S3 → Sandbox
-  POST   /cloud/projects/{name}/workspace/sync-to-s3        — Sandbox → S3
-  GET    /cloud/projects/{name}/workspace/terminal           — Get web terminal URL
-
-Key integration points:
-  • ``pocketpaw_ee.cloud.daytona.client.DaytonaClient`` — wraps the official ``daytona`` SDK
-  • The storage adapter (S3/local) for project file access --
-    from OSS ``pocketpaw.api.v1.cloud_projects``
-  • The project key pattern: ``projects/{workspace_id}/{user_id}/{name}/``
-
-Moved from OSS to EE: 2026-06-24
+Created: 2026-06-24.  Updated: 2026-07-10 — workspace VM replaces per-project sandbox.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
-from datetime import datetime
-from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import Response
 from pydantic import BaseModel
 
-from pocketpaw.api.v1.cloud_projects import _ADAPTER, _require_project, _resolve_ids
+from pocketpaw.api.v1.cloud_projects import _ADAPTER
+from pocketpaw.api.v1.schemas.files import (
+    BrowseResponse,
+    FileActionResponse,
+    FileEntry,
+    MkdirRequest,
+    RenameRequest,
+    WriteFileRequest,
+)
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
 from pocketpaw_ee.cloud.daytona.config import daytona_enabled
 
@@ -48,57 +46,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Daytona Workspaces"])
 
 # ── Helpers ────────────────────────────────────────────────────────────────
-
-# In-memory mapping: project_key -> sandbox_id
-# This maps a cloud project to its Daytona sandbox so we don't re-provision.
-# Persisted to ~/.pocketpaw/daytona_workspace_map.json
-_workspace_map: dict[str, dict] = {}
-_MAP_PATH = Path.home() / ".pocketpaw" / "daytona_workspace_map.json"
-
-
-def _load_workspace_map() -> dict[str, dict]:
-    """Load the workspace mapping from disk."""
-    if _workspace_map:
-        return _workspace_map
-    try:
-        if _MAP_PATH.exists():
-            with open(_MAP_PATH) as f:
-                data = json.load(f)
-                _workspace_map.update(data)
-    except Exception as exc:
-        logger.warning("Failed to load Daytona workspace map: %s", exc)
-    return _workspace_map
-
-
-def _save_workspace_map() -> None:
-    """Persist the workspace mapping to disk."""
-    try:
-        _MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(_MAP_PATH, "w") as f:
-            json.dump(_workspace_map, f, indent=2)
-    except Exception as exc:
-        logger.warning("Failed to save Daytona workspace map: %s", exc)
-
-
-def _get_sandbox_id(project_key: str) -> str | None:
-    """Get the sandbox ID for a project key, or None."""
-    mapping = _load_workspace_map()
-    entry = mapping.get(project_key)
-    return entry.get("sandbox_id") if entry else None
-
-
-def _set_sandbox_id(project_key: str, sandbox_id: str, sandbox_name: str) -> None:
-    """Record the sandbox ID for a project key."""
-    mapping = _load_workspace_map()
-    mapping[project_key] = {"sandbox_id": sandbox_id, "sandbox_name": sandbox_name}
-    _save_workspace_map()
-
-
-def _remove_sandbox_id(project_key: str) -> None:
-    """Remove the sandbox mapping for a project key."""
-    mapping = _load_workspace_map()
-    mapping.pop(project_key, None)
-    _save_workspace_map()
 
 
 async def _require_daytona() -> DaytonaClient:
@@ -112,91 +59,6 @@ async def _require_daytona() -> DaytonaClient:
     if client is None:
         raise HTTPException(status_code=501, detail="Daytona client is not available")
     return client
-
-
-# ── Storage adapter walking ──────────────────────────────────────────────
-
-
-async def _walk_adapter_files(prefix: str) -> list[tuple[str, str]]:
-    """Recursively walk the storage adapter tree under *prefix*.
-
-    Returns ``(full_key, relative_path)`` tuples for every file found.
-    """
-    files: list[tuple[str, str]] = []
-    stack = [("", prefix)]
-
-    while stack:
-        rel_dir, dir_key = stack.pop()
-        try:
-            items = await _ADAPTER.browse(dir_key)
-        except Exception:
-            continue
-
-        for item in items:
-            rel_path = f"{rel_dir}/{item.name}" if rel_dir else item.name
-            if item.is_dir:
-                stack.append((rel_path, f"{dir_key}{item.name}/"))
-            else:
-                files.append((f"{dir_key}{item.name}", rel_path))
-
-    return files
-
-
-# ── Sync: S3 → Sandbox ──────────────────────────────────────────────────
-
-
-async def _sync_directory_from_s3_to_sandbox(
-    client: DaytonaClient,
-    sandbox_id: str,
-    project_key: str,
-    sandbox_dir: str,
-) -> None:
-    """Sync all files from S3 (storage adapter) into the sandbox.
-
-    Uses the SDK's ``upload_bytes`` for each file — no temp directory or
-    tar archive needed.
-    """
-    logger.info(
-        "Syncing files from S3 to sandbox: project=%s sandbox=%s sandbox_dir=%s",
-        project_key,
-        sandbox_id,
-        sandbox_dir,
-    )
-
-    files = await _walk_adapter_files(project_key)
-    if not files:
-        logger.info("No files to sync for project %s", project_key)
-        return
-
-    uploaded = 0
-    for full_key, rel_path in files:
-        remote_path = f"{sandbox_dir}/{rel_path}"
-
-        try:
-            # Read file content from adapter (streaming).
-            chunks: list[bytes] = []
-            async for chunk in _ADAPTER.open(full_key):
-                chunks.append(chunk)
-            content = b"".join(chunks)
-
-            if not content:
-                continue
-
-            # Create parent directory in sandbox.
-            parent = os.path.dirname(remote_path)
-            try:
-                await client.create_folder(sandbox_id, parent)
-            except Exception:
-                pass
-
-            # Upload via SDK — handles HTTP/streaming internally.
-            await client.upload_bytes(sandbox_id, content, remote_path)
-            uploaded += 1
-
-        except Exception as exc:
-            logger.warning("Failed to sync file %s to sandbox: %s", rel_path, exc)
-
-    logger.info("Synced %d files from S3 to sandbox %s", uploaded, sandbox_id)
 
 
 # ── Sync: Sandbox → S3 ──────────────────────────────────────────────────
@@ -223,9 +85,17 @@ async def _sync_directory_from_sandbox_to_s3(
     # Recursively list all files in the sandbox directory.
     files_to_download: list[str] = []
     stack = [sandbox_dir]
+    visited_dirs: set[str] = set()
 
     while stack:
         current_dir = stack.pop()
+
+        # Guard against re-visiting the same directory (prevents infinite
+        # loops from `.` / `..` entries or symlink cycles).
+        if current_dir in visited_dirs:
+            continue
+        visited_dirs.add(current_dir)
+
         try:
             entries = await client.list_files(sandbox_id, current_dir)
         except Exception as exc:
@@ -233,12 +103,15 @@ async def _sync_directory_from_sandbox_to_s3(
             continue
 
         for entry in entries:
-            # FileInfo has .name and .is_dir
-            entry_path = (
-                f"{current_dir}/{entry.name}"
-                if current_dir != sandbox_dir
-                else f"{sandbox_dir}/{entry.name}"
-            )
+            name = entry.name
+            # Skip self / parent directory entries that some filesystems
+            # include in listings — they would re-add the current dir to
+            # the stack and cause an infinite loop.
+            if name in (".", ".."):
+                continue
+
+            entry_path = f"{current_dir}/{name}"
+
             if entry.is_dir:
                 stack.append(entry_path)
             else:
@@ -299,356 +172,602 @@ def _sandbox_status_detail(state: str) -> str:
 # ── Request/Response models ──────────────────────────────────────────────
 
 
-class ProvisionWorkspaceResponse(BaseModel):
-    ok: bool
-    project_name: str
-    sandbox_id: str
-    sandbox_name: str
-    state: str
-    state_detail: str
-    toolbox_url: str = ""
-    project_dir: str = ""
-
-
-class WorkspaceStatusResponse(BaseModel):
-    ok: bool
-    project_name: str
-    has_workspace: bool
-    sandbox_id: str = ""
-    sandbox_name: str = ""
-    state: str = ""
-    state_detail: str = ""
-    toolbox_url: str = ""
-    project_dir: str = ""
-
-
 class WorkspaceTerminalResponse(BaseModel):
     ok: bool
     web_terminal_url: str = ""
     sandbox_id: str = ""
 
 
-# ── Endpoints ────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKSPACE VM ENDPOINTS (NEW — primary path)
+# ══════════════════════════════════════════════════════════════════════════════
 
 
-@router.post("/cloud/projects/{project_name}/workspace")
-async def provision_workspace(
-    project_name: str,
-    http_request: Request,
-) -> ProvisionWorkspaceResponse:
-    """Provision a Daytona sandbox for a cloud project.
+class WorkspaceVmResponse(BaseModel):
+    """Response for workspace VM status."""
 
-    Creates a new sandbox (VM/container) for the given project. Files from
-    the project's S3 storage are synced into the sandbox after provisioning.
+    ok: bool
+    has_vm: bool
+    sandbox_id: str = ""
+    sandbox_name: str = ""
+    state: str = ""
+    state_detail: str = ""
+    workspace_root: str = ""
+    config: dict = {}
 
-    Returns immediately with the sandbox ID. The sandbox takes ~30-60 seconds
-    to provision — poll ``GET .../workspace`` until ``state == "started"``.
+
+class ProvisionWorkspaceVmRequest(BaseModel):
+    """Request body for provisioning/re-provisioning the workspace VM."""
+
+    cpu: int = 2
+    memory: int = 4
+    disk: int = 10
+    root_dir: str = "/workspace"
+
+
+def _resolve_workspace_id(http_request: Request) -> str:
+    """Extract workspace_id from the request context.
+
+    Reads ``X-Workspace-Id`` header, falling back to ``"default"``.
     """
-    workspace_id, user_id = _resolve_ids(http_request)
-    project_key = await _require_project(workspace_id, user_id, project_name)
+    return http_request.headers.get("X-Workspace-Id", "default")
 
-    client = await _require_daytona()
 
-    # Idempotency: check if a sandbox already exists for this project.
-    existing_id = _get_sandbox_id(project_key)
-    if existing_id:
-        try:
-            existing = await client.get_sandbox_by_id(existing_id)
-            if existing.state not in ("destroyed", "error"):
-                # Sandbox already exists — return it.
-                project_dir = ""
-                try:
-                    project_dir = await client.get_project_dir(existing.id)
-                except Exception:
-                    pass
-                return ProvisionWorkspaceResponse(
-                    ok=True,
-                    project_name=project_name,
-                    sandbox_id=existing.id,
-                    sandbox_name=existing.name,
-                    state=existing.state,
-                    state_detail=_sandbox_status_detail(existing.state),
-                    project_dir=project_dir,
-                )
-        except Exception:
-            # Sandbox might have been deleted externally — clean up.
-            _remove_sandbox_id(project_key)
+@router.get("/workspace/vm")
+async def get_workspace_vm(
+    http_request: Request,
+) -> WorkspaceVmResponse:
+    """Get workspace VM status — **auto-provisions** if no VM exists yet.
 
-    # Create a new sandbox.
-    sandbox_name = f"paw-{project_name}-{workspace_id[:8]}"
-    try:
-        info = await client.create_sandbox(
-            name=sandbox_name,
-            cpu=2,
-            memory=4,
-            disk=10,
+    This is the primary endpoint the frontend calls on mount. If the
+    workspace doesn't have a VM, one is created automatically with the
+    default config. The frontend polls until ``state == "started"``.
+    """
+    workspace_id = _resolve_workspace_id(http_request)
+
+    # Guard: never auto-provision for "default" — this means the frontend
+    # hasn't resolved the real workspace_id yet.  Returning no-VM here
+    # prevents creating a stray "paw-ws-default" sandbox that will never
+    # be used once the real workspace_id is known.
+    if workspace_id == "default":
+        return WorkspaceVmResponse(
+            ok=True,
+            has_vm=False,
+            state="pending",
+            state_detail="Waiting for workspace to be resolved…",
         )
-    except Exception as exc:
-        logger.exception("Failed to create Daytona sandbox")
-        raise HTTPException(status_code=502, detail=f"Failed to create workspace: {exc}")
 
-    # Record the mapping.
-    _set_sandbox_id(project_key, info.id, sandbox_name)
-
-    # Kick off background provisioning + sync.
-    asyncio.create_task(_provision_and_sync(client, info.id, project_key))
-
-    return ProvisionWorkspaceResponse(
-        ok=True,
-        project_name=project_name,
-        sandbox_id=info.id,
-        sandbox_name=sandbox_name,
-        state=info.state,
-        state_detail=_sandbox_status_detail(info.state),
-        toolbox_url="",
-        project_dir="",
+    from pocketpaw_ee.cloud.daytona.store import (
+        get_workspace_vm_config,
+        get_workspace_vm_sandbox_id,
+        set_workspace_vm,
     )
 
+    sandbox_id = get_workspace_vm_sandbox_id(workspace_id)
+    config = get_workspace_vm_config(workspace_id)
 
-async def _provision_and_sync(client: DaytonaClient, sandbox_id: str, project_key: str) -> None:
-    """Wait for sandbox to start, then sync files from S3."""
-    try:
-        await client.wait_for_sandbox(sandbox_id, target_state="started", timeout=120)
+    if sandbox_id:
+        # VM already exists — return status.
+        try:
+            client = await _require_daytona()
+            info = await client.get_sandbox_by_id(sandbox_id)
+            return WorkspaceVmResponse(
+                ok=True,
+                has_vm=True,
+                sandbox_id=info.id,
+                sandbox_name=info.name,
+                state=info.state,
+                state_detail=_sandbox_status_detail(info.state),
+                workspace_root=config.get("root_dir", "/workspace"),
+                config=config,
+            )
+        except Exception:
+            # Sandbox might have been deleted externally — clean up and re-provision.
+            from pocketpaw_ee.cloud.daytona.store import remove_workspace_vm as _rm_ws_vm
 
-        # Get project directory from sandbox.
-        project_dir = await client.get_project_dir(sandbox_id)
+            _rm_ws_vm(workspace_id)
+            sandbox_id = None
 
-        # Sync files from S3 to sandbox.
-        await _sync_directory_from_s3_to_sandbox(
-            client,
-            sandbox_id,
-            project_key,
-            project_dir,
+    # No VM exists or it was deleted — auto-provision.
+    if not daytona_enabled():
+        return WorkspaceVmResponse(
+            ok=True,
+            has_vm=False,
+            state="config_error",
+            state_detail="Daytona API is not configured",
+            config=config,
         )
-        logger.info(
-            "Provisioning complete for sandbox %s on project %s",
-            sandbox_id,
-            project_key,
+
+    try:
+        client = await _require_daytona()
+        sandbox_name = f"paw-ws-{workspace_id[:12]}"
+        cpu = config.get("cpu", 2)
+        memory = config.get("memory", 4)
+        disk = config.get("disk", 10)
+        auto_stop = config.get("auto_stop_interval", 3600)
+
+        info = await client.create_sandbox(
+            name=sandbox_name,
+            cpu=cpu,
+            memory=memory,
+            disk=disk,
+            auto_stop_interval=auto_stop,
+        )
+        set_workspace_vm(workspace_id, info.id, sandbox_name, config)
+
+        # Create the workspace root directory inside the VM.
+        root_dir = config.get("root_dir", "/workspace")
+        asyncio.create_task(_ensure_workspace_root(client, info.id, root_dir))
+
+        return WorkspaceVmResponse(
+            ok=True,
+            has_vm=True,
+            sandbox_id=info.id,
+            sandbox_name=sandbox_name,
+            state=info.state,
+            state_detail=_sandbox_status_detail(info.state),
+            workspace_root=root_dir,
+            config=config,
         )
     except Exception as exc:
-        logger.exception(
-            "Failed to provision sandbox %s for project %s: %s",
+        logger.exception("Failed to auto-provision workspace VM")
+        return WorkspaceVmResponse(
+            ok=True,
+            has_vm=False,
+            state="error",
+            state_detail=f"Provisioning failed: {exc}",
+            config=config,
+        )
+
+
+async def _ensure_workspace_root(client: DaytonaClient, sandbox_id: str, root_dir: str) -> None:
+    """Wait for sandbox to start, then create the workspace root directory."""
+    try:
+        await client.wait_for_sandbox(sandbox_id, target_state="started", timeout=120)
+        await client.create_folder(sandbox_id, root_dir)
+        logger.info("Workspace root %s created in sandbox %s", root_dir, sandbox_id)
+    except Exception as exc:
+        logger.warning(
+            "Failed to create workspace root %s in sandbox %s: %s",
+            root_dir,
             sandbox_id,
-            project_key,
             exc,
         )
 
 
-@router.get("/cloud/projects/{project_name}/workspace")
-async def get_workspace_status(
-    project_name: str,
+@router.post("/workspace/vm/provision")
+async def provision_workspace_vm(
+    req: ProvisionWorkspaceVmRequest,
     http_request: Request,
-) -> WorkspaceStatusResponse:
-    """Get the Daytona sandbox status for a cloud project.
+) -> WorkspaceVmResponse:
+    """Force (re)provision the workspace VM with the given config.
 
-    Returns ``has_workspace: false`` if no sandbox has been provisioned.
-    When a sandbox exists, returns its state, toolbox URL, and project dir.
+    If a VM already exists, it is destroyed first, then a new one is created.
     """
-    workspace_id, user_id = _resolve_ids(http_request)
-    project_key = await _require_project(workspace_id, user_id, project_name)
+    workspace_id = _resolve_workspace_id(http_request)
 
-    sandbox_id = _get_sandbox_id(project_key)
-    if not sandbox_id:
-        return WorkspaceStatusResponse(
-            ok=True,
-            project_name=project_name,
-            has_workspace=False,
-        )
+    from pocketpaw_ee.cloud.daytona.store import (
+        get_workspace_vm_sandbox_id,
+        remove_workspace_vm,
+        set_workspace_vm,
+    )
 
-    if not daytona_enabled():
-        return WorkspaceStatusResponse(
-            ok=True,
-            project_name=project_name,
-            has_workspace=True,
-            sandbox_id=sandbox_id,
-            state="config_error",
-            state_detail="Daytona API is not configured",
-        )
+    client = await _require_daytona()
 
-    try:
-        client = get_daytona_client()
-        if client is None:
-            raise HTTPException(status_code=501, detail="Daytona not available")
-        info = await client.get_sandbox_by_id(sandbox_id)
+    # Destroy existing VM if any.
+    existing_id = get_workspace_vm_sandbox_id(workspace_id)
+    if existing_id:
+        try:
+            await client.delete_sandbox(existing_id)
+        except Exception as exc:
+            logger.warning("Failed to delete existing workspace VM %s: %s", existing_id, exc)
+        remove_workspace_vm(workspace_id)
 
-        project_dir = ""
-        if info.state == "started":
-            try:
-                project_dir = await client.get_project_dir(info.id)
-            except Exception:
-                pass
+    config = {
+        "cpu": req.cpu,
+        "memory": req.memory,
+        "disk": req.disk,
+        "root_dir": req.root_dir,
+    }
 
-        return WorkspaceStatusResponse(
-            ok=True,
-            project_name=project_name,
-            has_workspace=True,
-            sandbox_id=info.id,
-            sandbox_name=info.name,
-            state=info.state,
-            state_detail=_sandbox_status_detail(info.state),
-            toolbox_url="",
-            project_dir=project_dir,
-        )
-    except Exception:
-        # Sandbox might have been deleted externally.
-        _remove_sandbox_id(project_key)
-        return WorkspaceStatusResponse(
-            ok=True,
-            project_name=project_name,
-            has_workspace=False,
-        )
+    sandbox_name = f"paw-ws-{workspace_id[:12]}"
+    info = await client.create_sandbox(
+        name=sandbox_name,
+        cpu=req.cpu,
+        memory=req.memory,
+        disk=req.disk,
+    )
+    set_workspace_vm(workspace_id, info.id, sandbox_name, config)
+
+    asyncio.create_task(_ensure_workspace_root(client, info.id, req.root_dir))
+
+    return WorkspaceVmResponse(
+        ok=True,
+        has_vm=True,
+        sandbox_id=info.id,
+        sandbox_name=sandbox_name,
+        state=info.state,
+        state_detail=_sandbox_status_detail(info.state),
+        workspace_root=req.root_dir,
+        config=config,
+    )
 
 
-@router.delete("/cloud/projects/{project_name}/workspace")
-async def delete_workspace(
-    project_name: str,
+@router.get("/workspace/vm/config")
+async def get_workspace_vm_config(
     http_request: Request,
 ) -> dict:
-    """Delete the Daytona sandbox for a cloud project.
+    """Return the current workspace VM configuration (cpu, memory, disk, etc.)
+    without touching the sandbox.  Returns defaults when no config exists."""
+    workspace_id = _resolve_workspace_id(http_request)
+    from pocketpaw_ee.cloud.daytona.store import get_workspace_vm_config
 
-    The project files in S3 are preserved. Only the compute sandbox is destroyed.
+    config = get_workspace_vm_config(workspace_id)
+    return {"ok": True, "config": config}
+
+
+class UpdateWorkspaceVmConfigRequest(BaseModel):
+    """Partial config update — every field optional."""
+
+    cpu: int | None = None
+    memory: int | None = None  # GB
+    disk: int | None = None  # GB
+    root_dir: str | None = None
+    auto_stop_interval: int | None = None  # seconds
+
+
+@router.patch("/workspace/vm/config")
+async def update_workspace_vm_config(
+    req: UpdateWorkspaceVmConfigRequest,
+    http_request: Request,
+) -> dict:
+    """Update the workspace VM configuration WITHOUT re-provisioning.
+
+    Changes take effect on the NEXT provision — the running VM is not
+    resized.  To apply changes, stop and re-provision the VM.
     """
-    workspace_id, user_id = _resolve_ids(http_request)
-    project_key = await _require_project(workspace_id, user_id, project_name)
+    workspace_id = _resolve_workspace_id(http_request)
+    from pocketpaw_ee.cloud.daytona.store import (
+        get_workspace_vm_config,
+        update_workspace_vm_config,
+    )
 
-    sandbox_id = _get_sandbox_id(project_key)
+    updates = req.model_dump(exclude_none=True)
+    if updates:
+        update_workspace_vm_config(workspace_id, updates)
+
+    config = get_workspace_vm_config(workspace_id)
+    return {"ok": True, "config": config}
+
+
+@router.post("/workspace/vm/stop")
+async def stop_workspace_vm(
+    http_request: Request,
+) -> dict:
+    """Stop the workspace VM without destroying it.
+
+    The sandbox is paused — data on the VM disk is preserved.  Use
+    GET /workspace/vm to resume (auto-provisions on next access if
+    the auto-stop interval hasn't elapsed yet, or POST
+    /workspace/vm/provision to force a fresh VM).
+    """
+    workspace_id = _resolve_workspace_id(http_request)
+
+    from pocketpaw_ee.cloud.daytona.store import get_workspace_vm_sandbox_id
+
+    sandbox_id = get_workspace_vm_sandbox_id(workspace_id)
     if not sandbox_id:
-        return {"ok": True, "message": "No workspace to delete"}
+        return {"ok": True, "message": "No workspace VM to stop"}
+
+    try:
+        client = await _require_daytona()
+        await client.stop_sandbox(sandbox_id)
+    except Exception as exc:
+        logger.warning("Failed to stop workspace VM %s: %s", sandbox_id, exc)
+        raise HTTPException(status_code=500, detail=f"Stop failed: {exc}") from exc
+
+    return {"ok": True, "message": "Workspace VM stopped", "state": "stopped"}
+
+
+@router.delete("/workspace/vm")
+async def delete_workspace_vm(
+    http_request: Request,
+) -> dict:
+    """Destroy the workspace VM. All project data in the VM is lost.
+
+    S3 storage is NOT affected — only the compute sandbox is destroyed.
+    """
+    workspace_id = _resolve_workspace_id(http_request)
+
+    from pocketpaw_ee.cloud.daytona.store import (
+        get_workspace_vm_sandbox_id,
+        remove_workspace_vm,
+    )
+
+    sandbox_id = get_workspace_vm_sandbox_id(workspace_id)
+    if not sandbox_id:
+        return {"ok": True, "message": "No workspace VM to delete"}
 
     try:
         client = await _require_daytona()
         await client.delete_sandbox(sandbox_id)
     except Exception as exc:
-        logger.warning("Failed to delete sandbox %s: %s", sandbox_id, exc)
+        logger.warning("Failed to delete workspace VM %s: %s", sandbox_id, exc)
 
-    _remove_sandbox_id(project_key)
-    return {"ok": True, "message": "Workspace deleted"}
-
-
-@router.post("/cloud/projects/{project_name}/workspace/sync-to-sandbox")
-async def sync_to_sandbox(
-    project_name: str,
-    http_request: Request,
-) -> dict:
-    """Sync project files from S3 to the Daytona sandbox.
-
-    One-directional: S3 → Sandbox. Overwrites files in the sandbox
-    with the current state from S3.
-    """
-    workspace_id, user_id = _resolve_ids(http_request)
-    project_key = await _require_project(workspace_id, user_id, project_name)
-
-    sandbox_id = _get_sandbox_id(project_key)
-    if not sandbox_id:
-        raise HTTPException(status_code=404, detail="No workspace provisioned for this project")
-
-    client = await _require_daytona()
-
-    # Ensure sandbox is running.
-    info = await client.get_sandbox_by_id(sandbox_id)
-    if info.state != "started":
-        if info.state in ("stopped", "paused"):
-            await client.start_sandbox(sandbox_id)
-            await client.wait_for_sandbox(sandbox_id, target_state="started", timeout=60)
-        else:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Sandbox is in state '{info.state}' — cannot sync until started",
-            )
-
-    project_dir = await client.get_project_dir(sandbox_id)
-
-    await _sync_directory_from_s3_to_sandbox(
-        client,
-        sandbox_id,
-        project_key,
-        project_dir,
-    )
-
-    return {"ok": True, "message": "Files synced from S3 to sandbox"}
+    remove_workspace_vm(workspace_id)
+    return {"ok": True, "message": "Workspace VM deleted"}
 
 
-@router.post("/cloud/projects/{project_name}/workspace/sync-to-s3")
-async def sync_to_s3(
-    project_name: str,
-    http_request: Request,
-) -> dict:
-    """Sync project files from the Daytona sandbox back to S3.
-
-    One-directional: Sandbox → S3. Overwrites files in S3 with the
-    current state from the sandbox (including .git, build artifacts, etc.).
-    """
-    workspace_id, user_id = _resolve_ids(http_request)
-    project_key = await _require_project(workspace_id, user_id, project_name)
-
-    sandbox_id = _get_sandbox_id(project_key)
-    if not sandbox_id:
-        raise HTTPException(status_code=404, detail="No workspace provisioned for this project")
-
-    client = await _require_daytona()
-
-    # Ensure sandbox is running.
-    info = await client.get_sandbox_by_id(sandbox_id)
-    if info.state != "started":
-        if info.state in ("stopped", "paused"):
-            await client.start_sandbox(sandbox_id)
-            await client.wait_for_sandbox(sandbox_id, target_state="started", timeout=60)
-        else:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Sandbox is in state '{info.state}' — cannot sync until started",
-            )
-
-    project_dir = await client.get_project_dir(sandbox_id)
-
-    await _sync_directory_from_sandbox_to_s3(
-        client,
-        sandbox_id,
-        project_key,
-        project_dir,
-    )
-
-    # Update the last synced timestamp.
-    mapping = _load_workspace_map()
-    if project_key in mapping:
-        mapping[project_key]["last_synced_at"] = datetime.utcnow().isoformat()
-        _save_workspace_map()
-
-    return {"ok": True, "message": "Files synced from sandbox to S3"}
-
-
-@router.get("/cloud/projects/{project_name}/workspace/terminal")
-async def get_workspace_terminal(
-    project_name: str,
+@router.get("/workspace/vm/terminal")
+async def get_workspace_vm_terminal(
     http_request: Request,
 ) -> WorkspaceTerminalResponse:
-    """Get the web terminal URL for a Daytona sandbox.
+    """Get the web terminal URL for the workspace VM."""
+    workspace_id = _resolve_workspace_id(http_request)
 
-    Returns the preview URL for port 22222 — the built-in web terminal
-    provided by Daytona. The frontend can open this URL in a new tab.
-    """
-    workspace_id, user_id = _resolve_ids(http_request)
-    project_key = await _require_project(workspace_id, user_id, project_name)
+    from pocketpaw_ee.cloud.daytona.store import get_workspace_vm_sandbox_id
 
-    sandbox_id = _get_sandbox_id(project_key)
+    sandbox_id = get_workspace_vm_sandbox_id(workspace_id)
     if not sandbox_id:
-        raise HTTPException(status_code=404, detail="No workspace provisioned for this project")
+        raise HTTPException(status_code=404, detail="No workspace VM provisioned")
 
     client = await _require_daytona()
-
-    # Ensure sandbox is running.
     info = await client.get_sandbox_by_id(sandbox_id)
     if info.state != "started":
         raise HTTPException(
             status_code=409,
-            detail=f"Sandbox is in state '{info.state}' — must be 'started' for terminal access",
+            detail=f"VM is in state '{info.state}' — must be 'started' for terminal access",
         )
 
-    # Get the web terminal URL via the SDK (preview link on port 22222).
     web_terminal_url = await client.get_web_terminal_url(sandbox_id)
-
     return WorkspaceTerminalResponse(
         ok=True,
         web_terminal_url=web_terminal_url,
         sandbox_id=sandbox_id,
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PROJECT-IN-VM FILE OPERATIONS (NEW)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# These endpoints let the frontend list, read, write, and manage files
+# inside a PROJECT SUBDIRECTORY within the workspace VM. When the user
+# opens a cloud project, the file tree scopes to:
+#
+#     {workspace_root}/{project_name}/
+#
+# Each endpoint:
+#   1. Resolves workspace_id from the request
+#   2. Looks up the workspace VM sandbox
+#   3. Ensures the VM is running
+#   4. Joins the relative path with the project subdirectory path
+#   5. Delegates to the DaytonaClient
+
+
+async def _require_workspace_vm(
+    workspace_id: str,
+    project_name: str,
+) -> tuple[DaytonaClient, str, str, str]:
+    """Resolve workspace VM → sandbox → project path.
+
+    Returns ``(client, sandbox_id, workspace_root, project_abs_path)``
+    or raises HTTPException.
+    """
+    from pocketpaw_ee.cloud.daytona.store import (
+        get_workspace_vm_config,
+        get_workspace_vm_sandbox_id,
+    )
+
+    sandbox_id = get_workspace_vm_sandbox_id(workspace_id)
+    if not sandbox_id:
+        raise HTTPException(
+            status_code=404,
+            detail="No workspace VM provisioned — visit /workspace/vm first",
+        )
+
+    client = await _require_daytona()
+    info = await client.get_sandbox_by_id(sandbox_id)
+    if info.state != "started":
+        raise HTTPException(
+            status_code=409,
+            detail=f"VM is in state '{info.state}' — must be 'started' for file operations",
+        )
+
+    config = get_workspace_vm_config(workspace_id)
+    workspace_root = config.get("root_dir", "/workspace")
+    project_abs_path = f"{workspace_root}/{project_name}".replace("//", "/")
+
+    return client, sandbox_id, workspace_root, project_abs_path
+
+
+def _vm_project_abs_path(project_abs: str, relative_path: str) -> str:
+    """Join the project absolute path with a relative path."""
+    clean = relative_path.strip("/")
+    if not clean or clean == ".":
+        return project_abs
+    return f"{project_abs}/{clean}"
+
+
+@router.get("/cloud/projects/{project_name}/vm/files/browse")
+async def browse_vm_project_files(
+    project_name: str,
+    path: str = Query("", description="Relative path within the project"),
+    http_request: Request = None,
+) -> BrowseResponse:
+    """List directory contents inside a project subdirectory in the workspace VM."""
+    workspace_id = _resolve_workspace_id(http_request)
+    client, sandbox_id, _, project_abs = await _require_workspace_vm(workspace_id, project_name)
+
+    remote_path = _vm_project_abs_path(project_abs, path)
+
+    try:
+        entries = await client.list_files(sandbox_id, remote_path)
+    except Exception as exc:
+        logger.warning("vm project browse failed: path=%s  err=%s", remote_path, exc)
+        return BrowseResponse(path=path, error="Could not list directory")
+
+    files = [
+        FileEntry(
+            name=e.name,
+            isDir=e.is_dir,
+            size=str(e.size) if not e.is_dir and e.size > 0 else "",
+        )
+        for e in entries
+    ]
+    return BrowseResponse(path=path, files=files)
+
+
+@router.get("/cloud/projects/{project_name}/vm/files/content")
+async def read_vm_project_file(
+    project_name: str,
+    path: str = Query(..., description="Relative file path within the project"),
+    http_request: Request = None,
+):
+    """Read a file from a project subdirectory in the workspace VM."""
+    workspace_id = _resolve_workspace_id(http_request)
+    client, sandbox_id, _, project_abs = await _require_workspace_vm(workspace_id, project_name)
+
+    if not path or path.strip("/") == "":
+        raise HTTPException(status_code=400, detail="Cannot read a directory")
+
+    remote_path = _vm_project_abs_path(project_abs, path)
+
+    try:
+        data = await client.download_file(sandbox_id, remote_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found in VM")
+    except Exception as exc:
+        logger.warning("vm project read failed: path=%s  err=%s", remote_path, exc)
+        raise HTTPException(status_code=500, detail="Could not read file") from exc
+
+    import mimetypes
+
+    mime, _ = mimetypes.guess_type(path)
+    return Response(content=data, media_type=mime or "application/octet-stream")
+
+
+@router.post("/cloud/projects/{project_name}/vm/files/write")
+async def write_vm_project_file(
+    project_name: str,
+    req: WriteFileRequest,
+    http_request: Request = None,
+) -> FileActionResponse:
+    """Create or overwrite a file in a project subdirectory in the workspace VM."""
+    workspace_id = _resolve_workspace_id(http_request)
+    client, sandbox_id, _, project_abs = await _require_workspace_vm(workspace_id, project_name)
+
+    relative = req.path.strip("/")
+    if not relative:
+        raise HTTPException(status_code=400, detail="path must not be empty")
+
+    remote_path = _vm_project_abs_path(project_abs, relative)
+
+    parent = os.path.dirname(remote_path)
+    try:
+        await client.create_folder(sandbox_id, parent)
+    except Exception:
+        pass
+
+    try:
+        await client.upload_bytes(sandbox_id, req.content.encode("utf-8"), remote_path)
+    except Exception as exc:
+        logger.warning("vm project write failed: path=%s  err=%s", remote_path, exc)
+        raise HTTPException(status_code=500, detail=f"Write failed: {exc}") from exc
+
+    return FileActionResponse(ok=True, path=relative)
+
+
+@router.post("/cloud/projects/{project_name}/vm/files/mkdir")
+async def mkdir_vm_project(
+    project_name: str,
+    req: MkdirRequest,
+    http_request: Request = None,
+) -> FileActionResponse:
+    """Create a directory inside a project subdirectory in the workspace VM."""
+    workspace_id = _resolve_workspace_id(http_request)
+    client, sandbox_id, _, project_abs = await _require_workspace_vm(workspace_id, project_name)
+
+    relative = req.path.strip("/")
+    if not relative:
+        raise HTTPException(status_code=400, detail="path must not be empty")
+
+    remote_path = _vm_project_abs_path(project_abs, relative)
+
+    try:
+        await client.create_folder(sandbox_id, remote_path, mode="755")
+    except Exception as exc:
+        logger.warning("vm project mkdir failed: path=%s  err=%s", remote_path, exc)
+        raise HTTPException(status_code=500, detail=f"Mkdir failed: {exc}") from exc
+
+    return FileActionResponse(ok=True, path=relative)
+
+
+@router.delete("/cloud/projects/{project_name}/vm/files/delete")
+async def delete_vm_project_item(
+    project_name: str,
+    path: str = Query(..., description="Relative path to delete"),
+    recursive: bool = Query(False, description="Delete directories recursively"),
+    http_request: Request = None,
+) -> FileActionResponse:
+    """Delete a file or directory from a project subdirectory in the workspace VM."""
+    workspace_id = _resolve_workspace_id(http_request)
+    client, sandbox_id, _, project_abs = await _require_workspace_vm(workspace_id, project_name)
+
+    relative = path.strip("/")
+    if not relative:
+        raise HTTPException(status_code=400, detail="path must not be empty")
+
+    remote_path = _vm_project_abs_path(project_abs, relative)
+
+    try:
+        await client.delete_file(sandbox_id, remote_path, recursive=recursive)
+    except Exception as exc:
+        logger.warning("vm project delete failed: path=%s  err=%s", remote_path, exc)
+        raise HTTPException(status_code=500, detail=f"Delete failed: {exc}") from exc
+
+    return FileActionResponse(ok=True)
+
+
+@router.patch("/cloud/projects/{project_name}/vm/files/rename")
+async def rename_vm_project_item(
+    project_name: str,
+    req: RenameRequest,
+    http_request: Request = None,
+) -> FileActionResponse:
+    """Rename or move a file/directory in a project subdirectory in the workspace VM."""
+    workspace_id = _resolve_workspace_id(http_request)
+    client, sandbox_id, _, project_abs = await _require_workspace_vm(workspace_id, project_name)
+
+    old_relative = req.path.strip("/")
+    new_relative = req.new_path.strip("/")
+    if not old_relative:
+        raise HTTPException(status_code=400, detail="path must not be empty")
+    if not new_relative:
+        raise HTTPException(status_code=400, detail="new_path must not be empty")
+
+    old_remote = _vm_project_abs_path(project_abs, old_relative)
+    new_remote = _vm_project_abs_path(project_abs, new_relative)
+
+    parent = os.path.dirname(new_remote)
+    try:
+        await client.create_folder(sandbox_id, parent)
+    except Exception:
+        pass
+
+    try:
+        data = await client.download_file(sandbox_id, old_remote)
+        await client.upload_bytes(sandbox_id, data, new_remote)
+        await client.delete_file(sandbox_id, old_remote, recursive=True)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Source file not found")
+    except Exception as exc:
+        logger.warning(
+            "vm project rename failed: old=%s new=%s  err=%s",
+            old_remote,
+            new_remote,
+            exc,
+        )
+        raise HTTPException(status_code=500, detail=f"Rename failed: {exc}") from exc
+
+    return FileActionResponse(ok=True, path=new_relative)

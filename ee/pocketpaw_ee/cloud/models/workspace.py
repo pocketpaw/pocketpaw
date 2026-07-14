@@ -1,5 +1,14 @@
 """Workspace document — one per deployment/org.
 
+2026-07-10 (compliance-starter): ``WorkspaceSettings.retention_days`` is no
+longer decorative. Added a field validator so a persisted value is always
+``None`` (keep forever) or a POSITIVE day count — 0 / negative are rejected
+at construction, closing both the dedicated retention endpoint and the
+general ``update()`` settings-merge path. The setting is read/written through
+``workspace.service.get_retention`` / ``set_retention`` and enforced by
+``workspace.service.enforce_retention`` (purges audit rows older than the
+cutoff). Nothing else on this document changed.
+
 2026-06-28 (AW-7 template gate deny-on-no-match): added
 ``Workspace.instinct_template_default_deny`` — the PER-WORKSPACE override for
 the TEMPLATE-level deny-by-default. ``None`` (the default) means "use the
@@ -35,7 +44,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from beanie import Indexed
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
@@ -43,7 +52,20 @@ from pocketpaw_ee.cloud.models.base import TimestampedDocument
 class WorkspaceSettings(BaseModel):
     default_agent: str | None = None  # Agent ID
     allow_invites: bool = True
-    retention_days: int | None = None  # None = keep forever
+    # Compliance retention policy: None = keep forever; otherwise a POSITIVE
+    # number of days after which audit records are purged (enforced by
+    # ``workspace.service.enforce_retention``). Zero / negative is rejected so
+    # a bad value can never silently disable retention or wipe everything.
+    retention_days: int | None = None
+
+    @field_validator("retention_days")
+    @classmethod
+    def _validate_retention_days(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError(
+                "retention_days must be a positive number of days, or null to keep forever"
+            )
+        return v
 
 
 class Branding(BaseModel):

@@ -13,6 +13,10 @@
 # the list and read responses must NOT contain access_token. Note the
 # existing CRUD tests above run under the conftest's _TESTING_FULL_ACCESS
 # bypass, so they exercise the post-auth route logic without a real session.
+# Updated: 2026-07-11 (W4a tenancy seam) — Test apps now pin the cloud
+# current_workspace_id dep via _override_workspace (the admin CRUD routes
+# thread it); added workspace-stamp-on-create + spec rollback endpoint tests
+# (round-trip, 409 when no revision, owner-token required).
 
 from __future__ import annotations
 
@@ -62,10 +66,24 @@ def _widget_payload(**overrides: Any) -> dict[str, Any]:
     return payload
 
 
+def _override_workspace(app: FastAPI, workspace_id: str = "w-test") -> None:
+    """Pin current_workspace_id for a bare test app (W4a).
+
+    The admin CRUD routes resolve the caller's active workspace through the
+    cloud session dep; these router-level tests mount the router on a bare
+    FastAPI app with no auth stack, so the dep is overridden the same way
+    tests/cloud/conftest.py does for other cloud routers.
+    """
+    from pocketpaw_ee.cloud._core.deps import current_workspace_id
+
+    app.dependency_overrides[current_workspace_id] = lambda: workspace_id
+
+
 @pytest.fixture
 def app_with_store(tmp_path: Path):
     app = FastAPI()
     app.include_router(router)
+    _override_workspace(app)
     store = PawBarStore(tmp_path / "paw_bar_router.db")
     with patch("pocketpaw_ee.paw_bar.router._store", return_value=store):
         yield app, store
@@ -136,6 +154,42 @@ class TestWidgetCRUDEndpoints:
             headers={"X-Paw-Bar-Token": created["access_token"]},
         )
         assert authed.status_code == 200
+
+    def test_created_widget_is_stamped_with_caller_workspace(self, client: TestClient) -> None:
+        # W4a — the admin route stamps the session workspace (the fixture pins
+        # current_workspace_id to "w-test"); the row's tenancy is server-derived.
+        created = client.post("/paw-bar/widgets", json=_widget_payload()).json()
+        assert created["workspace_id"] == "w-test"
+
+    def test_spec_rollback_round_trip(self, client: TestClient) -> None:
+        # W4a spec revisions — update archives the prior spec; rollback restores it.
+        created = client.post("/paw-bar/widgets", json=_widget_payload()).json()
+        token = {"X-Paw-Bar-Token": created["access_token"]}
+
+        new_spec = _spec(widget_id=created["id"]).model_dump()
+        new_spec["blocks"] = [{"type": "text", "content": "Closed today"}]
+        updated = client.patch(
+            f"/paw-bar/widgets/{created['id']}/spec", json=new_spec, headers=token
+        )
+        assert updated.status_code == 200
+        assert updated.json()["spec"]["blocks"][0]["content"] == "Closed today"
+
+        rolled = client.post(f"/paw-bar/widgets/{created['id']}/spec/rollback", headers=token)
+        assert rolled.status_code == 200
+        assert rolled.json()["spec"]["blocks"][0]["content"] == "Hi from Brew & Co"
+
+    def test_spec_rollback_without_revisions_is_409(self, client: TestClient) -> None:
+        created = client.post("/paw-bar/widgets", json=_widget_payload()).json()
+        res = client.post(
+            f"/paw-bar/widgets/{created['id']}/spec/rollback",
+            headers={"X-Paw-Bar-Token": created["access_token"]},
+        )
+        assert res.status_code == 409
+
+    def test_spec_rollback_requires_owner_token(self, client: TestClient) -> None:
+        created = client.post("/paw-bar/widgets", json=_widget_payload()).json()
+        res = client.post(f"/paw-bar/widgets/{created['id']}/spec/rollback")
+        assert res.status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +499,7 @@ def _build_authed_app(store: PawBarStore, **state_kwargs):
         return await call_next(request)
 
     app.include_router(router)
+    _override_workspace(app)
     return app
 
 

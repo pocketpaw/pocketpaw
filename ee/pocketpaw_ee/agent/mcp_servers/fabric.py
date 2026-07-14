@@ -44,19 +44,39 @@
 #     fabric_object_types table now carries a workspace_id; a NULL workspace_id
 #     is a legacy/global type visible to all — see FabricStore.list_types).
 #
-# Read-only: neither tool writes anything. FabricCreateTool is deliberately
-# NOT wrapped — ontology writes from the SDK backend should arrive as gated
-# proposals, not ambient writes.
+# Updated: 2026-07-11 (feat/paw-cli, C2) — the server is no longer read-only:
+# three ontology MODIFICATION tools joined the two reads, so an agent on this
+# backend can manage the ontology (link CRUD + type editing), mirroring the
+# HTTP surface the ontology-operator-ux wave shipped:
+#   * fabric_link_create — link two objects. Both endpoints must resolve in the
+#     caller's workspace (scoped get_object), and the workspace's DECLARED link
+#     schema is enforced through the router's own ``_enforce_link_type`` (one
+#     implementation, two surfaces) — same rules as POST /fabric/links.
+#   * fabric_link_delete — remove one link. ``FabricStore.unlink`` is unscoped,
+#     so the tool resolves the link through the scoped ``get_link`` first; a
+#     cross-tenant or unknown id refuses (mirrors DELETE /fabric/links/{id}).
+#   * fabric_type_update — rename/additive type editing via the store's
+#     versioned ``update_type`` + registry re-registration, mirroring
+#     PATCH /fabric/schema/types/{id}. That route is ADMIN-gated, so this tool
+#     RBAC-gates on ``fabric.admin`` (workspace_admin.py's check_workspace_action
+#     deny-envelope pattern) — a non-admin gets a structured denial, never a
+#     write. Destructive property removal stays deferred (store semantics).
+# The 2026-06-11 "writes arrive as gated proposals" posture is superseded for
+# the MEMBER-tier link writes: the HTTP routes already allow any member to
+# create/delete links directly (``fabric.write`` = MEMBER), so the MCP surface
+# now matches the REST surface instead of being stricter than it. Every write
+# is audited via record_tool_call.
 #
 # Security: query inputs are DATA — they are bound as SQL parameters by the
 # fabric store, never interpolated. The workspace id comes from the session's
-# ContextVars, never from the agent's args, so an agent cannot query another
-# tenant's rows. Result payloads are size-capped so a huge ontology can't blow
-# the model context.
+# ContextVars, never from the agent's args, so an agent cannot query or WRITE
+# another tenant's rows (writes stamp the resolved workspace; deletes resolve
+# through scoped reads). Result payloads are size-capped so a huge ontology
+# can't blow the model context.
 #
 # EE→OSS boundary: this module lives in pocketpaw_ee and imports only
 # ``pocketpaw`` (OSS) symbols at call time; core never imports this package.
-"""Agent-side MCP surface for read-only Fabric ontology access."""
+"""Agent-side MCP surface for Fabric ontology access (reads + gated writes)."""
 
 from __future__ import annotations
 
@@ -76,8 +96,17 @@ SERVER_NAME = "pocketpaw_fabric"
 # ``fabric_query`` / ``fabric_stats`` — keep the tool names stable.
 FABRIC_QUERY_TOOL_ID = f"mcp__{SERVER_NAME}__fabric_query"
 FABRIC_STATS_TOOL_ID = f"mcp__{SERVER_NAME}__fabric_stats"
+FABRIC_LINK_CREATE_TOOL_ID = f"mcp__{SERVER_NAME}__fabric_link_create"
+FABRIC_LINK_DELETE_TOOL_ID = f"mcp__{SERVER_NAME}__fabric_link_delete"
+FABRIC_TYPE_UPDATE_TOOL_ID = f"mcp__{SERVER_NAME}__fabric_type_update"
 
-FABRIC_TOOL_IDS = (FABRIC_QUERY_TOOL_ID, FABRIC_STATS_TOOL_ID)
+FABRIC_TOOL_IDS = (
+    FABRIC_QUERY_TOOL_ID,
+    FABRIC_STATS_TOOL_ID,
+    FABRIC_LINK_CREATE_TOOL_ID,
+    FABRIC_LINK_DELETE_TOOL_ID,
+    FABRIC_TYPE_UPDATE_TOOL_ID,
+)
 
 # Result-size caps. ``MAX_QUERY_LIMIT`` mirrors the registry tool's clamp
 # (``min(limit, 50)``); ``MAX_RESULT_BYTES`` bounds the serialized JSON body so
@@ -312,9 +341,307 @@ async def _fabric_stats_handler(args: dict) -> dict:
     )
 
 
+def _serialize_link(lnk: Any) -> dict[str, Any]:
+    """A JSON-friendly projection of a FabricLink."""
+    return {
+        "id": lnk.id,
+        "from_object_id": lnk.from_object_id,
+        "to_object_id": lnk.to_object_id,
+        "link_type": lnk.link_type,
+        "properties": dict(lnk.properties or {}),
+    }
+
+
+def _serialize_type(obj_type: Any) -> dict[str, Any]:
+    """A JSON-friendly projection of an ObjectType (schema surface fields)."""
+    return {
+        "id": obj_type.id,
+        "name": obj_type.name,
+        "version": getattr(obj_type, "version", 1),
+        "description": obj_type.description,
+        "properties": [
+            {"name": p.name, "type": p.type, "required": p.required} for p in obj_type.properties
+        ],
+    }
+
+
+async def _load_user(user_id: str) -> Any | None:
+    """Load the User Beanie doc for ``user_id`` so ``check_workspace_action``
+    has the ``.workspaces`` membership list it reads. Returns ``None`` on a bad
+    id / missing user. Lazy imports keep the module's top-level import surface
+    minimal (mirrors workspace_admin.py)."""
+    from beanie import PydanticObjectId
+
+    from pocketpaw_ee.cloud.models.user import User as _UserDoc
+
+    try:
+        return await _UserDoc.get(PydanticObjectId(user_id))
+    except Exception:  # noqa: BLE001 — malformed id / no DB
+        return None
+
+
+async def _gate_admin(tool: str, workspace_id: str, user_id: str | None) -> dict | None:
+    """RBAC-gate an ADMIN-tier tool on ``fabric.admin``.
+
+    Mirrors workspace_admin.py's gate: the User doc is loaded so
+    ``check_workspace_action`` has the membership list, and a ``Forbidden`` is
+    CAUGHT and returned as a structured deny envelope (never raised) — the gate
+    itself audits the denial. Returns ``None`` on PASS, or a ready-to-return
+    response dict on any failure.
+    """
+    if not user_id:
+        return _error_response(f"{tool} could not resolve the calling user for the RBAC check.")
+
+    from pocketpaw_ee.guards.deps import check_workspace_action
+    from pocketpaw_ee.guards.rbac import Forbidden
+
+    user = await _load_user(user_id)
+    if user is None:
+        return _error_response(f"{tool} could not resolve the calling user for the RBAC check.")
+
+    try:
+        check_workspace_action(user, workspace_id, "fabric.admin")
+    except Forbidden as exc:
+        logger.info(
+            "%s denied: user=%s workspace=%s code=%s", tool, user_id, workspace_id, exc.code
+        )
+        return _success_response(
+            {
+                "ok": False,
+                "denied": True,
+                "code": exc.code,
+                "message": f"editing the ontology schema requires an admin role ({exc.code}).",
+            }
+        )
+    return None
+
+
+async def _fabric_link_create_handler(args: dict) -> dict:
+    """MCP handler for ``fabric__fabric_link_create``.
+
+    Links two objects in the caller's workspace. Both endpoints must resolve
+    through the SCOPED ``get_object`` (a cross-tenant / unknown id refuses),
+    and the workspace's declared link schema is enforced through the router's
+    own ``_enforce_link_type`` — identical rules to ``POST /fabric/links``.
+    """
+    workspace_id, _user_id = _identity()
+    if not workspace_id:
+        return _error_response(
+            "fabric_link_create requires workspace context (call from a cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=_user_id,
+        tool_server="pocketpaw_fabric",
+        tool_name="_fabric_link_create",
+        status="ok",
+        ok=True,
+    )
+
+    args = coerce_json_object_args(args, ("properties",))
+    from_id = args.get("from_id")
+    to_id = args.get("to_id")
+    link_type = args.get("link_type")
+    properties = args.get("properties")
+
+    for field_name, value in (("from_id", from_id), ("to_id", to_id), ("link_type", link_type)):
+        if not value or not isinstance(value, str):
+            return _error_response(
+                f"fabric_link_create `{field_name}` is required and must be a string."
+            )
+    if properties is not None and not isinstance(properties, dict):
+        return _error_response("fabric_link_create `properties` must be a JSON object.")
+
+    store = _get_fabric_store()
+    if store is None:
+        return _error_response("Fabric is not available (enterprise feature).")
+
+    try:
+        for field_name, obj_id in (("from_id", from_id), ("to_id", to_id)):
+            obj = await store.get_object(obj_id, workspace_id=workspace_id)
+            if obj is None:
+                return _error_response(
+                    f"fabric_link_create `{field_name}` {obj_id!r} was not found in this workspace."
+                )
+
+        # One enforcement implementation, two surfaces: reuse the EE router's
+        # declared-link-schema check (no declarations -> no-op).
+        from pocketpaw_ee.cloud._core.errors import CloudError
+        from pocketpaw_ee.fabric.router import LinkRequest, _enforce_link_type
+
+        req = LinkRequest(
+            from_id=from_id, to_id=to_id, link_type=link_type, properties=properties or {}
+        )
+        try:
+            await _enforce_link_type(store, workspace_id, req)
+        except CloudError as exc:
+            return _error_response(exc.message)
+
+        lnk = await store.link(
+            from_id=from_id,
+            to_id=to_id,
+            link_type=link_type,
+            properties=properties or {},
+            workspace_id=workspace_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fabric_link_create failed (link_type=%s)", link_type, exc_info=True)
+        return _error_response(f"could not create the link: {exc}")
+
+    return _success_response({"created": True, "link": _serialize_link(lnk)})
+
+
+async def _fabric_link_delete_handler(args: dict) -> dict:
+    """MCP handler for ``fabric__fabric_link_delete``.
+
+    Deletes one link. ``FabricStore.unlink`` is unscoped by design, so the
+    tenancy guard lives here: the link is resolved through the SCOPED
+    ``get_link`` first — a cross-tenant or unknown id refuses without leaking
+    whether it exists elsewhere. Mirrors ``DELETE /fabric/links/{id}``.
+    """
+    workspace_id, _user_id = _identity()
+    if not workspace_id:
+        return _error_response(
+            "fabric_link_delete requires workspace context (call from a cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=_user_id,
+        tool_server="pocketpaw_fabric",
+        tool_name="_fabric_link_delete",
+        status="ok",
+        ok=True,
+    )
+
+    link_id = args.get("link_id")
+    if not link_id or not isinstance(link_id, str):
+        return _error_response("fabric_link_delete `link_id` is required and must be a string.")
+
+    store = _get_fabric_store()
+    if store is None:
+        return _error_response("Fabric is not available (enterprise feature).")
+
+    try:
+        link = await store.get_link(link_id, workspace_id=workspace_id)
+        if link is None:
+            return _error_response(f"link {link_id!r} was not found in this workspace.")
+        await store.unlink(link_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fabric_link_delete failed (link_id=%s)", link_id, exc_info=True)
+        return _error_response(f"could not delete the link: {exc}")
+
+    return _success_response({"deleted": True, "link": _serialize_link(link)})
+
+
+async def _fabric_type_update_handler(args: dict) -> dict:
+    """MCP handler for ``fabric__fabric_type_update``.
+
+    Rename/additive type editing — versions the type and migrates existing
+    objects through the store's ``update_type`` (a property rename moves the
+    key; an added property with a default is backfilled; destructive removal
+    is deferred). Mirrors ``PATCH /fabric/schema/types/{id}`` including its
+    gate: that route is ADMIN-only, so this tool RBAC-checks ``fabric.admin``
+    and returns a structured denial for a non-admin. The registry is
+    re-registered after the write, exactly like the route handler.
+    """
+    workspace_id, _user_id = _identity()
+    if not workspace_id:
+        return _error_response(
+            "fabric_type_update requires workspace context (call from a cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=_user_id,
+        tool_server="pocketpaw_fabric",
+        tool_name="_fabric_type_update",
+        status="ok",
+        ok=True,
+    )
+
+    denied = await _gate_admin("fabric_type_update", workspace_id, _user_id)
+    if denied is not None:
+        return denied
+
+    args = coerce_json_object_args(args, ("properties", "renames"))
+    type_name = args.get("type_name")
+    renames = args.get("renames")
+    properties = args.get("properties")
+    description = args.get("description")
+
+    if not type_name or not isinstance(type_name, str):
+        return _error_response("fabric_type_update `type_name` is required and must be a string.")
+    if renames is not None and not isinstance(renames, dict):
+        return _error_response(
+            "fabric_type_update `renames` must be a JSON object mapping "
+            "old property names to new ones."
+        )
+    if properties is not None and not isinstance(properties, list):
+        return _error_response(
+            "fabric_type_update `properties` must be an array of {name, type} objects."
+        )
+    if description is not None and not isinstance(description, str):
+        return _error_response("fabric_type_update `description` must be a string.")
+    if renames is None and properties is None and description is None:
+        return _error_response(
+            "fabric_type_update needs at least one change: `renames`, `properties`, "
+            "or `description`."
+        )
+
+    store = _get_fabric_store()
+    if store is None:
+        return _error_response("Fabric is not available (enterprise feature).")
+
+    try:
+        from pocketpaw.fabric.models import PropertyDef
+
+        prop_defs: list[Any] | None = None
+        if properties is not None:
+            prop_defs = []
+            for i, raw in enumerate(properties):
+                if not isinstance(raw, dict):
+                    return _error_response(
+                        f"fabric_type_update properties[{i}] must be a {{name, type}} object."
+                    )
+                try:
+                    prop_defs.append(PropertyDef(**raw))
+                except Exception as exc:  # pydantic ValidationError
+                    return _error_response(f"invalid property definition at index {i}: {exc}")
+
+        obj_type = await store.get_type_by_name(type_name, workspace_id=workspace_id)
+        if obj_type is None:
+            return _error_response(f"object type {type_name!r} was not found in this workspace.")
+
+        updated = await store.update_type(
+            obj_type.id,
+            properties=prop_defs,
+            renames=renames,
+            description=description,
+            workspace_id=workspace_id,
+        )
+        if updated is None:
+            return _error_response(f"object type {type_name!r} was not found in this workspace.")
+
+        # Registry re-registration, mirroring the route handler.
+        from pocketpaw_ee.fabric.storage import get_registry_store
+
+        reg = get_registry_store()
+        reg.register_entity_type(workspace_id, updated.name)
+        for prop in updated.properties:
+            reg.register_property(workspace_id, updated.name, prop.name, prop.type)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fabric_type_update failed (type=%s)", type_name, exc_info=True)
+        return _error_response(f"could not update the type: {exc}")
+
+    return _success_response({"updated": True, "type": _serialize_type(updated)})
+
+
 def build_fabric_server() -> tuple[str, Any] | None:
-    """Build the in-process SDK MCP server for read-only Fabric access, or
-    return ``None`` if the Claude Agent SDK isn't installed.
+    """Build the in-process SDK MCP server for Fabric ontology access (two
+    reads + three modification tools), or return ``None`` if the Claude Agent
+    SDK isn't installed.
 
     Matches the shape returned by ``build_belt_server`` (``(name, server)`` or
     ``None``) so the backend's MCP registration loop treats it identically.
@@ -404,18 +731,142 @@ def build_fabric_server() -> tuple[str, Any] | None:
     async def fabric_stats(args):  # type: ignore[no-untyped-def]
         return await _fabric_stats_handler(args)
 
+    @tool(
+        "fabric_link_create",
+        (
+            "Create a LINK between two existing objects in the Fabric "
+            "ontology (e.g. connect an Order to its Customer). Both objects "
+            "must exist in the current workspace, and if the workspace has "
+            "declared link types the link must match one (type name + "
+            "endpoint object types), else it is refused with the reason. "
+            "Args: `from_id` (source object id), `to_id` (target object id), "
+            "`link_type` (relationship name, e.g. 'has_order'), `properties` "
+            "(optional JSON object of link metadata). Returns {created, "
+            "link:{id, from_object_id, to_object_id, link_type, properties}}. "
+            "An error means relay the reason."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "from_id": {
+                    "type": "string",
+                    "description": "Source object ID.",
+                },
+                "to_id": {
+                    "type": "string",
+                    "description": "Target object ID.",
+                },
+                "link_type": {
+                    "type": "string",
+                    "description": "Relationship type (e.g. 'has_order', 'belongs_to').",
+                },
+                "properties": {
+                    "type": "object",
+                    "description": "Optional metadata to store on the link.",
+                },
+            },
+            "required": ["from_id", "to_id", "link_type"],
+            "additionalProperties": False,
+        },
+    )
+    async def fabric_link_create(args):  # type: ignore[no-untyped-def]
+        return await _fabric_link_create_handler(args)
+
+    @tool(
+        "fabric_link_delete",
+        (
+            "Delete one LINK from the Fabric ontology by its link id (find "
+            "ids via fabric_query's linked_to traversal or the links list). "
+            "Only removes the relationship — the objects on both ends are "
+            "untouched. Scoped to the current workspace: a link id from "
+            "another workspace refuses. Args: `link_id`. Returns {deleted, "
+            "link}. An error means relay the reason."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "link_id": {
+                    "type": "string",
+                    "description": "ID of the link to delete.",
+                },
+            },
+            "required": ["link_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def fabric_link_delete(args):  # type: ignore[no-untyped-def]
+        return await _fabric_link_delete_handler(args)
+
+    @tool(
+        "fabric_type_update",
+        (
+            "Edit an object TYPE's schema in the Fabric ontology — rename "
+            "properties and/or add new ones (rename + additive only; "
+            "removing a property never scrubs existing data). Requires an "
+            "ADMIN role in the workspace; non-admins get a structured "
+            "denial. The type's version is bumped and existing objects are "
+            "migrated (renamed keys move; an added property with a default "
+            "is backfilled). Args: `type_name` (which type to edit), "
+            "`renames` (JSON object mapping old property name -> new name), "
+            "`properties` (array of {name, type, required?, default?} — "
+            "REPLACES the declared schema, so include existing properties "
+            "you want to keep), `description` (new type description). At "
+            "least one change is required. Returns {updated, type:{id, "
+            "name, version, description, properties}}. An error means relay "
+            "the reason."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "type_name": {
+                    "type": "string",
+                    "description": "Name of the object type to edit (e.g. 'Customer').",
+                },
+                "renames": {
+                    "type": "object",
+                    "description": "Map of old property name -> new property name.",
+                },
+                "properties": {
+                    "type": "array",
+                    "description": (
+                        "Declared schema replacement: array of {name, type, "
+                        "required?, default?} objects. Include properties to keep."
+                    ),
+                    "items": {"type": "object"},
+                },
+                "description": {
+                    "type": "string",
+                    "description": "New human-readable description for the type.",
+                },
+            },
+            "required": ["type_name"],
+            "additionalProperties": False,
+        },
+    )
+    async def fabric_type_update(args):  # type: ignore[no-untyped-def]
+        return await _fabric_type_update_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[fabric_query, fabric_stats],
+        tools=[
+            fabric_query,
+            fabric_stats,
+            fabric_link_create,
+            fabric_link_delete,
+            fabric_type_update,
+        ],
     )
     return SERVER_NAME, server
 
 
 __all__ = [
+    "FABRIC_LINK_CREATE_TOOL_ID",
+    "FABRIC_LINK_DELETE_TOOL_ID",
     "FABRIC_QUERY_TOOL_ID",
     "FABRIC_STATS_TOOL_ID",
     "FABRIC_TOOL_IDS",
+    "FABRIC_TYPE_UPDATE_TOOL_ID",
     "SERVER_NAME",
     "build_fabric_server",
 ]

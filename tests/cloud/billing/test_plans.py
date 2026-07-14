@@ -22,6 +22,14 @@
 #   each tier carries the approved ceiling (free=1000 explicit trial, go/pro/pro_max
 #   = allotment × 1.5, enterprise=None uncapped), and an unknown key built directly
 #   FAILS CLOSED to the Free ceiling (never None/uncapped).
+# Updated 2026-07-08 (feat/billing-smb-caps): added coverage for the three SMB
+#   resource caps (``max_seats`` / ``max_pockets`` / ``max_connectors``): every tier
+#   carries an int cap (Enterprise is None = uncapped), Free ``max_seats`` == the
+#   ``Workspace.seats`` default (5) so no workspace regresses, and an unknown key
+#   built directly FAILS CLOSED to the Free value on all three (never None/uncapped).
+#   The numbers under test are the GENEROUS PLACEHOLDERS pending the captain's
+#   pricing call — these tests lock the machinery (present on every tier, uncapped
+#   Enterprise, fail-closed default), not the exact figures.
 
 from __future__ import annotations
 
@@ -59,6 +67,30 @@ EXPECTED_USAGE_LABELS = {
     "pro": "5× the usage",
     "pro_max": "20× the usage",
     "enterprise": "Custom",
+}
+# The three SMB resource caps (feat/billing-smb-caps) — GENEROUS PLACEHOLDERS
+# pending the captain's pricing call. Enterprise is None (uncapped). Free
+# ``max_seats`` MUST equal the Workspace.seats default (5) so no workspace regresses.
+EXPECTED_MAX_SEATS: dict[str, int | None] = {
+    "free": 5,
+    "go": 10,
+    "pro": 25,
+    "pro_max": 100,
+    "enterprise": None,
+}
+EXPECTED_MAX_POCKETS: dict[str, int | None] = {
+    "free": 200,
+    "go": 1_000,
+    "pro": 5_000,
+    "pro_max": 20_000,
+    "enterprise": None,
+}
+EXPECTED_MAX_CONNECTORS: dict[str, int | None] = {
+    "free": 50,
+    "go": 100,
+    "pro": 250,
+    "pro_max": 1_000,
+    "enterprise": None,
 }
 
 
@@ -140,6 +172,71 @@ def test_build_unknown_key_fails_closed_to_free_ceiling():
     bogus = plans._build("definitely_not_a_tier")
     assert bogus.monthly_ceiling == EXPECTED_CEILINGS["free"]
     assert bogus.monthly_ceiling is not None
+
+
+# ---------------------------------------------------------------------------
+# SMB resource caps — max_seats / max_pockets / max_connectors.
+# ---------------------------------------------------------------------------
+
+
+def test_every_tier_carries_the_three_smb_caps():
+    """Each tier exposes max_seats / max_pockets / max_connectors (the machinery).
+
+    Locks that the caps are PRESENT on every tier with the placeholder values, not
+    that the figures are final — the captain's pricing call moves the numbers, not
+    the shape.
+    """
+    by_key = {p.key: p for p in plans.list_plans()}
+    for key in EXPECTED_ORDER:
+        assert by_key[key].max_seats == EXPECTED_MAX_SEATS[key], key
+        assert by_key[key].max_pockets == EXPECTED_MAX_POCKETS[key], key
+        assert by_key[key].max_connectors == EXPECTED_MAX_CONNECTORS[key], key
+
+
+def test_free_max_seats_is_at_least_the_workspace_default():
+    """Free max_seats MUST be >= the Workspace.seats model default (5) — no regression.
+
+    The seat gate enforces max(doc.seats, plan.max_seats); if Free's cap dropped
+    below 5 a default free workspace would be blocked below the seats it already
+    has. This is the CRITICAL non-regression invariant.
+    """
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    default_seats = Workspace.model_fields["seats"].default
+    assert default_seats == 5
+    assert plans.get_plan("free").max_seats is not None
+    assert plans.get_plan("free").max_seats >= default_seats
+
+
+def test_enterprise_smb_caps_are_uncapped():
+    """Enterprise is the one uncapped tier on every SMB cap (None, never a number)."""
+    ent = plans.get_plan("enterprise")
+    assert ent.max_seats is None
+    assert ent.max_pockets is None
+    assert ent.max_connectors is None
+
+
+def test_non_enterprise_smb_caps_are_positive_ints():
+    """Every non-Enterprise tier carries a concrete positive cap on all three."""
+    by_key = {p.key: p for p in plans.list_plans()}
+    for key in ("free", "go", "pro", "pro_max"):
+        for cap in (by_key[key].max_seats, by_key[key].max_pockets, by_key[key].max_connectors):
+            assert isinstance(cap, int) and cap > 0, key
+
+
+def test_build_unknown_key_fails_closed_to_free_smb_caps():
+    """An unknown key built directly caps at the Free values on all three — never None.
+
+    Same fail-closed floor the ceiling uses: a stray/typo'd key must NOT resolve to
+    an uncapped SMB cap.
+    """
+    bogus = plans._build("definitely_not_a_tier")
+    assert bogus.max_seats == EXPECTED_MAX_SEATS["free"]
+    assert bogus.max_pockets == EXPECTED_MAX_POCKETS["free"]
+    assert bogus.max_connectors == EXPECTED_MAX_CONNECTORS["free"]
+    assert bogus.max_seats is not None
+    assert bogus.max_pockets is not None
+    assert bogus.max_connectors is not None
 
 
 def test_list_plans_is_cheapest_first():

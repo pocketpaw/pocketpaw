@@ -1,5 +1,12 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-07-08 (feat/external-alerting-delivery) — added
+``NotificationDeliveryConfig`` (the per-workspace external-delivery config: Slack
+incoming-webhook + generic HTTPS webhook + enabled switch + per-kind routing) to
+the imports, ``__all__``, and ``get_all_documents()`` so the
+``notification_delivery_configs`` collection is wired into ``init_beanie``. Only
+``ee.cloud.notifications`` (service writes, delivery reads) imports the doc class
+directly (import-linter "Notifications" contract).
 Updated: 2026-07-03 (feat/files-share-links FL-12b) — added ``ShareLink`` (the
 public, token-gated file share-link doc) to the lazy uploads loader,
 ``get_all_documents()`` and ``__all__`` so the ``file_share_links`` collection
@@ -84,6 +91,17 @@ Updated: 2026-06-20 (feat/szd-slice2-discovery, S2-R1) — added ``InstinctRuleD
 the imports, ``__all__``, and ``get_all_documents()`` so the ``instinct_rules``
 collection is wired into ``init_beanie`` and the ``beanie_test_db`` fixture. Only
 ``ee.cloud.rules.service`` imports the doc class directly (import-linter "Rules").
+Updated: 2026-07-09 (feat/instinct-guardrail-rules) — added
+``InstinctWorkspaceConfig`` (the per-workspace tri-state override on the global
+``instinct_enforce_discovered_rules`` flag) to the imports, ``__all__``, and
+``get_all_documents()`` so the ``instinct_workspace_configs`` collection is wired
+into ``init_beanie``. Only ``ee.cloud.rules.service`` writes it (import-linter
+"Rules").
+Updated: 2026-07-11 (feat/external-alerting-c2c3) — added
+``WorkspaceAutomationConfig`` (the per-workspace opt-out for the always-on
+background sweeps) to the imports, ``__all__``, and ``get_all_documents()`` so the
+``workspace_automation_configs`` collection is wired into ``init_beanie``. Only
+``ee.cloud.automations_status.service`` writes it (import-linter "AutomationsStatus").
 """
 
 from __future__ import annotations
@@ -125,6 +143,7 @@ from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
+from pocketpaw_ee.cloud.models.instinct_workspace_config import InstinctWorkspaceConfig
 from pocketpaw_ee.cloud.models.invite import Invite
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
@@ -137,6 +156,7 @@ from pocketpaw_ee.cloud.models.meeting import (
 from pocketpaw_ee.cloud.models.member_ingest_state import MemberIngestState
 from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reaction
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
+from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
 from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
@@ -159,6 +179,7 @@ from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 from pocketpaw_ee.cloud.models.vapid_keypair import VapidKeypair
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
+from pocketpaw_ee.cloud.models.workspace_automation_config import WorkspaceAutomationConfig
 from pocketpaw_ee.cloud.models.workspace_job import WorkspaceJobDoc
 
 # Lazy import to avoid circular imports
@@ -273,6 +294,8 @@ __all__ = [
     "GroupAgent",
     "InstinctApproval",
     "InstinctRuleDoc",
+    "InstinctWorkspaceConfig",
+    "WorkspaceAutomationConfig",
     "Invite",
     "Lead",
     "LeadSource",
@@ -285,6 +308,7 @@ __all__ = [
     "Mention",
     "Message",
     "Notification",
+    "NotificationDeliveryConfig",
     "NotificationSource",
     "OAuthAccount",
     "Payment",
@@ -343,6 +367,9 @@ def get_all_documents():
         AgentSessionRuntimeDoc,
         Comment,
         Notification,
+        # Per-workspace external-delivery config (Slack + generic webhook).
+        # Only ``ee.cloud.notifications`` service/delivery import it.
+        NotificationDeliveryConfig,
         FileObj,
         FileUpload,
         FileFolder,
@@ -375,6 +402,12 @@ def get_all_documents():
         # Discovered governed rules (SZD slice-2). Only ``ee.cloud.rules.service``
         # writes it.
         InstinctRuleDoc,
+        # Per-workspace Instinct enforcement override (feat/instinct-guardrail-rules).
+        # Only ``ee.cloud.rules.service`` writes it.
+        InstinctWorkspaceConfig,
+        # Per-workspace automation opt-out (feat/external-alerting-c2c3). Only
+        # ``ee.cloud.automations_status.service`` writes it.
+        WorkspaceAutomationConfig,
         Message,
         ReadState,
         RequestLog,

@@ -147,6 +147,36 @@ class SurfaceMeta:
     # these into ``belt_propose_change``. Both absent → ask-first behavior.
     repo: str | None = None
     base_branch: str | None = None
+    # Code surface hints — set by the /code page's SurfaceMetaProvider reading
+    # the live cloudProjectDetails / CodeStore.workspacePath.
+    #
+    # ``current_dir`` is the working directory the IDE is scoped to — either a
+    # real filesystem path (local-disk adapter, e.g.
+    # ``~/.pocketpaw/uploads/projects/{ws}/{uid}/{name}/``) or the storage key
+    # prefix (S3 adapter, e.g. ``projects/{ws}/{uid}/{name}/``). The code
+    # handler injects it into the preamble so the agent knows where to work.
+    #
+    # ``project_name`` is the human-friendly project name (e.g. ``"my-app"``),
+    # shown in the preamble so the agent can refer to the project by name.
+    # Omitted when working locally (no cloud project).
+    #
+    # ``storage_root`` is the canonical cloud storage key prefix (set on both
+    # local-disk and S3 adapters). Always projects/{ws}/{uid}/{name}/.
+    #
+    # ``is_cloud_storage`` is ``"true"`` when the project has no local
+    # filesystem representation (pure S3 adapter). The agent knows files
+    # aren't directly on disk and must use the cloud project REST API or
+    # a synced Daytona sandbox.
+    #
+    # ``workspace_vm`` is ``"true"`` when the project is running inside
+    # a shared workspace VM (Daytona sandbox). The agent uses Daytona MCP
+    # tools exclusively — all file I/O and command execution routes through
+    # the sandbox.
+    current_dir: str | None = None
+    project_name: str | None = None
+    storage_root: str | None = None
+    is_cloud_storage: str | None = None
+    workspace_vm: str | None = None
 
 
 @dataclass(frozen=True)

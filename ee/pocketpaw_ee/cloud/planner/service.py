@@ -68,6 +68,12 @@
 #   the dependent-dispatch cascade still fires. A requeued or escalated
 #   attempt never saves its output file, uploads artifacts, or
 #   auto-completes.
+# Updated: 2026-07-08 (feat/billing-enforce-gate) — ``_execute_ready_plan_tasks``
+#   now runs the shared run-start BILLING gate
+#   (``credits.guards.over_billing_limit``) after it finds ready tasks and BEFORE
+#   the claim + ``pool.run`` batch, so an over-budget tenant makes NO model call
+#   on the planner path. Tasks stay ``proposed`` and execute on a later tick once
+#   budget frees. Flag-gated no-op unless ``billing_enforced``.
 """Planner entity — business logic service.
 
 Public API (all module-level ``async def``):
@@ -1258,6 +1264,27 @@ async def _execute_ready_plan_tasks(
         )
         return
     logger.info("_execute_ready_plan_tasks: %d ready task(s)", len(ready))
+
+    # Run-start BILLING gate — the planner is a background (non-HTTP) executor, so
+    # reject BEFORE claiming/running any task rather than starting work an
+    # over-budget tenant can't pay for. Gating here (after we know there is work,
+    # before the claim + ``pool.run`` batch) means NO model call fires while over
+    # budget; the tasks stay ``proposed`` and execute on a later tick once budget
+    # frees. Flag-gated no-op unless ``billing_enforced``; there is no user-facing
+    # stream on this path, so a warning log is the terminal signal.
+    from pocketpaw_ee.cloud.credits.guards import over_billing_limit
+
+    billing_reject = await over_billing_limit(workspace_id)
+    if billing_reject is not None:
+        logger.warning(
+            "_execute_ready_plan_tasks: workspace %s over billing limit (%s) — "
+            "skipping execution of %d ready task(s) for project %s",
+            workspace_id,
+            billing_reject.code,
+            len(ready),
+            project_id,
+        )
+        return
 
     from types import SimpleNamespace
 

@@ -1,5 +1,24 @@
 # service.py — Generic Firestore→Fabric ingestion worker.
 # Created: 2026-06-11 — generic Firestore→Fabric ingestion worker.
+# Updated: 2026-07-11 (feat/real-pipeline-s1) — connector-source dispatch. The
+#   run path now branches on ``mapping.source_kind``: "firestore" rides the
+#   existing reader path UNCHANGED; "connector" routes through the new
+#   ``_ingest_from_connector`` — resolve the workspace's enabled
+#   ``WorkspaceConnector`` row (missing/disabled → error result, never raise),
+#   look the ingestor up in the OSS ``FABRIC_INGESTORS`` registry
+#   (lazy-imported; unregistered → error result), then
+#   ``await ingestor(store, workspace_id=..., user_id=wc.user_id)`` so a
+#   user-scoped connector reads with THAT member's OAuth token bucket (None =
+#   the shared/workspace bucket — the member_ingest seam). State bookkeeping +
+#   FabricIngestCompleted emit are reused verbatim; the cursor is untouched on
+#   connector runs (the ingestor owns its own read window). Also added the
+#   mapping-authoring service surface for the new router: ``list_mappings`` /
+#   ``upsert_mapping`` / ``delete_mapping`` (service.py stays the only reader
+#   of FabricIngestConfig — cloud rule §2).
+# Updated: 2026-07-11 (feat/external-alerting-c2c3) — ``run_ingest_sweep`` now
+#   filters sources by the per-workspace automation opt-out
+#   (``automations_status.service.filter_sweep_enabled_workspaces``): a tenant
+#   that turned its background sweeps off is skipped. Fails OPEN.
 # Updated: 2026-06-11 (rebase onto dev) — the per-document upsert now delegates
 #   to the OSS connector→Fabric mapper (pocketpaw.connectors.fabric_ingest
 #   .ingest_records, landed on dev in the Calendar ingestion PR #1418) instead
@@ -221,35 +240,52 @@ async def ingest_collection(
     errors: list[str] = []
     objects = 0
     new_cursor = state.cursor
+    source_kind = getattr(mapping, "source_kind", "firestore")
 
-    if reader is None:
+    # Only the firestore path needs a reader — a connector run's ingestor owns
+    # its own read (and constructing the default reader pulls google creds).
+    if reader is None and source_kind != "connector":
         reader = _default_reader()
 
     try:
-        # Backfill reads from an empty cursor (everything); incremental reads
-        # only documents past the stored high-water mark.
-        lower_bound = "" if mode == "backfill" else state.cursor
-        docs = await reader.read_collection(
-            mapping.collection,
-            cursor_field=mapping.cursor_field,
-            cursor=lower_bound,
-            limit=_MAX_DOCS_PER_RUN,
-        )
-        # Advance the high-water mark to the MAX cursor value we actually saw
-        # across docs with a usable identity — a real watermark from document
-        # data, never run wall-clock. Persisted only on a clean run (below).
-        for doc in docs:
-            if not str(doc.get("path") or ""):
-                continue  # no stable identity — the mapper skips it too
-            doc_cursor = _doc_cursor(doc, mapping.cursor_field)
-            if doc_cursor and doc_cursor > new_cursor:
-                new_cursor = doc_cursor
-        # Upsert through the canonical OSS connector→Fabric loop.
-        objects = await _mirror_docs(store, workspace_id, docs, mapping)
-        # Link rules run after all objects exist so a link can target a
-        # document mirrored earlier in the same batch.
-        if mapping.link_rules:
-            await _apply_link_rules(store, workspace_id, docs, mapping)
+        if source_kind == "connector":
+            # Connector-source dispatch (feat/real-pipeline-s1): pull records
+            # through the OSS ingestor registry with the workspace's own
+            # connector binding. Misconfiguration (connector not connected,
+            # ingestor not registered) is an error RESULT, never a raise —
+            # same contract as a missing mapping above. The cursor is left
+            # untouched: the ingestor owns its own read window and the
+            # upsert-by-(source_connector, source_id) loop keeps re-runs
+            # idempotent.
+            objects, connector_error = await _ingest_from_connector(store, workspace_id, mapping)
+            if connector_error:
+                errors.append(f"{source_id}: {connector_error}")
+        else:
+            # Backfill reads from an empty cursor (everything); incremental
+            # reads only documents past the stored high-water mark.
+            lower_bound = "" if mode == "backfill" else state.cursor
+            docs = await reader.read_collection(
+                mapping.collection,
+                cursor_field=mapping.cursor_field,
+                cursor=lower_bound,
+                limit=_MAX_DOCS_PER_RUN,
+            )
+            # Advance the high-water mark to the MAX cursor value we actually
+            # saw across docs with a usable identity — a real watermark from
+            # document data, never run wall-clock. Persisted only on a clean
+            # run (below).
+            for doc in docs:
+                if not str(doc.get("path") or ""):
+                    continue  # no stable identity — the mapper skips it too
+                doc_cursor = _doc_cursor(doc, mapping.cursor_field)
+                if doc_cursor and doc_cursor > new_cursor:
+                    new_cursor = doc_cursor
+            # Upsert through the canonical OSS connector→Fabric loop.
+            objects = await _mirror_docs(store, workspace_id, docs, mapping)
+            # Link rules run after all objects exist so a link can target a
+            # document mirrored earlier in the same batch.
+            if mapping.link_rules:
+                await _apply_link_rules(store, workspace_id, docs, mapping)
     except Exception as exc:  # noqa: BLE001 — isolate this collection so one bad
         # source never crashes the sweep or the other collections.
         logger.warning(
@@ -340,6 +376,18 @@ async def run_ingest_sweep(
     fn = ingest_fn or ingest_collection
 
     sources = await list_ingest_sources(workspace_id=workspace_id)
+    if not sources:
+        return {"sources": 0, "ok": 0, "errors": 0}
+
+    # Per-workspace opt-out (feat/external-alerting-c2c3): drop sources whose
+    # workspace turned its background sweeps off. One deduped check per unique
+    # workspace; fails OPEN so a config-read hiccup keeps the always-on default.
+    from pocketpaw_ee.cloud.automations_status.service import (
+        filter_sweep_enabled_workspaces,
+    )
+
+    enabled_ws = await filter_sweep_enabled_workspaces({s["workspace_id"] for s in sources})
+    sources = [s for s in sources if s["workspace_id"] in enabled_ws]
     if not sources:
         return {"sources": 0, "ok": 0, "errors": 0}
 
@@ -619,6 +667,127 @@ async def _apply_link_rules(
             )
 
 
+async def _ingest_from_connector(
+    store: StoreLike,
+    workspace_id: str,
+    mapping: Any,
+) -> tuple[int, str]:
+    """Run one connector-source mapping through the OSS ingestor registry.
+
+    Returns ``(objects_ingested, error)`` — ``error`` is ``""`` on success.
+    The two misconfiguration cases report as an error string (never raise):
+
+    1. the workspace has no ENABLED ``WorkspaceConnector`` row for the
+       connector — not connected, or the operator disabled it (tenant filter
+       on the read, cloud rule §7);
+    2. no ingestor is registered under the connector id in the OSS
+       ``FABRIC_INGESTORS`` registry.
+
+    On success the ingestor is called with the mapping's tenant-scoped store
+    and the connector row's ``user_id`` — a user-scoped connector (VIP
+    onboarding) reads with THAT member's OAuth token bucket; ``None`` means
+    the shared/workspace bucket (the member_ingest seam, proven at
+    member_ingest/service.py's WorkspaceConnector lookup). A genuine ingestor
+    failure (API error, expired token) propagates to ``ingest_collection``'s
+    per-collection isolation and lands as an error result there.
+    """
+    # service-to-model read of another entity's doc — same minimal correct
+    # path member_ingest/service.py takes (flagged there for a future
+    # ``connectors.service.list_user_connectors`` extraction).
+    from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
+
+    connector_id = getattr(mapping, "connector_id", None) or mapping.collection
+    wc = await WorkspaceConnector.find_one(
+        WorkspaceConnector.workspace == workspace_id,  # tenant filter
+        WorkspaceConnector.name == connector_id,
+        WorkspaceConnector.enabled == True,  # noqa: E712 — Beanie needs ==, not `is`
+    )
+    if wc is None:
+        return 0, f"connector {connector_id!r} is not connected/enabled for this workspace"
+
+    # Lazy import — EE reaches into the OSS registry, never the reverse.
+    from pocketpaw.connectors.fabric_ingest import get_fabric_ingestor
+
+    ingestor = get_fabric_ingestor(connector_id)
+    if ingestor is None:
+        return 0, f"no fabric ingestor registered for connector {connector_id!r}"
+
+    result = await ingestor(store, workspace_id=workspace_id, user_id=wc.user_id)
+    return result.total, ""
+
+
+# --------------------------------------------------------------------------
+# Mapping authoring (the transform surface's service layer)
+# --------------------------------------------------------------------------
+
+
+async def list_mappings(workspace_id: str) -> list[dict[str, Any]]:
+    """Return the workspace's authored mappings (empty list when no config).
+
+    Tenant filter on the read (cloud rule §7). Reads the config row regardless
+    of its ``enabled`` flag — authoring must show what's configured even while
+    the sweep is paused.
+    """
+    from pocketpaw_ee.cloud.models.fabric_ingest_state import FabricIngestConfig
+
+    cfg = await FabricIngestConfig.find_one(FabricIngestConfig.workspace == workspace_id)
+    if cfg is None:
+        return []
+    return [m.model_dump() for m in cfg.mappings]
+
+
+async def upsert_mapping(workspace_id: str, spec: dict[str, Any]) -> dict[str, Any]:
+    """Create-or-replace one mapping, keyed on ``collection``.
+
+    ``spec`` is validated through the DTO at entry (cloud rule §6) so a
+    malformed mapping never lands in the stored config. Creates the
+    workspace's config row on first authoring. Returns the stored mapping.
+    """
+    from pocketpaw_ee.cloud.fabric_ingest.dto import FieldMappingSpec
+    from pocketpaw_ee.cloud.models.fabric_ingest_state import (
+        FabricFieldMapping,
+        FabricIngestConfig,
+    )
+
+    validated = FieldMappingSpec.model_validate(spec)
+    mapping = FabricFieldMapping.model_validate(validated.model_dump())
+
+    cfg = await FabricIngestConfig.find_one(FabricIngestConfig.workspace == workspace_id)
+    if cfg is None:
+        cfg = FabricIngestConfig(workspace=workspace_id, mappings=[mapping])
+        await cfg.insert()
+        return mapping.model_dump()
+
+    replaced = False
+    mappings: list[FabricFieldMapping] = []
+    for existing in cfg.mappings:
+        if existing.collection == mapping.collection:
+            mappings.append(mapping)
+            replaced = True
+        else:
+            mappings.append(existing)
+    if not replaced:
+        mappings.append(mapping)
+    cfg.mappings = mappings
+    await cfg.save()  # no-event: config authoring, surfaced via the router
+    return mapping.model_dump()
+
+
+async def delete_mapping(workspace_id: str, collection: str) -> bool:
+    """Remove the mapping keyed on ``collection``. Returns True if removed."""
+    from pocketpaw_ee.cloud.models.fabric_ingest_state import FabricIngestConfig
+
+    cfg = await FabricIngestConfig.find_one(FabricIngestConfig.workspace == workspace_id)
+    if cfg is None:
+        return False
+    kept = [m for m in cfg.mappings if m.collection != collection]
+    if len(kept) == len(cfg.mappings):
+        return False
+    cfg.mappings = kept
+    await cfg.save()  # no-event: config authoring, surfaced via the router
+    return True
+
+
 # --------------------------------------------------------------------------
 # Default reader + store (lazy — keep google + OSS imports out of unit tests)
 # --------------------------------------------------------------------------
@@ -650,7 +819,10 @@ def _default_reader() -> FirestoreReader:
 
 __all__ = [
     "FirestoreReader",
+    "delete_mapping",
     "ingest_collection",
     "list_ingest_sources",
+    "list_mappings",
     "run_ingest_sweep",
+    "upsert_mapping",
 ]

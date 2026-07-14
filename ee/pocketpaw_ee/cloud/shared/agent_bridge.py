@@ -31,6 +31,12 @@ catches ``AgentDisabled`` from ``pool.get`` explicitly and SKIPS the agent
 (returns None, no error to the channel) — a soft-disabled agent simply stops
 responding in groups/DMs until re-enabled.
 
+Updated 2026-07-08 (feat/billing-enforce-gate): ``_dispatch_agent_responses``
+now runs the shared run-start billing gate (``credits.guards.over_billing_limit``)
+ABOVE the respond-mode evaluation — before ``_smart_relevance_check``'s Haiku
+pre-classifier call and before ``pool.run`` — so an over-budget tenant triggers
+NO model call on the group/DM auto-response path. On rejection it emits one
+``agent.error`` to the group and returns.
 Updated 2026-07-11 (ART-1): ``_run_agent_response`` binds a per-run
 delivered-artifact collector around ``pool.run`` and drains it into a
 ``{type:"artifact", meta}`` attachment per successful ``deliver_artifact`` call,
@@ -50,6 +56,7 @@ from typing import Any
 
 from pocketpaw_ee.cloud.realtime.emit import emit
 from pocketpaw_ee.cloud.realtime.events import (
+    AgentError,
     AgentStreamChunk,
     AgentStreamEnd,
     AgentStreamStart,
@@ -123,6 +130,40 @@ async def _dispatch_agent_responses(data: dict) -> None:
         len(group.agents),
         [(a.agent_id, a.respond_mode) for a in group.agents],
     )
+
+    # Run-start BILLING gate — placed ABOVE the respond-mode evaluation so an
+    # over-budget tenant makes NO model call at all. Critically this sits before
+    # ``_should_agent_respond`` -> ``_smart_relevance_check``: that pre-classifier
+    # is itself a (cheap Haiku) model call, so gating only before ``pool.run``
+    # would still let an over-budget workspace spend on the relevance check. The
+    # shared guard is flag-gated (a no-op unless ``billing_enforced``) and runs
+    # both the empty-wallet and monthly-ceiling assertions; on rejection we emit a
+    # single terminal ``agent.error`` to the group (best-effort — no run_id /
+    # stream transport on this event-bus path) and return without dispatching any
+    # agent. An empty ``workspace_id`` is a no-op (no wallet to attribute).
+    from pocketpaw_ee.cloud.credits.guards import over_billing_limit
+
+    billing_reject = await over_billing_limit(workspace_id)
+    if billing_reject is not None:
+        logger.warning(
+            "Agent bridge: workspace %s over billing limit (%s) — skipping all agents in group %s",
+            workspace_id,
+            billing_reject.code,
+            group_id,
+        )
+        try:
+            await emit(
+                AgentError(
+                    data={
+                        "group_id": group_id,
+                        "code": billing_reject.code,
+                        "message": str(billing_reject),
+                    },
+                )
+            )
+        except Exception:
+            logger.debug("billing agent.error emit failed for group %s", group_id, exc_info=True)
+        return
 
     agents_to_run: list[str] = []
     for group_agent in group.agents:

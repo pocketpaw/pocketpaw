@@ -15,6 +15,17 @@
 # crash). ``check_quota`` is stubbed at the run_core seam (it is called via the
 # locally-imported ``credits_service`` module, patched on that module) so these
 # tests assert the WIRING, not the chunk-2 quota math (test_quota.py owns that).
+#
+# Changed 2026-07-08 (feat/billing-enforce-gate): run_core's
+# ``_reject_if_over_credit_quota`` now delegates to the shared
+# ``credits.guards.reject_if_over_billing``, so the worker/executor leg gained the
+# BALANCE assertion (``check_balance``, wallet <= 0) it lacked — it ran only
+# ``check_quota`` before. Two harness updates follow: (1) the ``billing_enforced``
+# flag is now read inside the guards module, so the flag stub is applied to
+# ``credits.guards.get_settings`` (not run_core's); (2) ``check_balance`` runs
+# BEFORE ``check_quota`` in the shared gate, so it is stubbed to a no-op by default
+# in ``_wire_common`` and the quota cases stay isolated. A new case locks the new
+# leg: enforced + empty wallet -> the same clean reject with no model call.
 
 from __future__ import annotations
 
@@ -101,12 +112,23 @@ def _wire_common(monkeypatch, transport, *, enforced: bool) -> dict[str, bool]:
         return False
 
     monkeypatch.setattr(run_core, "_reject_if_over_jail_quota", _no_jail_reject)
-    # Point the executor's flag at a stub carrying the desired posture.
+    # Point the flag at a stub carrying the desired posture. The billing flag is
+    # read inside the shared guard, so patch THAT module's get_settings —
+    # run_core no longer imports it (the orphaned import was dropped).
     from types import SimpleNamespace
 
-    monkeypatch.setattr(
-        run_core, "get_settings", lambda: SimpleNamespace(billing_enforced=enforced)
-    )
+    from pocketpaw_ee.cloud.credits import guards
+
+    stub_settings = SimpleNamespace(billing_enforced=enforced)
+    monkeypatch.setattr(guards, "get_settings", lambda: stub_settings)
+
+    # The shared gate now runs check_balance BEFORE check_quota. Default it to a
+    # no-op so the quota-focused cases below stay isolated (the balance-reject
+    # case overrides it). Patched on the service module the guard imports.
+    async def _balance_ok(workspace_id):
+        return None
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.credits.service.check_balance", _balance_ok)
     return called
 
 
@@ -145,6 +167,53 @@ async def test_enforced_over_quota_rejects_and_does_not_call_model(monkeypatch):
     assert [e.event for e in events] == ["error"]
     assert events[0].data["code"] == "credits.quota_exceeded"
     # The run was marked terminally failed (and ONLY that — no completed mark).
+    assert mark_calls == [{"run_id": "r1", "status": "failed", "error": events[0].data["message"]}]
+
+
+# ---------------------------------------------------------------------------
+# 1b — enforced + EMPTY WALLET (balance <= 0) -> run rejected, model NOT called.
+#      Locks the new balance leg the worker/executor path gained by delegating to
+#      the shared guard (it previously caught only the quota case).
+# ---------------------------------------------------------------------------
+
+
+async def test_enforced_empty_wallet_rejects_and_does_not_call_model(monkeypatch):
+    from pocketpaw_ee.cloud._core.errors import InsufficientCredits
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+    called = _wire_common(monkeypatch, transport, enforced=True)
+
+    # check_balance raises FIRST (wallet <= 0) -> the gate rejects before quota.
+    async def _empty_wallet(workspace_id):
+        raise InsufficientCredits(1, 0)
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.credits.service.check_balance", _empty_wallet)
+
+    # check_quota must never be reached — balance is the primary guard.
+    async def _quota_unreached(workspace_id):
+        raise AssertionError("check_quota must not run once check_balance rejects")
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.credits.service.check_quota", _quota_unreached)
+
+    mark_calls: list[dict[str, Any]] = []
+
+    async def _track_terminal(run_id, *, status, error=None, **k):
+        mark_calls.append({"run_id": run_id, "status": status, "error": error})
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.runs.run_core.run_service.mark_terminal", _track_terminal
+    )
+
+    await run_core.execute_run(_spec())
+
+    # THE MONEY GUARANTEE: the agent loop (model) never ran.
+    assert called["agent_loop"] is False, "model must NOT be invoked on an empty-wallet block"
+
+    # A terminal ``error`` frame went to the stream with the balance code.
+    events = [e async for e in transport.read_events("r1", after="0", block_ms=10)]
+    assert [e.event for e in events] == ["error"]
+    assert events[0].data["code"] == "credits.insufficient"
     assert mark_calls == [{"run_id": "r1", "status": "failed", "error": events[0].data["message"]}]
 
 

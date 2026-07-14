@@ -1,6 +1,18 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-07-11 (self-serve-analysis S1): Added ``fabric_analyst`` (default False,
+    env POCKETPAW_FABRIC_ANALYST) — gates the Fabric transparent-analysis read
+    engine (SQL GROUP BY aggregation + reasoning steps on FabricStore.query /
+    POST /fabric/query). Off (default): an aggregation query is rejected
+    fail-loud with FabricAnalystDisabledError -> HTTP 422
+    fabric.analyst_disabled; plain queries are unaffected either way.
+  - 2026-07-11 (feat/external-alerting-c2c3): Added ``automation_evaluator_autostart``
+    (default True, env POCKETPAW_AUTOMATION_EVALUATOR_AUTOSTART) — the OSS
+    always-on automation switch. When on (default), the background
+    AutomationEvaluator starts at dashboard boot so threshold rules fire without
+    a manual POST /automations/evaluator/start. A new default-ON flag is safe: a
+    fresh install with no enabled rules just sleeps.
   - 2026-07-11 (FST-8 — divergence report + docs): Refreshed the
     ``fabric_source_truth_mode`` Field description — shadow/enforce semantics
     SHIPPED in FST-3..7 (the FST-1 "RESERVED / INERT" wording was stale):
@@ -1804,6 +1816,17 @@ class Settings(BaseSettings):
             "Set via POCKETPAW_INSTINCT_ENFORCE_DISCOVERED_RULES."
         ),
     )
+    automation_evaluator_autostart: bool = Field(
+        default=True,
+        description=(
+            "When true (the default), the background AutomationEvaluator starts at "
+            "dashboard boot so threshold/data-change rules fire without a manual "
+            "POST /automations/evaluator/start. This is the OSS always-on automation "
+            "switch — a new flag defaulting ON is safe because a fresh install with no "
+            "enabled rules does nothing but sleep. Set POCKETPAW_AUTOMATION_EVALUATOR_"
+            "AUTOSTART=false to keep the evaluator dormant until started via the router."
+        ),
+    )
 
     # Billing — Dodo Payments gateway (BC-2, the Gateway primitive).
     # The only payment gateway in v1; a provider abstraction
@@ -1921,6 +1944,23 @@ class Settings(BaseSettings):
             "killed. Default False so OSS / self-host deployments (which run no "
             "credit ledger) are unaffected; the cloud / subscription (PEE) "
             "deployments turn it on via POCKETPAW_BILLING_ENFORCED."
+        ),
+    )
+
+    # Self-serve analysis (S1 — transparent-analysis read engine). Gates the
+    # Fabric aggregation surface (FabricQuery.group_by/aggregate) end-to-end at
+    # the store, so neither the EE /fabric/query route nor agent-tool callers
+    # can aggregate while the feature is dark.
+    fabric_analyst: bool = Field(
+        default=False,
+        description=(
+            "Enable the Fabric self-serve-analysis read engine (S1): SQL "
+            "GROUP BY aggregation + human-readable reasoning steps on "
+            "FabricStore.query / POST /fabric/query. When False (the default) a "
+            "query carrying group_by/aggregate is rejected with a clear "
+            "FabricAnalystDisabledError (HTTP 422, code fabric.analyst_disabled) "
+            "— fail-loud, never silent degrade; plain queries are unaffected "
+            "either way. Set via POCKETPAW_FABRIC_ANALYST."
         ),
     )
 

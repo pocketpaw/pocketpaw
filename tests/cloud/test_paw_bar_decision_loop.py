@@ -84,6 +84,11 @@ def client(stores, monkeypatch):
     pp_store, _ = stores
     app = FastAPI()
     app.include_router(router)
+    # W4a — the admin CRUD routes resolve the caller's workspace via the cloud
+    # session dep; pin it for the bare test app (same as tests/cloud/conftest.py).
+    from pocketpaw_ee.cloud._core.deps import current_workspace_id
+
+    app.dependency_overrides[current_workspace_id] = lambda: "w-test"
     monkeypatch.setattr("pocketpaw_ee.paw_bar.router._store", lambda *a, **k: pp_store)
     return TestClient(app)
 
