@@ -6,6 +6,9 @@
 # collision guard), unknown key, revoked key, disallowed origin, missing origin,
 # and a constant-time key mismatch. Also asserts scope propagation (default set +
 # a narrowed override) and that user_id carries the caller's customer_ref.
+# Updated 2026-07-14 (adversarial review follow-up): + a non-str key → 401 guard
+# (FIX 2), and mint_foreign_site now mocks pockets_service.get with a cross-tenant
+# → Forbidden + no-Site-written assertion (FIX 1).
 
 from __future__ import annotations
 
@@ -142,6 +145,18 @@ async def test_empty_key_does_not_match_unpublished_signed_key(mongo_db):
 
 
 @pytest.mark.asyncio
+async def test_rejects_non_str_key(mongo_db):
+    """Review FIX 2: a non-str key (e.g. a smuggled ``{"$ne": ""}`` Mongo operator
+    dict, or a list) is rejected 401 by the isinstance guard — it must NEVER reach
+    ``find_one`` (NoSQL injection) or raise a 500 from ``len``/``compare_digest``."""
+    await _site()
+    for bad in ({"$ne": ""}, {"$gt": ""}, ["site_key_aaaaaaaaaaaaaaaa"], 12345, None):
+        with pytest.raises(HTTPException) as exc:
+            await resolve_site_key(bad, _ALLOWED_ORIGIN, "cust-1")  # type: ignore[arg-type]
+        assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_key_check_is_constant_time(mongo_db, monkeypatch):
     """The key comparison routes through secrets.compare_digest (constant-time),
     mirroring the leads path's H1 guarantee."""
@@ -163,21 +178,35 @@ async def test_key_check_is_constant_time(mongo_db, monkeypatch):
 
 # --------------------------------------------------------------------------- #
 # mint_foreign_site → resolve round-trip (T1.2 + T1.3 together)
+#
+# mint_foreign_site now runs the pockets-service ownership check first (review
+# FIX 1), so these mock ``pockets_service.get`` — an OWNED pocket returns a wire
+# dict; the cross-tenant test makes it raise Forbidden.
 # --------------------------------------------------------------------------- #
+
+_OWNED_POCKET = {"name": "Shop", "rippleSpec": {}}
 
 
 @pytest.mark.asyncio
 async def test_mint_foreign_site_then_resolve(mongo_db):
     """A foreign site (script_name="") minted by the service resolves by its
     signed_key — proving the lookup does NOT depend on script_name."""
-    site = await sites_service.mint_foreign_site(
-        workspace_id="ws-2",
-        pocket_id="pk-2",
-        owner="user:sam",
-        # Passed with scheme+port to prove normalization to a bare host.
-        allowed_origins=["https://shop.example.com:443"],
-        name="Sam's Concierge",
-    )
+    from unittest.mock import AsyncMock, patch
+
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value=_OWNED_POCKET),
+    ) as mock_get:
+        site = await sites_service.mint_foreign_site(
+            workspace_id="ws-2",
+            pocket_id="pk-2",
+            owner="user:sam",
+            # Passed with scheme+port to prove normalization to a bare host.
+            allowed_origins=["https://shop.example.com:443"],
+            name="Sam's Concierge",
+        )
+    # The ownership gate ran with (pocket_id, owner) before the insert.
+    mock_get.assert_awaited_once_with("pk-2", "user:sam")
     assert site.script_name == ""
     assert site.deployed is False
     assert site.signed_key.startswith("site_key_")
@@ -193,12 +222,42 @@ async def test_mint_foreign_site_then_resolve(mongo_db):
 
 @pytest.mark.asyncio
 async def test_mint_foreign_site_scope_override(mongo_db):
-    site = await sites_service.mint_foreign_site(
-        workspace_id="ws-3",
-        pocket_id="pk-3",
-        owner="user:sam",
-        allowed_origins=["shop.example.com"],
-        scopes=["chat"],
-    )
+    from unittest.mock import AsyncMock, patch
+
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value=_OWNED_POCKET),
+    ):
+        site = await sites_service.mint_foreign_site(
+            workspace_id="ws-3",
+            pocket_id="pk-3",
+            owner="user:sam",
+            allowed_origins=["shop.example.com"],
+            scopes=["chat"],
+        )
     ctx = await resolve_site_key(site.signed_key, "https://shop.example.com", "cust-1")
     assert ctx.scopes == ["chat"]
+
+
+@pytest.mark.asyncio
+async def test_mint_foreign_site_denies_cross_tenant_pocket(mongo_db):
+    """Review FIX 1 (HIGH): minting a concierge bound to a pocket the owner does
+    NOT own is refused BY the pockets-service ownership check, and no Site is
+    written — otherwise the resolved CONCIERGE context could read a victim
+    pocket's KB (pocket:<victim>)."""
+    from unittest.mock import AsyncMock, patch
+
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+
+    denied = AsyncMock(side_effect=Forbidden("pocket.access_denied", "no access"))
+    with patch("pocketpaw_ee.cloud.pockets.service.get", new=denied):
+        with pytest.raises(Forbidden) as exc:
+            await sites_service.mint_foreign_site(
+                workspace_id="attacker-ws",
+                pocket_id="pk-victim-xyz",
+                owner="attacker",
+                allowed_origins=["evil.example.com"],
+            )
+    assert exc.value.code == "pocket.access_denied"
+    # Fail-before-write: no Site was inserted for the victim pocket.
+    assert await Site.find_one({"pocket_id": "pk-victim-xyz"}) is None

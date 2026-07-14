@@ -23,6 +23,12 @@
 # ``script_name`` is "" (we never generated a Worker for it) — the lookup does not
 # depend on ``script_name`` at all. The leads path is left untouched (its id-keyed
 # lookup + inline checks still stand); this is the concierge-facing resolver.
+#
+# Updated 2026-07-14 (adversarial review follow-up): (FIX 2) guard the key with an
+# explicit ``isinstance(str)`` before it reaches ``find_one`` — this is THE public
+# credential value, so a smuggled ``{"$ne": ""}`` operator dict is rejected 401,
+# not leaned on ``len`` to block; (FIX 3) copy the scope list null-safe
+# (``site.scopes or []``) so a Mongo doc with ``scopes: null`` can't TypeError.
 
 from __future__ import annotations
 
@@ -95,7 +101,12 @@ async def resolve_site_key(
             key" beyond the status — both are 401 so an attacker can't enumerate
             which embed keys are live.
     """
-    if not key or len(key) < _MIN_SITE_KEY_LEN:
+    # ``isinstance`` FIRST: this value flows straight into a Mongo
+    # ``find_one({"signed_key": key})``, so a non-str (e.g. a ``{"$ne": ""}``
+    # operator dict smuggled through a JSON body) must be rejected outright rather
+    # than reaching the query or the ``len`` check. Then the empty/short-key guard
+    # (unchanged) blocks the ``signed_key=""`` DB collision.
+    if not isinstance(key, str) or len(key) < _MIN_SITE_KEY_LEN:
         raise HTTPException(status_code=401, detail="invalid_site_key")
 
     site = await _SiteDoc.find_one({"signed_key": key})
@@ -120,8 +131,9 @@ async def resolve_site_key(
         request_id=uuid4().hex,
         scope=ScopeKind.CONCIERGE,
         started_at=datetime.now(UTC),
-        # Copy the list so the frozen context never aliases the live model's field.
-        scopes=list(site.scopes),
+        # Copy the list so the frozen context never aliases the live model's
+        # field; ``or []`` keeps it null-safe if a Mongo doc stored ``scopes: null``.
+        scopes=list(site.scopes or []),
         pocket_id=site.pocket_id,
     )
 

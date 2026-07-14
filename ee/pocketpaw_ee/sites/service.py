@@ -11,6 +11,10 @@
 # ``_normalize_origin_hosts`` reduces caller-supplied origins to the bare hosts
 # ``origin_allowed`` matches on. Deliberately does NOT reuse ``_live_object_id`` (a
 # foreign concierge must not collide with a published site's stable per-pocket id).
+# Review follow-up (HIGH): ``mint_foreign_site`` now runs the pockets-service
+# ownership check (``pockets_service.get(pocket_id, owner)``) BEFORE inserting, the
+# same gate ``publish_pocket`` uses, so a caller cannot bind a concierge to another
+# workspace's pocket (which would leak that pocket's KB to the resolved context).
 #
 # Updated 2026-07-10 (HE-2 — canonical engine module): the engine content-selection
 # checks now route through ``sites.engines`` predicates instead of inline
@@ -1164,7 +1168,9 @@ async def mint_foreign_site(
         workspace_id: Owning tenant (the Site's ``workspace``).
         pocket_id: The pocket the concierge is grounded in (drives the KB scope
             ``pocket:<pocket_id>`` downstream).
-        owner: The creating user/logical owner (as the other Site paths record it).
+        owner: The acting user. Recorded as the Site's ``owner`` AND used as the
+            identity for the pocket ownership check below — so it must be a user
+            who can access ``pocket_id``, not an arbitrary label.
         allowed_origins: Origins the embed is valid from; normalized to bare hosts.
         name: Optional display name.
         scopes: Optional override of what the key may do; defaults to the Site
@@ -1173,7 +1179,24 @@ async def mint_foreign_site(
     Returns:
         The inserted ``Site`` doc, carrying its freshly-minted ``signed_key`` so the
         caller can hand the embed snippet back to the owner.
+
+    Raises:
+        Forbidden: ``pocket.access_denied`` when ``owner`` cannot access
+            ``pocket_id`` (via the pockets service ownership check).
+        NotFound: when ``pocket_id`` does not exist.
     """
+    # Ownership gate — the SAME check every other pocket-touching path in this
+    # service runs (see ``publish_pocket`` → ``pockets_service.get``). Without it a
+    # caller could mint a concierge bound to ANOTHER workspace's pocket, and the
+    # resolved CONCIERGE context would then read that victim pocket's KB
+    # (``pocket:<pocket_id>``). Run it BEFORE minting the key / inserting the doc so
+    # a denied caller leaves no orphan Site behind. ``get`` raises
+    # Forbidden("pocket.access_denied") on cross-tenant access and NotFound when the
+    # pocket is missing; we only need it for the side-effect of that check.
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    await pockets_service.get(pocket_id, owner)
+
     site = _SiteDoc(
         workspace=workspace_id,
         pocket_id=pocket_id,
