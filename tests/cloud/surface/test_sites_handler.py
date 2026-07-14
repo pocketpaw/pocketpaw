@@ -388,6 +388,31 @@ async def test_create_clarify_uses_ask_user_tool_on_svelte() -> None:
     assert "ask-user-questions" not in out
 
 
+async def test_create_states_ask_dont_assume_principle() -> None:
+    """The create preamble carries the general ASK, DON'T ASSUME rule: ask the
+    user for any material gap, never fabricate real-world facts, and it is not
+    capped at a single round of questions."""
+    out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    lower = out.lower()
+    assert "ask, don't assume" in lower
+    assert "fabricate" in lower
+    # The old one-round cap is gone — it may ask again as new gaps appear.
+    assert "not limited to one round" in lower
+
+
+async def test_refine_states_ask_dont_assume_principle() -> None:
+    """The refine preamble also tells the agent to ask (not guess) on ambiguous
+    edits and never fabricate facts."""
+    out = await sites_handler.build_preamble(
+        WORKSPACE,
+        USER,
+        SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
+    )
+    lower = out.lower()
+    assert "ask, don't assume" in lower
+    assert "fabricate" in lower
+
+
 async def test_create_has_just_build_it_escape_hatch() -> None:
     """The interview must always offer the 'just build it' out and cap at one
     round of questions so the flow never traps the user."""
