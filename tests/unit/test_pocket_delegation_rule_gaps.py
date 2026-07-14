@@ -47,13 +47,12 @@ class TestTemplatePreflight:
     def test_template_preflight_section_present(self):
         assert "TEMPLATE PREFLIGHT" in POCKET_DELEGATION_RULE
 
-    def test_template_preflight_runs_before_recipe(self):
-        idx_template = POCKET_DELEGATION_RULE.find("TEMPLATE PREFLIGHT")
-        idx_recipe = POCKET_DELEGATION_RULE.find("RECIPE PREFLIGHT")
-        assert idx_template != -1 and idx_recipe != -1
-        assert idx_template < idx_recipe, (
-            "template preflight must precede recipe preflight in the rule"
-        )
+    def test_recipe_preflight_removed(self):
+        # The bundled ripple-recipes scope was removed (2026-07-12), and with it
+        # the recipe-preflight blocks in the delegation rule. Template preflight
+        # stays; the recipe preflight must NOT reappear.
+        assert "TEMPLATE PREFLIGHT" in POCKET_DELEGATION_RULE
+        assert "RECIPE PREFLIGHT" not in POCKET_DELEGATION_RULE
 
     def test_index_json_path_present(self):
         # The agent reads this file via Bash; the path must appear verbatim.
@@ -72,15 +71,6 @@ class TestTemplatePreflight:
             "the matched template" in POCKET_DELEGATION_RULE
             or "the matched" in POCKET_DELEGATION_RULE
         )
-
-    def test_match_skips_recipe_preflight(self):
-        # The rule must tell the agent to SKIP the recipe preflight on a
-        # template match — otherwise both fire on every create, doubling
-        # bash work and confusing the brief.
-        # Whitespace-normalised so line-wrapping doesn't break the assert.
-        flat = " ".join(POCKET_DELEGATION_RULE.split())
-        assert "SKIP the recipe preflight" in flat
-
 
 class TestLabelWithoutSourceRule:
     """The specialist authored ``state.pets``-bound widgets and labels
