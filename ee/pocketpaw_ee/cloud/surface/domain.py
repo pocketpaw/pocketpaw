@@ -140,6 +140,11 @@ class SurfaceMeta:
     # "svelte"; absent / "ripple" keeps the default marketing brain. Does not
     # affect the refine branch (keyed on ``pocket_id``).
     engine: str | None = None
+    # Sites refine hint — the Build/Chat toggle in the /sites/[siteId] refine chat.
+    # ``"chat"`` answers questions about the existing site with NO mutation; ``"build"``
+    # / unset refines (edits) the site. Consulted only on the refine branch (pocket_id
+    # present); the sites handler reads ``meta.mode`` there. Absent on create/gallery.
+    mode: str | None = None
     # Belt console hints — set by the /belt page once the user has bound a repo
     # + branch for the run. ``repo`` is the absolute repo path; ``base_branch``
     # is the branch to base the change off. The belt handler injects both into

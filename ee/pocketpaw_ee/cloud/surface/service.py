@@ -300,6 +300,7 @@ def _meta_from_request(req: SurfaceMetaRequest) -> SurfaceMeta:
         panel=req.panel,
         site_id=req.site_id,
         engine=req.engine,
+        mode=req.mode,
         repo=req.repo,
         base_branch=req.base_branch,
         current_dir=req.current_dir,
