@@ -411,6 +411,42 @@ async def test_chat_unbound_widget_is_409(concierge_client):
 
 
 @pytest.mark.asyncio
+async def test_chat_refused_when_pocket_has_connectors(concierge_client, monkeypatch):
+    """Pilot connector lockdown (captain call 2026-07-14): a concierge whose pocket
+    exposes ANY connector is refused fail-closed (409) — a static deny can't strip
+    dynamic composio connector tool ids, so the public agent must not run at all."""
+    client, store = concierge_client
+    await _site()
+    widget = await store.create_widget(_widget(agent_id="agent-xyz"))
+
+    async def _has_connector(workspace_id, pocket_id, **_):
+        return [SimpleNamespace(name="gmail")]  # the pocket exposes a connector
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.connectors.service.list_pocket_connectors", _has_connector
+    )
+    res = await client.post("/paw-bar/chat", json=_payload(widget.id), headers={"Origin": _ORIGIN})
+    assert res.status_code == 409
+    assert "connector" in res.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_chat_fails_closed_when_connector_check_errors(concierge_client, monkeypatch):
+    """Fail-closed: if the connector lookup raises, the concierge refuses (409) — it
+    never proceeds to dispatch a run on an undetermined connector state."""
+    client, store = concierge_client
+    await _site()
+    widget = await store.create_widget(_widget(agent_id="agent-xyz"))
+
+    async def _boom(workspace_id, pocket_id, **_):
+        raise RuntimeError("connector store unavailable")
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.connectors.service.list_pocket_connectors", _boom)
+    res = await client.post("/paw-bar/chat", json=_payload(widget.id), headers={"Origin": _ORIGIN})
+    assert res.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_chat_widget_bound_to_sibling_pocket_is_403(concierge_client):
     """Finding #2 (endpoint half): a valid key for pocket A must not drive a
     widget bound to a SIBLING pocket B — even in the same workspace."""
