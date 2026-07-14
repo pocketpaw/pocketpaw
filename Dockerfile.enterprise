@@ -12,6 +12,15 @@
 #   * non-root pocketpaw user, 0.0.0.0:8888 bind, healthcheck.
 #
 # Changes:
+#   - 2026-07-09 (chore/dp0-bake-wrangler, DP0-5): bake the `wrangler` CLI so the
+#     DYNAMIC-site provision path (`wrangler d1 migrations apply` in the
+#     provision_site job) and workers-mode deploy (`wrangler deploy`) run offline
+#     instead of `bunx`-fetching wrangler at publish time. A `wrangler` stage
+#     `bun add wrangler@<pin>`; the runtime COPYs its node_modules to /opt/wrangler,
+#     installs a shebang wrapper at /usr/local/bin/wrangler (execs Node on the real
+#     entry, like paw-sites-gen), VERIFIES it with `wrangler --version` at build
+#     time, and sets `PAW_CF_WRANGLER_CMD=wrangler`. Without this the migrate step of
+#     a live dynamic publish would try to network-fetch wrangler on the box.
 #   - 2026-06-25 (feat/paw-sites-prod-deploy, DEP-1 + DEP-2): the Paw Sites publish
 #     path shells out to the paw-sites generator (`paw-sites-gen`) + `bun` at
 #     publish time, and a generated ripple-track site installs `@ripple-ui/svelte`.
@@ -134,6 +143,20 @@ RUN if [ "$RIPPLE_SOURCE" = "clone" ]; then \
       cp "/build/ripple-vendor/$RIPPLE_TARBALL" "/out/$RIPPLE_TARBALL" ; \
     fi && \
     test -f "/out/$RIPPLE_TARBALL" || ( echo "ERROR: ripple tarball missing after stage." && exit 1 )
+
+# ---- wrangler stage ----
+# Bake the wrangler CLI the DYNAMIC-site provision path runs
+# (`wrangler d1 migrations apply` in the provision_site job, DP0-3/DP0-5) so a
+# publish NEVER network-fetches it via `bunx` at runtime. Pinned to the same
+# version the runtime default (PAW_CF_WRANGLER_CMD) and workers_deploy expect, so
+# migrate + workers-mode deploy share ONE wrangler. `bun add` pulls wrangler + its
+# platform binaries (esbuild/workerd) for this debian image, which matches the
+# debian runtime stage below.
+FROM bun AS wrangler
+ARG WRANGLER_VERSION=4.101.0
+WORKDIR /wrangler
+RUN bun add wrangler@${WRANGLER_VERSION} \
+    && test -f /wrangler/node_modules/wrangler/bin/wrangler.js
 
 # ---- paw-sites generator stage ----
 # Build (or vendor) the paw-sites generator so /usr/local/bin/paw-sites-gen is on
@@ -295,6 +318,17 @@ RUN printf '#!/bin/sh\nexec node /opt/paw-sites/dist/cli.js "$@"\n' > /usr/local
 # ripple tarball: a generated ripple-track site installs @ripple-ui/svelte from the
 # `file:` spec baked into PAW_SITES_RIPPLE_DEP below.
 COPY --from=ripple /out/ripple-ui-svelte-0.5.0.tgz /opt/ripple-ui-svelte-0.5.0.tgz
+# wrangler (DP0-5): the DYNAMIC-site provision path execs `wrangler d1 migrations
+# apply` (provision_site job) and workers-mode deploy execs `wrangler deploy`. Bake
+# the CLI so neither network-fetches it via `bunx` at publish time. The bin is a
+# shebang wrapper that execs Node on wrangler's real entry (same trick as
+# paw-sites-gen, since the publish path execs without a shell). The build-time
+# `wrangler --version` PROVES the baked binary runs in this image — a wrong path or
+# a broken install fails the build here rather than at the first live publish.
+COPY --from=wrangler /wrangler/node_modules /opt/wrangler/node_modules
+RUN printf '#!/bin/sh\nexec node /opt/wrangler/node_modules/wrangler/bin/wrangler.js "$@"\n' > /usr/local/bin/wrangler \
+    && chmod 0755 /usr/local/bin/wrangler \
+    && CI=1 WRANGLER_SEND_METRICS=false /usr/local/bin/wrangler --version
 
 # Copy venv from builder
 COPY --from=builder /opt/venv /opt/venv
@@ -347,6 +381,10 @@ ENV POCKETPAW_FILE_JAIL_PATH=/home/pocketpaw/workspace
 # PAW_SITES_GEN_CMD is deliberately UNSET: the `paw-sites-gen` wrapper is on PATH.
 ENV PAW_SITES_RIPPLE_DEP=file:/opt/ripple-ui-svelte-0.5.0.tgz
 ENV PAW_SITES_MOTION_DEP=^12.40.0
+# Point the dynamic-site provision path (and workers-mode deploy) at the baked
+# wrangler wrapper so `wrangler d1 migrations apply` / `wrangler deploy` run offline
+# — no `bunx wrangler@...` network fetch at publish time (DP0-5).
+ENV PAW_CF_WRANGLER_CMD=wrangler
 
 EXPOSE 8888
 
