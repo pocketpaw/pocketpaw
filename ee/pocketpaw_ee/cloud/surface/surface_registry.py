@@ -152,6 +152,19 @@ _SITES_SVELTE_CREATE_DENY: frozenset[str] = frozenset(
     }
 )
 
+# Built-in SDK tools the /sites agent never needs. It authors sites through the
+# sites_manager + design MCP tools (the source map / copy is a tool ARGUMENT), so
+# it never touches the file system or a shell — a dedicated sites agent should not
+# carry Bash / file R-W / subagent spawning. These bare tool NAMES cross to the OSS
+# backend in the SAME ``deny_mcp_tool_ids`` set as the mcp__ ids: the backend's deny
+# filter subtracts ANY matching id from the launch allow-list, built-ins included, so
+# naming them here physically removes them before the SDK starts. WebSearch / WebFetch
+# / Skill are deliberately NOT denied (the agent still researches a business for real
+# copy and loads the create-site skills).
+_SITES_BUILTIN_DENY: frozenset[str] = frozenset(
+    {"Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"}
+)
+
 # The Instinct gate tool the /belt develop station proposes its diff through.
 # Spelled as a LITERAL because its canonical constant
 # (``BELT_PROPOSE_CHANGE_TOOL_ID`` / ``BELT_TOOL_IDS``) lives in a SIBLING
@@ -195,15 +208,39 @@ def _load_mcp_tool_ids() -> _McpToolIds:
 
     logger = logging.getLogger(__name__)
     try:
+        from pocketpaw_ee.agent.mcp_servers.ask import ASK_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.design_systems import DESIGN_SYSTEM_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.loom import LOOM_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.media import MEDIA_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.palette import PALETTE_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.stock_images import STOCK_TOOL_IDS
+
+        # /sites scopes to the sites-manager tools PLUS the authoring TOOLBELT the
+        # crew (and the create-svelte-site skill) needs on-surface: stock photos,
+        # icons, palette derivation, and the design-system library. These live on
+        # ambient in-process servers, but the per-surface allow-list is a hard
+        # whitelist (claude_sdk `allow_mcp_tool_ids`), so an id absent here is
+        # FILTERED OUT on /sites — the tool would be silently unreachable. Named
+        # here so authoring can actually call them. MEDIA (image/video gen) stays
+        # scoped to /studio, not added here (site imagery leans on stock first).
+        sites_allow = (
+            frozenset(SITES_TOOL_IDS)
+            | frozenset(STOCK_TOOL_IDS)
+            | frozenset(ICON_TOOL_IDS)
+            | frozenset(PALETTE_TOOL_IDS)
+            | frozenset(DESIGN_SYSTEM_TOOL_IDS)
+            # ask_user: interactive question chips. Needed most on svelte-create
+            # (ripple OFF) where the agent otherwise can only ask in plain text.
+            | frozenset(ASK_TOOL_IDS)
+        )
 
         return _McpToolIds(
             loaded=True,
             foresight_allow=frozenset(FORESIGHT_TOOL_IDS),
-            sites_allow=frozenset(SITES_TOOL_IDS),
+            sites_allow=sites_allow,
             # /studio scopes to the media-generation tools (image + video).
             # Crossed over from the EE mcp-server module as a plain
             # frozenset[str] — never an imported pocketpaw_ee symbol leaks into
@@ -304,11 +341,18 @@ def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
     if meta.pocket_id is None and meta.engine == "svelte":
         return SurfaceProfile(
             ripple_mode="off",
-            deny_mcp_tool_ids=_SITES_SVELTE_CREATE_DENY,
+            deny_mcp_tool_ids=_SITES_SVELTE_CREATE_DENY | _SITES_BUILTIN_DENY,
             allow_mcp_tool_ids=sites_allow,
             skill_names=frozenset({"create-svelte-site"}),
         )
-    return SurfaceProfile(ripple_mode="on", allow_mcp_tool_ids=sites_allow)
+    # Ripple-create + refine: keep ripple + the sites tool scope, but still drop the
+    # file/shell built-ins — no /sites mode authors on disk (refine edits the ripple
+    # spec through the pocket MCP tools, not the file system).
+    return SurfaceProfile(
+        ripple_mode="on",
+        allow_mcp_tool_ids=sites_allow,
+        deny_mcp_tool_ids=_SITES_BUILTIN_DENY,
+    )
 
 
 # One row per surface that currently has a handler registered in

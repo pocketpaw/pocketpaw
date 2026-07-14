@@ -189,12 +189,18 @@ Changes:
   - 2026-05-22: Added ``pocket_router_enabled`` (kill-switch) and
     ``pocket_router_min_confidence`` (cheap-tier confidence floor) for
     the pocket execution router (Increment 3).
+  - 2026-07-06: Added ``sites_crew_enabled`` — when true, the /sites
+    CREATE surface runs the guided authoring-crew flow (clarity gate →
+    interview → design-system + assets → build) instead of the single-shot
+    create preamble; default off (feat/sites-crew-create-flow, SC-crew).
   - 2026-05-22: Added ``auto_install_bundled_templates`` — toggles the
     boot-time mirror of built-in pocket templates into
     ``~/.pocketpaw/templates/`` (feat/bundled-templates, Increment 2a).
-  - 2026-05-21: Added ``auto_install_bundled_skills`` and
-    ``auto_install_bundled_kb_scopes`` — toggle the boot-time mirror of
-    bundled SKILL.md files and pre-compiled kb-go scopes.
+  - 2026-07-12: Removed ``auto_install_bundled_kb_scopes`` along with the
+    bundled ``ripple-recipes`` scope — the hand-authored pattern recipes
+    biased the agent's design toward fixed layouts.
+  - 2026-05-21: Added ``auto_install_bundled_skills`` — toggles the
+    boot-time mirror of bundled SKILL.md files.
   - 2026-04-30: Added pluggable embedding adapter settings — ``kb_vectors_enabled``,
     ``embedding_adapter``, ``embedding_dim``, ``embedding_monthly_cap_usd``,
     ``vertex_project_id``, ``vertex_location``. Stage 2.D of "Files as Knowledge".
@@ -789,6 +795,19 @@ class Settings(BaseSettings):
             "still works via the MCP tool surface even when no skill loads."
         ),
     )
+    sites_crew_enabled: bool = Field(
+        default=False,
+        description=(
+            "DEPRECATED / NO-OP (2026-07-14). The /sites CREATE surface now ALWAYS "
+            "runs the guided two-phase authoring flow (clarity gate + `ask_user` "
+            "chips → design system + real assets → build), regardless of this "
+            "flag: the three create preambles + this gate collapsed into one "
+            "always-on `_create_preamble` in "
+            "`handlers/sites.py`, so nothing reads this setting anymore. Kept only "
+            "so an existing ``POCKETPAW_SITES_CREW_ENABLED`` env var / config entry "
+            "doesn't fail validation. Safe to remove once no deploy sets it."
+        ),
+    )
     sdk_load_bundled_skills: bool = Field(
         default=True,
         description=(
@@ -805,23 +824,6 @@ class Settings(BaseSettings):
             "(CLAUDE.md, output styles) into the agent. Set ``false`` to keep "
             "the backend skill-free and drive everything via the per-surface "
             "MCP-tool preambles only."
-        ),
-    )
-    auto_install_bundled_kb_scopes: bool = Field(
-        default=True,
-        description=(
-            "On dashboard startup, mirror PocketPaw's pre-compiled kb-go "
-            "scopes from ``pocketpaw/bundled_kb/_bundled/<scope>/`` into "
-            "``~/.knowledge-base/<scope>/``. The bundle ships "
-            "``ripple-recipes`` — pattern recipes (sales-pipeline, "
-            "customer-support-app, recipe/how-to viewer) that the chat "
-            "agent retrieves at pocket-creation time via the existing "
-            "``_get_kb_context`` injection in bootstrap.context_builder. "
-            "Idempotent — SHA-256 hash compare per file, no-op when the "
-            "destination already matches. Set ``false`` to freeze a "
-            "hand-customised scope or disable bundled KB entirely. KB "
-            "retrieval is a non-critical enhancement: pocket creation "
-            "still works via the MCP tool surface + the bundled skill."
         ),
     )
     auto_install_bundled_templates: bool = Field(

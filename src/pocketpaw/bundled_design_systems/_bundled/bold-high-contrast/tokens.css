@@ -1,0 +1,81 @@
+/* tokens.css — Monolith (bold-high-contrast) design system.
+ * Compiled from DESIGN.md front-matter; the shared source of truth both the
+ * ripple and svelte render engines consume. Keep in lockstep with DESIGN.md.
+ * Created: 2026-07-06 (feat/sites-crew-design-systems, SC-7b). */
+:root {
+  /* Colors — primary (electric lime), secondary (graphite), neutral (grayscale) */
+  --color-primary-50: #F9FAF2;
+  --color-primary-100: #F3F8E3;
+  --color-primary-200: #EAF5C2;
+  --color-primary-300: #E0F594;
+  --color-primary-400: #D4F55E;
+  --color-primary-500: #C8F42A;
+  --color-primary-600: #B7E60C;
+  --color-primary-700: #95BB0C;
+  --color-primary-800: #708C0D;
+  --color-primary-900: #4B5C0C;
+  --color-secondary-50: #F6F6F6;
+  --color-secondary-100: #EBECED;
+  --color-secondary-200: #D6D7D9;
+  --color-secondary-300: #B9BCC0;
+  --color-secondary-400: #999CA3;
+  --color-secondary-500: #787D87;
+  --color-secondary-600: #60646C;
+  --color-secondary-700: #484B51;
+  --color-secondary-800: #2B2D31;
+  --color-secondary-900: #151619;
+  --color-neutral-50: #F6F6F6;
+  --color-neutral-100: #ECECEC;
+  --color-neutral-200: #D7D7D7;
+  --color-neutral-300: #BDBDBD;
+  --color-neutral-400: #9E9E9E;
+  --color-neutral-500: #808080;
+  --color-neutral-600: #666666;
+  --color-neutral-700: #4C4C4C;
+  --color-neutral-800: #2E2E2E;
+  --color-neutral-900: #171717;
+  --color-surface: #FFFFFF;
+  --color-text: var(--color-neutral-900);
+  --color-text-muted: var(--color-neutral-600);
+
+  /* Typography */
+  --font-display: 'Archivo', 'Arial Narrow', sans-serif;
+  --font-heading: 'Archivo', system-ui, sans-serif;
+  --font-body: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: 'Space Mono', ui-monospace, monospace;
+  --text-display: 6rem;
+  --text-h1: 4.209rem;
+  --text-h2: 3.157rem;
+  --text-h3: 2.369rem;
+  --text-h4: 1.777rem;
+  --text-body-lg: 1.333rem;
+  --text-body: 1rem;
+  --text-body-sm: 0.875rem;
+  --text-caption: 0.75rem;
+  --leading-tight: 0.95;
+  --leading-body: 1.6;
+  --tracking-tight: -0.03em;
+
+  /* Spacing — 4px base, scaled up */
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 1rem;
+  --space-lg: 2rem;
+  --space-xl: 3.5rem;
+  --space-2xl: 6rem;
+  --space-3xl: 9rem;
+
+  /* Rounded — hard edges */
+  --radius-none: 0;
+  --radius-sm: 0;
+  --radius-md: 0.125rem;
+  --radius-lg: 0.25rem;
+  --radius-xl: 0.25rem;
+  --radius-full: 9999px;
+
+  /* Elevation — hard offset blocks, no blur */
+  --shadow-sm: 2px 2px 0 rgba(23, 22, 25, 1);
+  --shadow-md: 4px 4px 0 rgba(23, 22, 25, 1);
+  --shadow-lg: 8px 8px 0 rgba(23, 22, 25, 1);
+  --shadow-xl: 12px 12px 0 rgba(23, 22, 25, 1);
+}

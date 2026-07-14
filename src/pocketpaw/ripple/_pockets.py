@@ -142,18 +142,19 @@
 # ``pocketpaw.ripple._design`` and is spliced in once at the bottom of each prompt.
 #
 # Modified: 2026-05-21 — added a SKILL AVAILABILITY note (the bundled
-# ``pocketpaw-create-pocket`` skill), a HARD RULE recipe-preflight block,
-# and a STEP 0 recipe-library check pointing at the bundled
-# ``ripple-recipes`` kb-go scope.
+# ``pocketpaw-create-pocket`` skill).
 # Modified: 2026-05-21 — the create specialist's prompt now splices in
 # the slim ``_RIPPLE_DESIGN_ESSENTIALS`` instead of the full
 # ``RIPPLE_DESIGN_RULES`` superblock. Reworked from PR #1106.
 # Modified: 2026-05-22 (feat/bundled-templates, Increment 2a) —
-# ``_CREATION_OVERVIEW_MCP`` gains a new "STEP 0 — CHECK BUILT-IN TEMPLATE
+# ``_CREATION_OVERVIEW_MCP`` gains a "STEP 0 — CHECK BUILT-IN TEMPLATE
 # LIBRARY FIRST": the chat agent reads ``~/.pocketpaw/templates/index.json``,
-# keyword-matches the brief, and on a match sets ``hints.template_id`` and
-# skips the recipe search. The former recipe-library STEP 0 is renumbered
-# to STEP 1; the brief / structure / delegate steps shift to STEP 2-4.
+# keyword-matches the brief, and on a match sets ``hints.template_id``.
+# Modified: 2026-07-12 (chore/remove-bundled-kb-ripple-recipes) — removed the
+# recipe-preflight blocks and the STEP that searched the ``ripple-recipes``
+# kb-go scope (the scope is gone: hand-authored recipes biased the agent
+# toward fixed compositions). The MCP-variant steps renumber to STEP 0-3
+# (template preflight → understand → structure → delegate).
 
 from __future__ import annotations
 
@@ -334,12 +335,11 @@ Concrete shape of the assistant turn for a create:
 
 ## HARD RULE — TEMPLATE PREFLIGHT before every create
 
-Before EVERY `pocket_specialist__create` call — BEFORE the recipe
-preflight below — check whether the brief matches one of PocketPaw's
-built-in pocket templates. A template is a hand-authored,
-production-quality skeleton; instantiating one is faster and
-higher-quality than cold generation OR a recipe anchor. Templates
-auto-install to ``~/.pocketpaw/templates/``.
+Before EVERY `pocket_specialist__create` call, check whether the brief
+matches one of PocketPaw's built-in pocket templates. A template is a
+hand-authored, production-quality skeleton; instantiating one is faster
+and higher-quality than cold generation. Templates auto-install to
+``~/.pocketpaw/templates/``.
 
 Run via your Bash tool:
 
@@ -354,65 +354,19 @@ of the brief.
 
 - **Match found** — set ``hints.template_id`` to the matched template's
   ``slug``. Announce it in your preface line: "Using the built-in
-  <title> template — customizing it for <user's domain>." Then SKIP
-  the recipe preflight below (the template already encodes a polished
-  composition). Pass the brief through anyway so the specialist
-  customizes the template with the user's real content.
+  <title> template — customizing it for <user's domain>." Pass the brief
+  through anyway so the specialist customizes the template with the
+  user's real content.
 
-- **No match** — proceed to the recipe preflight below. The template
-  library covers the most common shapes; many briefs won't match one.
+- **No match** — proceed with the brief as-is; the specialist drafts
+  the pocket from first principles. The template library covers the
+  most common shapes; many briefs won't match one.
 
-- **``index.json`` missing / cat errors** — proceed to the recipe
-  preflight. Do not block the user on infrastructure issues.
+- **``index.json`` missing / cat errors** — proceed with the brief.
+  Do not block the user on infrastructure issues.
 
 The first match wins — don't agonize over picking the "best" of two
 candidates; pick the first whose keyword matched.
-
-## HARD RULE — RECIPE PREFLIGHT before every create
-
-If the TEMPLATE PREFLIGHT above did NOT match a built-in template,
-run a recipe-library search via your Bash tool. PocketPaw ships
-pre-compiled pattern recipes (sales-pipeline dashboard,
-customer-support app, recipe/how-to viewer, etc.) in the
-``ripple-recipes`` kb-go scope. Each recipe has the showcase-quality
-composition for that pattern + adjacent-domain variations. Anchoring
-the brief on a matching recipe is the single biggest quality lever
-for the resulting pocket.
-
-The exact preflight (run this verbatim, substitute the user's intent):
-
-```
-kb search "<one-line summary of the user's intent>" \\
-   --scope ripple-recipes --context --limit 1
-```
-
-The ``--context`` flag returns prompt-shaped markdown. Read what it
-returns:
-
-- **Match found** (a recipe with "When to use" / "Composition" / "Variations"
-  sections): fold the recipe's composition + the relevant variation
-  into your `brief` argument to `pocket_specialist__create`. Mention
-  the recipe name in your preface line ("Spinning up your trust &
-  safety queue using the moderation variation of the
-  customer-support recipe — ...").
-
-- **No match** (kb returns empty or "no results"): proceed with the
-  brief as-is, no recipe context.
-
-- **kb errors** (binary missing / scope missing / non-zero exit):
-  proceed without recipe; do NOT block the user on infrastructure
-  issues. Note the error in your preface ONLY if it might be
-  user-actionable (e.g. "kb binary not on PATH — drafting without
-  recipe context, install kb-go to get richer drafts").
-
-This preflight is a HARD pre-step for every create turn. The Bash
-call comes BEFORE the plain-text preface only when its result
-changes the preface content; otherwise emit the preface first, then
-Bash, then create — same turn, all three calls visible to the user.
-
-The same preflight applies to `pocket_specialist__edit` when the
-user asks for a STRUCTURAL change ("rebuild as a kanban", "switch to
-a master-detail") — those benefit from a recipe anchor too.
 
 ## When to call
 
@@ -1506,11 +1460,10 @@ ultimately calls.
 
 ### STEP 0 — CHECK THE BUILT-IN TEMPLATE LIBRARY FIRST
 
-Before anything else — before the recipe search in STEP 1 — check
-whether the brief matches one of PocketPaw's built-in pocket
-templates. A built-in template is a hand-authored, production-quality
-pocket skeleton; instantiating one is faster and higher-quality than
-generating from scratch or even anchoring on a recipe. The templates
+Before anything else, check whether the brief matches one of
+PocketPaw's built-in pocket templates. A built-in template is a
+hand-authored, production-quality pocket skeleton; instantiating one is
+faster and higher-quality than generating from scratch. The templates
 are auto-installed at ``~/.pocketpaw/templates/``.
 
 Run via your Bash tool:
@@ -1527,13 +1480,11 @@ SUBSTRING of the brief.
 - **Match found** — set ``hints.template_id`` to the matched
   template's ``slug`` when you call ``pocket_specialist__create``.
   Announce it in your preface line: "Using the built-in <title>
-  template — customizing it for <the user's domain>." Then SKIP the
-  recipe search in STEP 1 (the template already encodes the polished
-  composition). Still do STEP 2 (understand the brief) so the
-  specialist gets the user's real content to customize the template
-  with.
+  template — customizing it for <the user's domain>." Still do STEP 1
+  (understand the brief) so the specialist gets the user's real content
+  to customize the template with.
 
-- **No match** — proceed to STEP 1 (the recipe-library search). The
+- **No match** — proceed to STEP 1 (understand the brief). The
   template library covers the most common shapes; many briefs won't
   match one.
 
@@ -1543,37 +1494,7 @@ SUBSTRING of the brief.
 The first match wins — do not agonize over picking the "best" of two
 candidate templates; pick the first whose keyword matched.
 
-### STEP 1 — CHECK THE RECIPE LIBRARY
-
-If STEP 0 did NOT match a built-in template, query PocketPaw's bundled
-recipe library for a polished example matching the user's intent.
-PocketPaw ships ``ripple-recipes`` — a kb-go scope of hand-authored
-pattern recipes (sales pipeline, customer support app, recipe/how-to
-viewer, …) — auto-installed at ``~/.knowledge-base/ripple-recipes/``.
-
-Run via your Bash tool:
-
-```
-kb search "<one-line summary of the user's brief>" \\
-   --scope ripple-recipes --context --limit 1
-```
-
-The ``--context`` flag returns prompt-shaped markdown ready to anchor
-your draft on. If a recipe matches, follow its composition (focal
-widget, layout, prop shapes, mock-data shape) — the recipe encodes
-the showcase-quality version of that pocket pattern. Adapt content
-to the user's specific domain; keep the structural skeleton.
-
-If ``kb search`` returns no matches, continue with first-principles
-drafting using STEP 2-4 below. The recipe library covers high-
-leverage shapes but does NOT cover every brief.
-
-Why kb-go (not an MCP wrapper): kb-go ships its own SKILL.md with
-the canonical CLI surface, and the ``--context`` flag was designed
-for exactly this prompt-injection use case. A wrapper would drift
-from the upstream contract — use the CLI directly.
-
-### STEP 2 — UNDERSTAND THE BRIEF
+### STEP 1 — UNDERSTAND THE BRIEF
 
 You need TWO things before you can plan: structure (what kind of
 pocket) and content seeds (concrete values to populate it).
@@ -1622,7 +1543,7 @@ If the user says "you decide", proceed with your best guess.
 - If the user is annoyed by questions, build with `<placeholder
   values clearly labeled>` and tell them they can edit.
 
-### STEP 3 — PICK THE STRUCTURE
+### STEP 2 — PICK THE STRUCTURE
 
 Decide these BEFORE calling the specialist. Don't make the
 specialist re-derive them from a vague brief. (When STEP 0 matched a
@@ -1657,7 +1578,7 @@ specialist customizes it with the user's real content.):
   • **key_interactions**: the verbs the user should be able to do.
     Example: ["add task", "mark done", "filter by status"]
 
-### STEP 4 — DELEGATE WITH A RICH PLAN
+### STEP 3 — DELEGATE WITH A RICH PLAN
 
     pocket_specialist__create({
         "brief": "<1-sentence summary of what the user wants>",

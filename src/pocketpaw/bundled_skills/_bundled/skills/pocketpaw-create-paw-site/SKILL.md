@@ -4,16 +4,21 @@ description: |
   Build a marketing landing page as a Paw Site — a real, standalone
   website composed by conversion role (navbar, hero, services, social
   proof, pricing, CTA, lead form, footer) and rendered statically to the
-  edge. Invoke when the user describes a BRAND-NEW marketing / landing
-  site: "build a dentist landing site", "make a marketing page for my
-  bakery", "a landing page for my SaaS", or when the create-site flow
-  routes a new-site request here. This is the marketing-first authoring
-  brain — it composes a sales page, NOT a dashboard. You provide the COPY
-  only; a deterministic tool assembles the page structure and stamps the
-  pocket with type="site" + pattern="landing" so the published page
-  renders as a landing page. For publishing an EXISTING pocket as a site,
-  use pocketpaw-create-site (Path A). Loading this skill keeps the chat
-  agent's always-on system prompt small while still delivering the full
+  edge. This is the DEFAULT landing-site brain and the right choice for the
+  COMMON case — a static, content-first marketing / landing page: "build a
+  dentist landing site", "make a marketing page for my bakery", "a landing
+  page for my SaaS", or when the create-site flow routes a new-site request
+  here. Reach for pocketpaw-create-svelte-site INSTEAD only when the site
+  genuinely needs framework-level interactivity or the user explicitly asks
+  for Svelte. This is the marketing-first authoring brain — it composes a sales
+  page, NOT a dashboard. You provide the COPY only; a deterministic tool
+  assembles the page structure and stamps the pocket with type="site" +
+  pattern="landing" so the published page renders as a landing page. (Need a
+  bespoke hand-written HTML/CSS page instead of the composed structure — e.g.
+  the user asks for plain HTML or a highly custom one-off layout? This skill's
+  raw-HTML track covers that; see the body.) For publishing an EXISTING pocket
+  as a site, use pocketpaw-create-site (Path A). Loading this skill keeps the
+  chat agent's always-on system prompt small while still delivering the full
   marketing brain when a landing site is actually requested.
 ---
 
@@ -36,6 +41,33 @@ This is **not** a dashboard. A landing page sells. It reads top to bottom
 as a conversion funnel: grab attention, explain the offer, prove it,
 price it, and capture the lead. The tool emits exactly that funnel from
 your copy.
+
+## Opt-in: the raw-HTML track (only when explicitly asked)
+
+The copy-only path above is the **default** and what you should use for a
+normal "build me a landing site" request. There is one exception. When the
+user **explicitly** asks for a plain / raw / single-file **HTML** site — "just
+give me an `index.html`", "no framework", "hand-written HTML/CSS", "no
+Svelte" — author the markup yourself and call **`create_html_site`** instead:
+
+```
+mcp__pocketpaw_sites_manager__create_html_site(
+  source = { "index.html": "<!doctype html>…", "styles.css": "…" },
+  name   = "…"                       // optional; defaults to "HTML site"
+)
+```
+
+`source` is a `{ relative_path: file_contents }` map of raw HTML/CSS/JS.
+It **must** include `index.html` (the edge serves it at the root); add
+stylesheets, scripts, and assets as sibling entries — every value is a
+content string. Publishing an html site skips the build step entirely, so
+the page must be complete on its own (inline or linked CSS/JS, real copy —
+never "TBD"/"Lorem ipsum"). It returns `{ ok, pocket_id, pocket }`; hand
+`pocket_id` to `publish` exactly like the copy path (STEP 3). If `ok` is
+false, relay the error.
+
+**Do not reach for this by default.** Unless the user explicitly wants raw
+HTML, use the copy-only `create_landing_site` path below.
 
 ## Why copy-only (and why this is the reliable path)
 

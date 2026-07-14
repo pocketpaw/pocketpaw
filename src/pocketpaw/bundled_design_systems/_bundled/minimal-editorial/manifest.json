@@ -1,0 +1,8 @@
+{
+  "slug": "minimal-editorial",
+  "name": "Quill",
+  "description": "A minimal, editorial system built on whitespace: a soft near-neutral canvas, a beautiful serif display over a clean sans body, hairline rules instead of shadows, and one restrained garnet accent.",
+  "aesthetic": ["minimal", "editorial", "elegant", "refined", "whitespace", "magazine", "timeless"],
+  "industries": ["publishing", "writer", "consultancy", "studio", "nonprofit", "architecture", "personal-brand", "journal"],
+  "page_types": ["landing", "essay", "about", "portfolio", "newsletter", "contact"]
+}

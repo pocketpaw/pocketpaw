@@ -42,10 +42,16 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from pocketpaw_ee.sites.engines import static_output_rel
+
 logger = logging.getLogger(__name__)
 
-# The control plane reads the deployable static site adapter-cloudflare emits
-# here (same dir the real path reads _worker.js from).
+# The deployable static-output dir, relative to the project dir, is resolved per
+# engine via ``static_output_rel`` (HE-4): ripple/svelte serve the adapter-cloudflare
+# output (``.svelte-kit/cloudflare``), html serves the raw static tree at the project
+# root (``.``). Without this an html site published in local mode looked for a
+# SvelteKit build that never exists and failed with MissingBuildOutput.
+# Retained for readability + back-compat; the ripple/svelte value.
 _CLOUDFLARE_BUILD_REL = ".svelte-kit/cloudflare"
 
 
@@ -65,11 +71,12 @@ def sites_home() -> Path:
     return base
 
 
-def persist_site(site_id: str, project_dir: str) -> Path:
-    """Copy the built static site (.svelte-kit/cloudflare/) into the stable
-    per-site dir <home>/<site_id>/ and return that dir. Replaces any prior
-    deploy of the same site so a re-publish serves fresh content."""
-    src = Path(project_dir, _CLOUDFLARE_BUILD_REL)
+def persist_site(site_id: str, project_dir: str, engine: str = "ripple") -> Path:
+    """Copy the built static site into the stable per-site dir <home>/<site_id>/
+    and return that dir. Replaces any prior deploy of the same site so a re-publish
+    serves fresh content. The source tree is ``static_output_rel(engine)`` —
+    ``.svelte-kit/cloudflare`` for ripple/svelte, the project root for html."""
+    src = Path(project_dir, static_output_rel(engine))
     if not src.is_dir():
         raise FileNotFoundError(f"no built static site at {src}")
     dest = sites_home() / site_id
@@ -117,19 +124,21 @@ def local_url_for(site_id: str) -> str:
     return f"{ensure_server()}/{site_id}/"
 
 
-def deploy_local(site_id: str, project_dir: str) -> str:
+def deploy_local(site_id: str, project_dir: str, *, engine: str = "ripple") -> str:
     """Persist the built site and return its served localhost URL. The one call
     the service makes in local mode in place of cf.put_worker().
 
-    Fails SOFT on a missing build dir (P1a): if ``.svelte-kit/cloudflare/`` is not
-    present (a build that produced no output), this does NOT raise a bare
-    FileNotFoundError → 500. When a PRIOR deploy of the same site is still on disk
-    it keeps that deploy and returns its URL with a logged warning (serve the
-    last-good site rather than break the page); only when there is no prior deploy
-    EITHER does it raise ``MissingBuildOutput`` — a clear, typed error the caller
-    can surface. With the P0a fix ``bun run build`` always runs, so a missing build
-    dir should not happen on the normal path; this is a defensive backstop."""
-    src = Path(project_dir, _CLOUDFLARE_BUILD_REL)
+    ``engine`` selects the static-output dir (``static_output_rel``): ripple/svelte
+    serve ``.svelte-kit/cloudflare``; html serves the project root (its raw static
+    tree). The default (``"ripple"``) preserves the exact prior behaviour.
+
+    Fails SOFT on a missing build dir (P1a): if the static output is not present (a
+    build that produced no output), this does NOT raise a bare FileNotFoundError →
+    500. When a PRIOR deploy of the same site is still on disk it keeps that deploy
+    and returns its URL with a logged warning (serve the last-good site rather than
+    break the page); only when there is no prior deploy EITHER does it raise
+    ``MissingBuildOutput`` — a clear, typed error the caller can surface."""
+    src = Path(project_dir, static_output_rel(engine))
     if not src.is_dir():
         dest = sites_home() / site_id
         if dest.is_dir():
@@ -144,7 +153,7 @@ def deploy_local(site_id: str, project_dir: str) -> str:
             f"no built static site at {src} and no prior deploy for {site_id} — "
             "the build produced no static output to serve."
         )
-    persist_site(site_id, project_dir)
+    persist_site(site_id, project_dir, engine)
     return local_url_for(site_id)
 
 

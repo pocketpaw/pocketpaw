@@ -3,6 +3,19 @@
 #
 # Created: 2026-06-25 (feat/sites-workers-deploy-mode) — the "workers" deploy mode.
 #
+# Updated 2026-07-12 (feat/sites-html-assets-only-deploy, HE-4) — the deploy is now
+# ENGINE-AWARE. An ``engine="html"`` site deploys as an ASSETS-ONLY Worker: the
+# generator emits a raw static tree (``static_output_rel("html") == "."``, no
+# ``_worker.js``), so the emitted ``wrangler.jsonc`` drops ``main`` + ``nodejs_compat``
+# and just serves ``assets.directory: "."`` — a legal no-``main`` Worker that ships
+# ZERO bytes of JavaScript for a form-less brochure. Because the asset dir is the
+# project ROOT (which also holds ``wrangler.jsonc``), html writes a config-excluding
+# ``.assetsignore`` (``wrangler.jsonc`` + ``.assetsignore``) so wrangler does not serve
+# the config as a public asset — wrangler only auto-excludes its config when the asset
+# dir is a SUBDIR (Cloudflare static-assets docs). ripple/svelte keep the exact
+# SvelteKit-worker config + the ``_worker.js`` ``.assetsignore`` (the default engine is
+# ``"ripple"``, so every existing caller is byte-for-byte unchanged).
+#
 # This is the third deploy target for a Paw Site, beside the LOCAL static server
 # (local_server.deploy_local — dev/smoke) and Workers-for-Platforms
 # (cloudflare_client.put_worker — the multi-tenant dispatch namespace). The
@@ -57,19 +70,31 @@ from pathlib import Path
 
 from pocketpaw_ee.cloud._core.errors import Internal, ValidationError
 from pocketpaw_ee.sites._wrangler import wrangler_argv as _wrangler_argv
+from pocketpaw_ee.sites.engines import needs_node_build, static_output_rel
 
 logger = logging.getLogger(__name__)
 
-# The static-output dir adapter-cloudflare emits, relative to the project dir. The
-# worker entry AND the asset tree both live here; ``main`` and ``assets.directory``
-# in the generated wrangler.jsonc both point at it.
+# The static-output dir adapter-cloudflare emits for a ripple/svelte build, relative
+# to the project dir. The worker entry AND the asset tree both live here. Retained as
+# a named constant for readability; the config is now driven off
+# ``static_output_rel(engine)`` (HE-4), which resolves to this for ripple/svelte and
+# to ``"."`` for html (whose raw static tree IS the project dir).
 _CF_OUTPUT_REL = ".svelte-kit/cloudflare"
 
-# The REQUIRED .assetsignore contents (exact three lines, no trailing blank). Drops
-# the Pages-style worker/routing/header files so wrangler 4.x does not try to upload
-# the worker entry as a static asset (which it HARD-ERRORS on). adapter-cloudflare
-# does not emit this file, so the deploy step writes it.
+# The REQUIRED .assetsignore contents for a ripple/svelte (server-worker) deploy —
+# exact three lines, no trailing blank. Drops the Pages-style worker/routing/header
+# files so wrangler 4.x does not try to upload the worker entry as a static asset
+# (which it HARD-ERRORS on). adapter-cloudflare does not emit this file, so the
+# deploy step writes it.
 _ASSETSIGNORE_LINES = ("_worker.js", "_routes.json", "_headers")
+
+# The .assetsignore contents for an html deploy. An html site's ``assets.directory``
+# is the project ROOT (``static_output_rel("html") == "."``), which also holds the
+# deploy scaffold — ``wrangler.jsonc`` and this ``.assetsignore`` — so wrangler would
+# otherwise upload the config file as a public asset (it only auto-excludes the config
+# when the asset dir is a SUBDIR, per the Cloudflare static-assets docs). There is no
+# ``_worker.js`` on this path; the exclusion is the config files, not a server entry.
+_HTML_ASSETSIGNORE_LINES = ("wrangler.jsonc", ".assetsignore")
 
 # wrangler reads the worker name + name-segment of the workers.dev URL from
 # ``wrangler.jsonc``'s ``name``. It must match this (lowercase alnum + hyphen,
@@ -116,17 +141,30 @@ def _worker_name(site_id: str) -> str:
     return f"paw-site-{_sanitize(site_id)}"
 
 
-def _wrangler_jsonc(name: str, d1_database_id: str | None = None) -> str:
+def _wrangler_jsonc(name: str, engine: str = "ripple", d1_database_id: str | None = None) -> str:
     """The clean wrangler config for a workers.dev deploy (the proven recipe).
-    ``main`` points at the worker entry adapter-cloudflare emits INSIDE the asset
-    dir, and ``assets.directory`` points at that SAME dir (the ``.assetsignore`` we
-    write keeps wrangler from uploading the worker entry as an asset). ``workers_dev:
-    true`` publishes to the free ``<name>.<subdomain>.workers.dev`` URL;
-    ``nodejs_compat`` is what the SvelteKit worker needs at runtime.
 
-    ``d1_database_id`` (DYNAMIC sites) adds the single ``DB`` D1 binding — the same
-    binding WfP's ``put_worker`` passes — so a dynamic site's remote functions reach
-    their per-tenant database on the FREE tier, with no dispatch namespace.
+    HE-4 — the config is ENGINE-AWARE:
+
+    * html (``not needs_node_build``) → an ASSETS-ONLY Worker. The generator emits a
+      raw static tree (no ``_worker.js``), so the config drops ``main`` and
+      ``nodejs_compat`` and just serves ``assets.directory`` (``static_output_rel`` →
+      ``"."``, the project root). An assets-only Worker with no ``main`` is legal —
+      ``assets.directory`` is the only required key — and it ships ZERO bytes of
+      JavaScript for a form-less brochure.
+    * ripple / svelte (``needs_node_build``) → the SvelteKit Cloudflare worker,
+      UNCHANGED. ``main`` points at the worker entry adapter-cloudflare emits INSIDE
+      the asset dir (``static_output_rel`` → ``.svelte-kit/cloudflare``), and
+      ``assets.directory`` points at that SAME dir (the ``.assetsignore`` we write
+      keeps wrangler from uploading the worker entry as an asset). ``nodejs_compat``
+      is what the SvelteKit worker needs at runtime.
+
+    ``workers_dev: true`` publishes to the free ``<name>.<subdomain>.workers.dev`` URL.
+
+    ``d1_database_id`` (DYNAMIC sites — ripple/svelte only) adds the single ``DB`` D1
+    binding — the same binding WfP's ``put_worker`` passes — so a dynamic site's
+    remote functions reach their per-tenant database on the FREE tier. Dynamic html is
+    out of scope (it has no server runtime), so an html config never carries a binding.
 
     Deliberately still NO Queue bindings. The generator's own wrangler.toml declares
     ``LEADS_QUEUE`` / ``WRITEBACK_QUEUE`` producers, but Cloudflare Queues is a paid
@@ -135,13 +173,25 @@ def _wrangler_jsonc(name: str, d1_database_id: str | None = None) -> str:
     gracefully on a missing binding (``api/submit`` forwards straight to the capture
     API; ``writeback.ts`` warns and skips), so omitting them costs durability
     buffering, never a dropped lead."""
-    config: dict[str, object] = {
+    output_rel = static_output_rel(engine)
+    # html: an assets-only Worker — no server script, so no ``main`` / ``nodejs_compat``
+    # and no D1 (dynamic html is out of scope). Just serve the static tree.
+    if not needs_node_build(engine):
+        config: dict[str, object] = {
+            "name": name,
+            "compatibility_date": "2024-09-23",
+            "workers_dev": True,
+            "assets": {"directory": output_rel},
+        }
+        return json.dumps(config, indent=2) + "\n"
+
+    config = {
         "name": name,
-        "main": f"{_CF_OUTPUT_REL}/_worker.js",
+        "main": f"{output_rel}/_worker.js",
         "compatibility_date": "2024-09-23",
         "compatibility_flags": ["nodejs_compat"],
         "workers_dev": True,
-        "assets": {"binding": "ASSETS", "directory": _CF_OUTPUT_REL},
+        "assets": {"binding": "ASSETS", "directory": output_rel},
     }
     if d1_database_id:
         config["d1_databases"] = [
@@ -175,13 +225,27 @@ def _parse_deploy_url(stdout: str, *, name: str) -> str:
     return ""
 
 
-def _write_deploy_files(project_dir: str, name: str, d1_database_id: str | None = None) -> None:
-    """Write the two files the recipe needs into the project: the REQUIRED
-    ``.svelte-kit/cloudflare/.assetsignore`` (exact three lines) and the clean
-    ``wrangler.jsonc`` at the project root. Both are overwritten on a re-publish so
-    a stale config can never linger. ``d1_database_id`` adds the dynamic site's D1
-    binding to the emitted config."""
-    out_dir = Path(project_dir, _CF_OUTPUT_REL)
+def _write_deploy_files(
+    project_dir: str, name: str, engine: str = "ripple", d1_database_id: str | None = None
+) -> None:
+    """Write the recipe files into the project: an ``.assetsignore`` inside the asset
+    dir + the clean ``wrangler.jsonc`` at the project root. Both are overwritten on a
+    re-publish so a stale config can never linger.
+
+    HE-4 — engine-aware. The asset dir is ``static_output_rel(engine)``
+    (``.svelte-kit/cloudflare`` for ripple/svelte, ``"."`` for html). The
+    ``.assetsignore`` differs by engine:
+
+    * ripple/svelte → drops the Pages worker entry (``_worker.js`` + friends) so
+      wrangler does not upload the server entry as a static asset.
+    * html → the asset dir IS the project root, which also holds ``wrangler.jsonc`` +
+      ``.assetsignore``, so it drops THOSE (the deploy scaffold) — otherwise wrangler
+      serves the config file as a public asset.
+
+    ``d1_database_id`` adds the dynamic site's D1 binding to the emitted config
+    (ripple/svelte only)."""
+    output_rel = static_output_rel(engine)
+    out_dir = Path(project_dir, output_rel)
     if not out_dir.is_dir():
         # The static output must exist before this runs — generator.build() emits it.
         # If it is missing the deploy can't proceed (nothing to upload).
@@ -189,8 +253,9 @@ def _write_deploy_files(project_dir: str, name: str, d1_database_id: str | None 
             "sites.workers_no_build",
             "The static build output is missing — the site must be built before a workers deploy.",
         )
-    (out_dir / ".assetsignore").write_text("\n".join(_ASSETSIGNORE_LINES) + "\n")
-    Path(project_dir, _CONFIG_FILENAME).write_text(_wrangler_jsonc(name, d1_database_id))
+    ignore_lines = _ASSETSIGNORE_LINES if needs_node_build(engine) else _HTML_ASSETSIGNORE_LINES
+    (out_dir / ".assetsignore").write_text("\n".join(ignore_lines) + "\n")
+    Path(project_dir, _CONFIG_FILENAME).write_text(_wrangler_jsonc(name, engine, d1_database_id))
 
 
 def _cf_env() -> dict[str, str]:
@@ -202,38 +267,51 @@ def _cf_env() -> dict[str, str]:
 
 
 async def deploy_workers(
-    site_id: str, project_dir: str, *, d1_database_id: str | None = None
+    site_id: str, project_dir: str, *, engine: str = "ripple", d1_database_id: str | None = None
 ) -> str:
     """Deploy a Paw Site as a regular Worker on the free workers.dev tier.
 
-    Writes the proven recipe files (``.assetsignore`` + ``wrangler.jsonc``) into the
+    Writes the recipe files (``.assetsignore`` + ``wrangler.jsonc``) into the
     already-built project, then runs ``wrangler deploy`` (PAW_CF_WRANGLER_CMD, default
     ``bunx wrangler@4.101.0``) with the CF creds in the env, and returns the deployed
     ``https://<name>.<subdomain>.workers.dev`` URL (parsed from wrangler's stdout,
     falling back to constructing it from PAW_CF_WORKERS_SUBDOMAIN).
 
-    ``d1_database_id`` (DYNAMIC sites) binds the site's per-tenant D1 as ``DB``, so a
-    dynamic site can serve its live data WITHOUT a Workers-for-Platforms dispatch
-    namespace (a paid add-on). The D1 must already exist and be migrated — the
+    HE-4 — ``engine`` selects the config shape. html deploys as an ASSETS-ONLY Worker
+    (no ``main`` / ``_worker.js``, ``assets.directory == "."``, and an ``.assetsignore``
+    that keeps the config out of the served tree); ripple/svelte deploy the SvelteKit
+    Cloudflare worker unchanged. The default (``"ripple"``) preserves the exact prior
+    behaviour for every existing caller — svelte resolves to the same
+    ``.svelte-kit/cloudflare`` output.
+
+    ``d1_database_id`` (DYNAMIC ripple/svelte sites) binds the site's per-tenant D1 as
+    ``DB``, so a dynamic site can serve its live data WITHOUT a Workers-for-Platforms
+    dispatch namespace (a paid add-on). The D1 must already exist and be migrated — the
     provision job does both before calling this.
 
-    The project MUST already carry the generator's ``.svelte-kit/cloudflare/``
-    static output (generator.build() emits it before this is called). On a non-zero
-    wrangler exit this raises ``Internal`` with the stderr tail so the failure
-    surfaces as a clean 5xx envelope, not an opaque crash."""
+    The project MUST already carry the engine's static output
+    (``static_output_rel(engine)`` — generator.build() emits it before this is called).
+    On a non-zero wrangler exit this raises ``Internal`` with the stderr tail so the
+    failure surfaces as a clean 5xx envelope, not an opaque crash."""
     name = _worker_name(site_id)
     if not _WORKER_NAME_RE.match(name):  # defensive — _worker_name always sanitizes
         raise ValidationError(
             "sites.workers_bad_name",
             f"Computed an invalid worker name from site id {site_id!r}.",
         )
-    _write_deploy_files(project_dir, name, d1_database_id)
+    _write_deploy_files(project_dir, name, engine, d1_database_id)
 
     # ``--config`` is REQUIRED, not cosmetic: a dynamic project dir also holds the
     # generator's wrangler.toml (whose queue producers reference queues that do not
     # exist on this path), and wrangler must not pick it up.
     argv = [*_wrangler_argv(), "deploy", "--config", _CONFIG_FILENAME]
-    logger.info("sites.workers: deploying %s (d1=%s) via %s", name, bool(d1_database_id), argv)
+    logger.info(
+        "sites.workers: deploying %s (engine=%s d1=%s) via %s",
+        name,
+        engine,
+        bool(d1_database_id),
+        argv,
+    )
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
