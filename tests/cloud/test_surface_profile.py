@@ -49,12 +49,16 @@ def test_sites_profile_declares_deny_set_and_skill():
     reason as ``test_sites_profile_turns_ripple_off`` — the deny set + skill
     belong to the svelte-create mode, not to every /sites meta."""
     profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="svelte"))
-    assert profile.deny_mcp_tool_ids == frozenset(
-        {
-            "mcp__pocketpaw_sites_manager__create_landing_site",
-            "mcp__pocketpaw_pocket_specialist__create",
-        }
-    ) | _SITES_BUILTIN_DENY
+    assert (
+        profile.deny_mcp_tool_ids
+        == frozenset(
+            {
+                "mcp__pocketpaw_sites_manager__create_landing_site",
+                "mcp__pocketpaw_pocket_specialist__create",
+            }
+        )
+        | _SITES_BUILTIN_DENY
+    )
     assert "create-svelte-site" in profile.skill_names
 
 

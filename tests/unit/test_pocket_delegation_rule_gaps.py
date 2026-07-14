@@ -72,6 +72,7 @@ class TestTemplatePreflight:
             or "the matched" in POCKET_DELEGATION_RULE
         )
 
+
 class TestLabelWithoutSourceRule:
     """The specialist authored ``state.pets``-bound widgets and labels
     like "Live from /pet/findByStatus" but skipped ``set_source``. The
