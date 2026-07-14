@@ -17,6 +17,10 @@ Server surfaces (module → server name → tools):
 * ``belt.py`` → ``pocketpaw_belt`` → ``belt_propose_change`` (gated code change)
 * ``connectors.py`` → ``pocketpaw_connectors`` → connector listing + execution
 * ``decisions.py`` → ``pocketpaw_decisions`` → Decision-Graph queries
+* ``design_systems.py`` → ``pocketpaw_design_systems`` → ``list_design_systems``
+  / ``get_design_system`` (retrieve a bundled DESIGN.md design system — full
+  token scales + prose — from ``pocketpaw.bundled_design_systems``; pure local
+  read, no identity, no network)
 * ``deliver.py`` → ``pocketpaw_deliver`` → ``deliver_artifact`` (land a built
   file/dir in tenant blob storage, return a download URL)
 * ``external_actions.py`` → ``pocketpaw_external_actions`` →
@@ -25,6 +29,8 @@ Server surfaces (module → server name → tools):
 * ``fabric.py`` → ``pocketpaw_fabric`` → ``fabric_query`` / ``fabric_stats``
   (READ-ONLY ontology access, workspace-scoped)
 * ``foresight.py`` → ``pocketpaw_foresight`` → scenario save/run
+* ``icons.py`` → ``pocketpaw_icons`` → ``search_icons`` (free open-source
+  icon/SVG search via Iconify for site iconography; pure read, no identity)
 * ``instinct.py`` → ``pocketpaw_instinct`` → ``instinct_pending`` /
   ``instinct_audit`` (READ-ONLY gate visibility, workspace-scoped; proposing
   goes through ``pocketpaw_external_actions``)
@@ -32,6 +38,9 @@ Server surfaces (module → server name → tools):
 * ``media.py`` → ``pocketpaw_media`` → ``image_generate`` / ``audio_generate`` /
   ``audio_transcribe`` / ``video_generate`` (routed through the LiteLLM proxy)
 * ``meetings.py`` → ``pocketpaw_meetings`` → meeting queries
+* ``palette.py`` → ``pocketpaw_palette`` → ``extract_palette`` (derive a full
+  50–900 role-scaled color palette from a reference image URL for site theming;
+  pure read, no identity)
 * ``planner.py`` → ``pocketpaw_planner`` (opt-in) + ``pocketpaw_pocket_planner``
 * ``pockets.py`` → ``pocketpaw_pocket`` → pocket context + widget pinning
 * ``sites.py`` / ``sites_create.py`` → ``pocketpaw_sites_manager`` → Paw Sites

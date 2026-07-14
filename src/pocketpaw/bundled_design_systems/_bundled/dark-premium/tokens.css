@@ -1,0 +1,85 @@
+/* tokens.css — Obsidian (dark-premium) design system.
+ * Compiled from DESIGN.md front-matter; the shared source of truth both the
+ * ripple and svelte render engines consume. Keep in lockstep with DESIGN.md.
+ * This is a DARK theme: the canvas is neutral-900 and text is the light end of
+ * the neutral scale. Created: 2026-07-06 (feat/sites-crew-design-systems, SC-7b). */
+:root {
+  /* Colors — primary (jade emerald), secondary (cool steel), neutral (cool graphite) */
+  --color-primary-50: #E8FDF6;
+  --color-primary-100: #C7FAE9;
+  --color-primary-200: #94F5D4;
+  --color-primary-300: #61F0C0;
+  --color-primary-400: #32EBAD;
+  --color-primary-500: #16DF9C;
+  --color-primary-600: #12BA82;
+  --color-primary-700: #0E9568;
+  --color-primary-800: #0A6B4B;
+  --color-primary-900: #06412D;
+  --color-secondary-50: #EFF2F5;
+  --color-secondary-100: #D9E0E8;
+  --color-secondary-200: #B6C3D2;
+  --color-secondary-300: #94A7BD;
+  --color-secondary-400: #748DAA;
+  --color-secondary-500: #5D7898;
+  --color-secondary-600: #4E647E;
+  --color-secondary-700: #3E5065;
+  --color-secondary-800: #2D3A49;
+  --color-secondary-900: #1B232C;
+  --color-neutral-50: #F2F2F3;
+  --color-neutral-100: #DFE0E1;
+  --color-neutral-200: #C3C4C6;
+  --color-neutral-300: #A6A8AB;
+  --color-neutral-400: #8B8E92;
+  --color-neutral-500: #77797E;
+  --color-neutral-600: #636569;
+  --color-neutral-700: #4F5154;
+  --color-neutral-800: #393A3C;
+  --color-neutral-900: #232325;
+  /* Dark-theme roles: canvas is the dark end, text is the light end */
+  --color-surface: var(--color-neutral-900);
+  --color-surface-raised: var(--color-neutral-800);
+  --color-text: var(--color-neutral-100);
+  --color-text-muted: var(--color-neutral-400);
+
+  /* Typography */
+  --font-display: 'Playfair Display', 'Times New Roman', serif;
+  --font-heading: 'Playfair Display', 'Times New Roman', serif;
+  --font-body: 'Manrope', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --text-display: 5.61rem;
+  --text-h1: 4.209rem;
+  --text-h2: 3.157rem;
+  --text-h3: 2.369rem;
+  --text-h4: 1.777rem;
+  --text-body-lg: 1.25rem;
+  --text-body: 1rem;
+  --text-body-sm: 0.875rem;
+  --text-caption: 0.75rem;
+  --leading-tight: 1.05;
+  --leading-body: 1.75;
+  --tracking-tight: -0.01em;
+  --tracking-caption: 0.12em;
+
+  /* Spacing — 4px base, generous editorial rhythm */
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 1rem;
+  --space-lg: 1.75rem;
+  --space-xl: 3rem;
+  --space-2xl: 5rem;
+  --space-3xl: 8rem;
+
+  /* Rounded — subtle, near-square */
+  --radius-none: 0;
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
+  --radius-full: 9999px;
+
+  /* Elevation — deep shadow + a soft emerald glow (xl) for the focal accent */
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 20px 50px rgba(0, 0, 0, 0.6);
+  --shadow-xl: 0 0 40px rgba(22, 223, 156, 0.20);
+}
