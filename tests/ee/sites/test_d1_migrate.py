@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 
 import pytest
 
@@ -62,7 +63,15 @@ async def test_apply_migrations_runs_the_expected_wrangler_command(tmp_path, mon
     argv = captured["argv"]
     # ...wrangler... d1 migrations apply paw-site-<id> --remote
     assert argv[-5:] == ["d1", "migrations", "apply", f"paw-site-{site_id}", "--remote"]
-    assert argv[:2] == ["bunx", "wrangler@4.101.0"]
+    # The shared _wrangler tokenizer rewrites a leading `bunx` to `bun x` on Windows
+    # (there is no launchable bunx.exe — see ee/pocketpaw_ee/sites/_wrangler.py); on
+    # POSIX a real `bunx` exists, so it passes through unchanged.
+    expected_head = (
+        ["bun", "x", "wrangler@4.101.0"]
+        if sys.platform == "win32"
+        else ["bunx", "wrangler@4.101.0"]
+    )
+    assert argv[: len(expected_head)] == expected_head
     assert captured["kwargs"]["cwd"] == str(tmp_path)
     # runs in its own session so a wedged wrangler's whole group can be killed
     assert captured["kwargs"]["start_new_session"] is True
