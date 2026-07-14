@@ -136,18 +136,14 @@ def test_sites_all_modes_drop_file_and_shell_builtins():
 # the real SDK filter predicate.
 # ---------------------------------------------------------------------------
 
-from pocketpaw_ee.agent.mcp_servers.design_systems import DESIGN_SYSTEM_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.palette import PALETTE_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS  # noqa: E402
 from pocketpaw_ee.agent.mcp_servers.stock_images import STOCK_TOOL_IDS  # noqa: E402
 
-_TOOLBELT_IDS = (
-    frozenset(STOCK_TOOL_IDS)
-    | frozenset(ICON_TOOL_IDS)
-    | frozenset(PALETTE_TOOL_IDS)
-    | frozenset(DESIGN_SYSTEM_TOOL_IDS)
-)
+# The canned design_systems library was dropped from the sites toolbelt — the
+# embedded pocketpaw-design-taste system is the design authority now.
+_TOOLBELT_IDS = frozenset(STOCK_TOOL_IDS) | frozenset(ICON_TOOL_IDS) | frozenset(PALETTE_TOOL_IDS)
 
 
 def _sites_create_metas():
