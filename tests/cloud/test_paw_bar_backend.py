@@ -144,6 +144,25 @@ class TestWidgetCRUD:
         assert fetched.event_mapping["order_click"].creates == "Order"
 
     @pytest.mark.asyncio
+    async def test_agent_id_round_trips_create_to_get(self, store: PawBarStore) -> None:
+        """T3 — a concierge widget's agent binding survives create → get (and the
+        default is "" for an unbound widget, like the workspace_id column)."""
+        bound = await store.create_widget(_widget(agent_id="agent-123"))
+        fetched = await store.get_widget(bound.id)
+        assert fetched is not None
+        assert fetched.agent_id == "agent-123"
+
+        # It also rides the list read (SELECT * → _row_to_widget).
+        listed = await store.list_widgets(pocket_id=bound.pocket_id)
+        assert listed and listed[0].agent_id == "agent-123"
+
+        # An unset binding defaults to "" (not None), mirroring workspace_id.
+        unbound = await store.create_widget(_widget(pocket_id="pocket-unbound"))
+        fetched_unbound = await store.get_widget(unbound.id)
+        assert fetched_unbound is not None
+        assert fetched_unbound.agent_id == ""
+
+    @pytest.mark.asyncio
     async def test_list_filters_by_pocket_and_owner(self, store: PawBarStore) -> None:
         await store.create_widget(_widget(pocket_id="pocket-1", owner="user:maya"))
         await store.create_widget(_widget(pocket_id="pocket-2", owner="user:priya"))

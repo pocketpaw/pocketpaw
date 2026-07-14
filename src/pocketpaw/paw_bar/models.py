@@ -1,4 +1,10 @@
 # ee/paw_bar/models.py — Pydantic models for the Paw Bar widget layer.
+# Updated: 2026-07-14 (Paw Bar concierge seam, T3) — PawBarWidget +
+#   PawBarWidgetPublic gain `agent_id: str = ""`, mirroring the workspace_id
+#   column right beside it (same nullability/default). It binds a concierge
+#   widget to the agent that answers its chats; "" = unbound (legacy / no agent).
+#   The KB scope is NOT stored — it is derived as `pocket:<pocket_id>` where
+#   needed — so this is the only new tenancy-adjacent field.
 # Updated: 2026-07-11 (W4a tenancy seam) — PawBarWidget + PawBarWidgetPublic
 #   gain `workspace_id: str = ""` (in-row tenancy, same model as DecisionStatus).
 #   Empty string = legacy/single-tenant row; the store's scoped reads match it.
@@ -152,6 +158,10 @@ class PawBarWidget(BaseModel):
     # W4a in-row tenancy — the owning workspace. Empty string means a
     # legacy/single-tenant row (matched by every scoped read, like decisions).
     workspace_id: str = ""
+    # T3 concierge binding — the agent that answers this widget's chats. "" =
+    # unbound (legacy row / no agent). Mirrors workspace_id above (same default);
+    # public read paths stay widget_id-keyed, this is just carried through.
+    agent_id: str = ""
     name: str = ""
     spec: PawBarSpec
     allowed_domains: list[str] = Field(default_factory=list)
@@ -199,6 +209,9 @@ class PawBarWidgetPublic(BaseModel):
     pocket_id: str
     owner: str
     workspace_id: str = ""
+    # T3 — mirror of PawBarWidget.agent_id; the token-free projection carries it
+    # too (it is not a secret, just the binding).
+    agent_id: str = ""
     name: str = ""
     spec: PawBarSpec
     allowed_domains: list[str] = Field(default_factory=list)

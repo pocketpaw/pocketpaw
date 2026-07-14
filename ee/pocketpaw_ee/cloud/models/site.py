@@ -103,6 +103,18 @@
 # can surface it on ``SiteResponse.provision_job_id``. None for a static publish and
 # for any DB-loaded doc (the PrivateAttr defaults to None). Private so it never
 # round-trips through the DB.
+#
+# Updated 2026-07-14 (Paw Bar concierge seam, T1): the Site's ``signed_key`` +
+# ``allowed_origins`` (already here since RFC 12) ARE the public, origin-bound
+# embed credential a Paw Bar concierge authenticates with — no parallel key model
+# is introduced. Three additive fields make that credential a first-class scoped
+# key: ``scopes`` (what a resolved concierge request may do — chat / kb.read /
+# event.ingest by default), ``revoked`` (a kill switch the resolver fails closed
+# on), and a ``rotate_signed_key`` helper (regenerate the embed key, e.g. after a
+# leak — caller persists). A ``signed_key`` index backs the key→Site lookup
+# ``auth.site_keys.resolve_site_key`` does on every concierge request. All defaults
+# are backward-compatible (existing docs read ``revoked=False`` + the default
+# scope set), so no migration.
 
 from __future__ import annotations
 
@@ -201,9 +213,43 @@ class Site(TimestampedDocument):
     honeypot_field: str = "company_website"
     event_mapping: dict[str, Any] = Field(default_factory=dict)
     domains: list[SiteDomain] = Field(default_factory=list)
+    # Paw Bar concierge (T1): what a request authenticated with this site's
+    # public embed key (``signed_key`` + ``allowed_origins``) is allowed to do.
+    # The concierge resolver copies this onto the RequestContext.scopes, and the
+    # per-endpoint ``require_scope`` gate checks against it. Defaults to the
+    # concierge baseline; a foreign-site mint can narrow it. Existing (site-
+    # capture) docs read this default but never consult it — the capture path is
+    # its own gate — so the default is harmless for them.
+    scopes: list[str] = Field(default_factory=lambda: ["chat", "kb.read", "event.ingest"])
+    # Paw Bar concierge (T1): a kill switch for the embed key. The resolver fails
+    # closed on it (a revoked key resolves to nothing) so a leaked key can be
+    # cut off without deleting the Site. Defaults False (every existing doc is
+    # live), so no migration.
+    revoked: bool = False
+
+    def rotate_signed_key(self) -> str:
+        """Regenerate the public embed key and return the new value (T1).
+
+        Mints a fresh ``site_key_...`` token (the SAME format the sites service
+        seeds — a world-visible, origin-bound embed key, NOT a hashed secret)
+        and assigns it to ``self.signed_key``. Rotation is how a leaked embed
+        key is retired: after this, the old key no longer resolves. The caller
+        is responsible for persisting (``await site.save()``) — this mutates the
+        in-memory doc only, mirroring how other model helpers stay I/O-free.
+        """
+        import secrets
+
+        self.signed_key = f"site_key_{secrets.token_urlsafe(24)}"
+        return self.signed_key
 
     class Settings:
         name = "sites"
         indexes = [
             [("workspace", 1), ("pocket_id", 1)],
+            # T1: back the concierge key→Site lookup (resolve_site_key does a
+            # ``find_one({"signed_key": key})`` on every concierge request). Not
+            # unique: unpublished/foreign docs can share the "" default, and the
+            # resolver rejects an empty key before it ever queries, so a blank
+            # key never resolves against those rows.
+            [("signed_key", 1)],
         ]

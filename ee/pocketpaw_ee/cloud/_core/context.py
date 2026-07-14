@@ -16,6 +16,14 @@ Updates:
     back to the standard JWT auth path when any check fails. Used by the
     foresight router; the dev-grade bypass tightens to a short-lived
     signed JWT in a follow-up PR.
+  - 2026-07-14 (Paw Bar concierge seam, T1): added ``ScopeKind.CONCIERGE``
+    — the scope a public, origin-bound Paw Bar embed key resolves into
+    (``site_keys.resolve_site_key``) — and a trailing ``pocket_id`` field on
+    ``RequestContext``. The concierge is bound to a Site's ``pocket_id`` (its
+    KB scope downstream is ``pocket:<pocket_id>``), which the workspace/user
+    axes don't carry, so the resolved envelope needs its own slot. The field
+    is optional (default ``None``) and trailing, so every existing keyword
+    construction is unaffected — no caller passes it yet.
 """
 
 from __future__ import annotations
@@ -46,6 +54,12 @@ class ScopeKind(StrEnum):
     GROUP = "group"
     DM = "dm"
     NONE = "none"
+    # A public, origin-bound Paw Bar embed key (Site.signed_key) resolves into
+    # this scope via ``auth.site_keys.resolve_site_key``. It is NOT a signed-in
+    # user session: the credential is world-visible (embedded in a foreign
+    # site's HTML), so the request's authority is the resolved Site's
+    # ``scopes`` + ``workspace`` + ``pocket_id``, never full workspace access.
+    CONCIERGE = "concierge"
 
 
 @dataclass(frozen=True)
@@ -68,6 +82,12 @@ class RequestContext:
         scopes: ``None`` for JWT/cookie auth (full access). A concrete
             list when the caller authed with an API key — ``require_scope``
             checks against this list.
+        pocket_id: The pocket a scope is bound to, when the scope carries one.
+            ``None`` for the workspace/user-axis scopes (WORKSPACE, SESSION,
+            NONE, …). Set by ``site_keys.resolve_site_key`` for a CONCIERGE
+            request — the Site the embed key belongs to is published from a
+            pocket, and the concierge's KB read is scoped to it
+            (``pocket:<pocket_id>``). Trailing + defaulted so it is additive.
     """
 
     user_id: str
@@ -76,6 +96,7 @@ class RequestContext:
     scope: ScopeKind
     started_at: datetime
     scopes: list[str] | None = field(default=None)
+    pocket_id: str | None = field(default=None)
 
 
 def _bearer_token(request: Request) -> str | None:

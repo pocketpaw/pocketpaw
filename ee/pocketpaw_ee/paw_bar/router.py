@@ -1,4 +1,8 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-14 (Paw Bar concierge seam, T3) — CreateWidgetRequest accepts
+#   an optional agent_id; create_widget stamps it onto the PawBarWidget so a
+#   concierge widget is bound to the agent that answers its chats. Purely
+#   additive — omitting it keeps the existing "" (unbound) behavior.
 # Updated: 2026-07-11 (W4a spec revisions) — POST /paw-bar/widgets/{id}/spec/
 #   rollback (admin + owner-token, workspace-scoped like update_spec) restores
 #   the latest archived spec revision; 409 when no revision exists.
@@ -115,6 +119,9 @@ def _origin_allowed(widget: PawBarWidget, origin: str | None) -> bool:
 class CreateWidgetRequest(BaseModel):
     pocket_id: str
     owner: str
+    # T3 — bind the widget to the agent that answers its concierge chats. Optional
+    # + defaults to "" (unbound), so existing create calls are unaffected.
+    agent_id: str = ""
     name: str = ""
     spec: PawBarSpec
     allowed_domains: list[str] = Field(default_factory=list)
@@ -192,6 +199,7 @@ async def create_widget(
         pocket_id=req.pocket_id,
         owner=req.owner,
         workspace_id=workspace_id,
+        agent_id=req.agent_id,
         name=req.name,
         spec=req.spec,
         allowed_domains=req.allowed_domains,

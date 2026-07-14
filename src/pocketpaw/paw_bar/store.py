@@ -1,4 +1,10 @@
 # ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
+# Updated: 2026-07-14 (Paw Bar concierge seam, T3) — paw_bar_widgets gains an
+#   agent_id TEXT DEFAULT '' column, mirroring the workspace_id column beside it.
+#   create_widget writes it; _row_to_widget reads it (get/list/update_spec/
+#   rotate_token round-trip it for free — they SELECT * and rebuild via
+#   _row_to_widget). Hard schema add, no migration (the widget has zero
+#   deployments, same rationale as the W4a workspace_id add).
 # Updated: 2026-07-11 (W4a spec revisions) — new paw_bar_spec_revisions table:
 #   update_spec archives the PRIOR spec with a monotonic per-widget revision
 #   number (same transaction as the update); latest_spec_revision reads the
@@ -58,6 +64,7 @@ CREATE TABLE IF NOT EXISTS paw_bar_widgets (
     pocket_id TEXT NOT NULL,
     owner TEXT NOT NULL,
     workspace_id TEXT DEFAULT '',
+    agent_id TEXT DEFAULT '',
     name TEXT DEFAULT '',
     spec TEXT NOT NULL,
     allowed_domains TEXT DEFAULT '[]',
@@ -176,15 +183,16 @@ class PawBarStore:
         async with self._conn() as db:
             await db.execute(
                 "INSERT INTO paw_bar_widgets"
-                " (id, pocket_id, owner, workspace_id, name, spec, allowed_domains,"
+                " (id, pocket_id, owner, workspace_id, agent_id, name, spec, allowed_domains,"
                 " access_token, rate_limit_per_min, per_customer_limit_per_min,"
                 " event_mapping, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     widget.id,
                     widget.pocket_id,
                     widget.owner,
                     widget.workspace_id,
+                    widget.agent_id,
                     widget.name,
                     widget.spec.model_dump_json(),
                     json.dumps(widget.allowed_domains),
@@ -561,6 +569,7 @@ class PawBarStore:
             pocket_id=row["pocket_id"],
             owner=row["owner"],
             workspace_id=row["workspace_id"] or "",
+            agent_id=row["agent_id"] or "",
             name=row["name"] or "",
             spec=spec,
             allowed_domains=raw_domains,
