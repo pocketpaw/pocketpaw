@@ -223,6 +223,41 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "on static HTML."
         )
 
+    # The Phase-1 clarity question renders as COMPLETE UI. On every engine except
+    # svelte-create, inline ripple is ON (see surface_registry._sites_profile), so
+    # the agent renders a real `ask-user-questions` ripple widget (a ```ui-spec
+    # block) — a stepped, clickable question whose `completeActions` emit
+    # `chat.send`, returning the user's pick as their next message. On the svelte
+    # track ripple is OFF, so it falls back to the `ask_user` MCP tool (chips).
+    ripple_on = engine != "svelte"
+    if ripple_on:
+        clarify_step = (
+            "Render the question as an `ask-user-questions` RIPPLE WIDGET — a "
+            "```ui-spec fenced block using the {version, ui} envelope, NOT plain "
+            "text and NOT a tool call. It renders as clickable option chips and, "
+            "on selection, sends the answer back as the user's next message. Use "
+            "exactly this shape, tailored to the site (option `description` is "
+            "optional):\n"
+            "```ui-spec\n"
+            '{"version": 1, "ui": {"type": "ask-user-questions", "props": '
+            '{"questions": [{"title": "What visual style fits best?", "options": '
+            '[{"title": "Clean & modern"}, {"title": "Warm & friendly"}, '
+            '{"title": "Bold & confident"}, {"title": "Elegant & premium"}, '
+            '{"title": "Just build it — you pick"}]}], "completeActions": '
+            '{"action": "emit", "target": "chat.send"}}}}\n'
+            "```\n"
+            "`completeActions` MUST emit `chat.send`. Emit the widget, then END "
+            "YOUR TURN and wait for the click — do NOT call any build tool."
+        )
+    else:
+        clarify_step = (
+            "Ask via the `mcp__pocketpaw_ask__ask_user` tool (this svelte track "
+            "has inline ripple OFF, so the tool renders the chips): pass a "
+            "one-line `question` and 3–5 short `options` (always include a 'Just "
+            "build it — you pick' option). Call it, then END YOUR TURN and wait "
+            "for the click — do NOT call any build tool."
+        )
+
     return (
         f'<surface kind="sites" route="{route}"{engine_attr} mode="create" />\n'
         "<sites-orientation>\n"
@@ -238,34 +273,24 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "request, then design and build a coherent, on-brand site.\n"
         "</sites-orientation>\n"
         "<sites-procedure>\n"
-        "Run TWO phases. Do not skip Phase 1, and do not start building until "
-        "Phase 1 is resolved.\n"
+        "Run TWO phases. PHASE 1 IS MANDATORY AND COMES FIRST. On the user's "
+        "first create message you MUST ask exactly one design-direction question "
+        "and then STOP — do NOT call any design, create, or publish tool in that "
+        "same turn, and do NOT skip this even for a long, detailed brief. This "
+        "rule OVERRIDES any skill, habit, or instinct that says build "
+        "immediately; asking the question is the ONLY thing you do on the first "
+        "turn.\n"
         "\n"
-        "PHASE 1 — CLARITY GATE + INTERVIEW.\n"
-        "Assess the user's request across these dimensions: (a) the purpose / "
-        "goal of the site, (b) the business and its audience, (c) the key "
-        "sections they want, (d) brand — colors, vibe, any existing logo or "
-        "brand assets, (e) voice / tone.\n"
-        "- IF the request ALREADY covers most of these dimensions (a detailed "
-        "prompt) → do NOT interrogate. Briefly restate the plan in one or two "
-        "lines and proceed straight to Phase 2.\n"
-        "- IF the request is VAGUE (e.g. 'make me a site for my cafe') → ask "
-        "3–5 SHORT, high-value questions in ONE message covering the biggest "
-        "gaps: what the site should achieve, the vibe or brands they admire, "
-        "the must-have sections, and any brand colors. THEN STOP and wait for "
-        "the reply — do not build yet. Always offer an out: end with '…or say "
-        '"just build it" and I\'ll pick sensible defaults.\' NEVER ask more '
-        "than ONE round of questions; if the user already gave detail, or "
-        "replies, or says 'just build it', move on to Phase 2 immediately.\n"
-        "- INTERACTIVE CHOICE. For the single most important CHOICE — the "
-        "vibe / design direction — prefer the `mcp__pocketpaw_ask__ask_user` "
-        "tool over plain text: it renders clickable option chips. Call it with a "
-        "one-line `question` and 3–5 short `options` (e.g. ['Clean & modern', "
-        "'Warm & friendly', 'Bold & confident', 'Elegant & premium']), then STOP "
-        "and wait — the user's click comes back as their next message. Ask ONE "
-        "such question per turn; gather any remaining open details (business "
-        "name, address) in plain text. Skip it entirely if the brief already "
-        "names a clear direction.\n"
+        "PHASE 1 — ASK THE DESIGN DIRECTION (always, as your first action).\n"
+        "Ask for the VISUAL DIRECTION — the one thing a prompt almost never pins "
+        f"down, so you must never assume it. {clarify_step}\n"
+        "- ONLY skip the question if the user's message ALREADY names a specific "
+        "visual STYLE (e.g. 'dark brutalist', 'like Stripe', 'minimal "
+        "black-and-white') — in that case briefly restate the plan and go to "
+        "Phase 2. A described business or section list is NOT a style and does "
+        "NOT let you skip.\n"
+        "- NEVER ask more than ONE round; once the user answers or picks 'just "
+        "build it', go straight to Phase 2 with sensible defaults.\n"
         "\n"
         "PHASE 2 — DESIGN + BUILD.\n"
         "1. PICK A LOOK. Call "

@@ -362,11 +362,30 @@ async def test_create_names_design_and_asset_tools() -> None:
     assert "mcp__pocketpaw_palette__scale_from_color" in out
 
 
-async def test_create_uses_ask_user_chips() -> None:
-    """The clarity gate prefers the ask_user question-chip tool for the vibe
-    choice so the UI renders selectable options (not just plain text)."""
-    out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+async def test_create_clarify_renders_ripple_widget_when_ripple_on() -> None:
+    """On ripple-ON create surfaces (html default, ripple) the clarity question is
+    rendered as a COMPLETE UI: an `ask-user-questions` ripple widget (ui-spec
+    block) whose completeActions emit chat.send — NOT the ask_user chip tool."""
+    for engine in (None, "html", "ripple"):
+        out = await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
+        )
+        assert "ask-user-questions" in out
+        assert "ui-spec" in out
+        assert '"target": "chat.send"' in out
+        # The ripple-widget path does NOT reach for the chip tool.
+        assert "mcp__pocketpaw_ask__ask_user" not in out
+
+
+async def test_create_clarify_uses_ask_user_tool_on_svelte() -> None:
+    """The svelte track has inline ripple OFF, so the clarity question falls back
+    to the `ask_user` MCP chip tool (the agent can't render a ripple widget
+    there)."""
+    out = await sites_handler.build_preamble(
+        WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="svelte")
+    )
     assert "mcp__pocketpaw_ask__ask_user" in out
+    assert "ask-user-questions" not in out
 
 
 async def test_create_has_just_build_it_escape_hatch() -> None:
