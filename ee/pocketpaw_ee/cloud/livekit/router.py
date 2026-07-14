@@ -8,10 +8,16 @@ Endpoints:
 - ``POST /api/v1/livekit/rooms/{group_id}/recording/start`` — start recording (owner only)
 - ``POST /api/v1/livekit/rooms/{group_id}/recording/stop`` — stop recording (owner only)
 - ``GET /api/v1/livekit/rooms/{group_id}/recording`` — get recording status
+- ``POST /api/v1/livekit/rooms/{group_id}/invite`` — create meeting invite link
+- ``GET /api/v1/livekit/invites/{token}`` — validate invite (public, no auth)
+- ``POST /api/v1/livekit/invites/{token}/join`` — join as guest (public, no auth)
+- ``GET /api/v1/livekit/rooms/{group_id}/invites`` — list active invites
+- ``DELETE /api/v1/livekit/rooms/{group_id}/invites/{invite_id}`` — revoke invite
 
 All routes require an active enterprise license, user authentication,
-and group membership. Recording endpoints additionally require workspace
-ownership."""
+and group membership, EXCEPT the public invite validate/join endpoints
+which allow external guests without a Pocketpaw account. Recording endpoints
+additionally require workspace ownership."""
 
 from __future__ import annotations
 
@@ -506,3 +512,179 @@ async def get_recording_status(
         started_at=info.get("started_at", 0),
         ended_at=info.get("ended_at", 0),
     )
+
+
+# ---------------------------------------------------------------------------
+# Meeting invite endpoints
+# ---------------------------------------------------------------------------
+
+
+class CreateInviteRequest(BaseModel):
+    display_name: str = ""
+    max_uses: int = Field(default=0, ge=0, description="0 = unlimited")
+    ttl_hours: int = Field(default=24, ge=1, le=72)
+
+
+class CreateInviteResponse(BaseModel):
+    invite_id: str
+    invite_token: str
+    group_id: str
+    room_name: str
+    created_by: str
+    expires_at: str
+    max_uses: int = 0
+
+
+class ValidateInviteResponse(BaseModel):
+    valid: bool
+    room_name: str
+    group_id: str
+    workspace_id: str
+    display_name: str
+    is_call_active: bool = False
+    participant_count: int = 0
+    expires_at: str
+    max_uses: int = 0
+    use_count: int = 0
+
+
+class JoinInviteRequest(BaseModel):
+    display_name: str = Field(
+        ..., min_length=1, max_length=80, description="Display name shown to other participants"
+    )
+
+
+class JoinInviteResponse(BaseModel):
+    token: str
+    url: str
+    room_name: str
+    identity: str
+    display_name: str
+    group_id: str
+
+
+class ListInvitesResponse(BaseModel):
+    invite_id: str
+    group_id: str
+    room_name: str
+    display_name: str
+    max_uses: int
+    use_count: int
+    guest_count: int
+    expires_at: str
+    created_at: str
+    created_by: str
+
+
+class RevokeInviteResponse(BaseModel):
+    invite_id: str
+    group_id: str
+    revoked: bool = True
+
+
+@router.post("/rooms/{group_id}/invite", response_model=CreateInviteResponse)
+async def create_invite(
+    group_id: str,
+    body: CreateInviteRequest = CreateInviteRequest(),
+    user=Depends(current_user),
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Create a shareable invite link for the active call in this group.
+
+    Returns an ``invite_token`` that can be shared as a URL. External
+    guests can use it to join the call without a Pocketpaw account.
+    """
+    await require_license()
+
+    # Verify the caller is a member of the target group.
+    group = await _get_group_domain_or_404(group_id)
+    _require_domain_group_member(group, str(user.id))
+
+    # Derive the room name for this group.
+    room_name = livekit_service.room_name_for_group(group_id)
+
+    from pocketpaw_ee.cloud.livekit import invites as invite_service
+
+    result = await invite_service.create_meeting_invite(
+        workspace_id=workspace_id,
+        group_id=group_id,
+        room_name=room_name,
+        created_by=str(user.id),
+        display_name=body.display_name,
+        max_uses=body.max_uses,
+        ttl_hours=body.ttl_hours,
+    )
+    return CreateInviteResponse(**result)
+
+
+@router.get("/rooms/{group_id}/invites", response_model=list[ListInvitesResponse])
+async def list_invites(
+    group_id: str,
+    user=Depends(current_user),
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """List all active meeting invites for a group.
+
+    Only group members can see the invite list.
+    """
+    await require_license()
+
+    group = await _get_group_domain_or_404(group_id)
+    _require_domain_group_member(group, str(user.id))
+
+    from pocketpaw_ee.cloud.livekit import invites as invite_service
+
+    items = await invite_service.list_meeting_invites(group_id)
+    return [ListInvitesResponse(**it) for it in items]
+
+
+@router.get("/invites/{token}", response_model=ValidateInviteResponse)
+async def validate_invite(token: str):
+    """Validate a meeting invite token (public — no auth required).
+
+    Returns room metadata so the guest join page can show whether the
+    call is still active before the guest enters a display name.
+    """
+    from pocketpaw_ee.cloud.livekit import invites as invite_service
+
+    result = await invite_service.validate_meeting_invite(token)
+    return ValidateInviteResponse(**result)
+
+
+@router.post("/invites/{token}/join", response_model=JoinInviteResponse)
+async def join_via_invite(token: str, body: JoinInviteRequest):
+    """Join a call as a guest via an invite token (public — no auth required).
+
+    Returns a LiveKit access token so the guest can connect immediately.
+    The guest identity is ``guest-{random}`` and the provided
+    ``display_name`` is shown to other participants.
+    """
+    from pocketpaw_ee.cloud.livekit import invites as invite_service
+
+    result = await invite_service.accept_meeting_invite(token, body.display_name)
+    return JoinInviteResponse(**result)
+
+
+@router.delete(
+    "/rooms/{group_id}/invites/{invite_id}",
+    response_model=RevokeInviteResponse,
+)
+async def revoke_invite(
+    group_id: str,
+    invite_id: str,
+    user=Depends(current_user),
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Revoke a meeting invite so it can no longer be used.
+
+    Only group members can revoke invites.
+    """
+    await require_license()
+
+    group = await _get_group_domain_or_404(group_id)
+    _require_domain_group_member(group, str(user.id))
+
+    from pocketpaw_ee.cloud.livekit import invites as invite_service
+
+    result = await invite_service.revoke_meeting_invite(invite_id, str(user.id))
+    return RevokeInviteResponse(**result)
