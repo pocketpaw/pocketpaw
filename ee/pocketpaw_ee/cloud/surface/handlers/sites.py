@@ -103,10 +103,55 @@
 
 from __future__ import annotations
 
+import functools
 from typing import Any
 
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
 from pocketpaw_ee.sites_crew.models import DesignBrief
+
+
+@functools.lru_cache(maxsize=1)
+def _design_taste_system() -> str:
+    """Return the ``pocketpaw-design-taste`` SKILL.md body (frontmatter stripped)
+    wrapped as a governing ``<design-system>`` block.
+
+    PERMANENT FIX (2026-07-14): the sites build agent was not reliably INVOKING
+    the design-taste skill (skill invocation is model-driven and probabilistic,
+    and the SDK backend can auto-select a weaker model that skips it), so sites
+    came out generic. On this surface, design quality IS the job — so instead of
+    hoping the model calls the skill, we EMBED the full 2026 Creative Director
+    system straight into the create preamble. It is read once from the bundled
+    skill file (the SKILL.md stays the single source of truth) and cached. A
+    missing file degrades to a short inline directive, never a crash.
+    """
+    try:
+        from pocketpaw.bundled_skills import bundled_skills_plugin_dir
+
+        base = bundled_skills_plugin_dir()
+        if base is not None:
+            md = (base / "skills" / "pocketpaw-design-taste" / "SKILL.md").read_text(
+                encoding="utf-8"
+            )
+            body = md
+            if md.startswith("---"):
+                parts = md.split("---", 2)
+                if len(parts) == 3:
+                    body = parts[2].strip()
+            return (
+                '<design-system name="pocketpaw-design-taste">\n'
+                "This 2026 Creative Director system GOVERNS every site you build "
+                "on this surface. It is ALREADY LOADED here — apply it in full; "
+                "you do NOT need to invoke any skill to use it.\n\n"
+                f"{body}\n"
+                "</design-system>"
+            )
+    except Exception:  # noqa: BLE001 — never let a read error break the preamble
+        pass
+    return (
+        '<design-system name="pocketpaw-design-taste">\n'
+        "Invoke the `pocketpaw-design-taste` skill and follow it in full.\n"
+        "</design-system>"
+    )
 
 
 async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
@@ -167,8 +212,9 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "BUILD via the `pocketpaw-create-svelte-site` skill — invoke it by "
             "intent (no slash command). YOU write premium hand-written SvelteKit "
             "components (Hero, Pricing, Faq, …) at the design quality bar, "
-            "authoring them with the `pocketpaw-design-taste` skill for premium, "
-            "non-generic styling on top of the chosen design system's tokens, "
+            "authoring them per the embedded `pocketpaw-design-taste` design "
+            "system for premium, non-generic styling on top of the design "
+            "system's tokens, "
             "THEME them with those tokens + your asset URLs, and it persists the "
             'source pocket `type="site"` + `pattern="landing"` + `engine="svelte"` '
             "and publishes it. There is NO rippleSpec and NO widget catalog on "
@@ -283,16 +329,17 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "numbers) — use an obviously-generic placeholder and flag it instead.\n"
         "\n"
         "PHASE 1 — CREATIVE DIRECTION (infer, do NOT ask).\n"
-        "Invoke the `pocketpaw-design-taste` skill (by intent, no slash command) "
-        "and run its Creative Direction Engine: declare the Vision Ledger and a "
-        "one-line Visual DNA Token (the Design Read), then commit to ONE visual "
-        "identity from its Trend Engine (Dark Kinetic, Tactile Brutalism, Aurora "
-        "Mesh, Liquid Glass, Frosted Editorial, Abstract Organic). State the read "
-        "in one sentence, then go — do NOT ask the user to pick the look. If the "
-        "user already named a style or brand, honor it. Rotate the identity and "
-        "palette so two similar briefs never look identical.\n"
+        "Run the Creative Direction Engine from the DESIGN SYSTEM embedded at the "
+        "end of this message (the 2026 Creative Director system is ALREADY in your "
+        "context — you do NOT need to invoke a skill): declare the Vision Ledger "
+        "and a one-line Visual DNA Token (the Design Read), then commit to ONE "
+        "visual identity from its Trend Engine (Dark Kinetic, Tactile Brutalism, "
+        "Immersive WebGL, Aurora Mesh, Liquid Glass, Frosted Editorial). State the "
+        "read in one sentence, then go — do NOT ask the user to pick the look. If "
+        "the user already named a style or brand, honor it. Rotate the identity "
+        "and palette so two similar briefs never look identical.\n"
         "\n"
-        "PHASE 2 — DESIGN + BUILD (apply `pocketpaw-design-taste` throughout).\n"
+        "PHASE 2 — DESIGN + BUILD (apply the embedded DESIGN SYSTEM throughout).\n"
         "1. PICK A LOOK. Call "
         "`mcp__pocketpaw_design_systems__list_design_systems` to see the "
         "library, choose the one that fits your Design Read, then "
@@ -334,7 +381,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "- Never claim a publish that didn't happen — relay the real publish "
         "error and show the real `url`. No phantom URLs.\n"
         "- Keep the 'site' / 'page' vocabulary throughout; never say 'pocket'.\n"
-        "</sites-procedure>"
+        "</sites-procedure>\n"
+        f"{_design_taste_system()}"
     )
 
 

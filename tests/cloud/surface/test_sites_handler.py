@@ -392,6 +392,22 @@ async def test_create_clarify_uses_ask_user_tool_on_svelte() -> None:
     assert "ask-user-questions" not in out
 
 
+async def test_create_embeds_design_system_inline() -> None:
+    """PERMANENT FIX: the full pocketpaw-design-taste system is EMBEDDED in the
+    create preamble (not left to a model-driven skill invocation the agent may
+    skip). A regression that drops the embed would silently return sites to
+    generic AI output."""
+    out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    # The governing block + load-bearing body markers from the skill file.
+    assert '<design-system name="pocketpaw-design-taste">' in out
+    assert "</design-system>" in out
+    assert "Vision Ledger" in out
+    assert "Trend Engine" in out
+    assert "PRE-FLIGHT" in out.upper()
+    # It is framed as already-loaded so the agent doesn't wait on a skill call.
+    assert "ALREADY LOADED" in out or "already in your context" in out.lower()
+
+
 async def test_create_decides_design_and_uses_taste_skill() -> None:
     """The create preamble tells the agent to DECIDE the look itself (infer via
     the pocketpaw-design-taste skill), NEVER ask the user for the theme, and
