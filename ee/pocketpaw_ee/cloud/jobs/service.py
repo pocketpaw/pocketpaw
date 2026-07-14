@@ -34,6 +34,17 @@
 # credentials, never tokens through params) and unwraps the connector's data
 # payload; a non-success response raises ``CloudError(code="job.connector_error")``
 # so the worker's failure path marks the job failed + un-hangs the button.
+#
+# Updated: 2026-07-14 (fix/jobs-source-collection-tenancy) — closed a P1
+# cross-tenant leak in ``read_source_records``. The source-collection name is
+# AUTHOR-controlled and the cloud DB is shared, but the read did an unscoped
+# ``find({})`` over ANY collection — a pocket author could set
+# ``source_collection: "users"`` (or ``workspace_connectors``) and read every
+# tenant's rows. Two guards now: (1) the read is SCOPED to the job's workspace
+# via ``find({"workspace": workspace_id})`` (new required kwarg; an untagged
+# record no longer matches — safe default), and (2) a ``_DENYLISTED_SOURCE_
+# COLLECTIONS`` constant blocks credential / identity / system collections
+# outright (returns ``[]`` + logs a warning), even intra-tenant.
 
 """Workspace-jobs service — Beanie writes + dispatch + lifecycle."""
 
@@ -208,8 +219,44 @@ async def get_job_by_id(job_id: str) -> WorkspaceJobDoc | None:
         return None
 
 
-async def read_source_records(collection: str, *, limit: int) -> list[dict[str, Any]]:
-    """Read up to ``limit`` records from a Mongo ``collection`` in the cloud DB.
+# Collections a workspace job may NEVER read, even for its own workspace. The
+# ``source_collection`` name is AUTHOR-controlled (a pocket editor sets it), so a
+# job could otherwise point at credential / identity / secret / system rows and
+# fan their contents into broadcast state. Sourced from the Beanie ``Settings.name``
+# declarations in ``ee/pocketpaw_ee/cloud/models/`` — every collection here holds
+# secrets, tokens, identity, or session material:
+#   users                        — identity + ``mfa_totp_secret``
+#   workspace_connectors         — OAuth token refs + secret ``config`` dict
+#   auth_sessions / sessions     — minted JWT / session records
+#   api_keys                     — argon2 ``hashed_secret``
+#   litellm_tenant_keys          — LiteLLM proxy bearer key
+#   composio_connections         — third-party connection credentials
+#   vapid_keypairs               — web-push private keys
+#   pocket_backend_credentials   — encrypted per-pocket backend auth token
+#   meeting_provider_credentials — encrypted provider client-secret / refresh-token
+# A denylisted request reads NOTHING (returns ``[]``) so a job can never surface
+# these rows regardless of the per-workspace scope filter below.
+_DENYLISTED_SOURCE_COLLECTIONS = frozenset(
+    {
+        "users",
+        "workspace_connectors",
+        "auth_sessions",
+        "sessions",
+        "api_keys",
+        "litellm_tenant_keys",
+        "composio_connections",
+        "vapid_keypairs",
+        "pocket_backend_credentials",
+        "meeting_provider_credentials",
+    }
+)
+
+
+async def read_source_records(
+    collection: str, *, workspace_id: str, limit: int
+) -> list[dict[str, Any]]:
+    """Read up to ``limit`` records from a Mongo ``collection`` in the cloud DB,
+    SCOPED to ``workspace_id``.
 
     The data-backed built-ins (e.g. ``score_applications``) read their input
     batch through here so they never open a second MongoClient and never touch
@@ -218,6 +265,16 @@ async def read_source_records(collection: str, *, limit: int) -> list[dict[str, 
     Beanie was initialized against — taken off
     ``WorkspaceJobDoc.get_pymongo_collection().database`` — so a job reads the
     same database the rest of the cloud writes, with no extra connection.
+
+    TENANCY: the ``collection`` name is AUTHOR-controlled, and the cloud DB is
+    shared across all tenants, so the read is filtered to
+    ``{"workspace": workspace_id}`` — a job only ever sees records tagged with
+    its OWN workspace. A record with no ``workspace`` field simply won't match
+    (safe default: it reads as nothing).
+
+    DENYLIST: even intra-tenant, a job must never read a credential / identity /
+    system collection (see :data:`_DENYLISTED_SOURCE_COLLECTIONS`); such a
+    request logs a warning and returns ``[]``.
 
     Bounded by ``limit`` (the caller pages from this slice) so a job can never
     pull an unbounded result set. ``limit <= 0`` reads nothing. A blank
@@ -228,9 +285,16 @@ async def read_source_records(collection: str, *, limit: int) -> list[dict[str, 
     capped = max(0, int(limit))
     if not name or capped == 0:
         return []
+    if name in _DENYLISTED_SOURCE_COLLECTIONS:
+        logger.warning(
+            "jobs: read_source_records blocked denylisted collection %r (workspace %s)",
+            name,
+            workspace_id,
+        )
+        return []
     try:
         db = WorkspaceJobDoc.get_pymongo_collection().database
-        cursor = db[name].find({}).limit(capped)
+        cursor = db[name].find({"workspace": workspace_id}).limit(capped)
         return [doc async for doc in cursor]
     except Exception:  # noqa: BLE001 — a missing/unreadable source is "no records"
         logger.warning("jobs: read_source_records failed for collection %r", name, exc_info=True)

@@ -1080,10 +1080,20 @@ async def test_route_no_kind_does_not_enqueue_job(
 # ---------------------------------------------------------------------------
 
 
-async def _seed_source(mongo_db: Any, collection: str, records: list[dict]) -> None:
-    """Insert raw source records into a Mongo collection in the test DB."""
+async def _seed_source(
+    mongo_db: Any, collection: str, records: list[dict], *, workspace: str = WS
+) -> None:
+    """Insert raw source records into a Mongo collection in the test DB.
+
+    Each record is stamped with a ``workspace`` field (default :data:`WS`) so the
+    tenancy-scoped read matches it — ``read_source_records`` now filters on
+    ``{"workspace": workspace_id}``, so an untagged record would (correctly) read
+    as nothing. A record that already carries its own ``workspace`` keeps it,
+    which lets a test seed MULTIPLE tenants into one collection (the cross-tenant
+    isolation test seeds both :data:`WS` and :data:`OTHER_WS` rows).
+    """
     for rec in records:
-        await mongo_db[collection].insert_one(dict(rec))
+        await mongo_db[collection].insert_one({"workspace": workspace, **rec})
 
 
 async def _seed_pocket_with_scored_rows(*, workspace: str, scored_rows: list[dict]) -> str:
@@ -1266,6 +1276,103 @@ async def test_score_applications_missing_source_collection_returns_empty(
     rows = result["state"]["scored_rows"]
     # Existing batch preserved; nothing new added.
     assert [r["id"] for r in rows] == ["app-1"]
+
+
+# ---------------------------------------------------------------------------
+# SECURITY (fix/jobs-source-collection-tenancy) — the source-collection read is
+# TENANCY-SCOPED and DENYLISTED. Before the fix, `read_source_records` did an
+# unscoped `db[name].find({})` over an AUTHOR-controlled collection name in the
+# SHARED cloud DB, so a pocket author could set `source_collection: "users"` (or
+# any collection) and pull EVERY tenant's rows — a cross-tenant leak. The fix
+# scopes the read to the job's own workspace AND denylists credential/identity/
+# system collections outright. These two tests FAIL on the pre-fix code (the
+# unscoped read pulls the other tenant's rows / reads the denylisted collection)
+# and PASS after the fix.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_score_applications_source_backed_is_workspace_scoped(
+    mongo_db: Any,
+) -> None:
+    """A source-backed run reads ONLY records tagged with the job's own
+    workspace — never another tenant's rows.
+
+    Seeds ONE collection with records for TWO tenants (:data:`WS` and
+    :data:`OTHER_WS`) and runs `score_applications` for :data:`WS`. The scored
+    rows come only from the WS records; the OTHER_WS rows are never read. FAILS
+    on the pre-fix code, whose unscoped `find({})` pulled every tenant's rows.
+    """
+    from pocketpaw_ee.cloud.jobs.builtin.score_applications import ScoreApplicationsJob
+
+    await _seed_source(
+        mongo_db,
+        "applications",
+        [
+            {"id": "ws-a-1", "name": "Alice A", "email": "alice@acme.com"},
+            {"id": "ws-a-2", "name": "Aaron A", "email": "aaron@acme.com"},
+        ],
+        workspace=WS,
+    )
+    await _seed_source(
+        mongo_db,
+        "applications",
+        [
+            {"id": "ws-b-1", "name": "Bianca B", "email": "bianca@other.com"},
+            {"id": "ws-b-2", "name": "Ben B", "email": "ben@other.com"},
+        ],
+        workspace=OTHER_WS,
+    )
+    pocket_id = await _seed_pocket_with_scored_rows(workspace=WS, scored_rows=[])
+
+    job = ScoreApplicationsJob()
+    result = await job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        job_id="j-tenant-1",
+        params={"source_collection": "applications", "batch_size": 10},
+    )
+
+    ids = {r["id"] for r in result["state"]["scored_rows"]}
+    assert ids == {"ws-a-1", "ws-a-2"}
+    assert not any(str(i).startswith("ws-b") for i in ids)
+
+
+@pytest.mark.asyncio
+async def test_score_applications_denylisted_collection_reads_nothing(
+    mongo_db: Any,
+) -> None:
+    """A denylisted collection (credential/identity/system) is NEVER read, even
+    for the job's own workspace.
+
+    Seeds `workspace_connectors` rows tagged with the job's own :data:`WS` and
+    points the job at it — nothing is scored (the denylist returns `[]` before
+    any read). FAILS on the pre-fix code, which had no denylist and scored the
+    connector rows (whose `config` holds secrets).
+    """
+    from pocketpaw_ee.cloud.jobs.builtin.score_applications import ScoreApplicationsJob
+
+    await _seed_source(
+        mongo_db,
+        "workspace_connectors",
+        [
+            {"id": "conn-1", "name": "github", "config": {"token": "ghp_secret"}},
+            {"id": "conn-2", "name": "slack", "config": {"token": "xoxb-secret"}},
+        ],
+        workspace=WS,
+    )
+    pocket_id = await _seed_pocket_with_scored_rows(workspace=WS, scored_rows=[])
+
+    job = ScoreApplicationsJob()
+    result = await job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        job_id="j-deny-1",
+        params={"source_collection": "workspace_connectors", "batch_size": 10},
+    )
+
+    assert result["state"]["scored_rows"] == []
+    assert result["state"]["score_applications_scored_count"] == 0
 
 
 # ---------------------------------------------------------------------------
