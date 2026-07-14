@@ -798,19 +798,14 @@ class Settings(BaseSettings):
     sites_crew_enabled: bool = Field(
         default=False,
         description=(
-            "When true, the /sites CREATE surface runs the guided "
-            "authoring-crew flow instead of the single-shot create preamble. "
-            "The crew flow stages two phases behind the same proven build "
-            "pipeline: (1) a clarity gate that interviews the user when the "
-            "request is vague (purpose, business/audience, sections, brand, "
-            "voice), then (2) retrieves and adapts a design system, gathers "
-            "real assets (stock photography, icons, palette scales), states a "
-            "short brief back, and builds a coherent site via the same engine "
-            "skill (`pocketpaw-create-svelte-site` on the svelte track, "
-            "`pocketpaw-create-paw-site` on the ripple track). Env "
-            "``POCKETPAW_SITES_CREW_ENABLED``. Default off so it can never "
-            "regress the shipped single-shot builder; the refine/chat "
-            "branches are untouched by this flag."
+            "DEPRECATED / NO-OP (2026-07-14). The /sites CREATE surface now ALWAYS "
+            "runs the guided two-phase authoring flow (clarity gate + `ask_user` "
+            "chips → design system + real assets → build), regardless of this "
+            "flag: the three create preambles + this gate collapsed into one "
+            "always-on `_create_preamble` in "
+            "`handlers/sites.py`, so nothing reads this setting anymore. Kept only "
+            "so an existing ``POCKETPAW_SITES_CREW_ENABLED`` env var / config entry "
+            "doesn't fail validation. Safe to remove once no deploy sets it."
         ),
     )
     sdk_load_bundled_skills: bool = Field(

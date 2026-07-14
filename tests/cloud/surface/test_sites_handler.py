@@ -66,10 +66,17 @@
 # the edit tool / mutation; (b) build (or unset) + pocket_id is byte-identical to
 # the existing refine preamble (regression guard); (c) create path (no pocket_id)
 # is unaffected by mode.
+# Updated: 2026-07-14 (fix/sites-unified-create-preamble) — the three create
+# preambles + the `sites_crew_enabled` flag collapsed into ONE always-on
+# `_create_preamble`. Every create (no pocket_id) now carries the clarity gate
+# (PHASE 1 + `ask_user` chips + "just build it" escape) and the design phase,
+# regardless of engine. The build step forks on `meta.engine`: DEFAULT/unset →
+# HTML (`create_html_site`); "svelte" → `create_svelte_site`; "ripple" → the
+# pocket-specialist landing spec. The old flag tests are gone; the create tests
+# below pin the always-asks behavior + per-engine build tool, and the refine/chat
+# tests are unchanged.
 
 from __future__ import annotations
-
-from types import SimpleNamespace
 
 import pytest
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
@@ -103,60 +110,65 @@ async def test_sites_handler_carries_orientation() -> None:
 
 
 async def test_sites_handler_create_mode_when_no_pocket_id() -> None:
-    """The gallery / no-pocket_id case still routes to BUILD AND PUBLISH a NEW
-    site — the create branch must not regress now that a refine branch exists."""
+    """The gallery / no-pocket_id case routes to the unified create flow — always
+    the clarity gate first, never refine framing when there's no pocket."""
     preamble = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
 
     lower = preamble.lower()
-    # The create orientation: build a brand-new marketing site.
-    assert "build and publish" in lower
+    # The unified create surface, tagged mode="create".
+    assert 'mode="create"' in preamble
+    # It always opens with the clarity gate, never blind-builds.
+    assert "phase 1" in lower
     # It must NOT slip into refine framing when there's no pocket to refine.
-    assert "refine" not in lower
-    assert "existing" not in lower
+    assert 'mode="refine"' not in preamble
 
 
-async def test_sites_handler_prefers_create_paw_site_brain() -> None:
-    """The preamble points the agent at the dedicated marketing brain
-    (`pocketpaw-create-paw-site`) as the primary path — NOT the generic
-    create-pocket flow, which publishes as a broken dashboard."""
+async def test_create_default_engine_is_html() -> None:
+    """No engine hint → the DEFAULT create engine is html: the build step authors
+    a static HTML/CSS bundle via `create_html_site`, NOT the ripple or svelte
+    tracks."""
     preamble = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
 
-    assert "pocketpaw-create-paw-site" in preamble
-    # It must be framed as the preferred route, not an afterthought.
-    assert "prefer" in preamble.lower()
-    # It stamps the landing intent so the generator renders a landing page.
-    assert 'pattern="landing"' in preamble
-
-
-async def test_sites_handler_keeps_mcp_fallback() -> None:
-    """The raw MCP tools remain as a fallback so the create→publish flow never
-    breaks when the skill is unavailable (e.g. sdk_load_bundled_skills off, or a
-    backend without the bundled plugin)."""
-    preamble = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
-
-    # Step 1 — create the source pocket via the pocket specialist MCP tool.
-    assert "mcp__pocketpaw_pocket_specialist__create" in preamble
-    # Step 2 — publish it as a live site via the sites manager MCP tool.
+    assert 'engine="html"' in preamble
+    assert "mcp__pocketpaw_sites_manager__create_html_site" in preamble
     assert "mcp__pocketpaw_sites_manager__publish" in preamble
-    # Framed as a fallback, not the primary instruction.
+    # Not the other engines' build brains.
+    assert "create-svelte-site" not in preamble
+    assert "mcp__pocketpaw_sites_manager__create_landing_site" not in preamble
+
+
+async def test_create_ripple_engine_uses_pocket_specialist_fallback() -> None:
+    """engine="ripple" is the widget-spec track: it prefers the create-paw-site
+    marketing brain, stamps `pattern="landing"`, and keeps the pocket-specialist
+    MCP tool as the fallback."""
+    preamble = await sites_handler.build_preamble(
+        WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="ripple")
+    )
+
+    assert 'engine="ripple"' in preamble
+    assert "pocketpaw-create-paw-site" in preamble
+    assert 'pattern="landing"' in preamble
+    # Fallback path — the pocket specialist create tool + publish.
+    assert "mcp__pocketpaw_pocket_specialist__create" in preamble
+    assert "mcp__pocketpaw_sites_manager__publish" in preamble
     assert "fall back" in preamble.lower() or "fallback" in preamble.lower()
 
 
 async def test_sites_handler_specifies_flat_lead_capture_form() -> None:
-    """The procedure asks for a FLAT-native lead form with clear field names,
-    and explicitly steers OFF the `form`/`newsletter` widget that nests an
-    invalid <form> on a static site (the broken-render trap)."""
-    preamble = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
-
-    lower = preamble.lower()
-    # A lead-capture form is part of the marketing/landing build.
-    assert "form" in lower
-    # At least one concrete, named field so leads are actually captured.
-    assert "email" in lower
-    # The flat-native rule: it must mention input + submit, and name the
-    # form/newsletter widget as the thing to avoid.
-    assert "flat" in lower
-    assert "newsletter" in lower
+    """Every create carries the flat-native lead-form rule so the published
+    static site captures leads: named fields (email) built FLAT, never a nested
+    form widget. Checked on both the html default and the ripple track."""
+    for engine in (None, "ripple"):
+        preamble = await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
+        )
+        lower = preamble.lower()
+        # A lead-capture form is part of the marketing/landing build.
+        assert "form" in lower
+        # At least one concrete, named field so leads are actually captured.
+        assert "email" in lower
+        # The flat-native rule.
+        assert "flat" in lower
 
 
 # --- Refine mode (meta carries a pocket_id — the per-site /sites/[siteId] chat) ---
@@ -241,71 +253,68 @@ async def test_sites_handler_refine_mode_is_landing_aware() -> None:
 
 
 async def test_create_mode_engine_svelte_prefers_create_svelte_site_skill() -> None:
-    """engine="svelte" routes the create preamble to the Svelte-track skill.
+    """engine="svelte" routes the build step to the Svelte-track skill.
 
-    It must MANDATE `pocketpaw-create-svelte-site`, point the MCP fallback at
-    `create_svelte_site`, and stamp engine="svelte" — while NOT preferring the
-    ripple `create-paw-site` brain."""
+    It prefers `pocketpaw-create-svelte-site`, points the MCP fallback at
+    `create_svelte_site`, stamps engine="svelte", and forbids the ripple-spec
+    machinery — while STILL carrying the shared clarity gate."""
     preamble = await sites_handler.build_preamble(
         WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="svelte")
     )
     lower = preamble.lower()
 
-    # Still the sites surface, now tagged with the svelte engine.
+    # Still the sites surface, now tagged with the svelte engine + create mode.
     assert '<surface kind="sites"' in preamble
     assert 'engine="svelte"' in preamble
-    # Still a build-AND-publish create flow (not refine).
-    assert "build and publish" in lower
-    assert "refine" not in lower
+    assert 'mode="create"' in preamble
+    # The shared clarity gate runs on every engine.
+    assert "phase 1" in lower
 
-    # MANDATORY path: the dedicated Svelte-track authoring skill. The svelte
-    # preamble strengthened the directive from "prefer" to "this track is
-    # MANDATORY ... Use the skill" — pin the stronger language.
+    # The dedicated Svelte-track authoring skill + the design-taste helper.
     assert "pocketpaw-create-svelte-site" in preamble
-    assert "mandatory" in lower
+    assert "design-taste-svelte" in preamble
     # MCP fallback points at the svelte create tool + publish.
     assert "mcp__pocketpaw_sites_manager__create_svelte_site" in preamble
     assert "mcp__pocketpaw_sites_manager__publish" in preamble
-    assert "fall back" in lower or "fallback" in lower
+    assert "unavailable" in lower
 
-    # It must NOT route to the ripple marketing brain on this track. The svelte
-    # preamble names `pocketpaw-create-paw-site` only to FORBID it (the strengthened
-    # "ABSOLUTELY DO NOT call ... or the pocketpaw-create-paw-site skill" clause).
-    assert "pocketpaw-create-paw-site" in preamble
-    assert "absolutely do not call" in lower
-    # The svelte track explicitly forbids the ripple-spec machinery (the term
-    # appears only inside the "no rippleSpec / do not draft one" prohibition).
+    # It must NOT route to the ripple marketing brain or the html tool here.
+    assert "pocketpaw-create-paw-site" not in preamble
+    assert "create_html_site" not in preamble
+    assert "mcp__pocketpaw_sites_manager__create_landing_site" not in preamble
+    # The svelte track forbids the ripple-spec machinery.
     assert "no ripplespec" in lower
-    assert "do not draft a ripplespec" in lower
 
 
-async def test_create_mode_default_engine_unchanged_prefers_create_paw_site() -> None:
-    """Default engine (None) keeps the ripple create brain: prefers
-    `pocketpaw-create-paw-site` and never mentions the svelte track."""
-    preamble = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
-
-    # Ripple brain preferred, svelte track absent.
-    assert "pocketpaw-create-paw-site" in preamble
-    assert "create-svelte-site" not in preamble
-    assert "create_svelte_site" not in preamble
-    assert 'engine="svelte"' not in preamble
-
-
-async def test_create_mode_engine_ripple_is_byte_identical_to_default() -> None:
-    """engine="ripple" is the explicit form of the default — the create preamble
-    must be byte-for-byte identical to the no-engine (None) preamble, proving the
-    fork only diverges for "svelte"."""
-    default_preamble = await sites_handler.build_preamble(
-        WORKSPACE, USER, SurfaceMeta(route_path="/sites")
+async def test_create_engine_routing_diverges_by_engine() -> None:
+    """The three engines fork ONLY on the build tool — html (default), svelte, and
+    ripple each name their own create tool and never each other's."""
+    html = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    svelte = await sites_handler.build_preamble(
+        WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="svelte")
     )
-    ripple_preamble = await sites_handler.build_preamble(
+    ripple = await sites_handler.build_preamble(
         WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="ripple")
     )
 
-    assert ripple_preamble == default_preamble
-    # And it is the ripple brain, not the svelte one.
-    assert "pocketpaw-create-paw-site" in ripple_preamble
-    assert "create-svelte-site" not in ripple_preamble
+    # Each is a distinct preamble (the fork is real), all in create mode.
+    assert html != svelte != ripple != html
+    for out in (html, svelte, ripple):
+        assert 'mode="create"' in out
+        assert "phase 1" in out.lower()
+
+    # html default → the html tool is the PRIMARY build path (it names the
+    # svelte/dynamic tools only as an explicit-request pivot, after the html one).
+    assert "mcp__pocketpaw_sites_manager__create_html_site" in html
+    assert html.index("create_html_site") < html.index("create_svelte_site")
+    assert "create_landing_site" not in html
+    # svelte → the svelte tool only, never the html one.
+    assert "mcp__pocketpaw_sites_manager__create_svelte_site" in svelte
+    assert "create_html_site" not in svelte
+    # ripple → the pocket specialist, not the hand-authored tracks.
+    assert "mcp__pocketpaw_pocket_specialist__create" in ripple
+    assert "create_html_site" not in ripple
+    assert "create_svelte_site" not in ripple
 
 
 async def test_engine_threads_through_meta_from_request() -> None:
@@ -318,64 +327,22 @@ async def test_engine_threads_through_meta_from_request() -> None:
     assert meta.engine == "svelte"
 
 
-# --- Authoring-crew create flow (behind settings.sites_crew_enabled) ---
+# --- Unified always-on create flow (the guided two-phase authoring gate) ---
 #
-# Default OFF: the create branch returns `_create_preamble(meta)` byte-for-byte.
-# Flag ON: a create meta returns the guided two-phase crew preamble. The flag is
-# toggled by monkeypatching `pocketpaw.config.get_settings` (the `_crew_enabled`
-# helper imports it lazily), never via leaking process env.
+# There is no `sites_crew_enabled` flag anymore: EVERY create (no pocket_id) runs
+# the clarity gate + design phase. These tests pin the always-on behavior, the
+# design/asset tool ids, the "just build it" escape hatch, and that the flow never
+# leaks into the refine branch.
 
 
-def _set_crew_flag(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
-    """Toggle `sites_crew_enabled` by patching `config.get_settings`."""
-    from pocketpaw import config
-
-    fake = SimpleNamespace(sites_crew_enabled=enabled)
-    monkeypatch.setattr(config, "get_settings", lambda *a, **k: fake)
-
-
-async def test_crew_flag_off_is_byte_identical_ripple(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Flag OFF → a ripple create meta returns `_create_preamble` byte-for-byte."""
-    _set_crew_flag(monkeypatch, False)
-    meta = SurfaceMeta(route_path="/sites")
-    out = await sites_handler.build_preamble(WORKSPACE, USER, meta)
-    assert out == sites_handler._create_preamble(meta)
-    assert 'mode="crew"' not in out
-
-
-async def test_crew_flag_off_is_byte_identical_svelte(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Flag OFF → a svelte create meta returns `_create_preamble` byte-for-byte."""
-    _set_crew_flag(monkeypatch, False)
-    meta = SurfaceMeta(route_path="/sites", engine="svelte")
-    out = await sites_handler.build_preamble(WORKSPACE, USER, meta)
-    assert out == sites_handler._create_preamble(meta)
-    assert 'mode="crew"' not in out
-
-
-async def test_crew_flag_off_default_settings_still_single_shot() -> None:
-    """With no monkeypatch (real settings, flag defaults False) the create branch
-    is the shipped single-shot builder — the flag can't regress by default."""
-    meta = SurfaceMeta(route_path="/sites")
-    out = await sites_handler.build_preamble(WORKSPACE, USER, meta)
-    assert out == sites_handler._create_preamble(meta)
-
-
-async def test_crew_flag_on_returns_two_phase_ripple(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Flag ON → a ripple create meta returns the crew preamble with BOTH phases:
-    an interview/questions instruction AND a build instruction."""
-    _set_crew_flag(monkeypatch, True)
+async def test_create_always_two_phase() -> None:
+    """Every create meta returns the two-phase flow: an interview/clarity front
+    (Phase 1) AND a design+build back (Phase 2) — no flag required."""
     out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
     lower = out.lower()
 
-    # Still the sites surface, tagged as the crew flow.
     assert '<surface kind="sites"' in out
-    assert 'mode="crew"' in out
+    assert 'mode="create"' in out
     # Two-phase structure: a clarity/interview front AND a build back.
     assert "phase 1" in lower
     assert "phase 2" in lower
@@ -383,12 +350,9 @@ async def test_crew_flag_on_returns_two_phase_ripple(
     assert "build" in lower
 
 
-async def test_crew_flag_on_names_design_and_asset_tools(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The crew preamble names the design-system, stock, and custom-color tool
+async def test_create_names_design_and_asset_tools() -> None:
+    """The create preamble names the design-system, stock, and custom-color tool
     ids so the agent themes the site and wires real assets."""
-    _set_crew_flag(monkeypatch, True)
     out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
 
     assert "mcp__pocketpaw_design_systems__list_design_systems" in out
@@ -398,12 +362,16 @@ async def test_crew_flag_on_names_design_and_asset_tools(
     assert "mcp__pocketpaw_palette__scale_from_color" in out
 
 
-async def test_crew_flag_on_has_just_build_it_escape_hatch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_create_uses_ask_user_chips() -> None:
+    """The clarity gate prefers the ask_user question-chip tool for the vibe
+    choice so the UI renders selectable options (not just plain text)."""
+    out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    assert "mcp__pocketpaw_ask__ask_user" in out
+
+
+async def test_create_has_just_build_it_escape_hatch() -> None:
     """The interview must always offer the 'just build it' out and cap at one
     round of questions so the flow never traps the user."""
-    _set_crew_flag(monkeypatch, True)
     out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
     lower = out.lower()
 
@@ -412,46 +380,9 @@ async def test_crew_flag_on_has_just_build_it_escape_hatch(
     assert "one round" in lower or "never ask more than one" in lower
 
 
-async def test_crew_flag_on_ripple_uses_ripple_skill(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """On the ripple (default) engine the crew BUILD step uses the ripple
-    marketing skill, not the svelte one."""
-    _set_crew_flag(monkeypatch, True)
-    out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
-
-    assert "pocketpaw-create-paw-site" in out
-    assert "create-svelte-site" not in out
-    assert 'engine="svelte"' not in out
-
-
-async def test_crew_flag_on_svelte_uses_svelte_skill(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """On the svelte engine the crew BUILD step uses the svelte authoring skill
-    and stamps engine="svelte" — still a crew preamble with the design tools."""
-    _set_crew_flag(monkeypatch, True)
-    out = await sites_handler.build_preamble(
-        WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="svelte")
-    )
-    lower = out.lower()
-
-    assert 'mode="crew"' in out
-    assert 'engine="svelte"' in out
-    assert "pocketpaw-create-svelte-site" in out
-    # Same design-system + interview machinery on both engines.
-    assert "mcp__pocketpaw_design_systems__list_design_systems" in out
-    assert "phase 1" in lower
-    # The svelte build step names its create/publish fallback tools.
-    assert "mcp__pocketpaw_sites_manager__create_svelte_site" in out
-
-
-async def test_crew_flag_on_leaves_refine_untouched(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The flag only governs the CREATE branch — a refine meta (pocket_id set)
-    still returns the refine preamble, never the crew flow."""
-    _set_crew_flag(monkeypatch, True)
+async def test_create_leaves_refine_untouched() -> None:
+    """The unified create flow only governs the CREATE branch — a refine meta
+    (pocket_id set) still returns the refine preamble, never the create flow."""
     out = await sites_handler.build_preamble(
         WORKSPACE,
         USER,
@@ -459,7 +390,7 @@ async def test_crew_flag_on_leaves_refine_untouched(
     )
 
     assert 'mode="refine"' in out
-    assert 'mode="crew"' not in out
+    assert 'mode="create"' not in out
     assert "phase 1" not in out.lower()
 
 
@@ -694,7 +625,8 @@ async def test_sites_handler_chat_mode_ignored_without_pocket_id() -> None:
 
     # No pocket to chat about → the create preamble is unchanged by mode.
     assert chat_no_pocket == plain_create
-    assert "build and publish" in chat_no_pocket.lower()
+    assert 'mode="create"' in chat_no_pocket
+    assert "phase 1" in chat_no_pocket.lower()
 
 
 async def test_mode_threads_through_meta_from_request() -> None:
