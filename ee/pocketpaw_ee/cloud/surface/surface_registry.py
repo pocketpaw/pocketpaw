@@ -209,6 +209,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
     logger = logging.getLogger(__name__)
     try:
         from pocketpaw_ee.agent.mcp_servers.ask import ASK_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.design_systems import DESIGN_SYSTEM_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.loom import LOOM_TOOL_IDS
@@ -218,22 +219,19 @@ def _load_mcp_tool_ids() -> _McpToolIds:
         from pocketpaw_ee.agent.mcp_servers.stock_images import STOCK_TOOL_IDS
 
         # /sites scopes to the sites-manager tools PLUS the authoring TOOLBELT the
-        # embedded design-taste system needs on-surface: stock photos, icons, and
-        # palette derivation (brand-hex -> tonal scale / logo -> palette). These
-        # live on ambient in-process servers, but the per-surface allow-list is a
-        # hard whitelist (claude_sdk `allow_mcp_tool_ids`), so an id absent here is
+        # crew (and the create-svelte-site skill) needs on-surface: stock photos,
+        # icons, palette derivation, and the design-system library. These live on
+        # ambient in-process servers, but the per-surface allow-list is a hard
+        # whitelist (claude_sdk `allow_mcp_tool_ids`), so an id absent here is
         # FILTERED OUT on /sites — the tool would be silently unreachable. Named
         # here so authoring can actually call them. MEDIA (image/video gen) stays
-        # scoped to /studio. The design_systems library (5 canned DESIGN.md
-        # systems) is deliberately NOT here: the pocketpaw-design-taste system is
-        # embedded in the sites preamble and provides richer, non-canned direction
-        # (Trend Engine + 6 families with full token specs), so the small bundled
-        # library only reintroduced the same-look bias it was meant to avoid.
+        # scoped to /studio, not added here (site imagery leans on stock first).
         sites_allow = (
             frozenset(SITES_TOOL_IDS)
             | frozenset(STOCK_TOOL_IDS)
             | frozenset(ICON_TOOL_IDS)
             | frozenset(PALETTE_TOOL_IDS)
+            | frozenset(DESIGN_SYSTEM_TOOL_IDS)
             # ask_user: interactive question chips. Needed most on svelte-create
             # (ripple OFF) where the agent otherwise can only ask in plain text.
             | frozenset(ASK_TOOL_IDS)

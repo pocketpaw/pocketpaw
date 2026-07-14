@@ -354,17 +354,16 @@ async def test_create_always_two_phase() -> None:
     assert "build" in lower
 
 
-async def test_create_names_asset_tools_not_design_systems() -> None:
-    """The create preamble names the stock + custom-color tool ids so the agent
-    wires real assets, and it NO LONGER points at the canned design_systems
-    library (the embedded pocketpaw-design-taste system is the design authority)."""
+async def test_create_names_design_and_asset_tools() -> None:
+    """The create preamble names the design-system, stock, and custom-color tool
+    ids so the agent themes the site and wires real assets."""
     out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
 
+    assert "mcp__pocketpaw_design_systems__list_design_systems" in out
+    assert "mcp__pocketpaw_design_systems__get_design_system" in out
     assert "mcp__pocketpaw_stock__search_stock_images" in out
     # Custom-color path: brand hex → full scale.
     assert "mcp__pocketpaw_palette__scale_from_color" in out
-    # The canned design-system library is intentionally gone.
-    assert "design_systems" not in out
 
 
 async def test_create_clarify_renders_ripple_widget_when_ripple_on() -> None:
