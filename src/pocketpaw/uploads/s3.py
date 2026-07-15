@@ -222,9 +222,7 @@ class S3StorageAdapter(StorageAdapter):
         diagnostic lie.
         """
         try:
-            resp = await asyncio.to_thread(
-                self._client.get_bucket_cors, Bucket=self._bucket
-            )
+            resp = await asyncio.to_thread(self._client.get_bucket_cors, Bucket=self._bucket)
         except Exception as exc:
             if _is_no_cors(exc):
                 return []
