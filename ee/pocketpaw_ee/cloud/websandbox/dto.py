@@ -11,6 +11,11 @@
 # tree), and ``SandboxTreeResponse`` (the tree wrapper carrying the bound Daytona
 # id). Same Rule-4 discipline: the open surface accepts only a repo + branch and
 # never a server-owned id/status.
+#
+# Changed 2026-07-15 (WC-S3, feat/websandbox-s3-durability): surfaced the durable
+# snapshot pointer on the wire (``WebSandboxResponse.snapshotFileId``) and added
+# ``SnapshotResponse`` — the ``{fileId}`` the snapshot endpoint returns after
+# landing the workspace tarball in the tenant's blob storage.
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -45,6 +50,7 @@ class WebSandboxResponse(BaseModel):
     status: str
     sandboxId: str | None = None
     installationId: str | None = None
+    snapshotFileId: str | None = None
     createdAt: str  # ISO-8601 UTC
     updatedAt: str  # ISO-8601 UTC
 
@@ -87,10 +93,22 @@ class SandboxTreeResponse(BaseModel):
     entries: list[TreeEntryResponse]
 
 
+# ---------------------------------------------------------------------------
+# WC-S3 — workspace durability (snapshot / restore).
+# ---------------------------------------------------------------------------
+
+
+class SnapshotResponse(BaseModel):
+    """The durable pointer minted by a snapshot — the blob-storage FileRecord id."""
+
+    fileId: str
+
+
 __all__ = [
     "CreateSandboxRequest",
     "OpenSandboxRequest",
     "SandboxTreeResponse",
+    "SnapshotResponse",
     "TreeEntryResponse",
     "UpdateStatusRequest",
     "WebSandboxListResponse",

@@ -12,6 +12,13 @@ Only ``ee.cloud.websandbox.service`` imports this doc class directly
 The ``installation_id`` is a plain optional str here — a pointer to a future
 GitHub App installation. WC-6 encrypts it at rest; until then it is stored in
 the clear (never a token, only an installation identifier).
+
+Changed 2026-07-15 (WC-S3, feat/websandbox-s3-durability): added
+``snapshot_file_id`` — a pointer to the tenant's most recent workspace snapshot
+in blob storage (an ``EEUploadService`` FileRecord id). The VM is scratch and
+gets reaped; this durable pointer lets a user's uncommitted work + workspace
+state be restored into a fresh VM. Null until the first snapshot is taken. No
+new index needed — it's read only via the owner-scoped registry row.
 """
 
 from __future__ import annotations
@@ -35,6 +42,10 @@ class WebSandbox(Document):
     # Pointer to a future GitHub App installation (WC-6 encrypts this at rest;
     # plain optional str for now — an installation id, never a token).
     installation_id: str | None = None
+    # Pointer to the latest durable workspace snapshot in the tenant's blob
+    # storage (an EEUploadService FileRecord id). Null until the first snapshot;
+    # set by ``service.set_snapshot`` from the WC-S3 durability module.
+    snapshot_file_id: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

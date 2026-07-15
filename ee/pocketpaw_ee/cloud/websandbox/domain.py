@@ -3,6 +3,11 @@
 # (workspace_id, user_id) are REQUIRED at construction with no defaults per
 # ee/cloud Rule 3 — constructing a view without tenancy is a TypeError, so a
 # leak can't be minted by omission.
+#
+# Changed 2026-07-15 (WC-S3, feat/websandbox-s3-durability): added the optional
+# ``snapshot_file_id`` — the pointer to the row's latest durable workspace
+# snapshot in blob storage. Optional (default None) so it lands after the
+# required tenancy fields without breaking the single construction site.
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -35,6 +40,8 @@ class WebSandboxView:
     installation_id: str | None
     created_at: datetime
     updated_at: datetime
+    # Pointer to the latest durable workspace snapshot in blob storage (WC-S3).
+    snapshot_file_id: str | None = None
 
 
 __all__ = [

@@ -22,6 +22,14 @@
 # WebSocket calls (throttled) on live traffic so the WC-2 idle reaper doesn't
 # reclaim a VM someone is actively using. It stays here (not in ws.py) so the
 # service remains the only module that writes the Beanie doc (Rule 2).
+#
+# Changed 2026-07-15 (WC-S3, feat/websandbox-s3-durability): added
+# ``set_snapshot`` — an owner-scoped write that records the durable
+# blob-storage snapshot pointer (a FileRecord id) on the row, and surfaced
+# ``snapshot_file_id`` through ``_doc_to_view`` + ``view_to_wire``. The
+# durability module (``websandbox/durability.py``) calls it after landing the
+# workspace tarball in the tenant's S3. It stays here so the service remains the
+# only module that writes the Beanie doc (Rule 2).
 from __future__ import annotations
 
 import logging
@@ -59,6 +67,7 @@ def _doc_to_view(doc: _WebSandboxDoc) -> WebSandboxView:
         status=doc.status,
         sandbox_id=doc.sandbox_id,
         installation_id=doc.installation_id,
+        snapshot_file_id=doc.snapshot_file_id,
         created_at=doc.created_at,
         updated_at=doc.updated_at,
     )
@@ -74,6 +83,7 @@ def view_to_wire(view: WebSandboxView) -> WebSandboxResponse:
         status=view.status,
         sandboxId=view.sandbox_id,
         installationId=view.installation_id,
+        snapshotFileId=view.snapshot_file_id,
         createdAt=view.created_at.isoformat(),
         updatedAt=view.updated_at.isoformat(),
     )
@@ -282,6 +292,33 @@ async def touch_activity(
     return True
 
 
+async def set_snapshot(
+    workspace_id: str,
+    user_id: str,
+    row_id: str,
+    file_id: str,
+) -> WebSandboxView:
+    """Record the durable workspace-snapshot pointer on a sandbox row.
+
+    Tenant- and owner-scoped (Rule 7 via ``_read_owned``): only the owning
+    caller can bind a snapshot to their own sandbox. ``file_id`` is the
+    blob-storage ``FileRecord`` id produced by ``EEUploadService.upload`` in the
+    WC-S3 durability module — a durable pointer to the tarball of the VM's
+    workspace, indexed in Mongo. Raises ``NotFound`` when no owned row matches.
+    """
+    doc = await _read_owned(workspace_id, user_id, row_id)
+    if doc is None:
+        raise NotFound("web_sandbox", row_id)
+    doc.snapshot_file_id = file_id
+    doc.updated_at = datetime.now(UTC)
+    await doc.save()
+    # no-event: the snapshot pointer is durability bookkeeping, not a lifecycle
+    # transition. No downstream handler (IDE WS fan-out, search index, ripple
+    # invalidation) reacts to it, and emitting WebSandboxStatusChanged would
+    # falsely signal a state change to clients tracking the status field.
+    return _doc_to_view(doc)
+
+
 async def list_sandboxes(workspace_id: str, user_id: str) -> list[WebSandboxView]:
     """List every sandbox owned by the caller, newest first.
 
@@ -390,6 +427,7 @@ __all__ = [
     "list_reapable_sandboxes",
     "list_sandboxes",
     "mark_reaped",
+    "set_snapshot",
     "touch_activity",
     "update_status",
     "view_to_wire",

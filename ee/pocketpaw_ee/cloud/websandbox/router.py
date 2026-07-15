@@ -14,19 +14,28 @@
 # clone a PUBLIC repo, returning the ready registry row) and
 # ``GET /websandbox/{row_id}/tree`` (the cloned repo's file tree). Both delegate
 # to ``websandbox/provision.py``; tenancy still comes only from the RequestContext.
+#
+# Changed 2026-07-15 (WC-S3, feat/websandbox-s3-durability): added the two
+# workspace-durability endpoints — ``POST /websandbox/{row_id}/snapshot``
+# (tar the VM workspace → land it in the tenant's S3 → return ``{fileId}``) and
+# ``POST /websandbox/{row_id}/restore`` (fetch the snapshot from S3 → untar it
+# into the VM, 204). Both delegate to ``websandbox/durability.py``; tenancy still
+# comes only from the RequestContext, and both are license-gated like the rest.
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.websandbox import durability as websandbox_durability
 from pocketpaw_ee.cloud.websandbox import provision as websandbox_provision
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
 from pocketpaw_ee.cloud.websandbox.dto import (
     CreateSandboxRequest,
     OpenSandboxRequest,
     SandboxTreeResponse,
+    SnapshotResponse,
     UpdateStatusRequest,
     WebSandboxListResponse,
     WebSandboxResponse,
@@ -110,3 +119,30 @@ async def get_sandbox_tree(
     """Return the cloned repo's file tree for a ready sandbox."""
     workspace_id = _require_workspace(ctx)
     return await websandbox_provision.get_tree(workspace_id, ctx.user_id, row_id)
+
+
+# ---------------------------------------------------------------------------
+# WC-S3 — workspace durability (snapshot / restore).
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{row_id}/snapshot", response_model=SnapshotResponse)
+async def snapshot_sandbox(
+    row_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> SnapshotResponse:
+    """Snapshot the sandbox's workspace to the tenant's blob storage."""
+    workspace_id = _require_workspace(ctx)
+    file_id = await websandbox_durability.snapshot_workspace(workspace_id, ctx.user_id, row_id)
+    return SnapshotResponse(fileId=file_id)
+
+
+@router.post("/{row_id}/restore", status_code=204)
+async def restore_sandbox(
+    row_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> Response:
+    """Restore the sandbox's latest workspace snapshot from blob storage into the VM."""
+    workspace_id = _require_workspace(ctx)
+    await websandbox_durability.restore_workspace(workspace_id, ctx.user_id, row_id)
+    return Response(status_code=204)
