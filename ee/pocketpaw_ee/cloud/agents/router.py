@@ -18,6 +18,15 @@ soft-disable / revoke-everywhere flow. Both carry the SAME owner/admin guard
 (``require_agent_owner_or_admin``) + ``current_user_id`` as DELETE — symmetric
 tenant-scope protection, so a cross-workspace / non-owner caller cannot revoke
 or restore an agent it doesn't own.
+
+Updated 2026-07-15 (fix/agent-visibility-enforcement, ASG-7): the READ endpoints
+now enforce agent visibility. ``GET /agents/{id}`` routes through
+``agents_service.get_for_viewer`` (404 for another user's private agent);
+``GET /agents`` passes ``viewer_user_id`` so the list hides others' private
+agents; and the three knowledge READS (``/knowledge``, ``/knowledge/{id}``,
+``/knowledge/search``) call ``agents_service.ensure_can_read`` before hitting kb.
+Previously any licensed workspace member could read any agent's config / KB by
+id. ``GET /agents/{id}/scope`` was already owner-gated and is unchanged.
 """
 
 from __future__ import annotations
@@ -89,15 +98,26 @@ async def create_agent(
 @router.get("")
 async def list_agents(
     workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
     query: str | None = Query(default=None),
 ) -> list[dict]:
-    items = await agents_service.list_agents(workspace_id, query=query)
+    # Visibility gate: pass the caller as ``viewer_user_id`` so another user's
+    # private agents are filtered out of the tenant list.
+    items = await agents_service.list_agents(
+        workspace_id, query=query, viewer_user_id=user_id
+    )
     return [agent_to_dict(a) for a in items]
 
 
 @router.get("/{agent_id}")
-async def get_agent(agent_id: str) -> dict:
-    return agent_to_dict(await agents_service.get(agent_id))
+async def get_agent(
+    agent_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    # Visibility gate: a non-owner cannot read another user's private agent by
+    # id — surfaces as 404 so the id never confirms the agent's existence.
+    return agent_to_dict(await agents_service.get_for_viewer(agent_id, workspace_id, user_id))
 
 
 @router.get("/uname/{slug}")
@@ -230,19 +250,33 @@ async def ingest_urls(agent_id: str, body: dict):
 
 
 @router.get("/{agent_id}/knowledge/search")
-async def search_knowledge(agent_id: str, q: str = Query(..., min_length=1), limit: int = 5):
+async def search_knowledge(
+    agent_id: str,
+    q: str = Query(..., min_length=1),
+    limit: int = 5,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+):
     """Search agent's knowledge base."""
     from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
 
+    # Visibility gate: a non-owner cannot read a private agent's knowledge.
+    await agents_service.ensure_can_read(agent_id, workspace_id, user_id)
     results = await KnowledgeService.search(agent_id, q, limit)
     return {"results": results}
 
 
 @router.get("/{agent_id}/knowledge")
-async def list_knowledge(agent_id: str):
+async def list_knowledge(
+    agent_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+):
     """List all knowledge articles for an agent."""
     from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
 
+    # Visibility gate: a non-owner cannot read a private agent's knowledge.
+    await agents_service.ensure_can_read(agent_id, workspace_id, user_id)
     try:
         articles = await KnowledgeService.list_articles(agent_id)
     except RuntimeError as exc:
@@ -251,10 +285,17 @@ async def list_knowledge(agent_id: str):
 
 
 @router.get("/{agent_id}/knowledge/{article_id}")
-async def get_knowledge_article(agent_id: str, article_id: str):
+async def get_knowledge_article(
+    agent_id: str,
+    article_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+):
     """Fetch the full body of a single knowledge article."""
     from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
 
+    # Visibility gate: a non-owner cannot read a private agent's knowledge.
+    await agents_service.ensure_can_read(agent_id, workspace_id, user_id)
     try:
         return await KnowledgeService.get_article(agent_id, article_id)
     except RuntimeError as exc:
