@@ -1528,11 +1528,42 @@ def _connector_response(records: Any) -> Any:
     return ExecuteActionResponse(success=True, data=records, execution_mode="cloud")
 
 
+def _read_action_info(action: str = "list_leads") -> Any:
+    """A read-first (``auto``-trust, ``is_read=True``) action classification —
+    the shape ``connectors_service.get_action_trust`` returns for a read action."""
+    from pocketpaw_ee.cloud.connectors.domain import ConnectorActionInfo
+
+    return ConnectorActionInfo(
+        name=action,
+        description="",
+        trust_level="auto",
+        execution_mode="cloud",
+        is_read=True,
+    )
+
+
+def _patch_action_trust(monkeypatch: pytest.MonkeyPatch, info: Any) -> None:
+    """Monkeypatch ``connectors_service.get_action_trust`` to return ``info``
+    (a :class:`ConnectorActionInfo` or ``None``). F3 makes
+    ``execute_connector_action`` consult this trust gate BEFORE ``execute``, so
+    the connector-backed tests must stub it as a read action to reach execute."""
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    async def _fake_trust(name, action):  # type: ignore[no-untyped-def]
+        return info
+
+    monkeypatch.setattr(connectors_service, "get_action_trust", _fake_trust)
+
+
 def _patch_connector_execute(monkeypatch: pytest.MonkeyPatch, records: Any):
     """Monkeypatch ``connectors_service.execute`` to return ``records`` and
     capture the call args. ``execute_connector_action`` lazy-imports the
     connectors service inside the function, so patching the real module object
     is what the lazy import resolves to.
+
+    Also stubs ``get_action_trust`` as a READ action so the F3 trust gate lets
+    the (fake) connector action through — the connector-backed built-in only
+    runs read actions, so this keeps the end-to-end path green.
 
     Returns the ``captured`` dict so a test can assert the call ran under the
     workspace job identity with ``pocket_id=None``.
@@ -1549,6 +1580,7 @@ def _patch_connector_execute(monkeypatch: pytest.MonkeyPatch, records: Any):
         return _connector_response(records)
 
     monkeypatch.setattr(connectors_service, "execute", _fake_execute)
+    _patch_action_trust(monkeypatch, _read_action_info())
     return captured
 
 
@@ -1739,6 +1771,9 @@ async def test_score_applications_connector_error_propagates(
         return ExecuteActionResponse(success=False, data=None, error="upstream 500")
 
     monkeypatch.setattr(connectors_service, "execute", _failing_execute)
+    # The action passes the F3 read gate (a real upstream error, not a blocked
+    # write) so the failure we assert is the connector's, not the trust gate's.
+    _patch_action_trust(monkeypatch, _read_action_info())
     pocket_id = await _seed_pocket_with_scored_rows(workspace=WS, scored_rows=[])
 
     job = ScoreApplicationsJob()
@@ -1750,3 +1785,103 @@ async def test_score_applications_connector_error_propagates(
             params={"connector": "snctm-api", "action": "list_leads", "batch_size": 20},
         )
     assert exc.value.code == "job.connector_error"
+
+
+# ---------------------------------------------------------------------------
+# F3 (security) — a job must not drive a WRITE connector action. `execute` does
+# NOT classify read/write trust; that gate lives only in the MCP
+# `connector_execute` tool via `get_action_trust`. `connector_action` is a free
+# author param, so without a gate here a job could run a write / confirm /
+# restricted action under the system identity, bypassing the interactive
+# approval + per-user permission checks. `execute_connector_action` now resolves
+# the action's trust FIRST and allows ONLY read-first (`auto`) actions.
+# ---------------------------------------------------------------------------
+
+
+def _write_action_info(action: str = "create_lead") -> Any:
+    """A write-shaped (``confirm``-trust, ``is_read=False``) action."""
+    from pocketpaw_ee.cloud.connectors.domain import ConnectorActionInfo
+
+    return ConnectorActionInfo(
+        name=action,
+        description="",
+        trust_level="confirm",
+        execution_mode="cloud",
+        is_read=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_connector_action_rejects_write_action(
+    mongo_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ARG001
+    """A WRITE (non-``auto``) action is refused BEFORE ``execute`` runs, so a job
+    can't drive a write connector action past the read gate under the system
+    identity. FAILS on the un-gated service, which calls ``execute`` regardless."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    execute_calls = {"n": 0}
+
+    async def _spy_execute(*args, **kwargs):  # type: ignore[no-untyped-def]
+        execute_calls["n"] += 1
+        return _connector_response([])
+
+    monkeypatch.setattr(connectors_service, "execute", _spy_execute)
+    _patch_action_trust(monkeypatch, _write_action_info("create_lead"))
+
+    with pytest.raises(CloudError) as exc:
+        await jobs_service.execute_connector_action(WS, "salesforce", "create_lead", {})
+
+    assert exc.value.code == "job.connector_action_not_allowed"
+    # The write action never reached execute — refused at the gate.
+    assert execute_calls["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_execute_connector_action_allows_read_action(
+    mongo_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ARG001
+    """A READ (``auto``-trust) action passes the gate: ``execute`` runs once and
+    its data payload is returned unchanged."""
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    records = [{"id": "r1"}, {"id": "r2"}]
+    execute_calls = {"n": 0}
+
+    async def _fake_execute(workspace_id, name, body, *, user_id=None):  # type: ignore[no-untyped-def]
+        execute_calls["n"] += 1
+        return _connector_response(records)
+
+    monkeypatch.setattr(connectors_service, "execute", _fake_execute)
+    _patch_action_trust(monkeypatch, _read_action_info("list_leads"))
+
+    out = await jobs_service.execute_connector_action(WS, "salesforce", "list_leads", {})
+
+    assert execute_calls["n"] == 1
+    assert out == records
+
+
+@pytest.mark.asyncio
+async def test_execute_connector_action_rejects_unknown_action(
+    mongo_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ARG001
+    """An unknown action (``get_action_trust`` → ``None``) is refused fail-closed,
+    and ``execute`` never runs."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    execute_calls = {"n": 0}
+
+    async def _spy_execute(*args, **kwargs):  # type: ignore[no-untyped-def]
+        execute_calls["n"] += 1
+        return _connector_response([])
+
+    monkeypatch.setattr(connectors_service, "execute", _spy_execute)
+    _patch_action_trust(monkeypatch, None)
+
+    with pytest.raises(CloudError) as exc:
+        await jobs_service.execute_connector_action(WS, "salesforce", "no_such_action", {})
+
+    assert exc.value.code == "job.connector_action_not_allowed"
+    assert execute_calls["n"] == 0

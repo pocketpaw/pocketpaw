@@ -35,6 +35,18 @@
 # payload; a non-success response raises ``CloudError(code="job.connector_error")``
 # so the worker's failure path marks the job failed + un-hangs the button.
 #
+# Updated: 2026-07-15 (fix/jobs-source-collection-tenancy, F3 security) — closed
+# a WRITE-action bypass in ``execute_connector_action``. ``connectors_service.
+# execute`` does not classify read/write trust (that gate lives only in the MCP
+# ``connector_execute`` tool), and the connector ``action`` is an author-
+# controlled param, so a job could run a write / ``confirm`` / ``restricted``
+# action under ``system:workspace_job`` — past the interactive approval + per-
+# user permission checks. The function now resolves the action's trust via
+# ``connectors_service.get_action_trust`` FIRST and raises
+# ``CloudError(403, "job.connector_action_not_allowed")`` for any non-read
+# action (and, fail-closed, for an unknown action → ``None``) BEFORE calling
+# ``execute``. A read (``auto``-trust) action proceeds unchanged.
+#
 # Updated: 2026-07-14 (fix/jobs-source-collection-tenancy) — closed a P1
 # cross-tenant leak in ``read_source_records``. The source-collection name is
 # AUTHOR-controlled and the cloud DB is shared, but the read did an unscoped
@@ -323,6 +335,14 @@ async def execute_connector_action(
     failure path turns into a ``failed`` job + a failed-state writeback so the
     triggering button never hangs.
 
+    F3 (security): the action's trust is resolved via ``get_action_trust`` and
+    only a READ-first (``auto``-trust) action is allowed. ``action`` is an
+    author-controlled param, so a write / ``confirm`` / ``restricted`` action —
+    or an unknown one — raises :class:`CloudError`
+    (code ``job.connector_action_not_allowed``, 403) BEFORE ``execute`` runs, so
+    a job can never drive a write action under the system identity past the
+    interactive-approval gate.
+
     Returns the connector's ``data`` payload (the records) — a ``list[dict]``
     for a list-shaped action, or a single ``dict`` for a scalar one.
     """
@@ -330,6 +350,26 @@ async def execute_connector_action(
     # module load (and the import graph acyclic).
     from pocketpaw_ee.cloud.connectors import service as connectors_service
     from pocketpaw_ee.cloud.connectors.dto import ExecuteActionRequest
+
+    # F3 — read-only trust gate. ``connectors_service.execute`` does NOT classify
+    # an action's read/write trust; that gate otherwise lives ONLY in the MCP
+    # ``connector_execute`` tool via ``get_action_trust``. Here ``action`` is an
+    # AUTHOR-controlled param (e.g. ``score_applications``'s ``action``), so
+    # without this a job could drive a write / ``confirm`` / ``restricted``
+    # action under the system identity, bypassing the interactive approval + the
+    # per-user connector permission checks. Resolve the action's trust FIRST and
+    # allow ONLY a read-first (``auto``-trust, ``is_read``) action. An unknown
+    # action (``get_action_trust`` returns ``None``) is refused too (fail-closed).
+    # Placed BEFORE the ``try`` so this refusal keeps its own precise code and is
+    # never re-wrapped into ``job.connector_error``.
+    trust = await connectors_service.get_action_trust(connector_name, action)
+    if trust is None or not trust.is_read:
+        raise CloudError(
+            403,
+            "job.connector_action_not_allowed",
+            f"connector '{connector_name}' action '{action}' is not a read action; "
+            "workspace jobs may run read (auto-trust) connector actions only",
+        )
 
     try:
         response = await connectors_service.execute(
