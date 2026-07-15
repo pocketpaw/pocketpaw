@@ -1,10 +1,16 @@
 # ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
+# Updated: 2026-07-14 (migration) — _ensure_schema runs _migrate_columns BEFORE
+#   executescript: additively ALTER-adds any missing workspace_id/agent_id columns
+#   to a pre-existing paw_bar_widgets (and workspace_id to paw_bar_decisions) so the
+#   SCHEMA_SQL indexes don't fail with "no such column" on a DB created before those
+#   columns. Supersedes the "no migration" note below — a deployed host CAN carry a
+#   stale paw_bar.db (the T5 pilot smoke hit exactly this).
 # Updated: 2026-07-14 (Paw Bar concierge seam, T3) — paw_bar_widgets gains an
 #   agent_id TEXT DEFAULT '' column, mirroring the workspace_id column beside it.
 #   create_widget writes it; _row_to_widget reads it (get/list/update_spec/
 #   rotate_token round-trip it for free — they SELECT * and rebuild via
-#   _row_to_widget). Hard schema add, no migration (the widget has zero
-#   deployments, same rationale as the W4a workspace_id add).
+#   _row_to_widget). (The former "no migration" note is now handled by the
+#   additive migration above.)
 # Updated: 2026-07-11 (W4a spec revisions) — new paw_bar_spec_revisions table:
 #   update_spec archives the PRIOR spec with a monotonic per-widget revision
 #   number (same transaction as the update); latest_spec_revision reads the
@@ -169,9 +175,49 @@ class PawBarStore:
         if self._initialized:
             return
         async with aiosqlite.connect(self._db_path) as db:
+            # Additive column migration BEFORE executescript. A paw_bar.db created
+            # before the W4a workspace_id add (2026-07-11) or the T3 agent_id add
+            # already has a paw_bar_widgets table, so CREATE TABLE IF NOT EXISTS
+            # no-ops and never adds the new columns — then CREATE INDEX ...
+            # (workspace_id) in SCHEMA_SQL fails with "no such column". Add any
+            # missing column first (a fresh DB has no table yet, so this is a
+            # no-op and SCHEMA_SQL builds the full schema below). Idempotent.
+            await self._migrate_columns(db)
             await db.executescript(SCHEMA_SQL)
             await db.commit()
         self._initialized = True
+
+    @staticmethod
+    async def _migrate_columns(db: aiosqlite.Connection) -> None:
+        """Add columns that post-date an already-deployed DB so the SCHEMA_SQL
+        indexes referencing them don't fail on an older table. Additive +
+        idempotent; only touches tables that already exist."""
+
+        async def _tables() -> set[str]:
+            async with db.execute("SELECT name FROM sqlite_master WHERE type='table'") as cur:
+                return {row[0] for row in await cur.fetchall()}
+
+        async def _columns(table: str) -> set[str]:
+            async with db.execute(f"PRAGMA table_info({table})") as cur:
+                return {row[1] for row in await cur.fetchall()}
+
+        existing = await _tables()
+        # paw_bar_widgets: workspace_id (W4a) + agent_id (T3). Column names are
+        # literals (never user input), so the f-string ALTER is injection-safe.
+        if "paw_bar_widgets" in existing:
+            cols = await _columns("paw_bar_widgets")
+            for name in ("workspace_id", "agent_id"):
+                if name not in cols:
+                    await db.execute(
+                        f"ALTER TABLE paw_bar_widgets ADD COLUMN {name} TEXT DEFAULT ''"
+                    )
+        # paw_bar_decisions: workspace_id (W4a) — the decision-scope reads need it.
+        if "paw_bar_decisions" in existing and "workspace_id" not in await _columns(
+            "paw_bar_decisions"
+        ):
+            await db.execute(
+                "ALTER TABLE paw_bar_decisions ADD COLUMN workspace_id TEXT DEFAULT ''"
+            )
 
     def _conn(self) -> aiosqlite.Connection:
         return aiosqlite.connect(self._db_path)
