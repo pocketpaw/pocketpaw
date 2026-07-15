@@ -1,5 +1,11 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-07-15 (fix/workspace-vm-map-to-db) — added ``WorkspaceVm`` (the
+workspace→Daytona-VM mapping, moved out of the local
+``~/.pocketpaw/daytona_workspace_vm_map.json`` file into the ``workspace_vms``
+collection) to the imports, ``__all__``, and ``get_all_documents()`` so the
+collection is wired into ``init_beanie``. Only ``ee.cloud.daytona.store``
+imports the doc class directly.
 Updated: 2026-07-15 (WC-1, feat/websandbox-registry) — added ``WebSandbox``
 (the Web Cursor sandbox registry: the (workspace_id, user_id, repo) -> sandbox
 tenancy/auth oracle) to the imports, ``__all__``, and ``get_all_documents()`` so
@@ -188,6 +194,7 @@ from pocketpaw_ee.cloud.models.web_sandbox import WebSandbox
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 from pocketpaw_ee.cloud.models.workspace_automation_config import WorkspaceAutomationConfig
 from pocketpaw_ee.cloud.models.workspace_job import WorkspaceJobDoc
+from pocketpaw_ee.cloud.models.workspace_vm import WorkspaceVm
 
 # Lazy import to avoid circular imports
 FileUpload: type = None  # type: ignore[assignment]
@@ -351,6 +358,7 @@ __all__ = [
     "WorkspaceJobDoc",
     "WorkspaceMembership",
     "WorkspaceSettings",
+    "WorkspaceVm",
 ]
 
 
@@ -472,6 +480,10 @@ def get_all_documents():
         # sandbox tenancy/auth oracle. Only ``ee.cloud.websandbox.service``
         # imports this doc directly (import-linter "WebSandbox" contract).
         WebSandbox,
+        # Workspace→Daytona-VM mapping (fix/workspace-vm-map-to-db) — moved out
+        # of the local daytona_workspace_vm_map.json file. One VM per workspace.
+        # Only ``ee.cloud.daytona.store`` imports this doc directly.
+        WorkspaceVm,
     ]
 
 
