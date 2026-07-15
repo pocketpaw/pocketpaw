@@ -66,6 +66,9 @@ class _FakeDaytonaClient:
     wait_calls: list[dict] = field(default_factory=list)
     clone_calls: list[dict] = field(default_factory=list)
     exec_calls: list[str] = field(default_factory=list)
+    # Full ``execute_command`` invocations (command + cwd + timeout) so tests can
+    # assert the auto-branch ``git checkout -b`` ran with cwd=WEBSANDBOX_WORKDIR.
+    exec_invocations: list[dict] = field(default_factory=list)
     stop_calls: list[str] = field(default_factory=list)
     delete_calls: list[str] = field(default_factory=list)
     _counter: int = 0
@@ -88,8 +91,12 @@ class _FakeDaytonaClient:
         return self.project_dir
 
     async def execute_command(self, sandbox_id, command, **kwargs):  # noqa: ANN001
-        # open_sandbox runs ``mkdir -p <workdir>`` before cloning.
+        # open_sandbox runs ``mkdir -p <workdir>`` before cloning, then
+        # ``git checkout -b paw/edit-<hex>`` after (the WC-5a auto-branch).
         self.exec_calls.append(command)
+        self.exec_invocations.append(
+            {"command": command, "cwd": kwargs.get("cwd"), "timeout": kwargs.get("timeout")}
+        )
         return None
 
     async def git_clone(self, sandbox_id, repo_url, path, branch=None, commit_id=None):  # noqa: ANN001
@@ -141,6 +148,33 @@ async def test_open_provisions_clones_and_marks_ready() -> None:
     fetched = await sandbox_service.get_sandbox("w1", "u1", view.id)
     assert fetched.status == "ready"
     assert fetched.sandbox_id == "dtn-1"
+
+
+async def test_open_creates_and_binds_edit_branch() -> None:
+    # WC-5a: opening checks out a fresh ``paw/edit-<hex>`` branch IN the VM (via
+    # execute_command with cwd=WEBSANDBOX_WORKDIR) and records it on the row.
+    from pocketpaw_ee.cloud.websandbox.constants import WEBSANDBOX_WORKDIR
+
+    fake = _FakeDaytonaClient()
+    view = await provision.open_sandbox(
+        "w1", "u1", {"repo": "https://github.com/octocat/Hello-World.git"}, client=fake
+    )
+
+    # The branch is minted, checked out in the VM, and stored on the ready row.
+    assert view.branch is not None
+    assert view.branch.startswith("paw/edit-")
+    assert view.status == "ready"
+
+    checkouts = [
+        inv for inv in fake.exec_invocations if inv["command"].startswith("git checkout -b ")
+    ]
+    assert len(checkouts) == 1
+    assert checkouts[0]["command"] == f"git checkout -b {view.branch}"
+    assert checkouts[0]["cwd"] == WEBSANDBOX_WORKDIR
+
+    # The persisted row agrees.
+    fetched = await sandbox_service.get_sandbox("w1", "u1", view.id)
+    assert fetched.branch == view.branch
 
 
 async def test_open_failure_marks_stopped_and_tears_down_vm() -> None:

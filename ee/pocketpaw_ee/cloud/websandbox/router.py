@@ -21,6 +21,13 @@
 # ``POST /websandbox/{row_id}/restore`` (fetch the snapshot from S3 → untar it
 # into the VM, 204). Both delegate to ``websandbox/durability.py``; tenancy still
 # comes only from the RequestContext, and both are license-gated like the rest.
+#
+# Changed 2026-07-15 (WC-5a, feat/websandbox-edit-agent): added the AI edit
+# endpoint — ``POST /websandbox/{row_id}/edit`` (a file + instruction → a PROPOSED
+# rewrite from a backend-side frontier model). Thin adapter over
+# ``websandbox/edit.py``; tenancy comes only from the RequestContext, and it's
+# license-gated like the rest. Generate-only — the frontend applies accepted hunks
+# via the existing file-RPC.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Response
@@ -29,10 +36,13 @@ from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.websandbox import durability as websandbox_durability
+from pocketpaw_ee.cloud.websandbox import edit as websandbox_edit
 from pocketpaw_ee.cloud.websandbox import provision as websandbox_provision
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
 from pocketpaw_ee.cloud.websandbox.dto import (
     CreateSandboxRequest,
+    EditRequest,
+    EditResponse,
     OpenSandboxRequest,
     SandboxTreeResponse,
     SnapshotResponse,
@@ -119,6 +129,22 @@ async def get_sandbox_tree(
     """Return the cloned repo's file tree for a ready sandbox."""
     workspace_id = _require_workspace(ctx)
     return await websandbox_provision.get_tree(workspace_id, ctx.user_id, row_id)
+
+
+# ---------------------------------------------------------------------------
+# WC-5a — AI edit agent (Cmd-K).
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{row_id}/edit", response_model=EditResponse)
+async def propose_edit(
+    row_id: str,
+    body: EditRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> EditResponse:
+    """Propose a model-authored rewrite of a file (generate-only, no VM write)."""
+    workspace_id = _require_workspace(ctx)
+    return await websandbox_edit.propose_edit(workspace_id, ctx.user_id, row_id, body)
 
 
 # ---------------------------------------------------------------------------

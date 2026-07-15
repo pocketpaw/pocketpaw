@@ -8,6 +8,11 @@
 # ``snapshot_file_id`` — the pointer to the row's latest durable workspace
 # snapshot in blob storage. Optional (default None) so it lands after the
 # required tenancy fields without breaking the single construction site.
+#
+# Changed 2026-07-15 (WC-5a, feat/websandbox-edit-agent): added the optional
+# ``branch`` — the auto-created ``paw/edit-<hex>`` feature branch the repo is
+# checked out onto in the VM so AI edits never touch the default branch. Optional
+# (default None) so it lands after the required tenancy fields.
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -42,6 +47,9 @@ class WebSandboxView:
     updated_at: datetime
     # Pointer to the latest durable workspace snapshot in blob storage (WC-S3).
     snapshot_file_id: str | None = None
+    # The auto-created ``paw/edit-<hex>`` feature branch checked out in the VM
+    # so AI edits never touch the default branch (WC-5a).
+    branch: str | None = None
 
 
 __all__ = [

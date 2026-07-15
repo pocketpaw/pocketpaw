@@ -19,6 +19,12 @@ in blob storage (an ``EEUploadService`` FileRecord id). The VM is scratch and
 gets reaped; this durable pointer lets a user's uncommitted work + workspace
 state be restored into a fresh VM. Null until the first snapshot is taken. No
 new index needed — it's read only via the owner-scoped registry row.
+
+Changed 2026-07-15 (WC-5a, feat/websandbox-edit-agent): added ``branch`` — the
+auto-created ``paw/edit-<hex>`` feature branch the repo is checked out onto in
+the VM at open time, so AI edits never touch the checked-out default branch.
+Null until the provisioner creates it (right after the clone). No new index
+needed — it's read only via the owner-scoped registry row.
 """
 
 from __future__ import annotations
@@ -46,6 +52,9 @@ class WebSandbox(Document):
     # storage (an EEUploadService FileRecord id). Null until the first snapshot;
     # set by ``service.set_snapshot`` from the WC-S3 durability module.
     snapshot_file_id: str | None = None
+    # The auto-created ``paw/edit-<hex>`` feature branch checked out in the VM at
+    # open time (WC-5a). Null until the provisioner creates it after the clone.
+    branch: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

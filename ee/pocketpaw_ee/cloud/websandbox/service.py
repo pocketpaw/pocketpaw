@@ -30,6 +30,13 @@
 # durability module (``websandbox/durability.py``) calls it after landing the
 # workspace tarball in the tenant's S3. It stays here so the service remains the
 # only module that writes the Beanie doc (Rule 2).
+#
+# Changed 2026-07-15 (WC-5a, feat/websandbox-edit-agent): ``update_status`` now
+# also binds the auto-created ``paw/edit-<hex>`` feature branch (via the new
+# ``UpdateStatusRequest.branch``) so the provisioner records it in the same write
+# that marks the row ``ready``; ``branch`` is surfaced through ``_doc_to_view`` +
+# ``view_to_wire``. The doc-write stays here so the service remains the only
+# module that touches the Beanie doc (Rule 2).
 from __future__ import annotations
 
 import logging
@@ -68,6 +75,7 @@ def _doc_to_view(doc: _WebSandboxDoc) -> WebSandboxView:
         sandbox_id=doc.sandbox_id,
         installation_id=doc.installation_id,
         snapshot_file_id=doc.snapshot_file_id,
+        branch=doc.branch,
         created_at=doc.created_at,
         updated_at=doc.updated_at,
     )
@@ -84,6 +92,7 @@ def view_to_wire(view: WebSandboxView) -> WebSandboxResponse:
         sandboxId=view.sandbox_id,
         installationId=view.installation_id,
         snapshotFileId=view.snapshot_file_id,
+        branch=view.branch,
         createdAt=view.created_at.isoformat(),
         updatedAt=view.updated_at.isoformat(),
     )
@@ -246,6 +255,8 @@ async def update_status(
     doc.status = body.status
     if body.sandbox_id is not None:
         doc.sandbox_id = body.sandbox_id
+    if body.branch is not None:
+        doc.branch = body.branch
     doc.updated_at = datetime.now(UTC)
     await doc.save()
 

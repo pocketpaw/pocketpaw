@@ -12,10 +12,12 @@
 # Three flows live here:
 #   1. ``open_sandbox`` — upsert a registry row (pending) → opening →
 #      cold-provision a Daytona VM (auto_stop_interval=30 min) → wait for boot →
-#      clone the PUBLIC repo (no credentials) → bind the Daytona id + mark ready.
-#      On any mid-flight failure the row is marked ``stopped`` and a CloudError is
-#      raised — the row is never left stuck in ``opening`` silently, and a
-#      half-created VM is best-effort torn down.
+#      clone the PUBLIC repo (no credentials) → create + check out a
+#      ``paw/edit-<hex>`` feature branch IN the VM so AI edits never touch the
+#      checked-out default branch (WC-5a) → bind the Daytona id + branch + mark
+#      ready. On any mid-flight failure the row is marked ``stopped`` and a
+#      CloudError is raised — the row is never left stuck in ``opening`` silently,
+#      and a half-created VM is best-effort torn down.
 #   2. ``get_tree`` — resolve the row (tenant-scoped) → authorize on its Daytona
 #      id (fail-closed) → single-level ``list_files`` → the file tree.
 #   3. Idle-TTL reaper — a background sweep that reclaims rows whose ``updated_at``
@@ -37,6 +39,7 @@ import logging
 import os
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from fastapi import FastAPI
 
@@ -60,6 +63,17 @@ _AUTO_STOP_MINUTES = 30
 
 # Daytona boot timeout (seconds) — block until the VM is ``started`` before clone.
 _BOOT_TIMEOUT_SECONDS = 120.0
+
+# Auto-feature-branch (WC-5a): the repo is checked out onto a fresh
+# ``paw/edit-<8 hex>`` branch in the VM so AI edits never touch the default
+# branch. The slug is derived from a uuid4 (no time/random-in-loop concerns) and
+# the checkout is a quick git op, so a short timeout is plenty.
+_BRANCH_CHECKOUT_TIMEOUT_SECONDS = 30
+
+
+def _new_edit_branch() -> str:
+    """Mint a fresh, collision-safe ``paw/edit-<8 hex>`` branch name."""
+    return f"paw/edit-{uuid4().hex[:8]}"
 
 # ---------------------------------------------------------------------------
 # Reaper env config.
@@ -172,6 +186,7 @@ async def open_sandbox(
     )
 
     daytona_id: str | None = None
+    branch = _new_edit_branch()
     try:
         # 2. Cold-provision. auto_stop_interval is in MINUTES — 30 is the backstop.
         info = await daytona.create_sandbox(
@@ -194,6 +209,16 @@ async def open_sandbox(
         project_dir = WEBSANDBOX_WORKDIR
         await daytona.execute_command(daytona_id, f"mkdir -p {project_dir}")
         await daytona.git_clone(daytona_id, repo_url, project_dir, branch=body.branch)
+
+        # 4b. Check out a fresh ``paw/edit-<hex>`` branch IN the VM (WC-5a) so
+        #     every AI edit lands on an isolated branch, never the checked-out
+        #     default. cwd is the pinned workspace dir where the repo was cloned.
+        await daytona.execute_command(
+            daytona_id,
+            f"git checkout -b {branch}",
+            cwd=project_dir,
+            timeout=_BRANCH_CHECKOUT_TIMEOUT_SECONDS,
+        )
     except Exception as exc:  # noqa: BLE001 — any provisioning failure is handled uniformly
         # Best-effort teardown of a half-created VM so a failure can't leak it.
         if daytona_id is not None:
@@ -210,11 +235,20 @@ async def open_sandbox(
             exc,
         ) from exc
 
-    # 5. Bind the Daytona id and mark ready.
+    # 5. Bind the Daytona id + the auto-created feature branch, and mark ready.
     ready = await websandbox_service.update_status(
-        workspace_id, user_id, row.id, {"status": "ready", "sandbox_id": daytona_id}
+        workspace_id,
+        user_id,
+        row.id,
+        {"status": "ready", "sandbox_id": daytona_id, "branch": branch},
     )
-    logger.info("websandbox.open ready: row=%s daytona=%s repo=%s", row.id, daytona_id, repo_url)
+    logger.info(
+        "websandbox.open ready: row=%s daytona=%s branch=%s repo=%s",
+        row.id,
+        daytona_id,
+        branch,
+        repo_url,
+    )
     return ready
 
 

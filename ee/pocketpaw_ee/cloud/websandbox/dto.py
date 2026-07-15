@@ -16,6 +16,14 @@
 # snapshot pointer on the wire (``WebSandboxResponse.snapshotFileId``) and added
 # ``SnapshotResponse`` — the ``{fileId}`` the snapshot endpoint returns after
 # landing the workspace tarball in the tenant's blob storage.
+#
+# Changed 2026-07-15 (WC-5a, feat/websandbox-edit-agent): surfaced the
+# auto-feature-branch on the wire (``WebSandboxResponse.branch``), let the
+# provisioner bind it via ``UpdateStatusRequest.branch``, and added the AI
+# edit-agent DTOs — ``EditRequest`` (a file path + instruction + optional
+# selection range) and ``EditResponse`` (the original + PROPOSED file content the
+# frontend reviews per-hunk and writes back via the existing file-RPC). The edit
+# agent is generate-only; it never writes to the VM.
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -36,10 +44,13 @@ class CreateSandboxRequest(BaseModel):
 
 
 class UpdateStatusRequest(BaseModel):
-    """Advance a sandbox's lifecycle state (and optionally bind its id)."""
+    """Advance a sandbox's lifecycle state (and optionally bind its id/branch)."""
 
     status: str = Field(..., max_length=32)
     sandbox_id: str | None = Field(default=None, max_length=256)
+    # The auto-created feature branch the provisioner checked out in the VM
+    # (WC-5a). Bound in the same write that marks the row ``ready``.
+    branch: str | None = Field(default=None, max_length=256)
 
 
 class WebSandboxResponse(BaseModel):
@@ -51,6 +62,7 @@ class WebSandboxResponse(BaseModel):
     sandboxId: str | None = None
     installationId: str | None = None
     snapshotFileId: str | None = None
+    branch: str | None = None
     createdAt: str  # ISO-8601 UTC
     updatedAt: str  # ISO-8601 UTC
 
@@ -104,8 +116,58 @@ class SnapshotResponse(BaseModel):
     fileId: str
 
 
+# ---------------------------------------------------------------------------
+# WC-5a — AI edit agent (Cmd-K).
+# ---------------------------------------------------------------------------
+
+
+class EditSelection(BaseModel):
+    """A 1-indexed inclusive line range within the target file the edit scopes to.
+
+    Optional on an ``EditRequest`` — when present it focuses the model on the
+    selected lines (the rest of the file is still supplied as context). When
+    absent the whole file is the edit target.
+    """
+
+    startLine: int = Field(..., ge=1)
+    endLine: int = Field(..., ge=1)
+
+
+class EditRequest(BaseModel):
+    """Ask the backend edit agent to PROPOSE a rewrite of a file (or selection).
+
+    ``path`` is relative to the in-VM workspace dir (jailed — ``..`` / absolute
+    paths are refused). ``instruction`` is the natural-language edit. ``selection``
+    optionally narrows the edit to a line range. The agent reads the file
+    server-side, calls a frontier model, and returns the proposal — it never
+    writes anything to the VM (Rule 4: the write surface never carries a proposed
+    body; the frontend applies accepted hunks via the existing file-RPC).
+    """
+
+    path: str = Field(..., min_length=1, max_length=1024)
+    instruction: str = Field(..., min_length=1, max_length=8192)
+    selection: EditSelection | None = None
+
+
+class EditResponse(BaseModel):
+    """The edit agent's PROPOSAL — original vs. proposed file content.
+
+    The frontend diffs ``originalContent`` against ``proposedContent`` to render
+    per-hunk review and writes accepted changes back via the file-RPC. ``selection``
+    echoes the requested range (if any) so the reviewer can scope the diff.
+    """
+
+    path: str
+    originalContent: str
+    proposedContent: str
+    selection: EditSelection | None = None
+
+
 __all__ = [
     "CreateSandboxRequest",
+    "EditRequest",
+    "EditResponse",
+    "EditSelection",
     "OpenSandboxRequest",
     "SandboxTreeResponse",
     "SnapshotResponse",
