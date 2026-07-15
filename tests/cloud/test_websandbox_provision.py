@@ -9,7 +9,8 @@
 # exercised for real.
 #
 # Covers:
-#   * open provisions (create called with auto_stop_interval=30), clones (the
+#   * open provisions (create called with the aggressive lifecycle: stop 5 /
+#     archive 5 / delete-on-stop), clones (the
 #     repo URL reaches git_clone), and the row ends ``ready`` with the Daytona
 #     sandbox_id bound.
 #   * open mid-flight failure marks the row ``stopped`` (never stuck ``opening``)
@@ -77,7 +78,13 @@ class _FakeDaytonaClient:
         self._counter += 1
         sid = f"dtn-{self._counter}"
         self.create_calls.append(
-            {"name": name, "auto_stop_interval": auto_stop_interval, "id": sid}
+            {
+                "name": name,
+                "auto_stop_interval": auto_stop_interval,
+                "auto_archive_interval": kwargs.get("auto_archive_interval"),
+                "auto_delete_interval": kwargs.get("auto_delete_interval"),
+                "id": sid,
+            }
         )
         return SandboxInfo(id=sid, name=name, state="creating")
 
@@ -130,9 +137,12 @@ async def test_open_provisions_clones_and_marks_ready() -> None:
         client=fake,
     )
 
-    # Cold-provision fired with the 30-MINUTE backstop (not the SDK's 60h default).
+    # Cold-provision fired with the aggressive Daytona lifecycle (all MINUTES):
+    # stop after 5 idle, archive 5 after stop, delete immediately on stop (0).
     assert len(fake.create_calls) == 1
-    assert fake.create_calls[0]["auto_stop_interval"] == 30
+    assert fake.create_calls[0]["auto_stop_interval"] == 5
+    assert fake.create_calls[0]["auto_archive_interval"] == 5
+    assert fake.create_calls[0]["auto_delete_interval"] == 0
 
     # It waited for boot before cloning, then cloned the exact repo URL.
     assert len(fake.wait_calls) == 1

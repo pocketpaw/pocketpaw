@@ -161,6 +161,8 @@ class DaytonaClient:
         memory: int = 4,
         disk: int = 10,
         auto_stop_interval: int = 3600,
+        auto_archive_interval: int | None = None,
+        auto_delete_interval: int | None = None,
     ) -> SandboxInfo:
         """Create a new sandbox using the SDK.
 
@@ -183,7 +185,14 @@ class DaytonaClient:
             cpu: Number of CPUs.
             memory: Memory in GB.
             disk: Disk size in GB.
-            auto_stop_interval: Seconds of inactivity before auto-stop.
+            auto_stop_interval: MINUTES of inactivity before the VM auto-stops.
+                (The SDK counts these in minutes, NOT seconds — the SDK's own
+                3600 default is 60 HOURS, a latent trap. 0 disables auto-stop.)
+            auto_archive_interval: MINUTES after a stop before the VM is
+                auto-archived. ``None`` leaves the SDK default in place.
+            auto_delete_interval: MINUTES after a stop before the VM is
+                auto-deleted (``0`` = delete immediately on stop, ``-1`` =
+                never). ``None`` leaves the SDK default in place.
         """
         daytona = await self._ensure_daytona()
 
@@ -204,12 +213,20 @@ class DaytonaClient:
             disk,
         )
 
-        params = CreateSandboxFromImageParams(
-            name=name,
-            image=resolved_image,
-            resources=Resources(cpu=cpu, memory=memory, disk=disk),
-            auto_stop_interval=auto_stop_interval,
-        )
+        create_kwargs: dict[str, Any] = {
+            "name": name,
+            "image": resolved_image,
+            "resources": Resources(cpu=cpu, memory=memory, disk=disk),
+            "auto_stop_interval": auto_stop_interval,
+        }
+        # Only set the archive/delete lifecycle knobs when a caller opts in — a
+        # None leaves the SDK's own default in place (so existing callers keep
+        # their behaviour; the Web Cursor path passes explicit values).
+        if auto_archive_interval is not None:
+            create_kwargs["auto_archive_interval"] = auto_archive_interval
+        if auto_delete_interval is not None:
+            create_kwargs["auto_delete_interval"] = auto_delete_interval
+        params = CreateSandboxFromImageParams(**create_kwargs)
         if language:
             params.language = language
 

@@ -11,7 +11,8 @@
 #
 # Three flows live here:
 #   1. ``open_sandbox`` — upsert a registry row (pending) → opening →
-#      cold-provision a Daytona VM (auto_stop_interval=30 min) → wait for boot →
+#      cold-provision a Daytona VM (auto_stop 5 / archive 5 / delete-on-stop) →
+#      wait for boot →
 #      clone the PUBLIC repo (no credentials) → create + check out a
 #      ``paw/edit-<hex>`` feature branch IN the VM so AI edits never touch the
 #      checked-out default branch (WC-5a) → bind the Daytona id + branch + mark
@@ -26,7 +27,8 @@
 #      create_sandbox`` does not forward labels to the SDK; the Registry (our DB)
 #      is the source of truth instead. WC-3 will refresh ``updated_at`` on live
 #      WebSocket traffic; until then "idle" == ``updated_at`` age. The SDK's own
-#      ``auto_stop_interval=30`` min is a second, independent backstop.
+#      Daytona-native lifecycle (stop 5 / archive 5 / delete-on-stop) is a
+#      second, independent backstop that reclaims idle VMs even faster.
 #
 # Every provisioning fn takes ``client: DaytonaClient | None = None`` (default
 # ``get_daytona_client()``) — the mandatory DI seam so tests inject a FAKE client
@@ -56,10 +58,17 @@ from pocketpaw_ee.cloud.websandbox.dto import (
 
 logger = logging.getLogger(__name__)
 
-# The SDK backstop: a self-stop after 30 minutes of inactivity. NOTE the SDK's
-# ``auto_stop_interval`` is in MINUTES (the SDK default 3600 = 60 HOURS is a
-# latent trap); 30 is a 30-minute backstop that mirrors our idle-TTL reaper.
-_AUTO_STOP_MINUTES = 30
+# Daytona-native VM lifecycle (all in MINUTES — the SDK counts these in minutes,
+# NOT seconds; its own 3600 default is 60 HOURS, a latent trap). Aggressive by
+# design: a Code Mode sandbox is pure-ephemeral (the durable half is the
+# CodeProject + its S3 snapshot), so we let Daytona reclaim idle VMs fast rather
+# than lean only on our own reaper.
+#   • stop 5 min after inactivity, • archive 5 min after a stop,
+#   • delete immediately on stop (0). A returning user re-provisions from the
+#     durable project (open_project) instead of resuming a stale VM.
+_AUTO_STOP_MINUTES = 5
+_AUTO_ARCHIVE_MINUTES = 5
+_AUTO_DELETE_MINUTES = 0
 
 # Daytona boot timeout (seconds) — block until the VM is ``started`` before clone.
 _BOOT_TIMEOUT_SECONDS = 120.0
@@ -184,7 +193,7 @@ async def open_sandbox(
     """Cold-provision a Daytona VM and clone a PUBLIC repo into it.
 
     Flow: upsert the registry row (``pending``) → mark ``opening`` →
-    ``create_sandbox(auto_stop_interval=30)`` → ``wait_for_sandbox`` →
+    ``create_sandbox(auto_stop 5 / archive 5 / delete-on-stop)`` → ``wait_for_sandbox`` →
     ``git_clone`` the public repo (NO credentials) into the project dir →
     bind the Daytona sandbox id + mark ``ready`` → return the ready view.
 
@@ -224,10 +233,13 @@ async def open_sandbox(
     daytona_id: str | None = None
     branch = _new_edit_branch()
     try:
-        # 2. Cold-provision. auto_stop_interval is in MINUTES — 30 is the backstop.
+        # 2. Cold-provision with the aggressive Daytona lifecycle (all MINUTES):
+        #    stop after 5 idle, archive 5 after stop, delete immediately on stop.
         info = await daytona.create_sandbox(
             name=f"websandbox-{row.id}",
             auto_stop_interval=_AUTO_STOP_MINUTES,
+            auto_archive_interval=_AUTO_ARCHIVE_MINUTES,
+            auto_delete_interval=_AUTO_DELETE_MINUTES,
         )
         daytona_id = info.id
 
