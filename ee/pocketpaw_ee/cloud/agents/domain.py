@@ -9,11 +9,19 @@ Beanie sub-model would require touching every caller of
 Updated: 2026-06-28 (feat/aiam-agent-revoke, AW-4) — added ``Agent.disabled``
 mirroring the new top-level flag on the Beanie doc, so callers (and the wire
 dict) can read whether an agent has been soft-disabled / revoked.
+
+Updated: 2026-07-15 (feat/agent-scoped-discover-fields, ASG-1) — added the
+additive presentation fields that mirror the new Beanie fields:
+``AgentConfigSpec.welcome_message`` / ``conversation_starters`` / ``voice`` /
+``appearance`` and ``Agent.tags``. Lists stay frozen-friendly tuples (matching
+``tools`` / ``soul_values``); ``voice`` / ``appearance`` are free-form blobs
+kept as dicts (nothing hashes these value objects — only ``!=`` equality is
+used, in ``service.update``).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 
@@ -36,6 +44,11 @@ class AgentConfigSpec:
     soul_archetype: str = ""
     soul_values: tuple[str, ...] = ()
     soul_ocean: tuple[tuple[str, float], ...] = ()  # frozen-friendly dict
+    # Presentation fields (ASG-1) — mirror ``models.agent.AgentConfig``.
+    welcome_message: str = ""
+    conversation_starters: tuple[str, ...] = ()  # frozen-friendly list
+    voice: dict | None = None
+    appearance: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -53,6 +66,7 @@ class Agent:
     created_at: datetime
     updated_at: datetime
     disabled: bool = False  # soft-disable / revoke-everywhere (AW-4)
+    tags: tuple[str, ...] = ()  # free-form gallery tags (ASG-1)
 
 
 __all__ = ["Agent", "AgentConfigSpec"]

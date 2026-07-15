@@ -25,6 +25,14 @@ Updated 2026-07-02 (feat/aiam-agent-revoke, AW-4 follow-up): ``get_persona``
 now returns ``None`` for a soft-disabled agent (reusing the doc it already
 loads — no extra read), so ``agent_bridge``'s smart-relevance LLM probe never
 fires for an agent ``pool.get`` would refuse to run.
+
+Updated 2026-07-15 (feat/agent-scoped-discover-fields, ASG-1): ``discover``
+grew a ``scoped`` flag (default True) — the default viewer union now OMITS the
+``{"visibility": "public"}`` clause so a public agent from another owner can
+never leak into the scoped gallery. Also threaded the additive presentation
+fields (``welcome_message`` / ``conversation_starters`` / ``voice`` /
+``appearance`` on config, ``tags`` on the agent) through the doc↔domain mappers,
+``create`` and ``update`` so they persist and round-trip on the wire.
 """
 
 from __future__ import annotations
@@ -82,6 +90,10 @@ def _config_to_domain(c: _AgentConfigDoc) -> AgentConfigSpec:
         soul_archetype=c.soul_archetype,
         soul_values=tuple(c.soul_values),
         soul_ocean=tuple(c.soul_ocean.items()),
+        welcome_message=c.welcome_message,
+        conversation_starters=tuple(c.conversation_starters),
+        voice=dict(c.voice) if c.voice is not None else None,
+        appearance=dict(c.appearance),
     )
 
 
@@ -102,6 +114,10 @@ def _config_to_doc(c: AgentConfigSpec) -> _AgentConfigDoc:
         soul_archetype=c.soul_archetype,
         soul_values=list(c.soul_values),
         soul_ocean=dict(c.soul_ocean),
+        welcome_message=c.welcome_message,
+        conversation_starters=list(c.conversation_starters),
+        voice=dict(c.voice) if c.voice is not None else None,
+        appearance=dict(c.appearance),
     )
 
 
@@ -118,6 +134,7 @@ def _to_domain(doc: _AgentDoc) -> Agent:
         created_at=getattr(doc, "createdAt", None),  # type: ignore[arg-type]
         updated_at=getattr(doc, "updatedAt", None),  # type: ignore[arg-type]
         disabled=getattr(doc, "disabled", False),
+        tags=tuple(getattr(doc, "tags", ()) or ()),
     )
 
 
@@ -147,6 +164,7 @@ def _build_create_config(body: CreateAgentRequest) -> AgentConfigSpec:
         soul_enabled=body.soul_enabled,
         soul_persona=body.persona,
         soul_archetype=body.soul_archetype or f"The {body.name}",
+        welcome_message=body.welcome_message,
     )
     overrides: dict[str, Any] = {}
     if body.temperature is not None:
@@ -167,6 +185,12 @@ def _build_create_config(body: CreateAgentRequest) -> AgentConfigSpec:
         overrides["soul_values"] = tuple(body.soul_values)
     if body.soul_ocean is not None:
         overrides["soul_ocean"] = tuple(body.soul_ocean.items())
+    if body.conversation_starters is not None:
+        overrides["conversation_starters"] = tuple(body.conversation_starters)
+    if body.voice is not None:
+        overrides["voice"] = dict(body.voice)
+    if body.appearance is not None:
+        overrides["appearance"] = dict(body.appearance)
     return replace(base, **overrides) if overrides else base
 
 
@@ -194,6 +218,12 @@ def _apply_update(current: AgentConfigSpec, body: UpdateAgentRequest) -> AgentCo
                 if isinstance(c.get("soul_ocean", dict(current.soul_ocean)), dict)
                 else current.soul_ocean
             ),
+            welcome_message=c.get("welcome_message", current.welcome_message),
+            conversation_starters=tuple(
+                c.get("conversation_starters", list(current.conversation_starters))
+            ),
+            voice=c.get("voice", current.voice),
+            appearance=dict(c.get("appearance", dict(current.appearance))),
         )
 
     overrides: dict[str, Any] = {}
@@ -206,6 +236,7 @@ def _apply_update(current: AgentConfigSpec, body: UpdateAgentRequest) -> AgentCo
         ("trust_level", body.trust_level),
         ("soul_enabled", body.soul_enabled),
         ("soul_archetype", body.soul_archetype),
+        ("welcome_message", body.welcome_message),
     ]:
         if attr is not None:
             overrides[field] = attr
@@ -223,6 +254,12 @@ def _apply_update(current: AgentConfigSpec, body: UpdateAgentRequest) -> AgentCo
         overrides["soul_ocean"] = tuple(body.soul_ocean.items())
     if body.persona is not None:
         overrides["soul_persona"] = body.persona
+    if body.conversation_starters is not None:
+        overrides["conversation_starters"] = tuple(body.conversation_starters)
+    if body.voice is not None:
+        overrides["voice"] = dict(body.voice)
+    if body.appearance is not None:
+        overrides["appearance"] = dict(body.appearance)
 
     return replace(current, **overrides) if overrides else current
 
@@ -252,6 +289,7 @@ async def create(ctx: RequestContext, workspace_id: str, body: CreateAgentReques
         visibility=body.visibility,
         owner=ctx.user_id,
         config=_config_to_doc(config),
+        tags=list(body.tags) if body.tags is not None else [],
     )
     await doc.insert()
     agent = _to_domain(doc)
@@ -322,6 +360,8 @@ async def update(ctx: RequestContext, agent_id: str, body: UpdateAgentRequest) -
         doc.avatar = body.avatar
     if body.visibility is not None:
         doc.visibility = body.visibility
+    if body.tags is not None:
+        doc.tags = list(body.tags)
     if new_config != _config_to_domain(doc.config):
         doc.config = _config_to_doc(new_config)
     await doc.save()
@@ -336,6 +376,8 @@ async def update(ctx: RequestContext, agent_id: str, body: UpdateAgentRequest) -
         payload["avatar"] = doc.avatar
     if body.visibility is not None:
         payload["visibility"] = doc.visibility
+    if body.tags is not None:
+        payload["tags"] = doc.tags
     await emit(AgentUpdated(data=payload))
     return _to_domain(doc)
 
@@ -456,11 +498,18 @@ async def discover(
     elif body.visibility == "public":
         filters["visibility"] = "public"
     else:
-        filters["$or"] = [
+        # Default viewer union. When ``scoped`` (the gallery default) the
+        # ``{"visibility": "public"}`` clause is OMITTED so a public agent owned
+        # by another member can NEVER leak in — the result is strictly
+        # {owner==me} ∪ {visibility==workspace} within this workspace. Callers
+        # that pass ``scoped=False`` get the legacy cross-workspace public union.
+        union: list[dict[str, Any]] = [
             {"workspace": workspace_id, "owner": ctx.user_id},
             {"workspace": workspace_id, "visibility": "workspace"},
-            {"visibility": "public"},
         ]
+        if not body.scoped:
+            union.append({"visibility": "public"})
+        filters["$or"] = union
     if body.query:
         filters["name"] = {"$regex": body.query, "$options": "i"}
 
