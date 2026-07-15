@@ -9,6 +9,12 @@ Credentials are shared with interacly-backend's file storage module — same
 env var names (``S3_ENDPOINT``, ``S3_REGION``, ``S3_ACCESS_KEY_ID``,
 ``S3_SECRET_ACCESS_KEY``, ``S3_PRIVATE_BUCKET``) so one deployment can point
 both services at the same bucket.
+
+2026-07-15 (CORS-1): added ``ensure_cors``/``get_cors`` so the bucket's CORS
+policy can be applied from code (the creds already live in the deploy env)
+instead of an out-of-band ``aws s3api put-bucket-cors``. Browsers fetching
+presigned URLs (attachment previews, artifact byte reads) need the origin in
+the bucket's allowlist or the cross-origin response is blocked.
 """
 
 from __future__ import annotations
@@ -155,6 +161,60 @@ class S3StorageAdapter(StorageAdapter):
             )
         except Exception:
             return None
+
+    async def ensure_cors(
+        self,
+        allowed_origins: list[str],
+        *,
+        allowed_methods: list[str] | None = None,
+        allowed_headers: list[str] | None = None,
+        expose_headers: list[str] | None = None,
+        max_age_seconds: int = 3600,
+    ) -> None:
+        """Apply a CORS policy to the bucket so browsers on ``allowed_origins``
+        may ``fetch`` presigned URLs (chat attachment previews, artifact byte
+        reads). Without this the browser blocks the cross-origin response even
+        though the object comes back — no ``Access-Control-Allow-Origin`` header.
+
+        Overwrites the bucket's CORS config with a single rule (S3 has no
+        merge — ``put_bucket_cors`` replaces the whole set), so pass every
+        origin the bucket must serve. ``GET``/``HEAD`` + the range-related
+        expose-headers are the defaults because attachment reads are byte-range
+        (``206``) requests. Raises the underlying boto exception on failure;
+        callers that must not fail closed (boot-time ensure) catch it.
+        """
+        rule: dict[str, object] = {
+            "AllowedOrigins": list(allowed_origins),
+            "AllowedMethods": allowed_methods or ["GET", "HEAD"],
+            "AllowedHeaders": allowed_headers or ["*"],
+            "ExposeHeaders": expose_headers
+            or ["Content-Range", "Content-Length", "Accept-Ranges", "ETag"],
+            "MaxAgeSeconds": int(max_age_seconds),
+        }
+        try:
+            await asyncio.to_thread(
+                self._client.put_bucket_cors,
+                Bucket=self._bucket,
+                CORSConfiguration={"CORSRules": [rule]},
+            )
+        except Exception as exc:
+            raise StorageFailure(f"put_bucket_cors failed: {exc}") from exc
+
+    async def get_cors(self) -> list[dict]:
+        """Return the bucket's current CORS rules (empty list when none set).
+
+        Read-side companion to :meth:`ensure_cors` — lets a caller show the
+        before/after when applying a policy. A bucket with no CORS config
+        raises ``NoSuchCORSConfiguration``; that's normalized to ``[]``.
+        """
+        try:
+            resp = await asyncio.to_thread(
+                self._client.get_bucket_cors, Bucket=self._bucket
+            )
+        except Exception:
+            return []
+        rules = resp.get("CORSRules", [])
+        return list(rules) if isinstance(rules, list) else []
 
     async def list_prefix(self, prefix: str) -> list[str]:
         """Return the unique "sub-folder" names under ``prefix``.
