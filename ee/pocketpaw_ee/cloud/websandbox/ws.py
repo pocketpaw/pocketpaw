@@ -7,15 +7,35 @@
 # single-use ws_ticket auth, because browsers can't set auth headers on a WS
 # upgrade.
 #
+# 2026-07-15 (WC-4b): the ticket now resolves via EITHER of two auth paths, so
+# the browser can authenticate without leaking the ticket in the URL (URL query
+# strings leak into access logs, browser history, and proxies — the same
+# REVIEW-4 reasoning that moved the chat WS off URL tickets):
+#   * Path 1 — single-use ws_ticket in ``?token=``, consumed BEFORE accept
+#     (unchanged; the only path a cross-origin WS upgrade can carry in the URL).
+#   * Path 3 — no ``?token=``: accept() FIRST (a frame can only be read after the
+#     handshake completes), then read the first frame under a 5s timeout and
+#     parse ``{"type":"auth","ticket"|"token":"..."}``. On timeout, a malformed
+#     frame, a non-auth frame, or a failed ``consume_ws_ticket`` -> close 4001 and
+#     the socket never reaches the message loop.
+# ``websocket.accept()`` is called exactly once on every path, tracked by the
+# ``accepted`` flag: Path 1 accepts AFTER the authz checks (as before); Path 3
+# accepts BEFORE reading the frame, so the shared authz section must not accept
+# again.
+#
 # Connect flow (fail-closed at every step; a PTY is opened ONLY after all pass):
-#   accept-gate: license present -> ticket in ?token= present
-#   consume_ws_ticket(token) -> user_id           (single-use, Redis fail-closed)
+#   license present                                (else 4003)
+#   Path 1: ticket in ?token= -> consume_ws_ticket (pre-accept; 1008 on failure)
+#   Path 3: no ?token= -> accept, read first auth   (post-accept; 4001 on failure)
+#           frame under 5s timeout -> consume_ws_ticket
+#   -> user_id                                     (single-use, Redis fail-closed)
 #   auth_service.get_active_workspace(user_id)     -> workspace_id
 #   websandbox_service.get_sandbox(ws, user, row)  -> row (NotFound if not owned)
 #   row.sandbox_id present (row is ``ready``)      (else 1008 not-ready)
 #   authorize_sandbox(ws, user, row.sandbox_id)    -> bind socket to the VM
-# Any failure closes 1008 BEFORE accept/PTY — a second user's ticket for someone
-# else's row is denied by get_sandbox/authorize_sandbox before any PTY opens.
+# A second user's ticket for someone else's row is denied by get_sandbox/
+# authorize_sandbox before any PTY opens. Path 1 closes 1008 pre-accept; Path 3
+# is already accepted, so an authz denial closes 1008 on the accepted socket.
 #
 # Message framing: client->server JSON — {"type":"input","data":"<str>"},
 # {"type":"resize","cols":N,"rows":N}, {"type":"ping"}. server->client — raw
@@ -34,6 +54,7 @@
 # DO bump the same throttled activity heartbeat.
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -52,12 +73,19 @@ from pocketpaw_ee.cloud.websandbox.terminal import DEFAULT_COLS, DEFAULT_ROWS, P
 
 logger = logging.getLogger(__name__)
 
-# WS close codes. 1008 == policy violation (auth / authz denial). 4003 mirrors
+# WS close codes. 1008 == policy violation (authz denial). 4001 == the Path 3
+# first-frame auth failed (mirrors the chat WS auth-frame close). 4003 mirrors
 # the chat WS "enterprise license required". 1011 == internal error (PTY open
 # failed after auth succeeded).
 _CLOSE_POLICY = 1008
+_CLOSE_AUTH_FRAME = 4001
 _CLOSE_LICENSE = 4003
 _CLOSE_INTERNAL = 1011
+
+# Seconds to wait for the Path 3 first-message auth frame before giving up. A
+# half-open socket must not hold resources waiting for a credential that may
+# never arrive. Mirrors the chat WS 5s auth-frame timeout.
+_AUTH_FRAME_TIMEOUT_SECONDS = 5.0
 
 # Minimum seconds between activity heartbeats per socket (throttle): a burst of
 # keystrokes becomes one ``updated_at`` write, not one per frame.
@@ -118,25 +146,59 @@ async def terminal_websocket_endpoint(
 ) -> None:
     """Stream a real bash PTY from the owning sandbox's VM to the browser.
 
-    See the module docstring for the full connect/auth flow. The ws_ticket is
-    consumed (single-use) BEFORE accept; any auth/authz failure closes 1008 and
-    never opens a PTY.
+    See the module docstring for the full connect/auth flow. The ws_ticket
+    resolves via Path 1 (``?token=``, consumed pre-accept) or Path 3 (a
+    first-message auth frame read post-accept under a 5s timeout). Any auth
+    failure closes 1008 (Path 1) or 4001 (Path 3); any authz failure closes 1008
+    and never opens a PTY.
     """
-    # License gate — parity with the REST /websandbox routes and chat WS.
+    # License gate first on BOTH paths — parity with the REST /websandbox routes
+    # and chat WS.
     lic = get_license()
     if lic is None or lic.expired:
         await websocket.close(code=_CLOSE_LICENSE, reason="Enterprise license required")
         return
 
-    # Path 1 — single-use ws_ticket in ?token= (the only auth path the browser
-    # can use on a cross-origin WS upgrade). No ticket -> no access.
-    if not token:
-        await websocket.close(code=_CLOSE_POLICY, reason="Missing ticket")
-        return
-    user_id = await consume_ws_ticket(token)
-    if not user_id:
-        await websocket.close(code=_CLOSE_POLICY, reason="Invalid ticket")
-        return
+    # ``accepted`` tracks whether accept() has run so accept() happens exactly
+    # once: Path 1 accepts AFTER the authz checks below; Path 3 accepts BEFORE it
+    # can read the first frame, then the shared authz section must not re-accept.
+    accepted = False
+
+    if token:
+        # Path 1 — single-use ws_ticket in ?token=. Consumed BEFORE accept, so a
+        # bad ticket is refused during the handshake (close 1008, no accept).
+        user_id = await consume_ws_ticket(token)
+        if not user_id:
+            await websocket.close(code=_CLOSE_POLICY, reason="Invalid ticket")
+            return
+    else:
+        # Path 3 — no URL token. Authenticate from the first frame so the ticket
+        # never travels in the URL. We MUST accept() before we can receive, and
+        # the 5s timeout stops a half-open socket from holding resources while we
+        # wait for a credential that may never come.
+        await websocket.accept()
+        accepted = True
+        try:
+            raw = await asyncio.wait_for(
+                websocket.receive_text(), timeout=_AUTH_FRAME_TIMEOUT_SECONDS
+            )
+            frame = json.loads(raw)
+        except Exception:
+            # Timeout, disconnect, or non-JSON first frame.
+            await websocket.close(code=_CLOSE_AUTH_FRAME, reason="Missing auth")
+            return
+
+        if not isinstance(frame, dict) or frame.get("type") != "auth":
+            await websocket.close(code=_CLOSE_AUTH_FRAME, reason="Missing auth")
+            return
+
+        # Accept ``token`` as an alias for ``ticket`` (parity with the chat WS
+        # auth frame); either carries the single-use ws_ticket.
+        ticket = frame.get("ticket") or frame.get("token")
+        user_id = await consume_ws_ticket(ticket) if isinstance(ticket, str) and ticket else None
+        if not user_id:
+            await websocket.close(code=_CLOSE_AUTH_FRAME, reason="Invalid ticket")
+            return
 
     # Resolve the caller's workspace from the same membership field the HTTP
     # request context reads. Fail closed if the user has no active workspace.
@@ -166,8 +228,10 @@ async def terminal_websocket_endpoint(
         await websocket.close(code=_CLOSE_LICENSE, reason="Sandbox runtime unavailable")
         return
 
-    # Every gate passed — accept the socket and open the PTY.
-    await websocket.accept()
+    # Every gate passed — accept the socket (unless Path 3 already did) and open
+    # the PTY. ``accepted`` keeps accept() exactly-once across both paths.
+    if not accepted:
+        await websocket.accept()
 
     session_id = f"term-{uuid.uuid4().hex}"
 

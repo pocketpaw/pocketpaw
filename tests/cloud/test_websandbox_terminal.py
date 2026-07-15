@@ -24,6 +24,15 @@
 #   * activity heartbeat is throttled (many frames -> one touch) and bumps
 #     updated_at at the service level.
 #   * the _ActivityThrottle unit gates to first-call-then-interval.
+#
+# 2026-07-15 (WC-4b): Path 3 first-message auth frame (no ?token=). Covers:
+#   * no ?token= + a valid {"type":"auth","ticket":<valid>} frame -> accept()
+#     first, then PTY opens (and the "token" alias works too).
+#   * no ?token= + malformed / non-auth / missing first frame -> closed 4001
+#     after accept, no PTY.
+#   * no ?token= + auth frame with an INVALID ticket -> closed 4001, no PTY.
+#   * no ?token= + valid ticket but a sandbox the caller does NOT own -> closed
+#     1008 after accept, no PTY.
 from __future__ import annotations
 
 import os
@@ -253,15 +262,18 @@ async def test_valid_ticket_opens_pty_streams_and_resizes(wire_terminal) -> None
 # ---------------------------------------------------------------------------
 
 
-async def test_missing_ticket_closes_1008_no_pty(wire_terminal) -> None:
+async def test_no_token_and_no_auth_frame_closes_4001_no_pty(wire_terminal) -> None:
+    # No ?token= now routes to Path 3 (first-message auth frame). With nothing on
+    # the wire, receive_text raises before any frame arrives -> 4001 after accept,
+    # never the old pre-accept 1008. (Path 3 detail covered further below.)
     client, _tokens = wire_terminal
-    await _seed_user("w1")  # existence irrelevant; no token supplied
+    await _seed_user("w1")  # existence irrelevant; no credential supplied
 
     ws = FakeWebSocket()
     await terminal_websocket_endpoint(ws, "any-row", token=None)
 
-    assert ws.accepted is False
-    assert ws.closed is not None and ws.closed[0] == 1008
+    assert ws.accepted is True
+    assert ws.closed is not None and ws.closed[0] == 4001
     assert client.sandbox.process.handle is None
 
 
@@ -310,6 +322,129 @@ async def test_not_ready_sandbox_closes_1008_no_pty(wire_terminal) -> None:
     await terminal_websocket_endpoint(ws, view.id, token="good-ticket")
 
     assert ws.accepted is False
+    assert ws.closed is not None and ws.closed[0] == 1008
+    assert client.sandbox.process.handle is None
+
+
+# ---------------------------------------------------------------------------
+# Path 3 — first-message auth frame (no ?token=), leak-free browser auth.
+# ---------------------------------------------------------------------------
+
+
+async def test_authframe_valid_opens_pty(wire_terminal) -> None:
+    client, tokens = wire_terminal
+    user_id = await _seed_user("w1")
+    row_id = await _seed_ready_sandbox("w1", user_id)
+    tokens["good-ticket"] = user_id
+
+    # No ?token=; the ticket rides in the FIRST frame, followed by a real input.
+    ws = FakeWebSocket(
+        inbound=[
+            '{"type":"auth","ticket":"good-ticket"}',
+            '{"type":"input","data":"echo hi\\n"}',
+        ]
+    )
+
+    await terminal_websocket_endpoint(ws, row_id, token=None)
+
+    # Path 3 accepts BEFORE reading the frame; auth then succeeded, so no close.
+    assert ws.accepted is True
+    assert ws.closed is None
+
+    # The auth frame was consumed by the handshake, not the input loop: only the
+    # actual keystroke reached the pty.
+    handle = client.sandbox.process.handle
+    assert handle is not None
+    assert handle.sent == ["echo hi\n"]
+    assert b"echo:echo hi\n" in ws.sent_bytes
+
+    # Disconnect tore the pty down (no leaked session).
+    assert client.kill_calls
+    assert handle.connected is False
+
+
+async def test_authframe_token_alias_opens_pty(wire_terminal) -> None:
+    # "token" is accepted as an alias for "ticket" in the auth frame (chat parity).
+    client, tokens = wire_terminal
+    user_id = await _seed_user("w1")
+    row_id = await _seed_ready_sandbox("w1", user_id)
+    tokens["good-ticket"] = user_id
+
+    ws = FakeWebSocket(inbound=['{"type":"auth","token":"good-ticket"}'])
+    await terminal_websocket_endpoint(ws, row_id, token=None)
+
+    assert ws.accepted is True
+    assert ws.closed is None
+    assert client.sandbox.process.handle is not None
+
+
+async def test_authframe_malformed_closes_4001_no_pty(wire_terminal) -> None:
+    client, _tokens = wire_terminal
+    await _seed_user("w1")
+
+    ws = FakeWebSocket(inbound=["this is not json"])
+    await terminal_websocket_endpoint(ws, "any-row", token=None)
+
+    # Accepted (Path 3 must accept before it can read), then closed 4001.
+    assert ws.accepted is True
+    assert ws.closed is not None and ws.closed[0] == 4001
+    assert client.sandbox.process.handle is None
+
+
+async def test_authframe_non_auth_first_frame_closes_4001_no_pty(wire_terminal) -> None:
+    client, _tokens = wire_terminal
+    await _seed_user("w1")
+
+    # Well-formed JSON but not an auth frame -> rejected.
+    ws = FakeWebSocket(inbound=['{"type":"input","data":"whoami"}'])
+    await terminal_websocket_endpoint(ws, "any-row", token=None)
+
+    assert ws.accepted is True
+    assert ws.closed is not None and ws.closed[0] == 4001
+    assert client.sandbox.process.handle is None
+
+
+async def test_authframe_missing_frame_closes_4001_no_pty(wire_terminal) -> None:
+    client, _tokens = wire_terminal
+    await _seed_user("w1")
+
+    # Empty inbound -> receive_text raises WebSocketDisconnect before any frame
+    # arrives (stands in for the client that never sends a credential).
+    ws = FakeWebSocket(inbound=[])
+    await terminal_websocket_endpoint(ws, "any-row", token=None)
+
+    assert ws.accepted is True
+    assert ws.closed is not None and ws.closed[0] == 4001
+    assert client.sandbox.process.handle is None
+
+
+async def test_authframe_invalid_ticket_closes_4001_no_pty(wire_terminal) -> None:
+    client, tokens = wire_terminal
+    tokens["good-ticket"] = "someone"
+
+    ws = FakeWebSocket(inbound=['{"type":"auth","ticket":"WRONG"}'])
+    await terminal_websocket_endpoint(ws, "any-row", token=None)
+
+    assert ws.accepted is True
+    assert ws.closed is not None and ws.closed[0] == 4001
+    assert client.sandbox.process.handle is None
+
+
+async def test_authframe_valid_ticket_not_owned_closes_1008_after_accept(wire_terminal) -> None:
+    client, tokens = wire_terminal
+    owner_id = await _seed_user("w1")
+    row_id = await _seed_ready_sandbox("w1", owner_id)
+
+    # A different user in the same workspace authenticates via the auth frame but
+    # asks for a row they don't own: authz denial closes 1008 on the already-
+    # accepted socket, and no PTY opens.
+    intruder_id = await _seed_user("w1")
+    tokens["intruder-ticket"] = intruder_id
+
+    ws = FakeWebSocket(inbound=['{"type":"auth","ticket":"intruder-ticket"}'])
+    await terminal_websocket_endpoint(ws, row_id, token=None)
+
+    assert ws.accepted is True  # Path 3 accepted before the authz check
     assert ws.closed is not None and ws.closed[0] == 1008
     assert client.sandbox.process.handle is None
 
