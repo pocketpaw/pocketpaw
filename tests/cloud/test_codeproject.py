@@ -1,0 +1,146 @@
+# test_codeproject.py — service + lifecycle tests for the Code Mode durable-project
+# registry (CM-2a, feat/code-mode).
+#
+# The registry runs on real Beanie over mongomock-motor (the ``mongo_db`` fixture)
+# so the tenant-filtered query paths are exercised for real; the sandbox runtime is
+# the injected FAKE DaytonaClient from the provision suite, so no test touches real
+# Daytona.
+#
+# Covers:
+#   * create_project is idempotent per (workspace, user, provider, repo) and
+#     defaults the display name to the repo's short name.
+#   * tenancy fail-closed: get_project / list_projects never cross the
+#     workspace OR user boundary; a foreign id reads as NotFound.
+#   * open_project provisions a fresh sandbox when the project has none and binds
+#     it (current_sandbox_id + last_opened_at).
+#   * open_project REUSES a still-live (ready) bound sandbox instead of
+#     provisioning a second one.
+#   * open_project REPROVISIONS when the bound sandbox is invalid/unavailable
+#     (reaped) — "if the id is invalid or unavailable, make a new sandbox."
+from __future__ import annotations
+
+import pytest
+from pocketpaw_ee.cloud._core.errors import NotFound
+from pocketpaw_ee.cloud.codeproject import lifecycle, service
+from pocketpaw_ee.cloud.websandbox import service as sandbox_service
+
+from tests.cloud.test_websandbox_provision import _FakeDaytonaClient
+
+pytestmark = pytest.mark.usefixtures("mongo_db")
+
+_WS = "ws-1"
+_USER = "user-1"
+_REPO = "https://github.com/acme/widgets.git"
+
+
+# ---------------------------------------------------------------------------
+# create / idempotency / naming.
+# ---------------------------------------------------------------------------
+
+
+async def test_create_project_defaults_name_to_repo_short_name() -> None:
+    view = await service.create_project(_WS, _USER, {"repo": _REPO})
+    assert view.name == "widgets"  # ".git" stripped, last path segment
+    assert view.provider == "github"
+    assert view.repo == _REPO
+    assert view.current_sandbox_id is None
+    assert view.snapshot_file_id is None
+
+
+async def test_create_project_is_idempotent_per_repo() -> None:
+    first = await service.create_project(_WS, _USER, {"repo": _REPO, "name": "Widgets"})
+    second = await service.create_project(_WS, _USER, {"repo": _REPO})
+    # Same durable id — a returning user lands back on the same project, and the
+    # second create does not clobber the existing name.
+    assert second.id == first.id
+    assert second.name == "Widgets"
+    listing = await service.list_projects(_WS, _USER)
+    assert len(listing) == 1
+
+
+async def test_create_project_explicit_name_is_kept() -> None:
+    view = await service.create_project(_WS, _USER, {"repo": _REPO, "name": "My Thing"})
+    assert view.name == "My Thing"
+
+
+# ---------------------------------------------------------------------------
+# tenancy fail-closed.
+# ---------------------------------------------------------------------------
+
+
+async def test_get_project_is_owner_scoped() -> None:
+    mine = await service.create_project(_WS, _USER, {"repo": _REPO})
+    # Same workspace, different user → NotFound (not another user's project).
+    with pytest.raises(NotFound):
+        await service.get_project(_WS, "user-2", mine.id)
+
+
+async def test_get_project_is_workspace_scoped() -> None:
+    mine = await service.create_project(_WS, _USER, {"repo": _REPO})
+    # Different workspace, same user id → NotFound.
+    with pytest.raises(NotFound):
+        await service.get_project("ws-2", _USER, mine.id)
+
+
+async def test_list_projects_never_crosses_tenant() -> None:
+    await service.create_project(_WS, _USER, {"repo": _REPO})
+    await service.create_project(_WS, "user-2", {"repo": "https://github.com/a/b"})
+    await service.create_project("ws-2", _USER, {"repo": "https://github.com/c/d"})
+    mine = await service.list_projects(_WS, _USER)
+    assert len(mine) == 1
+    assert mine[0].repo == _REPO
+
+
+async def test_get_project_missing_id_is_notfound() -> None:
+    with pytest.raises(NotFound):
+        await service.get_project(_WS, _USER, "not-a-real-id")
+
+
+# ---------------------------------------------------------------------------
+# open_project — provision / reuse / reprovision.
+# ---------------------------------------------------------------------------
+
+
+async def test_open_project_provisions_and_binds_when_unbound() -> None:
+    project = await service.create_project(_WS, _USER, {"repo": _REPO})
+    fake = _FakeDaytonaClient()
+
+    sandbox = await lifecycle.open_project(_WS, _USER, project.id, client=fake)
+
+    # A VM was cold-provisioned and the returned sandbox is ready + bound.
+    assert len(fake.create_calls) == 1
+    assert sandbox.status == "ready"
+    assert sandbox.sandbox_id is not None
+
+    # The durable project now points at that sandbox row and stamped last_opened.
+    reloaded = await service.get_project(_WS, _USER, project.id)
+    assert reloaded.current_sandbox_id == sandbox.id
+    assert reloaded.last_opened_at is not None
+
+
+async def test_open_project_reuses_live_bound_sandbox() -> None:
+    project = await service.create_project(_WS, _USER, {"repo": _REPO})
+    fake = _FakeDaytonaClient()
+
+    first = await lifecycle.open_project(_WS, _USER, project.id, client=fake)
+    # Second open with the SAME (still-ready) sandbox must NOT provision again.
+    second = await lifecycle.open_project(_WS, _USER, project.id, client=fake)
+
+    assert second.id == first.id
+    assert len(fake.create_calls) == 1  # reused, not re-provisioned
+
+
+async def test_open_project_reprovisions_when_bound_sandbox_reaped() -> None:
+    project = await service.create_project(_WS, _USER, {"repo": _REPO})
+    fake = _FakeDaytonaClient()
+
+    first = await lifecycle.open_project(_WS, _USER, project.id, client=fake)
+    # The bound VM gets reaped out from under the project (system reaper terminal).
+    await sandbox_service.mark_reaped(first.id)
+
+    # Opening again finds the bound row no longer live → provisions a fresh VM.
+    second = await lifecycle.open_project(_WS, _USER, project.id, client=fake)
+    assert len(fake.create_calls) == 2  # reprovisioned
+    assert second.status == "ready"
+    # Same stable WebSandbox row (idempotent on the repo), freshly booted.
+    assert second.id == first.id

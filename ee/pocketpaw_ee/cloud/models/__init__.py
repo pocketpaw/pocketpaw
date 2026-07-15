@@ -126,6 +126,7 @@ from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
 from pocketpaw_ee.cloud.models.auth_session import AuthSession
 from pocketpaw_ee.cloud.models.belt_workspace_config import BeltWorkspaceConfig
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+from pocketpaw_ee.cloud.models.code_project import CodeProject
 from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
 from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
 from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
@@ -283,6 +284,7 @@ __all__ = [
     "AuthSession",
     "BeltWorkspaceConfig",
     "ChatRunDoc",
+    "CodeProject",
     "Comment",
     "CommentAuthor",
     "CommentTarget",
@@ -484,6 +486,11 @@ def get_all_documents():
         # of the local daytona_workspace_vm_map.json file. One VM per workspace.
         # Only ``ee.cloud.daytona.store`` imports this doc directly.
         WorkspaceVm,
+        # Code Mode durable-project registry (CM-2a) — the (workspace, user,
+        # provider, repo) -> durable project that outlives any single ephemeral
+        # sandbox. Only ``ee.cloud.codeproject.service`` imports this doc directly
+        # (import-linter "CodeProject" contract).
+        CodeProject,
     ]
 
 

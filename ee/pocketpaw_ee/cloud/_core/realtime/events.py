@@ -1055,3 +1055,20 @@ class WebSandboxRegistered(Event):
 @dataclass
 class WebSandboxStatusChanged(Event):
     EVENT_TYPE: ClassVar[str] = "websandbox.status_changed"
+
+
+# Code Mode durable-project registry (CM-2a, feat/code-mode). The DURABLE half of
+# Code Mode's two-lifecycle model: a CodeProject outlives any single ephemeral
+# Daytona sandbox. ``CodeProjectCreated`` fires when a project is first registered
+# for a (workspace, user, provider, repo); ``CodeProjectOpened`` fires when a
+# project is opened and bound to a live sandbox (reused or freshly provisioned).
+# ``data`` carries the project id + workspace/user/repo + the bound sandbox row id
+# so a downstream fan-out can refresh the projects grid without re-reading the doc.
+@dataclass
+class CodeProjectCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "codeproject.created"
+
+
+@dataclass
+class CodeProjectOpened(Event):
+    EVENT_TYPE: ClassVar[str] = "codeproject.opened"

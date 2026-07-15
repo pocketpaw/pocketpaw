@@ -608,6 +608,18 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.user"]
 
 [[tool.importlinter.contracts]]
+name = "CodeProject — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.codeproject.router",
+    "pocketpaw_ee.cloud.codeproject.dto",
+    "pocketpaw_ee.cloud.codeproject.domain",
+    "pocketpaw_ee.cloud.codeproject.lifecycle",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.code_project"]
+
+[[tool.importlinter.contracts]]
 name = "Shared agent_bridge — orchestrate via entity services only"
 type = "forbidden"
 allow_indirect_imports = "true"
