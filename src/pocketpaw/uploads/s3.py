@@ -170,18 +170,24 @@ class S3StorageAdapter(StorageAdapter):
         allowed_headers: list[str] | None = None,
         expose_headers: list[str] | None = None,
         max_age_seconds: int = 3600,
+        preserve_rules: list[dict] | None = None,
     ) -> None:
-        """Apply a CORS policy to the bucket so browsers on ``allowed_origins``
+        """Apply a CORS rule to the bucket so browsers on ``allowed_origins``
         may ``fetch`` presigned URLs (chat attachment previews, artifact byte
         reads). Without this the browser blocks the cross-origin response even
         though the object comes back — no ``Access-Control-Allow-Origin`` header.
 
-        Overwrites the bucket's CORS config with a single rule (S3 has no
-        merge — ``put_bucket_cors`` replaces the whole set), so pass every
-        origin the bucket must serve. ``GET``/``HEAD`` + the range-related
-        expose-headers are the defaults because attachment reads are byte-range
-        (``206``) requests. Raises the underlying boto exception on failure;
-        callers that must not fail closed (boot-time ensure) catch it.
+        ``put_bucket_cors`` REPLACES the whole rule set (S3 has no merge). On a
+        bucket shared with other services, dropping their rules would silently
+        break their CORS, so pass ``preserve_rules`` (typically the current
+        :meth:`get_cors` result) to keep them: the final set is those rules,
+        minus any exact duplicate of ours, plus our rule (idempotent on re-run).
+        ``preserve_rules=None`` writes only our rule — a full replace.
+
+        ``GET``/``HEAD`` + the range-related expose-headers are the defaults
+        because attachment reads are byte-range (``206``) requests. Raises
+        ``StorageFailure`` on the boto error; callers that must not fail closed
+        (a boot-time ensure) catch it.
         """
         rule: dict[str, object] = {
             "AllowedOrigins": list(allowed_origins),
@@ -191,11 +197,15 @@ class S3StorageAdapter(StorageAdapter):
             or ["Content-Range", "Content-Length", "Accept-Ranges", "ETag"],
             "MaxAgeSeconds": int(max_age_seconds),
         }
+        # Preserve other services' rules; drop an exact prior copy of ours so a
+        # re-run doesn't stack duplicates.
+        rules = [r for r in (preserve_rules or []) if r != rule]
+        rules.append(rule)
         try:
             await asyncio.to_thread(
                 self._client.put_bucket_cors,
                 Bucket=self._bucket,
-                CORSConfiguration={"CORSRules": [rule]},
+                CORSConfiguration={"CORSRules": rules},
             )
         except Exception as exc:
             raise StorageFailure(f"put_bucket_cors failed: {exc}") from exc
@@ -205,14 +215,20 @@ class S3StorageAdapter(StorageAdapter):
 
         Read-side companion to :meth:`ensure_cors` — lets a caller show the
         before/after when applying a policy. A bucket with no CORS config
-        raises ``NoSuchCORSConfiguration``; that's normalized to ``[]``.
+        raises ``NoSuchCORSConfiguration``; that alone is normalized to ``[]``.
+        Any other error (``AccessDenied``, network, DNS) is raised as a
+        ``StorageFailure`` rather than masked as "no CORS" — otherwise a
+        permissions gap would read as an empty policy and make the before/after
+        diagnostic lie.
         """
         try:
             resp = await asyncio.to_thread(
                 self._client.get_bucket_cors, Bucket=self._bucket
             )
-        except Exception:
-            return []
+        except Exception as exc:
+            if _is_no_cors(exc):
+                return []
+            raise StorageFailure(f"get_bucket_cors failed: {exc}") from exc
         rules = resp.get("CORSRules", [])
         return list(rules) if isinstance(rules, list) else []
 
@@ -326,3 +342,14 @@ def _is_missing_key(exc: Exception) -> bool:
         return False
     code = response.get("Error", {}).get("Code", "")
     return code in ("NoSuchKey", "404", "NotFound")
+
+
+def _is_no_cors(exc: Exception) -> bool:
+    """True if ``exc`` is S3's "bucket has no CORS config" error. Everything
+    else (AccessDenied, network) is a real failure the caller must see, so
+    ``get_cors`` only swallows this one code."""
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return False
+    code = response.get("Error", {}).get("Code", "")
+    return code in ("NoSuchCORSConfiguration", "404", "NoSuchCorsConfiguration")

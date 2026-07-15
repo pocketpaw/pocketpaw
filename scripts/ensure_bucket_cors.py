@@ -10,16 +10,24 @@
 # S3_SECRET_ACCESS_KEY, S3_PRIVATE_BUCKET) via the same StorageAdapter factory
 # the app uses — no separate aws CLI config needed.
 #
+# SHARED-BUCKET SAFETY: put_bucket_cors REPLACES the whole rule set (S3 has no
+# merge), and interacly-dev-private is shared with interacly-backend. By default
+# this script MERGES — it reads the current rules and preserves them, adding
+# only our origin rule. Pass --replace to wipe existing rules and set ours only
+# (it prints a loud warning and lists what would be lost first).
+#
 # Usage (from the pocketpaw repo root, with .env populated):
 #   uv run python scripts/ensure_bucket_cors.py https://paw.hzd.interacly.com
 #   uv run python scripts/ensure_bucket_cors.py \
 #       https://paw.hzd.interacly.com http://localhost:1420
+#   uv run python scripts/ensure_bucket_cors.py --replace https://paw.hzd.interacly.com
 #   POCKETPAW_S3_CORS_ALLOWED_ORIGINS="https://paw.hzd.interacly.com" \
 #       uv run python scripts/ensure_bucket_cors.py        # origins from env
 #
 # Origins come from argv, else POCKETPAW_S3_CORS_ALLOWED_ORIGINS (comma or
 # whitespace separated). Prints the bucket's CORS rules before and after so the
-# change is visible. Requires the credentials to carry the PutBucketCORS action.
+# change is visible. Requires the credentials to carry PutBucketCORS (and
+# GetBucketCORS for the before/after read).
 
 from __future__ import annotations
 
@@ -39,7 +47,7 @@ def _origins_from_env() -> list[str]:
     return [o for o in raw.replace(",", " ").split() if o]
 
 
-async def _main(origins: list[str]) -> int:
+async def _main(origins: list[str], *, replace: bool) -> int:
     adapter = _build_s3()
     if not isinstance(adapter, S3StorageAdapter):  # pragma: no cover - defensive
         print("error: the configured upload adapter is not S3.", file=sys.stderr)
@@ -53,25 +61,37 @@ async def _main(origins: list[str]) -> int:
     print("CORS before:")
     print(json.dumps(before, indent=2) if before else "  (none)")
 
-    await adapter.ensure_cors(origins)
+    if replace and before:
+        print(
+            "\n!! --replace: the existing rules above will be REPLACED with only\n"
+            "!! the origins you passed. Any other service's rules are lost.",
+            file=sys.stderr,
+        )
+
+    # Merge by default (preserve others' rules); --replace writes only ours.
+    await adapter.ensure_cors(origins, preserve_rules=None if replace else before)
 
     after = await adapter.get_cors()
     print("\nCORS after:")
     print(json.dumps(after, indent=2))
-    print(f"\nApplied {len(origins)} allowed origin(s): {', '.join(origins)}")
+    mode = "replaced with" if replace else "merged in"
+    print(f"\n{mode} {len(origins)} allowed origin(s): {', '.join(origins)}")
     return 0
 
 
 def main() -> int:
-    origins = sys.argv[1:] or _origins_from_env()
+    args = sys.argv[1:]
+    replace = "--replace" in args
+    origins = [a for a in args if not a.startswith("--")] or _origins_from_env()
     if not origins:
         print(
-            "usage: ensure_bucket_cors.py <origin> [<origin> ...]\n"
-            "   or: set POCKETPAW_S3_CORS_ALLOWED_ORIGINS and run with no args.",
+            "usage: ensure_bucket_cors.py [--replace] <origin> [<origin> ...]\n"
+            "   or: set POCKETPAW_S3_CORS_ALLOWED_ORIGINS and run with no args.\n"
+            "Merges into existing bucket CORS by default; --replace overwrites all rules.",
             file=sys.stderr,
         )
         return 2
-    return asyncio.run(_main(origins))
+    return asyncio.run(_main(origins, replace=replace))
 
 
 if __name__ == "__main__":

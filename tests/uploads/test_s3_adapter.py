@@ -212,6 +212,40 @@ async def test_ensure_cors_wraps_client_errors():
         await adapter.ensure_cors(["https://x.example"])
 
 
+async def test_ensure_cors_preserves_other_rules():
+    """A shared bucket's existing rules are kept — ours is appended, theirs
+    stay — so applying our origin can't silently drop another service's CORS."""
+    client = MagicMock()
+    adapter = _make_adapter(client)
+    other = {"AllowedOrigins": ["https://other.example"], "AllowedMethods": ["PUT"]}
+
+    await adapter.ensure_cors(["https://x.example"], preserve_rules=[other])
+
+    rules = client.put_bucket_cors.call_args.kwargs["CORSConfiguration"]["CORSRules"]
+    assert other in rules
+    assert any(r["AllowedOrigins"] == ["https://x.example"] for r in rules)
+    assert len(rules) == 2
+
+
+async def test_ensure_cors_dedupes_identical_rule_on_rerun():
+    """Re-running with our own prior rule in preserve_rules doesn't stack a
+    duplicate — the exact copy is dropped before ours is appended."""
+    client = MagicMock()
+    adapter = _make_adapter(client)
+    ours = {
+        "AllowedOrigins": ["https://x.example"],
+        "AllowedMethods": ["GET", "HEAD"],
+        "AllowedHeaders": ["*"],
+        "ExposeHeaders": ["Content-Range", "Content-Length", "Accept-Ranges", "ETag"],
+        "MaxAgeSeconds": 3600,
+    }
+
+    await adapter.ensure_cors(["https://x.example"], preserve_rules=[ours])
+
+    rules = client.put_bucket_cors.call_args.kwargs["CORSConfiguration"]["CORSRules"]
+    assert rules == [ours]
+
+
 async def test_get_cors_returns_rules():
     client = MagicMock()
     client.get_bucket_cors.return_value = {"CORSRules": [{"AllowedOrigins": ["*"]}]}
@@ -233,3 +267,20 @@ async def test_get_cors_normalizes_missing_config_to_empty():
     adapter = _make_adapter(client)
 
     assert await adapter.get_cors() == []
+
+
+async def test_get_cors_raises_on_non_missing_error():
+    """A permissions/network error must NOT be masked as "no CORS" — otherwise
+    the before/after diagnostic would lie (an AccessDenied reads as empty)."""
+
+    class _Denied(Exception):
+        def __init__(self):
+            super().__init__("denied")
+            self.response = {"Error": {"Code": "AccessDenied"}}
+
+    client = MagicMock()
+    client.get_bucket_cors.side_effect = _Denied()
+    adapter = _make_adapter(client)
+
+    with pytest.raises(StorageFailure, match="get_bucket_cors failed"):
+        await adapter.get_cors()
