@@ -142,6 +142,36 @@ async def test_frame_valid_key_renders_with_csp(frame_client):
 
 
 @pytest.mark.asyncio
+async def test_frame_assets_carry_cache_busting_version(frame_client, tmp_path, monkeypatch):
+    """The asset URLs must carry ?v=<newest bundle mtime> so a deploy busts every
+    embedder's browser cache (StaticFiles sends no Cache-Control; heuristic
+    caching pinned the first live demo to a stale bundle)."""
+    (tmp_path / "pawbar.js").write_text("// bundle")
+    (tmp_path / "pawbar.css").write_text("/* styles */")
+    monkeypatch.setenv("PAWBAR_APP_DIR", str(tmp_path))
+    expected = max(
+        int((tmp_path / "pawbar.js").stat().st_mtime),
+        int((tmp_path / "pawbar.css").stat().st_mtime),
+    )
+
+    await _site()
+    res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
+    assert res.status_code == 200
+    assert f"/pawbar-app/pawbar.js?v={expected}" in res.text
+    assert f"/pawbar-app/pawbar.css?v={expected}" in res.text
+
+
+@pytest.mark.asyncio
+async def test_frame_assets_version_zero_when_bundle_missing(frame_client, tmp_path, monkeypatch):
+    """No bundle dropped in yet → ?v=0 (assets 404 either way; the frame must not 500)."""
+    monkeypatch.setenv("PAWBAR_APP_DIR", str(tmp_path / "empty"))
+    await _site()
+    res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
+    assert res.status_code == 200
+    assert "/pawbar-app/pawbar.js?v=0" in res.text
+
+
+@pytest.mark.asyncio
 async def test_frame_sends_no_x_frame_options(frame_client):
     """XFO is obsolete beside frame-ancestors; a conflicting XFO:DENY would block
     the frame from ever rendering, so we must NOT send it."""

@@ -1,4 +1,11 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-15 (glass frame asset versioning) — the frame HTML now appends
+#   ``?v=<newest bundle mtime>`` to the pawbar.js/css URLs (``_asset_version``).
+#   The StaticFiles mount sends no Cache-Control, so browsers heuristically cache
+#   the bundle and pin embedders to a STALE app after a deploy (bit the first live
+#   demo). Versioned URLs bust every embedder's cache on deploy, no restart, no
+#   hard-reload. ``pawbar_app_dir()`` is now the shared dir resolver (imported by
+#   the cloud mount — same never-drift pattern as PAWBAR_APP_MOUNT).
 # Updated: 2026-07-15 (Paw Bar glass frame, A1) — the iframe FRAME endpoint + the
 #   CSP-based origin model. (1) GET /paw-bar/frame?key=<signed_key>[&w=&po=] serves
 #   the glass app document from OUR origin: it authenticates the embed key
@@ -99,6 +106,7 @@ import os
 import re
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -169,6 +177,36 @@ def _origin_allowed(widget: PawBarWidget, origin: str | None) -> bool:
 # StaticFiles mount lives in ``ee/cloud/__init__.py``; both the mount and the frame
 # HTML import THIS constant so the ``<script src>`` and the mount path never drift.
 PAWBAR_APP_MOUNT = "/pawbar-app"
+
+
+def pawbar_app_dir() -> Path:
+    """Directory the glass app bundle is served from (PAWBAR_APP_DIR overridable).
+
+    Single source of truth shared with the StaticFiles mount in
+    ``ee/cloud/__init__.py`` (same never-drift pattern as ``PAWBAR_APP_MOUNT``).
+    """
+    return Path(os.environ.get("PAWBAR_APP_DIR", str(Path.home() / ".pocketpaw" / "pawbar-app")))
+
+
+def _asset_version() -> str:
+    """Cache-busting version stamp for the glass app assets.
+
+    The StaticFiles mount serves pawbar.js/css with no ``Cache-Control``, so
+    browsers fall back to heuristic freshness and can pin an embedder to a STALE
+    bundle after a deploy (bit the first live demo: a sizing fix shipped but the
+    browser kept replaying the old JS). The frame HTML appends ``?v=<newest
+    mtime>`` to both asset URLs so every deploy mints new URLs and busts every
+    embedder's cache with no server restart and no manual hard-reload. Two
+    ``stat`` calls per frame render — negligible next to the DB key lookup.
+    Returns "0" when the bundle isn't dropped in yet (assets 404 either way).
+    """
+    newest = 0
+    for name in ("pawbar.js", "pawbar.css"):
+        try:
+            newest = max(newest, int((pawbar_app_dir() / name).stat().st_mtime))
+        except OSError:
+            continue
+    return str(newest)
 
 # A frame-ancestors host-source is host[:port] with NO scheme, path, or whitespace.
 # ``allowed_origins`` is owner-controlled data flowing into a response HEADER, so
@@ -272,6 +310,7 @@ def _pawbar_bootstrap_html(config: dict[str, Any], asset_mount: str) -> str:
     router is mounted.
     """
     config_json = json.dumps(config).replace("<", "\\u003c")
+    v = _asset_version()
     return (
         "<!doctype html>\n"
         '<html lang="en">\n'
@@ -279,12 +318,12 @@ def _pawbar_bootstrap_html(config: dict[str, Any], asset_mount: str) -> str:
         '<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         "<title>Paw Bar</title>\n"
-        f'<link rel="stylesheet" href="{asset_mount}/pawbar.css">\n'
+        f'<link rel="stylesheet" href="{asset_mount}/pawbar.css?v={v}">\n'
         "</head>\n"
         "<body>\n"
         '<div id="pawbar-root"></div>\n'
         f"<script>window.__PAWBAR__ = {config_json};</script>\n"
-        f'<script src="{asset_mount}/pawbar.js"></script>\n'
+        f'<script src="{asset_mount}/pawbar.js?v={v}"></script>\n'
         "</body>\n"
         "</html>\n"
     )

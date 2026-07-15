@@ -699,19 +699,16 @@ def mount_cloud(app: FastAPI) -> None:
     # (PAWBAR_APP_DIR) so the built Vite/Svelte dist can be dropped in at deploy/smoke
     # time; it defaults under ~/.pocketpaw and is created empty so the mount always
     # binds (an empty dir just 404s the asset until the real bundle is copied in).
-    # PAWBAR_APP_MOUNT is imported from the router so the mount path and the frame
-    # HTML's <script src> can never drift.
-    import os
+    # PAWBAR_APP_MOUNT and the dir resolver are imported from the router so the
+    # mount path, the frame HTML's <script src>, and the ?v= cache-buster all read
+    # the same config and can never drift.
+    from pocketpaw_ee.paw_bar.router import PAWBAR_APP_MOUNT, pawbar_app_dir
 
-    from pocketpaw_ee.paw_bar.router import PAWBAR_APP_MOUNT
-
-    pawbar_app_dir = Path(
-        os.environ.get("PAWBAR_APP_DIR", str(Path.home() / ".pocketpaw" / "pawbar-app"))
-    )
-    pawbar_app_dir.mkdir(parents=True, exist_ok=True)
+    pawbar_dir = pawbar_app_dir()
+    pawbar_dir.mkdir(parents=True, exist_ok=True)
     app.mount(
         PAWBAR_APP_MOUNT,
-        StaticFiles(directory=str(pawbar_app_dir)),
+        StaticFiles(directory=str(pawbar_dir)),
         name="pawbar-app",
     )
 
