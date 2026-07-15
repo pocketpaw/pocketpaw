@@ -195,6 +195,11 @@ def _sanitize_ancestor(raw: Any) -> str | None:
     if "://" in v:
         v = v.split("://", 1)[1]
     v = v.split("/", 1)[0]  # drop any path
+    # SECURITY (ordering is load-bearing): ``v`` was ``.strip()``-ed above, so it
+    # carries no trailing newline. ``$`` in this pattern matches just BEFORE a
+    # trailing ``\n``, so a regex-before-strip reorder would let ``"host\n"`` pass
+    # and ``return v`` would emit that newline into the CSP header (classic header
+    # injection / directive split). Keep .strip() ahead of this match.
     if not _SAFE_ANCESTOR_RE.match(v):
         return None
     return v
@@ -208,7 +213,7 @@ def _frame_ancestors_csp(allowed_origins: list[str]) -> str | None:
     source-less directive. Mirrors ``site_keys.origin_allowed``'s empty=deny model,
     NOT the router's ``_origin_allowed`` empty=allow-all footgun.
     """
-    sources = [s for s in (_sanitize_ancestor(o) for o in allowed_origins) if s]
+    sources = [s for s in (_sanitize_ancestor(o) for o in (allowed_origins or [])) if s]
     if not sources:
         return None
     return "frame-ancestors " + " ".join(sources)
@@ -247,7 +252,7 @@ def _safe_parent_origin(po: str, allowed_origins: list[str]) -> str:
     hostport = rest.split("/", 1)[0]
     hostonly = hostport.split(":", 1)[0]
     allowed_hostonly = {
-        h.split(":", 1)[0] for h in (_sanitize_ancestor(o) for o in allowed_origins) if h
+        h.split(":", 1)[0] for h in (_sanitize_ancestor(o) for o in (allowed_origins or [])) if h
     }
     if hostonly not in allowed_hostonly:
         return ""
