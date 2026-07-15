@@ -641,6 +641,139 @@ async def test_worker_failure_writes_failed_state(
     assert doc.error
 
 
+# ---------------------------------------------------------------------------
+# F2 (security) — a job failure must NOT surface raw exception text on the
+# broadcast/audit paths. A workspace-CUSTOM job (the #1536 entry-point feature)
+# can raise with upstream text carrying a secret (a token, a DB row, a URL);
+# that raw text used to land in the pocket's broadcast `state` (seen by EVERY
+# viewer over the WS) AND the audit `error`. The worker now surfaces a
+# controlled error's safe, fixed `.code` — or a generic "job failed" for any
+# other raise; the FULL detail stays only in the exception log.
+# ---------------------------------------------------------------------------
+
+
+class _SecretLeakJob:
+    """A CUSTOM job that raises with raw upstream text carrying a secret."""
+
+    name = "secret_leak_job"
+
+    async def __call__(
+        self, *, workspace_id: str, pocket_id: str, job_id: str, params: dict
+    ) -> dict:
+        raise Exception("secret token abc123def")
+
+
+class _CloudErrorJob:
+    """A job that raises a CONTROLLED CloudError (safe, fixed `.code`)."""
+
+    name = "cloud_error_job"
+
+    async def __call__(
+        self, *, workspace_id: str, pocket_id: str, job_id: str, params: dict
+    ) -> dict:
+        from pocketpaw_ee.cloud._core.errors import CloudError
+
+        # The message interpolates a "secret" to prove ONLY the code is surfaced.
+        raise CloudError(502, "job.connector_error", "connector 'sf' row secret-xyz failed")
+
+
+@pytest.mark.asyncio
+async def test_worker_failure_does_not_leak_raw_exception_text(
+    mongo_db: Any,
+    fake_pool: _FakePool,
+    seed_pocket,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # noqa: ARG001
+    """A custom job raising raw text with a secret must NOT put that text on the
+    broadcast `state` or the audit `error`. Both carry the generic "job failed";
+    the secret substring appears in NEITHER. FAILS on the unfixed worker, which
+    writes `str(exc)` straight into both paths."""
+    jobs_registry.register_job(_SecretLeakJob())
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_merge_spec(workspace_id, user_id, pocket_id, body):  # type: ignore[no-untyped-def]
+        captured["body"] = body
+        return {"ok": True}
+
+    monkeypatch.setattr(jobs_worker, "merge_spec", _fake_merge_spec)
+
+    recorder = _RecordingAuditLogger()
+    monkeypatch.setattr(jobs_service, "get_audit_logger", lambda: recorder)
+
+    pocket_id = await seed_pocket(workspace=WS)
+    result = await jobs_service.dispatch_job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        action="run_leak",
+        job_name="secret_leak_job",
+        params={},
+        triggered_by=VIEWER,
+    )
+    job_id = result["job_id"]
+
+    await jobs_worker.execute_workspace_job({}, job_id)
+
+    # (a) broadcast state — the secret is absent; the message is the generic string.
+    broadcast_error = captured["body"]["merge"]["state"]["run_leak_error"]
+    assert "abc123def" not in broadcast_error
+    assert broadcast_error == "job failed"
+
+    # (b) audit error — same: no secret, generic string.
+    failed_events = [e for e in recorder.events if e.context.get("outcome") == "failed"]
+    assert failed_events, "the failed job must be audited"
+    audit_error = failed_events[-1].context.get("error")
+    assert "abc123def" not in str(audit_error)
+    assert audit_error == "job failed"
+
+    # (c) the persisted doc's error is the safe string too.
+    doc = await jobs_service.get_job(WS, job_id)
+    assert doc is not None
+    assert doc.status == "failed"
+    assert doc.error == "job failed"
+
+
+@pytest.mark.asyncio
+async def test_worker_failure_surfaces_controlled_error_code(
+    mongo_db: Any,
+    fake_pool: _FakePool,
+    seed_pocket,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # noqa: ARG001
+    """A CONTROLLED CloudError surfaces its safe, fixed `.code` (a useful signal)
+    on both paths — never the interpolated message (which here hides a secret)."""
+    jobs_registry.register_job(_CloudErrorJob())
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_merge_spec(workspace_id, user_id, pocket_id, body):  # type: ignore[no-untyped-def]
+        captured["body"] = body
+        return {"ok": True}
+
+    monkeypatch.setattr(jobs_worker, "merge_spec", _fake_merge_spec)
+
+    pocket_id = await seed_pocket(workspace=WS)
+    result = await jobs_service.dispatch_job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        action="run_cloud_err",
+        job_name="cloud_error_job",
+        params={},
+        triggered_by=VIEWER,
+    )
+    job_id = result["job_id"]
+
+    await jobs_worker.execute_workspace_job({}, job_id)
+
+    broadcast_error = captured["body"]["merge"]["state"]["run_cloud_err_error"]
+    assert broadcast_error == "job.connector_error"
+    assert "secret-xyz" not in broadcast_error
+
+    doc = await jobs_service.get_job(WS, job_id)
+    assert doc is not None
+    assert doc.error == "job.connector_error"
+
+
 @pytest.mark.asyncio
 async def test_worker_rejects_template_owned_result(
     mongo_db: Any, fake_pool: _FakePool, seed_pocket, monkeypatch: pytest.MonkeyPatch
