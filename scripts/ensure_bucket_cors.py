@@ -48,6 +48,16 @@ def _origins_from_env() -> list[str]:
 
 
 async def _main(origins: list[str], *, replace: bool) -> int:
+    # _build_s3 reads S3_* from os.environ. Unlike build_adapter it does NOT
+    # call load_dotenv itself, so load .env here (idempotent, won't override
+    # vars already in the environment) — otherwise a repo-root .env is ignored.
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except ImportError:
+        pass
+
     adapter = _build_s3()
     if not isinstance(adapter, S3StorageAdapter):  # pragma: no cover - defensive
         print("error: the configured upload adapter is not S3.", file=sys.stderr)
