@@ -1,4 +1,26 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-15 (Paw Bar glass frame, A1) — the iframe FRAME endpoint + the
+#   CSP-based origin model. (1) GET /paw-bar/frame?key=<signed_key>[&w=&po=] serves
+#   the glass app document from OUR origin: it authenticates the embed key
+#   (``lookup_site_by_key`` — the SAME chain resolve_site_key runs), FAILS CLOSED on
+#   an empty ``allowed_origins`` (403 refuse-to-render), and emits
+#   ``Content-Security-Policy: frame-ancestors <Site.allowed_origins>`` so the
+#   browser refuses to render the iframe inside any non-allowlisted parent — THIS
+#   (not a per-request Origin header) becomes the embedder gate. The body seeds
+#   ``window.__PAWBAR__`` (JSON-safe, ``<``-escaped) before loading pawbar.js/css
+#   from a configurable StaticFiles mount (``PAWBAR_APP_MOUNT`` / ``PAWBAR_APP_DIR``,
+#   wired in cloud/__init__.py). No ``X-Frame-Options`` — it is OBSOLETE beside
+#   frame-ancestors and a conflicting XFO:DENY would block the frame. (2) The
+#   /paw-bar/chat origin check is now DUAL-MODE: an inline/legacy widget request is
+#   still gated against ``Site.allowed_origins`` (fail-closed, via resolve_site_key),
+#   while an iframe-mode request (Origin == our ``PAWBAR_FRAME_ORIGIN``) is accepted
+#   because the embedder was already gated by the frame CSP at render time. The old
+#   step-2 ``_origin_allowed(widget, ...)`` footgun (empty widget.allowed_domains =
+#   allow-all) NO LONGER gates chat — the chat path converges on the fail-closed
+#   ``Site.allowed_origins`` allowlist. RESIDUAL (unchanged): CSP binds BROWSERS
+#   only; the world-visible key + a raw curl POST was always possible — the real
+#   controls remain the rate-limit + injection screen + zero-authority CONCIERGE
+#   scope. ``_origin_allowed`` stays in use for the spec/ingest/decision endpoints.
 # Updated: 2026-07-14 (Paw Bar concierge seam, T2) — added POST /paw-bar/chat, a
 #   PUBLIC, anonymous, streaming (SSE) concierge chat endpoint. Front-gate:
 #   _origin_allowed (403) → within_rate_limit (429) → injection-screen the
@@ -73,13 +95,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from pocketpaw.api.deps import require_scope
@@ -128,6 +151,206 @@ def _origin_allowed(widget: PawBarWidget, origin: str | None) -> bool:
     host = host.split("/", 1)[0]
     host = host.split(":", 1)[0]
     return host in widget.allowed_domains
+
+
+# ---------------------------------------------------------------------------
+# Glass frame (iframe) — CSP-based origin model (A1)
+#
+# The vanilla widget runs in the HOST page's origin, so a chat request's Origin
+# header IS the embedder and the per-request Origin gate authenticates WHO
+# embedded. Served in an iframe from OUR domain, every request carries OUR frame
+# origin — identical for all embedders — so that gate degenerates. The frame
+# endpoint moves the embedder gate to a CSP ``frame-ancestors`` header (the browser
+# refuses to render our iframe inside a non-allowlisted parent), and the chat
+# endpoint's origin check becomes dual-mode (see ``concierge_chat``).
+# ---------------------------------------------------------------------------
+
+# URL path the glass app bundle (pawbar.js + pawbar.css) is served from. The
+# StaticFiles mount lives in ``ee/cloud/__init__.py``; both the mount and the frame
+# HTML import THIS constant so the ``<script src>`` and the mount path never drift.
+PAWBAR_APP_MOUNT = "/pawbar-app"
+
+# A frame-ancestors host-source is host[:port] with NO scheme, path, or whitespace.
+# ``allowed_origins`` is owner-controlled data flowing into a response HEADER, so
+# each entry is reduced to this safe shape (or dropped) — a stray space / ``;`` /
+# newline would otherwise inject extra CSP directives or split the header.
+_SAFE_ANCESTOR_RE = re.compile(r"^[a-z0-9.\-]+(:[0-9]{1,5})?$")
+
+
+def _sanitize_ancestor(raw: Any) -> str | None:
+    """Reduce one ``allowed_origins`` entry to a safe frame-ancestors host-source.
+
+    Returns the bare ``host[:port]`` (scheme + path stripped) or ``None`` if it
+    can't be safely represented. Emitting the bare host (no scheme) is deliberate:
+    it matches the rest of the origin model (``origin_allowed`` is host-only) AND a
+    schemeless frame-ancestors source adapts to the frame's OWN scheme — https-tight
+    when the frame is served over https, http-permissive in local dev — instead of
+    hard-pinning a scheme that would break one or the other.
+    """
+    if not isinstance(raw, str):
+        return None
+    v = raw.strip().lower()
+    if not v:
+        return None
+    if "://" in v:
+        v = v.split("://", 1)[1]
+    v = v.split("/", 1)[0]  # drop any path
+    if not _SAFE_ANCESTOR_RE.match(v):
+        return None
+    return v
+
+
+def _frame_ancestors_csp(allowed_origins: list[str]) -> str | None:
+    """Build the ``frame-ancestors`` CSP value from a Site's ``allowed_origins``.
+
+    Returns ``None`` when NO entry survives sanitization (including an empty
+    allowlist) — the caller FAILS CLOSED (refuses to render) rather than emit a
+    source-less directive. Mirrors ``site_keys.origin_allowed``'s empty=deny model,
+    NOT the router's ``_origin_allowed`` empty=allow-all footgun.
+    """
+    sources = [s for s in (_sanitize_ancestor(o) for o in allowed_origins) if s]
+    if not sources:
+        return None
+    return "frame-ancestors " + " ".join(sources)
+
+
+def _configured_frame_origin(request: Request) -> str:
+    """OUR iframe's origin — the trusted parent for the dual-mode chat gate.
+
+    Configurable via ``PAWBAR_FRAME_ORIGIN`` (set it in any multi-origin / proxied
+    deploy where the frame is served from a fixed public origin). Defaults to the
+    request's own ``scheme://host`` for single-origin / local deploys where the
+    frame and the API share an origin.
+    """
+    configured = os.environ.get("PAWBAR_FRAME_ORIGIN", "").strip()
+    if configured:
+        return configured
+    return f"{request.url.scheme}://{request.url.netloc}"
+
+
+def _safe_parent_origin(po: str, allowed_origins: list[str]) -> str:
+    """Validate the loader-supplied parent origin against the Site's allowlist.
+
+    ``po`` rides in the iframe URL (set by the loader running in the embedder page),
+    so it is attacker-influenceable and never trusted verbatim. Returns a clean
+    ``scheme://host[:port]`` origin — usable as the glass app's postMessage
+    ``targetOrigin`` — ONLY when its host is on the Site's allowlist; otherwise "".
+    (The real embedder is allowlisted by definition, else the CSP blocks the frame.)
+    """
+    if not po:
+        return ""
+    v = po.strip().lower().rstrip("/")
+    if "://" in v:
+        scheme, rest = v.split("://", 1)
+    else:
+        scheme, rest = "https", v
+    hostport = rest.split("/", 1)[0]
+    hostonly = hostport.split(":", 1)[0]
+    allowed_hostonly = {
+        h.split(":", 1)[0] for h in (_sanitize_ancestor(o) for o in allowed_origins) if h
+    }
+    if hostonly not in allowed_hostonly:
+        return ""
+    if scheme not in ("http", "https") or not _SAFE_ANCESTOR_RE.match(hostport):
+        return ""
+    return f"{scheme}://{hostport}"
+
+
+def _pawbar_bootstrap_html(config: dict[str, Any], asset_mount: str) -> str:
+    """Render the glass frame document: seed ``window.__PAWBAR__`` then load the app.
+
+    The config dict is ``json.dumps``'d with ``<`` escaped to ``\\u003c`` so no
+    value (the world-visible key, the attacker-influenceable ``widgetId`` /
+    ``parentOrigin`` query params) can break out of the inline ``<script>`` with a
+    ``</script>`` sequence or inject markup. Assets load from ``asset_mount`` (the
+    root-absolute StaticFiles mount), so the document is valid wherever the API
+    router is mounted.
+    """
+    config_json = json.dumps(config).replace("<", "\\u003c")
+    return (
+        "<!doctype html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        "<title>Paw Bar</title>\n"
+        f'<link rel="stylesheet" href="{asset_mount}/pawbar.css">\n'
+        "</head>\n"
+        "<body>\n"
+        '<div id="pawbar-root"></div>\n'
+        f"<script>window.__PAWBAR__ = {config_json};</script>\n"
+        f'<script src="{asset_mount}/pawbar.js"></script>\n'
+        "</body>\n"
+        "</html>\n"
+    )
+
+
+@router.get("/paw-bar/frame")
+async def frame(
+    request: Request,
+    key: str = Query("", description="The public Site.signed_key baked into the loader"),
+    w: str = Query("", description="Optional Paw Bar widget id"),
+    po: str = Query("", description="Parent origin the loader passes for postMessage"),
+) -> HTMLResponse:
+    """Serve the glass Paw Bar app inside an iframe, gated by CSP frame-ancestors.
+
+    The embedder gate is NOT a per-request Origin check (in an iframe every request
+    carries OUR frame origin) — it is the ``Content-Security-Policy: frame-ancestors``
+    header the browser enforces at render time: it refuses to display this iframe
+    inside any parent whose origin isn't on the Site's ``allowed_origins``.
+
+    Order (fail-closed):
+      1. Authenticate the embed key — ``lookup_site_by_key`` (the SAME chain the
+         chat path runs): blank / short / unknown / revoked → 401.
+      2. Build the ``frame-ancestors`` value from ``Site.allowed_origins``. FAIL
+         CLOSED on an empty / unusable allowlist → 403 (refuse to render), mirroring
+         ``site_keys.origin_allowed`` — NOT the ``_origin_allowed`` allow-all footgun.
+      3. Seed ``window.__PAWBAR__`` (JSON-safe) and load pawbar.js/css.
+
+    No ``X-Frame-Options``: it is obsolete beside ``frame-ancestors`` and a
+    conflicting ``XFO: DENY`` would stop the frame from rendering at all.
+
+    Residual: ``frame-ancestors`` binds BROWSERS only. The key is world-visible and
+    a raw ``curl`` POST to /paw-bar/chat was always possible and is unchanged here —
+    the real controls stay the rate-limit + injection screen + the zero-authority
+    CONCIERGE scope. CSP does not close the curl path.
+    """
+    from pocketpaw_ee.cloud.auth.site_keys import lookup_site_by_key
+
+    # (1) Authenticate the embed key. A missing/blank ``key`` query param is a
+    # too-short key → 401 (never a 422), so the refusal is uniform with the chat path.
+    site = await lookup_site_by_key(key)
+
+    # (2) The embedder gate: the CSP frame-ancestors header. Fail closed when no
+    # allowlisted origin survives sanitization — refuse to render.
+    csp = _frame_ancestors_csp(site.allowed_origins)
+    if csp is None:
+        raise HTTPException(status_code=403, detail="frame_ancestors_unset")
+
+    # (3) Bootstrap config. ``endpoint`` is the API base derived from the request
+    # path (mount-agnostic: /api/v1 in prod, "" when the router is mounted bare in
+    # tests); the glass app POSTs ``{endpoint}/paw-bar/chat``. ``parentOrigin`` is
+    # validated against the allowlist. ``siteKey`` in the page is fine — it is a
+    # world-visible embed key by design.
+    api_base = request.url.path.rsplit("/paw-bar/frame", 1)[0]
+    config: dict[str, Any] = {
+        "siteKey": key,
+        "widgetId": w or "",
+        "endpoint": api_base,
+        "parentOrigin": _safe_parent_origin(po, site.allowed_origins),
+        "mode": "concierge",
+        "tokens": {},
+    }
+    html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT)
+    return HTMLResponse(
+        content=html,
+        headers={
+            "Content-Security-Policy": csp,
+            # The embed key is baked into the loader HTML per-embedder; the frame
+            # doc itself must not be cached across keys/parents by a shared proxy.
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -584,10 +807,12 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
 
     Order (fail-closed, cheap gates first):
       1. Widget exists (404).
-      2. Origin on the widget's allowlist (403) — the front-gate.
+      2. Resolve our frame origin (dual-mode origin model — no rejection here; the
+         authoritative, fail-closed origin gate is folded into step 5).
       3. Rate limit, overall + per-customer (429).
       4. Injection screen the free-text message; drop on HIGH (400).
-      5. Authenticate the embed key (``resolve_site_key`` — 401/403 fail-closed).
+      5. Authenticate the embed key + dual-mode origin gate (``resolve_site_key`` —
+         401 bad key / 403 disallowed origin, fail-closed).
       6. Bind the widget to the RESOLVED key: the widget must belong to the key's
          workspace AND pocket (403) — a key for pocket A must not drive a widget
          for a sibling pocket B (finding #2).
@@ -607,9 +832,16 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     if widget is None:
         raise HTTPException(404, "Widget not found")
 
-    # (2) Origin front-gate.
-    if not _origin_allowed(widget, origin):
-        raise HTTPException(403, "Origin not allowed for this widget")
+    # (2) Origin model — DUAL-MODE (A1). The chat origin gate now converges on the
+    # fail-closed ``Site.allowed_origins`` allowlist, enforced at step 5 by
+    # ``resolve_site_key``. It is NOT gated on ``widget.allowed_domains`` anymore —
+    # that check's empty=allow-all footgun would (a) silently allow any origin for
+    # an unconfigured widget and (b) reject OUR frame origin for a configured one,
+    # breaking the iframe path. ``frame_origin`` is our configured iframe origin: a
+    # request whose Origin equals it was already gated by the frame CSP at render
+    # time (iframe mode); any other Origin must be an allowlisted embedder (inline
+    # mode). The authoritative, fail-closed decision is made in ``resolve_site_key``.
+    frame_origin = _configured_frame_origin(request)
 
     # (3) Rate limit (reuse the ingest limiter). Counts prior events for this
     # (widget, customer); a recorded chat marker below feeds subsequent checks.
@@ -626,11 +858,16 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     if not await _screen_message_for_injection(body.message, body.widget_id):
         raise HTTPException(400, "message_rejected")
 
-    # (5) Authenticate the embed key — fail-closed (401 bad/unknown/revoked key,
-    # 403 disallowed/missing origin). This is THE credential; there is no user.
+    # (5) Authenticate the embed key + apply the dual-mode origin gate — fail-closed
+    # (401 bad/unknown/revoked key, 403 disallowed/missing origin). This is THE
+    # credential; there is no user. ``frame_origin`` makes the origin gate accept an
+    # iframe-mode request (Origin == our frame, already gated by the frame CSP) while
+    # still requiring an inline-mode request's Origin to be on ``Site.allowed_origins``.
     from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key
 
-    ctx = await resolve_site_key(body.signed_key, origin, body.customer_ref)
+    ctx = await resolve_site_key(
+        body.signed_key, origin, body.customer_ref, frame_origin=frame_origin
+    )
 
     # (6) Bind the widget to the RESOLVED key (finding #2). A legacy '' widget
     # workspace matches any; a non-empty mismatch is refused. The pocket MUST

@@ -694,6 +694,25 @@ def mount_cloud(app: FastAPI) -> None:
     uploads_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 
+    # Paw Bar glass app (A1) — the iframe served by GET /api/v1/paw-bar/frame loads
+    # pawbar.js + pawbar.css from THIS root-absolute mount. The dir is configurable
+    # (PAWBAR_APP_DIR) so the built Vite/Svelte dist can be dropped in at deploy/smoke
+    # time; it defaults under ~/.pocketpaw and is created empty so the mount always
+    # binds (an empty dir just 404s the asset until the real bundle is copied in).
+    # PAWBAR_APP_MOUNT is imported from the router so the mount path and the frame
+    # HTML's <script src> can never drift.
+    from pocketpaw_ee.paw_bar.router import PAWBAR_APP_MOUNT
+
+    pawbar_app_dir = Path(
+        os.environ.get("PAWBAR_APP_DIR", str(Path.home() / ".pocketpaw" / "pawbar-app"))
+    )
+    pawbar_app_dir.mkdir(parents=True, exist_ok=True)
+    app.mount(
+        PAWBAR_APP_MOUNT,
+        StaticFiles(directory=str(pawbar_app_dir)),
+        name="pawbar-app",
+    )
+
     # Mount WebSocket at root path (not under /api/v1 prefix)
     # so frontend can connect to ws://host/ws/cloud?token=...
     from pocketpaw_ee.cloud.chat.router import websocket_endpoint

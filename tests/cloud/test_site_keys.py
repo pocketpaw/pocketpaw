@@ -9,13 +9,18 @@
 # Updated 2026-07-14 (adversarial review follow-up): + a non-str key → 401 guard
 # (FIX 2), and mint_foreign_site now mocks pockets_service.get with a cross-tenant
 # → Forbidden + no-Site-written assertion (FIX 1).
+# Updated 2026-07-15 (Paw Bar glass frame, A1): + coverage for the two extracted /
+# added surfaces — ``lookup_site_by_key`` (the shared key-auth chain, no origin
+# gate) and ``resolve_site_key``'s new ``frame_origin`` dual-mode gate (an Origin
+# equal to our frame origin is accepted without an allowlist check; a mismatched
+# Origin still falls back to the fail-closed ``allowed_origins`` gate).
 
 from __future__ import annotations
 
 import pytest
 from fastapi import HTTPException
 from pocketpaw_ee.cloud._core.context import ScopeKind
-from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key
+from pocketpaw_ee.cloud.auth.site_keys import lookup_site_by_key, resolve_site_key
 from pocketpaw_ee.cloud.models.site import Site
 from pocketpaw_ee.sites import service as sites_service
 
@@ -261,3 +266,79 @@ async def test_mint_foreign_site_denies_cross_tenant_pocket(mongo_db):
     assert exc.value.code == "pocket.access_denied"
     # Fail-before-write: no Site was inserted for the victim pocket.
     assert await Site.find_one({"pocket_id": "pk-victim-xyz"}) is None
+
+
+# --------------------------------------------------------------------------- #
+# lookup_site_by_key — the shared key-auth chain (no origin gate)  [A1]
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_lookup_site_by_key_returns_live_site(mongo_db):
+    """The frame path authenticates the key WITHOUT an origin gate — a valid key
+    returns the Site regardless of any Origin (the CSP gates the embedder instead)."""
+    site = await _site()
+    got = await lookup_site_by_key(_VALID_KEY)
+    assert got.id == site.id
+    assert got.signed_key == _VALID_KEY
+
+
+@pytest.mark.asyncio
+async def test_lookup_site_by_key_rejects_bad_keys(mongo_db):
+    """Same fail-closed 401s as resolve_site_key's key chain: blank/short, unknown,
+    revoked, and a non-str (NoSQL-operator) key."""
+    await _site()
+    for bad in ("", "   ", "short", "site_key_" + "z" * 24, {"$ne": ""}, None):
+        with pytest.raises(HTTPException) as exc:
+            await lookup_site_by_key(bad)  # type: ignore[arg-type]
+        assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_lookup_site_by_key_rejects_revoked(mongo_db):
+    await _site(revoked=True)
+    with pytest.raises(HTTPException) as exc:
+        await lookup_site_by_key(_VALID_KEY)
+    assert exc.value.status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+# resolve_site_key frame_origin dual-mode  [A1]
+# --------------------------------------------------------------------------- #
+
+_FRAME_ORIGIN = "https://frame.pocketpaw.test"
+
+
+@pytest.mark.asyncio
+async def test_frame_origin_accepted_without_allowlist(mongo_db):
+    """Iframe mode: a request whose Origin equals our frame origin is accepted even
+    though that origin is NOT in the Site's allowed_origins — the embedder was gated
+    by the frame CSP at render time."""
+    await _site(allowed_origins=["brewco.com"])
+    ctx = await resolve_site_key(_VALID_KEY, _FRAME_ORIGIN, "cust-1", frame_origin=_FRAME_ORIGIN)
+    assert ctx.scope is ScopeKind.CONCIERGE
+    assert ctx.workspace_id == "ws-1"
+
+
+@pytest.mark.asyncio
+async def test_frame_origin_mismatch_falls_back_to_allowlist(mongo_db):
+    """A frame_origin is configured, but the request Origin is neither the frame nor
+    an allowlisted embedder → the fail-closed allowlist gate still refuses (403)."""
+    await _site(allowed_origins=["brewco.com"])
+    with pytest.raises(HTTPException) as exc:
+        await resolve_site_key(
+            _VALID_KEY, "https://evil.example", "cust-1", frame_origin=_FRAME_ORIGIN
+        )
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_frame_origin_none_is_pure_inline_behavior(mongo_db):
+    """Default (frame_origin=None): behavior is byte-identical to before A1 — the
+    allowlisted embedder passes, a disallowed one is 403."""
+    await _site(allowed_origins=["brewco.com"])
+    ctx = await resolve_site_key(_VALID_KEY, "https://brewco.com", "cust-1")
+    assert ctx.scope is ScopeKind.CONCIERGE
+    with pytest.raises(HTTPException) as exc:
+        await resolve_site_key(_VALID_KEY, "https://evil.example", "cust-1")
+    assert exc.value.status_code == 403
