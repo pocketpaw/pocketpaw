@@ -65,8 +65,9 @@ from fastapi import Query, WebSocket, WebSocketDisconnect
 from pocketpaw_ee.cloud._core.errors import CloudError
 from pocketpaw_ee.cloud.auth import service as auth_service
 from pocketpaw_ee.cloud.auth.ws_tickets import consume_ws_ticket
-from pocketpaw_ee.cloud.daytona.client import get_daytona_client
+from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
 from pocketpaw_ee.cloud.license import get_license
+from pocketpaw_ee.cloud.websandbox import durability as websandbox_durability
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
 from pocketpaw_ee.cloud.websandbox.files import FileRpc
 from pocketpaw_ee.cloud.websandbox.terminal import DEFAULT_COLS, DEFAULT_ROWS, PtyBridge
@@ -137,6 +138,36 @@ class TerminalConnectionManager:
 
 # Module-level singleton (mirrors chat.ws.manager).
 manager = TerminalConnectionManager()
+
+
+async def snapshot_on_disconnect(
+    workspace_id: str,
+    user_id: str,
+    row_id: str,
+    client: DaytonaClient | None,
+) -> None:
+    """Best-effort workspace snapshot when a terminal socket closes (CM-2a′).
+
+    The durable half of Code Mode is the S3 snapshot; the Daytona VM is pure
+    scratch. With the aggressive Daytona lifecycle (stop 5 / delete-on-stop), a
+    disconnected VM is reclaimed within minutes — so a CLEAN disconnect (tab
+    close, navigate away) is the moment to capture the workspace while the VM is
+    still alive. ``codeproject.lifecycle.open_project`` restores the latest
+    snapshot on the next open.
+
+    Best-effort by design: a snapshot failure (VM already gone, S3 down, an
+    unprovisioned row) must NEVER surface on socket teardown — it is logged at
+    debug and swallowed. The snapshot pointer lands on the stable WebSandbox row,
+    which survives the VM's reaping.
+    """
+    try:
+        await websandbox_durability.snapshot_workspace(
+            workspace_id, user_id, row_id, client=client
+        )
+    except Exception:  # noqa: BLE001 — teardown must never raise on a snapshot miss
+        logger.debug(
+            "websandbox.snapshot on disconnect failed for row=%s", row_id, exc_info=True
+        )
 
 
 async def terminal_websocket_endpoint(
@@ -312,6 +343,15 @@ async def terminal_websocket_endpoint(
     finally:
         # Teardown: kill the pty session so the shell doesn't leak in the VM.
         await manager.unregister(websocket)
+        # CM-2a′ durability: capture the workspace to S3 on this clean disconnect
+        # so a returning user restores their uncommitted work. Best-effort — a
+        # snapshot miss never turns a normal close into an error.
+        await snapshot_on_disconnect(workspace_id, user_id, row_id, client)
 
 
-__all__ = ["TerminalConnectionManager", "manager", "terminal_websocket_endpoint"]
+__all__ = [
+    "TerminalConnectionManager",
+    "manager",
+    "snapshot_on_disconnect",
+    "terminal_websocket_endpoint",
+]

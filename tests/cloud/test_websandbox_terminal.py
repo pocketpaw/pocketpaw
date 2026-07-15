@@ -517,3 +517,44 @@ def test_activity_throttle_gates_to_interval() -> None:
     assert throttle.should_touch(1030.0) is False  # inside the window
     assert throttle.should_touch(1061.0) is True  # past the window
     assert throttle.should_touch(1090.0) is False  # inside the new window
+
+
+# ---------------------------------------------------------------------------
+# CM-2a′ snapshot-on-disconnect helper.
+# ---------------------------------------------------------------------------
+
+
+async def test_snapshot_on_disconnect_captures_workspace(monkeypatch) -> None:
+    """A clean disconnect snapshots the row's workspace, forwarding the client."""
+    sentinel_client = object()
+    calls: list[dict] = []
+
+    async def _spy_snapshot(workspace_id, user_id, row_id, *, client=None):  # noqa: ANN001
+        calls.append(
+            {"workspace_id": workspace_id, "user_id": user_id, "row_id": row_id, "client": client}
+        )
+        return "file-1"
+
+    monkeypatch.setattr(terminal_ws.websandbox_durability, "snapshot_workspace", _spy_snapshot)
+
+    await terminal_ws.snapshot_on_disconnect("w1", "u1", "row-1", sentinel_client)
+
+    assert len(calls) == 1
+    assert calls[0] == {
+        "workspace_id": "w1",
+        "user_id": "u1",
+        "row_id": "row-1",
+        "client": sentinel_client,
+    }
+
+
+async def test_snapshot_on_disconnect_swallows_failures(monkeypatch) -> None:
+    """A snapshot failure on teardown is swallowed — a close never becomes an error."""
+
+    async def _boom(workspace_id, user_id, row_id, *, client=None):  # noqa: ANN001
+        raise RuntimeError("boom: VM already reaped")
+
+    monkeypatch.setattr(terminal_ws.websandbox_durability, "snapshot_workspace", _boom)
+
+    # Must not raise.
+    await terminal_ws.snapshot_on_disconnect("w1", "u1", "row-1", None)

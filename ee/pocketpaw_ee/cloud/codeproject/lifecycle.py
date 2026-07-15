@@ -1,4 +1,4 @@
-# lifecycle.py — Code Mode "open a project" orchestration (CM-2a).
+# lifecycle.py — Code Mode "open a project" orchestration (CM-2a, CM-2a′).
 # Created 2026-07-16 (feat/code-mode): the durable-project → ephemeral-sandbox
 # resolver. It sits ABOVE ``codeproject/service.py`` (the registry) and drives the
 # runtime through ``websandbox/provision.py``. Per ee/cloud Rule 2 it NEVER touches
@@ -12,6 +12,14 @@
 # cold-provision a fresh sandbox for the project's repo (idempotent on the repo, so
 # a reprovision reuses the same WebSandbox row) and rebind. Returns the ready
 # sandbox view for the caller to connect to.
+#
+# 2026-07-16 (CM-2a′): the reprovision branch now RESTORES the row's durable S3
+# snapshot into the fresh VM. The WebSandbox row is stable across reprovisions
+# (idempotent on the repo), so a ``snapshot_file_id`` written on a prior
+# disconnect survives on the row; when we boot a fresh VM we overlay that snapshot
+# so a returning user picks up their uncommitted work + branch instead of a bare
+# re-clone. Best-effort: a restore failure leaves the fresh clone usable rather
+# than blocking the open.
 from __future__ import annotations
 
 import logging
@@ -20,6 +28,7 @@ from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.codeproject import service as codeproject_service
 from pocketpaw_ee.cloud.codeproject.domain import CodeProjectView
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient
+from pocketpaw_ee.cloud.websandbox import durability as websandbox_durability
 from pocketpaw_ee.cloud.websandbox import provision as websandbox_provision
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
 from pocketpaw_ee.cloud.websandbox.domain import WebSandboxView
@@ -69,6 +78,9 @@ async def open_project(
     sandbox = await websandbox_provision.open_sandbox(
         workspace_id, user_id, {"repo": project.repo}, client=client
     )
+    # CM-2a′: overlay the row's durable snapshot (uncommitted work + branch from a
+    # prior session) onto the freshly-cloned VM, if one exists.
+    await _restore_if_snapshotted(workspace_id, user_id, sandbox, client)
     await codeproject_service.bind_current_sandbox(
         workspace_id, user_id, project_id, sandbox.id
     )
@@ -79,6 +91,44 @@ async def open_project(
         project.repo,
     )
     return sandbox
+
+
+async def _restore_if_snapshotted(
+    workspace_id: str,
+    user_id: str,
+    sandbox: WebSandboxView,
+    client: DaytonaClient | None,
+) -> None:
+    """Restore the sandbox row's durable S3 snapshot into its fresh VM, if any.
+
+    The WebSandbox row is stable across reprovisions, so a ``snapshot_file_id``
+    captured on a prior disconnect (see ``websandbox.ws.snapshot_on_disconnect``)
+    is still on the row when we reprovision. A row with no snapshot (never
+    disconnected with work, or first open) is a clean no-op.
+
+    Best-effort by design: a restore failure (VM gone, S3 down, corrupt tarball)
+    is logged and swallowed — the fresh clone from ``open_sandbox`` is still a
+    usable workspace, so a durability miss must never fail the open.
+    """
+    if not sandbox.snapshot_file_id:
+        return
+    try:
+        await websandbox_durability.restore_workspace(
+            workspace_id, user_id, sandbox.id, client=client
+        )
+        logger.info(
+            "codeproject.open: restored snapshot=%s into sandbox=%s",
+            sandbox.snapshot_file_id,
+            sandbox.id,
+        )
+    except Exception:  # noqa: BLE001 — a fresh clone is still usable; never block open
+        logger.warning(
+            "codeproject.open: snapshot restore failed for sandbox=%s (snapshot=%s); "
+            "continuing with the fresh clone",
+            sandbox.id,
+            sandbox.snapshot_file_id,
+            exc_info=True,
+        )
 
 
 async def _reuse_if_live(
