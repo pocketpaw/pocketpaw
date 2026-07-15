@@ -1,11 +1,19 @@
 # tests/cloud/test_paw_bar_decision_loop.py — gap2: the closed customer
 # decision loop, end to end.
+# Updated: 2026-07-15 (B0 H1 — store-split fix) — the open-loop tenancy assertions
+# now read the widget's REAL ``workspace_id`` (the create dep override "w-test"),
+# not the OWNER label ("ws:bright-smile"). A widget created through the admin route
+# is stamped with the caller's active workspace; the proposal scopes to THAT (the
+# token the dashboard reads by) and the owner becomes the Action assignee. The old
+# assertions read the proposal by the owner, which encoded the very store-split bug
+# B0 fixes. The direct-construction tests below keep owner-fallback scoping (their
+# widgets have no workspace_id).
 # Created: 2026-06-11 (gap2) — Proves the loop the module promised but never
 # wired: a customer event raises a PENDING Instinct proposal + parked decision;
 # approving it delivers the reply back, retrievable for that (widget, customer);
 # rejecting it declines with the reason. Also covers tenancy (the proposal is
-# workspace-scoped to the widget owner), the public poll endpoint (CORS-gated),
-# and the best-effort guarantee (a loop failure never fails ingest).
+# workspace-scoped to the widget's workspace_id), the public poll endpoint
+# (CORS-gated), and the best-effort guarantee (a loop failure never fails ingest).
 #
 # asyncio_mode = "auto" (see pyproject) → every ``async def test_*`` is run by
 # pytest-asyncio without a per-test marker. The TestClient calls are synchronous
@@ -134,15 +142,20 @@ class TestOpenLoop:
         action_id = body["instinct_action_id"]
         assert action_id, "ingest of a mapped event must raise an Instinct proposal"
 
-        # The proposal lands in the OWNER's workspace-scoped pending list.
-        pending = await instinct_store.pending(workspace_id="ws:bright-smile")
+        # The proposal lands in the tenant's workspace-scoped pending list —
+        # scoped to the widget's REAL workspace_id (the create dep override
+        # "w-test"), the SAME token the cloud dashboard reads its feed by.
+        pending = await instinct_store.pending(workspace_id="w-test")
         assert len(pending) == 1
         assert pending[0].id == action_id
+        # Owner and workspace are DISTINCT: the owner is the Action assignee (routes
+        # The Tray to the human), the workspace is the tenancy scope.
+        assert pending[0].assignee == "ws:bright-smile"
         blob = pending[0].parameters["_customer_reply"]
         assert blob["widget_id"] == created["id"]
         assert blob["customer_ref"] == "patient_42"
         assert blob["event_type"] == "appointment_request"
-        assert blob["workspace_id"] == "ws:bright-smile"
+        assert blob["workspace_id"] == "w-test"
 
     async def test_proposal_is_workspace_scoped(self, client, stores) -> None:
         """A different tenant must NOT see this proposal (deny-by-default)."""
@@ -176,7 +189,7 @@ class TestOpenLoop:
         )
         assert res.status_code == 200
         assert res.json()["instinct_action_id"] is None
-        assert await instinct_store.pending(workspace_id="ws:bright-smile") == []
+        assert await instinct_store.pending(workspace_id="w-test") == []
 
 
 # ---------------------------------------------------------------------------

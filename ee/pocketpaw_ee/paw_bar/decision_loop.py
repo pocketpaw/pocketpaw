@@ -1,4 +1,15 @@
 # ee/paw_bar/decision_loop.py — Close the customer decision loop via Instinct.
+# Updated: 2026-07-15 (B0 H1 — store-split tenancy fix) — propose_customer_decision
+#   now routes the write through the PER-WORKSPACE store the cloud dashboard reads
+#   from — get_instinct_store(workspace_id=widget.workspace_id) — instead of the
+#   bare get_instinct_store(). Root cause: the widget carries a real, server-stamped
+#   workspace_id (the header's old "no workspace_id column" claim was STALE), but
+#   resolve_workspace_id returned the widget OWNER and the write used the bare
+#   factory. In cloud/flag mode the workspace-less public ingest path made that bare
+#   factory raise WorkspaceScopeRequired → swallowed → the proposal was DROPPED
+#   (invisible to the owner's Tray); in shared mode it was stamped in-row with the
+#   owner label the dashboard never filters by. Now: real workspace_id = store route
+#   + in-row scope; owner = assignee only. See resolve_workspace_id + the store block.
 # Updated: 2026-07-08 — Renamed widget "Paw Print" → "Paw Bar" (module paw_print→paw_bar,
 #   source/requested_by labels paw_print→paw_bar). The separate one-word audit feed
 #   (past-tense record) is a DIFFERENT feature, unaffected.
@@ -25,11 +36,14 @@
 #
 # Tenancy: the proposal's ``_customer_reply`` blob carries ``workspace_id`` so
 #   the Instinct Action is workspace-scoped exactly like a parked pocket write.
-#   paw_bar's widget model predates per-row tenancy and has no workspace_id
-#   column, so the workspace is resolved from the widget OWNER (the freelancer /
-#   operator who owns the widget IS the tenant boundary here). This is the same
-#   scoping key the paw_bar store already indexes on. When the widget model
-#   grows a real workspace_id this resolver is the one line to change.
+#   The tenant boundary is the widget's real ``workspace_id`` (stamped server-side
+#   at create from the authenticated session — the SAME token the dashboard reads
+#   its pending feed by), which ALSO routes the physical instinct.db. The widget
+#   OWNER is a within-tenant human label used as the assignee (and as a back-compat
+#   in-row scope for a legacy widget whose ``workspace_id`` is still empty). The
+#   ``_customer_reply`` approve/reject paths carry a workspace assertion
+#   (``_assert_customer_reply_workspace``) comparing the blob's ``workspace_id`` to
+#   the caller's active workspace, like every other gated blob kind.
 #
 # Security: the blob carries NO secret — only the widget id, customer_ref,
 #   event type/payload-summary, workspace, and the default reply text. The
@@ -67,17 +81,24 @@ _MAX_SUMMARY_CHARS = 280
 
 
 def resolve_workspace_id(widget: Any) -> str:
-    """Resolve the owning workspace for a Paw Bar widget.
+    """Resolve the owning workspace (tenancy scope) for a Paw Bar widget.
 
-    The widget model predates per-row tenancy and has no ``workspace_id``; the
-    OWNER (the operator who created the widget) is the tenant boundary, and it is
-    the column the paw_bar store already scopes on. A widget with a
-    colon-qualified owner (``user:maya``) keeps the full string — the instinct
-    workspace assertion compares the blob's ``workspace_id`` to the caller's
-    active workspace as an opaque string, so consistency, not format, is what
-    matters here.
+    The widget carries a real ``workspace_id`` — stamped server-side at create
+    time from the authenticated session (``create_widget`` /
+    ``current_workspace_id``), the SAME token the cloud dashboard reads its
+    pending feed by. That is the tenant boundary, so prefer it. Fall back to the
+    OWNER only for a legacy / single-tenant widget whose ``workspace_id`` is
+    still empty (pre-tenancy rows); the owner is a within-tenant human label
+    (possibly colon-qualified, ``user:maya``) and is used as the in-row scope in
+    that back-compat case exactly as before.
+
+    This is the in-row / blob tenancy scope. Store ROUTING (which physical
+    instinct.db) is done separately in ``propose_customer_decision`` from the
+    real ``workspace_id`` only — an owner label is never a store-path token.
     """
-    return str(getattr(widget, "owner", "") or "")
+    return str(getattr(widget, "workspace_id", "") or "") or str(
+        getattr(widget, "owner", "") or ""
+    )
 
 
 def _summarize_payload(payload: dict[str, Any]) -> str:
@@ -139,6 +160,18 @@ async def propose_customer_decision(
 
         widget_id = str(getattr(widget, "id", "") or "")
         pocket_id = str(getattr(widget, "pocket_id", "") or "")
+        # Two DISTINCT identities on the widget (the H1 bug conflated them):
+        #   * ``store_ws`` — the real, server-stamped ``workspace_id`` (a
+        #     store-path-safe token). It routes the physical instinct.db AND is
+        #     the in-row tenancy scope, so the proposal lands in the SAME
+        #     per-workspace store the cloud dashboard reads its pending feed from.
+        #   * ``owner`` — the within-tenant human label (possibly colon-qualified,
+        #     ``user:maya``). It is the ASSIGNEE (routes The Tray to that human),
+        #     never a store-path token.
+        store_ws = str(getattr(widget, "workspace_id", "") or "")
+        owner = str(getattr(widget, "owner", "") or "")
+        # In-row / blob tenancy scope: the real workspace, or the owner for a
+        # legacy widget whose workspace_id is still empty (back-compat).
         workspace_id = resolve_workspace_id(widget)
         # Tenancy guard: an owner-less widget resolves to an EMPTY workspace. A
         # proposal raised with no workspace scope is NULL-scoped in Instinct, so
@@ -196,14 +229,19 @@ async def propose_customer_decision(
             "payload_summary": summary,
         }
 
-        # ISO note: paw-bar's tenant key is the widget OWNER, which is a
-        # logical, possibly colon-qualified string (``user:maya``) used for the
-        # in-row W4a ``workspace_id`` filter on ``store.propose`` below — NOT a
-        # physical-store-path workspace id (those must pass the strict
-        # path-traversal allowlist, which rejects a ``:``). So this path keeps
-        # the BARE store + in-row scoping; it does NOT thread the owner into the
-        # store factory (that would ValueError on a colon-qualified owner).
-        store = get_instinct_store()
+        # ISO-2 store routing (the H1 fix): route the write through the SAME
+        # per-workspace factory the cloud dashboard reads from —
+        # ``get_instinct_store(workspace_id=<real workspace>)`` lands the Action
+        # in ``~/.pocketpaw/workspaces/<store_ws>/instinct.db``, the exact file
+        # ``GET /instinct/actions/pending`` resolves for that tenant. The real
+        # ``workspace_id`` is a store-path-safe token, so no allowlist ValueError.
+        # A legacy widget with an empty ``store_ws`` keeps the BARE store +
+        # in-row scoping (owner as the scope) exactly as before — the owner label
+        # is never threaded into the store factory (it would ValueError on ``:``).
+        # Previously this called the bare ``get_instinct_store()`` unconditionally,
+        # which in cloud/flag mode raised ``WorkspaceScopeRequired`` on the
+        # workspace-less public ingest path → the proposal was silently dropped.
+        store = get_instinct_store(workspace_id=store_ws or None)
         action = await store.propose(
             pocket_id=pocket_id or widget_id,
             title=title,
@@ -215,9 +253,10 @@ async def propose_customer_decision(
             # Workspace-scope the Action so it appears only in the owning
             # tenant's pending list (deny-by-default Instinct tenancy — W4a).
             workspace_id=workspace_id or None,
-            # Route the approval to the widget owner — the operator who owns the
-            # customer relationship is the human in the loop.
-            assignee=workspace_id or None,
+            # Route the approval to the widget OWNER (the human who owns the
+            # customer relationship), NOT the workspace — The Tray filters by
+            # assignee to show an operator only the items they own.
+            assignee=owner or None,
         )
 
         # Park the PENDING decision row so the customer surface has something to
