@@ -24,16 +24,40 @@
 # selection range) and ``EditResponse`` (the original + PROPOSED file content the
 # frontend reviews per-hunk and writes back via the existing file-RPC). The edit
 # agent is generate-only; it never writes to the VM.
+#
+# Changed 2026-07-16 (review hardening): split the write surface. ``sandbox_id``
+# and ``status`` are SERVER-OWNED — the Daytona id is the load-bearing input to
+# ``authorize_sandbox``, so a client that could write it onto its own row could
+# forge access to another tenant's VM. The client-facing register route now binds
+# ``RegisterSandboxRequest`` (repo only); ``CreateSandboxRequest`` /
+# ``UpdateStatusRequest`` are INTERNAL command objects the provisioner (and tests
+# that stand in for it) use to bind server-generated runtime state, and are never
+# bound by a router. The client ``PATCH`` route was removed with the same intent.
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
 
-class CreateSandboxRequest(BaseModel):
-    """Register (or re-register) a sandbox for a (workspace, user, repo).
+class RegisterSandboxRequest(BaseModel):
+    """Client-facing register body for ``POST /websandbox`` — repo ONLY.
 
-    Only ``repo`` is required; the rest are set by the provisioner as the
-    sandbox moves through its lifecycle. Creating is idempotent per
+    The write surface never accepts a ``sandbox_id`` or ``status``: those are
+    server-owned. ``authorize_sandbox`` trusts the row's ``sandbox_id`` as the
+    proof-of-ownership key, so letting a client set it would let an attacker who
+    learned a victim's Daytona id register a row pointing at the victim's VM and
+    pass the authorization oracle. The provisioner binds runtime state internally
+    (see ``CreateSandboxRequest`` / ``UpdateStatusRequest`` below), never the client.
+    """
+
+    repo: str = Field(..., min_length=1, max_length=1024)
+
+
+class CreateSandboxRequest(BaseModel):
+    """INTERNAL registration command — provisioner / test-seed use only.
+
+    Never bound by a router (the client-facing model is ``RegisterSandboxRequest``).
+    Carries the server-owned ``sandbox_id`` / ``status`` / ``installation_id`` the
+    provisioner sets as the VM boots. Creating is idempotent per
     (workspace, user, repo) — see ``service.create_sandbox``.
     """
 
@@ -44,7 +68,13 @@ class CreateSandboxRequest(BaseModel):
 
 
 class UpdateStatusRequest(BaseModel):
-    """Advance a sandbox's lifecycle state (and optionally bind its id/branch)."""
+    """INTERNAL lifecycle-bind command — provisioner / test-seed use only.
+
+    Never bound by a router. Advances a sandbox's lifecycle state and binds its
+    server-generated Daytona id / feature branch. The client cannot reach this:
+    lifecycle is driven entirely by the provisioner (``provision.open_sandbox``)
+    and the idle reaper.
+    """
 
     status: str = Field(..., max_length=32)
     sandbox_id: str | None = Field(default=None, max_length=256)
@@ -169,6 +199,7 @@ __all__ = [
     "EditResponse",
     "EditSelection",
     "OpenSandboxRequest",
+    "RegisterSandboxRequest",
     "SandboxTreeResponse",
     "SnapshotResponse",
     "TreeEntryResponse",

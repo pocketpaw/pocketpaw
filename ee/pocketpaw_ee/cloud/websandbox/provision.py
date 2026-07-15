@@ -82,6 +82,13 @@ _DEFAULT_IDLE_TTL_SECONDS = 1800  # 30 min
 _DEFAULT_REAP_INTERVAL_SECONDS = 300  # 5 min
 _REAPER_TASK_KEY = "_websandbox_reaper_task"
 
+# Max concurrent live (pending/opening/ready) sandboxes a single user may hold.
+# Bounds cost/DoS by an authenticated tenant who would otherwise vary the repo URL
+# to mint unbounded cold VMs. Re-opening a repo the user already has open does NOT
+# count against this (it reuses the existing row). ``0`` disables the cap.
+_DEFAULT_MAX_PER_USER = 10
+_LIVE_STATUSES = ("pending", "opening", "ready")
+
 
 def _env_int(name: str, default: int) -> int:
     """Read a positive int from the environment, falling back to ``default``."""
@@ -109,6 +116,11 @@ def _reaper_enabled() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
+def _max_per_user() -> int:
+    """Per-user concurrent-sandbox cap (0 disables). See ``_DEFAULT_MAX_PER_USER``."""
+    return _env_int("POCKETPAW_WEBSANDBOX_MAX_PER_USER", _DEFAULT_MAX_PER_USER)
+
+
 # ---------------------------------------------------------------------------
 # Repo URL validation.
 # ---------------------------------------------------------------------------
@@ -120,6 +132,9 @@ def _validate_public_repo_url(repo: str) -> str:
     Fail-closed on anything that isn't an ``http``/``https`` URL with a host —
     ``file://``, ``git@`` SSH, ``ssh://``, or bare paths are rejected so the
     provisioner never hands the sandbox a local-path or credentialed remote.
+    A URL carrying embedded credentials (``https://user:token@host/repo``) is
+    rejected too: this is the PUBLIC-repo path, and userinfo would otherwise be
+    written into the VM's git remote and persist into snapshots.
     """
     candidate = (repo or "").strip()
     if not candidate:
@@ -129,6 +144,11 @@ def _validate_public_repo_url(repo: str) -> str:
         raise BadRequest(
             "websandbox.invalid_repo",
             "Repository must be a public http(s) URL (e.g. https://github.com/owner/repo.git)",
+        )
+    if parsed.username or parsed.password or "@" in parsed.netloc:
+        raise BadRequest(
+            "websandbox.invalid_repo",
+            "Repository URL must not embed credentials — only public repos are supported here",
         )
     return candidate
 
@@ -175,6 +195,22 @@ async def open_sandbox(
     body = OpenSandboxRequest.model_validate(body)
     repo_url = _validate_public_repo_url(body.repo)
     daytona = _require_client(client)
+
+    # Quota + re-open bookkeeping — read the caller's OWN rows once (tenant- and
+    # owner-scoped via list_sandboxes). Re-opening a repo already open reuses its
+    # row (not a new slot); opening a NEW repo past the per-user live cap is
+    # rejected cleanly rather than cold-booting an unbounded number of VMs.
+    owned = await websandbox_service.list_sandboxes(workspace_id, user_id)
+    existing = next((r for r in owned if r.repo == repo_url), None)
+    old_sandbox_id = existing.sandbox_id if existing is not None else None
+    cap = _max_per_user()
+    if cap and existing is None:
+        live = sum(1 for r in owned if r.status in _LIVE_STATUSES)
+        if live >= cap:
+            raise ConflictError(
+                "websandbox.too_many",
+                f"You have too many open workspaces ({live}); close one and try again",
+            )
 
     # 1. Upsert the registry row (idempotent on workspace+user+repo) and move it
     #    to ``opening`` so a concurrent reader sees the in-flight state.
@@ -242,6 +278,15 @@ async def open_sandbox(
         row.id,
         {"status": "ready", "sandbox_id": daytona_id, "branch": branch},
     )
+    # Re-open: this row previously pointed at a different VM. Now that the row
+    # references the NEW id, nothing references the old one — the idle reaper
+    # sweeps rows, not orphaned ids, so tear the old VM down here or it leaks
+    # (stopped-but-undeleted forever). Best-effort; a failure just defers cost.
+    if old_sandbox_id and old_sandbox_id != daytona_id:
+        with contextlib.suppress(Exception):
+            await daytona.stop_sandbox(old_sandbox_id)
+        with contextlib.suppress(Exception):
+            await daytona.delete_sandbox(old_sandbox_id)
     logger.info(
         "websandbox.open ready: row=%s daytona=%s branch=%s repo=%s",
         row.id,

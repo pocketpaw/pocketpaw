@@ -28,6 +28,14 @@
 # ``websandbox/edit.py``; tenancy comes only from the RequestContext, and it's
 # license-gated like the rest. Generate-only — the frontend applies accepted hunks
 # via the existing file-RPC.
+#
+# Changed 2026-07-16 (review hardening): the register route now binds the
+# repo-only ``RegisterSandboxRequest`` so a client can no longer write a
+# server-owned ``sandbox_id`` / ``status`` (that field is the key
+# ``authorize_sandbox`` trusts — a forgeable binding was a cross-tenant VM
+# takeover). The client-facing ``PATCH /{row_id}`` lifecycle route was removed
+# for the same reason: lifecycle is driven entirely by the provisioner + reaper,
+# never the client.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Response
@@ -44,9 +52,9 @@ from pocketpaw_ee.cloud.websandbox.dto import (
     EditRequest,
     EditResponse,
     OpenSandboxRequest,
+    RegisterSandboxRequest,
     SandboxTreeResponse,
     SnapshotResponse,
-    UpdateStatusRequest,
     WebSandboxListResponse,
     WebSandboxResponse,
 )
@@ -67,11 +75,16 @@ def _require_workspace(ctx: RequestContext) -> str:
 
 @router.post("", response_model=WebSandboxResponse)
 async def create_sandbox(
-    body: CreateSandboxRequest,
+    body: RegisterSandboxRequest,
     ctx: RequestContext = Depends(request_context),
 ) -> WebSandboxResponse:
     workspace_id = _require_workspace(ctx)
-    view = await websandbox_service.create_sandbox(workspace_id, ctx.user_id, body)
+    # Bind ONLY the repo from the client; sandbox_id/status stay server-owned
+    # (the provisioner sets them). Constructing the internal command here keeps
+    # the register row at status "pending" with no bound Daytona id.
+    view = await websandbox_service.create_sandbox(
+        workspace_id, ctx.user_id, CreateSandboxRequest(repo=body.repo)
+    )
     return websandbox_service.view_to_wire(view)
 
 
@@ -94,15 +107,11 @@ async def get_sandbox(
     return websandbox_service.view_to_wire(view)
 
 
-@router.patch("/{row_id}", response_model=WebSandboxResponse)
-async def update_sandbox_status(
-    row_id: str,
-    body: UpdateStatusRequest,
-    ctx: RequestContext = Depends(request_context),
-) -> WebSandboxResponse:
-    workspace_id = _require_workspace(ctx)
-    view = await websandbox_service.update_status(workspace_id, ctx.user_id, row_id, body)
-    return websandbox_service.view_to_wire(view)
+# NOTE: there is deliberately NO client ``PATCH /{row_id}`` route. A sandbox's
+# lifecycle (status, bound Daytona id, feature branch) is server-owned and driven
+# entirely by the provisioner (``provision.open_sandbox``) and the idle reaper —
+# never the client. Exposing a client status-write let a caller bind an arbitrary
+# ``sandbox_id`` onto its own row and forge access to another tenant's VM.
 
 
 # ---------------------------------------------------------------------------
