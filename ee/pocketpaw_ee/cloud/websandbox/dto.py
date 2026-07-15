@@ -4,6 +4,13 @@
 # for both input and output, so a server-owned field (id, timestamps) can't
 # leak into the write surface. Wire shape is camelCase to match the rest of
 # the cloud surface.
+#
+# Changed 2026-07-15 (WC-2, feat/websandbox-vm-provision): added the
+# cold-provision + file-tree DTOs — ``OpenSandboxRequest`` (the repo URL to open,
+# optional branch), ``TreeEntryResponse`` (one node in the cloned repo's file
+# tree), and ``SandboxTreeResponse`` (the tree wrapper carrying the bound Daytona
+# id). Same Rule-4 discipline: the open surface accepts only a repo + branch and
+# never a server-owned id/status.
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -46,8 +53,45 @@ class WebSandboxListResponse(BaseModel):
     items: list[WebSandboxResponse]
 
 
+# ---------------------------------------------------------------------------
+# WC-2 — cold-provision + file tree.
+# ---------------------------------------------------------------------------
+
+
+class OpenSandboxRequest(BaseModel):
+    """Open a sandbox against a public repo — cold-provision a VM and clone it.
+
+    Only the repo URL (and an optional branch) crosses the wire; the Daytona
+    ``sandbox_id`` and lifecycle ``status`` are server-owned and set by the
+    provisioner as the VM boots (Rule 4 — the write surface never accepts them).
+    """
+
+    repo: str = Field(..., min_length=1, max_length=1024)
+    branch: str | None = Field(default=None, max_length=256)
+
+
+class TreeEntryResponse(BaseModel):
+    """One node in the cloned repo's file tree (a single directory level)."""
+
+    name: str
+    isDir: bool
+    size: int = 0
+
+
+class SandboxTreeResponse(BaseModel):
+    """The file tree of a ready sandbox, keyed to its bound Daytona id."""
+
+    id: str
+    sandboxId: str
+    path: str
+    entries: list[TreeEntryResponse]
+
+
 __all__ = [
     "CreateSandboxRequest",
+    "OpenSandboxRequest",
+    "SandboxTreeResponse",
+    "TreeEntryResponse",
     "UpdateStatusRequest",
     "WebSandboxListResponse",
     "WebSandboxResponse",

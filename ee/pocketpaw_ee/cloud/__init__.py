@@ -935,6 +935,30 @@ def mount_cloud(app: FastAPI) -> None:
         async def _stop_fabric_ingest() -> None:
             await stop_fabric_ingest(app)
 
+    # Web Cursor idle-TTL reaper (WC-2, feat/websandbox-vm-provision). Every
+    # ~5 minutes (POCKETPAW_WEBSANDBOX_REAP_INTERVAL_SECONDS) it reclaims
+    # dropped browser-IDE sandboxes: rows in ``ready``/``opening`` whose
+    # ``updated_at`` is older than the idle TTL
+    # (POCKETPAW_WEBSANDBOX_IDLE_TTL_SECONDS, default 1800) get their Daytona VM
+    # stopped+deleted and the row marked ``reaped``. Same scheduler gate as the
+    # cycle/decisions/ingest loops so pytest runs never spawn a background loop
+    # that outlives the test; production sets POCKETPAW_CLOUD_SCHEDULER_ENABLED=
+    # true. ``start_websandbox_reaper`` also honors its own
+    # POCKETPAW_WEBSANDBOX_REAPER_ENABLED off-switch (default true).
+    if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
+        from pocketpaw_ee.cloud.websandbox.provision import (
+            start_websandbox_reaper,
+            stop_websandbox_reaper,
+        )
+
+        @app.on_event("startup")
+        async def _start_websandbox_reaper() -> None:
+            await start_websandbox_reaper(app)
+
+        @app.on_event("shutdown")
+        async def _stop_websandbox_reaper() -> None:
+            await stop_websandbox_reaper(app)
+
     # Mandate autopilot reconciler (feat/belt-autopilot). The persisted
     # ``MandateDoc.autopilot.on`` flag is the source of truth for whether a
     # mandate's autopilot SHOULD run; the background loop itself is

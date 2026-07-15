@@ -10,6 +10,12 @@
 # authorization that emits a high-severity audit event BEFORE it raises, so a
 # denied access attempt is always on the record. Every later Web Cursor slice
 # (session WS, editor RPC, git broker) calls this before touching a sandbox.
+#
+# Changed 2026-07-15 (WC-2, feat/websandbox-vm-provision): added the two
+# system-level reaper support functions ``list_reapable_sandboxes`` (global-read)
+# and ``mark_reaped`` (global-write). The idle-TTL reaper in ``provision.py``
+# drives them; they live here so the service stays the ONLY module that touches
+# the WebSandbox Beanie doc (Rule 2).
 from __future__ import annotations
 
 import logging
@@ -257,6 +263,70 @@ async def list_sandboxes(workspace_id: str, user_id: str) -> list[WebSandboxView
     return [_doc_to_view(d) for d in docs]
 
 
+# ---------------------------------------------------------------------------
+# System-level reaper support (WC-2). The idle-TTL reaper is a background sweep
+# that acts ACROSS tenants, so these two functions are deliberately NOT
+# tenant-scoped — they carry an explicit ``# global-read`` / ``# global-write``
+# marker per Rule 7. They stay HERE (not in provision.py) so the service remains
+# the only module that touches the Beanie doc (Rule 2).
+# ---------------------------------------------------------------------------
+
+
+async def list_reapable_sandboxes(
+    cutoff: datetime,
+    statuses: tuple[str, ...] = ("ready", "opening"),
+) -> list[WebSandboxView]:
+    """List sandboxes idle since before ``cutoff`` (system reaper candidate set).
+
+    "Idle" == ``updated_at`` older than the cutoff, in a still-live state
+    (``ready`` / ``opening``). Not tenant-scoped: the reaper reclaims leaked VMs
+    for every tenant. WC-3 will refresh ``updated_at`` on live WebSocket traffic;
+    until then age alone marks a session as dropped.
+    """
+    docs = await _WebSandboxDoc.find(
+        # global-read: the idle-TTL reaper sweeps every tenant's sandboxes; this
+        # is a system sweep, not a per-request read, so no workspace filter.
+        {"status": {"$in": list(statuses)}, "updated_at": {"$lt": cutoff}}
+    ).to_list()
+    return [_doc_to_view(d) for d in docs]
+
+
+async def mark_reaped(row_id: str) -> WebSandboxView | None:
+    """Flip a sandbox row to ``reaped`` (system reaper terminal), returning the
+    updated view — or ``None`` if the row vanished mid-sweep.
+
+    Resolves the row by id ONLY (no owner filter) because the reaper is a system
+    actor, not the owning user. The emitted ``WebSandboxStatusChanged`` still
+    carries the row's own tenancy so downstream fan-out stays scoped.
+    """
+    from beanie import PydanticObjectId
+
+    try:
+        oid = PydanticObjectId(row_id)
+    except Exception:  # noqa: BLE001 — a bad id is simply "nothing to reap"
+        return None
+    # global-write: system reaper terminal state; resolve by id across tenants.
+    doc = await _WebSandboxDoc.find_one({"_id": oid})
+    if doc is None:
+        return None
+    doc.status = "reaped"
+    doc.updated_at = datetime.now(UTC)
+    await doc.save()
+
+    await emit(
+        WebSandboxStatusChanged(
+            data={
+                "id": str(doc.id),
+                "workspace_id": doc.workspace_id,
+                "user_id": doc.user_id,
+                "repo": doc.repo,
+                "status": doc.status,
+            }
+        )
+    )
+    return _doc_to_view(doc)
+
+
 async def _read_owned(
     workspace_id: str,
     user_id: str,
@@ -282,7 +352,9 @@ __all__ = [
     "authorize_sandbox",
     "create_sandbox",
     "get_sandbox",
+    "list_reapable_sandboxes",
     "list_sandboxes",
+    "mark_reaped",
     "update_status",
     "view_to_wire",
 ]

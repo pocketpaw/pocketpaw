@@ -8,6 +8,12 @@
 # only; per-action RBAC (require_action) is deferred to a later slice because it
 # needs new action strings registered in the RBAC catalog. The tenancy/owner
 # filtering in the service is the security boundary for now.
+#
+# Changed 2026-07-15 (WC-2, feat/websandbox-vm-provision): added the two
+# cold-provision endpoints — ``POST /websandbox/open`` (provision a Daytona VM +
+# clone a PUBLIC repo, returning the ready registry row) and
+# ``GET /websandbox/{row_id}/tree`` (the cloned repo's file tree). Both delegate
+# to ``websandbox/provision.py``; tenancy still comes only from the RequestContext.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
@@ -15,9 +21,12 @@ from fastapi import APIRouter, Depends
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.websandbox import provision as websandbox_provision
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
 from pocketpaw_ee.cloud.websandbox.dto import (
     CreateSandboxRequest,
+    OpenSandboxRequest,
+    SandboxTreeResponse,
     UpdateStatusRequest,
     WebSandboxListResponse,
     WebSandboxResponse,
@@ -75,3 +84,29 @@ async def update_sandbox_status(
     workspace_id = _require_workspace(ctx)
     view = await websandbox_service.update_status(workspace_id, ctx.user_id, row_id, body)
     return websandbox_service.view_to_wire(view)
+
+
+# ---------------------------------------------------------------------------
+# WC-2 — cold-provision + file tree.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/open", response_model=WebSandboxResponse)
+async def open_sandbox(
+    body: OpenSandboxRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> WebSandboxResponse:
+    """Cold-provision a Daytona VM and clone a PUBLIC repo into it."""
+    workspace_id = _require_workspace(ctx)
+    view = await websandbox_provision.open_sandbox(workspace_id, ctx.user_id, body)
+    return websandbox_service.view_to_wire(view)
+
+
+@router.get("/{row_id}/tree", response_model=SandboxTreeResponse)
+async def get_sandbox_tree(
+    row_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> SandboxTreeResponse:
+    """Return the cloned repo's file tree for a ready sandbox."""
+    workspace_id = _require_workspace(ctx)
+    return await websandbox_provision.get_tree(workspace_id, ctx.user_id, row_id)
