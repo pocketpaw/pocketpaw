@@ -24,6 +24,7 @@ from collections.abc import Awaitable, Callable
 from daytona import PtySize
 
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient
+from pocketpaw_ee.cloud.websandbox.constants import WEBSANDBOX_WORKDIR
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,7 @@ class PtyBridge:
         self._handle = await sb.process.create_pty_session(
             self._session_id,
             self._on_data,
+            cwd=WEBSANDBOX_WORKDIR,  # open the shell where the repo is cloned
             pty_size=PtySize(rows=rows, cols=cols),
         )
         # Wait until the pty WebSocket is live before we accept input. Guarded by

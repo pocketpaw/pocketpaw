@@ -40,6 +40,7 @@ import os
 import posixpath
 
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient
+from pocketpaw_ee.cloud.websandbox.constants import WEBSANDBOX_WORKDIR
 
 logger = logging.getLogger(__name__)
 
@@ -84,10 +85,23 @@ def _jail(project_dir: str, rel_path: str, op: str) -> str:
     into a ``file.error`` frame, so download/upload is never reached for a
     traversal attempt.
     """
-    if not isinstance(rel_path, str) or not rel_path.strip():
+    if not isinstance(rel_path, str):
         raise FileRpcError(op, "a 'path' (relative to the project dir) is required")
 
     root = posixpath.normpath(project_dir)
+    # Empty string or '.' addresses the project root itself. The editor's file
+    # tree lists the repo root by requesting path '' (see the frontend
+    # loadTree -> listDir('')), so this MUST resolve to the jail root rather than
+    # being rejected — otherwise the root listing always errors and the tree
+    # shows nothing. Absolute paths and '..' escapes are still refused below.
+    stripped = rel_path.strip()
+    if stripped in ("", ".", "./"):
+        # Listing the root is valid (the tree needs it); reading/writing the
+        # directory itself is not — those still require a real file path.
+        if op == "list":
+            return root
+        raise FileRpcError(op, "a 'path' (relative to the project dir) is required")
+
     # posixpath.join drops the left side entirely if rel_path is absolute, so an
     # absolute path resolves outside the root and is rejected below (belt: the
     # explicit is_absolute check makes the intent obvious).
@@ -133,9 +147,14 @@ class FileRpc:
         self._project_dir = project_dir
 
     async def _root(self) -> str:
-        """Resolve + cache the sandbox project dir (the jail root)."""
+        """The jail root: the pinned in-VM workspace dir (``WEBSANDBOX_WORKDIR``).
+
+        Uses the shared constant, NOT the SDK's ``get_project_dir()`` (which
+        returns ``/root`` on this image and mismatches where the repo is cloned
+        and where the terminal opens). A ``project_dir`` passed to ``__init__``
+        still overrides it (tests inject a fake root)."""
         if self._project_dir is None:
-            self._project_dir = await self._client.get_project_dir(self._sandbox_id)
+            self._project_dir = WEBSANDBOX_WORKDIR
         return self._project_dir
 
     # ── Ops (raise FileRpcError on failure) ───────────────────────────────

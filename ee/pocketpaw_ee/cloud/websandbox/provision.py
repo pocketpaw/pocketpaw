@@ -43,6 +43,7 @@ from fastapi import FastAPI
 from pocketpaw_ee.cloud._core.errors import BadRequest, CloudError, ConflictError, with_cause
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
+from pocketpaw_ee.cloud.websandbox.constants import WEBSANDBOX_WORKDIR
 from pocketpaw_ee.cloud.websandbox.domain import WebSandboxView
 from pocketpaw_ee.cloud.websandbox.dto import (
     OpenSandboxRequest,
@@ -186,7 +187,12 @@ async def open_sandbox(
 
         # 4. Clone the PUBLIC repo — pass NO credentials (clean; no token ever
         #    involved). Clone into the sandbox's project dir.
-        project_dir = await daytona.get_project_dir(daytona_id)
+        # Clone INTO the pinned workspace dir (WEBSANDBOX_WORKDIR = /home/daytona)
+        # so the file tree, the terminal cwd, and the clone all agree on one
+        # directory. get_project_dir() returns /root on this image, which the
+        # terminal never opens in — that mismatch is why the tree looked empty.
+        project_dir = WEBSANDBOX_WORKDIR
+        await daytona.execute_command(daytona_id, f"mkdir -p {project_dir}")
         await daytona.git_clone(daytona_id, repo_url, project_dir, branch=body.branch)
     except Exception as exc:  # noqa: BLE001 — any provisioning failure is handled uniformly
         # Best-effort teardown of a half-created VM so a failure can't leak it.
@@ -240,7 +246,7 @@ async def get_tree(
     # Fail-closed authorization on the Daytona id BEFORE touching the runtime.
     await websandbox_service.authorize_sandbox(workspace_id, user_id, row.sandbox_id)
 
-    project_dir = await daytona.get_project_dir(row.sandbox_id)
+    project_dir = WEBSANDBOX_WORKDIR
     files = await daytona.list_files(row.sandbox_id, project_dir)
     entries = [
         TreeEntryResponse(

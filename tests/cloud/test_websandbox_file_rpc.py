@@ -28,7 +28,9 @@ from pocketpaw_ee.cloud.websandbox.dto import CreateSandboxRequest
 from pocketpaw_ee.cloud.websandbox.files import FileRpc, FileRpcError
 from pocketpaw_ee.cloud.websandbox.ws import terminal_websocket_endpoint
 
-PROJECT_DIR = "/home/daytona/project"
+# The pinned in-VM workspace dir (WEBSANDBOX_WORKDIR). ws.py builds FileRpc
+# without an explicit project_dir, so it uses this; Tier-1 tests inject it too.
+PROJECT_DIR = "/home/daytona"
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +80,20 @@ class _FakeFsClient:
 
 
 def _rpc(client: _FakeFsClient) -> FileRpc:
-    return FileRpc(client, "dtn-1")
+    # Inject the fake's project dir so path assertions are independent of the
+    # WEBSANDBOX_WORKDIR default (covered separately below).
+    return FileRpc(client, "dtn-1", project_dir=client.project_dir)
+
+
+async def test_root_defaults_to_websandbox_workdir() -> None:
+    # With no injected project_dir, the jail root is the pinned in-VM workspace
+    # (/home/daytona) — NOT the SDK's get_project_dir() (which returns /root).
+    from pocketpaw_ee.cloud.websandbox.constants import WEBSANDBOX_WORKDIR
+
+    client = _FakeFsClient(listing=[_FakeFileInfo("README.md", size=1)])
+    rpc = FileRpc(client, "dtn-1")
+    await rpc.list_dir("")
+    assert client.list_paths == [WEBSANDBOX_WORKDIR]
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +121,18 @@ async def test_list_returns_entries_with_relative_paths() -> None:
 async def test_list_root_uses_project_dir() -> None:
     client = _FakeFsClient(listing=[_FakeFileInfo("README.md", size=1)])
     entries = await _rpc(client).list_dir(".")
+    assert client.list_paths == [PROJECT_DIR]
+    assert entries[0]["path"] == "README.md"
+
+
+async def test_list_empty_path_lists_project_root() -> None:
+    # Regression: the editor's file tree lists the repo root by sending path ''
+    # (frontend loadTree -> listDir('')). An empty path MUST resolve to the
+    # project dir, not raise — otherwise the tree comes back empty even though
+    # the repo cloned fine. (Diagnosed live 2026-07-15: clone lands in the
+    # project dir, but list('') was rejected.)
+    client = _FakeFsClient(listing=[_FakeFileInfo("README.md", size=1)])
+    entries = await _rpc(client).list_dir("")
     assert client.list_paths == [PROJECT_DIR]
     assert entries[0]["path"] == "README.md"
 

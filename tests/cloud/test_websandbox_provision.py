@@ -53,7 +53,7 @@ class _FakeDaytonaClient:
     DI seam. ``clone_fails`` flips ``git_clone`` into a raise to exercise the
     provisioning-failure path."""
 
-    project_dir: str = "/home/daytona/project"
+    project_dir: str = "/home/daytona"  # matches WEBSANDBOX_WORKDIR (clone target + jail root)
     files: list[_FakeFileInfo] = field(
         default_factory=lambda: [
             _FakeFileInfo("README.md", is_dir=False, size=42),
@@ -65,6 +65,7 @@ class _FakeDaytonaClient:
     create_calls: list[dict] = field(default_factory=list)
     wait_calls: list[dict] = field(default_factory=list)
     clone_calls: list[dict] = field(default_factory=list)
+    exec_calls: list[str] = field(default_factory=list)
     stop_calls: list[str] = field(default_factory=list)
     delete_calls: list[str] = field(default_factory=list)
     _counter: int = 0
@@ -85,6 +86,11 @@ class _FakeDaytonaClient:
 
     async def get_project_dir(self, sandbox_id):  # noqa: ANN001
         return self.project_dir
+
+    async def execute_command(self, sandbox_id, command, **kwargs):  # noqa: ANN001
+        # open_sandbox runs ``mkdir -p <workdir>`` before cloning.
+        self.exec_calls.append(command)
+        return None
 
     async def git_clone(self, sandbox_id, repo_url, path, branch=None, commit_id=None):  # noqa: ANN001
         if self.clone_fails:
