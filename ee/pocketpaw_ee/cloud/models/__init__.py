@@ -1,5 +1,11 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-07-15 (WC-1, feat/websandbox-registry) — added ``WebSandbox``
+(the Web Cursor sandbox registry: the (workspace_id, user_id, repo) -> sandbox
+tenancy/auth oracle) to the imports, ``__all__``, and ``get_all_documents()`` so
+the ``web_sandboxes`` collection is wired into ``init_beanie``. Only
+``ee.cloud.websandbox.service`` imports the doc class directly (import-linter
+"WebSandbox" contract).
 Updated: 2026-07-08 (feat/external-alerting-delivery) — added
 ``NotificationDeliveryConfig`` (the per-workspace external-delivery config: Slack
 incoming-webhook + generic HTTPS webhook + enabled switch + per-kind routing) to
@@ -178,6 +184,7 @@ from pocketpaw_ee.cloud.models.task_event import TaskEvent
 from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 from pocketpaw_ee.cloud.models.vapid_keypair import VapidKeypair
+from pocketpaw_ee.cloud.models.web_sandbox import WebSandbox
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 from pocketpaw_ee.cloud.models.workspace_automation_config import WorkspaceAutomationConfig
 from pocketpaw_ee.cloud.models.workspace_job import WorkspaceJobDoc
@@ -336,6 +343,7 @@ __all__ = [
     "TaskEvent",
     "TemporalSweepStateDoc",
     "User",
+    "WebSandbox",
     "Widget",
     "WidgetPosition",
     "Workspace",
@@ -460,6 +468,10 @@ def get_all_documents():
         sighting_doc,
         # Branch primitive — universal artifact version log (BP-1).
         artifact_version_doc,
+        # Web Cursor sandbox registry (WC-1) — the (workspace, user, repo) ->
+        # sandbox tenancy/auth oracle. Only ``ee.cloud.websandbox.service``
+        # imports this doc directly (import-linter "WebSandbox" contract).
+        WebSandbox,
     ]
 
 

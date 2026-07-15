@@ -1,0 +1,77 @@
+# router.py — Thin FastAPI adapter for the Web Cursor Sandbox Registry (WC-1).
+# Created 2026-07-15 (feat/websandbox-registry): workspace+user scoped
+# /api/v1/websandbox. Tenancy comes from the RequestContext (never the body or
+# query), the service does the work, and CloudError -> JSON is handled by
+# _core.http — this router never raises HTTPException.
+#
+# NOTE (WC-1 scope): endpoints are gated by license + an authenticated context
+# only; per-action RBAC (require_action) is deferred to a later slice because it
+# needs new action strings registered in the RBAC catalog. The tenancy/owner
+# filtering in the service is the security boundary for now.
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends
+
+from pocketpaw_ee.cloud._core.context import RequestContext, request_context
+from pocketpaw_ee.cloud._core.errors import Forbidden
+from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.websandbox import service as websandbox_service
+from pocketpaw_ee.cloud.websandbox.dto import (
+    CreateSandboxRequest,
+    UpdateStatusRequest,
+    WebSandboxListResponse,
+    WebSandboxResponse,
+)
+
+router = APIRouter(
+    prefix="/websandbox",
+    tags=["WebSandbox"],
+    dependencies=[Depends(require_license)],
+)
+
+
+def _require_workspace(ctx: RequestContext) -> str:
+    """A workspace-scoped route needs an active workspace; fail closed if absent."""
+    if not ctx.workspace_id:
+        raise Forbidden("websandbox.no_workspace", "No active workspace")
+    return ctx.workspace_id
+
+
+@router.post("", response_model=WebSandboxResponse)
+async def create_sandbox(
+    body: CreateSandboxRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> WebSandboxResponse:
+    workspace_id = _require_workspace(ctx)
+    view = await websandbox_service.create_sandbox(workspace_id, ctx.user_id, body)
+    return websandbox_service.view_to_wire(view)
+
+
+@router.get("", response_model=WebSandboxListResponse)
+async def list_sandboxes(
+    ctx: RequestContext = Depends(request_context),
+) -> WebSandboxListResponse:
+    workspace_id = _require_workspace(ctx)
+    views = await websandbox_service.list_sandboxes(workspace_id, ctx.user_id)
+    return WebSandboxListResponse(items=[websandbox_service.view_to_wire(v) for v in views])
+
+
+@router.get("/{row_id}", response_model=WebSandboxResponse)
+async def get_sandbox(
+    row_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> WebSandboxResponse:
+    workspace_id = _require_workspace(ctx)
+    view = await websandbox_service.get_sandbox(workspace_id, ctx.user_id, row_id)
+    return websandbox_service.view_to_wire(view)
+
+
+@router.patch("/{row_id}", response_model=WebSandboxResponse)
+async def update_sandbox_status(
+    row_id: str,
+    body: UpdateStatusRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> WebSandboxResponse:
+    workspace_id = _require_workspace(ctx)
+    view = await websandbox_service.update_status(workspace_id, ctx.user_id, row_id, body)
+    return websandbox_service.view_to_wire(view)

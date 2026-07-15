@@ -260,6 +260,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.rules.router import router as rules_router
     from pocketpaw_ee.cloud.sessions.router import router as sessions_router
     from pocketpaw_ee.cloud.skills.router import router as skills_router
+    from pocketpaw_ee.cloud.websandbox.router import router as websandbox_router
     from pocketpaw_ee.cloud.workspace.router import router as workspace_router
 
     app.include_router(auth_router, prefix="/api/v1")
@@ -269,6 +270,9 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(agents_router, prefix="/api/v1")
     app.include_router(audit_router, prefix="/api/v1")
     app.include_router(audit_workspace_router, prefix="/api/v1")
+    # Web Cursor sandbox registry (WC-1) — the (workspace, user, repo) -> sandbox
+    # tenancy/auth oracle every later Web Cursor slice authorizes against.
+    app.include_router(websandbox_router, prefix="/api/v1")
     app.include_router(request_log_router, prefix="/api/v1")
     app.include_router(deep_work_log_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")
