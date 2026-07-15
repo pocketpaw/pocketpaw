@@ -701,6 +701,8 @@ def mount_cloud(app: FastAPI) -> None:
     # binds (an empty dir just 404s the asset until the real bundle is copied in).
     # PAWBAR_APP_MOUNT is imported from the router so the mount path and the frame
     # HTML's <script src> can never drift.
+    import os
+
     from pocketpaw_ee.paw_bar.router import PAWBAR_APP_MOUNT
 
     pawbar_app_dir = Path(
