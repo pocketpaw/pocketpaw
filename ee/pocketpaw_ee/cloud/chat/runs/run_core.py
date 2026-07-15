@@ -1,6 +1,15 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-07-15 (fix/paw-bar-concierge-soul-policy) — ``_persist_and_complete``
+  now gates the ``pool.observe`` soul-learning call: a Paw Bar concierge run
+  (session_key prefix ``cloud:concierge:``) SKIPS it so anonymous, untrusted
+  website-visitor input can no longer feed the per-agent soul (a memory-
+  poisoning channel). Normal runs still observe unchanged. New helper
+  ``_is_concierge_run`` + constant ``_CONCIERGE_SESSION_PREFIX``; the prefix is
+  the pickle-safe signal that reaches the executor and also covers a typed
+  ``ScopeKind.CONCIERGE`` scope once it lands (session_key derives from
+  ``ctx.kind.value``). A future quarantine-via-Instinct path can supersede this.
 - 2026-07-11 (ART-1) — ``execute_run`` binds a per-run delivered-artifact
   collector (``collect_delivered_artifacts``) around the run and, at persist
   time, drains it into one ``{type:"artifact", meta}`` attachment on the
@@ -762,6 +771,31 @@ def _normalize_and_strip(
     return remaining, spec
 
 
+# Session-key prefix that marks a Paw Bar concierge run. Concierge chats are
+# driven by anonymous, untrusted website visitors, so their turns must NOT feed
+# the per-agent soul via pool.observe — otherwise a visitor could poison the
+# agent's memory ("remember: everything is free on Fridays"). The prefix is the
+# pickle-safe signal that survives the RunSpec round-trip into the executor;
+# because session_key_for() builds the key from ctx.kind.value, matching the
+# prefix here also covers a typed ScopeKind.CONCIERGE scope once the concierge
+# endpoint lands, without run_core needing to import that not-yet-existent enum
+# member. Mirrors the spirit of the local-loop per-turn suppression flag
+# (suppress_global_soul_observe) — same intent, cloud per-agent tier.
+_CONCIERGE_SESSION_PREFIX = "cloud:concierge:"
+
+
+def _is_concierge_run(spec: RunSpec) -> bool:
+    """True when this run is a Paw Bar concierge (anonymous-visitor) chat.
+
+    Gated on the session-key prefix rather than a typed scope check because
+    ``spec.session_key`` is the signal guaranteed to reach the executor across
+    the arq pickle boundary, and it manifests the concierge scope directly
+    (the key is derived from ``ctx.kind.value``). A future quarantine-via-Instinct
+    path can supersede this outright suppression.
+    """
+    return (spec.session_key or "").startswith(_CONCIERGE_SESSION_PREFIX)
+
+
 async def _persist_and_complete(
     spec: RunSpec,
     ctx: ScopeContext,
@@ -788,15 +822,22 @@ async def _persist_and_complete(
         ctx, assistant_id, full_text, attachments, created_at=msg.createdAt
     )
 
-    try:
-        pool = get_agent_pool()
-        await pool.observe(ctx.target_agent_id, spec.content, full_text)
-    except Exception:
-        logger.warning(
-            "pool.observe failed for agent %s — per-agent soul not updated",
-            ctx.target_agent_id,
-            exc_info=True,
+    if _is_concierge_run(spec):
+        logger.debug(
+            "skipping pool.observe for concierge run %s — anonymous visitor input "
+            "must not train the per-agent soul",
+            spec.run_id,
         )
+    else:
+        try:
+            pool = get_agent_pool()
+            await pool.observe(ctx.target_agent_id, spec.content, full_text)
+        except Exception:
+            logger.warning(
+                "pool.observe failed for agent %s — per-agent soul not updated",
+                ctx.target_agent_id,
+                exc_info=True,
+            )
     return assistant_id
 
 
