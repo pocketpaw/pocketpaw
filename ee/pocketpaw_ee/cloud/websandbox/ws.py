@@ -22,6 +22,16 @@
 # BINARY frames carry terminal output (cleanest for xterm); pong is JSON. On
 # live traffic the row's ``updated_at`` is bumped (throttled ~60s) so the WC-2
 # idle reaper doesn't reclaim an active session.
+#
+# 2026-07-15 (WC-4a): the SAME socket also carries file operations, multiplexed
+# alongside the terminal. Any ``file.*`` frame ({"type":"file.list|read|write",
+# "reqId":..,"path":..[,"content":..]}) is handed to the socket-agnostic
+# ``FileRpc`` (websandbox/files.py), which jails the path to the sandbox project
+# dir and returns a JSON response frame (file.list.ok / file.read.ok /
+# file.write.ok / file.error). File responses are typed JSON text frames while
+# terminal output is binary, so the two streams never collide. No per-frame
+# re-authorization — the socket is already owner-bound to the VM — but file ops
+# DO bump the same throttled activity heartbeat.
 from __future__ import annotations
 
 import json
@@ -37,6 +47,7 @@ from pocketpaw_ee.cloud.auth.ws_tickets import consume_ws_ticket
 from pocketpaw_ee.cloud.daytona.client import get_daytona_client
 from pocketpaw_ee.cloud.license import get_license
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
+from pocketpaw_ee.cloud.websandbox.files import FileRpc
 from pocketpaw_ee.cloud.websandbox.terminal import DEFAULT_COLS, DEFAULT_ROWS, PtyBridge
 
 logger = logging.getLogger(__name__)
@@ -176,6 +187,11 @@ async def terminal_websocket_endpoint(
     manager.register(websocket, bridge)
     throttle = _ActivityThrottle()
 
+    # File ops share this socket. FileRpc jails every path to the sandbox project
+    # dir (resolved lazily on first use); it reuses the already-owner-authorized
+    # client + sandbox_id and never re-authorizes per frame.
+    file_rpc = FileRpc(client, row.sandbox_id)
+
     async def _touch() -> None:
         """Bump the row's activity heartbeat, throttled, swallowing errors."""
         if not throttle.should_touch(time.monotonic()):
@@ -196,6 +212,15 @@ async def terminal_websocket_endpoint(
                 continue
 
             mtype = msg.get("type")
+            if isinstance(mtype, str) and mtype.startswith("file."):
+                # File op multiplexed on the terminal socket. FileRpc jails the
+                # path and returns a JSON response frame (or file.error); a bad
+                # frame never tears the socket down.
+                response = await file_rpc.dispatch(msg)
+                if response is not None:
+                    await websocket.send_json(response)
+                    await _touch()
+                continue
             if mtype == "input":
                 data = msg.get("data")
                 if isinstance(data, str):
