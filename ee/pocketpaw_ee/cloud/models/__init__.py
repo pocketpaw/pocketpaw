@@ -113,6 +113,7 @@ from pocketpaw_ee.cloud.models.audit_event import AuditEvent
 from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
 from pocketpaw_ee.cloud.models.auth_session import AuthSession
 from pocketpaw_ee.cloud.models.belt_workspace_config import BeltWorkspaceConfig
+from pocketpaw_ee.cloud.models.builtin_widget import BuiltInWidget, BuiltInWidgetPosition
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
 from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
@@ -268,6 +269,8 @@ __all__ = [
     "AuditWebhook",
     "AuthSession",
     "BeltWorkspaceConfig",
+    "BuiltInWidget",
+    "BuiltInWidgetPosition",
     "ChatRunDoc",
     "Comment",
     "CommentAuthor",
@@ -358,6 +361,9 @@ def get_all_documents():
         Pocket,
         PocketBackendCredential,
         Session,
+        # Built-in widget definitions — system-level rows every new home pocket
+        # seeds from. Read by GET /pockets/builtin-widgets + ensure_home_pocket.
+        BuiltInWidget,
         # Agent-session transcript rows backing the Mongo SessionStore (SS-2).
         # Only ``ee.cloud.agent_sessions.store`` imports this doc directly.
         SessionTranscriptDoc,
