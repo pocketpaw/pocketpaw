@@ -704,6 +704,13 @@ def mount_cloud(app: FastAPI) -> None:
 
     app.add_api_websocket_route("/ws/cloud", websocket_endpoint)
 
+    # Web Cursor terminal WS (WC-3) — one PTY-over-WS shell per session, bound to
+    # the owning sandbox's Daytona VM. Mounted at root (not /api/v1) so the SPA
+    # connects to ws://host/ws/websandbox/<row_id>?token=<ws_ticket>.
+    from pocketpaw_ee.cloud.websandbox.ws import terminal_websocket_endpoint
+
+    app.add_api_websocket_route("/ws/websandbox/{row_id}", terminal_websocket_endpoint)
+
     # License endpoint (no auth)
     @app.get("/api/v1/license", tags=["License"])
     async def license_info():

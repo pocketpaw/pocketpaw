@@ -118,6 +118,23 @@ async def get_home_pocket_id(user_id: str) -> str | None:
     return doc.home_pocket_id
 
 
+async def get_active_workspace(user_id: str) -> str | None:
+    """Return the user's ``active_workspace`` id, or None if unset.
+
+    Takes a plain ``user_id`` (not a ``RequestContext``) so callers outside the
+    HTTP request cycle — notably the Web Cursor terminal WebSocket, which only
+    holds the ``user_id`` decoded from a ws_ticket — can resolve the caller's
+    workspace without minting a context. This is the same membership field the
+    ``request_context`` dependency reads (``user.active_workspace``); exposing it
+    here keeps ``models.user`` reads inside the auth entity (Rule 2). Returns
+    None when the user has no active workspace so the caller can fail closed.
+    """
+    doc = await _UserDoc.get(PydanticObjectId(user_id))
+    if doc is None:
+        raise NotFound("user", user_id)
+    return doc.active_workspace
+
+
 async def claim_home_pocket_id(user_id: str, new_pocket_id: str, *, expected: str | None) -> bool:
     """Atomically set ``home_pocket_id`` to ``new_pocket_id`` — but only if
     it still holds ``expected``. Returns ``True`` when the swap took.

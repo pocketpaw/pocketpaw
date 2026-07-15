@@ -16,6 +16,12 @@
 # and ``mark_reaped`` (global-write). The idle-TTL reaper in ``provision.py``
 # drives them; they live here so the service stays the ONLY module that touches
 # the WebSandbox Beanie doc (Rule 2).
+#
+# Changed 2026-07-15 (WC-3, feat/websandbox-terminal-ws): added
+# ``touch_activity`` — an owner-scoped ``updated_at`` heartbeat the terminal
+# WebSocket calls (throttled) on live traffic so the WC-2 idle reaper doesn't
+# reclaim a VM someone is actively using. It stays here (not in ws.py) so the
+# service remains the only module that writes the Beanie doc (Rule 2).
 from __future__ import annotations
 
 import logging
@@ -247,6 +253,35 @@ async def update_status(
     return _doc_to_view(doc)
 
 
+async def touch_activity(
+    workspace_id: str,
+    user_id: str,
+    row_id: str,
+) -> bool:
+    """Bump a sandbox row's ``updated_at`` to mark it as actively in use.
+
+    Tenant- and owner-scoped: only the owning caller can refresh their own
+    session's liveness. Returns ``True`` when a row was touched, ``False`` when
+    no owned row matched (e.g. it was already reaped) — the terminal socket
+    treats a missing row as a benign no-op rather than an error.
+
+    The idle-TTL reaper (WC-2) reclaims ``ready``/``opening`` rows whose
+    ``updated_at`` predates the TTL; without this heartbeat a long, quiet
+    terminal session would be reaped mid-use. The caller throttles it (at most
+    once per ~60s per socket) so a burst of keystrokes is one write, not one
+    write per frame.
+    """
+    doc = await _read_owned(workspace_id, user_id, row_id)
+    if doc is None:
+        return False
+    doc.updated_at = datetime.now(UTC)
+    await doc.save()
+    # no-event: a high-frequency liveness heartbeat, not a state change —
+    # downstream handlers (search index, ripple invalidation) don't need it and
+    # fanning out per-touch would be pure noise.
+    return True
+
+
 async def list_sandboxes(workspace_id: str, user_id: str) -> list[WebSandboxView]:
     """List every sandbox owned by the caller, newest first.
 
@@ -355,6 +390,7 @@ __all__ = [
     "list_reapable_sandboxes",
     "list_sandboxes",
     "mark_reaped",
+    "touch_activity",
     "update_status",
     "view_to_wire",
 ]
