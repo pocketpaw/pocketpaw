@@ -21,7 +21,11 @@ Auth model:
 
 from __future__ import annotations
 
+import glob
+import json
 import logging
+import os
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
@@ -36,6 +40,10 @@ from pocketpaw_ee.cloud.shared.deps import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Regex matching kb-go's sanitize() — replaces any char outside [a-zA-Z0-9_-] with '_'.
+_SANITIZE_RE = re.compile(r"[^a-zA-Z0-9_-]")
+KB_HOME = os.path.expanduser("~/.knowledge-base")
 
 router = APIRouter(
     prefix="/knowledge",
@@ -54,17 +62,99 @@ async def _list_workspace_agent_ids(workspace_id: str) -> list[str]:
     return [a.id for a in agents]
 
 
+def _sanitize_scope(scope: str) -> str:
+    """Mirror kb-go's sanitize() — replaces non-[a-zA-Z0-9_-] chars with '_'.
+
+    kb-go stores articles under ``~/.knowledge-base/{sanitized_scope}/`` so the
+    colon in ``workspace:abc`` becomes ``workspace_abc`` on disk."""
+    return _SANITIZE_RE.sub("_", scope)
+
+
+def _list_orphan_raw_docs(scope: str) -> list[dict[str, Any]]:
+    """Read raw docs that have *no* corresponding wiki article for *scope*.
+
+    When kb-go ingests text it saves a raw doc first, then compiles a wiki
+    article.  If compilation fails (LLM timeout, subprocess killed, etc.) the
+    raw doc stays on disk without a wiki article — it becomes invisible to the
+    normal ``kb list`` path.  This helper catches those orphans so the
+    workspace knowledge browser still surfaces every piece of ingested content.
+    """
+    sanitized = _sanitize_scope(scope)
+    scope_dir = os.path.join(KB_HOME, sanitized)
+    wiki_dir = os.path.join(scope_dir, "wiki")
+    raw_dir = os.path.join(scope_dir, "raw")
+
+    if not os.path.isdir(raw_dir):
+        return []
+
+    # Collect the set of raw-doc IDs that ARE referenced by wiki articles
+    # (via the ``source_docs`` frontmatter field).
+    referenced_raws: set[str] = set()
+    if os.path.isdir(wiki_dir):
+        for md_path in glob.glob(os.path.join(wiki_dir, "*.md")):
+            try:
+                with open(md_path, encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+                if not text.startswith("---"):
+                    continue
+                parts = text.split("---", 2)
+                if len(parts) < 3:
+                    continue
+                fm = json.loads(parts[1])
+                for sd in fm.get("source_docs", []) or []:
+                    referenced_raws.add(str(sd))
+            except Exception:
+                logger.debug("Failed to read wiki article %s", md_path, exc_info=True)
+
+    orphans: list[dict[str, Any]] = []
+    for raw_path in glob.glob(os.path.join(raw_dir, "*.json")):
+        raw_id = os.path.splitext(os.path.basename(raw_path))[0]
+        if raw_id in referenced_raws:
+            continue  # Already surfaced through a wiki article.
+        try:
+            with open(raw_path, encoding="utf-8", errors="replace") as fh:
+                doc = json.load(fh)
+        except Exception:
+            logger.debug("Failed to read raw doc %s", raw_path, exc_info=True)
+            continue
+
+        orphans.append(
+            {
+                "id": raw_id,
+                "title": doc.get("source") or doc.get("filename") or raw_id,
+                "source": doc.get("source") or "",
+                "updated_at": doc.get("ingested_at"),
+            }
+        )
+
+    return orphans
+
+
 def _call_kb_list(scope: str) -> list[Any]:
     """Wrap the kb-go ``list`` command. Non-list returns are coerced to ``[]``
-    so the aggregator never sees surprising shapes."""
+    so the aggregator never sees surprising shapes.
+
+    Also folds in *orphan* raw docs — ingested files whose wiki compilation
+    never completed — so the workspace knowledge browser surfaces every piece
+    of content, not just fully-compiled articles."""
     from pocketpaw_ee.cloud.agents.knowledge import _kb
 
+    wiki_articles: list[Any] = []
     try:
         result = _kb("list", "--scope", scope)
+        if isinstance(result, list):
+            wiki_articles = result
     except Exception as exc:  # noqa: BLE001
         logger.debug("kb list raised for scope=%s: %s", scope, exc)
-        return []
-    return result if isinstance(result, list) else []
+
+    # Append orphan raw docs as synthetic articles so they show up in the UI.
+    try:
+        orphan_rows = _list_orphan_raw_docs(scope)
+    except Exception:
+        logger.debug("orphan-raw-doc scan failed for scope=%s", scope, exc_info=True)
+        orphan_rows = []
+
+    return wiki_articles + orphan_rows
 
 
 @router.get(
