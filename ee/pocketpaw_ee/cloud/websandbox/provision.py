@@ -48,6 +48,7 @@ from uuid import uuid4
 from fastapi import FastAPI
 
 from pocketpaw_ee.cloud._core.errors import BadRequest, CloudError, ConflictError, with_cause
+from pocketpaw_ee.cloud.codegit import wire as codegit_wire
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
 from pocketpaw_ee.cloud.websandbox import broker as websandbox_broker
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
@@ -289,6 +290,23 @@ async def open_sandbox(
             cwd=project_dir,
             timeout=_BRANCH_CHECKOUT_TIMEOUT_SECONDS,
         )
+
+        # 4c. CM-3d: for a broker-cloned (connected) repo, repoint ``origin`` at
+        #     the git proxy so an in-VM ``git push``/``fetch`` works with the token
+        #     still minted server-side (never in the VM). Best-effort — a wiring
+        #     miss leaves the clone fully usable, it just can't push yet; it must
+        #     never fail the open. Skipped for public clones (no connection to push
+        #     through) and when no public backend URL is reachable from the VM.
+        if scoped is not None:
+            with contextlib.suppress(Exception):
+                await codegit_wire.wire_push_remote(
+                    daytona,
+                    daytona_id,
+                    workspace_id,
+                    user_id,
+                    websandbox_broker.repo_full_name(repo_url) or repo_url,
+                    project_dir,
+                )
     except Exception as exc:  # noqa: BLE001 — any provisioning failure is handled uniformly
         # Best-effort teardown of a half-created VM so a failure can't leak it.
         if daytona_id is not None:

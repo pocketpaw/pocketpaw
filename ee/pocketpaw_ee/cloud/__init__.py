@@ -238,6 +238,9 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.billing.webhooks import router as billing_webhooks_router
     from pocketpaw_ee.cloud.chat.router import router as chat_router
     from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
+    from pocketpaw_ee.cloud.codeconnect.router import router as codeconnect_router
+    from pocketpaw_ee.cloud.codegit.router import router as codegit_router
+    from pocketpaw_ee.cloud.codeproject.router import router as codeproject_router
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
     from pocketpaw_ee.cloud.credits.router import router as credits_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
@@ -260,8 +263,6 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.rules.router import router as rules_router
     from pocketpaw_ee.cloud.sessions.router import router as sessions_router
     from pocketpaw_ee.cloud.skills.router import router as skills_router
-    from pocketpaw_ee.cloud.codeconnect.router import router as codeconnect_router
-    from pocketpaw_ee.cloud.codeproject.router import router as codeproject_router
     from pocketpaw_ee.cloud.websandbox.router import router as websandbox_router
     from pocketpaw_ee.cloud.workspace.router import router as workspace_router
 
@@ -281,6 +282,11 @@ def mount_cloud(app: FastAPI) -> None:
     # Code Mode GitHub connect (CM-3) — install-URL / callback / repo picker so a
     # user can open PRIVATE repos; the token is minted server-side, never in the VM.
     app.include_router(codeconnect_router, prefix="/api/v1")
+    # Code Mode git proxy (CM-3d) — the VM's git remote points here (basic-auth
+    # ticket, NOT the GitHub token); the broker mints a repo-scoped token
+    # server-side and proxies push/fetch upstream. Ticket-authed, not license/RC
+    # gated (git can't do OAuth); CSRF only fires on cookie auth, so it passes.
+    app.include_router(codegit_router, prefix="/api/v1")
     app.include_router(request_log_router, prefix="/api/v1")
     app.include_router(deep_work_log_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")

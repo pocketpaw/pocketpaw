@@ -219,6 +219,56 @@ async def test_open_via_broker_clones_server_side_no_token_in_vm(monkeypatch) ->
     assert "tok-SECRET" not in blob
 
 
+async def test_open_via_broker_wires_push_remote_when_public_url_set(monkeypatch) -> None:
+    # CM-3d: on the broker path, with a reachable public backend URL, open_sandbox
+    # repoints the VM's origin at the git proxy (so in-VM push works). Localhost is
+    # the default in the other broker test, which SKIPS wiring — here we prove the
+    # wire fires when the URL is public.
+    from datetime import UTC, datetime
+
+    from pocketpaw_ee.cloud.codeconnect import service as codeconnect_service
+    from pocketpaw_ee.cloud.websandbox import broker
+    from pocketpaw_ee.cloud.websandbox.repoauth import ProviderId, ScopedRepoToken
+
+    monkeypatch.setenv("POCKETPAW_PUBLIC_BASE_URL", "https://app.pocketpaw.com")
+    await codeconnect_service.save_connection("w1", "u1", "inst-1")
+
+    class _Prov:
+        provider_id = ProviderId.GITHUB
+
+        async def mint_repo_token(self, connection_id, repo, *, scopes=None, now=None):  # noqa: ANN001
+            return ScopedRepoToken(
+                provider=ProviderId.GITHUB,
+                token="tok-SECRET",
+                expires_at=datetime(2026, 7, 16, tzinfo=UTC),
+                repo=repo,
+                scopes={},
+            )
+
+    monkeypatch.setattr(broker, "get_repo_auth_provider", lambda _p: _Prov())
+
+    async def fake_pack(token, clean_url, branch):  # noqa: ANN001
+        return b"PACKED-TREE"
+
+    monkeypatch.setattr(broker, "_clone_and_pack_repo", fake_pack)
+
+    fake = _FakeDaytonaClient()
+    view = await provision.open_sandbox(
+        "w1", "u1", {"repo": "https://github.com/owner/repo.git"}, client=fake
+    )
+
+    assert view.status == "ready"
+    # The proxy remote was wired into the VM.
+    wires = [
+        inv for inv in fake.exec_invocations
+        if inv["command"].startswith("git remote set-url origin ")
+    ]
+    assert len(wires) == 1
+    assert "@app.pocketpaw.com/api/v1/codegit/owner/repo" in wires[0]["command"]
+    # The GitHub token still never reaches the VM.
+    assert "tok-SECRET" not in repr(fake.exec_invocations) + repr(fake.upload_calls)
+
+
 async def test_open_creates_and_binds_edit_branch() -> None:
     # WC-5a: opening checks out a fresh ``paw/edit-<hex>`` branch IN the VM (via
     # execute_command with cwd=WEBSANDBOX_WORKDIR) and records it on the row.
