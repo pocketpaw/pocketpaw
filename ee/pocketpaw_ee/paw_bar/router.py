@@ -1,4 +1,24 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-16 (Paw Bar concierge dashboard reads, D2) — added four OWNER
+#   aggregation reads for the per-site Concierge dashboard, all under
+#   /paw-bar/admin/site/{site_id}/*, all ``require_scope("admin")`` +
+#   workspace-scoped: (1) GET /overview — {widget, enabled, greeting, counts} with
+#   cheap COUNT/distinct counters; (2) GET /conversations — recent concierge
+#   ``ChatRunDoc`` runs grouped by customer_ref (LISTABLE via the run model's
+#   (workspace, context_type, scope_id, createdAt) index; bounded scan + optional
+#   cursor); (3) GET /decisions — the site widget's paw_bar ``DecisionStatus`` rows
+#   (``WHERE widget_id = ?``); (4) GET /handoffs — ``_paw_handoffs`` reserved Fabric
+#   objects scoped to the widget (no producer yet → empty in v1). Tenancy runs at
+#   TWO gates: the Site is loaded workspace-scoped (cross-tenant id → 404), then its
+#   paw-bar widget is resolved from ``Site.pocket_id`` ALSO workspace-scoped; the
+#   decisions/conversations/handoffs filters then bind to THAT widget/pocket — never
+#   pocket-wide or workspace-wide — so a sibling site or a second widget in the same
+#   workspace can never appear (the leak surface the security review checks).
+#   Decisions read the singleton ``DecisionStatus`` table (the 1:1 mirror of the
+#   Instinct proposals) rather than the Instinct store directly, because paw-bar
+#   stamps the Instinct row's in-row ``workspace_id`` with the widget OWNER, not the
+#   physical workspace, and the Instinct proposal's physical file is
+#   ContextVar-dependent — the DecisionStatus table has neither hazard.
 # Updated: 2026-07-16 (Paw Bar concierge settings + kill switch, D1 / SS-6) — the
 #   owner's on/off toggle + greeting. (a) GET /paw-bar/frame now refuses (403
 #   ``concierge_disabled``) when the resolved Site has ``concierge_enabled=False``,
@@ -843,6 +863,471 @@ async def update_site_concierge_settings(
         concierge_enabled=site.concierge_enabled,
         concierge_greeting=site.concierge_greeting,
     )
+
+
+# ---------------------------------------------------------------------------
+# Admin: per-Site concierge aggregation reads (D2)
+#
+# Read-only aggregation over ONE site's paw-bar operational data, for the
+# paw-enterprise Concierge dashboard. OWNER endpoints (admin session +
+# ``current_workspace_id``), NOT the public visitor surface. Every read is
+# scoped to the caller's ACTIVE workspace at TWO gates:
+#   1. the Site is loaded workspace-scoped (``_load_site_scoped`` — cross-tenant
+#      id → 404, never leaks existence), then
+#   2. its paw-bar widget is resolved from ``Site.pocket_id`` ALSO workspace-scoped
+#      (``list_widgets(pocket_id=…, workspace_id=…)``), so the widget in hand
+#      always belongs to the caller's tenant.
+# The decisions / conversations / handoffs reads then filter to THAT widget /
+# pocket — never pocket-wide, never workspace-wide — so a sibling site or a
+# second widget in the same workspace can never appear in this site's data. This
+# widget/site-scoping is the leak surface the security review checks.
+#
+# Data sources (all reuse existing stores — nothing new is written here):
+#   * decisions  — the paw_bar ``DecisionStatus`` table (get_paw_bar_store, a
+#       SINGLETON store), filtered ``WHERE widget_id = ?``. This is the 1:1 mirror
+#       of the Instinct proposals the decision loop raises (parked by
+#       ``instinct_action_id``), but keyed on a real ``widget_id`` column and
+#       served from ONE file regardless of deployment mode. It is chosen over
+#       querying the Instinct store directly because (a) paw-bar stamps the
+#       Instinct row's in-row ``workspace_id`` with the widget OWNER
+#       (``decision_loop.resolve_workspace_id`` → ``widget.owner``), NOT the
+#       physical dashboard workspace, so a workspace-scoped Instinct read would
+#       hide every row, and (b) the Instinct proposal's physical file is
+#       ContextVar-dependent (per-workspace on the run path, shared on the ingest
+#       path) — the singleton DecisionStatus table has neither hazard, giving an
+#       airtight ``WHERE widget_id = ?`` isolation seam.
+#   * conversations — concierge runs are persisted as ``ChatRunDoc`` (context_type
+#       "concierge", scope_id = the site's pocket). LISTABLE: the model's compound
+#       (workspace, context_type, scope_id, createdAt DESC) index backs an
+#       efficient per-site query; a Site is 1:1 with (workspace, pocket_id), so a
+#       pocket-scoped read IS site-scoped. Runs are grouped by ``user_id``
+#       (customer_ref) into one conversation each. No full-collection scan — the
+#       fetch window is bounded.
+#   * handoffs — the ``_paw_handoffs`` reserved Fabric object (SS-6). NO producer
+#       exists yet, so v1 defines the shape (contact / question / transcript_ref /
+#       created_at) and queries Fabric for objects of that type carrying this
+#       widget's id — an empty list until the capture path ships (deferred). The
+#       widget-id property filter is the same cross-site isolation guarantee.
+# Overview counts are cheap (COUNT / distinct) — never load a full list.
+# ---------------------------------------------------------------------------
+
+
+# The reserved Fabric object type for a human-handoff request (SS-6). No producer
+# yet; v1 only READS it. The shape below is the contract a future capture path
+# must write (each field is a Fabric object property; ``widget_id`` is the scope
+# key this read filters on).
+_PAW_HANDOFFS_TYPE = "_paw_handoffs"
+
+# The concierge run marker on ``ChatRunDoc`` — a concierge dispatch stamps
+# ``context_type="concierge"`` and ``scope_id=<pocket_id>`` (see ``concierge_chat``).
+_CONCIERGE_CONTEXT_TYPE = "concierge"
+
+# Preview length for a conversation's last message — enough for the dashboard row
+# without shipping the whole transcript.
+_CONVERSATION_PREVIEW_CHARS = 140
+
+# Upper bound on how many raw runs a single conversations page scans before
+# grouping — keeps the read bounded (never a full-collection scan) while leaving
+# room to dedupe several runs per customer down to ``limit`` conversations.
+_CONVERSATION_SCAN_CAP = 200
+
+
+class AdminWidgetView(BaseModel):
+    """The site's paw-bar widget as the owner dashboard needs it (D2 overview)."""
+
+    id: str
+    spec: PawBarSpec
+    agent_id: str = ""
+
+
+class OverviewCounts(BaseModel):
+    """Cheap per-site counters for the dashboard header (D2)."""
+
+    conversations: int = 0
+    pending_decisions: int = 0
+    handoffs: int = 0
+
+
+class SiteOverviewResponse(BaseModel):
+    """GET /paw-bar/admin/site/{id}/overview payload (D2).
+
+    ``widget`` is ``None`` when the site has no paw-bar widget yet (a published
+    site whose concierge widget was never created) — the toggle + greeting still
+    render off the Site, and every count is 0.
+    """
+
+    widget: AdminWidgetView | None = None
+    enabled: bool
+    greeting: str
+    counts: OverviewCounts
+
+
+class ConversationItem(BaseModel):
+    customer_ref: str
+    last_message_at: str
+    preview: str
+
+
+class ConversationsResponse(BaseModel):
+    """GET /paw-bar/admin/site/{id}/conversations payload (D2).
+
+    ``unsupported`` stays False on this deployment: concierge runs ARE listable
+    (the ChatRunDoc compound index backs the per-site query). The field is part of
+    the frozen contract so the frontend degrades gracefully if a future backend
+    can't serve the list. ``cursor`` is the ISO ``createdAt`` to page older
+    conversations from; ``None`` when the scan reached the end.
+    """
+
+    items: list[ConversationItem] = Field(default_factory=list)
+    cursor: str | None = None
+    unsupported: bool = False
+
+
+class DecisionItem(BaseModel):
+    id: str
+    verb_or_kind: str
+    summary: str
+    status: str
+    created_at: str
+
+
+class DecisionsResponse(BaseModel):
+    items: list[DecisionItem] = Field(default_factory=list)
+
+
+class HandoffItem(BaseModel):
+    contact: str
+    question: str
+    transcript_ref: str
+    created_at: str
+
+
+class HandoffsResponse(BaseModel):
+    items: list[HandoffItem] = Field(default_factory=list)
+
+
+async def _resolve_site_and_widget(
+    site_id: str, workspace_id: str
+) -> tuple[Any, PawBarWidget | None]:
+    """Resolve a site id → (Site, its paw-bar widget) both workspace-scoped (D2).
+
+    Step 1 loads the Site scoped to the caller's workspace (cross-tenant / bad id
+    → 404, via the shared ``_load_site_scoped``). Step 2 resolves the site's
+    paw-bar widget from ``Site.pocket_id``, ALSO workspace-scoped, so the returned
+    widget always belongs to the caller's tenant. Returns ``widget=None`` when the
+    site has no paw-bar widget yet (the concierge was never wired) — the callers
+    degrade to an empty view rather than 404, because the SITE exists and its
+    owner-facing settings are still meaningful.
+    """
+    site = await _load_site_scoped(site_id, workspace_id)
+    widgets = await _store().list_widgets(
+        pocket_id=site.pocket_id, workspace_id=workspace_id, limit=1
+    )
+    widget = widgets[0] if widgets else None
+    return site, widget
+
+
+def _decision_verb_or_kind(event_type: str) -> str:
+    """Map a parked decision's ``event_type`` to the contract's ``verb_or_kind``.
+
+    A gated concierge action parks ``event_type="paw_bar_action:<verb>"`` (see
+    ``decision_loop.propose_customer_action``) → return ``<verb>``. Any other
+    event is an ingest customer reply → return ``"customer_reply"``.
+    """
+    if event_type.startswith("paw_bar_action:"):
+        return event_type.split(":", 1)[1] or "action"
+    return "customer_reply"
+
+
+def _decision_summary(decision: Any) -> str:
+    """One-line owner-facing summary of a parked decision (D2 decisions list).
+
+    Once a human has answered (delivered / declined), the operator's reply is the
+    most useful summary; while pending, describe the request from its
+    ``verb_or_kind``. Kept terse — the dashboard row is a glance, not the detail
+    view.
+    """
+    reply = str(getattr(decision, "reply", "") or "").strip()
+    if reply:
+        return reply
+    kind = _decision_verb_or_kind(str(getattr(decision, "event_type", "") or ""))
+    if kind == "customer_reply":
+        return "Customer request awaiting a reply"
+    return f"Visitor '{kind}' action awaiting a decision"
+
+
+@router.get(
+    "/paw-bar/admin/site/{site_id}/overview",
+    response_model=SiteOverviewResponse,
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def get_site_overview(
+    site_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+) -> SiteOverviewResponse:
+    """Aggregate a site's concierge widget, kill-switch state, and cheap counts.
+
+    Admin-authed, workspace-scoped (cross-tenant site id → 404). Counts are cheap
+    (COUNT / distinct) and each is scoped to THIS site's widget / pocket — never
+    pocket-wide or workspace-wide. Every count degrades to 0 on a missing widget
+    or an unavailable backing store rather than failing the whole overview.
+    """
+    site, widget = await _resolve_site_and_widget(site_id, workspace_id)
+
+    counts = OverviewCounts()
+    widget_view: AdminWidgetView | None = None
+    if widget is not None:
+        widget_view = AdminWidgetView(id=widget.id, spec=widget.spec, agent_id=widget.agent_id)
+        counts.pending_decisions = await _store().count_pending_decisions(widget.id)
+        counts.handoffs = await _count_handoffs(widget.id, workspace_id)
+    # Conversations are pocket-scoped (a Site is 1:1 with its pocket), so the
+    # count stands even when the widget row is absent.
+    counts.conversations = await _count_conversations(site.pocket_id, workspace_id)
+
+    return SiteOverviewResponse(
+        widget=widget_view,
+        enabled=site.concierge_enabled,
+        greeting=site.concierge_greeting,
+        counts=counts,
+    )
+
+
+@router.get(
+    "/paw-bar/admin/site/{site_id}/conversations",
+    response_model=ConversationsResponse,
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def get_site_conversations(
+    site_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    cursor: str | None = Query(None),
+    workspace_id: str = Depends(current_workspace_id),
+) -> ConversationsResponse:
+    """Recent concierge conversations for a site, newest first (D2).
+
+    Concierge runs persist as ``ChatRunDoc`` (context_type "concierge",
+    scope_id = the site's pocket). The compound (workspace, context_type,
+    scope_id, createdAt) index backs an efficient per-site query, so this is
+    LISTABLE (``unsupported`` stays False). Runs are grouped by customer_ref into
+    one conversation each (most-recent run wins for the preview + timestamp). The
+    scan window is bounded (never a full-collection read). Cross-site isolation:
+    scope_id is the site's OWN pocket, so a sibling site's runs never match.
+    """
+    site = await _load_site_scoped(site_id, workspace_id)
+    return await _list_conversations(site.pocket_id, workspace_id, limit=limit, cursor=cursor)
+
+
+@router.get(
+    "/paw-bar/admin/site/{site_id}/decisions",
+    response_model=DecisionsResponse,
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def get_site_decisions(
+    site_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    workspace_id: str = Depends(current_workspace_id),
+) -> DecisionsResponse:
+    """Recent decisions raised on a site's concierge widget, newest first (D2).
+
+    Reads the paw_bar ``DecisionStatus`` rows filtered ``WHERE widget_id = ?`` —
+    the airtight cross-site isolation seam (the widget was resolved
+    workspace-scoped, so its id belongs to this tenant, and a sibling widget's id
+    never matches). Each row maps to {id (the Instinct action id, the Tray join
+    key), verb_or_kind, summary, status, created_at}. No widget → empty list.
+    """
+    _site, widget = await _resolve_site_and_widget(site_id, workspace_id)
+    if widget is None:
+        return DecisionsResponse(items=[])
+    decisions = await _store().list_decisions_for_widget(widget.id, limit=limit)
+    items = [
+        DecisionItem(
+            # Prefer the Instinct action id so the dashboard can deep-link the
+            # decision into The Tray; fall back to the row id for a pre-loop row.
+            id=d.instinct_action_id or d.id,
+            verb_or_kind=_decision_verb_or_kind(d.event_type),
+            summary=_decision_summary(d),
+            status=d.state.value,
+            created_at=d.created_at.isoformat(),
+        )
+        for d in decisions
+    ]
+    return DecisionsResponse(items=items)
+
+
+@router.get(
+    "/paw-bar/admin/site/{site_id}/handoffs",
+    response_model=HandoffsResponse,
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def get_site_handoffs(
+    site_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    workspace_id: str = Depends(current_workspace_id),
+) -> HandoffsResponse:
+    """Human-handoff requests captured for a site's concierge widget (D2).
+
+    Reads ``_paw_handoffs`` Fabric objects scoped to this widget + workspace. The
+    capture path does not exist yet (SS-6, deferred), so this returns an empty but
+    well-shaped list in v1. When a producer ships, each object's properties map to
+    {contact, question, transcript_ref, created_at}. Cross-site isolation is the
+    ``widget_id`` property filter (a sibling widget's handoffs never match).
+    """
+    _site, widget = await _resolve_site_and_widget(site_id, workspace_id)
+    if widget is None:
+        return HandoffsResponse(items=[])
+    objects = await _query_handoff_objects(widget.id, workspace_id, limit=limit)
+    items = [
+        HandoffItem(
+            contact=str(o.properties.get("contact", "") or ""),
+            question=str(o.properties.get("question", "") or ""),
+            transcript_ref=str(o.properties.get("transcript_ref", "") or ""),
+            created_at=o.created_at.isoformat() if getattr(o, "created_at", None) else "",
+        )
+        for o in objects
+    ]
+    return HandoffsResponse(items=items)
+
+
+# --- D2 aggregation data-source helpers -------------------------------------
+
+
+async def _list_conversations(
+    pocket_id: str, workspace_id: str, *, limit: int, cursor: str | None
+) -> ConversationsResponse:
+    """Group concierge ``ChatRunDoc`` runs into per-customer conversations.
+
+    Fetches a BOUNDED window of the site's concierge runs (index-backed, newest
+    first, optionally older than ``cursor``), then dedupes by customer_ref keeping
+    the most-recent run per customer. Returns up to ``limit`` conversations plus a
+    cursor (the oldest scanned run's timestamp) when the window filled — the
+    signal that older conversations remain. Best-effort: a store error degrades to
+    an empty, well-shaped payload rather than failing the dashboard.
+    """
+    from datetime import datetime
+
+    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+    try:
+        conditions: list[Any] = [
+            ChatRunDoc.workspace == workspace_id,
+            ChatRunDoc.context_type == _CONCIERGE_CONTEXT_TYPE,
+            ChatRunDoc.scope_id == pocket_id,
+        ]
+        if cursor:
+            try:
+                conditions.append(ChatRunDoc.createdAt < datetime.fromisoformat(cursor))
+            except ValueError:
+                pass  # A malformed cursor is ignored — start from the newest run.
+        runs = (
+            await ChatRunDoc.find(*conditions)
+            .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
+            .limit(_CONVERSATION_SCAN_CAP)
+            .to_list()
+        )
+    except Exception:  # noqa: BLE001 — a read failure must not 500 the dashboard
+        logger.warning("conversations read failed for pocket %s", pocket_id, exc_info=True)
+        return ConversationsResponse(items=[], cursor=None, unsupported=False)
+
+    items: list[ConversationItem] = []
+    seen: set[str] = set()
+    for run in runs:
+        if run.user_id in seen:
+            continue
+        seen.add(run.user_id)
+        when = run.ended_at or run.createdAt
+        items.append(
+            ConversationItem(
+                customer_ref=run.user_id,
+                last_message_at=when.isoformat() if when else "",
+                preview=(run.partial_text or "")[:_CONVERSATION_PREVIEW_CHARS],
+            )
+        )
+        if len(items) >= limit:
+            break
+
+    # A cursor is offered only when the scan hit its cap (older runs may remain);
+    # it is the oldest run we looked at, so the next page continues strictly older.
+    next_cursor = (
+        runs[-1].createdAt.isoformat()
+        if len(runs) >= _CONVERSATION_SCAN_CAP and runs
+        else None
+    )
+    return ConversationsResponse(items=items, cursor=next_cursor, unsupported=False)
+
+
+async def _count_conversations(pocket_id: str, workspace_id: str) -> int:
+    """Count DISTINCT concierge customers for a site (D2 overview).
+
+    Scans a BOUNDED window of the site's concierge runs (index-backed, capped at
+    ``_CONVERSATION_SCAN_CAP`` — never a full-collection read) and counts distinct
+    customer_refs. Bounded rather than exact so a very busy site can't turn the
+    overview into an unbounded scan; the badge is a "recent activity" signal, not
+    an audited total. Best-effort: any read error degrades to 0.
+    """
+    try:
+        from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+        runs = (
+            await ChatRunDoc.find(
+                ChatRunDoc.workspace == workspace_id,
+                ChatRunDoc.context_type == _CONCIERGE_CONTEXT_TYPE,
+                ChatRunDoc.scope_id == pocket_id,
+            )
+            .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
+            .limit(_CONVERSATION_SCAN_CAP)
+            .to_list()
+        )
+        return len({run.user_id for run in runs})
+    except Exception:  # noqa: BLE001 — an overview count is best-effort
+        logger.debug("conversations count failed for pocket %s", pocket_id, exc_info=True)
+        return 0
+
+
+async def _query_handoff_objects(widget_id: str, workspace_id: str, *, limit: int) -> list[Any]:
+    """Query ``_paw_handoffs`` Fabric objects for one widget (D2 handoffs).
+
+    Scoped to the widget (a ``widget_id`` object property) AND the workspace. No
+    producer exists yet, so this returns [] in v1. Best-effort: a Fabric error
+    degrades to an empty list.
+    """
+    try:
+        from pocketpaw.fabric.models import FabricQuery
+        from pocketpaw_ee.api import get_fabric_store
+
+        fabric = get_fabric_store(workspace_id=workspace_id)
+        result = await fabric.query(
+            FabricQuery(
+                type_name=_PAW_HANDOFFS_TYPE,
+                filters={"widget_id": widget_id},
+                limit=limit,
+            ),
+            workspace_id=workspace_id,
+        )
+        return list(result.objects)
+    except Exception:  # noqa: BLE001 — a read failure must not 500 the dashboard
+        logger.warning("handoffs read failed for widget %s", widget_id, exc_info=True)
+        return []
+
+
+async def _count_handoffs(widget_id: str, workspace_id: str) -> int:
+    """Cheap COUNT of a widget's ``_paw_handoffs`` objects (D2 overview).
+
+    Reuses the scoped Fabric query but reads only its ``total`` (a COUNT(*)) — the
+    row payload isn't materialized. 0 in v1 (no producer). Best-effort → 0.
+    """
+    try:
+        from pocketpaw.fabric.models import FabricQuery
+        from pocketpaw_ee.api import get_fabric_store
+
+        fabric = get_fabric_store(workspace_id=workspace_id)
+        result = await fabric.query(
+            FabricQuery(type_name=_PAW_HANDOFFS_TYPE, filters={"widget_id": widget_id}, limit=1),
+            workspace_id=workspace_id,
+        )
+        return result.total
+    except Exception:  # noqa: BLE001 — an overview count is best-effort
+        logger.debug("handoffs count failed for widget %s", widget_id, exc_info=True)
+        return 0
 
 
 # ---------------------------------------------------------------------------

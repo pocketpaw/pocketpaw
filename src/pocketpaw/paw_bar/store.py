@@ -1,4 +1,16 @@
 # ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
+# Updated: 2026-07-16 (D2 owner aggregation reads) — added two widget-keyed
+#   decision reads for the per-site Concierge dashboard: list_decisions_for_widget
+#   (recent decisions for ONE widget, newest first) and count_pending_decisions
+#   (cheap COUNT of the widget's undecided rows for the overview). Both filter on
+#   ``widget_id`` ONLY — deliberately NOT on the in-row ``workspace_id`` column,
+#   because that column stores the widget OWNER (decision_loop.resolve_workspace_id
+#   returns widget.owner, e.g. "user:maya"), NOT the physical workspace id the
+#   dashboard authenticates with. The caller resolves the widget workspace-scoped
+#   FIRST (site -> Site -> its paw-bar widget, all tenant-scoped), so a widget_id
+#   in hand already belongs to the caller's tenant; scoping the decision read on
+#   the owner column too would wrongly hide every row. This is the airtight
+#   cross-site isolation seam (one widget -> its own decisions only).
 # Updated: 2026-07-16 (C1 hardening) — count_events_since gains an optional
 #   event_type filter so the dedicated gated-action rate cap can count only
 #   proposal-generating actions ("pawbar_gated_action") separately from the
@@ -685,6 +697,53 @@ class PawBarStore:
             ) as cur:
                 row = await cur.fetchone()
                 return self._row_to_decision(row) if row else None
+
+    async def list_decisions_for_widget(
+        self, widget_id: str, limit: int = 50
+    ) -> list[DecisionStatus]:
+        """Recent decisions for ONE widget, newest first (D2 owner dashboard).
+
+        The owner-facing read behind GET /paw-bar/admin/site/{id}/decisions: the
+        operator sees the customer requests that raised a decision on THIS site's
+        concierge widget, and whether each is still pending or has been answered.
+
+        Filters on ``widget_id`` ONLY. The row's ``workspace_id`` column holds the
+        widget OWNER (decision_loop stamps it from ``widget.owner``), not the
+        physical dashboard workspace, so it is NOT a valid tenant filter here — and
+        it doesn't need to be: the caller resolved the widget workspace-scoped
+        before this call, so ``widget_id`` already names a widget in the caller's
+        tenant. That makes this the cross-site isolation seam — a sibling site's
+        widget has a different id and never matches. Served by the existing
+        ``idx_pp_decisions_customer`` (widget_id, customer_ref, created_at DESC)
+        index; ``limit`` bounds the scan so the dashboard never loads the world.
+        """
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM paw_bar_decisions"
+                " WHERE widget_id = ?"
+                " ORDER BY created_at DESC LIMIT ?",
+                (widget_id, limit),
+            ) as cur:
+                return [self._row_to_decision(row) async for row in cur]
+
+    async def count_pending_decisions(self, widget_id: str) -> int:
+        """Count the widget's undecided (state='pending') decisions (D2 overview).
+
+        A cheap COUNT for the dashboard's ``pending_decisions`` badge — never loads
+        the rows. Same widget-only filter (and same isolation rationale) as
+        :meth:`list_decisions_for_widget`: the widget is already tenant-resolved,
+        and the in-row ``workspace_id`` column is the OWNER, not a tenant key.
+        """
+        await self._ensure_schema()
+        async with self._conn() as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM paw_bar_decisions WHERE widget_id = ? AND state = 'pending'",
+                (widget_id,),
+            ) as cur:
+                row = await cur.fetchone()
+                return row[0] if row else 0
 
     # ---------------- Carts (C1 — visitor-scoped commerce state) ----------------
 
