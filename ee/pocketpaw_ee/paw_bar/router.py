@@ -1,8 +1,17 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-16 (D2 security review — role gate + empty-pocket guard) —
+#   the four D2 reads now gate on ``require_action("paw_bar.read")`` (ADMIN — the
+#   caller's WORKSPACE ROLE), NOT the coarse ``require_scope("admin")`` that
+#   admitted any authenticated dashboard user (a member/viewer could read another
+#   owner's visitor conversations). The role check binds to the SESSION workspace
+#   (``workspace_dep=current_workspace_id``), the same one the reads scope data to,
+#   so tenancy stays session-derived. Also ``_resolve_site_and_widget`` now returns
+#   no widget on an empty ``Site.pocket_id`` (finding #2 — an empty pocket_id would
+#   otherwise widen ``list_widgets`` and resolve a sibling's widget).
 # Updated: 2026-07-16 (Paw Bar concierge dashboard reads, D2) — added four OWNER
 #   aggregation reads for the per-site Concierge dashboard, all under
-#   /paw-bar/admin/site/{site_id}/*, all ``require_scope("admin")`` +
-#   workspace-scoped: (1) GET /overview — {widget, enabled, greeting, counts} with
+#   /paw-bar/admin/site/{site_id}/*, role-gated (``require_action("paw_bar.read")``)
+#   + workspace-scoped: (1) GET /overview — {widget, enabled, greeting, counts} with
 #   cheap COUNT/distinct counters; (2) GET /conversations — recent concierge
 #   ``ChatRunDoc`` runs grouped by customer_ref (LISTABLE via the run model's
 #   (workspace, context_type, scope_id, createdAt) index; bounded scan + optional
@@ -170,9 +179,19 @@ from pocketpaw.paw_bar.models import (
     PawBarWidget,
     PawBarWidgetPublic,
 )
-from pocketpaw_ee.cloud._core.deps import current_workspace_id
+from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_action
 
 logger = logging.getLogger(__name__)
+
+# Role gate for the D2 concierge dashboard reads. ``require_action`` enforces the
+# caller's WORKSPACE ROLE against the ``paw_bar.read`` rule (ADMIN — owner/admin
+# only, not member); replaces the coarse ``require_scope("admin")`` that admitted
+# any authenticated dashboard user. ``workspace_dep=current_workspace_id`` binds
+# the role check to the SESSION's active workspace (never a path/query value — the
+# D2 routes carry ``{site_id}``, not ``{workspace_id}``, so the default
+# path-sourced dep would read an attacker-suppliable query param), the SAME
+# workspace the reads scope their data to.
+_require_paw_bar_read = require_action("paw_bar.read", workspace_dep=current_workspace_id)
 
 router = APIRouter(tags=["PawBar"])
 
@@ -1020,6 +1039,13 @@ async def _resolve_site_and_widget(
     owner-facing settings are still meaningful.
     """
     site = await _load_site_scoped(site_id, workspace_id)
+    # Belt-and-suspenders (security review finding #2): never resolve a widget on
+    # an EMPTY pocket_id. ``list_widgets`` drops the pocket filter on a falsy
+    # pocket_id, so a bad write that ever left ``Site.pocket_id`` blank would
+    # otherwise match the workspace's FIRST widget — a sibling site's concierge.
+    # A site with no pocket has no concierge widget by definition; return None.
+    if not site.pocket_id:
+        return site, None
     widgets = await _store().list_widgets(
         pocket_id=site.pocket_id, workspace_id=workspace_id, limit=1
     )
@@ -1059,7 +1085,7 @@ def _decision_summary(decision: Any) -> str:
 @router.get(
     "/paw-bar/admin/site/{site_id}/overview",
     response_model=SiteOverviewResponse,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_read)],
 )
 async def get_site_overview(
     site_id: str,
@@ -1095,7 +1121,7 @@ async def get_site_overview(
 @router.get(
     "/paw-bar/admin/site/{site_id}/conversations",
     response_model=ConversationsResponse,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_read)],
 )
 async def get_site_conversations(
     site_id: str,
@@ -1120,7 +1146,7 @@ async def get_site_conversations(
 @router.get(
     "/paw-bar/admin/site/{site_id}/decisions",
     response_model=DecisionsResponse,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_read)],
 )
 async def get_site_decisions(
     site_id: str,
@@ -1157,7 +1183,7 @@ async def get_site_decisions(
 @router.get(
     "/paw-bar/admin/site/{site_id}/handoffs",
     response_model=HandoffsResponse,
-    dependencies=[Depends(require_scope("admin"))],
+    dependencies=[Depends(_require_paw_bar_read)],
 )
 async def get_site_handoffs(
     site_id: str,

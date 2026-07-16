@@ -2,12 +2,17 @@
 # (D2). Created 2026-07-16: covers the four per-site Concierge dashboard reads under
 # /paw-bar/admin/site/{site_id}/* — overview, conversations, decisions, handoffs.
 # Layers:
-#   * Auth: require_scope("admin") — an unauthenticated caller gets 403 (enforce_scope).
+#   * Auth ROLE gate (D2 security review): the reads use require_action("paw_bar.read")
+#     (ADMIN). A member session gets 403 on all 4 reads; admin + owner get 200.
 #   * Tenancy: a cross-tenant / malformed site id → 404 (never leaks existence).
 #   * CROSS-SITE ISOLATION (the key security test): a second site + widget in the
 #     SAME workspace is absent from this site's decisions, conversations, and
 #     handoffs — each read is bound to THIS site's widget/pocket, never pocket-wide
 #     or workspace-wide.
+#   * CROSS-WORKSPACE ISOLATION (belt-and-suspenders): a second workspace's widget +
+#     decisions never appear in workspace-1's reads.
+#   * Empty-pocket_id guard: a site with a blank pocket_id resolves widget=None (no
+#     sibling leak) rather than widening the widget lookup.
 #   * Overview shape + counts (pending decisions from the DecisionStatus table,
 #     conversations from ChatRunDoc, handoffs from Fabric).
 #   * Decisions filtered to the widget + mapped to {id, verb_or_kind, summary,
@@ -19,6 +24,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -121,7 +127,9 @@ async def _mk_run(**ov: Any):
     return doc
 
 
-async def _mk_handoff(fabric, widget_id: str, **props: Any):
+async def _mk_handoff(fabric, widget_id: str, *, workspace: str = "ws-1", **props: Any):
+    # The type is defined for ws-1 in the fixture; create_object resolves it by id
+    # unscoped, so a ws-2 object reuses the same type_id but stamps its own workspace.
     type_ = await fabric.get_type_by_name("_paw_handoffs", workspace_id="ws-1")
     p = dict(
         widget_id=widget_id,
@@ -130,7 +138,7 @@ async def _mk_handoff(fabric, widget_id: str, **props: Any):
         transcript_ref="tr-1",
     )
     p.update(props)
-    return await fabric.create_object(type_id=type_.id, properties=p, workspace_id="ws-1")
+    return await fabric.create_object(type_id=type_.id, properties=p, workspace_id=workspace)
 
 
 # --------------------------------------------------------------------------- #
@@ -153,58 +161,88 @@ async def fabric(tmp_path):
     return fs
 
 
-@pytest_asyncio.fixture
-async def client(mongo_db, store, fabric, monkeypatch):
-    """One admin app client backed by the tmp paw_bar store (widget + decisions),
-    Beanie (Site + ChatRunDoc), and a tmp Fabric store (handoffs).
-    ``current_workspace_id`` is pinned to ws-1. Yields ``(client, store, fabric)``.
+def _fake_user(role: str, workspace_id: str = "ws-1", user_id: str = "u1") -> SimpleNamespace:
+    """User stand-in shaped like ``ee.cloud.models.user.User`` — only the fields
+    the RBAC chain reads (``id``, ``active_workspace``, ``workspaces``). ``role`` is
+    the caller's WorkspaceRole in ``workspace_id`` (member | admin | owner)."""
+    return SimpleNamespace(
+        id=user_id,
+        active_workspace=workspace_id,
+        workspaces=[SimpleNamespace(workspace=workspace_id, role=role)],
+    )
+
+
+def _build_app(store, fabric, monkeypatch, *, role: str = "admin", workspace_id: str = "ws-1"):
+    """Mount the paw_bar router with the given caller ROLE + workspace.
+
+    ``current_active_user`` is overridden with a role-scoped stand-in so
+    ``require_action("paw_bar.read")`` runs its REAL role check;
+    ``current_workspace_id`` is pinned so the reads scope data to the same
+    workspace. The tmp paw_bar + Fabric stores are patched in.
     """
     from pocketpaw_ee.cloud._core.deps import current_workspace_id
     from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud.auth import current_active_user
     from pocketpaw_ee.paw_bar.router import router
 
     app = FastAPI()
     add_error_handler(app)
     app.include_router(router)
-    app.dependency_overrides[current_workspace_id] = lambda: "ws-1"
+
+    user = _fake_user(role=role, workspace_id=workspace_id)
+    app.dependency_overrides[current_active_user] = lambda: user
+    app.dependency_overrides[current_workspace_id] = lambda: workspace_id
 
     monkeypatch.setattr("pocketpaw_ee.paw_bar.router._store", lambda: store)
     monkeypatch.setattr("pocketpaw_ee.api.get_fabric_store", lambda *a, **k: fabric)
+    return app
 
+
+@pytest_asyncio.fixture
+async def client(mongo_db, store, fabric, monkeypatch):
+    """Default (ADMIN) app client backed by the tmp paw_bar store (widget +
+    decisions), Beanie (Site + ChatRunDoc), and a tmp Fabric store (handoffs).
+    Pinned to ws-1. Yields ``(client, store, fabric)``.
+    """
+    app = _build_app(store, fabric, monkeypatch, role="admin")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://t") as c:
         yield c, store, fabric
 
 
 # --------------------------------------------------------------------------- #
-# Layer 1 — auth: require_scope("admin")
+# Layer 1 — auth ROLE gate: require_action("paw_bar.read") (ADMIN)
 # --------------------------------------------------------------------------- #
 
+_ALL_READS = ("overview", "conversations", "decisions", "handoffs")
 
-@pytest.mark.enforce_scope
+
 @pytest.mark.asyncio
-async def test_overview_requires_admin(mongo_db, tmp_path, monkeypatch):
-    """An unauthenticated caller is 403'd before any resolution (require_scope)."""
-    from pocketpaw_ee.cloud._core.http import add_error_handler
-    from pocketpaw_ee.paw_bar.router import router
-
-    app = FastAPI()
-    add_error_handler(app)
-
-    @app.middleware("http")
-    async def _no_auth(request, call_next):
-        return await call_next(request)  # stamps nothing → unauthenticated
-
-    app.include_router(router)
-    monkeypatch.setattr(
-        "pocketpaw_ee.paw_bar.router._store",
-        lambda: PawBarStore(tmp_path / "auth.db"),
-    )
+async def test_member_role_is_forbidden_on_all_reads(mongo_db, store, fabric, monkeypatch):
+    """A workspace MEMBER (below admin) gets 403 on every read — the reads carry
+    visitor PII + owner decision context, so member/viewer must not see them."""
+    site = await _site()
+    await store.create_widget(_widget())
+    app = _build_app(store, fabric, monkeypatch, role="member")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://t") as c:
-        for path in ("overview", "conversations", "decisions", "handoffs"):
-            res = await c.get(f"/paw-bar/admin/site/000000000000000000000001/{path}")
-            assert res.status_code == 403, f"{path}: {res.status_code}"
+        for path in _ALL_READS:
+            res = await c.get(f"/paw-bar/admin/site/{site.id}/{path}")
+            assert res.status_code == 403, f"{path}: {res.status_code} {res.text}"
+
+
+@pytest.mark.parametrize("role", ["admin", "owner"])
+@pytest.mark.asyncio
+async def test_admin_and_owner_roles_are_allowed(role, mongo_db, store, fabric, monkeypatch):
+    """Admin and owner both clear the role gate (200) on every read."""
+    site = await _site()
+    await store.create_widget(_widget())
+    app = _build_app(store, fabric, monkeypatch, role=role)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        for path in _ALL_READS:
+            res = await c.get(f"/paw-bar/admin/site/{site.id}/{path}")
+            assert res.status_code == 200, f"{role}/{path}: {res.status_code} {res.text}"
 
 
 # --------------------------------------------------------------------------- #
@@ -454,3 +492,69 @@ async def test_sibling_site_absent_from_all_reads(client):
     assert overview["counts"]["pending_decisions"] == 1
     assert overview["counts"]["conversations"] == 1
     assert overview["counts"]["handoffs"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# Layer 8 — CROSS-WORKSPACE ISOLATION (belt-and-suspenders) + empty pocket_id
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_second_workspace_absent_from_reads(client):
+    """A second workspace's widget + decisions + runs + handoffs never appear in
+    workspace-1's reads. Even when the foreign widget reuses the SAME pocket_id,
+    the workspace-scoped widget lookup + the workspace-filtered conversations query
+    keep the tenants apart.
+    """
+    c, store, fabric = client  # this client is scoped to ws-1
+
+    # ws-1: the site + its widget (workspace_id ws-1).
+    site_a = await _site(workspace="ws-1", pocket_id="pocket-1")
+    widget_a = await store.create_widget(_widget(pocket_id="pocket-1", workspace_id="ws-1"))
+    await _mk_decision(store, widget_a.id, instinct_action_id="ws1-dec")
+    await _mk_run(workspace="ws-1", scope_id="pocket-1", user_id="cust-1")
+    await _mk_handoff(fabric, widget_a.id, workspace="ws-1", contact="ws1-contact")
+
+    # ws-2: a foreign widget on the SAME pocket id, with its own data.
+    widget_b = await store.create_widget(
+        _widget(pocket_id="pocket-1", workspace_id="ws-2", spec=_spec("pocket-1", "pp_b"))
+    )
+    await _mk_decision(store, widget_b.id, instinct_action_id="ws2-dec", workspace_id="ws-2")
+    await _mk_run(workspace="ws-2", scope_id="pocket-1", user_id="cust-2")
+    await _mk_handoff(fabric, widget_b.id, workspace="ws-2", contact="ws2-contact")
+
+    # ws-1 admin reads site_a: the widget resolves to ws-1's widget (not ws-2's),
+    # and none of ws-2's data bleeds through.
+    decisions = (await c.get(f"/paw-bar/admin/site/{site_a.id}/decisions")).json()["items"]
+    assert [d["id"] for d in decisions] == ["ws1-dec"]
+
+    convos = (await c.get(f"/paw-bar/admin/site/{site_a.id}/conversations")).json()["items"]
+    assert [x["customer_ref"] for x in convos] == ["cust-1"]
+
+    handoffs = (await c.get(f"/paw-bar/admin/site/{site_a.id}/handoffs")).json()["items"]
+    assert [h["contact"] for h in handoffs] == ["ws1-contact"]
+
+    overview = (await c.get(f"/paw-bar/admin/site/{site_a.id}/overview")).json()
+    assert overview["widget"]["id"] == widget_a.id
+    assert overview["counts"] == {"conversations": 1, "pending_decisions": 1, "handoffs": 1}
+
+
+@pytest.mark.asyncio
+async def test_empty_pocket_id_resolves_no_widget(client):
+    """A site whose pocket_id is blank must resolve widget=None, never widen the
+    widget lookup into a sibling's widget (security review finding #2)."""
+    c, store, _fabric = client
+    # A sibling widget exists in the same workspace; the empty-pocket site must NOT
+    # pick it up.
+    await store.create_widget(_widget(pocket_id="pocket-real"))
+    site = await _site(pocket_id="")
+
+    overview = (await c.get(f"/paw-bar/admin/site/{site.id}/overview")).json()
+    assert overview["widget"] is None
+    assert overview["counts"]["pending_decisions"] == 0
+
+    decisions = (await c.get(f"/paw-bar/admin/site/{site.id}/decisions")).json()
+    assert decisions["items"] == []
+
+    handoffs = (await c.get(f"/paw-bar/admin/site/{site.id}/handoffs")).json()
+    assert handoffs["items"] == []
