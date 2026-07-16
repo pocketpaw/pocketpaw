@@ -72,6 +72,7 @@ class _FakeDaytonaClient:
     exec_invocations: list[dict] = field(default_factory=list)
     stop_calls: list[str] = field(default_factory=list)
     delete_calls: list[str] = field(default_factory=list)
+    upload_calls: list[dict] = field(default_factory=list)
     _counter: int = 0
 
     async def create_sandbox(self, name, auto_stop_interval=3600, **kwargs):  # noqa: ANN001
@@ -112,6 +113,10 @@ class _FakeDaytonaClient:
         self.clone_calls.append(
             {"id": sandbox_id, "repo_url": repo_url, "path": path, "branch": branch}
         )
+
+    async def upload_bytes(self, sandbox_id, data, remote_path):  # noqa: ANN001
+        # The broker clone path (CM-3c) ships the packed tree in via upload_bytes.
+        self.upload_calls.append({"id": sandbox_id, "data": data, "path": remote_path})
 
     async def list_files(self, sandbox_id, path="."):  # noqa: ANN001
         return list(self.files)
@@ -158,6 +163,60 @@ async def test_open_provisions_clones_and_marks_ready() -> None:
     fetched = await sandbox_service.get_sandbox("w1", "u1", view.id)
     assert fetched.status == "ready"
     assert fetched.sandbox_id == "dtn-1"
+
+
+async def test_open_via_broker_clones_server_side_no_token_in_vm(monkeypatch) -> None:
+    # CM-3c: when a connection can authenticate the repo, open_sandbox clones via
+    # the BROKER (server-side) instead of the public in-VM git_clone. The packed
+    # tree ships in via upload_bytes, the public clone is NOT called, the feature
+    # branch is still created, and the token never reaches the VM.
+    from datetime import UTC, datetime
+
+    from pocketpaw_ee.cloud.codeconnect import service as codeconnect_service
+    from pocketpaw_ee.cloud.websandbox import broker
+    from pocketpaw_ee.cloud.websandbox.repoauth import ProviderId, ScopedRepoToken
+
+    conn = await codeconnect_service.save_connection("w1", "u1", "inst-1")
+
+    class _Prov:
+        provider_id = ProviderId.GITHUB
+
+        async def mint_repo_token(self, connection_id, repo, *, scopes=None, now=None):  # noqa: ANN001
+            assert connection_id == conn.installation_id
+            return ScopedRepoToken(
+                provider=ProviderId.GITHUB,
+                token="tok-SECRET",
+                expires_at=datetime(2026, 7, 16, tzinfo=UTC),
+                repo=repo,
+                scopes={},
+            )
+
+    monkeypatch.setattr(broker, "get_repo_auth_provider", lambda _p: _Prov())
+
+    # Stub the real git/tar step; assert it received the CLEAN url (tokenizing is
+    # its own, server-side concern) and return canned tar bytes.
+    async def fake_pack(token, clean_url, branch):  # noqa: ANN001
+        assert clean_url == "https://github.com/owner/repo.git"
+        assert token.token == "tok-SECRET"
+        return b"PACKED-TREE"
+
+    monkeypatch.setattr(broker, "_clone_and_pack_repo", fake_pack)
+
+    fake = _FakeDaytonaClient()
+    view = await provision.open_sandbox(
+        "w1", "u1", {"repo": "https://github.com/owner/repo.git"}, client=fake
+    )
+
+    assert view.status == "ready"
+    # The broker shipped the packed tree in; the public clone was NOT used.
+    assert fake.clone_calls == []
+    assert len(fake.upload_calls) == 1
+    assert fake.upload_calls[0]["data"] == b"PACKED-TREE"
+    # The auto feature branch still got created in the VM.
+    assert view.branch is not None and view.branch.startswith("paw/edit-")
+    # THE INVARIANT: the token appears in nothing sent to the VM.
+    blob = repr(fake.upload_calls) + repr(fake.exec_invocations)
+    assert "tok-SECRET" not in blob
 
 
 async def test_open_creates_and_binds_edit_branch() -> None:

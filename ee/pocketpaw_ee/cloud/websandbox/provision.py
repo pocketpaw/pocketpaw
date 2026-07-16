@@ -13,10 +13,12 @@
 #   1. ``open_sandbox`` — upsert a registry row (pending) → opening →
 #      cold-provision a Daytona VM (auto_stop 5 / archive 5 / delete-on-stop) →
 #      wait for boot →
-#      clone the PUBLIC repo (no credentials) → create + check out a
-#      ``paw/edit-<hex>`` feature branch IN the VM so AI edits never touch the
-#      checked-out default branch (WC-5a) → bind the Daytona id + branch + mark
-#      ready. On any mid-flight failure the row is marked ``stopped`` and a
+#      clone the repo: via the BROKER (server-side, token-isolated) when the
+#      caller has a GitHub connection that can reach it (CM-3c — the token NEVER
+#      enters the VM), else the PUBLIC in-VM clone (no credentials) → create +
+#      check out a ``paw/edit-<hex>`` feature branch IN the VM so AI edits never
+#      touch the checked-out default branch (WC-5a) → bind the Daytona id + branch
+#      + mark ready. On any mid-flight failure the row is marked ``stopped`` and a
 #      CloudError is raised — the row is never left stuck in ``opening`` silently,
 #      and a half-created VM is best-effort torn down.
 #   2. ``get_tree`` — resolve the row (tenant-scoped) → authorize on its Daytona
@@ -47,6 +49,7 @@ from fastapi import FastAPI
 
 from pocketpaw_ee.cloud._core.errors import BadRequest, CloudError, ConflictError, with_cause
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
+from pocketpaw_ee.cloud.websandbox import broker as websandbox_broker
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
 from pocketpaw_ee.cloud.websandbox.constants import WEBSANDBOX_WORKDIR
 from pocketpaw_ee.cloud.websandbox.domain import WebSandboxView
@@ -135,15 +138,17 @@ def _max_per_user() -> int:
 # ---------------------------------------------------------------------------
 
 
-def _validate_public_repo_url(repo: str) -> str:
-    """Validate ``repo`` is a plausible public http(s) git URL, returning it.
+def _validate_repo_url(repo: str) -> str:
+    """Validate ``repo`` is a clean http(s) git URL (no embedded creds), returning it.
 
     Fail-closed on anything that isn't an ``http``/``https`` URL with a host —
     ``file://``, ``git@`` SSH, ``ssh://``, or bare paths are rejected so the
-    provisioner never hands the sandbox a local-path or credentialed remote.
-    A URL carrying embedded credentials (``https://user:token@host/repo``) is
-    rejected too: this is the PUBLIC-repo path, and userinfo would otherwise be
-    written into the VM's git remote and persist into snapshots.
+    provisioner never hands the sandbox a local-path remote. A URL carrying
+    embedded credentials (``https://user:token@host/repo``) is rejected too: auth
+    is the broker's job (CM-3c mints a repo-scoped token server-side), so a
+    client-supplied credential must never be accepted — it would otherwise be
+    written into the VM's git remote and persist into snapshots. Private repos are
+    supported via the broker, not via credentials in the URL.
     """
     candidate = (repo or "").strip()
     if not candidate:
@@ -152,12 +157,12 @@ def _validate_public_repo_url(repo: str) -> str:
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise BadRequest(
             "websandbox.invalid_repo",
-            "Repository must be a public http(s) URL (e.g. https://github.com/owner/repo.git)",
+            "Repository must be an http(s) URL (e.g. https://github.com/owner/repo.git)",
         )
     if parsed.username or parsed.password or "@" in parsed.netloc:
         raise BadRequest(
             "websandbox.invalid_repo",
-            "Repository URL must not embed credentials — only public repos are supported here",
+            "Repository URL must not embed credentials — private repos connect via GitHub",
         )
     return candidate
 
@@ -190,19 +195,21 @@ async def open_sandbox(
     body: OpenSandboxRequest | dict,
     client: DaytonaClient | None = None,
 ) -> WebSandboxView:
-    """Cold-provision a Daytona VM and clone a PUBLIC repo into it.
+    """Cold-provision a Daytona VM and clone a repo into it.
 
     Flow: upsert the registry row (``pending``) → mark ``opening`` →
     ``create_sandbox(auto_stop 5 / archive 5 / delete-on-stop)`` → ``wait_for_sandbox`` →
-    ``git_clone`` the public repo (NO credentials) into the project dir →
-    bind the Daytona sandbox id + mark ``ready`` → return the ready view.
+    clone the repo into the project dir — via the broker (server-side,
+    token-isolated) when a connection can authenticate it (CM-3c), else the
+    credential-free public in-VM ``git_clone`` → bind the Daytona sandbox id +
+    mark ``ready`` → return the ready view.
 
     On any failure after the row exists, the row is advanced to ``stopped`` and a
     ``CloudError`` is raised (never left stuck in ``opening``); a VM created before
     the failure is best-effort stopped+deleted so a crash can't leak a live VM.
     """
     body = OpenSandboxRequest.model_validate(body)
-    repo_url = _validate_public_repo_url(body.repo)
+    repo_url = _validate_repo_url(body.repo)
     daytona = _require_client(client)
 
     # Quota + re-open bookkeeping — read the caller's OWN rows once (tenant- and
@@ -248,15 +255,30 @@ async def open_sandbox(
             daytona_id, target_state="started", timeout=_BOOT_TIMEOUT_SECONDS
         )
 
-        # 4. Clone the PUBLIC repo — pass NO credentials (clean; no token ever
-        #    involved). Clone into the sandbox's project dir.
+        # 4. Clone the repo into the sandbox's project dir.
         # Clone INTO the pinned workspace dir (WEBSANDBOX_WORKDIR = /home/daytona)
         # so the file tree, the terminal cwd, and the clone all agree on one
         # directory. get_project_dir() returns /root on this image, which the
         # terminal never opens in — that mismatch is why the tree looked empty.
+        #
+        # CM-3c: if the caller has a GitHub connection whose installation can reach
+        # this repo, clone it via the BROKER — the token is minted + used entirely
+        # server-side and NEVER enters the VM (the VM receives files + a token-free
+        # git remote). Otherwise, clone the PUBLIC repo in-VM with NO credentials.
         project_dir = WEBSANDBOX_WORKDIR
         await daytona.execute_command(daytona_id, f"mkdir -p {project_dir}")
-        await daytona.git_clone(daytona_id, repo_url, project_dir, branch=body.branch)
+        scoped = await websandbox_broker.resolve_repo_token(workspace_id, user_id, repo_url)
+        if scoped is not None:
+            await websandbox_broker.clone_into_vm(
+                daytona,
+                daytona_id,
+                scoped,
+                project_dir,
+                clean_url=repo_url,
+                branch=body.branch,
+            )
+        else:
+            await daytona.git_clone(daytona_id, repo_url, project_dir, branch=body.branch)
 
         # 4b. Check out a fresh ``paw/edit-<hex>`` branch IN the VM (WC-5a) so
         #     every AI edit lands on an isolated branch, never the checked-out
