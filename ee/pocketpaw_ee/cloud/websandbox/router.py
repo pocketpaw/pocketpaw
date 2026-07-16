@@ -33,7 +33,12 @@
 # ``GET /websandbox/{row_id}/git/status`` and ``POST .../git/stage|commit|push``.
 # Thin adapters over ``websandbox/git.py`` (git runs in the VM; the push token
 # never enters it). Tenancy comes only from the RequestContext; a push failure is
-# a ``pushed:false`` body, never a 500. PR-open is a separate slice (P4b).
+# a ``pushed:false`` body, never a 500.
+#
+# Changed 2026-07-16 (WC-7/P4b, feat/code-mode): added ``POST .../git/pr`` — open a
+# GitHub pull request for the pushed ``paw/edit-*`` branch via the GitHub App
+# (server-side; the token never enters the VM). Thin adapter over
+# ``websandbox/git.py:open_pr``; tenancy comes only from the RequestContext.
 #
 # Changed 2026-07-16 (WC-8/P3b, feat/code-mode): added the live-preview endpoint —
 # ``GET /websandbox/{row_id}/preview?port=<int>`` returns the iframe-embeddable
@@ -64,10 +69,12 @@ from pocketpaw_ee.cloud.websandbox import provision as websandbox_provision
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
 from pocketpaw_ee.cloud.websandbox.dto import (
     CommitRequest,
+    CreatePrRequest,
     CreateSandboxRequest,
     EditRequest,
     EditResponse,
     GitCommitResponse,
+    GitPrResponse,
     GitPushResponse,
     GitStatusResponse,
     OpenSandboxRequest,
@@ -222,6 +229,17 @@ async def git_push(
     """Push the sandbox's feature branch to origin (never 500s on push failure)."""
     workspace_id = _require_workspace(ctx)
     return await websandbox_git.push(workspace_id, ctx.user_id, row_id)
+
+
+@router.post("/{row_id}/git/pr", response_model=GitPrResponse)
+async def git_open_pr(
+    row_id: str,
+    body: CreatePrRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> GitPrResponse:
+    """Open a GitHub pull request for the sandbox's pushed feature branch."""
+    workspace_id = _require_workspace(ctx)
+    return await websandbox_git.open_pr(workspace_id, ctx.user_id, row_id, body)
 
 
 # ---------------------------------------------------------------------------

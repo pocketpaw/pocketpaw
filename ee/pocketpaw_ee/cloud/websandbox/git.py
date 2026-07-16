@@ -9,7 +9,10 @@
 # ``websandbox/service.py`` — every op resolves + fail-closed-authorizes the row
 # exactly like ``preview.py`` / ``edit.py`` BEFORE any VM touch.
 #
-# SCOPE: status/stage/commit/push only. PR-open is a separate slice (P4b).
+# SCOPE: status/stage/commit/push, plus open-a-PR (P4b). ``open_pr`` is the only op
+# that does NOT touch the VM — it opens a GitHub pull request server-side via the
+# GitHub App (the token never enters the VM), for the ``paw/edit-*`` branch the
+# push already put on the remote.
 #
 # SECURITY CRUX: every client-supplied value that lands in a shell string — each
 # staged ``path``, the commit ``message``, and the commit identity name/email — is
@@ -31,20 +34,24 @@ import logging
 import re
 import shlex
 
-from pocketpaw_ee.cloud._core.errors import CloudError, ConflictError
+from pocketpaw_ee.cloud._core.errors import BadRequest, CloudError, ConflictError
 from pocketpaw_ee.cloud.codeconnect import service as codeconnect_service
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
+from pocketpaw_ee.cloud.websandbox import broker as websandbox_broker
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
 from pocketpaw_ee.cloud.websandbox.constants import WEBSANDBOX_WORKDIR
 from pocketpaw_ee.cloud.websandbox.domain import WebSandboxView
 from pocketpaw_ee.cloud.websandbox.dto import (
     CommitRequest,
+    CreatePrRequest,
     GitCommitResponse,
     GitFileEntry,
+    GitPrResponse,
     GitPushResponse,
     GitStatusResponse,
     StageRequest,
 )
+from pocketpaw_ee.cloud.websandbox.githubapp import GitHubAppError, get_github_app_client
 
 logger = logging.getLogger(__name__)
 
@@ -332,4 +339,116 @@ async def push(
     return GitPushResponse(pushed=False, branch=branch, detail=detail)
 
 
-__all__ = ["commit", "git_status", "push", "stage"]
+# ---------------------------------------------------------------------------
+# open pull request (P4b).
+# ---------------------------------------------------------------------------
+
+
+def _repo_full_name(repo_raw: str) -> str | None:
+    """Normalize the row's ``repo`` to ``owner/name`` (URL or bare ``owner/repo``).
+
+    Reuses the broker's URL parser for an https git URL; if the row instead stored a
+    bare ``owner/repo`` (no scheme), accepts that too. Returns ``None`` for anything
+    that isn't a recognizable two-segment repo.
+    """
+    full = websandbox_broker.repo_full_name(repo_raw)
+    if full:
+        return full
+    cleaned = (repo_raw or "").strip().removesuffix(".git").strip("/")
+    if "://" in cleaned:
+        return None
+    parts = [p for p in cleaned.split("/") if p]
+    return "/".join(parts[:2]) if len(parts) == 2 else None
+
+
+async def _resolve_pr_installation(
+    workspace_id: str,
+    user_id: str,
+    repo_full: str,
+    github_client,  # noqa: ANN001 — a GitHubAppClient-shaped object (DI seam)
+) -> tuple[str | None, str | None]:
+    """Find the first GitHub connection whose installation can reach ``repo_full``.
+
+    Broker-style routing: iterate the caller's connections and probe each with
+    ``get_default_branch`` — which mints a repo-scoped token GitHub declines when the
+    installation can't see the repo, so a success both proves reachability AND yields
+    the PR base branch in one call. Returns ``(installation_id, base)`` for the first
+    reachable connection, or ``(None, None)`` when none can reach it.
+    """
+    conns = await codeconnect_service.list_connections(workspace_id, user_id)
+    for conn in conns:
+        if conn.provider != "github":
+            continue
+        try:
+            base = await github_client.get_default_branch(conn.installation_id, repo_full)
+        except GitHubAppError:
+            continue  # this installation can't reach the repo — try the next
+        return conn.installation_id, base
+    return None, None
+
+
+async def open_pr(
+    workspace_id: str,
+    user_id: str,
+    row_id: str,
+    body: CreatePrRequest | dict,
+    *,
+    client: DaytonaClient | None = None,
+    github_client=None,  # noqa: ANN001 — a GitHubAppClient-shaped object (DI seam)
+) -> GitPrResponse:
+    """Open a GitHub pull request for the sandbox's pushed feature branch.
+
+    Resolves + authorizes the row (same guard as the other git ops), then works
+    entirely against GitHub server-side — the VM is never touched. The head is the
+    row's ``paw/edit-*`` branch (already pushed via ``push``); the base is the repo's
+    default branch. The installation is resolved broker-style from the caller's
+    connections. This does NOT auto-push: if the head isn't on the remote yet,
+    GitHub's 422 message ("make sure the branch is pushed") is surfaced as-is.
+    """
+    body = CreatePrRequest.model_validate(body)
+    row, _daytona = await _resolve_ready(workspace_id, user_id, row_id, client)
+
+    head = row.branch or ""
+    if not head:
+        raise ConflictError(
+            "websandbox.no_branch", "This sandbox has no feature branch to open a pull request from"
+        )
+
+    repo_full = _repo_full_name(row.repo)
+    if repo_full is None:
+        raise BadRequest(
+            "websandbox.pr_repo_unrecognized",
+            "This workspace's repository isn't a recognizable GitHub repository",
+        )
+
+    gh = github_client if github_client is not None else get_github_app_client()
+    if gh is None:
+        raise CloudError(
+            503, "websandbox.github_not_configured", "GitHub is not configured for pull requests"
+        )
+
+    installation_id, base = await _resolve_pr_installation(workspace_id, user_id, repo_full, gh)
+    if installation_id is None:
+        # No connection whose installation can reach this repo — the user must
+        # connect GitHub and grant this repository to the Paw app.
+        raise BadRequest(
+            "websandbox.pr_no_connection",
+            "Connect GitHub and grant this repository access before opening a pull request",
+        )
+
+    result = await gh.create_pull_request(
+        installation_id,
+        repo_full,
+        head=head,
+        base=base,
+        title=body.title,
+        body=body.body,
+    )
+    url = result.get("url")
+    number = result.get("number")
+    if not url or number is None:
+        raise CloudError(502, "websandbox.pr_failed", "GitHub returned an incomplete pull request")
+    return GitPrResponse(url=url, number=int(number))
+
+
+__all__ = ["commit", "git_status", "open_pr", "push", "stage"]

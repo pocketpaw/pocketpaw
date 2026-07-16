@@ -232,6 +232,24 @@ class GitPushResponse(BaseModel):
     detail: str | None = None
 
 
+class CreatePrRequest(BaseModel):
+    """Open a pull request for the sandbox's feature branch (WC-7/P4b).
+
+    Only the ``title`` and optional ``body`` cross the wire; the head branch, base
+    branch, and repo are all server-resolved from the sandbox row + the caller's
+    GitHub connection (never client-supplied)."""
+
+    title: str = Field(..., min_length=1, max_length=256)
+    body: str = Field(default="", max_length=65536)
+
+
+class GitPrResponse(BaseModel):
+    """An opened pull request — its ``url`` (html_url) and ``number``."""
+
+    url: str
+    number: int
+
+
 # ---------------------------------------------------------------------------
 # WC-5a — AI edit agent (Cmd-K).
 # ---------------------------------------------------------------------------
@@ -281,12 +299,14 @@ class EditResponse(BaseModel):
 
 __all__ = [
     "CommitRequest",
+    "CreatePrRequest",
     "CreateSandboxRequest",
     "EditRequest",
     "EditResponse",
     "EditSelection",
     "GitCommitResponse",
     "GitFileEntry",
+    "GitPrResponse",
     "GitPushResponse",
     "GitStatusResponse",
     "OpenSandboxRequest",

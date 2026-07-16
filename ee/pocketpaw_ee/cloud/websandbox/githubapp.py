@@ -332,6 +332,86 @@ class GitHubAppClient:
             )
         return list(resp.json().get("repositories", []))
 
+    async def get_default_branch(
+        self, installation_id: str, repo: str, *, now: datetime | None = None
+    ) -> str:
+        """The default branch of ``repo`` (``owner/name``) — the PR base.
+
+        Mints a repo-scoped ``metadata:read`` token (which GitHub declines when the
+        installation can't reach the repo — the same reachability signal the broker
+        relies on) and reads ``GET /repos/{owner}/{name}``. A non-200 (incl. a 404
+        for a repo this installation can't see) raises a clean ``GitHubAppError`` so
+        the caller can try the next connection. Falls back to ``main`` if the field
+        is absent.
+        """
+        meta = await self.mint_installation_token(
+            installation_id,
+            repositories=[_repo_short_name(repo)],
+            permissions={"metadata": "read"},
+            now=now,
+        )
+        owner, name = _split_owner_repo(repo)
+        url = f"{self._api_base}/repos/{owner}/{name}"
+        headers = {
+            "Authorization": f"token {meta.token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        resp = await self._request("GET", url, headers=headers)
+        if resp.status_code != 200:
+            raise GitHubAppError(
+                "websandbox.repo_unreachable",
+                f"Could not read repository {repo} (HTTP {resp.status_code})",
+                status=404 if resp.status_code == 404 else 502,
+            )
+        return (resp.json() or {}).get("default_branch") or "main"
+
+    async def create_pull_request(
+        self,
+        installation_id: str,
+        repo: str,
+        *,
+        head: str,
+        base: str,
+        title: str,
+        body: str = "",
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Open a pull request on ``repo`` (``owner/name``); return ``{url, number}``.
+
+        Mints a repo-scoped token with least-privilege write (contents +
+        pull_requests) and ``POST /repos/{owner}/{name}/pulls`` with
+        ``{title, head, base, body}``. 201 → the PR's ``html_url`` + ``number``. A
+        422 is GitHub's field-level rejection (no commits between head/base, the
+        head branch isn't pushed, or a PR already exists) — surfaced as a clean
+        422 ``GitHubAppError`` carrying GitHub's own ``errors[].message`` when
+        present. Any other non-201 is a clean error carrying the status.
+        """
+        inst = await self.mint_installation_token(
+            installation_id,
+            repositories=[_repo_short_name(repo)],
+            permissions={"contents": "write", "pull_requests": "write"},
+            now=now,
+        )
+        owner, name = _split_owner_repo(repo)
+        url = f"{self._api_base}/repos/{owner}/{name}/pulls"
+        headers = {
+            "Authorization": f"token {inst.token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        payload = {"title": title, "head": head, "base": base, "body": body}
+        resp = await self._request("POST", url, headers=headers, json=payload)
+        if resp.status_code == 201:
+            data = resp.json() or {}
+            return {"url": data.get("html_url"), "number": data.get("number")}
+        if resp.status_code == 422:
+            raise GitHubAppError("websandbox.pr_invalid", _pr_error_message(resp), status=422)
+        raise GitHubAppError(
+            "websandbox.pr_failed",
+            f"GitHub declined to open the pull request (HTTP {resp.status_code})",
+        )
+
     async def get_installation_account(
         self, installation_id: str, *, now: datetime | None = None
     ) -> dict[str, Any] | None:
@@ -379,6 +459,32 @@ class GitHubAppClient:
 def _repo_short_name(repo: str) -> str:
     """``owner/repo`` → ``repo`` (GitHub's access-token endpoint scopes by name)."""
     return repo.removesuffix(".git").split("/")[-1]
+
+
+def _split_owner_repo(repo: str) -> tuple[str, str]:
+    """``owner/repo`` → ``(owner, repo)`` for building a ``/repos/{owner}/{repo}`` URL."""
+    cleaned = repo.removesuffix(".git").strip("/")
+    owner, _, name = cleaned.partition("/")
+    return owner, name
+
+
+def _pr_error_message(resp: _HttpResponse) -> str:
+    """Extract a human message from a GitHub 422 PR response.
+
+    Prefers the first ``errors[].message`` (GitHub's specific reason, e.g. "No
+    commits between …" or "A pull request already exists …"), then the top-level
+    ``message``, then a sensible default that hints the branch may not be pushed.
+    """
+    try:
+        data = resp.json() or {}
+    except Exception:  # noqa: BLE001 — a non-JSON body just falls through to the default
+        data = {}
+    for err in data.get("errors") or []:
+        if isinstance(err, dict) and err.get("message"):
+            return str(err["message"])
+    if data.get("message"):
+        return str(data["message"])
+    return "GitHub could not open the pull request (make sure the branch is pushed)"
 
 
 def _parse_expiry(value: Any) -> datetime:

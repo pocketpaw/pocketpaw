@@ -182,6 +182,111 @@ async def test_mint_installation_token_error_when_token_missing() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Pull request (WC-7/P4b) + default branch.
+# ---------------------------------------------------------------------------
+
+
+async def test_create_pull_request_posts_and_returns_url_and_number() -> None:
+    http = _FakeHttp(
+        {
+            "access_tokens": _token_resp(),  # repo-scoped token minted first
+            "/pulls": _FakeResp(
+                201,
+                {"html_url": "https://github.com/acme/api/pull/7", "number": 7},
+            ),
+        }
+    )
+    client = _client(http)
+
+    result = await client.create_pull_request(
+        "inst-1",
+        "acme/api",
+        head="paw/edit-abc",
+        base="main",
+        title="Ship the thing",
+        body="does the thing",
+        now=_FIXED_NOW,
+    )
+
+    assert result == {"url": "https://github.com/acme/api/pull/7", "number": 7}
+    # The token was minted repo-scoped with contents+pull_requests write.
+    mint = http.calls[0]
+    assert mint["json"]["repositories"] == ["api"]
+    assert mint["json"]["permissions"] == {"contents": "write", "pull_requests": "write"}
+    # The PR POST hit the right URL/body/headers.
+    pr = http.calls[1]
+    assert pr["method"] == "POST"
+    assert pr["url"].endswith("/repos/acme/api/pulls")
+    assert pr["json"] == {
+        "title": "Ship the thing",
+        "head": "paw/edit-abc",
+        "base": "main",
+        "body": "does the thing",
+    }
+    assert pr["headers"]["Authorization"] == "token ghs_installationtoken"
+    assert pr["headers"]["X-GitHub-Api-Version"] == "2022-11-28"
+
+
+async def test_create_pull_request_422_surfaces_github_message() -> None:
+    http = _FakeHttp(
+        {
+            "access_tokens": _token_resp(),
+            "/pulls": _FakeResp(
+                422,
+                {
+                    "message": "Validation Failed",
+                    "errors": [{"message": "No commits between main and paw/edit-abc"}],
+                },
+            ),
+        }
+    )
+    client = _client(http)
+
+    with pytest.raises(GitHubAppError) as exc:
+        await client.create_pull_request(
+            "inst-1", "acme/api", head="paw/edit-abc", base="main",
+            title="t", body="", now=_FIXED_NOW,
+        )
+    assert exc.value.status_code == 422
+    assert "No commits between" in exc.value.message
+
+
+async def test_create_pull_request_other_error_is_clean() -> None:
+    http = _FakeHttp(
+        {"access_tokens": _token_resp(), "/pulls": _FakeResp(500, {"message": "boom"})}
+    )
+    client = _client(http)
+    with pytest.raises(GitHubAppError) as exc:
+        await client.create_pull_request(
+            "inst-1", "acme/api", head="h", base="main", title="t", now=_FIXED_NOW
+        )
+    assert exc.value.code == "websandbox.pr_failed"
+
+
+async def test_get_default_branch_returns_repo_default() -> None:
+    http = _FakeHttp(
+        {
+            "access_tokens": _token_resp(),
+            "/repos/acme/api": _FakeResp(200, {"default_branch": "trunk"}),
+        }
+    )
+    client = _client(http)
+    assert await client.get_default_branch("inst-1", "acme/api", now=_FIXED_NOW) == "trunk"
+
+
+async def test_get_default_branch_unreachable_repo_raises() -> None:
+    http = _FakeHttp(
+        {
+            "access_tokens": _token_resp(),
+            "/repos/acme/api": _FakeResp(404, {"message": "Not Found"}),
+        }
+    )
+    client = _client(http)
+    with pytest.raises(GitHubAppError):
+        await client.get_default_branch("inst-1", "acme/api", now=_FIXED_NOW)
+
+
+# ---------------------------------------------------------------------------
 # Repo listing (picker) + upstream URL.
 # ---------------------------------------------------------------------------
 

@@ -32,6 +32,7 @@ from pocketpaw_ee.cloud.codeconnect import service as codeconnect_service
 from pocketpaw_ee.cloud.websandbox import git as git_svc
 from pocketpaw_ee.cloud.websandbox import service as sandbox_service
 from pocketpaw_ee.cloud.websandbox.constants import WEBSANDBOX_WORKDIR
+from pocketpaw_ee.cloud.websandbox.githubapp import GitHubAppError
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
 
@@ -300,3 +301,133 @@ async def test_status_not_ready_when_unprovisioned() -> None:
         await git_svc.git_status("w1", "u1", row.id, client=fake)
     assert exc.value.code == "websandbox.not_ready"
     assert fake.calls == []
+
+
+# ---------------------------------------------------------------------------
+# open pull request (WC-7/P4b).
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _FakeGitHub:
+    """Drop-in for the GitHubAppClient DI seam — only the two methods open_pr uses."""
+
+    default_branch: str = "main"
+    pr_url: str = "https://github.com/acme/api/pull/7"
+    pr_number: int = 7
+    reachable: bool = True
+    raise_pr_422: bool = False
+    calls: list = field(default_factory=list)
+
+    async def get_default_branch(self, installation_id, repo, *, now=None):  # noqa: ANN001
+        self.calls.append(("default_branch", installation_id, repo))
+        if not self.reachable:
+            raise GitHubAppError("websandbox.repo_unreachable", "not found", status=404)
+        return self.default_branch
+
+    async def create_pull_request(
+        self, installation_id, repo, *, head, base, title, body="", now=None
+    ):  # noqa: ANN001
+        self.calls.append(("pr", installation_id, repo, head, base, title, body))
+        if self.raise_pr_422:
+            raise GitHubAppError(
+                "websandbox.pr_invalid", "No commits between main and paw/edit-abc", status=422
+            )
+        return {"url": self.pr_url, "number": self.pr_number}
+
+
+async def test_open_pr_returns_url_and_number() -> None:
+    await codeconnect_service.save_connection("w1", "u1", "inst-1", account_login="octocat")
+    row_id = await _ready_row(branch="paw/edit-abc")
+    gh = _FakeGitHub(
+        default_branch="main", pr_url="https://github.com/acme/api/pull/9", pr_number=9
+    )
+
+    resp = await git_svc.open_pr(
+        "w1", "u1", row_id, {"title": "Ship it", "body": "please"},
+        client=_FakeGitDaytona(), github_client=gh,
+    )
+
+    assert resp.url == "https://github.com/acme/api/pull/9"
+    assert resp.number == 9
+    # The PR opened against the repo's default branch with the row's feature branch.
+    pr_call = next(c for c in gh.calls if c[0] == "pr")
+    _, inst, repo, head, base, title, body = pr_call
+    assert inst == "inst-1" and repo == "acme/api"
+    assert head == "paw/edit-abc" and base == "main"
+    assert title == "Ship it" and body == "please"
+
+
+async def test_open_pr_surfaces_github_422() -> None:
+    await codeconnect_service.save_connection("w1", "u1", "inst-1", account_login="octocat")
+    row_id = await _ready_row(branch="paw/edit-abc")
+    gh = _FakeGitHub(raise_pr_422=True)
+
+    with pytest.raises(CloudError) as exc:
+        await git_svc.open_pr(
+            "w1", "u1", row_id, {"title": "t"}, client=_FakeGitDaytona(), github_client=gh
+        )
+    assert exc.value.status_code == 422
+
+
+async def test_open_pr_no_reachable_connection_is_400() -> None:
+    # A connection exists but its installation can't reach the repo.
+    await codeconnect_service.save_connection("w1", "u1", "inst-1", account_login="octocat")
+    row_id = await _ready_row()
+    gh = _FakeGitHub(reachable=False)
+
+    with pytest.raises(CloudError) as exc:
+        await git_svc.open_pr(
+            "w1", "u1", row_id, {"title": "t"}, client=_FakeGitDaytona(), github_client=gh
+        )
+    assert exc.value.status_code == 400
+    # Never attempted the PR itself.
+    assert not any(c[0] == "pr" for c in gh.calls)
+
+
+async def test_open_pr_no_connection_at_all_is_400() -> None:
+    row_id = await _ready_row()  # no code connection seeded
+    gh = _FakeGitHub()
+
+    with pytest.raises(CloudError) as exc:
+        await git_svc.open_pr(
+            "w1", "u1", row_id, {"title": "t"}, client=_FakeGitDaytona(), github_client=gh
+        )
+    assert exc.value.status_code == 400
+
+
+async def test_open_pr_no_branch_is_clean_error() -> None:
+    await codeconnect_service.save_connection("w1", "u1", "inst-1", account_login="octocat")
+    row_id = await _ready_row(branch="")  # ready but no feature branch bound
+    gh = _FakeGitHub()
+
+    with pytest.raises(CloudError) as exc:
+        await git_svc.open_pr(
+            "w1", "u1", row_id, {"title": "t"}, client=_FakeGitDaytona(), github_client=gh
+        )
+    assert exc.value.code == "websandbox.no_branch"
+
+
+async def test_open_pr_denies_not_owned_row() -> None:
+    await codeconnect_service.save_connection("w2", "u1", "inst-1", account_login="octocat")
+    row_id = await _ready_row("w1", "u1")
+    gh = _FakeGitHub()
+
+    with pytest.raises(CloudError) as exc:
+        await git_svc.open_pr(
+            "w2", "u1", row_id, {"title": "t"}, client=_FakeGitDaytona(), github_client=gh
+        )
+    assert exc.value.status_code == 404
+
+
+async def test_open_pr_not_ready_when_unprovisioned() -> None:
+    row = await sandbox_service.create_sandbox(
+        "w1", "u1", {"repo": "https://github.com/acme/api.git", "status": "pending"}
+    )
+    gh = _FakeGitHub()
+
+    with pytest.raises(CloudError) as exc:
+        await git_svc.open_pr(
+            "w1", "u1", row.id, {"title": "t"}, client=_FakeGitDaytona(), github_client=gh
+        )
+    assert exc.value.code == "websandbox.not_ready"
