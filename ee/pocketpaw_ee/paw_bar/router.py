@@ -1,4 +1,15 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-16 (Paw Bar concierge settings + kill switch, D1 / SS-6) — the
+#   owner's on/off toggle + greeting. (a) GET /paw-bar/frame now refuses (403
+#   ``concierge_disabled``) when the resolved Site has ``concierge_enabled=False``,
+#   mirroring the empty-allowlist 403; chat + action/cart get the SAME 403 via
+#   ``resolve_site_key`` (the shared resolver), so all three public entry points fail
+#   closed on the kill switch, re-read per request. (b) The frame's ``window.__PAWBAR__``
+#   config now carries ``greeting`` (``Site.concierge_greeting``) for the glass app.
+#   (c) New admin surface: GET + PATCH /paw-bar/admin/site/{site_id}/settings —
+#   ``require_scope("admin")`` + workspace-scoped (cross-tenant id → 404), reads/writes
+#   ONLY ``concierge_enabled`` + ``concierge_greeting`` on the Site doc (the natural
+#   owner key — the fields live on the Site, not the widget).
 # Updated: 2026-07-16 (C1 hardening) — (a) the shared front-gate now validates
 #   customer_ref against a charset+length bound (400) as its cheapest check;
 #   (b) GET /paw-bar/cart records a cart-read marker so read enumeration counts
@@ -386,6 +397,14 @@ async def frame(
     # too-short key → 401 (never a 422), so the refusal is uniform with the chat path.
     site = await lookup_site_by_key(key)
 
+    # (1b) Kill switch (D1 / SS-6): the owner's ``concierge_enabled`` toggle. When
+    # off, refuse to render (403) — the same fail-closed shape as the empty-allowlist
+    # refusal below. Re-read on every request (``lookup_site_by_key`` does a fresh
+    # find_one, nothing is cached), so toggling off silences the frame immediately.
+    # Distinct from ``revoked`` (which cuts the KEY at 401 inside lookup_site_by_key).
+    if not site.concierge_enabled:
+        raise HTTPException(status_code=403, detail="concierge_disabled")
+
     # (2) The embedder gate: the CSP frame-ancestors header. Fail closed when no
     # allowlisted origin survives sanitization — refuse to render.
     csp = _frame_ancestors_csp(site.allowed_origins)
@@ -404,6 +423,9 @@ async def frame(
         "endpoint": api_base,
         "parentOrigin": _safe_parent_origin(po, site.allowed_origins),
         "mode": "concierge",
+        # D1 / SS-6 — the owner's opening line rides into the bootstrap config; the
+        # glass app renders it (D4) and falls back to its own default when "".
+        "greeting": site.concierge_greeting or "",
         "tokens": {},
     }
     html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT)
@@ -713,6 +735,114 @@ async def list_events(
     _require_owner_token(widget, x_paw_bar_token)
     events = await _store().recent_events(widget_id, limit=limit)
     return EventsListResponse(events=events, total=len(events))
+
+
+# ---------------------------------------------------------------------------
+# Admin: per-Site concierge settings (D1 / SS-6)
+#
+# The kill switch + greeting live on the SITE doc (not the widget), so the owner
+# read/update is keyed on ``site_id``, not a widget id. Auth mirrors the widget
+# admin CRUD above: ``require_scope("admin")`` (a signed-in dashboard session) +
+# the caller's ACTIVE workspace via ``current_workspace_id``. The lookup is
+# workspace-scoped, so another tenant's site id resolves to 404 and never leaks or
+# mutates. Reads/writes touch ONLY the two concierge fields — the site's publish /
+# billing / capture config is out of scope here. Co-located with the paw-bar
+# enforcement (the frame/chat/action gates) rather than the heavier sites control
+# plane so the owner surface and the switch it drives sit in one place.
+# ---------------------------------------------------------------------------
+
+
+class ConciergeSettingsUpdate(BaseModel):
+    """Partial update of a Site's concierge settings (D1).
+
+    Every field is optional; only the ones the client SENDS are written (tracked
+    via ``model_fields_set``), so a PATCH that carries just ``concierge_enabled``
+    leaves the greeting untouched and vice-versa.
+    """
+
+    concierge_enabled: bool | None = None
+    concierge_greeting: str | None = None
+
+
+class ConciergeSettingsResponse(BaseModel):
+    """The owner-facing view of a Site's concierge settings (D1)."""
+
+    site_id: str
+    concierge_enabled: bool
+    concierge_greeting: str
+
+
+async def _load_site_scoped(site_id: str, workspace_id: str) -> Any:
+    """Load a Site by id, scoped to the caller's workspace (cross-tenant → 404).
+
+    Mirrors ``sites.service._load`` (the canonical tenant-scoped Site reader) but
+    raises the router's ``HTTPException(404)`` instead of the service's domain
+    ``NotFound`` — a malformed/foreign/absent id is all one 404 so nothing leaks
+    across tenants. Kept local so the paw-bar router doesn't reach into the sites
+    service's private helper or its exception-translation layer.
+    """
+    from bson import ObjectId
+    from bson.errors import InvalidId
+
+    from pocketpaw_ee.cloud.models.site import Site
+
+    try:
+        oid = ObjectId(site_id)
+    except (InvalidId, TypeError):
+        raise HTTPException(404, "Site not found")
+    site = await Site.find_one({"_id": oid, "workspace": workspace_id})
+    if site is None:
+        raise HTTPException(404, "Site not found")
+    return site
+
+
+@router.get(
+    "/paw-bar/admin/site/{site_id}/settings",
+    response_model=ConciergeSettingsResponse,
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def get_site_concierge_settings(
+    site_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+) -> ConciergeSettingsResponse:
+    """Read a Site's concierge settings so the dashboard can render the toggle +
+    greeting field. Admin-authed, workspace-scoped (cross-tenant id → 404)."""
+    site = await _load_site_scoped(site_id, workspace_id)
+    return ConciergeSettingsResponse(
+        site_id=str(site.id),
+        concierge_enabled=site.concierge_enabled,
+        concierge_greeting=site.concierge_greeting,
+    )
+
+
+@router.patch(
+    "/paw-bar/admin/site/{site_id}/settings",
+    response_model=ConciergeSettingsResponse,
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def update_site_concierge_settings(
+    site_id: str,
+    req: ConciergeSettingsUpdate,
+    workspace_id: str = Depends(current_workspace_id),
+) -> ConciergeSettingsResponse:
+    """Toggle the kill switch and/or set the greeting on a Site (D1 / SS-6).
+
+    Only the fields the client SENT are applied (``model_fields_set``). Admin-authed
+    and workspace-scoped, so a cross-tenant site id 404s before anything is written.
+    The change is read on the NEXT public request (the gates re-``find_one`` the Site
+    every time), so toggling ``concierge_enabled`` off silences the bar immediately.
+    """
+    site = await _load_site_scoped(site_id, workspace_id)
+    for name in req.model_fields_set:
+        value = getattr(req, name)
+        if value is not None:
+            setattr(site, name, value)
+    await site.save()
+    return ConciergeSettingsResponse(
+        site_id=str(site.id),
+        concierge_enabled=site.concierge_enabled,
+        concierge_greeting=site.concierge_greeting,
+    )
 
 
 # ---------------------------------------------------------------------------

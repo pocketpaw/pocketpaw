@@ -115,6 +115,19 @@
 # ``auth.site_keys.resolve_site_key`` does on every concierge request. All defaults
 # are backward-compatible (existing docs read ``revoked=False`` + the default
 # scope set), so no migration.
+#
+# Updated 2026-07-16 (Paw Bar concierge settings + kill switch, D1 — folds in
+# staffed-sites SS-6): added the owner-facing concierge controls, distinct from the
+# key-level ``revoked`` flag above. ``concierge_enabled`` is the owner's on/off kill
+# switch for the concierge itself (NOT the embed key): the three public paw-bar
+# entry points (frame / chat / action) fail closed with a 403 when it is False, so
+# an owner can silence the bar without deleting the Site or rotating the key.
+# ``revoked`` still cuts the KEY (401, anti-enumeration); ``concierge_enabled=False``
+# refuses the resolved concierge (403) — two different switches. ``concierge_greeting``
+# is the opening line the glass bar renders; it rides into the frame's
+# ``window.__PAWBAR__`` config payload. Both default backward-compatibly
+# (``concierge_enabled=True`` + ``concierge_greeting=""``), so every existing Site
+# reads as enabled with no greeting — no migration.
 
 from __future__ import annotations
 
@@ -226,6 +239,19 @@ class Site(TimestampedDocument):
     # cut off without deleting the Site. Defaults False (every existing doc is
     # live), so no migration.
     revoked: bool = False
+    # Paw Bar concierge (D1 / SS-6): the OWNER's on/off kill switch for the
+    # concierge — distinct from ``revoked`` (which cuts the KEY). When False, the
+    # three public entry points (frame / chat / action) refuse with a 403, so the
+    # owner can silence the bar instantly without deleting the Site or rotating the
+    # key. Re-read on EVERY request (never cached on a warm client) so a toggle
+    # takes effect immediately. Defaults True (every existing site stays live), so
+    # no migration.
+    concierge_enabled: bool = True
+    # Paw Bar concierge (D1 / SS-6): the opening line the glass bar renders. Rides
+    # into the frame's ``window.__PAWBAR__`` config as ``greeting``; the glass app
+    # reads it in a parallel slice and falls back to its own default when "".
+    # Defaults "" (no custom greeting), so no migration.
+    concierge_greeting: str = ""
 
     def rotate_signed_key(self) -> str:
         """Regenerate the public embed key and return the new value (T1).

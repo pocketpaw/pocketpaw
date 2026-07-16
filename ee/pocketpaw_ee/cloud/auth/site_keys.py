@@ -47,6 +47,18 @@
 # is unchanged: the key is world-visible, so a raw ``curl`` POST was always
 # possible — CSP binds BROWSERS only; the real controls stay the rate-limit +
 # injection screen + the zero-authority CONCIERGE scope.
+#
+# Updated 2026-07-16 (Paw Bar concierge kill switch, D1 / SS-6): ``resolve_site_key``
+# now fails closed with a 403 when the resolved Site has ``concierge_enabled=False``
+# — the owner's on/off switch for the concierge (chat / action / cart all go through
+# this resolver). It is checked AFTER ``lookup_site_by_key`` (which stays 401-only to
+# preserve its anti-enumeration contract) and BEFORE the origin gate, at the point
+# where the Site is resolved, and is re-read on every request (a fresh ``find_one``,
+# never cached) so a toggle takes effect immediately. This is DISTINCT from
+# ``revoked``: ``revoked`` cuts the KEY (401, indistinguishable from a bad key);
+# ``concierge_enabled=False`` refuses the resolved concierge (403 ``concierge_disabled``).
+# The FRAME endpoint enforces the same switch inline (it calls ``lookup_site_by_key``
+# directly, not this resolver).
 
 from __future__ import annotations
 
@@ -174,6 +186,10 @@ async def resolve_site_key(
 
       1-4. **Key auth** (``lookup_site_by_key``): empty/short → 401, unknown → 401,
          revoked → 401, constant-time mismatch → 401.
+      4b. **Kill switch** (D1 / SS-6): the owner's ``concierge_enabled`` toggle. When
+         False the concierge is off → 403 ``concierge_disabled``. Re-read per request
+         (never cached) so toggling off takes effect immediately; distinct from
+         ``revoked`` (which cuts the KEY at 401).
       5. **Origin gate — dual-mode.**
          * ``frame_origin`` unset (inline / legacy widget): the request ``Origin``
            IS the embedder, so ``origin_allowed`` must place its host in the Site's
@@ -212,12 +228,21 @@ async def resolve_site_key(
         ``pocket_id`` from the Site, ``scopes`` copied from the Site.
 
     Raises:
-        HTTPException: 401 (bad/unknown/revoked/mismatched key) or 403 (origin not
+        HTTPException: 401 (bad/unknown/revoked/mismatched key), 403
+            (``concierge_disabled`` — owner kill switch off) or 403 (origin not
             allowed). Deliberately no distinct code for "does not exist" vs "wrong
             key" beyond the status — both are 401 so an attacker can't enumerate
             which embed keys are live.
     """
     site = await lookup_site_by_key(key)
+
+    # Kill switch (D1 / SS-6): the owner's on/off toggle for the concierge, checked
+    # the moment the Site is resolved and re-read on every request (never cached), so
+    # toggling it off silences chat/action/cart immediately. Distinct from ``revoked``
+    # (which cuts the KEY at 401): a disabled concierge is a 403 on a valid key. Placed
+    # before the origin gate so "this concierge is off" is the authoritative refusal.
+    if not site.concierge_enabled:
+        raise HTTPException(status_code=403, detail="concierge_disabled")
 
     # Dual-mode origin gate. Frame mode (request Origin == our frame origin) means
     # the embedder was already gated by the frame CSP, so we accept; otherwise the
