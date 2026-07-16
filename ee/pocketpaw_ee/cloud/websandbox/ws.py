@@ -285,7 +285,19 @@ async def terminal_websocket_endpoint(
     # File ops share this socket. FileRpc jails every path to the sandbox project
     # dir (resolved lazily on first use); it reuses the already-owner-authorized
     # client + sandbox_id and never re-authorizes per frame.
-    file_rpc = FileRpc(client, row.sandbox_id)
+    #
+    # Write-through durability (CM-2a′): build ONE overlay uploads service for the
+    # session and pass FileRpc a mirror closure bound to this tenant + row. Each
+    # editor save then also lands in blob storage; a mirror failure is swallowed
+    # inside FileRpc so it never fails the save.
+    overlay_uploads = websandbox_durability.build_uploads()
+
+    async def _mirror(rel_path: str, data: bytes) -> None:
+        await websandbox_durability.mirror_file(
+            workspace_id, user_id, row_id, rel_path, data, uploads=overlay_uploads
+        )
+
+    file_rpc = FileRpc(client, row.sandbox_id, on_write=_mirror)
 
     async def _touch() -> None:
         """Bump the row's activity heartbeat, throttled, swallowing errors."""

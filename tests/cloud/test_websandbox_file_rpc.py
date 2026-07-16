@@ -307,6 +307,38 @@ async def test_dispatch_missing_path_is_error_frame() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Write-through mirror hook (CM-2a′).
+# ---------------------------------------------------------------------------
+
+
+async def test_write_invokes_on_write_mirror_with_relpath_and_bytes() -> None:
+    client = _FakeFsClient()
+    mirrored: list[tuple[str, bytes]] = []
+
+    async def _spy(rel_path, data):  # noqa: ANN001
+        mirrored.append((rel_path, data))
+
+    rpc = FileRpc(client, "dtn-1", project_dir=client.project_dir, on_write=_spy)
+    await rpc.write_file("src/app.ts", "hello")
+
+    # The VM write landed, and the mirror got the project-relative path + bytes.
+    assert client.uploads == [(f"{PROJECT_DIR}/src/app.ts", b"hello")]
+    assert mirrored == [("src/app.ts", b"hello")]
+
+
+async def test_write_mirror_failure_does_not_fail_the_save() -> None:
+    client = _FakeFsClient()
+
+    async def _boom(rel_path, data):  # noqa: ANN001
+        raise RuntimeError("boom: blob storage down")
+
+    rpc = FileRpc(client, "dtn-1", project_dir=client.project_dir, on_write=_boom)
+    # Must NOT raise — the VM write already succeeded before the mirror ran.
+    await rpc.write_file("a.ts", "x")
+    assert client.uploads == [(f"{PROJECT_DIR}/a.ts", b"x")]
+
+
+# ---------------------------------------------------------------------------
 # Tier 2 — ws.py frame dispatch over the real auth path (mongomock).
 #
 # Reuses the WC-3 fakes/harness (a pty must still open so the receive loop runs),

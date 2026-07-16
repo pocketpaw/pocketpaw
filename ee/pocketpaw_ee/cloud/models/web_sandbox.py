@@ -25,6 +25,15 @@ auto-created ``paw/edit-<hex>`` feature branch the repo is checked out onto in
 the VM at open time, so AI edits never touch the checked-out default branch.
 Null until the provisioner creates it (right after the clone). No new index
 needed — it's read only via the owner-scoped registry row.
+
+Changed 2026-07-16 (CM-2a′ write-through, feat/code-mode): added ``overlay`` —
+the incremental durability tier. Every editor save (``file.write``) mirrors the
+file to the tenant's blob storage and records ``relpath -> FileRecord id`` here,
+so a crash / idle-out between full snapshots doesn't lose edits: ``open_project``
+replays the overlay onto the fresh clone. ``set_snapshot`` CLEARS it — a full
+workspace snapshot supersedes the incremental overlay (and clearing on snapshot
+is what avoids replaying a stale write over a since-deleted file). No new index
+needed — read only via the owner-scoped registry row.
 """
 
 from __future__ import annotations
@@ -55,6 +64,10 @@ class WebSandbox(Document):
     # The auto-created ``paw/edit-<hex>`` feature branch checked out in the VM at
     # open time (WC-5a). Null until the provisioner creates it after the clone.
     branch: str | None = None
+    # The write-through durability overlay (CM-2a′): ``relpath -> FileRecord id``
+    # for each editor-saved file mirrored to blob storage since the last full
+    # snapshot. Replayed onto a fresh clone on reopen; cleared by ``set_snapshot``.
+    overlay: dict[str, str] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

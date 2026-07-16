@@ -181,6 +181,27 @@ async def test_open_project_restores_snapshot_on_reprovision(monkeypatch) -> Non
     assert restored[0]["row_id"] == second.id
 
 
+async def test_open_project_restores_overlay_only_on_reprovision(monkeypatch) -> None:
+    # The crash-before-any-snapshot case: the row carries a write-through overlay
+    # but no snapshot. Restore must still fire.
+    project = await service.create_project(_WS, _USER, {"repo": _REPO})
+    fake = _FakeDaytonaClient()
+
+    restored: list[str] = []
+
+    async def _spy_restore(workspace_id, user_id, row_id, *, client=None):  # noqa: ANN001
+        restored.append(row_id)
+
+    monkeypatch.setattr(lifecycle.websandbox_durability, "restore_workspace", _spy_restore)
+
+    first = await lifecycle.open_project(_WS, _USER, project.id, client=fake)
+    await sandbox_service.set_overlay_entry(_WS, _USER, first.id, "a.ts", "file-1")
+    await sandbox_service.mark_reaped(first.id)
+
+    second = await lifecycle.open_project(_WS, _USER, project.id, client=fake)
+    assert restored == [second.id]
+
+
 async def test_open_project_swallows_restore_failure(monkeypatch) -> None:
     project = await service.create_project(_WS, _USER, {"repo": _REPO})
     fake = _FakeDaytonaClient()

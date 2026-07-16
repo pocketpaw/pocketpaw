@@ -99,27 +99,31 @@ async def _restore_if_snapshotted(
     sandbox: WebSandboxView,
     client: DaytonaClient | None,
 ) -> None:
-    """Restore the sandbox row's durable S3 snapshot into its fresh VM, if any.
+    """Restore the sandbox row's durable state into its fresh VM, if any.
 
-    The WebSandbox row is stable across reprovisions, so a ``snapshot_file_id``
-    captured on a prior disconnect (see ``websandbox.ws.snapshot_on_disconnect``)
-    is still on the row when we reprovision. A row with no snapshot (never
-    disconnected with work, or first open) is a clean no-op.
+    The WebSandbox row is stable across reprovisions, so both durability tiers
+    survive on the row when we reprovision: the ``snapshot_file_id`` (captured on
+    a prior clean disconnect) AND the write-through ``overlay`` (per-file edits
+    mirrored since the last snapshot — the tier that covers a crash / idle-out
+    before any disconnect snapshot). Restore fires when EITHER exists; a row with
+    neither (first open, or nothing edited) is a clean no-op.
 
     Best-effort by design: a restore failure (VM gone, S3 down, corrupt tarball)
     is logged and swallowed — the fresh clone from ``open_sandbox`` is still a
     usable workspace, so a durability miss must never fail the open.
     """
-    if not sandbox.snapshot_file_id:
+    if not sandbox.snapshot_file_id and not sandbox.overlay:
         return
     try:
         await websandbox_durability.restore_workspace(
             workspace_id, user_id, sandbox.id, client=client
         )
         logger.info(
-            "codeproject.open: restored snapshot=%s into sandbox=%s",
-            sandbox.snapshot_file_id,
+            "codeproject.open: restored durable state into sandbox=%s "
+            "(snapshot=%s, overlay=%d file(s))",
             sandbox.id,
+            sandbox.snapshot_file_id,
+            len(sandbox.overlay or {}),
         )
     except Exception:  # noqa: BLE001 — a fresh clone is still usable; never block open
         logger.warning(

@@ -38,11 +38,17 @@ from __future__ import annotations
 import logging
 import os
 import posixpath
+from collections.abc import Awaitable, Callable
 
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient
 from pocketpaw_ee.cloud.websandbox.constants import WEBSANDBOX_WORKDIR
 
 logger = logging.getLogger(__name__)
+
+# Best-effort write-through callback: (rel_path, encoded_bytes) -> awaitable.
+# ws.py binds this to the CM-2a′ blob-storage mirror; a bare FileRpc leaves it
+# None (no durability), which is exactly the shape the WC-4a tests exercise.
+OnWrite = Callable[[str, bytes], Awaitable[None]]
 
 # File-op size cap (KB). Applies to a read's downloaded bytes AND a write's
 # encoded content, so neither a huge file nor a huge payload can blow up the
@@ -141,10 +147,15 @@ class FileRpc:
         client: DaytonaClient,
         sandbox_id: str,
         project_dir: str | None = None,
+        on_write: OnWrite | None = None,
     ) -> None:
         self._client = client
         self._sandbox_id = sandbox_id
         self._project_dir = project_dir
+        # Best-effort write-through hook (CM-2a′): called with (rel_path, bytes)
+        # after a successful VM write so ws.py can mirror the file to durable blob
+        # storage. Never awaited in a way that can fail the save — see write_file.
+        self._on_write = on_write
 
     async def _root(self) -> str:
         """The jail root: the pinned in-VM workspace dir (``WEBSANDBOX_WORKDIR``).
@@ -217,6 +228,16 @@ class FileRpc:
                 f"content is {len(data) // 1024} KB, over the {cap // 1024} KB limit",
             )
         await self._client.upload_bytes(self._sandbox_id, data, abs_path)
+
+        # Write-through mirror to durable blob storage (CM-2a′), best-effort: the
+        # VM write above already succeeded (that's what file.write.ok confirms), so
+        # a mirror failure must NOT turn a good save into an error. Pass the
+        # project-relative path so restore can replay it into the same jail slot.
+        if self._on_write is not None:
+            try:
+                await self._on_write(rel_path.strip().lstrip("/"), data)
+            except Exception:  # noqa: BLE001 — durability is best-effort; save already landed
+                logger.debug("write-through mirror failed for %r", rel_path, exc_info=True)
 
     # ── Frame dispatch (never raises into the socket loop) ────────────────
 

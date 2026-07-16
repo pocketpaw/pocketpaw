@@ -13,9 +13,14 @@
 # ``branch`` — the auto-created ``paw/edit-<hex>`` feature branch the repo is
 # checked out onto in the VM so AI edits never touch the default branch. Optional
 # (default None) so it lands after the required tenancy fields.
+#
+# Changed 2026-07-16 (CM-2a′ write-through, feat/code-mode): added the optional
+# ``overlay`` (``relpath -> FileRecord id``) — the incremental durability tier of
+# editor-saved files mirrored to blob storage since the last snapshot. Optional
+# (empty dict) so it lands after the required tenancy fields.
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, NewType
 
@@ -50,6 +55,10 @@ class WebSandboxView:
     # The auto-created ``paw/edit-<hex>`` feature branch checked out in the VM
     # so AI edits never touch the default branch (WC-5a).
     branch: str | None = None
+    # The write-through durability overlay (CM-2a′): ``relpath -> FileRecord id``
+    # for editor-saved files mirrored to blob storage since the last snapshot.
+    # frozen dataclass → a mutable default needs a factory.
+    overlay: dict[str, str] = field(default_factory=dict)
 
 
 __all__ = [

@@ -179,6 +179,109 @@ async def test_snapshot_over_cap_raises_before_upload(monkeypatch) -> None:
     assert (await sandbox_service.get_sandbox("w1", "u1", row.id)).snapshot_file_id is None
 
 
+# ---------------------------------------------------------------------------
+# write-through overlay (CM-2a′).
+# ---------------------------------------------------------------------------
+
+
+async def test_mirror_file_uploads_and_records_overlay() -> None:
+    row = await _ready_row()
+    uploads = _FakeUploads()
+
+    file_id = await durability.mirror_file(
+        "w1", "u1", row.id, "src/app.ts", b"console.log(1)", uploads=uploads
+    )
+
+    # Uploaded the file bytes to the overlay folder, workspace + owner scoped.
+    assert len(uploads.upload_calls) == 1
+    up = uploads.upload_calls[0]
+    assert up["workspace"] == "w1"
+    assert up["owner_id"] == "u1"
+    assert up["folder_path"] == "/websandbox-overlay"
+    assert up["data"] == b"console.log(1)"
+
+    # Recorded relpath -> file_id on the row.
+    assert file_id == "file-1"
+    assert (await sandbox_service.get_sandbox("w1", "u1", row.id)).overlay == {
+        "src/app.ts": "file-1"
+    }
+
+
+async def test_snapshot_clears_the_overlay() -> None:
+    row = await _ready_row()
+    uploads = _FakeUploads()
+    fake = _FakeDaytonaClient(tar_bytes=b"TAR")
+
+    await durability.mirror_file("w1", "u1", row.id, "a.ts", b"AAA", uploads=uploads)
+    assert (await sandbox_service.get_sandbox("w1", "u1", row.id)).overlay != {}
+
+    # A full snapshot supersedes the incremental overlay → overlay is wiped.
+    await durability.snapshot_workspace("w1", "u1", row.id, client=fake, uploads=uploads)
+    assert (await sandbox_service.get_sandbox("w1", "u1", row.id)).overlay == {}
+
+
+async def test_restore_replays_overlay_over_snapshot() -> None:
+    row = await _ready_row()
+    fake = _FakeDaytonaClient(tar_bytes=b"SNAPSHOT-TAR")
+    uploads = _FakeUploads()
+
+    # Disconnect snapshot (clears overlay), then a fresh session's edits mirror in.
+    await durability.snapshot_workspace("w1", "u1", row.id, client=fake, uploads=uploads)
+    await durability.mirror_file("w1", "u1", row.id, "a.ts", b"AAA", uploads=uploads)
+    await durability.mirror_file("w1", "u1", row.id, "dir/b.ts", b"BBB", uploads=uploads)
+
+    await durability.restore_workspace("w1", "u1", row.id, client=fake, uploads=uploads)
+
+    # Snapshot untarred first, then each overlay file written into the jail at
+    # WORKDIR/relpath (with a mkdir -p for the nested dir).
+    assert any("tar -xzf" in c for c in fake.exec_calls)
+    written = {u["remote_path"]: u["data"] for u in fake.upload_calls}
+    assert written[f"{WEBSANDBOX_WORKDIR}/a.ts"] == b"AAA"
+    assert written[f"{WEBSANDBOX_WORKDIR}/dir/b.ts"] == b"BBB"
+    assert any(f"mkdir -p {WEBSANDBOX_WORKDIR}/dir" in c for c in fake.exec_calls)
+
+
+async def test_restore_overlay_only_no_snapshot() -> None:
+    row = await _ready_row()
+    fake = _FakeDaytonaClient()
+    uploads = _FakeUploads()
+
+    await durability.mirror_file("w1", "u1", row.id, "only.ts", b"ONLY", uploads=uploads)
+    await durability.restore_workspace("w1", "u1", row.id, client=fake, uploads=uploads)
+
+    # No snapshot → no untar, but the overlay file is still replayed.
+    assert not any("tar -xzf" in c for c in fake.exec_calls)
+    written = {u["remote_path"]: u["data"] for u in fake.upload_calls}
+    assert written[f"{WEBSANDBOX_WORKDIR}/only.ts"] == b"ONLY"
+
+
+async def test_restore_with_neither_snapshot_nor_overlay_is_conflict() -> None:
+    row = await _ready_row()
+    fake = _FakeDaytonaClient()
+    uploads = _FakeUploads()
+
+    with pytest.raises(CloudError) as exc:
+        await durability.restore_workspace("w1", "u1", row.id, client=fake, uploads=uploads)
+    assert exc.value.code == "websandbox.no_snapshot"
+
+
+async def test_restore_skips_unsafe_overlay_path() -> None:
+    row = await _ready_row()
+    fake = _FakeDaytonaClient()
+    uploads = _FakeUploads()
+
+    await durability.mirror_file("w1", "u1", row.id, "safe.ts", b"SAFE", uploads=uploads)
+    # Hand-inject a traversal path the file.write jail would never produce.
+    await sandbox_service.set_overlay_entry("w1", "u1", row.id, "../evil.ts", "file-x")
+
+    await durability.restore_workspace("w1", "u1", row.id, client=fake, uploads=uploads)
+
+    written = {u["remote_path"]: u["data"] for u in fake.upload_calls}
+    assert written.get(f"{WEBSANDBOX_WORKDIR}/safe.ts") == b"SAFE"
+    # Nothing was written outside the jail.
+    assert all("evil.ts" not in p for p in written)
+
+
 async def test_snapshot_not_ready_when_unprovisioned() -> None:
     # A row with no bound Daytona id is a clean 409, not a runtime crash.
     row = await sandbox_service.create_sandbox("w1", "u1", {"repo": "r", "status": "pending"})

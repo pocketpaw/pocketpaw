@@ -162,6 +162,37 @@ async def test_get_denies_cross_tenant_row() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Write-through overlay (CM-2a′)
+# ---------------------------------------------------------------------------
+
+
+async def test_set_overlay_entry_records_and_is_last_write_wins() -> None:
+    row = await sandbox_service.create_sandbox("w1", "u1", CreateSandboxRequest(repo="r1"))
+    await sandbox_service.set_overlay_entry("w1", "u1", row.id, "a.ts", "file-1")
+    await sandbox_service.set_overlay_entry("w1", "u1", row.id, "b.ts", "file-2")
+    await sandbox_service.set_overlay_entry("w1", "u1", row.id, "a.ts", "file-3")  # overwrite
+
+    fetched = await sandbox_service.get_sandbox("w1", "u1", row.id)
+    assert fetched.overlay == {"a.ts": "file-3", "b.ts": "file-2"}
+
+
+async def test_set_overlay_entry_is_owner_scoped() -> None:
+    row = await sandbox_service.create_sandbox("w1", "u1", CreateSandboxRequest(repo="r1"))
+    # A different user in the same workspace can't mirror onto this row.
+    with pytest.raises(NotFound):
+        await sandbox_service.set_overlay_entry("w1", "u2", row.id, "a.ts", "file-1")
+
+
+async def test_set_snapshot_clears_the_overlay() -> None:
+    row = await sandbox_service.create_sandbox("w1", "u1", CreateSandboxRequest(repo="r1"))
+    await sandbox_service.set_overlay_entry("w1", "u1", row.id, "a.ts", "file-1")
+    # A full snapshot supersedes the incremental overlay.
+    snap = await sandbox_service.set_snapshot("w1", "u1", row.id, "snap-1")
+    assert snap.snapshot_file_id == "snap-1"
+    assert snap.overlay == {}
+
+
+# ---------------------------------------------------------------------------
 # Rule 3 — domain enforces tenancy at construction
 # ---------------------------------------------------------------------------
 

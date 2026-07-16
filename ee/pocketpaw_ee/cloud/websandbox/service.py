@@ -76,6 +76,7 @@ def _doc_to_view(doc: _WebSandboxDoc) -> WebSandboxView:
         installation_id=doc.installation_id,
         snapshot_file_id=doc.snapshot_file_id,
         branch=doc.branch,
+        overlay=dict(doc.overlay or {}),
         created_at=doc.created_at,
         updated_at=doc.updated_at,
     )
@@ -321,12 +322,46 @@ async def set_snapshot(
     if doc is None:
         raise NotFound("web_sandbox", row_id)
     doc.snapshot_file_id = file_id
+    # A full snapshot supersedes the incremental write-through overlay (CM-2a′):
+    # everything the overlay held is now inside the snapshot tar. Clearing it here
+    # is also what keeps restore correct — an overlay entry for a file that was
+    # deleted before this snapshot won't be replayed back over the deletion.
+    doc.overlay = {}
     doc.updated_at = datetime.now(UTC)
     await doc.save()
     # no-event: the snapshot pointer is durability bookkeeping, not a lifecycle
     # transition. No downstream handler (IDE WS fan-out, search index, ripple
     # invalidation) reacts to it, and emitting WebSandboxStatusChanged would
     # falsely signal a state change to clients tracking the status field.
+    return _doc_to_view(doc)
+
+
+async def set_overlay_entry(
+    workspace_id: str,
+    user_id: str,
+    row_id: str,
+    rel_path: str,
+    file_id: str,
+) -> WebSandboxView:
+    """Record one write-through overlay entry (``rel_path -> FileRecord id``).
+
+    Tenant- and owner-scoped (Rule 7 via ``_read_owned``): only the owning caller
+    can mirror a file onto their own sandbox row. Called best-effort from the
+    ``file.write`` path (WC-4a) after the byte-for-byte VM write, so every editor
+    save is durable in blob storage the moment it lands — a crash / idle-out
+    before the next full snapshot no longer loses the edit. Last-write-wins per
+    path. Raises ``NotFound`` when no owned row matches.
+    """
+    doc = await _read_owned(workspace_id, user_id, row_id)
+    if doc is None:
+        raise NotFound("web_sandbox", row_id)
+    # Reassign (not in-place mutate) so Beanie always sees the field as dirty.
+    overlay = dict(doc.overlay or {})
+    overlay[rel_path] = file_id
+    doc.overlay = overlay
+    doc.updated_at = datetime.now(UTC)
+    await doc.save()
+    # no-event: incremental durability bookkeeping, same reasoning as set_snapshot.
     return _doc_to_view(doc)
 
 
@@ -438,6 +473,7 @@ __all__ = [
     "list_reapable_sandboxes",
     "list_sandboxes",
     "mark_reaped",
+    "set_overlay_entry",
     "set_snapshot",
     "touch_activity",
     "update_status",
