@@ -44,14 +44,20 @@
 # idle reaper doesn't reclaim an active session.
 #
 # 2026-07-15 (WC-4a): the SAME socket also carries file operations, multiplexed
-# alongside the terminal. Any ``file.*`` frame ({"type":"file.list|read|write",
-# "reqId":..,"path":..[,"content":..]}) is handed to the socket-agnostic
-# ``FileRpc`` (websandbox/files.py), which jails the path to the sandbox project
-# dir and returns a JSON response frame (file.list.ok / file.read.ok /
-# file.write.ok / file.error). File responses are typed JSON text frames while
-# terminal output is binary, so the two streams never collide. No per-frame
-# re-authorization — the socket is already owner-bound to the VM — but file ops
-# DO bump the same throttled activity heartbeat.
+# alongside the terminal. Any ``file.*`` frame ({"type":"file.list|read|write|
+# create|delete|move","reqId":..,"path":..[,"content"|"isDir"|"toPath":..]}) is
+# handed to the socket-agnostic ``FileRpc`` (websandbox/files.py), which jails the
+# path to the sandbox project dir and returns a JSON response frame (file.<op>.ok
+# / file.error). File responses are typed JSON text frames while terminal output
+# is binary, so the two streams never collide. No per-frame re-authorization — the
+# socket is already owner-bound to the VM — but file ops DO bump the same throttled
+# activity heartbeat.
+#
+# 2026-07-16 (WC-4c): create/delete/move join the file verbs. ws.py binds three
+# best-effort durability closures onto FileRpc — ``_mirror`` (on_write),
+# ``_drop`` (on_delete → overlay drop), ``_move`` (on_move → overlay re-key) — so
+# a create/save is mirrored, a delete isn't resurrected, and a rename replays at
+# its new path on restore.
 from __future__ import annotations
 
 import asyncio
@@ -297,7 +303,17 @@ async def terminal_websocket_endpoint(
             workspace_id, user_id, row_id, rel_path, data, uploads=overlay_uploads
         )
 
-    file_rpc = FileRpc(client, row.sandbox_id, on_write=_mirror)
+    async def _drop(rel_path: str) -> None:
+        # Delete-side durability: drop the overlay entry so a deleted file is not
+        # resurrected on restore (WC-4c). Best-effort — swallowed inside FileRpc.
+        await websandbox_durability.drop_overlay(workspace_id, user_id, row_id, rel_path)
+
+    async def _move(src_rel: str, dst_rel: str) -> None:
+        # Rename-side durability: re-key the overlay entry to the new path so
+        # restore replays the file where it now lives (WC-4c). Best-effort.
+        await websandbox_durability.move_overlay(workspace_id, user_id, row_id, src_rel, dst_rel)
+
+    file_rpc = FileRpc(client, row.sandbox_id, on_write=_mirror, on_delete=_drop, on_move=_move)
 
     async def _touch() -> None:
         """Bump the row's activity heartbeat, throttled, swallowing errors."""

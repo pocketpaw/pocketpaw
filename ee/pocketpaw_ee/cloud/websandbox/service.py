@@ -365,6 +365,75 @@ async def set_overlay_entry(
     return _doc_to_view(doc)
 
 
+async def drop_overlay_entry(
+    workspace_id: str,
+    user_id: str,
+    row_id: str,
+    rel_path: str,
+) -> WebSandboxView:
+    """Drop overlay entries for ``rel_path`` (and anything under it) from a row.
+
+    Tenant- and owner-scoped (Rule 7 via ``_read_owned``). Called best-effort from
+    the ``file.delete`` path (WC-4c) after the byte-for-byte VM delete: DROPPING an
+    overlay entry is always safe — it just falls back to the snapshot tier on
+    restore, and it stops a since-deleted file being resurrected from the overlay.
+    A directory delete drops every child under ``rel_path + '/'`` too. Raises
+    ``NotFound`` when no owned row matches.
+    """
+    doc = await _read_owned(workspace_id, user_id, row_id)
+    if doc is None:
+        raise NotFound("web_sandbox", row_id)
+    prefix = rel_path.rstrip("/") + "/"
+    # Reassign (not in-place mutate) so Beanie always sees the field as dirty.
+    overlay = {
+        k: v
+        for k, v in (doc.overlay or {}).items()
+        if k != rel_path and not k.startswith(prefix)
+    }
+    doc.overlay = overlay
+    doc.updated_at = datetime.now(UTC)
+    await doc.save()
+    # no-event: incremental durability bookkeeping, same reasoning as set_snapshot.
+    return _doc_to_view(doc)
+
+
+async def move_overlay_entry(
+    workspace_id: str,
+    user_id: str,
+    row_id: str,
+    src: str,
+    dst: str,
+) -> WebSandboxView:
+    """Re-key overlay entries from ``src`` to ``dst`` (rename == move).
+
+    Tenant- and owner-scoped (Rule 7 via ``_read_owned``). Called best-effort from
+    the ``file.move`` path (WC-4c) after the VM move. The re-key is safe: the
+    FileRecord id (the actual blob) is unchanged — only its overlay KEY moves — so
+    restore replays the same content at the file's new path. A directory move
+    re-keys every child under ``src + '/'`` to the matching ``dst + '/'`` path; a
+    path with no overlay entry is a clean no-op. Raises ``NotFound`` when no owned
+    row matches.
+    """
+    doc = await _read_owned(workspace_id, user_id, row_id)
+    if doc is None:
+        raise NotFound("web_sandbox", row_id)
+    src_prefix = src.rstrip("/") + "/"
+    dst_prefix = dst.rstrip("/") + "/"
+    overlay: dict[str, str] = {}
+    for k, v in (doc.overlay or {}).items():
+        if k == src:
+            overlay[dst] = v
+        elif k.startswith(src_prefix):
+            overlay[dst_prefix + k[len(src_prefix):]] = v
+        else:
+            overlay[k] = v
+    doc.overlay = overlay
+    doc.updated_at = datetime.now(UTC)
+    await doc.save()
+    # no-event: incremental durability bookkeeping, same reasoning as set_snapshot.
+    return _doc_to_view(doc)
+
+
 async def list_sandboxes(workspace_id: str, user_id: str) -> list[WebSandboxView]:
     """List every sandbox owned by the caller, newest first.
 
@@ -469,10 +538,12 @@ async def _read_owned(
 __all__ = [
     "authorize_sandbox",
     "create_sandbox",
+    "drop_overlay_entry",
     "get_sandbox",
     "list_reapable_sandboxes",
     "list_sandboxes",
     "mark_reaped",
+    "move_overlay_entry",
     "set_overlay_entry",
     "set_snapshot",
     "touch_activity",

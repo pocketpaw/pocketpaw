@@ -60,6 +60,9 @@ class _FakeFsClient:
     uploads: list[tuple[str, bytes]] = field(default_factory=list)
     list_paths: list[str] = field(default_factory=list)
     download_paths: list[str] = field(default_factory=list)
+    created_dirs: list[str] = field(default_factory=list)
+    deletes: list[tuple[str, bool]] = field(default_factory=list)
+    moves: list[tuple[str, str]] = field(default_factory=list)
 
     async def get_project_dir(self, sandbox_id):  # noqa: ANN001
         return self.project_dir
@@ -77,6 +80,18 @@ class _FakeFsClient:
     async def upload_bytes(self, sandbox_id, data, remote_path):  # noqa: ANN001
         self.uploads.append((remote_path, data))
         self.files[remote_path] = data
+
+    async def create_folder(self, sandbox_id, path, mode="755"):  # noqa: ANN001
+        self.created_dirs.append(path)
+
+    async def delete_file(self, sandbox_id, path, recursive=False):  # noqa: ANN001
+        self.deletes.append((path, recursive))
+        self.files.pop(path, None)
+
+    async def move_file(self, sandbox_id, src, dst):  # noqa: ANN001
+        self.moves.append((src, dst))
+        if src in self.files:
+            self.files[dst] = self.files.pop(src)
 
 
 def _rpc(client: _FakeFsClient) -> FileRpc:
@@ -339,6 +354,259 @@ async def test_write_mirror_failure_does_not_fail_the_save() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Tier 1 — create / delete / move ops (WC-4c: file CRUD verbs).
+# ---------------------------------------------------------------------------
+
+
+async def test_create_file_uploads_empty_at_jailed_path() -> None:
+    client = _FakeFsClient()  # empty listing -> target does not exist
+    await _rpc(client).create("src/new.py", False)
+    assert client.uploads == [(f"{PROJECT_DIR}/src/new.py", b"")]
+    assert client.created_dirs == []
+
+
+async def test_create_dir_makes_folder_at_jailed_path() -> None:
+    client = _FakeFsClient()
+    await _rpc(client).create("src/newdir", True)
+    assert client.created_dirs == [f"{PROJECT_DIR}/src/newdir"]
+    assert client.uploads == []
+
+
+async def test_create_refuses_existing_target() -> None:
+    # The parent listing already carries the target name -> refuse (no clobber).
+    client = _FakeFsClient(listing=[_FakeFileInfo("app.py", size=1)])
+    with pytest.raises(FileRpcError) as ei:
+        await _rpc(client).create("app.py", False)
+    assert ei.value.op == "create"
+    assert client.uploads == []
+
+
+async def test_create_root_is_refused() -> None:
+    client = _FakeFsClient()
+    for bad in ("", ".", "./"):
+        with pytest.raises(FileRpcError) as ei:
+            await _rpc(client).create(bad, True)
+        assert ei.value.op == "create"
+    assert client.created_dirs == []
+    assert client.uploads == []
+
+
+async def test_delete_file_calls_delete_recursive() -> None:
+    client = _FakeFsClient(files={f"{PROJECT_DIR}/old.py": b"x"})
+    await _rpc(client).delete("old.py")
+    assert client.deletes == [(f"{PROJECT_DIR}/old.py", True)]
+
+
+async def test_delete_dir_calls_delete_recursive() -> None:
+    client = _FakeFsClient()
+    await _rpc(client).delete("src/pkg")
+    assert client.deletes == [(f"{PROJECT_DIR}/src/pkg", True)]
+
+
+async def test_delete_root_is_refused() -> None:
+    client = _FakeFsClient()
+    for bad in ("", ".", "./"):
+        with pytest.raises(FileRpcError) as ei:
+            await _rpc(client).delete(bad)
+        assert ei.value.op == "delete"
+    assert client.deletes == []
+
+
+async def test_move_renames_at_jailed_paths() -> None:
+    client = _FakeFsClient()
+    await _rpc(client).move("a.py", "b.py")
+    assert client.moves == [(f"{PROJECT_DIR}/a.py", f"{PROJECT_DIR}/b.py")]
+
+
+async def test_move_refuses_existing_destination() -> None:
+    client = _FakeFsClient(listing=[_FakeFileInfo("b.py", size=1)])
+    with pytest.raises(FileRpcError) as ei:
+        await _rpc(client).move("a.py", "b.py")
+    assert ei.value.op == "move"
+    assert client.moves == []
+
+
+async def test_move_root_source_is_refused() -> None:
+    client = _FakeFsClient()
+    for bad in ("", ".", "./"):
+        with pytest.raises(FileRpcError) as ei:
+            await _rpc(client).move(bad, "b.py")
+        assert ei.value.op == "move"
+    assert client.moves == []
+
+
+@pytest.mark.parametrize("bad_src", ["../../etc/passwd", "/etc/passwd", "src/../../evil"])
+async def test_move_jails_source_path(bad_src) -> None:  # noqa: ANN001
+    client = _FakeFsClient()
+    with pytest.raises(FileRpcError) as ei:
+        await _rpc(client).move(bad_src, "ok.py")
+    assert ei.value.op == "move"
+    assert client.moves == []
+
+
+@pytest.mark.parametrize("bad_dst", ["../../etc/passwd", "/etc/passwd", "src/../../evil"])
+async def test_move_jails_destination_path(bad_dst) -> None:  # noqa: ANN001
+    client = _FakeFsClient()
+    with pytest.raises(FileRpcError) as ei:
+        await _rpc(client).move("ok.py", bad_dst)
+    assert ei.value.op == "move"
+    assert client.moves == []
+
+
+@pytest.mark.parametrize("bad", ["../../etc/passwd", "/etc/passwd", ".."])
+async def test_create_jails_path(bad) -> None:  # noqa: ANN001
+    client = _FakeFsClient()
+    with pytest.raises(FileRpcError) as ei:
+        await _rpc(client).create(bad, False)
+    assert ei.value.op == "create"
+    assert client.uploads == [] and client.created_dirs == []
+
+
+@pytest.mark.parametrize("bad", ["../../etc/passwd", "/etc/passwd", ".."])
+async def test_delete_jails_path(bad) -> None:  # noqa: ANN001
+    client = _FakeFsClient()
+    with pytest.raises(FileRpcError) as ei:
+        await _rpc(client).delete(bad)
+    assert ei.value.op == "delete"
+    assert client.deletes == []
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 — durability hooks (on_delete / on_move) fire with the right rel paths.
+# ---------------------------------------------------------------------------
+
+
+async def test_create_file_mirrors_empty_via_on_write() -> None:
+    client = _FakeFsClient()
+    mirrored: list[tuple[str, bytes]] = []
+
+    async def _spy(rel_path, data):  # noqa: ANN001
+        mirrored.append((rel_path, data))
+
+    rpc = FileRpc(client, "dtn-1", project_dir=client.project_dir, on_write=_spy)
+    await rpc.create("src/new.ts", False)
+    # An empty file lands in the overlay just like a write of "".
+    assert mirrored == [("src/new.ts", b"")]
+
+
+async def test_create_dir_does_not_mirror() -> None:
+    client = _FakeFsClient()
+    mirrored: list = []
+
+    async def _spy(rel_path, data):  # noqa: ANN001
+        mirrored.append((rel_path, data))
+
+    rpc = FileRpc(client, "dtn-1", project_dir=client.project_dir, on_write=_spy)
+    await rpc.create("newdir", True)
+    assert mirrored == []
+
+
+async def test_delete_calls_on_delete_with_relpath() -> None:
+    client = _FakeFsClient()
+    dropped: list[str] = []
+
+    async def _drop(rel_path):  # noqa: ANN001
+        dropped.append(rel_path)
+
+    rpc = FileRpc(client, "dtn-1", project_dir=client.project_dir, on_delete=_drop)
+    await rpc.delete("src/old.ts")
+    assert dropped == ["src/old.ts"]
+
+
+async def test_move_calls_on_move_with_rel_paths() -> None:
+    client = _FakeFsClient()
+    moved: list[tuple[str, str]] = []
+
+    async def _move(src_rel, dst_rel):  # noqa: ANN001
+        moved.append((src_rel, dst_rel))
+
+    rpc = FileRpc(client, "dtn-1", project_dir=client.project_dir, on_move=_move)
+    await rpc.move("a.ts", "b.ts")
+    assert moved == [("a.ts", "b.ts")]
+
+
+async def test_delete_hook_failure_does_not_fail_delete() -> None:
+    client = _FakeFsClient(files={f"{PROJECT_DIR}/a.ts": b"x"})
+
+    async def _boom(rel_path):  # noqa: ANN001
+        raise RuntimeError("overlay drop failed")
+
+    rpc = FileRpc(client, "dtn-1", project_dir=client.project_dir, on_delete=_boom)
+    await rpc.delete("a.ts")  # must not raise — the VM delete already landed
+    assert client.deletes == [(f"{PROJECT_DIR}/a.ts", True)]
+
+
+async def test_move_hook_failure_does_not_fail_move() -> None:
+    client = _FakeFsClient()
+
+    async def _boom(src_rel, dst_rel):  # noqa: ANN001
+        raise RuntimeError("overlay re-key failed")
+
+    rpc = FileRpc(client, "dtn-1", project_dir=client.project_dir, on_move=_boom)
+    await rpc.move("a.ts", "b.ts")  # must not raise
+    assert client.moves == [(f"{PROJECT_DIR}/a.ts", f"{PROJECT_DIR}/b.ts")]
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 — dispatch frames for the new verbs.
+# ---------------------------------------------------------------------------
+
+
+async def test_dispatch_create_ok_frame() -> None:
+    client = _FakeFsClient()
+    resp = await _rpc(client).dispatch(
+        {"type": "file.create", "reqId": "c1", "path": "new.py", "isDir": False}
+    )
+    assert resp == {"type": "file.create.ok", "reqId": "c1", "path": "new.py", "isDir": False}
+    assert client.uploads == [(f"{PROJECT_DIR}/new.py", b"")]
+
+
+async def test_dispatch_create_dir_ok_frame() -> None:
+    client = _FakeFsClient()
+    resp = await _rpc(client).dispatch(
+        {"type": "file.create", "reqId": "c2", "path": "pkg", "isDir": True}
+    )
+    assert resp == {"type": "file.create.ok", "reqId": "c2", "path": "pkg", "isDir": True}
+    assert client.created_dirs == [f"{PROJECT_DIR}/pkg"]
+
+
+async def test_dispatch_delete_ok_frame() -> None:
+    client = _FakeFsClient(files={f"{PROJECT_DIR}/old.py": b"x"})
+    resp = await _rpc(client).dispatch({"type": "file.delete", "reqId": "d1", "path": "old.py"})
+    assert resp == {"type": "file.delete.ok", "reqId": "d1", "path": "old.py"}
+    assert client.deletes == [(f"{PROJECT_DIR}/old.py", True)]
+
+
+async def test_dispatch_move_ok_frame() -> None:
+    client = _FakeFsClient()
+    resp = await _rpc(client).dispatch(
+        {"type": "file.move", "reqId": "m1", "path": "a.py", "toPath": "b.py"}
+    )
+    assert resp == {"type": "file.move.ok", "reqId": "m1", "path": "a.py", "toPath": "b.py"}
+    assert client.moves == [(f"{PROJECT_DIR}/a.py", f"{PROJECT_DIR}/b.py")]
+
+
+async def test_dispatch_create_traversal_returns_error_frame() -> None:
+    client = _FakeFsClient()
+    resp = await _rpc(client).dispatch(
+        {"type": "file.create", "reqId": "c9", "path": "../../etc/x", "isDir": False}
+    )
+    assert resp["type"] == "file.error"
+    assert resp["op"] == "create" and resp["reqId"] == "c9"
+    assert client.uploads == []
+
+
+async def test_dispatch_move_traversal_returns_error_frame() -> None:
+    client = _FakeFsClient()
+    resp = await _rpc(client).dispatch(
+        {"type": "file.move", "reqId": "m9", "path": "a.py", "toPath": "../../etc/x"}
+    )
+    assert resp["type"] == "file.error"
+    assert resp["op"] == "move" and resp["reqId"] == "m9"
+    assert client.moves == []
+
+
+# ---------------------------------------------------------------------------
 # Tier 2 — ws.py frame dispatch over the real auth path (mongomock).
 #
 # Reuses the WC-3 fakes/harness (a pty must still open so the receive loop runs),
@@ -390,6 +658,10 @@ class _FakeDaytonaClient:
     project_dir: str = PROJECT_DIR
     files: dict[str, bytes] = field(default_factory=dict)
     uploads: list[tuple[str, bytes]] = field(default_factory=list)
+    listing: list[_FakeFileInfo] = field(default_factory=list)
+    created_dirs: list[str] = field(default_factory=list)
+    deletes: list[tuple[str, bool]] = field(default_factory=list)
+    moves: list[tuple[str, str]] = field(default_factory=list)
 
     async def get_sandbox_instance(self, sandbox_id):  # noqa: ANN001
         return self.sandbox
@@ -404,6 +676,10 @@ class _FakeDaytonaClient:
         return self.project_dir
 
     async def list_files(self, sandbox_id, path="."):  # noqa: ANN001
+        # Empty listing by default so create/move existence probes see a clean
+        # tree; the read/list round-trip test seeds ``listing`` explicitly.
+        if self.listing:
+            return list(self.listing)
         return [_FakeFileInfo("app.py", is_dir=False, size=5)]
 
     async def download_file(self, sandbox_id, remote_path):  # noqa: ANN001
@@ -414,6 +690,18 @@ class _FakeDaytonaClient:
     async def upload_bytes(self, sandbox_id, data, remote_path):  # noqa: ANN001
         self.uploads.append((remote_path, data))
         self.files[remote_path] = data
+
+    async def create_folder(self, sandbox_id, path, mode="755"):  # noqa: ANN001
+        self.created_dirs.append(path)
+
+    async def delete_file(self, sandbox_id, path, recursive=False):  # noqa: ANN001
+        self.deletes.append((path, recursive))
+        self.files.pop(path, None)
+
+    async def move_file(self, sandbox_id, src, dst):  # noqa: ANN001
+        self.moves.append((src, dst))
+        if src in self.files:
+            self.files[dst] = self.files.pop(src)
 
 
 class FakeWebSocket:
@@ -561,3 +849,67 @@ async def test_ws_malformed_file_frame_does_not_tear_down_socket(wire_terminal) 
     assert ws.closed is None  # never force-closed
     reads = [m for m in ws.sent_json if m.get("type") == "file.read.ok"]
     assert reads and reads[0]["content"] == "ok"
+
+
+@pytest.mark.usefixtures("mongo_db")
+async def test_ws_file_create_frame_lands_empty_and_acks(wire_terminal) -> None:
+    client, tokens = wire_terminal
+    user_id = await _seed_user("w1")
+    row_id = await _seed_ready_sandbox("w1", user_id)
+    tokens["good-ticket"] = user_id
+
+    ws = FakeWebSocket(
+        inbound=['{"type":"file.create","reqId":"c1","path":"fresh.txt","isDir":false}']
+    )
+    await terminal_websocket_endpoint(ws, row_id, token="good-ticket")
+
+    # The create frame reached the VM as an empty upload and got its ack. The
+    # empty-file overlay mirror is exercised at Tier 1 (on_write spy) — the ws
+    # path's real build_uploads() blob write is out of scope here.
+    assert {"type": "file.create.ok", "reqId": "c1", "path": "fresh.txt", "isDir": False} in (
+        ws.sent_json
+    )
+    assert client.uploads == [(f"{PROJECT_DIR}/fresh.txt", b"")]
+
+
+@pytest.mark.usefixtures("mongo_db")
+async def test_ws_file_delete_frame_drops_overlay(wire_terminal) -> None:
+    client, tokens = wire_terminal
+    user_id = await _seed_user("w1")
+    row_id = await _seed_ready_sandbox("w1", user_id)
+    tokens["good-ticket"] = user_id
+    # Seed an overlay entry the delete must drop so restore can't resurrect it.
+    await sandbox_service.set_overlay_entry("w1", user_id, row_id, "gone.txt", "file-x")
+
+    ws = FakeWebSocket(inbound=['{"type":"file.delete","reqId":"d1","path":"gone.txt"}'])
+    await terminal_websocket_endpoint(ws, row_id, token="good-ticket")
+
+    assert {"type": "file.delete.ok", "reqId": "d1", "path": "gone.txt"} in ws.sent_json
+    assert client.deletes == [(f"{PROJECT_DIR}/gone.txt", True)]
+    row = await sandbox_service.get_sandbox("w1", user_id, row_id)
+    assert "gone.txt" not in row.overlay
+
+
+@pytest.mark.usefixtures("mongo_db")
+async def test_ws_file_move_frame_rekeys_overlay(wire_terminal) -> None:
+    client, tokens = wire_terminal
+    user_id = await _seed_user("w1")
+    row_id = await _seed_ready_sandbox("w1", user_id)
+    tokens["good-ticket"] = user_id
+    await sandbox_service.set_overlay_entry("w1", user_id, row_id, "a.txt", "file-a")
+
+    ws = FakeWebSocket(
+        inbound=['{"type":"file.move","reqId":"m1","path":"a.txt","toPath":"b.txt"}']
+    )
+    await terminal_websocket_endpoint(ws, row_id, token="good-ticket")
+
+    assert {
+        "type": "file.move.ok",
+        "reqId": "m1",
+        "path": "a.txt",
+        "toPath": "b.txt",
+    } in ws.sent_json
+    assert client.moves == [(f"{PROJECT_DIR}/a.txt", f"{PROJECT_DIR}/b.txt")]
+    # Overlay re-keyed src -> dst so restore replays the file at its new path.
+    row = await sandbox_service.get_sandbox("w1", user_id, row_id)
+    assert row.overlay == {"b.txt": "file-a"}

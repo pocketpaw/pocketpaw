@@ -381,6 +381,18 @@ class DaytonaClient:
         fs = await self.get_fs(sandbox_id)
         await fs.delete_file(path, recursive=recursive)
 
+    async def move_file(self, sandbox_id: str, src: str, dst: str) -> None:
+        """Move or rename a file/dir in the sandbox (rename == move).
+
+        Delegates to the SDK filesystem ``move_files(source, destination)``. The
+        parent directory of *dst* must already exist — inside the Web Cursor jail
+        the destination's parent is the project dir (or an existing subdir), so a
+        sibling rename always satisfies that. *src* and *dst* are absolute in-VM
+        paths already jailed by the caller.
+        """
+        fs = await self.get_fs(sandbox_id)
+        await fs.move_files(src, dst)
+
     async def get_work_dir(self, sandbox_id: str) -> str:
         """Get the sandbox's work directory path."""
         sb = await self.get_sandbox_instance(sandbox_id)

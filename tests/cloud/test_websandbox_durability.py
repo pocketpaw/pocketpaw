@@ -282,6 +282,66 @@ async def test_restore_skips_unsafe_overlay_path() -> None:
     assert all("evil.ts" not in p for p in written)
 
 
+async def test_drop_overlay_removes_entry() -> None:
+    row = await _ready_row()
+    uploads = _FakeUploads()
+    await durability.mirror_file("w1", "u1", row.id, "a.ts", b"A", uploads=uploads)
+
+    await durability.drop_overlay("w1", "u1", row.id, "a.ts")
+
+    # The dropped entry falls back to the snapshot tier on restore (safe).
+    assert (await sandbox_service.get_sandbox("w1", "u1", row.id)).overlay == {}
+
+
+async def test_drop_overlay_prefix_drops_directory_entries() -> None:
+    row = await _ready_row()
+    uploads = _FakeUploads()
+    await durability.mirror_file("w1", "u1", row.id, "dir/a.ts", b"A", uploads=uploads)
+    await durability.mirror_file("w1", "u1", row.id, "dir/sub/b.ts", b"B", uploads=uploads)
+    await durability.mirror_file("w1", "u1", row.id, "keep.ts", b"K", uploads=uploads)
+
+    # Deleting the directory drops every overlay entry underneath it.
+    await durability.drop_overlay("w1", "u1", row.id, "dir")
+
+    assert (await sandbox_service.get_sandbox("w1", "u1", row.id)).overlay == {"keep.ts": "file-3"}
+
+
+async def test_move_overlay_rekeys_src_to_dst() -> None:
+    row = await _ready_row()
+    uploads = _FakeUploads()
+    await durability.mirror_file("w1", "u1", row.id, "a.ts", b"A", uploads=uploads)
+
+    await durability.move_overlay("w1", "u1", row.id, "a.ts", "b.ts")
+
+    # Same FileRecord id, new key — restore replays the file at its new path.
+    assert (await sandbox_service.get_sandbox("w1", "u1", row.id)).overlay == {"b.ts": "file-1"}
+
+
+async def test_move_overlay_rekeys_directory_children() -> None:
+    row = await _ready_row()
+    uploads = _FakeUploads()
+    await durability.mirror_file("w1", "u1", row.id, "old/a.ts", b"A", uploads=uploads)
+    await durability.mirror_file("w1", "u1", row.id, "old/sub/b.ts", b"B", uploads=uploads)
+
+    await durability.move_overlay("w1", "u1", row.id, "old", "new")
+
+    assert (await sandbox_service.get_sandbox("w1", "u1", row.id)).overlay == {
+        "new/a.ts": "file-1",
+        "new/sub/b.ts": "file-2",
+    }
+
+
+async def test_move_overlay_without_src_entry_is_noop() -> None:
+    row = await _ready_row()
+    uploads = _FakeUploads()
+    await durability.mirror_file("w1", "u1", row.id, "keep.ts", b"K", uploads=uploads)
+
+    # Moving a file that has no overlay entry leaves the overlay untouched.
+    await durability.move_overlay("w1", "u1", row.id, "a.ts", "b.ts")
+
+    assert (await sandbox_service.get_sandbox("w1", "u1", row.id)).overlay == {"keep.ts": "file-1"}
+
+
 async def test_snapshot_not_ready_when_unprovisioned() -> None:
     # A row with no bound Daytona id is a clean 409, not a runtime crash.
     row = await sandbox_service.create_sandbox("w1", "u1", {"repo": "r", "status": "pending"})

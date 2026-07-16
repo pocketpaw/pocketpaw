@@ -9,6 +9,12 @@
 # edits). The overlay is cleared by ``service.set_snapshot`` (a full snapshot
 # supersedes it), which keeps replay from resurrecting a since-deleted file.
 #
+# Changed 2026-07-16 (WC-4c file verbs, feat/code-mode): added the delete/rename
+# overlay siblings ``drop_overlay`` (removes an entry so a deleted file is not
+# resurrected on restore) and ``move_overlay`` (re-keys an entry so a renamed file
+# replays at its new path). ws.py binds them as the FileRpc on_delete / on_move
+# hooks, the delete/rename counterparts of the on_write mirror.
+#
 # The Daytona VM is pure scratch and gets reaped (WC-2). Code durability is git
 # (push); this module makes a user's UNCOMMITTED work + workspace state durable
 # by snapshotting the in-VM workspace dir to the tenant's blob storage (S3,
@@ -440,9 +446,47 @@ async def mirror_file(
     return rec.id
 
 
+async def drop_overlay(
+    workspace_id: str,
+    user_id: str,
+    row_id: str,
+    rel_path: str,
+) -> None:
+    """Drop the overlay entry for a deleted file (WC-4c on_delete hook).
+
+    The delete-side sibling of ``mirror_file``: after ``file.delete`` removes the
+    file in the VM, drop its overlay entry so a later restore falls back to the
+    snapshot tier instead of resurrecting the deleted file. Dropping is always
+    safe (worst case the file reappears from the snapshot, never a stale
+    resurrection). Delegates the doc write to the service (Rule 2). A directory
+    delete drops every child entry too.
+    """
+    await websandbox_service.drop_overlay_entry(workspace_id, user_id, row_id, rel_path)
+
+
+async def move_overlay(
+    workspace_id: str,
+    user_id: str,
+    row_id: str,
+    src_rel: str,
+    dst_rel: str,
+) -> None:
+    """Re-key the overlay entry for a renamed file (WC-4c on_move hook).
+
+    The move-side sibling of ``mirror_file``: after ``file.move`` renames the file
+    in the VM, re-key its overlay entry from ``src_rel`` to ``dst_rel`` so restore
+    replays the same durable blob at the new path. The FileRecord id is unchanged,
+    so no blob work is needed — only the key moves. Delegates the doc write to the
+    service (Rule 2). A directory move re-keys every child entry too.
+    """
+    await websandbox_service.move_overlay_entry(workspace_id, user_id, row_id, src_rel, dst_rel)
+
+
 __all__ = [
     "build_uploads",
+    "drop_overlay",
     "mirror_file",
+    "move_overlay",
     "restore_workspace",
     "snapshot_workspace",
 ]
