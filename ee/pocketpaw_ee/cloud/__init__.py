@@ -258,6 +258,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.projects.router import router as projects_router
     from pocketpaw_ee.cloud.request_log.router import router as request_log_router
     from pocketpaw_ee.cloud.rules.router import router as rules_router
+    from pocketpaw_ee.cloud.senses.router import router as senses_router
     from pocketpaw_ee.cloud.sessions.router import router as sessions_router
     from pocketpaw_ee.cloud.skills.router import router as skills_router
     from pocketpaw_ee.cloud.workspace.router import router as workspace_router
@@ -274,6 +275,11 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(runs_router, prefix="/api/v1")
     app.include_router(connectors_router, prefix="/api/v1")
+    # Senses — the browsable connector catalog (GET /cloud/senses/catalog).
+    # Mounted beside connectors since it reads the same registry catalog and
+    # overlays this workspace's bound state; the connectors router owns
+    # enable/disable, this one owns the read-only discovery front door.
+    app.include_router(senses_router, prefix="/api/v1")
     # Discovery — zero-setup workspace-discovery TRIGGER
     # (POST /cloud/discovery/run). Workspace-scoped (no path param); fires the
     # orchestrator in the background and stages proposals as pending Instinct
