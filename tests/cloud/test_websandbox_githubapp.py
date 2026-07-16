@@ -222,6 +222,39 @@ def test_upstream_clone_url_normalizes_suffix() -> None:
     assert client.upstream_clone_url("acme/api.git") == "https://github.com/acme/api.git"
 
 
+# ---------------------------------------------------------------------------
+# Installation account (connected-account chip display info).
+# ---------------------------------------------------------------------------
+
+
+async def test_get_installation_account_returns_login_and_avatar() -> None:
+    http = _FakeHttp(
+        {
+            "/app/installations/inst-1": _FakeResp(
+                200,
+                {"account": {"login": "octo", "avatar_url": "https://av/o.png"}},
+            )
+        }
+    )
+    client = _client(http)
+
+    info = await client.get_installation_account("inst-1", now=_FIXED_NOW)
+
+    assert info == {"login": "octo", "avatar_url": "https://av/o.png"}
+    # Read with the App JWT (no installation token needed for this metadata).
+    assert http.calls[0]["headers"]["Authorization"].startswith("Bearer ")
+
+
+async def test_get_installation_account_none_on_error_or_missing_account() -> None:
+    # A non-200 → None (best-effort display enrichment, never an error).
+    err = _client(_FakeHttp({"/app/installations/inst-1": _FakeResp(404, {"message": "gone"})}))
+    assert await err.get_installation_account("inst-1", now=_FIXED_NOW) is None
+
+    # A 200 with no login → None (nothing worth displaying).
+    empty = _client(_FakeHttp({"/app/installations/inst-1": _FakeResp(200, {"account": {}})}))
+    assert await empty.get_installation_account("inst-1", now=_FIXED_NOW) is None
+
+
 @pytest.mark.parametrize(
     ("env", "expected"),
     [

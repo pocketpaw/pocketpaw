@@ -8,11 +8,14 @@
 # Covers:
 #   * state sign/verify roundtrip; a tampered or expired state is rejected.
 #   * save_connection is idempotent per (workspace, user, provider, installation)
-#     and refreshes a newly-known account_login without minting a duplicate.
+#     and refreshes a newly-known account_login / avatar_url without a duplicate.
 #   * list_connections never crosses the workspace OR user boundary.
 #   * build_install_url embeds the slug + a verifiable state; 503 when unconfigured.
-#   * handle_callback persists the connection + recovers (ws, user) from state, and
+#   * handle_callback persists the connection + recovers (ws, user) from state,
+#     backfills account login + avatar, still persists when that fetch fails, and
 #     fails closed on a missing installation id or an unverifiable state.
+#   * connect.list_connections lazily enriches a row missing its display info,
+#     stops calling GitHub once complete, and falls back when the App is off.
 #   * list_repositories merges + de-dupes across a caller's connections, is empty
 #     with no connections, and 503s when connections exist but the provider is off.
 from __future__ import annotations
@@ -45,6 +48,23 @@ class _FakeProvider:
     async def list_repositories(self, connection_id, *, now=None):  # noqa: ANN001
         self.calls.append(connection_id)
         return list(self._repos.get(connection_id, []))
+
+
+class _FakeAppClient:
+    """A GitHub App client stub that serves canned account info per installation.
+
+    Stands in for ``get_github_app_client()`` so the callback-backfill and
+    lazy-enrich paths are exercised without touching real GitHub. Counts calls so a
+    test can assert enrichment stops firing once the row is complete.
+    """
+
+    def __init__(self, accounts: dict[str, dict | None]) -> None:
+        self._accounts = accounts
+        self.calls: list[str] = []
+
+    async def get_installation_account(self, installation_id, *, now=None):  # noqa: ANN001
+        self.calls.append(installation_id)
+        return self._accounts.get(installation_id)
 
 
 def _repo(full_name: str, *, private: bool = True, branch: str = "main") -> RemoteRepo:
@@ -96,6 +116,19 @@ async def test_save_connection_refreshes_account_login() -> None:
     await service.save_connection(_WS, _USER, "inst-1")
     refreshed = await service.save_connection(_WS, _USER, "inst-1", account_login="acme")
     assert refreshed.account_login == "acme"
+    assert len(await service.list_connections(_WS, _USER)) == 1
+
+
+async def test_save_connection_persists_and_refreshes_avatar() -> None:
+    created = await service.save_connection(
+        _WS, _USER, "inst-1", account_login="acme", avatar_url="https://av/1.png"
+    )
+    assert created.avatar_url == "https://av/1.png"
+    # A later callback with a rotated avatar refreshes the same row in place.
+    refreshed = await service.save_connection(
+        _WS, _USER, "inst-1", account_login="acme", avatar_url="https://av/2.png"
+    )
+    assert refreshed.avatar_url == "https://av/2.png"
     assert len(await service.list_connections(_WS, _USER)) == 1
 
 
@@ -152,6 +185,66 @@ async def test_handle_callback_rejects_missing_installation() -> None:
     token = state.sign_state(_WS, _USER)
     with pytest.raises(BadRequest):
         await connect.handle_callback("", token)
+
+
+async def test_handle_callback_backfills_account_login_and_avatar(monkeypatch) -> None:
+    client = _FakeAppClient({"inst-9": {"login": "octo", "avatar_url": "https://av/o.png"}})
+    monkeypatch.setattr(connect, "get_github_app_client", lambda: client)
+    token = state.sign_state(_WS, _USER)
+
+    await connect.handle_callback("inst-9", token)
+
+    [conn] = await service.list_connections(_WS, _USER)
+    assert conn.account_login == "octo"
+    assert conn.avatar_url == "https://av/o.png"
+
+
+async def test_handle_callback_persists_even_when_account_fetch_fails(monkeypatch) -> None:
+    class _Boom:
+        async def get_installation_account(self, _id, *, now=None):  # noqa: ANN001
+            raise RuntimeError("github down")
+
+    monkeypatch.setattr(connect, "get_github_app_client", lambda: _Boom())
+    token = state.sign_state(_WS, _USER)
+
+    # The connection is the load-bearing artifact — a failed display lookup must
+    # not sink it (nor leak the error to the browser redirect).
+    ws, user = await connect.handle_callback("inst-9", token)
+    assert (ws, user) == (_WS, _USER)
+    [conn] = await service.list_connections(_WS, _USER)
+    assert conn.installation_id == "inst-9"
+    assert conn.account_login is None and conn.avatar_url is None
+
+
+# ---------------------------------------------------------------------------
+# connect — lazy display enrichment on list.
+# ---------------------------------------------------------------------------
+
+
+async def test_list_connections_lazily_enriches_missing_display_info(monkeypatch) -> None:
+    # A row saved with no display info (e.g. the callback fetch failed earlier).
+    await service.save_connection(_WS, _USER, "inst-1")
+    client = _FakeAppClient({"inst-1": {"login": "octo", "avatar_url": "https://av/o.png"}})
+    monkeypatch.setattr(connect, "get_github_app_client", lambda: client)
+
+    first = await connect.list_connections(_WS, _USER)
+    assert first[0].account_login == "octo"
+    assert first[0].avatar_url == "https://av/o.png"
+    assert client.calls == ["inst-1"]  # enriched once
+
+    # Second read is fully populated → no further GitHub calls.
+    second = await connect.list_connections(_WS, _USER)
+    assert second[0].avatar_url == "https://av/o.png"
+    assert client.calls == ["inst-1"]  # unchanged — bounded to the missing window
+
+
+async def test_list_connections_falls_back_when_client_absent(monkeypatch) -> None:
+    await service.save_connection(_WS, _USER, "inst-1")
+    monkeypatch.setattr(connect, "get_github_app_client", lambda: None)
+    # No App client configured → return the un-enriched view, not an error.
+    listing = await connect.list_connections(_WS, _USER)
+    assert [c.installation_id for c in listing] == ["inst-1"]
+    assert listing[0].avatar_url is None
 
 
 # ---------------------------------------------------------------------------

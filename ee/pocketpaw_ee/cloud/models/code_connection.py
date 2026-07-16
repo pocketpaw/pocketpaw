@@ -7,6 +7,11 @@
 # distinct installation id. The ``installation_id`` is the least-privilege pointer
 # the broker mints repo-scoped tokens from (githubapp.py); it is NEVER a token.
 #
+# Updated 2026-07-16 (connect-UX): added ``avatar_url`` alongside ``account_login``
+# so the connected-account chip can render the GitHub profile image + username.
+# Both are display-only, enriched from GitHub lazily (None until the callback or a
+# connections read backfills them).
+#
 # Only ``ee.cloud.codeconnect.service`` imports this doc class directly
 # (import-linter "CodeConnection" contract, same discipline as WebSandbox).
 
@@ -31,6 +36,9 @@ class CodeConnection(Document):
     # The GitHub account (user/org) the App was installed on, for display in the
     # picker. Optional — enriched from GitHub lazily; None until then.
     account_login: str | None = None
+    # The account's avatar URL, for the connected-account chip. Display-only,
+    # enriched lazily alongside ``account_login``; None until then.
+    avatar_url: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

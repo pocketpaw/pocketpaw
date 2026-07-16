@@ -87,7 +87,10 @@ async def list_connections(
 ) -> CodeConnectionListResponse:
     """List the caller's GitHub connections (for the "connected as" UI state)."""
     workspace_id = _require_workspace(ctx)
-    views = await service.list_connections(workspace_id, ctx.user_id)
+    # connect.list_connections wraps the service read to lazily backfill each
+    # connection's display info (account login + avatar) so the chip can render a
+    # profile image without a reinstall.
+    views = await connect.list_connections(workspace_id, ctx.user_id)
     return CodeConnectionListResponse(
         connections=[service.view_to_wire(v) for v in views]
     )

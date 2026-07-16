@@ -3,6 +3,8 @@
 # REQUIRED at construction with no defaults per ee/cloud Rule 3 — a view is only
 # ever built from a persisted, tenant-checked row, so there is no safe default for
 # who owns a connection.
+# Updated 2026-07-16 (connect-UX): added ``avatar_url`` (display-only, optional)
+# so the read model carries the profile image for the connected-account chip.
 
 from __future__ import annotations
 
@@ -26,6 +28,8 @@ class CodeConnectionView:
     updated_at: datetime
     # The GitHub account the App was installed on (display only). Optional.
     account_login: str | None = None
+    # The account's avatar URL for the connected-account chip (display only).
+    avatar_url: str | None = None
 
 
 __all__ = ["CodeConnectionId", "CodeConnectionView"]

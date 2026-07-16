@@ -27,6 +27,7 @@ class CodeConnectionResponse(BaseModel):
     provider: str
     installationId: str
     accountLogin: str | None = None
+    avatarUrl: str | None = None
     createdAt: str
     updatedAt: str
 

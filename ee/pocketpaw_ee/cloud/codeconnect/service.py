@@ -35,6 +35,7 @@ def _doc_to_view(doc: _CodeConnectionDoc) -> CodeConnectionView:
         provider=doc.provider,
         installation_id=doc.installation_id,
         account_login=doc.account_login,
+        avatar_url=doc.avatar_url,
         created_at=doc.created_at,
         updated_at=doc.updated_at,
     )
@@ -49,6 +50,7 @@ def view_to_wire(view: CodeConnectionView) -> CodeConnectionResponse:
         provider=view.provider,
         installationId=view.installation_id,
         accountLogin=view.account_login,
+        avatarUrl=view.avatar_url,
         createdAt=view.created_at.isoformat(),
         updatedAt=view.updated_at.isoformat(),
     )
@@ -59,14 +61,16 @@ async def save_connection(
     user_id: str,
     installation_id: str,
     account_login: str | None = None,
+    avatar_url: str | None = None,
     provider: str = _PROVIDER,
 ) -> CodeConnectionView:
     """Persist (or refresh) a GitHub connection for a (workspace, user, installation).
 
     Idempotent on the registry key: re-installing / a repeated callback for the
     same installation refreshes the existing row (and any newly-known
-    ``account_login``) rather than minting a duplicate. Only an actual insert emits
-    ``CodeConnectionCreated`` (an idempotent refresh is not a new connection).
+    ``account_login`` / ``avatar_url``) rather than minting a duplicate. Only an
+    actual insert emits ``CodeConnectionCreated`` (an idempotent refresh is not a
+    new connection).
     """
     installation_id = (installation_id or "").strip()
     if not installation_id:
@@ -82,8 +86,14 @@ async def save_connection(
         }
     )
     if existing is not None:
+        changed = False
         if account_login and existing.account_login != account_login:
             existing.account_login = account_login
+            changed = True
+        if avatar_url and existing.avatar_url != avatar_url:
+            existing.avatar_url = avatar_url
+            changed = True
+        if changed:
             existing.updated_at = datetime.now(UTC)
             await existing.save()
         # no-event: an idempotent refresh is not a new connection.
@@ -95,6 +105,7 @@ async def save_connection(
         provider=provider,
         installation_id=installation_id,
         account_login=account_login,
+        avatar_url=avatar_url,
     )
     await doc.insert()
 

@@ -332,6 +332,32 @@ class GitHubAppClient:
             )
         return list(resp.json().get("repositories", []))
 
+    async def get_installation_account(
+        self, installation_id: str, *, now: datetime | None = None
+    ) -> dict[str, Any] | None:
+        """Fetch the account (login + avatar) an installation belongs to, for display.
+
+        ``GET /app/installations/{id}`` authenticated with the App JWT returns the
+        installation's ``account`` object. Returns ``{"login", "avatar_url"}`` or
+        ``None`` when GitHub declines or the account is absent — this is best-effort
+        display enrichment, never a hard dependency of the connect flow, so callers
+        treat ``None`` as "no display info yet" rather than an error.
+        """
+        url = f"{self._api_base}/app/installations/{installation_id}"
+        headers = {
+            "Authorization": f"Bearer {self.app_jwt(now=now)}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        resp = await self._request("GET", url, headers=headers)
+        if resp.status_code != 200:
+            return None
+        account = (resp.json() or {}).get("account") or {}
+        login = account.get("login")
+        if not login:
+            return None
+        return {"login": login, "avatar_url": account.get("avatar_url")}
+
     # -- transport ------------------------------------------------------------
 
     async def _request(
