@@ -29,6 +29,12 @@
 # license-gated like the rest. Generate-only — the frontend applies accepted hunks
 # via the existing file-RPC.
 #
+# Changed 2026-07-16 (WC-7/P4a, feat/code-mode): added the git write-path routes —
+# ``GET /websandbox/{row_id}/git/status`` and ``POST .../git/stage|commit|push``.
+# Thin adapters over ``websandbox/git.py`` (git runs in the VM; the push token
+# never enters it). Tenancy comes only from the RequestContext; a push failure is
+# a ``pushed:false`` body, never a 500. PR-open is a separate slice (P4b).
+#
 # Changed 2026-07-16 (WC-8/P3b, feat/code-mode): added the live-preview endpoint —
 # ``GET /websandbox/{row_id}/preview?port=<int>`` returns the iframe-embeddable
 # public URL of a dev-server port running in the VM. Thin adapter over
@@ -52,18 +58,24 @@ from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.websandbox import durability as websandbox_durability
 from pocketpaw_ee.cloud.websandbox import edit as websandbox_edit
+from pocketpaw_ee.cloud.websandbox import git as websandbox_git
 from pocketpaw_ee.cloud.websandbox import preview as websandbox_preview
 from pocketpaw_ee.cloud.websandbox import provision as websandbox_provision
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
 from pocketpaw_ee.cloud.websandbox.dto import (
+    CommitRequest,
     CreateSandboxRequest,
     EditRequest,
     EditResponse,
+    GitCommitResponse,
+    GitPushResponse,
+    GitStatusResponse,
     OpenSandboxRequest,
     PreviewResponse,
     RegisterSandboxRequest,
     SandboxTreeResponse,
     SnapshotResponse,
+    StageRequest,
     WebSandboxListResponse,
     WebSandboxResponse,
 )
@@ -163,6 +175,53 @@ async def get_sandbox_preview(
     """Return the iframe-embeddable public URL for a dev-server port in the VM."""
     workspace_id = _require_workspace(ctx)
     return await websandbox_preview.get_preview(workspace_id, ctx.user_id, row_id, port)
+
+
+# ---------------------------------------------------------------------------
+# WC-7/P4a — git write path (status / stage / commit / push).
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{row_id}/git/status", response_model=GitStatusResponse)
+async def git_status(
+    row_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> GitStatusResponse:
+    """Return the working-tree status (branch, ahead/behind, changed files)."""
+    workspace_id = _require_workspace(ctx)
+    return await websandbox_git.git_status(workspace_id, ctx.user_id, row_id)
+
+
+@router.post("/{row_id}/git/stage", response_model=GitStatusResponse)
+async def git_stage(
+    row_id: str,
+    body: StageRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> GitStatusResponse:
+    """Stage (or unstage) paths, then return a fresh status."""
+    workspace_id = _require_workspace(ctx)
+    return await websandbox_git.stage(workspace_id, ctx.user_id, row_id, body)
+
+
+@router.post("/{row_id}/git/commit", response_model=GitCommitResponse)
+async def git_commit(
+    row_id: str,
+    body: CommitRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> GitCommitResponse:
+    """Commit the staged changes as the caller's resolved identity."""
+    workspace_id = _require_workspace(ctx)
+    return await websandbox_git.commit(workspace_id, ctx.user_id, row_id, body)
+
+
+@router.post("/{row_id}/git/push", response_model=GitPushResponse)
+async def git_push(
+    row_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> GitPushResponse:
+    """Push the sandbox's feature branch to origin (never 500s on push failure)."""
+    workspace_id = _require_workspace(ctx)
+    return await websandbox_git.push(workspace_id, ctx.user_id, row_id)
 
 
 # ---------------------------------------------------------------------------

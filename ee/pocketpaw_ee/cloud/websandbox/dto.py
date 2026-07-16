@@ -30,6 +30,12 @@
 # the sandbox VM. Response-only (Rule 4); the requested port arrives as a query
 # param, never a body, and tenancy comes from the RequestContext.
 #
+# Changed 2026-07-16 (WC-7/P4a git, feat/code-mode): added the git write-path DTOs —
+# request bodies ``StageRequest`` (paths + unstage) and ``CommitRequest`` (message),
+# and response models ``GitStatusResponse`` / ``GitFileEntry`` / ``GitCommitResponse``
+# / ``GitPushResponse``. Same Rule-4 split: the request bodies carry only what the
+# client supplies; tenancy comes from the RequestContext, never the body.
+#
 # Changed 2026-07-16 (review hardening): split the write surface. ``sandbox_id``
 # and ``status`` are SERVER-OWNED — the Daytona id is the load-bearing input to
 # ``authorize_sandbox``, so a client that could write it onto its own row could
@@ -169,6 +175,64 @@ class PreviewResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# WC-7/P4a — git write path (status / stage / commit / push).
+# ---------------------------------------------------------------------------
+
+
+class StageRequest(BaseModel):
+    """Stage (or unstage) a set of paths for the next commit.
+
+    ``paths`` are project-relative and each is ``shlex.quote``d before it reaches
+    the shell (git.py). ``unstage`` flips ``git add`` to ``git reset HEAD``.
+    """
+
+    paths: list[str] = Field(default_factory=list)
+    unstage: bool = False
+
+
+class CommitRequest(BaseModel):
+    """Commit the staged changes with ``message`` (shlex-quoted before the shell)."""
+
+    message: str = Field(..., min_length=1, max_length=8192)
+
+
+class GitFileEntry(BaseModel):
+    """One changed path from ``git status --porcelain`` — the two status columns
+    plus a convenience ``staged`` flag (the index column is a real change)."""
+
+    path: str
+    index: str  # the index (staged) column: 'M','A','D','R','?'…
+    worktree: str  # the worktree (unstaged) column
+    staged: bool
+
+
+class GitStatusResponse(BaseModel):
+    """Working-tree status: current branch, upstream ahead/behind, changed files."""
+
+    branch: str | None = None
+    ahead: int = 0
+    behind: int = 0
+    files: list[GitFileEntry] = Field(default_factory=list)
+
+
+class GitCommitResponse(BaseModel):
+    """The result of a commit — the new ``sha`` and whether anything was committed
+    (``committed`` is False when there was nothing staged)."""
+
+    sha: str
+    committed: bool
+
+
+class GitPushResponse(BaseModel):
+    """The result of a push — ``pushed`` plus the ``branch`` and, on failure, a
+    human-readable ``detail`` (a push failure is NEVER an error response)."""
+
+    pushed: bool
+    branch: str
+    detail: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # WC-5a — AI edit agent (Cmd-K).
 # ---------------------------------------------------------------------------
 
@@ -216,15 +280,21 @@ class EditResponse(BaseModel):
 
 
 __all__ = [
+    "CommitRequest",
     "CreateSandboxRequest",
     "EditRequest",
     "EditResponse",
     "EditSelection",
+    "GitCommitResponse",
+    "GitFileEntry",
+    "GitPushResponse",
+    "GitStatusResponse",
     "OpenSandboxRequest",
     "PreviewResponse",
     "RegisterSandboxRequest",
     "SandboxTreeResponse",
     "SnapshotResponse",
+    "StageRequest",
     "TreeEntryResponse",
     "UpdateStatusRequest",
     "WebSandboxListResponse",
