@@ -59,6 +59,16 @@
 #   chokepoint contracts stay 0-broken. (``propose.py`` itself statically imports
 #   no Beanie document class — it lazy-imports ``pocketpaw.stores`` /
 #   ``pocketpaw.instinct.models`` internally.)
+# Updated: 2026-07-16 (SR-6 member→admin bind requests) — ``sense_request_bind``
+#   now files its bind proposal with ``authorize="approver"`` so the executor
+#   re-checks the APPROVING admin's ``connector.manage`` (not the proposer's). A
+#   non-admin MEMBER who hits an unbound connector can now REQUEST the bind; it
+#   routes to the admins' Tray (workspace-wide pending feed) and lands ONLY when an
+#   admin approves. A member's self-approve fails closed twice over: the approve
+#   endpoint requires ``instinct.approve`` (ADMIN), and the execute-time re-check
+#   would deny a member approver. SR-4's proposer-keyed re-check (which failed a
+#   member's request even on admin approval) is replaced for THIS tool only; the
+#   admin ``workspace_admin.connector_enable`` path keeps proposer authority.
 # Updated: 2026-07-16 (SR-4 just-in-time bind) — added a SIXTH tool,
 #   ``sense_request_bind(connector)``: the BIND step after discovery. sense_search
 #   lets the agent find an UNBOUND connector; this proposes enabling it for the
@@ -900,9 +910,14 @@ async def _propose_connector_bind(
     security rule: this NEVER calls ``connectors.service.enable_connector``. The
     bind fires only when an admin approves in The Tray — the instinct router then
     runs ``execute_approved_admin_action`` → (whitelist ``connector.manage``
-    op=enable) → ``enable_connector`` (re-validated: the executor RE-CHECKS the
-    PROPOSER's CURRENT ``connector.manage`` (ADMIN) role, so a since-demoted or
-    non-admin proposer's bind fails closed). We propose-and-suspend, STOP.
+    op=enable) → ``enable_connector``. SR-6: this is a member→admin REQUEST, filed
+    with ``authorize="approver"``, so the executor RE-CHECKS the APPROVER's CURRENT
+    ``connector.manage`` (ADMIN) role — NOT the proposer's. A MEMBER can therefore
+    REQUEST a bind that only an admin's approval lands; a member's (self-)approval
+    fails closed at that re-check (a member approver lacks the role), on top of the
+    approve endpoint already requiring ``instinct.approve`` (ADMIN). An admin who
+    requests a bind still approves their own (they hold the role). We
+    propose-and-suspend, STOP.
 
     Binding is a workspace-admin CONFIG op (``enable_connector``), NOT a connector
     ACTION (``execute``) — so it rides the admin-proposal gate (which enforces
@@ -929,6 +944,14 @@ async def _propose_connector_bind(
             proposer_user_id=user_id,
             summary=f"Enable the '{connector}' connector for {where}.",
             title=f"Enable connector '{connector}'",
+            # SR-6 — a bind requested from chat is a member→admin REQUEST: the
+            # requester may be a MEMBER (no ``connector.manage``), so the AUTHORITY
+            # is the admin who approves in the Tray, not the proposer. The executor
+            # re-checks the APPROVER's ``connector.manage`` at execute time, so an
+            # admin's approval lands the bind and a member's (self-)approval fails
+            # closed. (Admins who request a bind still approve their own — they hold
+            # the role, so the approver re-check passes.)
+            authorize="approver",
         )
     except Exception as exc:  # noqa: BLE001 — surface a clean MCP error, never a 500.
         logger.warning("sense_request_bind propose failed", exc_info=True)

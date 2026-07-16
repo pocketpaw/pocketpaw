@@ -1,5 +1,18 @@
 # ee/cloud/admin_proposals/propose.py — propose a gated workspace-admin action.
 # Created: 2026-07-03 (feat/workspace-admin-tools, WA-2).
+# Updated: 2026-07-16 (SR-6 member→admin connector binds) — the blob now carries an
+#   optional ``authorize`` field selecting WHOSE current role the executor re-checks
+#   at approve time: ``"proposer"`` (default — WA-2..WA-6, UNCHANGED: the proposer is
+#   the author AND the authority, since only an admin can call those tools) or
+#   ``"approver"`` (a member→admin REQUEST — e.g. the ``sense_request_bind`` connector
+#   bind — where the requester may be a MEMBER who never holds ``connector.manage``,
+#   so the AUTHORITY is the human who APPROVES in the Tray). ``propose_admin_action``
+#   accepts ``authorize`` (validated to that pair) and stamps it on the blob; the
+#   executor reads it to pick the re-check subject. The field is additive + optional
+#   (absent → ``"proposer"``), so schema stays 1 and old pending Actions are
+#   unaffected. It rides OUTSIDE ``params_hash`` (which covers only action + args),
+#   and flipping it can never ESCALATE: ``"proposer"`` is the more-restrictive
+#   default, and ``"approver"`` still requires a current admin to have approved.
 #
 # What this module does (the propose half of the admin-action gate): a
 # workspace-admin tool (e.g. ``member_update_role`` in the workspace_admin MCP
@@ -202,6 +215,7 @@ async def propose_admin_action(
     title: str | None = None,
     correlation_id: str | None = None,
     assignee: str | None = None,
+    authorize: str = "proposer",
 ) -> str:
     """Build + store an Instinct ``Action`` for a gated workspace-admin write.
 
@@ -228,6 +242,11 @@ async def propose_admin_action(
             when omitted — the common case).
         assignee: the workspace member who should approve. Defaults to
             ``proposer_user_id``.
+        authorize: whose CURRENT role the executor re-checks at approve time —
+            ``"proposer"`` (default, WA-2 behavior) or ``"approver"`` (a
+            member→admin request, where the approving admin is the authority).
+            SR-6: the ``sense_request_bind`` connector bind passes ``"approver"``
+            so a member can REQUEST a bind that only an admin's approval lands.
     """
     from pocketpaw.instinct.models import ActionCategory, ActionPriority, ActionTrigger
     from pocketpaw.stores import get_instinct_store
@@ -241,6 +260,11 @@ async def propose_admin_action(
     proposer_user_id = str(proposer_user_id or "")
     if not proposer_user_id:
         raise ValueError("propose_admin_action requires a non-empty proposer_user_id")
+    authorize = str(authorize or "proposer")
+    if authorize not in ("proposer", "approver"):
+        # Fail loud on a typo — a silently-defaulted authorize could re-check the
+        # wrong subject and either strand a member request or (never) over-grant.
+        raise ValueError("propose_admin_action authorize must be 'proposer' or 'approver'")
 
     call_args = dict(args or {})
     args_hash = compute_args_hash(action, call_args)
@@ -265,6 +289,9 @@ async def propose_admin_action(
         "proposer_user_id": proposer_user_id,
         "params_hash": args_hash,
         "idempotency_key": idem,
+        # SR-6 — whose CURRENT role the executor re-checks at approve time. Absent
+        # on pre-SR-6 blobs → the executor defaults to "proposer" (WA-2 behavior).
+        "authorize": authorize,
         "summary": human_summary,
         # Decision-Graph chain-correlation fields (schema 1 carries them).
         "correlation_id": corr,
