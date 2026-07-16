@@ -2,6 +2,12 @@
 # type (the 8th gated Instinct kind, WA-2), plus the WA-5 whitelist extensions.
 #
 # Created: 2026-07-03 (feat/workspace-admin-tools, WA-2).
+# Updated: 2026-07-16 (SR-4 just-in-time connector bind) — the ``connector.manage``
+#   op=enable dispatch now accepts an optional connector SCOPE. Two new tests:
+#   scope=pocket + pocket_id → enable_connector is called with an
+#   EnableConnectorRequest carrying scope=pocket + the pocket_id (the JIT bind the
+#   agent's sense_request_bind proposes, landing ONLY on approval); scope=pocket
+#   with NO pocket_id → the strict adapter raises → FAILED, no service call.
 # Updated: 2026-07-03 (WA-6) — coverage for the three OWNER writes
 #   (instinct.activate / workspace.delete / billing.manage). Per action: approve →
 #   the whitelisted service fires EXACTLY ONCE with the adapted args; reject via
@@ -722,6 +728,46 @@ async def test_executor_connector_enable_fires_once(store, monkeypatch):
     workspace_id, name, body = call_args
     assert workspace_id == "w1"
     assert name == "gmail"
+
+
+async def test_executor_connector_enable_pocket_scope_fires_with_scope(store, monkeypatch):
+    """SR-4 — op=enable with scope=pocket + pocket_id binds the connector to THAT
+    pocket: enable_connector is called with an EnableConnectorRequest carrying
+    scope=pocket + the pocket_id (the just-in-time bind the agent's
+    sense_request_bind proposes). This is the ONLY path that reaches
+    enable_connector — proving a bind lands ONLY on approval, never inline."""
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.connectors.service.enable_connector", spy)
+    await _propose_approve_execute(
+        store,
+        monkeypatch,
+        action="connector.manage",
+        args={"op": "enable", "name": "github", "scope": "pocket", "pocket_id": "pk_9"},
+    )
+    assert len(spy.calls) == 1
+    workspace_id, name, body = spy.calls[0][0]
+    assert workspace_id == "w1"
+    assert name == "github"
+    # The scope + pocket_id ride INSIDE the typed DTO (never as top-level kwargs).
+    assert body.scope == "pocket"
+    assert body.pocket_id == "pk_9"
+    assert spy.calls[0][1] == {}  # nothing smuggled as kwargs
+
+
+async def test_executor_connector_enable_pocket_scope_missing_pocket_id_fails(store, monkeypatch):
+    """SR-4 — scope=pocket with NO pocket_id → the strict adapter raises →
+    MalformedArgs failure, enable_connector is NEVER called."""
+    spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.connectors.service.enable_connector", spy)
+    approved = await _propose_approve_execute(
+        store,
+        monkeypatch,
+        action="connector.manage",
+        args={"op": "enable", "name": "github", "scope": "pocket"},
+    )
+    assert spy.calls == []
+    final = await store.get_action(approved.id)
+    assert final.status == ActionStatus.FAILED
 
 
 async def test_executor_connector_disable_fires_once(store, monkeypatch):

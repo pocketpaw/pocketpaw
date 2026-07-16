@@ -59,6 +59,28 @@
 #   chokepoint contracts stay 0-broken. (``propose.py`` itself statically imports
 #   no Beanie document class — it lazy-imports ``pocketpaw.stores`` /
 #   ``pocketpaw.instinct.models`` internally.)
+# Updated: 2026-07-16 (SR-4 just-in-time bind) — added a SIXTH tool,
+#   ``sense_request_bind(connector)``: the BIND step after discovery. sense_search
+#   lets the agent find an UNBOUND connector; this proposes enabling it for the
+#   current pocket so the agent can use it — one conversation, no settings-page
+#   trip. Modeled on ``_propose_connector_write``'s propose-and-suspend shape but,
+#   because binding a connector is a workspace-admin CONFIG op (``enable_connector``)
+#   and NOT a connector ACTION (``execute``), it files through the ADMIN-proposal
+#   gate (``admin_proposals.propose.propose_admin_action`` with action key
+#   ``connector.manage``), NOT the external-action gate. THE load-bearing rule is
+#   identical: it NEVER calls ``enable_connector`` inline — the bind fires only when
+#   an admin approves in The Tray, at which point the instinct router runs
+#   ``execute_approved_admin_action`` → whitelist ``connector.manage`` op=enable →
+#   ``enable_connector`` (scope=pocket), RE-CHECKING the PROPOSER's CURRENT
+#   ``connector.manage`` (ADMIN) role. Admin one-click approval only in this slice
+#   (member→admin request-routing is SR-6). OAUTH REALITY (v1): the bind ENABLES the
+#   connector regardless of credentials, but its actions only actually run if stored
+#   config (PAT/token) exists — there is no interactive-OAuth-inline flow in v1, so a
+#   connector needing fresh OAuth binds but stays unusable until an admin adds config
+#   (a documented v1 limitation, not built here). Unknown connector names are rejected
+#   at propose time via the registry-only ``connectors.service.is_known_connector``.
+#   Tool id ``mcp__pocketpaw_connectors__sense_request_bind``. OSS-EE boundary held —
+#   the registry/Beanie reads stay in ``connectors.service``.
 # Updated: 2026-07-16 (SR-1 catalog-wide discovery) — added a FIFTH tool,
 #   ``sense_search(query)``: catalog-WIDE discovery over all 35 connectors, not
 #   just the ones a pocket already bound. The other tools can only enumerate
@@ -119,6 +141,7 @@ CONNECTOR_EXECUTE_TOOL_ID = f"mcp__{SERVER_NAME}__connector_execute"
 LIST_SENSES_TOOL_ID = f"mcp__{SERVER_NAME}__list_senses"
 SENSE_EXECUTE_TOOL_ID = f"mcp__{SERVER_NAME}__sense_execute"
 SENSE_SEARCH_TOOL_ID = f"mcp__{SERVER_NAME}__sense_search"
+SENSE_REQUEST_BIND_TOOL_ID = f"mcp__{SERVER_NAME}__sense_request_bind"
 
 CONNECTOR_TOOL_IDS = (
     LIST_CONNECTOR_ACTIONS_TOOL_ID,
@@ -126,6 +149,7 @@ CONNECTOR_TOOL_IDS = (
     LIST_SENSES_TOOL_ID,
     SENSE_EXECUTE_TOOL_ID,
     SENSE_SEARCH_TOOL_ID,
+    SENSE_REQUEST_BIND_TOOL_ID,
 )
 
 
@@ -814,6 +838,131 @@ async def _sense_search_handler(args: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Tool handler — just-in-time connector bind (propose-and-suspend via Instinct)
+# ---------------------------------------------------------------------------
+
+
+async def _sense_request_bind_handler(args: dict) -> dict:
+    workspace_id, user_id, pocket_id = _identity()
+    if not workspace_id:
+        return _error_response(
+            "no active workspace — sense_request_bind can only be called from "
+            "inside a cloud chat stream"
+        )
+    if not user_id:
+        # The bind is an admin action attributed to a proposer; the execute-time
+        # RBAC re-check loads THIS user fresh. No user → nothing to attribute /
+        # re-check, so fail closed rather than propose an unownable action.
+        return _error_response(
+            "no active user — sense_request_bind needs a signed-in user to file "
+            "the bind request under"
+        )
+
+    connector = args.get("connector")
+    if not isinstance(connector, str) or not connector.strip():
+        return _error_response(
+            "connector is required (string — the connector to enable, e.g. 'github')"
+        )
+    connector = connector.strip()
+
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    # Reject an unknown connector NOW (registry-only check, no Beanie) so the
+    # agent gets a clean error instead of a doomed proposal that only fails at
+    # execute time. The Beanie/registry read stays in the service (OSS-EE §2).
+    if not connectors_service.is_known_connector(connector):
+        return _error_response(
+            f"connector '{connector}' is not in the catalog. Call sense_search to "
+            "find a real connector name before requesting a bind."
+        )
+
+    return await _propose_connector_bind(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        connector=connector,
+    )
+
+
+async def _propose_connector_bind(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str | None,
+    connector: str,
+) -> dict[str, Any]:
+    """Propose enabling (binding) ``connector`` and suspend — NEVER bind inline.
+
+    Files a PENDING Instinct ``Action`` via ``propose_admin_action`` (the
+    workspace-admin gate, action key ``connector.manage``) and returns a
+    pending-shaped success envelope so the chat agent relays "I've proposed
+    enabling <connector> — approve it in your Tray" to the user. THE load-bearing
+    security rule: this NEVER calls ``connectors.service.enable_connector``. The
+    bind fires only when an admin approves in The Tray — the instinct router then
+    runs ``execute_approved_admin_action`` → (whitelist ``connector.manage``
+    op=enable) → ``enable_connector`` (re-validated: the executor RE-CHECKS the
+    PROPOSER's CURRENT ``connector.manage`` (ADMIN) role, so a since-demoted or
+    non-admin proposer's bind fails closed). We propose-and-suspend, STOP.
+
+    Binding is a workspace-admin CONFIG op (``enable_connector``), NOT a connector
+    ACTION (``execute``) — so it rides the admin-proposal gate (which enforces
+    ``connector.manage``), not the external-action gate (which the connector-WRITE
+    path uses and which does no RBAC re-check). ``scope`` follows the pocket: a
+    pocket-anchored chat proposes a ``pocket``-scoped bind (so the connector lands
+    for THIS pocket and ``list_connector_actions`` then shows it here); an
+    unanchored chat proposes a ``workspace``-scoped enable.
+    """
+    # Lazy import — keeps the module's import surface identical to today (the
+    # READ path already lazy-imports ``connectors.service`` function-locally).
+    from pocketpaw_ee.cloud.admin_proposals.propose import propose_admin_action
+
+    scope = "pocket" if pocket_id else "workspace"
+    call_args: dict[str, Any] = {"op": "enable", "name": connector, "scope": scope}
+    if pocket_id:
+        call_args["pocket_id"] = pocket_id
+    where = f"pocket {pocket_id}" if pocket_id else "the workspace"
+    try:
+        action_id = await propose_admin_action(
+            workspace_id=workspace_id,
+            action="connector.manage",
+            args=call_args,
+            proposer_user_id=user_id,
+            summary=f"Enable the '{connector}' connector for {where}.",
+            title=f"Enable connector '{connector}'",
+        )
+    except Exception as exc:  # noqa: BLE001 — surface a clean MCP error, never a 500.
+        logger.warning("sense_request_bind propose failed", exc_info=True)
+        return _error_response(f"could not request enabling {connector!r} for approval: {exc}")
+
+    logger.info(
+        "sense_request_bind proposed: connector=%r scope=%r pocket=%r action_id=%s",
+        connector,
+        scope,
+        pocket_id,
+        action_id,
+    )
+    # Pending-shaped success: an admin gates the bind. ``status`` is the string
+    # ``"pending_approval"`` (not an HTTP code); ``action_id`` lets the user (and
+    # the agent) correlate the proposal with the pending Action in The Tray. The
+    # ``message`` is phrased for the agent to relay verbatim — it must NOT claim
+    # the connector is connected yet.
+    return _success_response(
+        {
+            "executed": False,
+            "status": "pending_approval",
+            "action_id": action_id,
+            "connector": connector,
+            "scope": scope,
+            "message": (
+                f"I've proposed enabling '{connector}' — it's waiting for an admin "
+                "to approve it in the Tray. Once approved, it'll be connected here "
+                "and I can use it. No change has been made yet."
+            ),
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
 # Server factory
 # ---------------------------------------------------------------------------
 
@@ -998,15 +1147,54 @@ def build_connectors_context_server() -> tuple[str, Any] | None:
     async def sense_search(args):  # type: ignore[no-untyped-def]
         return await _sense_search_handler(args)
 
+    @tool(
+        "sense_request_bind",
+        (
+            "Request that a connector be ENABLED (bound) for the current "
+            "pocket/room so you can then use it. Call this AFTER sense_search "
+            "surfaces a connector the user wants that is NOT yet bound here "
+            "(`bound`=false) — instead of telling the user to visit the settings "
+            "page, propose the bind right from the chat. Args: `connector` (the "
+            "registry name from a sense_search result, e.g. 'github' or 'stripe'). "
+            "This does NOT connect the tool inline — binding a connector is an "
+            "admin action, so it is PROPOSED to the user's Tray: the tool returns "
+            "status 'pending_approval' with an action_id, and the connector is "
+            "enabled only once an admin approves it there. When you get a pending "
+            "result, tell the user you've requested it and it needs an admin's "
+            "approval in the Tray — do NOT claim the connector is connected or try "
+            "to use it yet. After approval the connector's actions become "
+            "available automatically on your next turn (call list_connector_actions "
+            "again to confirm). Use this only for a real connector name; if you're "
+            "unsure it exists, sense_search first."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "connector": {
+                    "type": "string",
+                    "description": (
+                        "Registry name of the connector to enable, e.g. 'github', "
+                        "'gmail', 'stripe'. Must be a real connector — take it from "
+                        "a sense_search result's `connector` field."
+                    ),
+                },
+            },
+            "required": ["connector"],
+        },
+    )
+    async def sense_request_bind(args):  # type: ignore[no-untyped-def]
+        return await _sense_request_bind_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
-        version="1.2.0",
+        version="1.3.0",
         tools=[
             list_connector_actions,
             connector_execute,
             list_senses,
             sense_execute,
             sense_search,
+            sense_request_bind,
         ],
     )
     return SERVER_NAME, server
@@ -1018,6 +1206,7 @@ __all__ = [
     "LIST_CONNECTOR_ACTIONS_TOOL_ID",
     "LIST_SENSES_TOOL_ID",
     "SENSE_EXECUTE_TOOL_ID",
+    "SENSE_REQUEST_BIND_TOOL_ID",
     "SENSE_SEARCH_TOOL_ID",
     "SERVER_NAME",
     "build_connectors_context_server",

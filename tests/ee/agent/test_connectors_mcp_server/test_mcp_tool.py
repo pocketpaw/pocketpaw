@@ -19,6 +19,16 @@
 #   trust) actions PROPOSE without ever calling execute inline, connectors not
 #   bound to the pocket are rejected, and a missing pocket / workspace
 #   ContextVar (called off-stream) yields a clear error.
+# Updated: 2026-07-16 (SR-4 just-in-time bind) — the server now carries a SIXTH
+#   tool, ``sense_request_bind``. Bumped the tool-count assertion (5 -> 6) and
+#   added ``SENSE_REQUEST_BIND_TOOL_ID`` to the registration test. New
+#   ``TestSenseRequestBind`` proves the SR-4 security contract: the tool PROPOSES
+#   the bind through the ADMIN-proposal gate (``propose_admin_action`` with action
+#   ``connector.manage`` op=enable, scope=pocket for anchored / workspace for
+#   unanchored) and ``connectors.service.enable_connector`` is NEVER awaited inline;
+#   an unknown connector fails at propose time via ``is_known_connector`` (no
+#   proposal filed); a propose failure is a clean error that still never enables
+#   inline; and no-workspace / no-user / missing-connector all fail closed.
 # Updated: 2026-07-16 (SR-1 catalog-wide discovery) — the server now carries a
 #   FIFTH tool, ``sense_search``. Bumped the tool-count assertion (4 -> 5) and
 #   added ``SENSE_SEARCH_TOOL_ID`` to the registration test. New ``TestSenseSearch``
@@ -54,6 +64,7 @@ class TestConnectorsMcpServerRegistration:
             CONNECTOR_EXECUTE_TOOL_ID,
             CONNECTOR_TOOL_IDS,
             LIST_CONNECTOR_ACTIONS_TOOL_ID,
+            SENSE_REQUEST_BIND_TOOL_ID,
             SENSE_SEARCH_TOOL_ID,
             SERVER_NAME,
         )
@@ -63,11 +74,14 @@ class TestConnectorsMcpServerRegistration:
         assert LIST_CONNECTOR_ACTIONS_TOOL_ID == "mcp__pocketpaw_connectors__list_connector_actions"
         assert CONNECTOR_EXECUTE_TOOL_ID == "mcp__pocketpaw_connectors__connector_execute"
         assert SENSE_SEARCH_TOOL_ID == "mcp__pocketpaw_connectors__sense_search"
+        assert SENSE_REQUEST_BIND_TOOL_ID == "mcp__pocketpaw_connectors__sense_request_bind"
         assert LIST_CONNECTOR_ACTIONS_TOOL_ID in CONNECTOR_TOOL_IDS
         assert CONNECTOR_EXECUTE_TOOL_ID in CONNECTOR_TOOL_IDS
         assert SENSE_SEARCH_TOOL_ID in CONNECTOR_TOOL_IDS
-        # Connector surface + two Sense-tier tools (chunk 4) + sense_search (SR-1).
-        assert len(CONNECTOR_TOOL_IDS) == 5
+        assert SENSE_REQUEST_BIND_TOOL_ID in CONNECTOR_TOOL_IDS
+        # Connector surface + two Sense-tier tools (chunk 4) + sense_search (SR-1)
+        # + sense_request_bind (SR-4).
+        assert len(CONNECTOR_TOOL_IDS) == 6
 
     def test_extension_provider_advertises_tool_ids(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk
@@ -924,3 +938,213 @@ class TestSenseSearch:
         body = _decode_payload(out)
         assert body["results"] == []
         assert "No catalog actions matched" in body["message"]
+
+
+# ---------------------------------------------------------------------------
+# Handler — sense_request_bind (just-in-time bind: propose-and-suspend)
+# ---------------------------------------------------------------------------
+
+
+class TestSenseRequestBind:
+    @pytest.mark.asyncio
+    async def test_proposes_pocket_bind_and_never_enables_inline(self) -> None:
+        """THE SR-4 security rule — sense_request_bind PROPOSES the bind through
+        the admin-proposal gate (``connector.manage`` op=enable, scope=pocket) and
+        ``connectors.service.enable_connector`` is NEVER called inline. An admin
+        gates it in The Tray; only their approval (via the instinct router →
+        ``execute_approved_admin_action``) fires the enable."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        proposed_id = "act-bind-555"
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.is_known_connector",
+                return_value=True,
+            ) as mock_known,
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.enable_connector",
+                new=AsyncMock(),
+            ) as mock_enable,
+            patch(
+                "pocketpaw_ee.cloud.admin_proposals.propose.propose_admin_action",
+                new=AsyncMock(return_value=proposed_id),
+            ) as mock_propose,
+        ):
+            out = await connectors_mcp._sense_request_bind_handler({"connector": "github"})
+
+        # Assertion #1 — the bind was PROPOSED as a connector.manage op=enable
+        # with the pocket scope resolved from the per-stream ContextVars.
+        mock_propose.assert_awaited_once()
+        kw = mock_propose.await_args.kwargs
+        assert kw["workspace_id"] == "ws_1"
+        assert kw["action"] == "connector.manage"
+        assert kw["args"] == {
+            "op": "enable",
+            "name": "github",
+            "scope": "pocket",
+            "pocket_id": "pk_1",
+        }
+        assert kw["proposer_user_id"] == "u_1"
+        mock_known.assert_called_once_with("github")
+
+        # Assertion #2 — enable_connector was NEVER awaited inline. THE rule.
+        mock_enable.assert_not_awaited()
+
+        # Assertion #3 — pending-shaped success carrying the proposed action_id.
+        assert not out.get("is_error")
+        body = _decode_payload(out)
+        assert body["executed"] is False
+        assert body["status"] == "pending_approval"
+        assert body["action_id"] == proposed_id
+        assert body["connector"] == "github"
+        assert body["scope"] == "pocket"
+        assert "Tray" in body["message"]
+
+    @pytest.mark.asyncio
+    async def test_unanchored_proposes_workspace_scope(self) -> None:
+        """A bind requested from an UNANCHORED chat (pocket_id=None) proposes a
+        ``workspace``-scoped enable and carries NO pocket_id. Still never enables
+        inline."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", None)
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.is_known_connector",
+                return_value=True,
+            ),
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.enable_connector",
+                new=AsyncMock(),
+            ) as mock_enable,
+            patch(
+                "pocketpaw_ee.cloud.admin_proposals.propose.propose_admin_action",
+                new=AsyncMock(return_value="act-ws-bind"),
+            ) as mock_propose,
+        ):
+            out = await connectors_mcp._sense_request_bind_handler({"connector": "gmail"})
+
+        mock_propose.assert_awaited_once()
+        kw = mock_propose.await_args.kwargs
+        assert kw["args"] == {"op": "enable", "name": "gmail", "scope": "workspace"}
+        assert "pocket_id" not in kw["args"]
+        mock_enable.assert_not_awaited()
+        assert not out.get("is_error")
+        body = _decode_payload(out)
+        assert body["scope"] == "workspace"
+
+    @pytest.mark.asyncio
+    async def test_unknown_connector_is_clean_error_no_propose_no_enable(self) -> None:
+        """An unknown connector name is rejected at PROPOSE time (registry check)
+        — no admin proposal is filed and enable_connector is never called."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.is_known_connector",
+                return_value=False,
+            ),
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.enable_connector",
+                new=AsyncMock(),
+            ) as mock_enable,
+            patch(
+                "pocketpaw_ee.cloud.admin_proposals.propose.propose_admin_action",
+                new=AsyncMock(),
+            ) as mock_propose,
+        ):
+            out = await connectors_mcp._sense_request_bind_handler(
+                {"connector": "not_a_real_connector"}
+            )
+
+        assert out.get("is_error") is True
+        assert "not in the catalog" in out["content"][0]["text"]
+        mock_propose.assert_not_awaited()
+        mock_enable.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_propose_failure_is_clean_error_not_inline_enable(self) -> None:
+        """If ``propose_admin_action`` raises the handler returns a clean MCP error
+        and STILL never enables inline — a propose failure must not fall through to
+        an inline bind."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.is_known_connector",
+                return_value=True,
+            ),
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.enable_connector",
+                new=AsyncMock(),
+            ) as mock_enable,
+            patch(
+                "pocketpaw_ee.cloud.admin_proposals.propose.propose_admin_action",
+                new=AsyncMock(side_effect=RuntimeError("instinct store unavailable")),
+            ),
+        ):
+            out = await connectors_mcp._sense_request_bind_handler({"connector": "github"})
+
+        assert out.get("is_error") is True
+        assert "for approval" in out["content"][0]["text"]
+        mock_enable.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_workspace_is_error(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        ws_patch, user_patch, pocket_patch = _patch_identity(None, None, None)
+        with ws_patch, user_patch, pocket_patch:
+            out = await connectors_mcp._sense_request_bind_handler({"connector": "github"})
+
+        assert out.get("is_error") is True
+        assert "no active workspace" in out["content"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_no_user_is_error(self) -> None:
+        """No signed-in user → fail closed (the bind is attributed to a proposer
+        the executor re-checks; there is nothing to attribute)."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", None, "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.admin_proposals.propose.propose_admin_action",
+                new=AsyncMock(),
+            ) as mock_propose,
+        ):
+            out = await connectors_mcp._sense_request_bind_handler({"connector": "github"})
+
+        assert out.get("is_error") is True
+        assert "no active user" in out["content"][0]["text"]
+        mock_propose.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_connector_is_error(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with ws_patch, user_patch, pocket_patch:
+            out = await connectors_mcp._sense_request_bind_handler({})
+
+        assert out.get("is_error") is True
+        assert "connector is required" in out["content"][0]["text"]
