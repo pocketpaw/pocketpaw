@@ -79,11 +79,11 @@ async def delete_cycle(
     cycle_id: str,
     ctx: RequestContext = Depends(request_context),
 ) -> dict[str, str]:
-    """Delete a completed cycle permanently.
+    """Delete a cycle permanently.
 
-    Only completed cycles can be deleted. The cycle document is removed
-    from the database and any remaining task references to this cycle are
-    detached.
+    Cycles in any state (upcoming, active, or completed) can be deleted.
+    The cycle document is removed from the database and any remaining task
+    references to this cycle are detached.
     """
     return await cycles_service.agent_delete_cycle(ctx, cycle_id)
 

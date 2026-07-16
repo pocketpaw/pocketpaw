@@ -530,25 +530,18 @@ async def agent_close_cycle(ctx: RequestContext, cycle_id: str) -> CycleResponse
 
 
 async def agent_delete_cycle(ctx: RequestContext, cycle_id: str) -> dict[str, Any]:
-    """Delete a completed cycle permanently.
+    """Delete a cycle permanently.
 
-    Only completed cycles can be deleted — active or upcoming cycles must
-    be closed first. This is a destructive operation: the cycle document
-    is removed from the database. Incomplete tasks attached to the cycle
-    have their ``cycle_id`` cleared so they don't orphan.
+    Cycles in any state (upcoming, active, or completed) can be deleted.
+    This is a destructive operation: the cycle document is removed from
+    the database. Any tasks attached to the cycle have their ``cycle_id``
+    cleared so they don't orphan.
 
     Raises:
-        Forbidden: If the cycle is not completed.
         NotFound: If the cycle does not exist in the caller's workspace.
     """
     workspace_id = _require_workspace(ctx)
     doc = await _fetch_in_workspace(workspace_id, cycle_id)
-
-    if doc.status != "completed":
-        raise Forbidden(
-            "cycle.not_completed",
-            "Only completed cycles can be deleted. Close the cycle first.",
-        )
 
     # Detach any tasks still pointing at this cycle
     try:
