@@ -1,4 +1,10 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-16 (C1 hardening) — (a) the shared front-gate now validates
+#   customer_ref against a charset+length bound (400) as its cheapest check;
+#   (b) GET /paw-bar/cart records a cart-read marker so read enumeration counts
+#   toward the rate limiter like writes; (c) concierge_chat threads the widget's
+#   catalog (capped at _MAX_PREAMBLE_CATALOG) onto surface_meta so the concierge
+#   preamble can name real products, not just the action verbs.
 # Updated: 2026-07-16 (Paw Bar action registry, C1) — the visitor commerce loop.
 #   (1) POST /paw-bar/action {key,w,customer_ref,verb,args} and GET /paw-bar/cart
 #   ?key&w&customer_ref — PUBLIC endpoints with the SAME armor as concierge chat,
@@ -140,6 +146,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["PawBar"])
 
 _PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}")
+
+# Cap the catalog threaded into the concierge preamble so a large catalog can't
+# bloat the prompt (C1). The full catalog is still enforced by the spec cap.
+_MAX_PREAMBLE_CATALOG = 50
 
 
 def _store():
@@ -1046,6 +1056,23 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
         {"verb": a.verb, "policy": a.policy, "args": dict(a.args), "label": a.label}
         for a in (widget.spec.actions or [])
     ]
+    # C1 — the catalog also rides surface_meta (capped) so the concierge preamble
+    # can name real products, prices, and ids: without it the agent knows the
+    # action verbs but not WHAT it sells and declines ("I don't have a list"). Only
+    # threaded when actions are declared; the preamble renders a compact block.
+    pawbar_catalog = (
+        [
+            {
+                "id": c.id,
+                "name": c.name,
+                "price_cents": c.price_cents,
+                "currency": c.currency,
+            }
+            for c in (widget.spec.catalog or [])[:_MAX_PREAMBLE_CATALOG]
+        ]
+        if pawbar_actions
+        else []
+    )
     # The run is bound to the KEY's pocket (ctx.pocket_id — the authenticated
     # authority), the KEY's workspace, and the widget's agent. ``user_id`` is the
     # anonymous customer handle (session / rate-limit key, never a principal).
@@ -1075,6 +1102,7 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
             "route_path": "/paw-bar",
             "widget_id": widget.id,
             "pawbar_actions": pawbar_actions,
+            "pawbar_catalog": pawbar_catalog,
         },
     )
     run = await run_service.create_run(spec)
@@ -1129,6 +1157,13 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
 # concierge chat carries don't apply here.
 # ---------------------------------------------------------------------------
 
+# The visitor handle is client-minted (the glass app uses a 128-bit crypto-random
+# hex ref). Bound its charset + length server-side so a malformed / oversized ref
+# is refused with the same fail-closed shape as the other gate checks. This is a
+# cheap bound, NOT the root fix — a server-issued/HMAC-signed handle is a tracked
+# follow-up (the 256-bit client ref makes enumeration impractical today).
+_CUSTOMER_REF_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+
 
 async def _front_gate_for_key(
     *,
@@ -1141,6 +1176,7 @@ async def _front_gate_for_key(
     """The shared public front-gate: resolve the widget + authenticate the key.
 
     Mirrors ``concierge_chat`` steps 1-6 (fail-closed, cheap gates first):
+      0. ``customer_ref`` matches the charset + length bound (400) — cheapest gate.
       1. Widget exists (404) — UNSCOPED (workspace unknown until the key resolves).
       2. Rate limit, overall + per-customer (429).
       3. Authenticate the embed key + dual-mode origin gate (``resolve_site_key`` —
@@ -1149,6 +1185,8 @@ async def _front_gate_for_key(
          AND pocket (403) — a key for pocket A must not drive a widget for pocket B.
     Returns ``(widget, ctx)`` where ``ctx.workspace_id`` is the authenticated
     tenant used to scope any gated Instinct proposal."""
+    if not _CUSTOMER_REF_RE.match(customer_ref or ""):
+        raise HTTPException(400, "invalid_customer_ref")
     store = _store()
     widget = await store.get_widget(widget_id)
     if widget is None:
@@ -1241,7 +1279,18 @@ async def get_cart(
         origin=origin,
         request=request,
     )
-    cart = await _store().get_cart(w, customer_ref)
+    store = _store()
+    # Record a cart-read marker so reads count toward the shared rate limiter —
+    # otherwise a read-only enumeration loop is unbounded (the front-gate only
+    # CHECKS the limit, nothing was recording for it). Best-effort; a store hiccup
+    # must not fail the read.
+    try:
+        await store.record_event(
+            PawBarEvent(widget_id=w, type="pawbar_cart_read", payload={}, customer_ref=customer_ref)
+        )
+    except Exception:
+        logger.debug("cart-read marker record failed (non-fatal)", exc_info=True)
+    cart = await store.get_cart(w, customer_ref)
     return JSONResponse(cart_wire(widget, customer_ref, cart))
 
 

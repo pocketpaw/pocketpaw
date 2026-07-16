@@ -78,6 +78,9 @@ class SurfaceMetaRequest(BaseModel):
     # public path), so the concierge run allow-lists + surfaces exactly this
     # widget's declared verbs. A JSON list of {verb, policy, args, label}.
     pawbar_actions: list[dict[str, Any]] | None = None
+    # Concierge catalog hint (C1) — mirror SurfaceMeta. Set server-side from the
+    # widget spec (capped) so the preamble can name real products.
+    pawbar_catalog: list[dict[str, Any]] | None = None
 
 
 class SurfaceRequest(BaseModel):

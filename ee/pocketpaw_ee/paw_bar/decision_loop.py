@@ -1,4 +1,11 @@
 # ee/paw_bar/decision_loop.py — Close the customer decision loop via Instinct.
+# Updated: 2026-07-16 (C1 hardening) — propose_customer_action now sanitizes the
+#   visitor-controlled portions of the owner-facing proposal: customer_ref + the
+#   args summary are run through _sanitize_for_human (strip control chars, collapse
+#   whitespace, length-cap — the summary at the same 280 chars the event path uses,
+#   which this path previously skipped) and DEMARCATED from our framing as
+#   "untrusted input" so a human approver can't be misled by injected text.
+#   Backend defense-in-depth; the Tray frontend should also escape on render.
 # Updated: 2026-07-16 (Paw Bar action registry, C1) — added
 #   ``propose_customer_action``: the gated-verb path. When a concierge action's
 #   policy is "gated", the shared executor NEVER runs the verb — it raises an
@@ -59,9 +66,23 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_for_human(text: Any, *, cap: int) -> str:
+    """Neutralize visitor-controlled text before it lands in an owner-facing
+    Instinct proposal (C1 hardening).
+
+    Strips control characters (so an embedded newline can't inject fake framing
+    into the human approver's Tray view), collapses runs of whitespace, and caps
+    the length. This is BACKEND defense-in-depth; the Tray frontend should ALSO
+    escape on render (a separate paw-enterprise follow-up)."""
+    s = "".join(ch for ch in str(text) if ch.isprintable())
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:cap]
 
 # Schema version stamped onto the ``_customer_reply`` blob. Bump when the blob
 # shape changes so a stale pending Action approved after a deploy is handled
@@ -315,16 +336,26 @@ async def propose_customer_action(
 
         widget_name = str(getattr(widget, "name", "") or "") or widget_id
         event_type = f"paw_bar_action:{verb}"
+        # Neutralize + cap the visitor-controlled portions before they land in the
+        # owner-facing proposal. ``verb`` is snake_case-validated at spec time, but
+        # ``customer_ref`` and the args ``summary`` are visitor input — sanitize
+        # them and DEMARCATE them from our framing so a human approver can never
+        # be misled by injected text. The composed summary is capped at the same
+        # 280 chars the event path uses (which this path previously skipped).
+        safe_customer = _sanitize_for_human(customer_ref, cap=128)
+        safe_summary = _sanitize_for_human(summary, cap=_MAX_SUMMARY_CHARS)
+        safe_widget_name = _sanitize_for_human(widget_name, cap=80) or widget_id
         default_reply = (
-            f"Thanks — we've passed your '{verb}' request to the team and will "
+            f"Thanks, we've passed your '{verb}' request to the team and will "
             "follow up shortly."
         )
-        title = f"Visitor action on {widget_name}: {verb}".strip()
+        title = f"Visitor action on {safe_widget_name}: {verb}".strip()
         recommendation = (
-            f"A visitor ({customer_ref}) asked to '{verb}' via the '{widget_name}' "
-            f"concierge. {summary} Suggested reply: {default_reply}"
+            f"A visitor (ref {safe_customer}) asked to run the '{verb}' action via "
+            f"the '{safe_widget_name}' concierge. Visitor-provided details "
+            f"(untrusted input): [{safe_summary}]. Suggested reply: {default_reply}"
         )
-        description = f"Action '{verb}' args: {summary}"
+        description = f"Action '{verb}'. Visitor details (untrusted input): [{safe_summary}]"
 
         trigger = ActionTrigger(
             type="connector",

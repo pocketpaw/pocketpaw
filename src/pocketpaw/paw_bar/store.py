@@ -1,4 +1,8 @@
 # ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
+# Updated: 2026-07-16 (C1 hardening) — count_events_since gains an optional
+#   event_type filter so the dedicated gated-action rate cap can count only
+#   proposal-generating actions ("pawbar_gated_action") separately from the
+#   overall widget traffic.
 # Updated: 2026-07-16 (Paw Bar action registry, C1) — new paw_bar_carts table:
 #   the visitor-scoped cart, keyed by (widget_id, customer_ref), holding the
 #   cart's items (a JSON list of {id,name,price_cents,currency,qty}) + currency +
@@ -506,14 +510,22 @@ class PawBarStore:
         widget_id: str,
         since: datetime,
         customer_ref: str | None = None,
+        event_type: str | None = None,
     ) -> int:
-        """Count events in the last window — backs the rate limiter."""
+        """Count events in the last window — backs the rate limiter.
+
+        ``event_type``, when given, restricts the count to one event type — used
+        by the dedicated gated-action cap (C1) to count only proposal-generating
+        actions separately from the overall widget traffic."""
         await self._ensure_schema()
         conditions = ["widget_id = ?", "timestamp >= ?"]
         params: list[Any] = [widget_id, since.isoformat()]
         if customer_ref is not None:
             conditions.append("customer_ref = ?")
             params.append(customer_ref)
+        if event_type is not None:
+            conditions.append("type = ?")
+            params.append(event_type)
         async with self._conn() as db:
             async with db.execute(
                 f"SELECT COUNT(*) FROM paw_bar_events WHERE {' AND '.join(conditions)}",

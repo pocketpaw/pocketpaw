@@ -308,6 +308,7 @@ def _meta_from_request(req: SurfaceMetaRequest) -> SurfaceMeta:
         is_cloud_storage=req.is_cloud_storage,
         workspace_vm=req.workspace_vm,
         pawbar_actions=req.pawbar_actions,
+        pawbar_catalog=req.pawbar_catalog,
     )
 
 

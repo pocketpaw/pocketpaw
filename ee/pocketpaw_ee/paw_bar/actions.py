@@ -158,23 +158,36 @@ def cart_wire(widget: Any, customer_ref: str, cart: Any) -> dict[str, Any]:
     return _cart_dict(cart, checkout_url=checkout_url)
 
 
+# The gated-action marker type is FIXED (not verb-suffixed) so the dedicated
+# gated rate cap can count it with a single equality filter. Auto actions keep a
+# verb-suffixed type for a readable owner audit trail.
+GATED_MARKER_TYPE = "pawbar_gated_action"
+# A dedicated, lower cap for proposal-generating (gated) actions, separate from
+# the widget's overall per-customer cap: rotating customer_ref must not flood the
+# owner's Instinct tray at the full widget rate.
+GATED_ACTIONS_PER_MIN = 6
+
+
 async def _record_action_marker(
     store: Any, widget_id: str, customer_ref: str, verb: str, policy: str, ok: bool
 ) -> None:
     """Best-effort audit + rate-limit marker via the layer's event mechanism.
 
-    Recording a ``pawbar_action:<verb>`` event reuses the paw_bar layer's existing
-    audit trail (owner reads it via recent_events) AND feeds the shared rate
-    limiter, so a burst of actions is throttled like any other widget traffic. A
-    store hiccup must never fail the action."""
+    Recording an event reuses the paw_bar layer's existing audit trail (owner
+    reads it via recent_events) AND feeds the shared rate limiter, so a burst of
+    actions is throttled like any other widget traffic. Gated actions use the
+    FIXED ``pawbar_gated_action`` type so the dedicated gated cap can count them;
+    auto actions use ``pawbar_action:<verb>``. A store hiccup must never fail the
+    action."""
     try:
         from pocketpaw.paw_bar.models import PawBarEvent
 
+        event_type = GATED_MARKER_TYPE if policy == "gated" else f"pawbar_action:{verb}"
         await store.record_event(
             PawBarEvent(
                 widget_id=widget_id,
-                type=f"pawbar_action:{verb}",
-                payload={"policy": policy, "ok": ok},
+                type=event_type,
+                payload={"policy": policy, "verb": verb, "ok": ok},
                 customer_ref=customer_ref,
             )
         )
@@ -313,9 +326,26 @@ async def _do_gated(
     verb: str,
     args: dict[str, Any],
 ) -> ActionOutcome:
+    from datetime import datetime, timedelta
+
     from pocketpaw_ee.paw_bar.decision_loop import propose_customer_action
 
     widget_id = str(getattr(widget, "id", "") or "")
+
+    # Dedicated gated cap (proposal spam): count this customer's recent gated
+    # actions and refuse before proposing once over the per-minute ceiling, so a
+    # rotating customer_ref can't flood the owner's Instinct tray at the full
+    # widget rate. Best-effort — a count error must not block a legitimate action.
+    try:
+        window = datetime.now() - timedelta(minutes=1)
+        recent_gated = await store.count_events_since(
+            widget_id, window, customer_ref=customer_ref, event_type=GATED_MARKER_TYPE
+        )
+        if recent_gated >= GATED_ACTIONS_PER_MIN:
+            return _fail("gated_rate_limit", 429)
+    except Exception:  # noqa: BLE001
+        logger.debug("gated-action rate check failed (allowing)", exc_info=True)
+
     summary = ", ".join(f"{k}={v}" for k, v in sorted(args.items())) or "(no args)"
     action_id = await propose_customer_action(
         widget=widget,
