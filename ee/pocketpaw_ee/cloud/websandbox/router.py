@@ -29,6 +29,13 @@
 # license-gated like the rest. Generate-only — the frontend applies accepted hunks
 # via the existing file-RPC.
 #
+# Changed 2026-07-16 (WC-8/P3b, feat/code-mode): added the live-preview endpoint —
+# ``GET /websandbox/{row_id}/preview?port=<int>`` returns the iframe-embeddable
+# public URL of a dev-server port running in the VM. Thin adapter over
+# ``websandbox/preview.py``; tenancy comes only from the RequestContext, the port
+# is a validated query param (out-of-range / the reserved terminal port refused),
+# and it's license-gated like the rest.
+#
 # Changed 2026-07-16 (review hardening): the register route now binds the
 # repo-only ``RegisterSandboxRequest`` so a client can no longer write a
 # server-owned ``sandbox_id`` / ``status`` (that field is the key
@@ -38,13 +45,14 @@
 # never the client.
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.websandbox import durability as websandbox_durability
 from pocketpaw_ee.cloud.websandbox import edit as websandbox_edit
+from pocketpaw_ee.cloud.websandbox import preview as websandbox_preview
 from pocketpaw_ee.cloud.websandbox import provision as websandbox_provision
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
 from pocketpaw_ee.cloud.websandbox.dto import (
@@ -52,6 +60,7 @@ from pocketpaw_ee.cloud.websandbox.dto import (
     EditRequest,
     EditResponse,
     OpenSandboxRequest,
+    PreviewResponse,
     RegisterSandboxRequest,
     SandboxTreeResponse,
     SnapshotResponse,
@@ -138,6 +147,22 @@ async def get_sandbox_tree(
     """Return the cloned repo's file tree for a ready sandbox."""
     workspace_id = _require_workspace(ctx)
     return await websandbox_provision.get_tree(workspace_id, ctx.user_id, row_id)
+
+
+# ---------------------------------------------------------------------------
+# WC-8/P3b — live dev-server preview.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{row_id}/preview", response_model=PreviewResponse)
+async def get_sandbox_preview(
+    row_id: str,
+    port: int = Query(..., description="Dev-server port running in the sandbox VM"),
+    ctx: RequestContext = Depends(request_context),
+) -> PreviewResponse:
+    """Return the iframe-embeddable public URL for a dev-server port in the VM."""
+    workspace_id = _require_workspace(ctx)
+    return await websandbox_preview.get_preview(workspace_id, ctx.user_id, row_id, port)
 
 
 # ---------------------------------------------------------------------------

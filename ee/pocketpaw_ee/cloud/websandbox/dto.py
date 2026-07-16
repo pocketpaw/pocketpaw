@@ -25,6 +25,11 @@
 # frontend reviews per-hunk and writes back via the existing file-RPC). The edit
 # agent is generate-only; it never writes to the VM.
 #
+# Changed 2026-07-16 (WC-8/P3b preview, feat/code-mode): added ``PreviewResponse``
+# ({url, port}) — the iframe-embeddable public URL of a dev-server port running in
+# the sandbox VM. Response-only (Rule 4); the requested port arrives as a query
+# param, never a body, and tenancy comes from the RequestContext.
+#
 # Changed 2026-07-16 (review hardening): split the write surface. ``sandbox_id``
 # and ``status`` are SERVER-OWNED — the Daytona id is the load-bearing input to
 # ``authorize_sandbox``, so a client that could write it onto its own row could
@@ -147,6 +152,23 @@ class SnapshotResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# WC-8/P3b — live dev-server preview.
+# ---------------------------------------------------------------------------
+
+
+class PreviewResponse(BaseModel):
+    """The iframe-embeddable public URL for a dev-server port in the sandbox VM.
+
+    Response-only (Rule 4): the requested ``port`` arrives as a query param and is
+    echoed back alongside the resolved ``url``. ``url`` already carries the Daytona
+    preview access token as a query param, so it embeds in an ``<iframe>`` directly.
+    """
+
+    url: str
+    port: int
+
+
+# ---------------------------------------------------------------------------
 # WC-5a — AI edit agent (Cmd-K).
 # ---------------------------------------------------------------------------
 
@@ -199,6 +221,7 @@ __all__ = [
     "EditResponse",
     "EditSelection",
     "OpenSandboxRequest",
+    "PreviewResponse",
     "RegisterSandboxRequest",
     "SandboxTreeResponse",
     "SnapshotResponse",
