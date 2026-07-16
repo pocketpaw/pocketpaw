@@ -93,6 +93,16 @@ def _git_base() -> str:
     return os.environ.get("GITHUB_GIT_BASE", _GITHUB_GIT_BASE).strip().rstrip("/")
 
 
+def github_app_slug() -> str:
+    """The App's public slug, for the install URL (``/apps/<slug>/installations/new``).
+
+    Distinct from the numeric App id: GitHub's install page is keyed by the slug
+    (e.g. ``devrohit06-personal``). Returns '' when unset — callers surface a clean
+    "GitHub connect not configured" rather than building a broken URL.
+    """
+    return os.environ.get("POCKETPAW_GITHUB_APP_SLUG", "").strip()
+
+
 def github_app_enabled() -> bool:
     """True when both the App id and a usable private key are configured."""
     return bool(_app_id() and _private_key_pem())

@@ -260,6 +260,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.rules.router import router as rules_router
     from pocketpaw_ee.cloud.sessions.router import router as sessions_router
     from pocketpaw_ee.cloud.skills.router import router as skills_router
+    from pocketpaw_ee.cloud.codeconnect.router import router as codeconnect_router
     from pocketpaw_ee.cloud.codeproject.router import router as codeproject_router
     from pocketpaw_ee.cloud.websandbox.router import router as websandbox_router
     from pocketpaw_ee.cloud.workspace.router import router as workspace_router
@@ -277,6 +278,9 @@ def mount_cloud(app: FastAPI) -> None:
     # Code Mode durable-project registry (CM-2a) — the reap-surviving project the
     # redesigned /code surface deep-links to; opening one resolves a ready sandbox.
     app.include_router(codeproject_router, prefix="/api/v1")
+    # Code Mode GitHub connect (CM-3) — install-URL / callback / repo picker so a
+    # user can open PRIVATE repos; the token is minted server-side, never in the VM.
+    app.include_router(codeconnect_router, prefix="/api/v1")
     app.include_router(request_log_router, prefix="/api/v1")
     app.include_router(deep_work_log_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")

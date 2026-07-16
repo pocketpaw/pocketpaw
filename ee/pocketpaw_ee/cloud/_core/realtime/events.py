@@ -1072,3 +1072,12 @@ class CodeProjectCreated(Event):
 @dataclass
 class CodeProjectOpened(Event):
     EVENT_TYPE: ClassVar[str] = "codeproject.opened"
+
+
+# Code Mode GitHub connect (CM-3, feat/code-mode). Fires when a user's GitHub App
+# installation is first bound to a (workspace, user) — the durable "this user can
+# open private repos" signal a connected-state UI reacts to. ``data`` carries the
+# connection id + workspace/user/provider + installation id.
+@dataclass
+class CodeConnectionCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "codeconnection.created"

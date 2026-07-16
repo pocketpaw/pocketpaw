@@ -126,6 +126,7 @@ from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
 from pocketpaw_ee.cloud.models.auth_session import AuthSession
 from pocketpaw_ee.cloud.models.belt_workspace_config import BeltWorkspaceConfig
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+from pocketpaw_ee.cloud.models.code_connection import CodeConnection
 from pocketpaw_ee.cloud.models.code_project import CodeProject
 from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
 from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
@@ -284,6 +285,7 @@ __all__ = [
     "AuthSession",
     "BeltWorkspaceConfig",
     "ChatRunDoc",
+    "CodeConnection",
     "CodeProject",
     "Comment",
     "CommentAuthor",
@@ -491,6 +493,11 @@ def get_all_documents():
         # sandbox. Only ``ee.cloud.codeproject.service`` imports this doc directly
         # (import-linter "CodeProject" contract).
         CodeProject,
+        # Code Mode GitHub connection (CM-3) — the (workspace, user, provider,
+        # installation_id) binding that lets a user list + open private repos.
+        # Only ``ee.cloud.codeconnect.service`` imports this doc directly
+        # (import-linter "CodeConnection" contract).
+        CodeConnection,
     ]
 
 
