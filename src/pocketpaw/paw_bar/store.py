@@ -1,4 +1,13 @@
 # ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
+# Updated: 2026-07-16 (Paw Bar action registry, C1) — new paw_bar_carts table:
+#   the visitor-scoped cart, keyed by (widget_id, customer_ref), holding the
+#   cart's items (a JSON list of {id,name,price_cents,currency,qty}) + currency +
+#   timestamps. get_cart reads it, upsert_cart_item merges one line (qty caps +
+#   MAX_CART_ITEMS ceiling), clear_cart empties it. Pure SQLite / no EE import —
+#   the "auto" add_to_cart path is the only writer, the checkout path reads. New
+#   table via CREATE IF NOT EXISTS, so no ALTER migration is needed (a pre-existing
+#   paw_bar.db just gains the table on next _ensure_schema). No TTL in v1
+#   (tracked as a follow-up).
 # Updated: 2026-07-14 (migration) — _ensure_schema runs _migrate_columns BEFORE
 #   executescript: additively ALTER-adds any missing workspace_id/agent_id columns
 #   to a pre-existing paw_bar_widgets (and workspace_id to paw_bar_decisions) so the
@@ -56,8 +65,11 @@ from typing import Any
 import aiosqlite
 
 from pocketpaw.paw_bar.models import (
+    MAX_CART_ITEMS,
     DecisionState,
     DecisionStatus,
+    PawBarCart,
+    PawBarCartItem,
     PawBarEvent,
     PawBarSpec,
     PawBarWidget,
@@ -117,6 +129,19 @@ CREATE TABLE IF NOT EXISTS paw_bar_spec_revisions (
     revision INTEGER NOT NULL,
     spec TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- C1 action registry: the visitor-scoped cart. One row per (widget_id,
+-- customer_ref); ``items`` is a JSON list of cart lines. The "auto" add_to_cart
+-- verb upserts here (visitor-owned state auto-fires — SS-2); checkout reads it.
+CREATE TABLE IF NOT EXISTS paw_bar_carts (
+    widget_id TEXT NOT NULL,
+    customer_ref TEXT NOT NULL,
+    items TEXT DEFAULT '[]',
+    currency TEXT DEFAULT 'USD',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (widget_id, customer_ref)
 );
 
 CREATE INDEX IF NOT EXISTS idx_pp_widgets_pocket ON paw_bar_widgets(pocket_id);
@@ -366,6 +391,54 @@ class PawBarStore:
         _, archived_spec = latest
         return await self.update_spec(widget_id, archived_spec, workspace_id=workspace_id)
 
+    async def update_fields(
+        self,
+        widget_id: str,
+        fields: dict[str, Any],
+        workspace_id: str | None = None,
+    ) -> PawBarWidget | None:
+        """Partial-update the admin-editable widget columns (C1 — agent binding).
+
+        ``fields`` is a whitelisted subset of ``{agent_id, name, allowed_domains,
+        rate_limit_per_min, per_customer_limit_per_min}`` — only the keys present
+        are written. ``allowed_domains`` is JSON-encoded like create. The lookup +
+        UPDATE are workspace-scoped: a cross-tenant widget id resolves to None and
+        nothing is written. Returns None when the widget doesn't exist in scope or
+        ``fields`` is empty. ``spec`` is intentionally NOT editable here — that is
+        ``update_spec`` (which archives a revision)."""
+        existing = await self.get_widget(widget_id, workspace_id=workspace_id)
+        if existing is None:
+            return None
+        allowed = {
+            "agent_id",
+            "name",
+            "allowed_domains",
+            "rate_limit_per_min",
+            "per_customer_limit_per_min",
+        }
+        assignments: list[str] = []
+        values: list[Any] = []
+        for key, val in fields.items():
+            if key not in allowed:
+                continue
+            assignments.append(f"{key} = ?")
+            values.append(json.dumps(val) if key == "allowed_domains" else val)
+        if not assignments:
+            return existing
+        assignments.append("updated_at = ?")
+        values.append(datetime.now().isoformat())
+        ws_cond, ws_params = _widget_workspace_scope(workspace_id)
+        sql = f"UPDATE paw_bar_widgets SET {', '.join(assignments)} WHERE id = ?"
+        values.append(widget_id)
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            values.extend(ws_params)
+        await self._ensure_schema()
+        async with self._conn() as db:
+            await db.execute(sql, values)
+            await db.commit()
+        return await self.get_widget(widget_id, workspace_id=workspace_id)
+
     async def rotate_token(
         self, widget_id: str, workspace_id: str | None = None
     ) -> PawBarWidget | None:
@@ -601,7 +674,95 @@ class PawBarStore:
                 row = await cur.fetchone()
                 return self._row_to_decision(row) if row else None
 
+    # ---------------- Carts (C1 — visitor-scoped commerce state) ----------------
+
+    async def get_cart(self, widget_id: str, customer_ref: str) -> PawBarCart | None:
+        """Return the visitor's cart, or ``None`` when they have none yet.
+
+        Scoped to the visitor's own ``(widget_id, customer_ref)`` — the same
+        no-owner-credential model as the decision poll. The returned cart carries
+        no ``checkout_url`` (that lives on the spec); the endpoint fills it in.
+        """
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM paw_bar_carts WHERE widget_id = ? AND customer_ref = ?",
+                (widget_id, customer_ref),
+            ) as cur:
+                row = await cur.fetchone()
+                return self._row_to_cart(row) if row else None
+
+    async def upsert_cart_item(
+        self, widget_id: str, customer_ref: str, item: PawBarCartItem
+    ) -> PawBarCart:
+        """Merge one line into the visitor's cart and return the updated cart.
+
+        If the product id is already in the cart the quantities add (capped at
+        the model's per-line qty ceiling by the caller); a new id appends, up to
+        ``MAX_CART_ITEMS`` distinct lines (an over-cap add is dropped rather than
+        raising — the visitor keeps the cart they have). The cart currency tracks
+        the first line added. Idempotent per call; the executor owns the qty caps.
+        """
+        cart = await self.get_cart(widget_id, customer_ref) or PawBarCart(
+            widget_id=widget_id, customer_ref=customer_ref, currency=item.currency
+        )
+        merged = False
+        for line in cart.items:
+            if line.id == item.id:
+                line.qty += item.qty
+                merged = True
+                break
+        if not merged:
+            if len(cart.items) >= MAX_CART_ITEMS:
+                return await self._save_cart(cart)
+            cart.items.append(item)
+        return await self._save_cart(cart)
+
+    async def clear_cart(self, widget_id: str, customer_ref: str) -> None:
+        """Empty a visitor's cart (delete the row). Used after a completed handoff."""
+        await self._ensure_schema()
+        async with self._conn() as db:
+            await db.execute(
+                "DELETE FROM paw_bar_carts WHERE widget_id = ? AND customer_ref = ?",
+                (widget_id, customer_ref),
+            )
+            await db.commit()
+
+    async def _save_cart(self, cart: PawBarCart) -> PawBarCart:
+        cart.updated_at = datetime.now()
+        payload = json.dumps([item.model_dump() for item in cart.items], default=str)
+        await self._ensure_schema()
+        async with self._conn() as db:
+            await db.execute(
+                "INSERT INTO paw_bar_carts (widget_id, customer_ref, items, currency, updated_at)"
+                " VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(widget_id, customer_ref) DO UPDATE SET"
+                " items = excluded.items, currency = excluded.currency,"
+                " updated_at = excluded.updated_at",
+                (
+                    cart.widget_id,
+                    cart.customer_ref,
+                    payload,
+                    cart.currency,
+                    cart.updated_at.isoformat(),
+                ),
+            )
+            await db.commit()
+        return cart
+
     # ---------------- Helpers ----------------
+
+    def _row_to_cart(self, row: Any) -> PawBarCart:
+        raw_items = json.loads(row["items"]) if row["items"] else []
+        items = [PawBarCartItem.model_validate(i) for i in raw_items]
+        return PawBarCart(
+            widget_id=row["widget_id"],
+            customer_ref=row["customer_ref"],
+            items=items,
+            currency=row["currency"] or "USD",
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
 
     def _row_to_widget(self, row: Any) -> PawBarWidget:
         from pocketpaw.paw_bar.models import PawBarEventMapping

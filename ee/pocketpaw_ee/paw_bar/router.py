@@ -1,4 +1,15 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-16 (Paw Bar action registry, C1) — the visitor commerce loop.
+#   (1) POST /paw-bar/action {key,w,customer_ref,verb,args} and GET /paw-bar/cart
+#   ?key&w&customer_ref — PUBLIC endpoints with the SAME armor as concierge chat,
+#   factored into ``_front_gate_for_key``: resolve_site_key fail-closed → dual-mode
+#   origin gate → within_rate_limit → widget↔workspace/pocket binding (403). Both
+#   call the SHARED ``actions.execute_action`` / cart store — never a parallel path.
+#   Args are structured (no free text), so no injection screen; the executor
+#   enforces the schema strictly. (2) PATCH /paw-bar/widgets/{id} — admin + owner-
+#   token, workspace-scoped (cross-tenant id → 404) partial update of agent_id +
+#   name/allowed_domains/rate limits (spec stays on update_spec). The paw-enterprise
+#   agent-binding UI drives it.
 # Updated: 2026-07-15 (glass frame asset versioning) — the frame HTML now appends
 #   ``?v=<newest bundle mtime>`` to the pawbar.js/css URLs (``_asset_version``).
 #   The StaticFiles mount sends no Cache-Control, so browsers heuristically cache
@@ -416,6 +427,23 @@ class CreateWidgetRequest(BaseModel):
     event_mapping: dict[str, PawBarEventMapping] = Field(default_factory=dict)
 
 
+class UpdateWidgetRequest(BaseModel):
+    """Partial admin update of a widget's mutable, non-spec fields (C1).
+
+    Every field is optional; only the ones the client SENDS are written (tracked
+    via ``model_fields_set``). ``agent_id`` may be set to a new agent or ``null``
+    to unbind (stored as ""). The spec is NOT editable here — that is
+    ``update_spec`` (which archives a revision). The paw-enterprise agent-binding
+    UI ships against exactly this shape.
+    """
+
+    agent_id: str | None = None
+    name: str | None = None
+    allowed_domains: list[str] | None = None
+    rate_limit_per_min: int | None = None
+    per_customer_limit_per_min: int | None = None
+
+
 class WidgetListResponse(BaseModel):
     # PawBarWidgetPublic (not PawBarWidget) — list payloads must never
     # carry access_token (W0b).
@@ -549,6 +577,43 @@ async def update_spec(
         raise HTTPException(404, "Widget not found")
     _require_owner_token(widget, x_paw_bar_token)
     updated = await _store().update_spec(widget_id, spec, workspace_id=workspace_id)
+    if updated is None:
+        raise HTTPException(404, "Widget not found")
+    return PawBarWidgetPublic.from_widget(updated)
+
+
+@router.patch(
+    "/paw-bar/widgets/{widget_id}",
+    response_model=PawBarWidgetPublic,
+    dependencies=[Depends(require_scope("admin"))],
+)
+async def update_widget(
+    widget_id: str,
+    req: UpdateWidgetRequest,
+    x_paw_bar_token: str | None = Header(default=None, alias="X-Paw-Bar-Token"),
+    workspace_id: str = Depends(current_workspace_id),
+) -> PawBarWidgetPublic:
+    """Partial-update a widget's mutable, non-spec fields (C1 — agent binding).
+
+    Auth mirrors ``update_spec``: an admin dashboard session AND the per-widget
+    owner token, with the lookup workspace-scoped so a cross-tenant widget id
+    404s before anything is written. Only the fields the client SENT are applied
+    (``model_fields_set``); ``agent_id: null`` unbinds (stored as ""). The spec is
+    intentionally not editable here."""
+    widget = await _store().get_widget(widget_id, workspace_id=workspace_id)
+    if widget is None:
+        raise HTTPException(404, "Widget not found")
+    _require_owner_token(widget, x_paw_bar_token)
+
+    # Only the sent fields become column writes. agent_id null → "" (unbind).
+    fields: dict[str, Any] = {}
+    for name in req.model_fields_set:
+        value = getattr(req, name)
+        if name == "agent_id":
+            fields[name] = value or ""
+        elif value is not None:
+            fields[name] = value
+    updated = await _store().update_fields(widget_id, fields, workspace_id=workspace_id)
     if updated is None:
         raise HTTPException(404, "Widget not found")
     return PawBarWidgetPublic.from_widget(updated)
@@ -972,6 +1037,15 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
 
     run_id = uuid.uuid4().hex
     client_message_id = uuid.uuid4().hex
+    # C1 — the widget's declared actions ride surface_meta (JSON-shaped) so the
+    # CONCIERGE run allow-lists + surfaces EXACTLY this widget's per-verb tools and
+    # binds them onto the per-stream ContextVar the pawbar_actions MCP server builds
+    # from. Stamped server-side from the widget spec (never client-supplied). Empty
+    # when the widget declares no actions → the concierge stays deny-all as before.
+    pawbar_actions = [
+        {"verb": a.verb, "policy": a.policy, "args": dict(a.args), "label": a.label}
+        for a in (widget.spec.actions or [])
+    ]
     # The run is bound to the KEY's pocket (ctx.pocket_id — the authenticated
     # authority), the KEY's workspace, and the widget's agent. ``user_id`` is the
     # anonymous customer handle (session / rate-limit key, never a principal).
@@ -996,7 +1070,12 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
         attachments=[],
         mentions=[],
         surface="concierge",
-        surface_meta={"pocket_id": ctx.pocket_id, "route_path": "/paw-bar"},
+        surface_meta={
+            "pocket_id": ctx.pocket_id,
+            "route_path": "/paw-bar",
+            "widget_id": widget.id,
+            "pawbar_actions": pawbar_actions,
+        },
     )
     run = await run_service.create_run(spec)
     if run.run_id != spec.run_id:
@@ -1037,6 +1116,133 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Public action / cart endpoints (C1) — the visitor commerce loop
+#
+# Same armor class as concierge chat, factored into ``_front_gate_for_key`` so the
+# two endpoints share ONE fail-closed gate (no parallel path). The args are
+# structured (verb + typed args, not free text), so there is no injection screen —
+# the executor validates every arg against the widget's declared schema. Neither
+# endpoint runs the agent, so the agent-bound + connector-lockdown steps that
+# concierge chat carries don't apply here.
+# ---------------------------------------------------------------------------
+
+
+async def _front_gate_for_key(
+    *,
+    widget_id: str,
+    signed_key: str,
+    customer_ref: str,
+    origin: str | None,
+    request: Request,
+) -> tuple[PawBarWidget, Any]:
+    """The shared public front-gate: resolve the widget + authenticate the key.
+
+    Mirrors ``concierge_chat`` steps 1-6 (fail-closed, cheap gates first):
+      1. Widget exists (404) — UNSCOPED (workspace unknown until the key resolves).
+      2. Rate limit, overall + per-customer (429).
+      3. Authenticate the embed key + dual-mode origin gate (``resolve_site_key`` —
+         401 bad/unknown/revoked key, 403 disallowed/missing origin, fail-closed).
+      4. Bind the widget to the RESOLVED key: it must belong to the key's workspace
+         AND pocket (403) — a key for pocket A must not drive a widget for pocket B.
+    Returns ``(widget, ctx)`` where ``ctx.workspace_id`` is the authenticated
+    tenant used to scope any gated Instinct proposal."""
+    store = _store()
+    widget = await store.get_widget(widget_id)
+    if widget is None:
+        raise HTTPException(404, "Widget not found")
+
+    ok = await store.within_rate_limit(
+        widget_id,
+        overall_per_min=widget.rate_limit_per_min,
+        per_customer_per_min=widget.per_customer_limit_per_min,
+        customer_ref=customer_ref,
+    )
+    if not ok:
+        raise HTTPException(429, "Rate limit exceeded")
+
+    frame_origin = _configured_frame_origin(request)
+    from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key
+
+    ctx = await resolve_site_key(signed_key, origin, customer_ref, frame_origin=frame_origin)
+
+    # Bind the widget to the resolved key (finding #2 — no sibling-pocket reach).
+    if widget.workspace_id and widget.workspace_id != ctx.workspace_id:
+        raise HTTPException(403, "widget_workspace_mismatch")
+    if widget.pocket_id != ctx.pocket_id:
+        raise HTTPException(403, "widget_pocket_mismatch")
+    return widget, ctx
+
+
+class PawBarActionRequest(BaseModel):
+    # The public embed key + the widget id (named ``key`` / ``w`` to match the
+    # frame endpoint's query params and the glass app's action fetcher).
+    key: str
+    w: str
+    customer_ref: str
+    verb: str
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/paw-bar/action")
+async def post_action(body: PawBarActionRequest, request: Request) -> JSONResponse:
+    """Execute one declared action for a public visitor → {ok, result, cart}.
+
+    Front-gated by ``_front_gate_for_key`` (auth + origin + rate + binding), then
+    routed through the SHARED ``execute_action`` — the same code path the concierge
+    agent's per-verb tools use. SS-2: a gated verb never executes; it raises an
+    Instinct proposal and returns a pending result the visitor polls on the
+    decision endpoint. The executor's status hint becomes the HTTP status on
+    failure (422 bad verb/args, 409 empty cart / unavailable)."""
+    origin = request.headers.get("origin")
+    widget, ctx = await _front_gate_for_key(
+        widget_id=body.w,
+        signed_key=body.key,
+        customer_ref=body.customer_ref,
+        origin=origin,
+        request=request,
+    )
+    from pocketpaw_ee.paw_bar.actions import execute_action
+
+    outcome = await execute_action(
+        widget,
+        ctx.workspace_id,
+        body.customer_ref,
+        body.verb,
+        body.args,
+        store=_store(),
+    )
+    if not outcome.ok:
+        raise HTTPException(outcome.http_status, outcome.error)
+    return JSONResponse({"ok": True, "result": outcome.result, "cart": outcome.cart})
+
+
+@router.get("/paw-bar/cart")
+async def get_cart(
+    request: Request,
+    key: str = Query("", description="The public Site.signed_key"),
+    w: str = Query("", description="The Paw Bar widget id"),
+    customer_ref: str = Query("", description="The anonymous visitor handle"),
+) -> JSONResponse:
+    """Return the visitor's cart → {items, total_cents, currency, checkout_url}.
+
+    Same front-gate as POST /paw-bar/action. Reads the cart via the shared
+    ``cart_wire`` serializer (so the shape never drifts from the executor's cart
+    results); no cart yet returns an empty cart with the rendered checkout_url."""
+    from pocketpaw_ee.paw_bar.actions import cart_wire
+
+    origin = request.headers.get("origin")
+    widget, _ctx = await _front_gate_for_key(
+        widget_id=w,
+        signed_key=key,
+        customer_ref=customer_ref,
+        origin=origin,
+        request=request,
+    )
+    cart = await _store().get_cart(w, customer_ref)
+    return JSONResponse(cart_wire(widget, customer_ref, cart))
 
 
 # ---------------------------------------------------------------------------

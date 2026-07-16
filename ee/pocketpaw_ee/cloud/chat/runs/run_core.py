@@ -245,6 +245,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     ScopeKind,
     attach_agent_identity,
     attach_sse_event_sink,
+    bind_pawbar_run,
     build_behavior_instructions,
     build_knowledge_context,
     collect_delivered_artifacts,
@@ -253,6 +254,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     mark_cloud_chat_run,
     push_sse_event,
     session_key_for,
+    unbind_pawbar_run,
 )
 from pocketpaw_ee.cloud.chat.agent_service import (
     resolve_scope_context as resolve_scope_context,
@@ -419,6 +421,24 @@ async def _resolve_entity_profile(ctx: ScopeContext) -> SurfaceProfile:
         return base
     override = await _load_entity_profile_override(ctx.workspace_id, pocket_id)
     return compose_entity_profile(base, override)
+
+
+def _pawbar_run_from_ctx(ctx: ScopeContext) -> dict[str, Any] | None:
+    """Build the per-stream Paw Bar action context for a CONCIERGE run, or None.
+
+    A concierge run whose widget declares actions carries them on
+    ``surface_context.meta.pawbar_actions`` (threaded there by ``concierge_chat``).
+    Return ``{"widget_id", "actions"}`` so the ``pawbar_actions`` MCP server can
+    build one tool per verb and its handlers can resolve the widget. Any other run
+    (no surface, no actions) returns ``None`` — the server builds NO tools, so the
+    concierge tool surface stays deny-all exactly as before this slice."""
+    sc = ctx.surface_context
+    if sc is None:
+        return None
+    actions = getattr(sc.meta, "pawbar_actions", None)
+    if not actions:
+        return None
+    return {"widget_id": getattr(sc.meta, "widget_id", "") or "", "actions": list(actions)}
 
 
 async def _persist_assistant_message(
@@ -901,6 +921,9 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
             session_mongo_id=session_mongo_id,
             pocket_id=ctx.pocket_id,
         )
+        # C1 — bind the concierge action context so the warm subprocess builds the
+        # same pawbar_actions tool set turn 1 will resolve (None for every other run).
+        pawbar_token = bind_pawbar_run(_pawbar_run_from_ctx(ctx))
         try:
             await pool.prewarm(
                 ctx.target_agent_id,
@@ -913,6 +936,7 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
                 skill_names=surface_skills,
             )
         finally:
+            unbind_pawbar_run(pawbar_token)
             detach_agent_identity(identity_tokens)
     except Exception as exc:  # noqa: BLE001 — prewarm must NEVER break a run
         logger.debug("prewarm_session skipped (swallowed): %s", exc)
@@ -999,6 +1023,10 @@ async def _drive_agent_loop(
         # plain DM/group threads — the connector tools then say "no pocket".
         pocket_id=ctx.pocket_id,
     )
+    # C1 — bind this run's concierge action context (None for every non-concierge
+    # or no-actions run). The pawbar_actions MCP server + tool handlers read it;
+    # reset in the same finally as the identity tokens so it never leaks.
+    pawbar_token = bind_pawbar_run(_pawbar_run_from_ctx(ctx))
 
     if not history and ctx.session_id:
         asyncio.create_task(_generate_session_title(ctx, user_content))
@@ -1378,6 +1406,10 @@ async def _drive_agent_loop(
             await asyncio.gather(*pending, return_exceptions=True)
         try:
             detach_sse_event_sink(sink_token)
+        except Exception:
+            pass
+        try:
+            unbind_pawbar_run(pawbar_token)
         except Exception:
             pass
         try:

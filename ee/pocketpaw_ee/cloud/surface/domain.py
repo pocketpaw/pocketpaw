@@ -73,7 +73,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -191,6 +191,14 @@ class SurfaceMeta:
     storage_root: str | None = None
     is_cloud_storage: str | None = None
     workspace_vm: str | None = None
+    # Concierge action registry hint (C1). A CONCIERGE run whose Paw Bar widget
+    # declares actions carries the declarations here (a JSON-shaped list of
+    # {verb, policy, args, label}). ``concierge_chat`` stamps it from the widget
+    # spec; the concierge PROFILE reads the verbs to allow-list exactly this
+    # widget's per-verb tools, the PREAMBLE lists them, and ``run_core`` binds them
+    # onto the per-stream ContextVar the pawbar_actions MCP server builds from.
+    # Absent on every other surface — the concierge stays deny-all.
+    pawbar_actions: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)

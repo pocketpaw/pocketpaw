@@ -360,18 +360,35 @@ def _concierge_allow_mcp(site_kind: str = "foreign") -> frozenset[str]:
     return frozenset()
 
 
-def _concierge_profile(_meta: SurfaceMeta) -> SurfaceProfile:
+def _concierge_profile(meta: SurfaceMeta) -> SurfaceProfile:
     """/paw-bar — the PUBLIC concierge widget. Ripple OFF (it answers questions,
     never builds a dashboard) + the public-safe tool lockdown (``_CONCIERGE_DENY``
     hard-strips web/code/write/subagent/pocket-write tools) + the site-scoped MCP
     allow-list. KB grounding is locked to ``pocket:<id>`` by
     ``ScopeKind.CONCIERGE`` in ``agent_service._kb_scopes_for_context`` — the
     profile governs tools, the scope governs KB.
-    """
+
+    C1 — action registry: when the widget declares actions (carried on
+    ``meta.pawbar_actions`` by ``concierge_chat``), the restrictive MCP allow-list
+    is WIDENED by EXACTLY this widget's per-verb tool ids
+    (``mcp__pawbar_actions__pawbar_<verb>``) so those tools survive the lockdown —
+    and nothing else does. A widget with no declared actions keeps the empty
+    allow-list, so the concierge tool surface is byte-identical deny-all."""
+    allow = _concierge_allow_mcp("foreign")
+    actions = getattr(meta, "pawbar_actions", None)
+    if actions:
+        from pocketpaw_ee.agent.mcp_servers.pawbar import pawbar_tool_id
+
+        verb_ids = frozenset(
+            pawbar_tool_id(a["verb"])
+            for a in actions
+            if isinstance(a, dict) and a.get("verb")
+        )
+        allow = allow | verb_ids
     return SurfaceProfile(
         ripple_mode="off",
         deny_mcp_tool_ids=_CONCIERGE_DENY,
-        allow_mcp_tool_ids=_concierge_allow_mcp("foreign"),
+        allow_mcp_tool_ids=allow,
     )
 
 

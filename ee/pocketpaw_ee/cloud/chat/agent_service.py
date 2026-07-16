@@ -350,6 +350,31 @@ def current_pocket_id() -> str | None:
     return _active_pocket_id.get()
 
 
+# Per-stream Paw Bar action context (C1). Set by ``run_core`` for a CONCIERGE run
+# whose widget declares actions; read by the in-process ``pawbar_actions`` MCP
+# server to build ONE tool per declared verb and by each tool handler to resolve
+# which widget to run ``execute_action`` against. ``None`` (every non-concierge or
+# no-actions run) means the server builds NO tools — deny-all, exactly as before.
+# Shape: ``{"widget_id": str, "actions": [{"verb","policy","args","label"}, ...]}``.
+_active_pawbar_run: ContextVar[dict[str, Any] | None] = ContextVar(
+    "agent_pawbar_run", default=None
+)
+
+
+def bind_pawbar_run(run: dict[str, Any] | None) -> Token:
+    """Bind (or clear) the active stream's Paw Bar action context. Returns a
+    reset token — the caller resets it in a finally so it never leaks past a run."""
+    return _active_pawbar_run.set(run)
+
+
+def unbind_pawbar_run(token: Token) -> None:
+    _active_pawbar_run.reset(token)
+
+
+def current_pawbar_run() -> dict[str, Any] | None:
+    return _active_pawbar_run.get()
+
+
 def current_cloud_chat_run() -> bool:
     """True when the active context is a live cloud CHAT run dispatch.
 
