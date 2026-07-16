@@ -61,6 +61,15 @@
 # so the belt handler's ``build_preamble`` injects them into the preamble and
 # tells the agent NOT to ask for the repo (and to pass exactly these into
 # ``belt_propose_change``). Absent → the handler keeps the ask-first behavior.
+# Changes: 2026-07-16 (feat/senses-skill-surfacing, SR-5) — corrected the stale
+# ``SurfaceProfile`` field-doc below: ``skill_names`` is NO LONGER inert. It is
+# CONSUMED per run — the entity/connector-derived ``surface_profile.skill_names``
+# composes into ``resolved_profile`` (``compose_entity_profile``, a UNION) and
+# ``run_core`` forwards it to ``AgentPool.run(skill_names=...)``, where the Claude
+# SDK backend materializes the named skills into a per-run local-plugin dir (RFC 14
+# M3 keystone, #1343 / #1374). ``system_message_override`` is likewise consumed
+# now. Doc-only correction — no behavior change; the end-to-end proof lives at
+# ``tests/cloud/runs/test_run_core_connector_skill_surfacing.py``.
 
 from __future__ import annotations
 
@@ -229,8 +238,16 @@ class SurfaceProfile:
         ``frozenset[str]`` (``deny_mcp_tool_ids``) and subtracted from
         ``allowed_tools`` before the SDK launches. Non-empty only on the /sites
         svelte-create row.
-      * ``skill_names`` — skills this surface surfaces to the agent. Tested DATA;
-        skill-surfacing consumption lands in a later pass.
+      * ``skill_names`` — skills this surface (or its entity/connector-derived
+        override) surfaces to the agent. CONSUMED: ``compose_entity_profile``
+        UNIONs the pocket's ``surface_profile.skill_names`` (auto-authored from a
+        pocket's bound connectors — gmail → "gmail", github → "github") over the
+        surface base; ``run_core`` reads the composed set off ``resolved_profile``,
+        folds in the agent's own ``skill_refs`` (still a UNION — additive), and
+        forwards it to ``AgentPool.run(skill_names=...)`` where the Claude SDK
+        backend materializes the named skills into a per-run local-plugin dir.
+        Binding a connector adds its skill to the NEXT run; unbinding removes only
+        the derived skill (pre-existing ``skill_refs`` are untouched).
       * ``system_message_override`` — the surface's own system prompt, replacing
         the pocket-shaped DELIVERABLE stack. CONSUMED since 2026-07-22
         (fix/code-surface-denies-pocket-authoring); set on the CODE row, ``None``
@@ -248,11 +265,10 @@ class SurfaceProfile:
         pockets still lost to a request whose vocabulary matched the
         create-pocket skill, because a prohibition does not create a default.
 
-    ``ripple_mode``, ``deny_mcp_tool_ids``, ``allow_mcp_tool_ids`` and
-    ``system_message_override`` are CONSUMED today; ``allowed_sdk_tools`` and
-    ``skill_names`` remain populated-but-inert so the descriptor's shape is
-    locked now and later passes add enforcement without re-designing the
-    primitive.
+    ``ripple_mode``, ``deny_mcp_tool_ids``, ``allow_mcp_tool_ids``, ``skill_names``
+    and ``system_message_override`` are CONSUMED today; ``allowed_sdk_tools``
+    remains populated-but-inert so the descriptor's shape is locked now and a
+    later pass adds enforcement without re-designing the primitive.
     """
 
     ripple_mode: Literal["on", "off", "trim"]
