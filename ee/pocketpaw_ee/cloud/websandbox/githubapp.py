@@ -99,8 +99,19 @@ def github_app_slug() -> str:
     Distinct from the numeric App id: GitHub's install page is keyed by the slug
     (e.g. ``devrohit06-personal``). Returns '' when unset — callers surface a clean
     "GitHub connect not configured" rather than building a broken URL.
+
+    Forgiving of a mis-set env: someone naturally pastes the whole install URL
+    (``https://github.com/apps/devrohit06-personal``) into the slug var, which would
+    otherwise double-wrap into ``/apps/https://github.com/apps/<slug>/…`` and 404.
+    We extract the bare slug — take the segment after ``/apps/`` if present, then
+    the first path segment — so both the bare slug and a pasted URL resolve right.
     """
-    return os.environ.get("POCKETPAW_GITHUB_APP_SLUG", "").strip()
+    raw = os.environ.get("POCKETPAW_GITHUB_APP_SLUG", "").strip()
+    if not raw:
+        return ""
+    if "/apps/" in raw:
+        raw = raw.split("/apps/", 1)[1]
+    return raw.strip("/").split("/")[0]
 
 
 def github_app_enabled() -> bool:

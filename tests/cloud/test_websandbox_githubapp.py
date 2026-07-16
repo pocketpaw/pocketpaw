@@ -20,6 +20,7 @@ from pocketpaw_ee.cloud.websandbox.githubapp import (
     GitHubAppError,
     get_github_app_client,
     github_app_enabled,
+    github_app_slug,
 )
 from pocketpaw_ee.cloud.websandbox.githubapp import (
     _reset_client_for_tests as reset_github_client,
@@ -219,6 +220,22 @@ def test_upstream_clone_url_normalizes_suffix() -> None:
     client = _client(_FakeHttp({}))
     assert client.upstream_clone_url("acme/api") == "https://github.com/acme/api.git"
     assert client.upstream_clone_url("acme/api.git") == "https://github.com/acme/api.git"
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ("devrohit06-personal", "devrohit06-personal"),  # the bare slug
+        ("  devrohit06-personal  ", "devrohit06-personal"),  # whitespace
+        # A pasted full install URL must resolve to the bare slug, not double-wrap.
+        ("https://github.com/apps/devrohit06-personal", "devrohit06-personal"),
+        ("https://github.com/apps/devrohit06-personal/installations/new", "devrohit06-personal"),
+        ("", ""),  # unset → empty (caller shows "not configured")
+    ],
+)
+def test_github_app_slug_extracts_bare_slug(monkeypatch, env: str, expected: str) -> None:
+    monkeypatch.setenv("POCKETPAW_GITHUB_APP_SLUG", env)
+    assert github_app_slug() == expected
 
 
 # ---------------------------------------------------------------------------
