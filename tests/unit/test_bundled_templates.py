@@ -319,9 +319,8 @@ def test_index_json_lists_all_bundled_templates() -> None:
 # the dashboard-oriented manifest prop-schema does not enumerate — anchor
 # ``id`` on the wrapping section/card (so navbar/CTA anchors resolve) and a
 # real ``name`` on each flat lead-form input (so the page POSTs natively
-# with zero JS). Both are MANDATED by the shipped landing recipe
-# (bundled_kb/.../marketing-landing-page-conversion-ordered-paw-site-recipe.md)
-# and tolerated by the EE validator (only *required*-prop violations
+# with zero JS). Both are properties of the landing skeleton this template
+# ships, and tolerated by the EE validator (only *required*-prop violations
 # hard-fail; unknown/extra props are advisory). The landing skeleton's
 # widget *types* are still asserted manifest-known in
 # tests/unit/test_landing_template_fastpath.py, so the "red unknown-widget

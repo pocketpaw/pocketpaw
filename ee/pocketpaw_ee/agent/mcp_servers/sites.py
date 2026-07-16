@@ -22,6 +22,13 @@
 # ``create_dynamic_site`` tool also registers on this SAME server. Dynamic sites
 # are ripple-engine sites whose spec carries live-data bindings; publish carries
 # those through to the paw-sites generator.
+#
+# Updated 2026-07-12 (feat/sites-html-create-tool, HE-6): the ``create_html_site``
+# tool also registers on this SAME server. An html site is a raw {path: contents}
+# HTML/CSS/JS map with no framework; publish materializes it and skips the Node
+# build. Its id rides ``SITES_TOOL_IDS`` so the per-surface allowlist picks it up
+# automatically. Opt-in — the default marketing brain stays create_landing_site
+# (ripple); the default flip to html is HE-12.
 """Agent-side MCP surface for publishing a PocketPaw pocket as a Paw Site.
 
 A site is published FROM a pocket: the chat agent identifies the pocket to
@@ -76,6 +83,10 @@ EDIT_SVELTE_COMPONENT_TOOL_ID = f"mcp__{SERVER_NAME}__edit_svelte_component"
 # (see sites_create.py). Dynamic sites are ripple-engine sites whose spec carries
 # live-data bindings; publish carries those through to the paw-sites generator.
 CREATE_DYNAMIC_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_dynamic_site"
+# The html-track create tool (HE-6) also registers on this SAME server (see
+# sites_create.py). An html site is a raw {path: contents} HTML/CSS/JS map with no
+# framework; publish materializes it and skips the Node build.
+CREATE_HTML_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_html_site"
 
 SITES_TOOL_IDS = (
     PUBLISH_TOOL_ID,
@@ -83,6 +94,7 @@ SITES_TOOL_IDS = (
     CREATE_SVELTE_SITE_TOOL_ID,
     EDIT_SVELTE_COMPONENT_TOOL_ID,
     CREATE_DYNAMIC_SITE_TOOL_ID,
+    CREATE_HTML_SITE_TOOL_ID,
 )
 
 
@@ -249,6 +261,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     # keys servers by name and a second server under this name would clobber it.
     from pocketpaw_ee.agent.mcp_servers.sites_create import (
         make_create_dynamic_site_tool,
+        make_create_html_site_tool,
         make_create_landing_site_tool,
         make_create_svelte_site_tool,
         make_edit_svelte_component_tool,
@@ -265,6 +278,10 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     # author-spec → create_dynamic_site → publish hops sit on one allowlisted
     # server. Publish carries the spec's dynamic blocks through to the generator.
     create_dynamic_site = make_create_dynamic_site_tool(tool)
+    # The html-track create tool (HE-6) — same server, so the author-html-map →
+    # create_html_site → publish hops sit on one allowlisted server. Opt-in: the
+    # tool steers the agent to it only on an explicit raw-HTML request.
+    create_html_site = make_create_html_site_tool(tool)
 
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
@@ -275,6 +292,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
             create_svelte_site,
             edit_svelte_component,
             create_dynamic_site,
+            create_html_site,
         ],
     )
     return SERVER_NAME, server
@@ -282,6 +300,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
 
 __all__ = [
     "CREATE_DYNAMIC_SITE_TOOL_ID",
+    "CREATE_HTML_SITE_TOOL_ID",
     "CREATE_LANDING_SITE_TOOL_ID",
     "CREATE_SVELTE_SITE_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",

@@ -52,9 +52,8 @@
 # storage change.
 """Built-in pocket templates bundled and auto-installed by PocketPaw.
 
-Third sibling to ``pocketpaw.bundled_skills`` and ``pocketpaw.bundled_kb``.
-Where ``bundled_skills`` ships on-demand workflow markdown and ``bundled_kb``
-ships pre-compiled kb-go retrieval scopes, ``bundled_templates`` ships
+Sibling to ``pocketpaw.bundled_skills``. Where ``bundled_skills`` ships
+on-demand workflow markdown, ``bundled_templates`` ships
 **ready-to-instantiate pocket templates** — hand-authored, production-quality
 rippleSpec skeletons paired with RFC 03 v2 schema metadata.
 

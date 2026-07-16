@@ -1,5 +1,15 @@
 # ee/instinct/router.py — FastAPI router for the Instinct decision pipeline API.
 # Created: 2026-03-28 — Propose, approve/reject, list pending, query audit.
+# Updated: 2026-07-15 (B0 H2 — _customer_reply tenancy gate) — closed a gap in the
+#   FOUR-path dispatch: the paw-bar ``_customer_reply`` blob (carried by
+#   ``decision_loop.propose_customer_decision``) had a delivery hook on the
+#   approve/reject paths but NO workspace assertion, while every other gated blob
+#   kind did. Added ``_customer_reply_blob`` + ``_assert_customer_reply_workspace``
+#   (peers of the ``_external_action`` pair) and wired the 403 into ALL FOUR
+#   locations (approve / bulk-approve / reject / bulk-reject) BEFORE any delivery.
+#   Without it, a ws-A admin could approve/reject a ws-B ``_customer_reply`` action
+#   and ``deliver_customer_decision`` would flip a decision row in ws-B (it routes
+#   by the blob's ``workspace_id``). The other kinds are unchanged.
 # Updated: 2026-07-10 (FST-6 — _fabric_conflict proposal type) — wired the
 #   conflict-stewardship gate kind into the FOUR-path dispatch.
 #   ``_fabric_conflict_blob`` + ``_assert_fabric_conflict_workspace`` are the
@@ -799,6 +809,58 @@ def _assert_external_action_workspace(action: Any, current_workspace: str) -> No
         )
 
 
+def _customer_reply_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_customer_reply`` blob on an Action, or ``None``.
+
+    The blob is the paw-bar customer-decision payload
+    ``decision_loop.propose_customer_decision`` stores under
+    ``Action.parameters._customer_reply`` (widget / customer / event routing + the
+    editable reply + the originating ``workspace_id``). The approve/reject paths
+    dispatch ``deliver_customer_decision`` on its presence, exactly as they
+    dispatch the external-action executor on ``_external_action``. Anything that
+    is not a dict is treated as "no customer reply". (The key is inlined — mirror
+    of the peer ``_blob`` accessors — so the OSS instinct router carries no
+    EE-paw_bar import at module load.)
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_customer_reply")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_customer_reply_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting a customer-reply action from another workspace.
+
+    Mirror of ``_assert_external_action_workspace`` for the ``_customer_reply``
+    blob. ``require_action_any_workspace("instinct.approve")`` only proves the
+    caller holds the role SOMEWHERE; this binds the customer-reply Action to the
+    caller's active workspace. A customer reply carries no pocket the way a parked
+    write does — its tenancy lives entirely on the blob's ``workspace_id``, and
+    the delivery hook (``deliver_customer_decision``) routes the reply to THAT
+    workspace's decision row (``set_decision(workspace_id=...)``). So a blob whose
+    ``workspace_id`` differs from the caller's active workspace would deliver a
+    decision into another tenant's paw-bar surface → 403. A non-customer-reply
+    Action (no blob) is unaffected.
+    """
+    blob = _customer_reply_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    # Empty workspace claim fails closed (the delivery hook resolves the decision
+    # row from this field; an empty one would misfile onto the shared surface).
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This customer reply has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This customer reply belongs to a different workspace",
+        )
+
+
 def _admin_action_blob(action: Any) -> dict[str, Any] | None:
     """Return the ``_admin_action`` blob on an Action, or ``None``.
 
@@ -1419,6 +1481,7 @@ async def bulk_approve_actions(
             _assert_belt_plan_workspace(action, workspace_id)
             _assert_artifact_change_workspace(action, workspace_id)
             _assert_admin_action_workspace(action, workspace_id)
+            _assert_customer_reply_workspace(action, workspace_id)
 
     approved, missing, bulk_id = await store.bulk_approve(
         list(req.ids), approver=approver_id, note=req.note
@@ -1809,6 +1872,7 @@ async def bulk_reject_actions(
             _assert_belt_plan_workspace(action, workspace_id)
             _assert_artifact_change_workspace(action, workspace_id)
             _assert_admin_action_workspace(action, workspace_id)
+            _assert_customer_reply_workspace(action, workspace_id)
 
     rejected, missing, bulk_id = await store.bulk_reject(
         list(req.ids), reason=req.reason, rejector=rejector_id
@@ -2155,6 +2219,10 @@ async def approve_action(
     # fires a workspace-admin write (e.g. a member role change) after an
     # execute-time RBAC re-check, so the cross-workspace gate is mandatory here.
     _assert_admin_action_workspace(before, workspace_id)
+    # ``_customer_reply`` (paw-bar) — the delivery hook routes the reply to the
+    # blob's workspace, so a cross-workspace approve would deliver a decision into
+    # another tenant's paw-bar surface. Gate it like every other blob kind.
+    _assert_customer_reply_workspace(before, workspace_id)
 
     req = req or ApproveRequest()
     # SHOULD-FIX 1 — the audit actor is the authenticated identity, not
@@ -2667,6 +2735,10 @@ async def reject_action(
     # side. Asymmetric tenant scope is no tenant scope: a cross-workspace reject
     # must 403 before any mutation, exactly like the approve side.
     _assert_admin_action_workspace(before, workspace_id)
+    # ``_customer_reply`` (paw-bar) — same tenancy gate on the REJECT side: a
+    # cross-workspace reject would deliver a DECLINED decision into another
+    # tenant's paw-bar surface. Asymmetric tenant scope is no tenant scope.
+    _assert_customer_reply_workspace(before, workspace_id)
 
     reason = req.reason if req else ""
     rejector_id = str(user.id)

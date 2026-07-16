@@ -1,0 +1,8 @@
+{
+  "slug": "warm-local-service",
+  "name": "Hearth",
+  "description": "A warm, earthy, friendly system for local businesses — cafes, salons, dentists, studios. Honey amber and deep teal on soft stone, rounded corners, a characterful display, and gentle shadows.",
+  "aesthetic": ["warm", "friendly", "earthy", "approachable", "rounded", "cozy", "organic"],
+  "industries": ["cafe", "restaurant", "salon", "spa", "dentist", "wellness", "local-service", "boutique", "bakery"],
+  "page_types": ["landing", "services", "menu", "booking", "about", "contact", "gallery"]
+}

@@ -71,19 +71,25 @@ All SDK imports are mocked.
 import logging
 from unittest.mock import patch
 
+from pocketpaw_ee.agent.mcp_servers.ask import SERVER_NAME as _ASK_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.belt import SERVER_NAME as _BELT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.connectors import SERVER_NAME as _CONNECTORS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.daytona import SERVER_NAME as _DAYTONA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.decisions import SERVER_NAME as _DECISIONS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.design_systems import (
+    SERVER_NAME as _DESIGN_SYSTEMS_MCP_SERVER_NAME,
+)
 from pocketpaw_ee.agent.mcp_servers.external_actions import (
     SERVER_NAME as _EXTERNAL_ACTIONS_MCP_SERVER_NAME,
 )
 from pocketpaw_ee.agent.mcp_servers.fabric import SERVER_NAME as _FABRIC_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.icons import SERVER_NAME as _ICONS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.instinct import SERVER_NAME as _INSTINCT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.loom import SERVER_NAME as _LOOM_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.media import SERVER_NAME as _MEDIA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.meetings import SERVER_NAME as _MEETINGS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.palette import SERVER_NAME as _PALETTE_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.planner import (
     POCKET_PLANNER_SERVER_NAME as _POCKET_PLANNER_MCP_SERVER_NAME,
 )
@@ -140,6 +146,15 @@ def _strip_builtin_servers(result: dict) -> dict:
     # call search_stock_images for site imagery without an explicit opt-in.
     # Pure read (free Pexels + Unsplash photo search), no identity.
     out.pop(_STOCK_MCP_SERVER_NAME, None)
+    # ``pocketpaw_icons`` / ``pocketpaw_palette`` / ``pocketpaw_design_systems`` /
+    # ``pocketpaw_ask`` are always-on too — the /sites authoring toolbelt (icon
+    # search, palette derivation, the design-system library, and the interactive
+    # ask_user question chips) is ambient, same regime as stock/media. Pure read /
+    # in-process, no identity.
+    out.pop(_ICONS_MCP_SERVER_NAME, None)
+    out.pop(_PALETTE_MCP_SERVER_NAME, None)
+    out.pop(_DESIGN_SYSTEMS_MCP_SERVER_NAME, None)
+    out.pop(_ASK_MCP_SERVER_NAME, None)
     # ``pocketpaw_belt`` is always-on too — the bundled `belt` skill calls
     # belt_propose_change without an explicit opt-in. ``loom`` is settings-gated
     # (loom_model_path unset -> not registered) but stripped defensively: a

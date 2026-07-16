@@ -172,6 +172,96 @@ async def test_dynamic_deploy_declares_no_queue_producers(tmp_path, monkeypatch)
     assert "queues" not in cfg
 
 
+# ── html engine: an assets-only Worker, no server script (HE-4) ──────────────
+
+
+def _build_html_project(tmp_path: Path) -> str:
+    """Create a minimal built HTML project. ``static_output_rel("html")`` is ``"."``,
+    so the generator writes the raw static tree straight into the project dir (no
+    ``.svelte-kit/cloudflare`` build subdir) — index.html at the root."""
+    (tmp_path / "index.html").write_text("<!doctype html><h1>hi</h1>")
+    (tmp_path / "styles.css").write_text("h1{color:#111}")
+    return str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_html_deploy_is_assets_only_no_main(tmp_path, monkeypatch):
+    """An html site is a raw static tree with NO server worker, so its wrangler
+    config is assets-only: no ``main`` (there is no ``_worker.js``), no
+    ``nodejs_compat`` (nothing runs the node runtime), and ``assets.directory`` is
+    the project root itself (``static_output_rel("html") == "."``)."""
+    project = _build_html_project(tmp_path)
+    site_id = "507f1f77bcf86cd799439011"
+    proc = _FakeProc(0, b"https://paw-site-507f1f77bcf86cd799439011.acct.workers.dev\n", b"")
+    _patch_subprocess(monkeypatch, proc)
+
+    url = await workers_deploy.deploy_workers(site_id, project, engine="html")
+
+    cfg = json.loads(Path(project, "wrangler.jsonc").read_text())
+    assert cfg["name"] == f"paw-site-{site_id}"
+    assert cfg["workers_dev"] is True
+    assert cfg["assets"] == {"directory": "."}
+    # The assets-only shape drops every server-worker key.
+    assert "main" not in cfg
+    assert "compatibility_flags" not in cfg
+    assert "d1_databases" not in cfg
+    assert url == "https://paw-site-507f1f77bcf86cd799439011.acct.workers.dev"
+
+
+@pytest.mark.asyncio
+async def test_html_assetsignore_excludes_the_config_file(tmp_path, monkeypatch):
+    """With ``assets.directory == "."`` the wrangler config sits INSIDE the asset
+    dir, so wrangler would serve ``wrangler.jsonc`` as a public asset. The html
+    ``.assetsignore`` (also at the root) keeps the deploy-scaffold files out of the
+    served tree — the reason html needs an ``.assetsignore`` even though it has no
+    ``_worker.js`` to ignore."""
+    project = _build_html_project(tmp_path)
+    proc = _FakeProc(0, b"https://x.y.workers.dev\n", b"")
+    _patch_subprocess(monkeypatch, proc)
+
+    await workers_deploy.deploy_workers("507f1f77bcf86cd799439011", project, engine="html")
+
+    assetsignore = Path(project, ".assetsignore").read_text().splitlines()
+    assert "wrangler.jsonc" in assetsignore
+    # It never lists a _worker.js — that Pages-style entry does not exist on html.
+    assert "_worker.js" not in assetsignore
+
+
+@pytest.mark.asyncio
+async def test_html_deploy_passes_config_flag(tmp_path, monkeypatch):
+    """html still names its config explicitly, same as the svelte/ripple path."""
+    project = _build_html_project(tmp_path)
+    proc = _FakeProc(0, b"https://x.y.workers.dev\n", b"")
+    captured = _patch_subprocess(monkeypatch, proc)
+    monkeypatch.setenv("PAW_CF_WRANGLER_CMD", "bunx wrangler@4.101.0")
+
+    await workers_deploy.deploy_workers("507f1f77bcf86cd799439011", project, engine="html")
+
+    assert "--config" in captured["argv"]
+    assert captured["argv"][-1] == "wrangler.jsonc"
+    assert captured["cwd"] == project
+
+
+@pytest.mark.asyncio
+async def test_static_svelte_config_unchanged_by_engine_default(tmp_path, monkeypatch):
+    """Regression guard: the default engine (ripple/svelte) keeps the exact
+    server-worker config — ``main`` + ``nodejs_compat`` + the ``.svelte-kit/cloudflare``
+    asset dir — byte-for-byte, so HE-4 does not touch the proven path."""
+    project = _build_project(tmp_path)
+    proc = _FakeProc(0, b"https://x.y.workers.dev\n", b"")
+    _patch_subprocess(monkeypatch, proc)
+
+    await workers_deploy.deploy_workers("507f1f77bcf86cd799439011", project)
+
+    cfg = json.loads(Path(project, "wrangler.jsonc").read_text())
+    assert cfg["main"] == ".svelte-kit/cloudflare/_worker.js"
+    assert cfg["compatibility_flags"] == ["nodejs_compat"]
+    assert cfg["assets"] == {"binding": "ASSETS", "directory": ".svelte-kit/cloudflare"}
+    # The svelte/ripple .assetsignore still drops the Pages worker entry.
+    assetsignore = Path(project, ".svelte-kit/cloudflare/.assetsignore").read_text().splitlines()
+    assert assetsignore == ["_worker.js", "_routes.json", "_headers"]
+
+
 @pytest.mark.asyncio
 async def test_deploy_invokes_wrangler_with_deploy_in_project_dir(tmp_path, monkeypatch):
     project = _build_project(tmp_path)

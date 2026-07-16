@@ -109,6 +109,23 @@
 # ``pocketpaw_sites_manager`` server (``mcp__pocketpaw_sites_manager__
 # create_landing_site``) so the create + publish hops sit side by side for the
 # chat agent — the SKILL produces copy → create_landing_site → publish.
+#
+# Updated: 2026-07-12 (feat/sites-html-create-tool, HE-6) — added a FOURTH create
+# tool ``create_html_site`` for the Paw Sites "html track". It mirrors
+# ``create_svelte_site`` (the agent IS the author; a raw {relative_path:
+# file_contents} source MAP is persisted verbatim via ``agent_create(
+# engine="html", source=<map>, type_="site", pattern="landing", ripple_spec=None,
+# trusted=True)`` — no ``assemble_*`` step, no rippleSpec, no catalog gate) but the
+# map is plain HTML/CSS/JS with NO SvelteKit scaffold and NO bundler. Validation is
+# lighter than svelte's §4.3: the only required key is the entry ``index.html`` (the
+# edge serves it at the root); ``_missing_html_keys`` fails the create CLOSED
+# without it. html has NO live-data binding siblings (that is the svelte/ripple
+# dynamic track), so the whole map is {path: str} and every value must be a content
+# string — no exemption list. Publishing an html site skips the Node build entirely
+# (generator_client.needs_node_build("html") is False). This is OPT-IN: the tool
+# description steers the agent to it ONLY on an explicit raw/plain-HTML request; the
+# default marketing brain stays create_landing_site (ripple). The default flip is
+# HE-12, gated behind HE-11.
 """Agent-side MCP surface for DETERMINISTIC Paw Site landing-page creation.
 
 A landing site is built from an LLM ``content`` copy object. This tool:
@@ -162,12 +179,18 @@ EDIT_SVELTE_COMPONENT_TOOL_ID = f"mcp__{SERVER_NAME}__edit_svelte_component"
 # create_dynamic_site → publish (publish carries the dynamic blocks through to the
 # paw-sites generator, which scaffolds the per-tenant D1 + read/write remote fns).
 CREATE_DYNAMIC_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_dynamic_site"
+# The html-track create tool (HE-6) — also the SAME server. The skill flow is:
+# author a raw HTML/CSS/JS source map → create_html_site → publish. Publishing an
+# html site skips the Node build entirely (generator_client.needs_node_build is
+# False for html); the raw markup is materialized and served as-is.
+CREATE_HTML_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_html_site"
 
 SITES_CREATE_TOOL_IDS = (
     CREATE_LANDING_SITE_TOOL_ID,
     CREATE_SVELTE_SITE_TOOL_ID,
     EDIT_SVELTE_COMPONENT_TOOL_ID,
     CREATE_DYNAMIC_SITE_TOOL_ID,
+    CREATE_HTML_SITE_TOOL_ID,
 )
 
 
@@ -243,6 +266,25 @@ def _missing_source_keys(source: dict[str, Any]) -> list[str]:
         if not any(k.startswith(prefix) for k in source):
             missing.append(f"{prefix}*.svelte")
     return missing
+
+
+# ── html-track source map (HE-6) ────────────────────────────────────────────
+# An html-engine ``source`` map is a raw {relative_path: file_contents} map of
+# HTML/CSS/JS — no SvelteKit scaffold, no bundler. The only hard requirement is
+# the entry document ``index.html``: the paw-sites generator materializes the map
+# verbatim (html-scaffold.ts:materializeHtml) and the edge serves ``index.html``
+# at the site root, so a map without it is unservable. Everything else (styles,
+# scripts, extra pages, assets) is optional and passes through as authored.
+HTML_REQUIRED_KEYS = ("index.html",)
+
+
+def _missing_html_keys(source: dict[str, Any]) -> list[str]:
+    """Return the required html keys absent from ``source`` (empty list = valid).
+
+    Only ``index.html`` is required — it is the entry the generator materializes
+    and the edge serves at the site root. Used to fail the create closed with an
+    actionable message rather than persisting a site with no servable entry."""
+    return [k for k in HTML_REQUIRED_KEYS if k not in source]
 
 
 # ── Dynamic-track spec surface (RFC 12 A2) ──────────────────────────────────
@@ -965,6 +1007,194 @@ def make_create_svelte_site_tool(tool: Any) -> Any:
     return create_svelte_site
 
 
+async def _create_html_site_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__create_html_site`` (the html track, HE-6).
+
+    Reads workspace/user identity from the per-stream ContextVars, validates the
+    ``source`` map (a raw {relative_path: file_contents} HTML/CSS/JS map that MUST
+    carry ``index.html``), and persists it DIRECTLY via ``agent_create``
+    (engine="html", source=<map>, type="site", pattern="landing", ripple_spec=None,
+    trusted=True). Returns ``{ok, pocket_id, pocket}`` on success; sets ``is_error``
+    when identity is missing, ``source`` is absent/malformed/incomplete, or the
+    persist fails.
+
+    Like ``create_svelte_site`` there is no ``assemble_*`` step — the agent authored
+    the markup, so the map is persisted verbatim and the generator materializes it
+    at publish. Unlike svelte, an html publish skips the Node build entirely
+    (``generator_client.needs_node_build("html")`` is False): the raw files are
+    served as authored. html has NO live-data binding siblings — the whole map is
+    {path: str}, so every value must be a content string."""
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "create_html_site requires workspace and user context (call from a cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_create_html_site",
+        status="ok",
+        ok=True,
+    )
+
+    args = coerce_json_object_args(args, ("source",))
+    source = args.get("source")
+    if not isinstance(source, dict) or not source:
+        return _error_response(
+            "create_html_site requires a `source` object — the raw HTML/CSS/JS "
+            "source map { relative_path: file_contents } you authored. It must "
+            "include `index.html` (the page the edge serves); add stylesheets, "
+            "scripts, and assets as sibling entries. You write the markup; this "
+            "tool persists it."
+        )
+    # The whole map is {path: contents} — every value is a file content string.
+    # html has no live-data binding siblings (that is the svelte/ripple dynamic
+    # track), so unlike create_svelte_site there is no exemption list.
+    bad = [k for k, v in source.items() if not isinstance(v, str)]
+    if bad:
+        return _error_response(
+            "create_html_site `source` file values must be content strings; these "
+            f"keys are not strings: {', '.join(sorted(bad)[:8])}."
+        )
+    missing = _missing_html_keys(source)
+    if missing:
+        return _error_response(
+            "create_html_site `source` is missing required files: "
+            f"{', '.join(missing)}. An html site needs an `index.html` entry "
+            "document — the edge serves it at the site root."
+        )
+
+    # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
+    # create can't bypass the router's require_plan_feature("sites") gate.
+    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+        return gate
+
+    name_raw = args.get("name")
+    name = name_raw.strip() if isinstance(name_raw, str) and name_raw.strip() else "HTML site"
+    description_raw = args.get("description")
+    description = description_raw if isinstance(description_raw, str) else ""
+    icon_raw = args.get("icon")
+    icon = icon_raw if isinstance(icon_raw, str) else ""
+    color_raw = args.get("color")
+    color = color_raw if isinstance(color_raw, str) else ""
+
+    # Persist DIRECTLY through the pockets service — NO pocket_specialist, NO
+    # rippleSpec, NO catalog gate (there is no spec to gate). ``engine="html"``
+    # + ``source`` stamp the html track so the generator materializes the map
+    # verbatim and publish skips the Node build; ``type_="site"`` +
+    # ``pattern="landing"`` keep the site identity the rest of the pipeline
+    # (publish, /sites listing) keys on. ``trusted=True`` short-circuits the strict
+    # catalog gate, which only runs on a non-null rippleSpec anyway — the html
+    # path passes ``ripple_spec=None``.
+    from pocketpaw_ee.cloud.pockets.service import agent_create
+
+    try:
+        view, new_pocket_id, err = await agent_create(
+            workspace_id=workspace_id,
+            owner_id=user_id,
+            name=name,
+            description=description,
+            type_="site",
+            pattern="landing",
+            icon=icon,
+            color=color,
+            ripple_spec=None,
+            engine="html",
+            source=source,
+            trusted=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("create_html_site: persist raised", exc_info=True)
+        return _error_response(f"create failed: {exc}")
+
+    if err is not None or view is None or new_pocket_id is None:
+        return _error_response(f"create failed: {err or 'create returned no view'}")
+
+    await _bind_session_and_emit(new_pocket_id, view, user_id)
+
+    return _success_response(
+        {
+            "ok": True,
+            "pocket_id": new_pocket_id,
+            "pocket": {
+                "id": new_pocket_id,
+                "name": view.get("name"),
+                "type": view.get("type"),
+                "pattern": view.get("pattern"),
+                "engine": view.get("engine"),
+            },
+        }
+    )
+
+
+def make_create_html_site_tool(tool: Any) -> Any:
+    """Build the ``create_html_site`` SDK tool object using the SDK's ``tool``
+    decorator (passed in by the caller that already imported it).
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as publish +
+    create_landing_site + create_svelte_site + create_dynamic_site (see
+    ``make_create_landing_site_tool`` for why one server)."""
+
+    @tool(
+        "create_html_site",
+        (
+            "Create a Paw Site landing page on the HTML TRACK — a raw, "
+            "hand-authored static site (plain HTML/CSS/JS, no framework, no build "
+            "step). Use this ONLY when the user EXPLICITLY asks for a plain / "
+            "raw / single-file HTML site or 'no framework' ('give me a bare HTML "
+            "landing page', 'just an index.html', 'no Svelte'). For a normal "
+            "marketing request the default is create_landing_site (ripple) — do "
+            "NOT pick this one by default. You AUTHOR the markup yourself and pass "
+            "it as a `source` MAP { relative_path: file_contents }; the tool "
+            "persists the map and stamps the pocket type='site', pattern='landing', "
+            "engine='html'. You do NOT compose a rippleSpec, do NOT author Svelte, "
+            "do NOT call pocket_specialist. The map MUST include `index.html` (the "
+            "page the edge serves at the root); add stylesheets, scripts, extra "
+            "pages, and assets as sibling entries — every value is a content "
+            "STRING. Publishing an html site skips the Node build entirely: the raw "
+            "files are served exactly as authored, so the page must be complete on "
+            "its own (inline or linked CSS/JS, real copy — never 'TBD'/'Lorem "
+            "ipsum'). Returns {ok, pocket_id, pocket}; hand `pocket_id` to "
+            "`mcp__pocketpaw_sites_manager__publish` to publish. ok=false with an "
+            "error means relay the reason, do NOT report a created pocket."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "object",
+                    "description": (
+                        "The raw HTML/CSS/JS source map you authored — a "
+                        "{ relative_path: file_contents } map, paths relative to the "
+                        "site root, every value a content STRING. MUST include "
+                        "`index.html` (the entry document served at the root). Add "
+                        "styles, scripts, and assets as sibling entries."
+                    ),
+                    "additionalProperties": {"type": "string"},
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional pocket/site name. Defaults to 'HTML site'.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional one-line pocket description.",
+                },
+                "icon": {"type": "string", "description": "Optional lucide icon name."},
+                "color": {"type": "string", "description": "Optional accent color hex."},
+            },
+            "required": ["source"],
+            "additionalProperties": False,
+        },
+    )
+    async def create_html_site(args):  # type: ignore[no-untyped-def]
+        return await _create_html_site_handler(args)
+
+    return create_html_site
+
+
 async def _edit_svelte_component_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__edit_svelte_component``.
 
@@ -1227,14 +1457,17 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
 
 __all__ = [
     "CREATE_DYNAMIC_SITE_TOOL_ID",
+    "CREATE_HTML_SITE_TOOL_ID",
     "CREATE_LANDING_SITE_TOOL_ID",
     "CREATE_SVELTE_SITE_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
+    "HTML_REQUIRED_KEYS",
     "SERVER_NAME",
     "SITES_CREATE_TOOL_IDS",
     "SVELTE_REQUIRED_EXACT_KEYS",
     "SVELTE_REQUIRED_PREFIXES",
     "make_create_dynamic_site_tool",
+    "make_create_html_site_tool",
     "make_create_landing_site_tool",
     "make_create_svelte_site_tool",
     "make_edit_svelte_component_tool",
