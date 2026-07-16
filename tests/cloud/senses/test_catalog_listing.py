@@ -146,16 +146,17 @@ async def test_cloud_connector_actions_available_with_trust(registry) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_app(workspace_id: str) -> FastAPI:
+def _build_app(workspace_id: str, user_id: str = "u-1") -> FastAPI:
     from pocketpaw_ee.cloud._core.http import add_error_handler
     from pocketpaw_ee.cloud.license import require_license
     from pocketpaw_ee.cloud.senses.router import router as senses_router
-    from pocketpaw_ee.cloud.shared.deps import current_workspace_id
+    from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
 
     app = FastAPI()
     add_error_handler(app)
     app.include_router(senses_router, prefix="/api/v1")
     app.dependency_overrides[current_workspace_id] = lambda: workspace_id
+    app.dependency_overrides[current_user_id] = lambda: user_id
     app.dependency_overrides[require_license] = lambda: None
     return app
 
@@ -225,10 +226,19 @@ async def test_route_tenant_filter_no_leak(w1_client: AsyncClient, w2_client: As
 
 
 @pytest.mark.asyncio
-async def test_route_pocket_scope_query_param(w1_client: AsyncClient) -> None:
-    """A pocket-scoped connector is bound only when ?pocket_id matches; the
-    default (no pocket_id) is workspace-scope and does not see it."""
+async def test_route_pocket_scope_query_param(
+    w1_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pocket-scoped connector is bound only when ?pocket_id matches AND the
+    caller has run-access to that pocket; the default (no pocket_id) is
+    workspace-scope and does not see it."""
     from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
+    from pocketpaw_ee.cloud.senses import router as senses_router
+
+    async def _grant(_pocket_id: str, _user_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr(senses_router.pockets_service, "has_action_run_access", _grant)
 
     await WorkspaceConnector(
         workspace="ws-1",
@@ -243,3 +253,35 @@ async def test_route_pocket_scope_query_param(w1_client: AsyncClient) -> None:
     without_pocket = await w1_client.get("/api/v1/cloud/senses/catalog")
     assert _flatten_route(with_pocket.json())["github"]["bound"] is True
     assert _flatten_route(without_pocket.json())["github"]["bound"] is False
+
+
+@pytest.mark.asyncio
+async def test_route_pocket_scope_denied_falls_back_to_workspace(
+    w1_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SR-9: a caller WITHOUT run-access to the requested pocket must NOT see that
+    pocket's private bindings. The route silently drops pocket_id and falls back to
+    workspace-scope (status 200, no bound leak, no 403 existence oracle)."""
+    from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
+    from pocketpaw_ee.cloud.senses import router as senses_router
+
+    async def _deny(_pocket_id: str, _user_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(senses_router.pockets_service, "has_action_run_access", _deny)
+
+    # A pocket-scoped binding in another member's private pocket.
+    await WorkspaceConnector(
+        workspace="ws-1",
+        name="github",
+        enabled=True,
+        scope="pocket",
+        pocket_id="pk-private",
+        config={},
+    ).insert()
+
+    r = await w1_client.get("/api/v1/cloud/senses/catalog", params={"pocket_id": "pk-private"})
+    assert r.status_code == 200, r.text  # silent fallback, not a 403 oracle
+    # The private pocket's binding must NOT surface — the overlay fell back to
+    # workspace-scope, where github is not bound.
+    assert _flatten_route(r.json())["github"]["bound"] is False
