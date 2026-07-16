@@ -70,9 +70,22 @@
 #   folds them into the typed ``EnableConnectorRequest``. Absent scope → the
 #   historical workspace-scope enable, so ``workspace_admin.connector_enable`` is
 #   unchanged. THE security posture is reused wholesale: a bind is still a
-#   ``connector.manage`` (ADMIN) write, RE-CHECKED against the PROPOSER's CURRENT
-#   role at execute time (a member's bind proposal fails closed — member→admin
-#   routing is SR-6, not built here). No new approve→execute path, no new subsystem.
+#   ``connector.manage`` (ADMIN) write, RE-CHECKED at execute time. SR-4 keyed that
+#   re-check on the PROPOSER, so a member's bind proposal failed closed even when an
+#   admin approved it — member→admin routing was deferred to SR-6.
+# Updated: 2026-07-16 (SR-6 member→admin connector binds) — the execute-time RBAC
+#   re-check now honors the blob's ``authorize`` field (added in
+#   ``admin_proposals.propose``): ``"proposer"`` (default) keeps the WA-2 behavior
+#   verbatim (re-check the proposer); ``"approver"`` re-checks the human who APPROVED
+#   the Action (``action.approved_by``) instead — the authority for a member→admin
+#   REQUEST, where the requester (a MEMBER) never holds ``connector.manage``. The
+#   ``sense_request_bind`` connector bind is filed with ``authorize="approver"``, so
+#   an admin's approval lands the bind while a member's (self-)approval fails closed
+#   at this re-check (a member approver lacks the role). No new approve→execute path
+#   and no threading through the router: the approver is READ from the Action, which
+#   every approve path stamps (``store.approve`` / ``store.bulk_approve``) before
+#   dispatching this executor. The proposer re-check for all other admin actions is
+#   UNCHANGED — not weakened.
 #
 # What this module does (the apply-on-approve half of the admin-action gate): the
 # propose helper (``admin_proposals.propose.propose_admin_action``) files an
@@ -1003,15 +1016,45 @@ async def _execute_approved_admin_action_locked(
         )
         return
 
-    # EXECUTE-TIME RBAC RE-CHECK (the load-bearing security rule). The proposer's
-    # CURRENT role is resolved fresh; a demoted / removed proposer fails closed
-    # here BEFORE any service call. A Forbidden → failed outcome, NOT an exception.
+    # EXECUTE-TIME RBAC RE-CHECK (the load-bearing security rule). WHOSE current
+    # role is resolved fresh depends on the blob's ``authorize`` field (SR-6):
+    #   * ``"proposer"`` (default, WA-2..WA-6, UNCHANGED) — the proposer authored
+    #     AND is the authority (only an admin can call those tools), so re-check the
+    #     PROPOSER; a demoted / removed proposer fails closed.
+    #   * ``"approver"`` (a member→admin REQUEST, e.g. the ``sense_request_bind``
+    #     connector bind) — the requester may be a MEMBER who never holds the
+    #     action's role, so the AUTHORITY is the human who APPROVED in the Tray.
+    #     Re-check the APPROVER (``action.approved_by``, stamped by every approve
+    #     path: the instinct router single/bulk approve AND mission_control
+    #     bulk-approve, BEFORE this executor runs). A member who reaches an approve
+    #     surface still fails closed here — a member approver lacks the required
+    #     role. This is NOT a weakening: it is the SAME real re-check against a fresh
+    #     User doc, just keyed to the correct subject for a request→approve flow.
+    # Either way a Forbidden → failed outcome, NOT an exception.
+    authorize = str(blob.get("authorize") or "proposer")
+    if authorize == "approver":
+        # Prefer the freshly-read guard copy (its ``approved_by`` is the persisted
+        # truth); fall back to the passed-in Action. Both carry it post-approval.
+        recheck_subject = str(
+            getattr(guard_action, "approved_by", None) or getattr(action, "approved_by", None) or ""
+        )
+        subject_label = "approver"
+        if not recheck_subject:
+            await _fail(
+                "member-request admin action carries no approver — cannot re-check "
+                "RBAC against the approving admin; refusing the write",
+                error_class="MissingApprover",
+            )
+            return
+    else:
+        recheck_subject = proposer_user_id
+        subject_label = "proposer"
     try:
-        await _recheck_rbac(workspace_id, proposer_user_id, rbac_action)
+        await _recheck_rbac(workspace_id, recheck_subject, rbac_action)
     except Exception as exc:  # noqa: BLE001 — Forbidden (deny) or a resolve error → fail closed
         await _fail(
-            f"execute-time RBAC re-check failed for proposer {proposer_user_id} on "
-            f"'{rbac_action}' — the proposer no longer holds the required role; "
+            f"execute-time RBAC re-check failed for {subject_label} {recheck_subject} on "
+            f"'{rbac_action}' — they do not hold the required role; "
             f"refusing the approved admin write: {exc}",
             error_class=type(exc).__name__,
             response_summary=str(exc),

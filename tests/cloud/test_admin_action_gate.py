@@ -2,6 +2,16 @@
 # type (the 8th gated Instinct kind, WA-2), plus the WA-5 whitelist extensions.
 #
 # Created: 2026-07-03 (feat/workspace-admin-tools, WA-2).
+# Updated: 2026-07-16 (SR-6 member→admin connector binds) — the blob's new
+#   ``authorize`` field selects whose CURRENT role the executor re-checks:
+#   ``"proposer"`` (default, WA-2 — UNCHANGED) or ``"approver"`` (a member→admin
+#   request). New tests: propose stamps ``authorize`` (default proposer) and rejects
+#   a typo; a member's bind request is visible in the workspace-wide admin queue
+#   (ACCEPTANCE #1); the executor re-checks the APPROVER not the member proposer for
+#   ``authorize="approver"`` (and still the proposer for the default — control); a
+#   member self-approve FAILS CLOSED via the REAL re-check (ACCEPTANCE #2); an admin
+#   approve LANDS the bind via the REAL re-check (ACCEPTANCE #3); a missing approver
+#   fails closed (MissingApprover defense).
 # Updated: 2026-07-16 (SR-4 just-in-time connector bind) — the ``connector.manage``
 #   op=enable dispatch now accepts an optional connector SCOPE. Two new tests:
 #   scope=pocket + pocket_id → enable_connector is called with an
@@ -809,6 +819,221 @@ async def test_executor_connector_manage_bad_op_fails(store, monkeypatch):
     )
     assert spy.calls == []
     final = await store.get_action(approved.id)
+    assert final.status == ActionStatus.FAILED
+
+
+# ---- SR-6 — member→admin connector bind requests --------------------------
+# A non-admin MEMBER who hits an unbound connector can REQUEST a bind: the agent's
+# ``sense_request_bind`` files it with ``authorize="approver"``. The request routes
+# to the admins' Tray (the workspace-wide pending feed) and lands ONLY when an admin
+# approves — the executor re-checks the APPROVER's ``connector.manage``
+# (``action.approved_by``), NOT the member requester's. A member's self-approve fails
+# closed at that re-check (on top of the approve endpoint's ADMIN gate). The proposer
+# re-check for every OTHER admin action is unchanged (``authorize`` defaults to
+# ``"proposer"``).
+
+
+def _patch_approver_role(monkeypatch, *, role: str) -> None:
+    """Patch the executor's fresh User-doc load so the REAL ``_recheck_rbac``
+    resolves the given workspace role for whatever user id it's handed. No DB
+    touched — mirrors ``test_recheck_rbac_denies_demoted_proposer``."""
+
+    class _M:
+        def __init__(self, ws, r):
+            self.workspace = ws
+            self.role = r
+
+    class _User:
+        def __init__(self, uid):
+            self.id = uid
+            self.workspaces = [_M("w1", role)]
+
+    async def _get(uid):  # noqa: ANN001
+        return _User(uid)
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.models.user.User.get", staticmethod(_get))
+    # PydanticObjectId(subject) must not choke on a non-ObjectId test id.
+    monkeypatch.setattr("beanie.PydanticObjectId", lambda x: x)
+
+
+def _recheck_subject_spy(monkeypatch) -> list[str]:
+    """Spy on ``_recheck_rbac`` — records the SUBJECT user id it was handed
+    (proposer vs approver) and PASSES. Returns the recording list."""
+    seen: list[str] = []
+
+    async def _spy(workspace_id, subject_user_id, rbac_action):  # noqa: ANN001
+        seen.append(subject_user_id)
+        return None
+
+    monkeypatch.setattr(aa_executor, "_recheck_rbac", _spy)
+    return seen
+
+
+async def test_propose_authorize_approver_stamps_blob(store):
+    """propose_admin_action stamps ``authorize`` on the blob: default ``"proposer"``
+    (WA-2), ``"approver"`` carried through for a member→admin request. The field
+    rides OUTSIDE ``params_hash`` (which covers action + args only)."""
+    default_id = await aa_propose.propose_admin_action(
+        workspace_id="w1",
+        action="connector.manage",
+        args={"op": "enable", "name": "github"},
+        proposer_user_id="member1",
+    )
+    default_blob = (await store.get_action(default_id)).parameters["_admin_action"]
+    assert default_blob["authorize"] == "proposer"
+
+    approver_id = await aa_propose.propose_admin_action(
+        workspace_id="w1",
+        action="connector.manage",
+        args={"op": "enable", "name": "github", "scope": "pocket", "pocket_id": "pk_1"},
+        proposer_user_id="member1",
+        authorize="approver",
+    )
+    approver_blob = (await store.get_action(approver_id)).parameters["_admin_action"]
+    assert approver_blob["authorize"] == "approver"
+    assert approver_blob["params_hash"] == aa_propose.compute_args_hash(
+        "connector.manage",
+        {"op": "enable", "name": "github", "scope": "pocket", "pocket_id": "pk_1"},
+    )
+
+
+async def test_propose_rejects_unknown_authorize(store):
+    """A typo in ``authorize`` fails loud rather than silently defaulting to a
+    subject the caller did not intend."""
+    with pytest.raises(ValueError, match="authorize"):
+        await aa_propose.propose_admin_action(
+            workspace_id="w1",
+            action="connector.manage",
+            args={"op": "enable", "name": "github"},
+            proposer_user_id="member1",
+            authorize="whoever",
+        )
+
+
+async def test_member_bind_request_visible_in_workspace_admin_queue(store):
+    """ACCEPTANCE #1 — a member's bind request is a workspace-scoped PENDING Action,
+    so it surfaces in the admins' Tray (the workspace-wide pending feed queried
+    WITHOUT an assignee filter — the authoritative admin approval queue that
+    ``mission_control.agent_list_work_items`` reads)."""
+    action_id = await aa_propose.propose_admin_action(
+        workspace_id="w1",
+        action="connector.manage",
+        args={"op": "enable", "name": "github", "scope": "pocket", "pocket_id": "pk_1"},
+        proposer_user_id="member1",
+        authorize="approver",
+    )
+    pending = await store.pending(workspace_id="w1")
+    assert action_id in {a.id for a in pending}
+
+
+async def test_executor_authorize_approver_rechecks_approver_not_proposer(store, monkeypatch):
+    """SR-6 — an ``authorize="approver"`` bind re-checks the APPROVER
+    (``approved_by``), NOT the member proposer. A default (proposer-authorized)
+    admin action still re-checks the proposer (control)."""
+    enable_spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.connectors.service.enable_connector", enable_spy)
+    seen = _recheck_subject_spy(monkeypatch)
+
+    action_id = await aa_propose.propose_admin_action(
+        workspace_id="w1",
+        action="connector.manage",
+        args={"op": "enable", "name": "github", "scope": "pocket", "pocket_id": "pk_1"},
+        proposer_user_id="member1",
+        authorize="approver",
+    )
+    approved = await store.approve(action_id, approver="admin_boss")
+    await aa_executor.execute_approved_admin_action(approved)
+
+    # The re-check subject was the APPROVER, not the member proposer.
+    assert seen == ["admin_boss"]
+    # The bind landed (re-check stubbed pass): enable_connector fired once.
+    assert len(enable_spy.calls) == 1
+
+    # Control — a default (proposer-authorized) admin action re-checks the PROPOSER.
+    seen.clear()
+    default_id = await aa_propose.propose_admin_action(
+        workspace_id="w1",
+        action="connector.manage",
+        args={"op": "enable", "name": "gmail"},
+        proposer_user_id="admin1",
+    )
+    default_approved = await store.approve(default_id, approver="admin_boss")
+    await aa_executor.execute_approved_admin_action(default_approved)
+    assert seen == ["admin1"]  # proposer, not approver — WA-2 behavior preserved
+
+
+async def test_member_self_approve_bind_fails_closed_real_recheck(store, monkeypatch):
+    """ACCEPTANCE #2 — a MEMBER cannot make their own bind execute. Even reaching an
+    approve surface, the REAL execute-time re-check of the APPROVER's (member's)
+    ``connector.manage`` DENIES → enable_connector is NEVER called, the action FAILS.
+    (The instinct approve endpoint separately 403s a member; this is the executor
+    backstop that also covers the un-gated mission_control bulk-approve path.)"""
+    enable_spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.connectors.service.enable_connector", enable_spy)
+    _patch_approver_role(monkeypatch, role="member")  # the approver is a MEMBER
+
+    action_id = await aa_propose.propose_admin_action(
+        workspace_id="w1",
+        action="connector.manage",
+        args={"op": "enable", "name": "github", "scope": "pocket", "pocket_id": "pk_1"},
+        proposer_user_id="member1",
+        authorize="approver",
+    )
+    approved = await store.approve(action_id, approver="member1")  # member self-approve
+    await aa_executor.execute_approved_admin_action(approved)
+
+    assert enable_spy.calls == []  # FAILS CLOSED — no bind
+    final = await store.get_action(action_id)
+    assert final.status == ActionStatus.FAILED
+
+
+async def test_admin_approve_lands_member_bind_real_recheck(store, monkeypatch):
+    """ACCEPTANCE #3 — an ADMIN approving the member's request lands the bind. The
+    REAL re-check of the APPROVER's ``connector.manage`` (ADMIN) passes →
+    enable_connector fires ONCE with the pocket-scoped DTO, the action is EXECUTED."""
+    enable_spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.connectors.service.enable_connector", enable_spy)
+    _patch_approver_role(monkeypatch, role="admin")  # the approver is an ADMIN
+
+    action_id = await aa_propose.propose_admin_action(
+        workspace_id="w1",
+        action="connector.manage",
+        args={"op": "enable", "name": "github", "scope": "pocket", "pocket_id": "pk_1"},
+        proposer_user_id="member1",
+        authorize="approver",
+    )
+    approved = await store.approve(action_id, approver="admin_boss")
+    await aa_executor.execute_approved_admin_action(approved)
+
+    assert len(enable_spy.calls) == 1  # the bind landed
+    workspace_id, name, body = enable_spy.calls[0][0]
+    assert workspace_id == "w1"
+    assert name == "github"
+    assert body.scope == "pocket"
+    assert body.pocket_id == "pk_1"
+    final = await store.get_action(action_id)
+    assert final.status == ActionStatus.EXECUTED
+
+
+async def test_authorize_approver_missing_approver_fails_closed(store, monkeypatch):
+    """Defense — an ``authorize="approver"`` action with NO recorded approver cannot
+    re-check the authority, so it fails closed (never binds). Exercises the
+    MissingApprover guard by running the executor on the un-approved Action."""
+    enable_spy = _CallSpy()
+    monkeypatch.setattr("pocketpaw_ee.cloud.connectors.service.enable_connector", enable_spy)
+
+    action_id = await aa_propose.propose_admin_action(
+        workspace_id="w1",
+        action="connector.manage",
+        args={"op": "enable", "name": "github"},
+        proposer_user_id="member1",
+        authorize="approver",
+    )
+    pending = await store.get_action(action_id)  # approved_by is unset
+    await aa_executor.execute_approved_admin_action(pending)
+
+    assert enable_spy.calls == []
+    final = await store.get_action(action_id)
     assert final.status == ActionStatus.FAILED
 
 

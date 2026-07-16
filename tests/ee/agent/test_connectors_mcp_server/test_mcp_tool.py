@@ -19,6 +19,12 @@
 #   trust) actions PROPOSE without ever calling execute inline, connectors not
 #   bound to the pocket are rejected, and a missing pocket / workspace
 #   ContextVar (called off-stream) yields a clear error.
+# Updated: 2026-07-16 (SR-6 member→admin bind requests) — new
+#   ``TestSenseRequestBind.test_bind_request_files_with_authorize_approver`` proves
+#   the tool files its bind proposal with ``authorize="approver"`` so the executor
+#   re-checks the APPROVING admin's ``connector.manage`` (not the member
+#   requester's) — the change that lets a non-admin REQUEST a bind that only an
+#   admin's approval lands.
 # Updated: 2026-07-16 (SR-4 just-in-time bind) — the server now carries a SIXTH
 #   tool, ``sense_request_bind``. Bumped the tool-count assertion (5 -> 6) and
 #   added ``SENSE_REQUEST_BIND_TOOL_ID`` to the registration test. New
@@ -1004,6 +1010,35 @@ class TestSenseRequestBind:
         assert body["connector"] == "github"
         assert body["scope"] == "pocket"
         assert "Tray" in body["message"]
+
+    @pytest.mark.asyncio
+    async def test_bind_request_files_with_authorize_approver(self) -> None:
+        """SR-6 — a bind requested from chat is a member→admin REQUEST, filed with
+        ``authorize="approver"`` so the executor re-checks the APPROVING admin's
+        ``connector.manage``, not the (possibly member) requester's. This is what
+        lets a non-admin REQUEST a bind that only an admin's approval lands, while a
+        member's self-approve fails closed."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.connectors.service.is_known_connector",
+                return_value=True,
+            ),
+            patch(
+                "pocketpaw_ee.cloud.admin_proposals.propose.propose_admin_action",
+                new=AsyncMock(return_value="act-bind-sr6"),
+            ) as mock_propose,
+        ):
+            out = await connectors_mcp._sense_request_bind_handler({"connector": "github"})
+
+        mock_propose.assert_awaited_once()
+        assert mock_propose.await_args.kwargs["authorize"] == "approver"
+        assert not out.get("is_error")
 
     @pytest.mark.asyncio
     async def test_unanchored_proposes_workspace_scope(self) -> None:
