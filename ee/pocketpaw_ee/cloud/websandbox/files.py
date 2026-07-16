@@ -5,6 +5,12 @@
 # on_delete / on_move durability hooks (siblings of on_write) so a delete or
 # rename is reflected in the overlay tier and never resurrected on restore.
 #
+# Changed 2026-07-16 (WC-9/P3c, feat/code-mode): added file.search — a server-side
+# find-in-files that shells out to ripgrep (grep fallback) in the VM. The user
+# query is a LITERAL fixed string and is ALWAYS shlex.quoted into its own argv
+# token — it never reaches the shell as executable text. Results are capped and a
+# ``truncated`` flag bounds the frame.
+#
 # Socket-agnostic sibling of terminal.py's PtyBridge: this is the file-operation
 # half of the session WebSocket, multiplexed alongside the terminal on the SAME
 # authenticated socket. The browser editor round-trips directory listings, file
@@ -34,8 +40,10 @@
 #   file.create {path, isDir}   -> file.create.ok {path, isDir}
 #   file.delete {path}          -> file.delete.ok {path}
 #   file.move   {path, toPath}  -> file.move.ok   {path, toPath}   # rename == move
+#   file.search {query}         -> file.search.ok {query, results:[{path,line,col,text}],
+#                                                   truncated}
 #   any failure                 -> file.error     {op, message}
-# ``op`` in a file.error is list|read|write|create|delete|move.
+# ``op`` in a file.error is list|read|write|create|delete|move|search.
 # Responses are JSON text frames; terminal output stays binary, so the two
 # multiplexed streams never collide. Content is UTF-8 TEXT (binary is out of
 # scope for v1); a non-UTF-8 read returns file.error rather than corrupting the
@@ -46,6 +54,7 @@ from __future__ import annotations
 import logging
 import os
 import posixpath
+import shlex
 from collections.abc import Awaitable, Callable
 
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient
@@ -70,6 +79,12 @@ OnMove = Callable[[str, str], Awaitable[None]]
 # encoded content, so neither a huge file nor a huge payload can blow up the
 # multiplexed socket frame. Override via POCKETPAW_WEBSANDBOX_MAX_FILE_KB.
 _DEFAULT_MAX_FILE_KB = 1024
+
+# find-in-files (WC-9/P3c). Cap the match count so one broad query can't blow up
+# the JSON frame; ``truncated`` tells the client more matches existed. The exec
+# timeout bounds a search over a huge repo so it can't hang the socket.
+_SEARCH_MAX_RESULTS = 500
+_SEARCH_TIMEOUT_SECONDS = 15
 
 
 def _max_file_bytes() -> int:
@@ -146,6 +161,42 @@ def _rel_entry_path(rel_dir: str, name: str) -> str:
     base = "" if rel_dir.strip() in ("", ".", "./") else rel_dir.strip().strip("/")
     joined = posixpath.normpath(posixpath.join(base, name)) if base else name
     return joined.lstrip("/")
+
+
+def _parse_matches(stdout: str, cap: int, *, with_column: bool) -> tuple[list[dict], bool]:
+    """Parse ``rg``/``grep`` stdout into result rows, capped at ``cap``.
+
+    Each line is ``path:line:col:text`` (rg with ``--column``) or ``path:line:text``
+    (grep, no column). ``rsplit``-free left splits keep colons in ``text`` intact.
+    Malformed lines (too few fields, non-numeric line/col) are skipped rather than
+    aborting the whole search. A leading ``./`` (grep's recursive prefix) is
+    stripped so paths stay project-relative like rg's. Returns ``(rows, truncated)``
+    — ``truncated`` is True when more valid matches existed beyond ``cap``.
+    """
+    rows: list[dict] = []
+    truncated = False
+    for raw in stdout.splitlines():
+        if not raw.strip():
+            continue
+        parts = raw.split(":", 3 if with_column else 2)
+        if len(parts) < (4 if with_column else 3):
+            continue
+        if with_column:
+            path, line_s, col_s, text = parts
+        else:
+            path, line_s, text = parts
+            col_s = "1"  # grep has no column; default to the line start (1-indexed)
+        try:
+            line_n = int(line_s)
+            col_n = int(col_s)
+        except ValueError:
+            continue
+        if len(rows) >= cap:
+            truncated = True
+            break
+        path = path[2:] if path.startswith("./") else path
+        rows.append({"path": path, "line": line_n, "col": col_n, "text": text})
+    return rows, truncated
 
 
 class FileRpc:
@@ -345,6 +396,69 @@ class FileRpc:
             except Exception:  # noqa: BLE001 — durability is best-effort; move already landed
                 logger.debug("overlay re-key failed for %r -> %r", rel_path, to_path, exc_info=True)
 
+    async def search(self, query: str) -> tuple[list[dict], bool]:
+        """Find-in-files across the workspace. Returns ``(results, truncated)``.
+
+        LITERAL fixed-string, smart-case search via ripgrep run in the jailed
+        project root (so paths come back project-relative). The query is ALWAYS
+        ``shlex.quote``d into a single argv token — it can never break out into
+        executable shell — and ``rg -F`` treats it as literal text, not a regex.
+
+        rg exit 0 → matches; exit 1 → no matches (a NORMAL empty result, not an
+        error); exit 127 (rg absent) → fall back to a bounded ``grep``; any other
+        exit — or an exec failure/timeout — is a clean ``FileRpcError``. Results are
+        capped at ``_SEARCH_MAX_RESULTS`` with ``truncated`` set when more existed.
+        """
+        if not isinstance(query, str) or not query.strip():
+            raise FileRpcError("search", "a non-empty 'query' is required")
+        root = await self._root()
+        quoted = shlex.quote(query)
+        # Explicit '.' path: exec has no tty, and rg with no path arg can block on
+        # stdin — a fixed search root avoids that and keeps output project-relative.
+        cmd = (
+            "rg -F --line-number --column --no-heading --color=never --smart-case "
+            f"-- {quoted} ."
+        )
+        try:
+            resp = await self._client.execute_command(
+                self._sandbox_id, cmd, cwd=root, timeout=_SEARCH_TIMEOUT_SECONDS
+            )
+        except Exception as exc:  # noqa: BLE001 — a timeout / exec error is a clean search failure
+            raise FileRpcError("search", "search failed") from exc
+        exit_code = int(getattr(resp, "exit_code", 0) or 0)
+        stdout = getattr(resp, "result", "") or ""
+        if exit_code in (0, 1):  # 0 = matches, 1 = no matches (normal empty result)
+            return _parse_matches(stdout, _SEARCH_MAX_RESULTS, with_column=True)
+        if exit_code == 127:  # rg not installed on this image → grep fallback
+            return await self._search_grep(query, root)
+        raise FileRpcError("search", "search failed")
+
+    async def _search_grep(self, query: str, root: str) -> tuple[list[dict], bool]:
+        """Fallback find-in-files via ``grep`` when ripgrep is unavailable.
+
+        Same quoting discipline (``shlex.quote``) and output contract as ``search``;
+        grep has no column, so ``_parse_matches`` defaults it. Common heavy dirs are
+        excluded (rg honours ``.gitignore`` for free; grep must be told). grep exit 0
+        → matches, 1 → none; anything else (incl. 127 = grep also missing) is a clean
+        ``FileRpcError``.
+        """
+        quoted = shlex.quote(query)
+        cmd = (
+            "grep -rInF --exclude-dir=.git --exclude-dir=node_modules "
+            f"--exclude-dir=dist --exclude-dir=build -- {quoted} ."
+        )
+        try:
+            resp = await self._client.execute_command(
+                self._sandbox_id, cmd, cwd=root, timeout=_SEARCH_TIMEOUT_SECONDS
+            )
+        except Exception as exc:  # noqa: BLE001 — a timeout / exec error is a clean search failure
+            raise FileRpcError("search", "search failed") from exc
+        exit_code = int(getattr(resp, "exit_code", 0) or 0)
+        stdout = getattr(resp, "result", "") or ""
+        if exit_code in (0, 1):
+            return _parse_matches(stdout, _SEARCH_MAX_RESULTS, with_column=False)
+        raise FileRpcError("search", "search is unavailable in this sandbox")
+
     # ── Frame dispatch (never raises into the socket loop) ────────────────
 
     async def dispatch(self, msg: dict) -> dict | None:
@@ -396,6 +510,17 @@ class FileRpc:
                     "reqId": req_id,
                     "path": path,
                     "toPath": to_path,
+                }
+            if mtype == "file.search":
+                query = msg.get("query")
+                query = query if isinstance(query, str) else ""
+                results, truncated = await self.search(query)
+                return {
+                    "type": "file.search.ok",
+                    "reqId": req_id,
+                    "query": query,
+                    "results": results,
+                    "truncated": truncated,
                 }
             # A ``file.*`` type we don't implement — honest error, socket stays up.
             return {

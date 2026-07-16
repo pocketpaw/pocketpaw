@@ -46,6 +46,14 @@ class _FakeFileInfo:
 
 
 @dataclass
+class _FakeExec:
+    """Stand-in for the SDK ExecuteResponse (only the fields search reads)."""
+
+    exit_code: int = 0
+    result: str = ""
+
+
+@dataclass
 class _FakeFsClient:
     """Fake DaytonaClient exposing only the file methods FileRpc uses.
 
@@ -63,6 +71,12 @@ class _FakeFsClient:
     created_dirs: list[str] = field(default_factory=list)
     deletes: list[tuple[str, bool]] = field(default_factory=list)
     moves: list[tuple[str, str]] = field(default_factory=list)
+    # search: canned exec responses keyed by which tool the command invokes.
+    exec_calls: list[dict] = field(default_factory=list)
+    rg_exit: int = 0
+    rg_stdout: str = ""
+    grep_exit: int = 0
+    grep_stdout: str = ""
 
     async def get_project_dir(self, sandbox_id):  # noqa: ANN001
         return self.project_dir
@@ -92,6 +106,15 @@ class _FakeFsClient:
         self.moves.append((src, dst))
         if src in self.files:
             self.files[dst] = self.files.pop(src)
+
+    async def execute_command(self, sandbox_id, command, cwd=None, timeout=None):  # noqa: ANN001
+        self.exec_calls.append({"command": command, "cwd": cwd, "timeout": timeout})
+        stripped = command.strip()
+        if stripped.startswith("rg "):
+            return _FakeExec(exit_code=self.rg_exit, result=self.rg_stdout)
+        if stripped.startswith("grep "):
+            return _FakeExec(exit_code=self.grep_exit, result=self.grep_stdout)
+        return _FakeExec(exit_code=0, result="")
 
 
 def _rpc(client: _FakeFsClient) -> FileRpc:
@@ -604,6 +627,136 @@ async def test_dispatch_move_traversal_returns_error_frame() -> None:
     assert resp["type"] == "file.error"
     assert resp["op"] == "move" and resp["reqId"] == "m9"
     assert client.moves == []
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 — find-in-files search (WC-9/P3c). rg preferred, grep fallback, and the
+# injection-safety guard (the whole risk of the slice).
+# ---------------------------------------------------------------------------
+
+import shlex  # noqa: E402 — local to the search tests, kept next to them
+
+from pocketpaw_ee.cloud.websandbox import files as files_mod  # noqa: E402
+
+
+async def test_search_parses_rg_results() -> None:
+    client = _FakeFsClient(
+        rg_exit=0,
+        rg_stdout="src/app.py:12:5:    hello world\nREADME.md:3:1:hello\n",
+    )
+    results, truncated = await _rpc(client).search("hello")
+
+    assert truncated is False
+    assert results == [
+        {"path": "src/app.py", "line": 12, "col": 5, "text": "    hello world"},
+        {"path": "README.md", "line": 3, "col": 1, "text": "hello"},
+    ]
+    # Ran rg as a LITERAL, smart-case search in the jailed project root.
+    call = client.exec_calls[0]
+    assert call["cwd"] == PROJECT_DIR
+    assert call["command"].startswith("rg -F ")
+    assert "--smart-case" in call["command"]
+
+
+async def test_search_quotes_shell_metacharacters() -> None:
+    # The injection crux: a query full of shell metacharacters must reach the
+    # command as ONE literal argv token, never as executable shell.
+    evil = '"; rm -rf / #`whoami`$(id) && echo pwned'
+    client = _FakeFsClient(rg_exit=1, rg_stdout="")
+    await _rpc(client).search(evil)
+
+    cmd = client.exec_calls[0]["command"]
+    # The query appears only in its shlex-quoted form...
+    assert shlex.quote(evil) in cmd
+    # ...and re-tokenizing the command the way a shell would yields the query as a
+    # single intact argument — so no metacharacter escaped its token.
+    assert evil in shlex.split(cmd)
+    # The dangerous substring never appears unquoted as its own command.
+    assert "rm -rf / " not in cmd.replace(shlex.quote(evil), "")
+
+
+async def test_search_empty_query_is_rejected() -> None:
+    client = _FakeFsClient()
+    for bad in ("", "   ", "\t\n"):
+        with pytest.raises(FileRpcError) as ei:
+            await _rpc(client).search(bad)
+        assert ei.value.op == "search"
+    # Never shelled out for an empty query.
+    assert client.exec_calls == []
+
+
+async def test_search_exit_1_is_empty_not_error() -> None:
+    # rg exits 1 when there are simply no matches — a NORMAL empty result.
+    client = _FakeFsClient(rg_exit=1, rg_stdout="")
+    results, truncated = await _rpc(client).search("nothingmatches")
+    assert results == []
+    assert truncated is False
+
+
+async def test_search_caps_results_and_sets_truncated(monkeypatch) -> None:
+    monkeypatch.setattr(files_mod, "_SEARCH_MAX_RESULTS", 2)
+    stdout = "".join(f"f{i}.py:{i}:1:match {i}\n" for i in range(1, 6))  # 5 matches
+    client = _FakeFsClient(rg_exit=0, rg_stdout=stdout)
+
+    results, truncated = await _rpc(client).search("match")
+    assert len(results) == 2
+    assert truncated is True
+
+
+async def test_search_falls_back_to_grep_when_rg_absent() -> None:
+    # rg missing → shell exit 127 → fall back to grep, keeping the same contract.
+    client = _FakeFsClient(
+        rg_exit=127,
+        rg_stdout="",
+        grep_exit=0,
+        grep_stdout="./src/app.py:12:    hello world\n",
+    )
+    results, truncated = await _rpc(client).search("hello")
+
+    assert truncated is False
+    # grep has no column → col defaults; the leading ./ is stripped.
+    assert results == [{"path": "src/app.py", "line": 12, "col": 1, "text": "    hello world"}]
+    # A grep command was built with the VCS/build dirs excluded.
+    grep_cmd = client.exec_calls[1]["command"]
+    assert grep_cmd.startswith("grep ")
+    assert "--exclude-dir=.git" in grep_cmd
+    assert "--exclude-dir=node_modules" in grep_cmd
+
+
+async def test_search_real_rg_failure_is_error() -> None:
+    # rg exit 2 = a real error (bad flag, IO) — NOT "no matches" — surfaces cleanly.
+    client = _FakeFsClient(rg_exit=2, rg_stdout="")
+    with pytest.raises(FileRpcError) as ei:
+        await _rpc(client).search("hello")
+    assert ei.value.op == "search"
+
+
+async def test_search_skips_malformed_lines() -> None:
+    client = _FakeFsClient(
+        rg_exit=0,
+        rg_stdout="good.py:1:1:ok\ngarbage-without-fields\nbad.py:notanumber:1:x\n",
+    )
+    results, _ = await _rpc(client).search("x")
+    assert results == [{"path": "good.py", "line": 1, "col": 1, "text": "ok"}]
+
+
+async def test_dispatch_search_ok_frame() -> None:
+    client = _FakeFsClient(rg_exit=0, rg_stdout="a.py:1:1:hit\n")
+    resp = await _rpc(client).dispatch({"type": "file.search", "reqId": "s1", "query": "hit"})
+    assert resp == {
+        "type": "file.search.ok",
+        "reqId": "s1",
+        "query": "hit",
+        "results": [{"path": "a.py", "line": 1, "col": 1, "text": "hit"}],
+        "truncated": False,
+    }
+
+
+async def test_dispatch_search_empty_query_is_error_frame() -> None:
+    client = _FakeFsClient()
+    resp = await _rpc(client).dispatch({"type": "file.search", "reqId": "s2", "query": "  "})
+    assert resp["type"] == "file.error"
+    assert resp["op"] == "search" and resp["reqId"] == "s2"
 
 
 # ---------------------------------------------------------------------------
