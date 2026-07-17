@@ -558,3 +558,96 @@ async def test_empty_pocket_id_resolves_no_widget(client):
 
     handoffs = (await c.get(f"/paw-bar/admin/site/{site.id}/handoffs")).json()
     assert handoffs["items"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Layer 9 — conversation transcript drill-in
+# --------------------------------------------------------------------------- #
+
+_CUST = "cust-0001"  # valid customer_ref (>= 8 chars, allowed charset)
+
+
+@pytest.mark.asyncio
+async def test_transcript_happy_path_ordered_and_shaped(client):
+    """The transcript is this visitor's concierge turns, oldest-first, shaped
+    {customer_ref, messages:[{role,content,created_at}], count}. v1: assistant-only
+    (the concierge MVP doesn't persist the visitor's message)."""
+    c, store, _fabric = client
+    site = await _site()
+    await store.create_widget(_widget())
+    now = datetime.now(UTC)
+    await _mk_run(user_id=_CUST, partial_text="second", createdAt=now, ended_at=now)
+    await _mk_run(
+        user_id=_CUST,
+        partial_text="first",
+        createdAt=now - timedelta(minutes=5),
+        ended_at=now - timedelta(minutes=5),
+    )
+    # A different visitor's run must not leak into this transcript.
+    await _mk_run(user_id="cust-9999", partial_text="other visitor")
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/conversations/{_CUST}")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["customer_ref"] == _CUST
+    assert body["count"] == 2
+    assert [m["content"] for m in body["messages"]] == ["first", "second"]  # oldest-first
+    assert {m["role"] for m in body["messages"]} == {"assistant"}
+    assert all(m["created_at"] for m in body["messages"])
+
+
+@pytest.mark.asyncio
+async def test_transcript_404_on_unknown_ref(client):
+    c, store, _fabric = client
+    site = await _site()
+    await store.create_widget(_widget())
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/conversations/nosuchcustomer")
+    assert res.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_transcript_invalid_customer_ref_is_400(client):
+    """A ref that fails the charset/length bound is rejected before any lookup."""
+    c, store, _fabric = client
+    site = await _site()
+    await store.create_widget(_widget())
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/conversations/short")  # < 8 chars
+    assert res.status_code == 400
+    assert "invalid_customer_ref" in res.text
+
+
+@pytest.mark.asyncio
+async def test_transcript_cross_site_isolation(client):
+    """A visitor's conversation on a SIBLING site (different pocket) is not readable
+    through this site — 404, never another pocket's transcript."""
+    c, store, _fabric = client
+    site_a = await _site(pocket_id="pocket-1")
+    await store.create_widget(_widget(pocket_id="pocket-1"))
+    _site_b = await _site(pocket_id="pocket-2")
+    await store.create_widget(_widget(pocket_id="pocket-2", spec=_spec("pocket-2", "pp_b")))
+    # The conversation lives on site B's pocket only.
+    await _mk_run(scope_id="pocket-2", user_id=_CUST, partial_text="only on B")
+
+    res = await c.get(f"/paw-bar/admin/site/{site_a.id}/conversations/{_CUST}")
+    assert res.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_transcript_member_role_is_forbidden(mongo_db, store, fabric, monkeypatch):
+    site = await _site()
+    await store.create_widget(_widget())
+    await _mk_run(user_id=_CUST, partial_text="hi")
+    app = _build_app(store, fabric, monkeypatch, role="member")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        res = await c.get(f"/paw-bar/admin/site/{site.id}/conversations/{_CUST}")
+        assert res.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_transcript_cross_tenant_site_is_404(client):
+    c, store, _fabric = client
+    site = await _site(workspace="ws-other")
+    await _mk_run(workspace="ws-other", user_id=_CUST, partial_text="hi")
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/conversations/{_CUST}")
+    assert res.status_code == 404

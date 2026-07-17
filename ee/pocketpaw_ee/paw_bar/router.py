@@ -1,4 +1,13 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-17 (D2 conversation transcript) — added GET
+#   /paw-bar/admin/site/{site_id}/conversations/{customer_ref} → {customer_ref,
+#   messages:[{role,content,created_at}], count}. Same role gate (paw_bar.read) +
+#   site→widget→pocket resolution as the other reads; the transcript is the
+#   concierge ``ChatRunDoc`` runs for (pocket, customer_ref), most-recent 200,
+#   oldest-first; 400 on a bad customer_ref, 404 when the ref has no conversation
+#   here. v1 caveat: the concierge MVP does not persist the visitor's message, so
+#   every turn is role "assistant" (the agent reply on ``partial_text``) until
+#   visitor-text capture is approved (a PII-posture decision).
 # Updated: 2026-07-16 (D2 security review — role gate + empty-pocket guard) —
 #   the four D2 reads now gate on ``require_action("paw_bar.read")`` (ADMIN — the
 #   caller's WORKSPACE ROLE), NOT the coarse ``require_scope("admin")`` that
@@ -950,6 +959,11 @@ _CONVERSATION_PREVIEW_CHARS = 140
 # room to dedupe several runs per customer down to ``limit`` conversations.
 _CONVERSATION_SCAN_CAP = 200
 
+# Max turns returned in one conversation transcript (the most recent N, presented
+# oldest-first). Bounds the drill-in read; a long-running visitor conversation
+# never ships the whole history in one response.
+_TRANSCRIPT_CAP = 200
+
 
 class AdminWidgetView(BaseModel):
     """The site's paw-bar widget as the owner dashboard needs it (D2 overview)."""
@@ -1000,6 +1014,28 @@ class ConversationsResponse(BaseModel):
     items: list[ConversationItem] = Field(default_factory=list)
     cursor: str | None = None
     unsupported: bool = False
+
+
+class TranscriptMessage(BaseModel):
+    """One message in a conversation transcript (D2 drill-in).
+
+    ``role`` is "user" or "assistant" per the frozen contract. NOTE (v1): the
+    concierge run path is a stateless MVP that does NOT persist the visitor's
+    (user) message — only the agent reply survives, on ``ChatRunDoc.partial_text``
+    — so today every message is role "assistant". Persisting visitor text is a
+    privacy posture decision (it stores visitor PII) tracked as a follow-up; when
+    it lands, user turns fill in here with no shape change.
+    """
+
+    role: str
+    content: str
+    created_at: str
+
+
+class ConversationTranscriptResponse(BaseModel):
+    customer_ref: str
+    messages: list[TranscriptMessage] = Field(default_factory=list)
+    count: int
 
 
 class DecisionItem(BaseModel):
@@ -1144,6 +1180,48 @@ async def get_site_conversations(
 
 
 @router.get(
+    "/paw-bar/admin/site/{site_id}/conversations/{customer_ref}",
+    response_model=ConversationTranscriptResponse,
+    dependencies=[Depends(_require_paw_bar_read)],
+)
+async def get_site_conversation_transcript(
+    site_id: str,
+    customer_ref: str,
+    workspace_id: str = Depends(current_workspace_id),
+) -> ConversationTranscriptResponse:
+    """One visitor's concierge transcript on a site, oldest-first (D2 drill-in).
+
+    Admin/owner-authed (``paw_bar.read``), workspace-scoped. Resolves site → widget
+    → pocket exactly like the sibling reads, then returns the messages of the
+    concierge conversation for ``customer_ref`` on THIS site's pocket
+    (``ChatRunDoc`` with context_type "concierge", scope_id = the pocket, user_id =
+    customer_ref). Capped at the most recent ``_TRANSCRIPT_CAP`` (200) turns,
+    presented oldest-first. 404 when the ref has no concierge conversation here.
+
+    ROLE COVERAGE (v1): the concierge run path is a stateless MVP that does not
+    persist the visitor's message (see ``concierge_chat`` — user_message_id="",
+    "no persisted user message"), so the only per-visitor content that survives is
+    the agent reply on ``ChatRunDoc.partial_text``. Every message is therefore role
+    "assistant" today. Persisting visitor text (to fill in the "user" turns) stores
+    visitor PII and is a privacy-posture decision for a follow-up, NOT done here.
+    """
+    if not _CUSTOMER_REF_RE.match(customer_ref or ""):
+        raise HTTPException(400, "invalid_customer_ref")
+    site, widget = await _resolve_site_and_widget(site_id, workspace_id)
+    # No concierge widget on this site → no conversation exists to read.
+    if widget is None:
+        raise HTTPException(404, "conversation_not_found")
+    messages = await _load_transcript(site.pocket_id, customer_ref, workspace_id)
+    if messages is None:
+        # No concierge run for this (pocket, customer_ref) — the ref has no
+        # conversation on this site's widget.
+        raise HTTPException(404, "conversation_not_found")
+    return ConversationTranscriptResponse(
+        customer_ref=customer_ref, messages=messages, count=len(messages)
+    )
+
+
+@router.get(
     "/paw-bar/admin/site/{site_id}/decisions",
     response_model=DecisionsResponse,
     dependencies=[Depends(_require_paw_bar_read)],
@@ -1279,6 +1357,51 @@ async def _list_conversations(
         else None
     )
     return ConversationsResponse(items=items, cursor=next_cursor, unsupported=False)
+
+
+async def _load_transcript(
+    pocket_id: str, customer_ref: str, workspace_id: str
+) -> list[TranscriptMessage] | None:
+    """Build one visitor's concierge transcript, oldest-first (D2 drill-in).
+
+    Fetches this (pocket, customer_ref)'s concierge ``ChatRunDoc`` runs (index-
+    backed, most-recent ``_TRANSCRIPT_CAP``), then presents them oldest-first. Each
+    completed run contributes the agent reply (``partial_text``) as an "assistant"
+    message; the visitor's own message is not persisted by the stateless concierge
+    MVP, so it does not appear (see the endpoint docstring). Returns ``None`` when
+    the ref has NO concierge run here (the caller 404s) — distinct from an empty
+    list, which means runs exist but none carried reply text yet.
+    """
+    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+    runs = (
+        await ChatRunDoc.find(
+            ChatRunDoc.workspace == workspace_id,
+            ChatRunDoc.context_type == _CONCIERGE_CONTEXT_TYPE,
+            ChatRunDoc.scope_id == pocket_id,
+            ChatRunDoc.user_id == customer_ref,
+        )
+        .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
+        .limit(_TRANSCRIPT_CAP)
+        .to_list()
+    )
+    if not runs:
+        return None
+
+    messages: list[TranscriptMessage] = []
+    for run in reversed(runs):  # oldest-first
+        text = run.partial_text or ""
+        if not text:
+            continue
+        when = run.ended_at or run.createdAt
+        messages.append(
+            TranscriptMessage(
+                role="assistant",
+                content=text,
+                created_at=when.isoformat() if when else "",
+            )
+        )
+    return messages
 
 
 async def _count_conversations(pocket_id: str, workspace_id: str) -> int:
