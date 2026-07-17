@@ -1,4 +1,9 @@
 # tests/ee/agent/test_sites_mcp_server/test_create_svelte_site.py
+# Updated: 2026-07-17 (feat/sites-draft-first-create) — added
+# test_create_result_is_draft_shaped_no_live_url: the create tool persists a DRAFT and
+# never publishes, so its result payload carries no live-site fields (url/live/deployed)
+# — only {ok, pocket_id, pocket}. Pins the draft-path payload the FE renders as
+# unpublished (draft/preview affordances), so draft-first never shows a dead live button.
 # Updated: 2026-06-17 (fix/sites-plan-gate-asymmetry) — create_svelte_site now
 # calls the shared Sites plan gate (sites.service.require_sites_plan) before
 # agent_create, so an autouse fixture defaults get_workspace_plan to "go"
@@ -214,6 +219,48 @@ class TestCreateSvelteSiteEndToEnd:
         assert doc.source == source
         # The svelte path persists NO rippleSpec.
         assert doc.rippleSpec is None
+
+    @pytest.mark.asyncio
+    async def test_create_result_is_draft_shaped_no_live_url(
+        self, beanie_test_db, recording_bus
+    ) -> None:
+        """feat/sites-draft-first-create: the create tool persists a DRAFT and never
+        publishes, so its result payload carries NO live-site fields (no url / live /
+        deployed) — only {ok, pocket_id, pocket:{id,name,type,pattern,engine}}. This is
+        the payload the FE already renders for an unpublished pocket (draft/preview
+        affordances), so draft-first never surfaces a dead 'Open live site' button."""
+        from unittest.mock import patch
+
+        from bson import ObjectId
+        from pocketpaw_ee.agent.mcp_servers import sites_create as sites_create_mcp
+
+        with (
+            patch(
+                "pocketpaw_ee.cloud.chat.agent_service.current_workspace_id",
+                return_value=str(ObjectId()),
+            ),
+            patch(
+                "pocketpaw_ee.cloud.chat.agent_service.current_user_id",
+                return_value=str(ObjectId()),
+            ),
+        ):
+            out = await sites_create_mcp._create_svelte_site_handler(
+                {"source": _sample_source(), "name": "Draft Svelte"}
+            )
+
+        assert not out.get("is_error"), out
+        body = json.loads(out["content"][0]["text"])
+        # Draft-shaped: the create result identifies the pocket for the in-app
+        # preview but carries no live-site fields (publish is a separate, on-request
+        # step).
+        assert body["ok"] is True
+        assert body["pocket_id"]
+        assert set(body["pocket"]) == {"id", "name", "type", "pattern", "engine"}
+        assert body["pocket"]["engine"] == "svelte"
+        # No live-site fields leak into the create (draft) payload.
+        for leaked in ("url", "live", "deployed", "site_url"):
+            assert leaked not in body, f"create (draft) payload must not carry {leaked!r}"
+            assert leaked not in body["pocket"]
 
     @pytest.mark.asyncio
     async def test_missing_identity_is_error(self) -> None:

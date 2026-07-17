@@ -100,6 +100,19 @@
 # does NOT author markup by hand). `_crew_enabled()` and the two removed preambles
 # are gone; `sites_crew_enabled` in config is now vestigial. The refine/chat
 # branches (keyed on `pocket_id`) are untouched.
+#
+# Updated: 2026-07-17 (feat/sites-draft-first-create) — the CREATE preamble is now
+# DRAFT-FIRST. The create tools already persist a reviewable DRAFT (they never
+# publish); the preamble used to tell the agent to publish in the same turn
+# ("auto-publishes to a live URL", step 6 "PUBLISH and SHOW the live url", each
+# engine build step "then publish"), which shipped a site live off a plain "create a
+# landing page" — no draft, no preview, and on a paid tier an unasked checkout. Now
+# the orientation frames the pocket as a draft the user previews; each engine build
+# step STOPS at the draft; and the final step points the user at the in-app Preview
+# (/sites), offers to publish, and calls `mcp__pocketpaw_sites_manager__publish` IN
+# THE SAME TURN only when the user's request already asked to go live ("publish",
+# "make it live", "ship it"). The publish tool is still NAMED (the on-request path),
+# so nothing regresses for an explicit publish. Refine/chat branches untouched.
 
 from __future__ import annotations
 
@@ -160,7 +173,8 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
     Modes, keyed on the meta:
 
     * **Create** (no ``pocket_id``) — the /sites gallery / describe-to-create
-      rail. Build AND publish a brand-new marketing site.
+      rail. Build a brand-new marketing site as a reviewable DRAFT; publish only
+      when the user explicitly asks (draft-first — see ``_create_preamble``).
     * **Chat** (``pocket_id`` present AND ``mode == "chat"``) — the per-site
       chat with the Build/Chat toggle set to Chat. Answer QUESTIONS about the
       existing site with NO mutation: never edit, republish, or create a pocket.
@@ -195,6 +209,14 @@ def _create_preamble(meta: SurfaceMeta) -> str:
     high-value questions via the ``ask_user`` chips (with a "just build it"
     escape hatch); Phase 2 picks a design system, gathers real assets, states a
     one-line brief, then builds via the engine-appropriate tool above.
+
+    DRAFT-FIRST (feat/sites-draft-first-create): the create tools persist a
+    reviewable DRAFT and do NOT publish, so the build step stops at the draft.
+    The final step points the user at the in-app Preview (/sites) and offers to
+    publish; it calls the publish tool IN THE SAME TURN only when the user's
+    request already asked to go live ("publish", "make it live", "ship it").
+    Publishing deploys to the public edge (and can open a paid checkout), so it
+    is the user's call — not an automatic step off a plain "create a site".
     """
     route = meta.route_path or "/sites"
     engine = (meta.engine or "html").lower()
@@ -217,11 +239,12 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "system's tokens, "
             "THEME them with those tokens + your asset URLs, and it persists the "
             'source pocket `type="site"` + `pattern="landing"` + `engine="svelte"` '
-            "and publishes it. There is NO rippleSpec and NO widget catalog on "
+            "as a reviewable DRAFT — it does NOT publish (see the DRAFT-FIRST "
+            "step). There is NO rippleSpec and NO widget catalog on "
             "this track — do not draft a rippleSpec or call the pocket "
             "specialist. If the skill is unavailable, author the source map "
             "yourself and call `mcp__pocketpaw_sites_manager__create_svelte_site` "
-            "then `mcp__pocketpaw_sites_manager__publish`."
+            "(then STOP at the draft — publish only on explicit request)."
         )
     elif engine == "ripple":
         engine_note = " The page is rendered STATICALLY (no JavaScript runs for the visitor)."
@@ -236,8 +259,9 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "`newsletter` widget, which nests an invalid `<form>` on a static "
             "site and captures zero leads. If the skill is unavailable, fall back "
             "to `mcp__pocketpaw_pocket_specialist__create` (build the "
-            "conversion-ordered ripple landing spec) then "
-            "`mcp__pocketpaw_sites_manager__publish`. This is the ripple/widget "
+            "conversion-ordered ripple landing spec, then STOP at the draft — "
+            "publish only on explicit request per the DRAFT-FIRST step). This is "
+            "the ripple/widget "
             "track — the page is a widget spec, not hand-authored markup."
         )
     else:  # html (default)
@@ -257,8 +281,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "your asset URLs, then persist it by calling "
             "`mcp__pocketpaw_sites_manager__create_html_site` with the `source` "
             'map (it stamps the source pocket `type="site"` + `pattern="landing"` '
-            '+ `engine="html"`), then `mcp__pocketpaw_sites_manager__publish` '
-            "with the returned pocket_id. There is NO rippleSpec and NO widget "
+            '+ `engine="html"`), then STOP at the draft — publish only on '
+            "explicit request per the DRAFT-FIRST step. There is NO rippleSpec and NO widget "
             "catalog on this track — do not draft a rippleSpec or call the pocket "
             "specialist; the HTML files ARE the page. The lead-capture form must "
             "be a real `<form>` with FLAT named `input`/`textarea` fields (name, "
@@ -312,7 +336,9 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "bottom as a conversion funnel: nav, hero, services, social proof, "
         "pricing, a call-to-action, a lead-capture form, footer. Talk about it "
         "as a 'site' or 'page' — never a 'pocket'. The pocket is only the "
-        f"source spec; it auto-publishes to a live URL.{engine_note} You are a "
+        "source spec; you create the site as a reviewable DRAFT the user "
+        "previews in-app, then publish to a live URL only when they ask — do "
+        f"NOT auto-publish.{engine_note} You are a "
         "SENIOR DESIGNER + engineer: YOU decide the look and build a coherent, "
         "premium, on-brand site — you do not ask the user what theme to use.\n"
         "</sites-orientation>\n"
@@ -366,8 +392,19 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "'Building a [design-system vibe] site for [business] with sections "
         "[…], palette [primary].' Then build.\n"
         f"5. {build_step}\n"
-        "6. PUBLISH and SHOW the live `url` plus a link to /sites where the "
-        "user manages their sites.\n"
+        "6. DRAFT-FIRST — STOP at the draft; do NOT publish by default. The create "
+        "tool persists a reviewable DRAFT the user previews IN-APP (open /sites → "
+        "the site's Preview tab). Publishing deploys the site to the public edge "
+        "(and on a paid tier can open a checkout), so it is the user's call, not "
+        "an automatic next step. Tell the user the draft is ready, point them at "
+        "the Preview, and OFFER to take it live — e.g. 'Your site is ready as a "
+        "draft — preview it under /sites, and say publish (or \"make it live\") "
+        "when you're happy with it.' Then STOP. Publish IN THIS SAME TURN only if "
+        "the user's request ALREADY asked to go live ('publish', 'make it live', "
+        "'ship it', 'put it online'): in that case call "
+        "`mcp__pocketpaw_sites_manager__publish` with the pocket_id and SHOW the "
+        "returned live `url` plus a link to /sites. Do not publish on a plain "
+        "'create'/'build'/'make' request.\n"
         "\n"
         "ROBUSTNESS (this flow must never stall or disappoint in real use):\n"
         "- If ANY tool errors (design-system, stock, palette, or icons), do "
@@ -378,8 +415,10 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "- ONE round of questions maximum. If the user already gave detail or "
         "says 'just build it', skip straight to Phase 2 with sensible "
         "defaults.\n"
-        "- Never claim a publish that didn't happen — relay the real publish "
-        "error and show the real `url`. No phantom URLs.\n"
+        "- When you DO publish (the user asked), never claim a publish that "
+        "didn't happen — relay the real publish error and show the real `url`. "
+        "No phantom URLs. On the default draft path there is no `url` yet — point "
+        "at the in-app Preview, don't invent a live link.\n"
         "- Keep the 'site' / 'page' vocabulary throughout; never say 'pocket'.\n"
         "</sites-procedure>\n"
         f"{_design_taste_system()}"

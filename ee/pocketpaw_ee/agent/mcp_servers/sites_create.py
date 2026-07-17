@@ -561,7 +561,9 @@ def make_create_landing_site_tool(tool: Any) -> Any:
             "contact {address, phone, email}; footer {copyright}. Variable-length "
             "services/testimonials/tiers are handled. Returns {ok, pocket_id, "
             "pocket}; hand `pocket_id` to "
-            "`mcp__pocketpaw_sites_manager__publish` to publish. ok=false with an "
+            "`mcp__pocketpaw_sites_manager__publish` to publish ONLY when the user "
+            "asks to go live (draft-first: a plain create stops at the draft for "
+            "in-app preview). ok=false with an "
             "error means relay the reason, do NOT report a created pocket."
         ),
         {
@@ -745,7 +747,9 @@ def make_create_dynamic_site_tool(tool: Any) -> Any:
             "spec must declare `objects` AND at least one source/action/auth, and "
             "every source/action must reference a declared object. Returns {ok, "
             "pocket_id, pocket}; hand `pocket_id` to "
-            "`mcp__pocketpaw_sites_manager__publish` to publish. ok=false with an "
+            "`mcp__pocketpaw_sites_manager__publish` to publish ONLY when the user "
+            "asks to go live (draft-first: a plain create stops at the draft for "
+            "in-app preview). ok=false with an "
             "error means relay the reason, do NOT report a created pocket."
         ),
         {
@@ -958,7 +962,9 @@ def make_create_svelte_site_tool(tool: Any) -> Any:
             "because the page is PRERENDERED and onMount does not run at prerender "
             "time (a count-up initialized to 0 bakes '$0.00'; initialize it to the "
             "final value). Returns {ok, pocket_id, pocket}; hand `pocket_id` to "
-            "`mcp__pocketpaw_sites_manager__publish` to publish. ok=false with an "
+            "`mcp__pocketpaw_sites_manager__publish` to publish ONLY when the user "
+            "asks to go live (draft-first: a plain create stops at the draft for "
+            "in-app preview). ok=false with an "
             "error means relay the reason, do NOT report a created pocket."
         ),
         {
@@ -1157,7 +1163,9 @@ def make_create_html_site_tool(tool: Any) -> Any:
             "files are served exactly as authored, so the page must be complete on "
             "its own (inline or linked CSS/JS, real copy — never 'TBD'/'Lorem "
             "ipsum'). Returns {ok, pocket_id, pocket}; hand `pocket_id` to "
-            "`mcp__pocketpaw_sites_manager__publish` to publish. ok=false with an "
+            "`mcp__pocketpaw_sites_manager__publish` to publish ONLY when the user "
+            "asks to go live (draft-first: a plain create stops at the draft for "
+            "in-app preview). ok=false with an "
             "error means relay the reason, do NOT report a created pocket."
         ),
         {

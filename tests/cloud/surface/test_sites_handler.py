@@ -75,6 +75,13 @@
 # pocket-specialist landing spec. The old flag tests are gone; the create tests
 # below pin the always-asks behavior + per-engine build tool, and the refine/chat
 # tests are unchanged.
+#
+# Updated: 2026-07-17 (feat/sites-draft-first-create) — added
+# test_create_is_draft_first_publish_on_request: the create preamble now stops at a
+# reviewable DRAFT and offers to publish, gating the publish tool on an EXPLICIT
+# go-live request instead of auto-publishing off a plain "create a site". Asserts the
+# draft/preview framing + the explicit-go-live gate across all engines, and that the
+# publish tool is still named (the on-request path) so an explicit publish is unbroken.
 
 from __future__ import annotations
 
@@ -140,6 +147,28 @@ async def test_create_default_engine_is_html() -> None:
     # The svelte/ripple tools appear ONLY after the html one (i.e. in the
     # do-not-use / explicit-exception context, never as the primary path).
     assert preamble.index("create_html_site") < preamble.index("create_svelte_site")
+
+
+async def test_create_is_draft_first_publish_on_request() -> None:
+    """feat/sites-draft-first-create: the create preamble is DRAFT-FIRST. It frames the
+    site as a reviewable draft the user previews, tells the agent to STOP at the draft
+    and offer to publish, and gates publish on an EXPLICIT go-live request — it no
+    longer auto-publishes. The publish tool is still NAMED (the on-request path)."""
+    for engine in (None, "svelte", "ripple"):
+        preamble = await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
+        )
+        lower = preamble.lower()
+        # It frames the deliverable as a draft the user previews first.
+        assert "draft" in lower
+        assert "preview" in lower
+        # Publish is conditioned on an explicit go-live ask, not automatic.
+        assert "make it live" in lower
+        # The old auto-publish framing is gone (the preamble now says "do NOT
+        # auto-publish", so guard against the specific old auto-publish claim).
+        assert "auto-publishes to a live url" not in lower
+        # The publish tool is still available for the on-request path.
+        assert "mcp__pocketpaw_sites_manager__publish" in preamble
 
 
 async def test_create_ripple_engine_uses_pocket_specialist_fallback() -> None:
