@@ -1189,6 +1189,20 @@ from the request's `Origin` header, falling back to the configured
 `PAW_SITES_BUILDER_ORIGIN` when absent (the same precedence as `/editable` and
 `/dev-preview`), so the call works with no header.
 
+**Origin stability — the pre-warm must match the view.** The builder origin is part
+of the content hash, so a pre-warm only saves a view a build when it builds with the
+**same** origin that view resolves. A browser view resolves its origin from the
+request `Origin` header (the dashboard origin), so `POST /sites/publish` and
+`POST /sites/by-pocket/{id}/leaf-edits` thread their request `Origin` into the
+background pre-warm — otherwise the pre-warm would fall back to
+`PAW_SITES_BUILDER_ORIGIN` while the view uses the dashboard origin, the two hashes
+would differ, and every view would stay a cold miss. Chat-agent / MCP publishes and
+edits have no request origin, so their pre-warm keeps the env fallback: **set
+`PAW_SITES_BUILDER_ORIGIN` to the dashboard origin** (e.g.
+`https://paw.example.com`, not the `http://localhost:8888` default) in every
+deployment so that fallback matches the origin views ask for — a belt-and-braces
+default even where the request `Origin` is threaded.
+
 **CSS reader is path-traversal-guarded.** Stylesheet `href`s from the built
 `index.html` are resolved against the build tree (relative `./_app/…` and
 absolute `/_app/…` hrefs both) and each resolved path is checked to be contained

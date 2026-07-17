@@ -1,5 +1,11 @@
 # tests/ee/sites/test_native_artifact.py — the native-artifact render path (NE-5b).
 # Created 2026-07-01 (feat/native-editing-ne4b).
+# Updated 2026-07-17 (fix/sites-prewarm-origin): the pre-warm must build with the SAME
+# origin a browser VIEW resolves (its request Origin header) or the content hashes never
+# match. New tests prove: a publish given an explicit prewarm_origin warms THAT origin
+# (a view there HITs zero builds) even when the env fallback differs; a publish with no
+# prewarm_origin keeps the env fallback (the defaulted-param no-request-origin path); and
+# apply_leaf_edits forwards its prewarm_origin into the pre-warm's builder_origin.
 # Updated 2026-07-02: + test_native_artifact_build_failure_maps_to_cloud_error — DEP-3
 # hardening: a generator build failure (SmokeGateFailed / missing toolchain) now
 # surfaces as a clean CloudError (sites.generator_failed), not an opaque 500, because
@@ -533,6 +539,127 @@ async def test_component_edit_schedules_prewarm(beanie_test_db, _captured_prewar
     )
 
     assert len(_captured_prewarms) == 1, "a component edit must schedule a native-artifact pre-warm"
+
+
+# ---------------------------------------------------------------------------
+# fix/sites-prewarm-origin — the pre-warm must build with the SAME origin a browser
+# VIEW resolves (its request Origin header), or the content hashes never match and the
+# pre-warmed artifact is dead weight. publish_pocket / apply_leaf_edits take a
+# ``prewarm_origin`` the REST routers thread the request Origin into.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_publish_prewarm_uses_prewarm_origin_over_env(
+    beanie_test_db, tmp_path, monkeypatch, _captured_prewarms
+):
+    """A live publish given an explicit ``prewarm_origin`` warms the artifact for THAT
+    origin — the one a browser view resolves from its request Origin header — NOT the
+    PAW_SITES_BUILDER_ORIGIN env fallback. Proven by setting the env to a DIFFERENT
+    origin: with the pre-warm-origin bug, the pre-warm would warm at the env origin and
+    the next view AT THE REQUEST ORIGIN would MISS — the _NoBuildGenerator would fire."""
+    monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "local")
+    # The env fallback is a DIFFERENT origin than the request origin: the OLD behaviour
+    # warmed here, so a view at the request origin would have been a cold miss.
+    monkeypatch.setenv("PAW_SITES_BUILDER_ORIGIN", "http://localhost:8888")
+    view_origin = "https://paw.hzd.interacly.com"
+    pocket_id = await _make_svelte_pocket("ws1", "u1")
+    _write_built_output(tmp_path)
+    gen = _CountingGenerator(str(tmp_path))
+
+    await sites_service.publish_pocket(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        prewarm_origin=view_origin,
+        _generator=gen,
+        _bundle_reader=lambda d: b"export default {}",
+        _local_deploy=_fake_local_deploy,
+    )
+
+    assert len(_captured_prewarms) == 1, "a live svelte publish must schedule a pre-warm"
+    await _captured_prewarms[0]  # build + store the armed artifact at view_origin
+
+    # The next view AT THE REQUEST ORIGIN is a read-through HIT (zero builds) — the
+    # pre-warm used prewarm_origin, not the (different) env fallback.
+    result = await sites_service.get_native_artifact(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        builder_origin=view_origin,
+        _generator=_NoBuildGenerator(),
+    )
+    assert result["pocket_id"] == pocket_id
+    assert 'data-uid="Hero:headline:0"' in result["body_html"]
+
+
+@pytest.mark.asyncio
+async def test_publish_no_prewarm_origin_keeps_env_fallback(
+    beanie_test_db, tmp_path, monkeypatch, _captured_prewarms
+):
+    """A publish with NO prewarm_origin (a chat-agent / MCP publish — no request origin)
+    keeps the pre-warm's PAW_SITES_BUILDER_ORIGIN env fallback, so a view with no origin
+    (which resolves the same env fallback) still HITs. Guards the defaulted param: the
+    fix must not regress the no-request-origin path."""
+    monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "local")
+    monkeypatch.setenv("PAW_SITES_BUILDER_ORIGIN", "https://configured.paw.example")
+    pocket_id = await _make_svelte_pocket("ws1", "u1")
+    _write_built_output(tmp_path)
+    gen = _CountingGenerator(str(tmp_path))
+
+    await sites_service.publish_pocket(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        _generator=gen,
+        _bundle_reader=lambda d: b"export default {}",
+        _local_deploy=_fake_local_deploy,
+    )
+    assert len(_captured_prewarms) == 1
+    await _captured_prewarms[0]
+
+    result = await sites_service.get_native_artifact(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        builder_origin="",  # resolves the same env fallback the pre-warm used
+        _generator=_NoBuildGenerator(),
+    )
+    assert result["pocket_id"] == pocket_id
+
+
+@pytest.mark.asyncio
+async def test_leaf_edit_prewarm_uses_prewarm_origin(beanie_test_db, monkeypatch):
+    """apply_leaf_edits forwards its ``prewarm_origin`` (the request Origin the
+    leaf-edits router threads) into the native-artifact pre-warm's builder_origin, so
+    the warmed artifact matches the origin the browser view asks for — not the env
+    fallback. Captures the scheduling call to assert the threaded origin."""
+    pocket_id = await _make_svelte_pocket("ws1", "u1")
+
+    captured: dict = {}
+
+    def _capture(**kw):
+        captured.update(kw)
+
+    monkeypatch.setattr(sites_service, "_schedule_native_prewarm", _capture)
+
+    async def _fake_apply(*, source, edits):
+        new = dict(source)
+        new["src/lib/components/Hero.svelte"] = "<section class='hero'><h1>Edited</h1></section>"
+        return {"source": new, "results": [{"uid": edits[0]["uid"], "applied": True}]}
+
+    await sites_service.apply_leaf_edits(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        edits=[{"uid": "Hero:headline:0", "op": {"kind": "text", "value": "Edited"}}],
+        prewarm_origin="https://paw.hzd.interacly.com",
+        _apply=_fake_apply,
+    )
+
+    assert captured.get("builder_origin") == "https://paw.hzd.interacly.com", (
+        "the leaf-edit pre-warm must build with the request origin, not the env fallback"
+    )
 
 
 def test_filesystem_store_missing_and_corrupt_read_as_miss(tmp_path, monkeypatch):

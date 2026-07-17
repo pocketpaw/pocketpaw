@@ -1,6 +1,21 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-07-17 (fix/sites-prewarm-origin — pre-warm the origin a VIEW asks for):
+# the native-artifact pre-warm must build with the SAME origin the browser's
+# ``GET /native-artifact`` view resolves (the request Origin header), or the content
+# hashes differ and the pre-warmed artifact is never hit — every view stays a cold
+# miss. ``publish_pocket`` and ``apply_leaf_edits`` gained a ``prewarm_origin`` param
+# the REST routers thread the request Origin into; it steers ONLY the pre-warm's armed
+# artifact (``builder_origin=prewarm_origin or builder_origin``), never the PUBLIC
+# deploy (a ``/sites/publish`` live deploy stays plain). Chat-agent / MCP callers pass
+# no ``prewarm_origin`` (no request origin), so the pre-warm keeps its
+# PAW_SITES_BUILDER_ORIGIN env fallback — set that env to the dashboard origin in
+# deployments as a belt-and-braces default so the fallback matches the view too.
+# ``edit_svelte_component`` is UNCHANGED: it is MCP-only (no request origin) and warms
+# with the origin the site was armed/published with (``prior.builder_origin``), which
+# already equals the dashboard origin a view asks for.
+#
 # Updated 2026-07-17 (feat/sites-native-artifact-no-build — kill preview-time builds):
 # ``get_native_artifact`` is now a READ-THROUGH cache instead of building on every
 # call. It hashes the pocket's render inputs (svelte source map + theme + builder
@@ -2327,6 +2342,7 @@ async def publish_pocket(
     name: str = "",
     site_plan_key: str | None = None,
     builder_origin: str | None = None,
+    prewarm_origin: str | None = None,
     preview: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
@@ -2375,6 +2391,18 @@ async def publish_pocket(
     ``builder_origin`` (SE-2b) is forwarded straight through so a publish via this
     shared path can request an editable site (the edit-bridge gates on it). It
     defaults to ``None`` (a normal, non-editable publish).
+
+    ``prewarm_origin`` is the origin the background native-artifact pre-warm should
+    build with — SEPARATE from ``builder_origin`` so it steers ONLY the pre-warmed
+    armed artifact, never the PUBLIC deploy (a live ``/sites/publish`` stays plain).
+    The REST ``/sites/publish`` router passes the request ``Origin`` header here so
+    the pre-warm produces the SAME content hash a browser's ``GET /native-artifact``
+    view (which resolves origin from its own request Origin header) will ask for;
+    otherwise the pre-warm would fall back to ``PAW_SITES_BUILDER_ORIGIN`` while the
+    view uses the dashboard origin, so their hashes never match and every view is a
+    cold miss. It defaults to ``None`` (chat-agent / MCP callers have no request
+    origin, so the pre-warm keeps the env fallback — set PAW_SITES_BUILDER_ORIGIN to
+    the dashboard origin in deployments so that fallback matches too).
 
     The generator / Cloudflare / bundle-reader / local-deploy seams are forwarded
     straight through to ``publish`` so the shared path is unit-testable without
@@ -2493,6 +2521,15 @@ async def publish_pocket(
     # PLAIN (non-armed) public site (the /sites/publish endpoint threads no
     # builder_origin — see the armed-vs-plain finding in the PR); the pre-warm produces
     # the ARMED artifact the native editor needs, so the public deploy is unchanged.
+    #
+    # ORIGIN-STABILITY (fix/sites-prewarm-origin): the pre-warm must build with the SAME
+    # origin the browser's native-artifact VIEW resolves — the request Origin header —
+    # or the content hashes never match and the pre-warmed artifact is dead weight. So
+    # steer the pre-warm by ``prewarm_origin`` (the request Origin the /sites/publish
+    # router threads), falling back to ``builder_origin`` (an armed publish) and then —
+    # inside the pre-warm — the PAW_SITES_BUILDER_ORIGIN env. This does NOT touch the
+    # public deploy above (still plain on the REST path); it only picks the arm origin.
+    #
     # Only svelte sites have a native build; a dynamic site deferred to the provision
     # job returns deployed=False, so guard on doc.deployed too. Best-effort, off the
     # publish's path. Forwards the injected generator so a faked publish warms with the
@@ -2502,7 +2539,7 @@ async def publish_pocket(
             workspace_id=workspace_id,
             user_id=user_id,
             pocket_id=pocket_id,
-            builder_origin=builder_origin,
+            builder_origin=prewarm_origin or builder_origin,
             _generator=_generator,
         )
 
@@ -2977,6 +3014,7 @@ async def apply_leaf_edits(
     user_id: str,
     pocket_id: str,
     edits: list[dict[str, Any]],
+    prewarm_origin: str | None = None,
     _apply: Any = None,
 ) -> list[dict[str, Any]]:
     """Persist native-editor leaf edits as a reviewable Branch draft (NE-4b).
@@ -3002,6 +3040,15 @@ async def apply_leaf_edits(
          naturally persists nothing and never churns an empty draft), each write
          auto-writing the Branch draft snapshot;
       5. return the per-uid verdicts unchanged.
+
+    ``prewarm_origin`` is the origin the background native-artifact pre-warm should
+    build with — the leaf-edits router passes the request ``Origin`` header so the
+    pre-warm produces the SAME content hash the browser's native-artifact VIEW
+    (which resolves origin from its own request Origin header) will ask for. Without
+    it the pre-warm falls back to ``PAW_SITES_BUILDER_ORIGIN`` while the view uses the
+    dashboard origin — different hash, so the warmed artifact is never hit. Defaults
+    to ``None`` (the pre-warm keeps the env fallback for callers with no request
+    origin).
 
     ``_apply`` is an injectable seam for the generator bridge (defaults to
     ``generator_client.apply_leaf_edits``) so the orchestration is unit-testable
@@ -3086,9 +3133,17 @@ async def apply_leaf_edits(
     # instead of an on-view build. Only when something actually changed (a fully
     # rejected batch persists nothing, so it warms nothing). Best-effort + off the
     # edit's path; a pre-warm failure never affects this call.
+    #
+    # ORIGIN-STABILITY (fix/sites-prewarm-origin): warm with the request Origin the
+    # native editor called from (``prewarm_origin``) so the hash matches the browser's
+    # native-artifact view; ``None`` keeps the pre-warm's PAW_SITES_BUILDER_ORIGIN env
+    # fallback for callers with no request origin.
     if changed:
         _schedule_native_prewarm(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            builder_origin=prewarm_origin,
         )
 
     return results
