@@ -283,9 +283,24 @@ do **not** fall back to drafting a rippleSpec. The tool fails closed when
 the map is missing a required §4.3 file and names which one; add it and
 retry.
 
-## STEP 4 — Publish
+## STEP 4 — Stop at the draft (publish only when asked)
 
-Publish the new pocket as a site:
+**Default: create the draft, do NOT publish.** After `create_svelte_site`
+returns, the pocket exists as a reviewable **draft** — a real, editable svelte
+site the user can preview in-app right now (open **/sites** → the site's
+**Preview** tab). Publishing deploys it to the public edge (and, on a paid
+tier, can open a checkout), so taking it live is the user's call, not an
+automatic next step.
+
+So **do NOT call `publish` by default.** Instead, tell the user the draft is
+ready, point them at the Preview, and offer to take it live — e.g. *"Your
+Bright Smile site is ready as a draft. Preview it under /sites, and say
+**publish** (or 'make it live') when you're happy with it."* Then stop. Keep
+iterating on the draft if they want changes; an edit is a draft too.
+
+**Publish in this same turn ONLY if the user's request already asked to go
+live** — "publish it", "make it live", "ship it", "put it online". When they
+did, publish the pocket:
 
 ```
 mcp__pocketpaw_sites_manager__publish(pocket_id = <the id from STEP 3>)
@@ -470,8 +485,10 @@ D1 + wires the read/write layer. Done.
    `src/lib/components/*.svelte` sections — every import resolvable.
 4. **It converts + captures.** CTAs are anchors, there's a real priced
    pricing section, and a flat lead form POSTing to `/api/submit`.
-5. **You showed the live URL.** The user got the `url` from publish and a
-   pointer to /sites — not just "done". Errors were relayed, never masked.
+5. **You stopped at the draft (or published only if asked).** By default the
+   user got a pointer to the in-app Preview under /sites and an offer to
+   publish — not an auto-publish. If they explicitly asked to go live, they got
+   the `url` from publish. Errors were relayed, never masked.
 
 ## Related tools (via MCP)
 
@@ -482,6 +499,7 @@ D1 + wires the read/write layer. Done.
   `auth` bindings — see [Dynamic svelte sites](#dynamic-svelte-sites--live-data-on-the-svelte-track)).
   Returns `{ok, pocket_id, pocket}`.
 - `mcp__pocketpaw_sites_manager__publish` — publish the pocket as a live
-  site; show the user the `url`.
+  site; show the user the `url`. Call it only when the user asks to go live
+  (draft-first — STEP 4); a plain "create a site" stops at the draft.
 - `mcp__pocketpaw_pocket__list_pockets` — find an existing pocket if the
   user named one rather than describing a new site.
