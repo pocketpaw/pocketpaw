@@ -1,4 +1,16 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-17 (D5 owner preview frame) — added GET
+#   /paw-bar/admin/site/{site_id}/preview-frame → the concierge bar frame HTML for
+#   the OWNER to test inside the dashboard. SESSION-authed (paw_bar.read role gate)
+#   sibling of the public /paw-bar/frame: REUSES ``_pawbar_bootstrap_html`` + a new
+#   shared ``_pawbar_frame_config`` builder (the public frame now calls the same
+#   builder — behavior unchanged, just no forked config dict). Two differences from
+#   the public frame: (1) CSP ``frame-ancestors`` = the dashboard origin from the new
+#   ``PAWBAR_DASHBOARD_ORIGIN`` env (default http://localhost:5173), sanitized to a
+#   single host[:port] — never the Site allowlist, never ``*``/Origin/Referer; (2)
+#   served REGARDLESS of ``concierge_enabled`` so a paused bar can be previewed
+#   (chat/action still obey the kill switch, unchanged). The public visitor frame's
+#   security (CSP from allowed_origins, kill-switch 403) is untouched.
 # Updated: 2026-07-17 (D2 conversation transcript) — added GET
 #   /paw-bar/admin/site/{site_id}/conversations/{customer_ref} → {customer_ref,
 #   messages:[{role,content,created_at}], count}. Same role gate (paw_bar.read) +
@@ -409,6 +421,49 @@ def _pawbar_bootstrap_html(config: dict[str, Any], asset_mount: str) -> str:
     )
 
 
+def _pawbar_frame_config(
+    *,
+    site_key: str,
+    widget_id: str,
+    api_base: str,
+    parent_origin: str,
+    greeting: str,
+) -> dict[str, Any]:
+    """Build the ``window.__PAWBAR__`` bootstrap config shared by the public frame
+    and the owner preview frame (D5).
+
+    Single source of truth for the config shape so the two framing paths never
+    drift: both seed the SAME glass app with the SAME fields. The callers differ
+    only in WHERE the values come from — the public frame reads ``siteKey`` +
+    ``parentOrigin`` from the world-visible key + allowlist, the owner preview from
+    the resolved Site + the dashboard origin — and in the CSP ancestor they set.
+    """
+    return {
+        "siteKey": site_key,
+        "widgetId": widget_id or "",
+        "endpoint": api_base,
+        "parentOrigin": parent_origin,
+        "mode": "concierge",
+        # D1 / SS-6 — the owner's opening line; the glass app renders it (D4) and
+        # falls back to its own default when "".
+        "greeting": greeting or "",
+        "tokens": {},
+    }
+
+
+def _dashboard_origin() -> str:
+    """The paw-enterprise dashboard origin allowed to frame the owner preview (D5).
+
+    Read from ``PAWBAR_DASHBOARD_ORIGIN`` (set it to the deployed dashboard origin,
+    e.g. ``https://app.example.com``). Defaults to the Vite dev server
+    (``http://localhost:5173``) so local dev works with no config. This is the ONLY
+    origin the preview frame's CSP ``frame-ancestors`` permits — deliberately NOT
+    the Site's public ``allowed_origins`` (that gates the visitor frame) and never
+    ``*`` or the request's own Origin/Referer.
+    """
+    return os.environ.get("PAWBAR_DASHBOARD_ORIGIN", "").strip() or "http://localhost:5173"
+
+
 @router.get("/paw-bar/frame")
 async def frame(
     request: Request,
@@ -465,17 +520,13 @@ async def frame(
     # validated against the allowlist. ``siteKey`` in the page is fine — it is a
     # world-visible embed key by design.
     api_base = request.url.path.rsplit("/paw-bar/frame", 1)[0]
-    config: dict[str, Any] = {
-        "siteKey": key,
-        "widgetId": w or "",
-        "endpoint": api_base,
-        "parentOrigin": _safe_parent_origin(po, site.allowed_origins),
-        "mode": "concierge",
-        # D1 / SS-6 — the owner's opening line rides into the bootstrap config; the
-        # glass app renders it (D4) and falls back to its own default when "".
-        "greeting": site.concierge_greeting or "",
-        "tokens": {},
-    }
+    config = _pawbar_frame_config(
+        site_key=key,
+        widget_id=w or "",
+        api_base=api_base,
+        parent_origin=_safe_parent_origin(po, site.allowed_origins),
+        greeting=site.concierge_greeting or "",
+    )
     html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT)
     return HTMLResponse(
         content=html,
@@ -1290,6 +1341,68 @@ async def get_site_handoffs(
         for o in objects
     ]
     return HandoffsResponse(items=items)
+
+
+@router.get(
+    "/paw-bar/admin/site/{site_id}/preview-frame",
+    response_class=HTMLResponse,
+    dependencies=[Depends(_require_paw_bar_read)],
+)
+async def get_site_preview_frame(
+    site_id: str,
+    request: Request,
+    workspace_id: str = Depends(current_workspace_id),
+) -> HTMLResponse:
+    """Serve the concierge bar frame for the OWNER to preview inside the dashboard (D5).
+
+    This is the SESSION-authed sibling of the public GET /paw-bar/frame: same glass
+    app, same ``_pawbar_bootstrap_html`` + config builder, but gated by the admin
+    role (``paw_bar.read``) instead of the world-visible embed key, and framed by
+    the DASHBOARD origin instead of the Site's public ``allowed_origins``. It exists
+    so an owner can test their bar in the dashboard without exposing a permissive
+    ancestor to the public.
+
+    Differences from the public frame (everything else is identical):
+      * Auth: admin/owner role (route-level ``_require_paw_bar_read``), workspace-
+        scoped site resolution (cross-tenant / bad id → 404, no widget → 404).
+      * CSP ``frame-ancestors`` = the configured dashboard origin
+        (``PAWBAR_DASHBOARD_ORIGIN``), sanitized to a single host[:port] — never the
+        Site allowlist, never ``*``, never the request's own Origin/Referer.
+      * Kill switch: served REGARDLESS of ``concierge_enabled`` so the owner can
+        preview a PAUSED bar. Chat/action are unchanged and still obey the kill
+        switch, so a paused bar renders in preview but won't answer — correct and
+        consistent. The preview iframe is same-origin with the backend, so its
+        chat/action calls already satisfy the existing dual-mode Origin gate.
+    """
+    site, widget = await _resolve_site_and_widget(site_id, workspace_id)
+    if widget is None:
+        raise HTTPException(status_code=404, detail="no_concierge_widget")
+
+    # The ONLY embedder allowed to frame the preview is the dashboard origin.
+    # Reuse the SAME sanitizer the public frame uses on allowed_origins, so the
+    # ancestor is reduced to a safe host[:port] with no header injection. Fail
+    # closed (500 — a misconfiguration, not a client error) if the configured
+    # origin can't be represented; NEVER emit a source-less or wildcard directive.
+    dash = _dashboard_origin()
+    csp = _frame_ancestors_csp([dash])
+    if csp is None:
+        raise HTTPException(status_code=500, detail="dashboard_origin_invalid")
+
+    api_base = request.url.path.split("/paw-bar/", 1)[0]
+    config = _pawbar_frame_config(
+        site_key=site.signed_key,
+        widget_id=widget.id,
+        api_base=api_base,
+        # The dashboard is the trusted parent; validate it against itself so the
+        # glass app's postMessage targetOrigin is a clean scheme://host[:port].
+        parent_origin=_safe_parent_origin(dash, [dash]),
+        greeting=site.concierge_greeting or "",
+    )
+    html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT)
+    return HTMLResponse(
+        content=html,
+        headers={"Content-Security-Policy": csp, "Cache-Control": "no-store"},
+    )
 
 
 # --- D2 aggregation data-source helpers -------------------------------------

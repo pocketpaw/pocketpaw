@@ -651,3 +651,93 @@ async def test_transcript_cross_tenant_site_is_404(client):
     await _mk_run(workspace="ws-other", user_id=_CUST, partial_text="hi")
     res = await c.get(f"/paw-bar/admin/site/{site.id}/conversations/{_CUST}")
     assert res.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# Layer 10 — owner preview frame (D5)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("role", ["admin", "owner"])
+@pytest.mark.asyncio
+async def test_preview_frame_serves_html_for_owner_admin(
+    role, mongo_db, store, fabric, monkeypatch
+):
+    """Owner/admin get the glass bar HTML seeded with this site's key + widget."""
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    app = _build_app(store, fabric, monkeypatch, role=role)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+    assert res.status_code == 200, res.text
+    assert res.headers["content-type"].startswith("text/html")
+    body = res.text
+    assert "window.__PAWBAR__" in body
+    assert "/pawbar-app/pawbar.js" in body  # the bundle ref (PAWBAR_APP_MOUNT)
+    assert _KEY in body  # the site's signed_key seeded into the config
+    assert widget.id in body  # the resolved widget id
+
+
+@pytest.mark.asyncio
+async def test_preview_frame_member_role_forbidden(mongo_db, store, fabric, monkeypatch):
+    site = await _site()
+    await store.create_widget(_widget())
+    app = _build_app(store, fabric, monkeypatch, role="member")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+    assert res.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_preview_frame_cross_tenant_is_404(client):
+    c, _store, _fabric = client
+    site = await _site(workspace="ws-other")
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+    assert res.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_preview_frame_no_widget_is_404(client):
+    c, _store, _fabric = client
+    site = await _site(pocket_id="pocket-empty")  # no widget created for this pocket
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+    assert res.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_preview_frame_csp_is_dashboard_origin(client, monkeypatch):
+    """CSP frame-ancestors is exactly the configured dashboard origin (sanitized to
+    a single host[:port]) — never the Site's allowed_origins, never '*'."""
+    monkeypatch.setenv("PAWBAR_DASHBOARD_ORIGIN", "dash.example.com")
+    c, store, _fabric = client
+    site = await _site(allowed_origins=["brewco.com"])
+    await store.create_widget(_widget())
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+    assert res.status_code == 200
+    assert res.headers["content-security-policy"] == "frame-ancestors dash.example.com"
+    # The Site's public allowlist must NOT be the framer here.
+    assert "brewco.com" not in res.headers["content-security-policy"]
+
+
+@pytest.mark.asyncio
+async def test_preview_frame_default_dashboard_origin(client):
+    """With no env set, the CSP defaults to the Vite dev origin (scheme stripped)."""
+    c, store, _fabric = client
+    site = await _site()
+    await store.create_widget(_widget())
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+    assert res.headers["content-security-policy"] == "frame-ancestors localhost:5173"
+
+
+@pytest.mark.asyncio
+async def test_preview_frame_served_when_concierge_disabled(client):
+    """The preview renders even when the kill switch is OFF, so the owner can test a
+    paused bar (chat/action stay gated by the switch, unchanged)."""
+    c, store, _fabric = client
+    site = await _site(concierge_enabled=False)
+    await store.create_widget(_widget())
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+    assert res.status_code == 200
+    assert "window.__PAWBAR__" in res.text
