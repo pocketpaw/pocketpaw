@@ -149,6 +149,49 @@ async def test_open_project_reprovisions_when_bound_sandbox_reaped() -> None:
     assert second.id == first.id
 
 
+# ---------------------------------------------------------------------------
+# rename / delete.
+# ---------------------------------------------------------------------------
+
+
+async def test_rename_project_changes_name() -> None:
+    project = await service.create_project(_WS, _USER, {"repo": _REPO, "name": "Old"})
+    renamed = await service.rename_project(_WS, _USER, project.id, {"name": "  New Name  "})
+    assert renamed.name == "New Name"  # trimmed
+    reloaded = await service.get_project(_WS, _USER, project.id)
+    assert reloaded.name == "New Name"
+
+
+async def test_rename_project_is_owner_scoped() -> None:
+    mine = await service.create_project(_WS, _USER, {"repo": _REPO})
+    with pytest.raises(NotFound):
+        await service.rename_project(_WS, "user-2", mine.id, {"name": "Hijacked"})
+
+
+async def test_delete_project_removes_row_and_tears_down_vm() -> None:
+    project = await service.create_project(_WS, _USER, {"repo": _REPO})
+    fake = _FakeDaytonaClient()
+    sandbox = await lifecycle.open_project(_WS, _USER, project.id, client=fake)
+    assert sandbox.sandbox_id is not None
+
+    await lifecycle.delete_project(_WS, _USER, project.id, client=fake)
+
+    # The durable project is gone…
+    with pytest.raises(NotFound):
+        await service.get_project(_WS, _USER, project.id)
+    # …and the bound VM was torn down (not left to leak).
+    assert sandbox.sandbox_id in fake.delete_calls
+
+
+async def test_delete_project_is_owner_scoped() -> None:
+    mine = await service.create_project(_WS, _USER, {"repo": _REPO})
+    fake = _FakeDaytonaClient()
+    with pytest.raises(NotFound):
+        await lifecycle.delete_project(_WS, "user-2", mine.id, client=fake)
+    # Still there for the real owner.
+    assert (await service.get_project(_WS, _USER, mine.id)).id == mine.id
+
+
 async def test_open_project_reprovisions_when_vm_deleted_out_of_band() -> None:
     """The reported bug: a day-old project's row still reads ``ready`` but Daytona
     already deleted the VM (delete-on-stop) before the 30-min reaper reconciled the

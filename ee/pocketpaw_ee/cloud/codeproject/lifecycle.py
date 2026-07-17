@@ -31,6 +31,7 @@
 # else falls through to reprovision + snapshot restore.
 from __future__ import annotations
 
+import contextlib
 import logging
 
 from pocketpaw_ee.cloud._core.errors import NotFound
@@ -106,6 +107,66 @@ async def open_project(
         project.repo,
     )
     return sandbox
+
+
+async def delete_project(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    client: DaytonaClient | None = None,
+) -> None:
+    """Delete a durable project and best-effort tear down its bound sandbox VM.
+
+    Flow:
+      1. Resolve the project (tenant + owner scoped; ``NotFound`` if not owned).
+      2. If it's bound to a sandbox, best-effort stop+delete the Daytona VM and
+         mark the WebSandbox row ``reaped`` so no runtime is orphaned.
+      3. Delete the durable CodeProject doc (the sole doc write goes through the
+         service).
+
+    The VM teardown is best-effort: a Daytona hiccup must not block removing the
+    project (the idle reaper + Daytona's own delete-on-stop reclaim a stray VM
+    anyway). The doc delete is the authoritative step.
+    """
+    project = await codeproject_service.get_project(workspace_id, user_id, project_id)
+
+    if project.current_sandbox_id:
+        await _teardown_bound_sandbox(
+            workspace_id, user_id, project.current_sandbox_id, client
+        )
+
+    await codeproject_service.delete_project(workspace_id, user_id, project_id)
+    logger.info(
+        "codeproject.delete: project=%s removed (repo=%s)", project_id, project.repo
+    )
+
+
+async def _teardown_bound_sandbox(
+    workspace_id: str,
+    user_id: str,
+    sandbox_row_id: str,
+    client: DaytonaClient | None,
+) -> None:
+    """Best-effort stop+delete the bound Daytona VM and mark its row reaped.
+
+    Every step is guarded: a missing row, an unconfigured/erroring Daytona, or a
+    VM that's already gone are all fine — the goal is just "don't leak a live VM
+    when the project is deleted", not to fail the delete on a teardown miss.
+    """
+    try:
+        sandbox = await websandbox_service.get_sandbox(
+            workspace_id, user_id, sandbox_row_id
+        )
+    except NotFound:
+        return
+    daytona = client if client is not None else get_daytona_client()
+    if daytona is not None and sandbox.sandbox_id:
+        with contextlib.suppress(Exception):
+            await daytona.stop_sandbox(sandbox.sandbox_id)
+        with contextlib.suppress(Exception):
+            await daytona.delete_sandbox(sandbox.sandbox_id)
+    with contextlib.suppress(Exception):
+        await websandbox_service.mark_reaped(sandbox_row_id)
 
 
 async def _restore_if_snapshotted(
@@ -221,4 +282,4 @@ async def _daytona_vm_is_live(sandbox_id: str, client: DaytonaClient | None) -> 
     return False
 
 
-__all__ = ["open_project"]
+__all__ = ["delete_project", "open_project"]

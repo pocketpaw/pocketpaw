@@ -1074,6 +1074,21 @@ class CodeProjectOpened(Event):
     EVENT_TYPE: ClassVar[str] = "codeproject.opened"
 
 
+# ``CodeProjectRenamed`` fires when a project's display name changes; ``data``
+# carries the project id + workspace/user + the new name. ``CodeProjectDeleted``
+# fires when a project is removed (and its bound sandbox torn down); ``data``
+# carries the project id + workspace/user so a projects-grid fan-out can drop the
+# card without a re-read.
+@dataclass
+class CodeProjectRenamed(Event):
+    EVENT_TYPE: ClassVar[str] = "codeproject.renamed"
+
+
+@dataclass
+class CodeProjectDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "codeproject.deleted"
+
+
 # Code Mode GitHub connect (CM-3, feat/code-mode). Fires when a user's GitHub App
 # installation is first bound to a (workspace, user) — the durable "this user can
 # open private repos" signal a connected-state UI reacts to. ``data`` carries the

@@ -18,9 +18,18 @@ from datetime import UTC, datetime
 
 from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud._core.realtime.emit import emit
-from pocketpaw_ee.cloud._core.realtime.events import CodeProjectCreated, CodeProjectOpened
+from pocketpaw_ee.cloud._core.realtime.events import (
+    CodeProjectCreated,
+    CodeProjectDeleted,
+    CodeProjectOpened,
+    CodeProjectRenamed,
+)
 from pocketpaw_ee.cloud.codeproject.domain import CodeProjectId, CodeProjectView
-from pocketpaw_ee.cloud.codeproject.dto import CodeProjectResponse, CreateProjectRequest
+from pocketpaw_ee.cloud.codeproject.dto import (
+    CodeProjectResponse,
+    CreateProjectRequest,
+    RenameProjectRequest,
+)
 from pocketpaw_ee.cloud.models.code_project import CodeProject as _CodeProjectDoc
 
 logger = logging.getLogger(__name__)
@@ -156,6 +165,79 @@ async def get_project(
     return _doc_to_view(doc)
 
 
+async def rename_project(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    body: RenameProjectRequest | dict,
+) -> CodeProjectView:
+    """Rename a project's display name, tenant- and owner-scoped.
+
+    Validates + trims the new name (Rule 6). Raises ``NotFound`` for a row the
+    caller doesn't own. A no-op rename (same name) still returns the view but does
+    not emit. Emits ``CodeProjectRenamed`` on an actual change (Rule 9).
+    """
+    body = RenameProjectRequest.model_validate(body)
+    new_name = body.name.strip()
+
+    doc = await _read_owned(workspace_id, user_id, project_id)
+    if doc is None:
+        raise NotFound("code_project", project_id)
+
+    if doc.name == new_name:
+        # no-event: nothing changed.
+        return _doc_to_view(doc)
+
+    doc.name = new_name
+    doc.updated_at = datetime.now(UTC)
+    await doc.save()
+
+    await emit(
+        CodeProjectRenamed(
+            data={
+                "id": str(doc.id),
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "name": new_name,
+            }
+        )
+    )
+    return _doc_to_view(doc)
+
+
+async def delete_project(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+) -> CodeProjectView:
+    """Delete a project row, tenant- and owner-scoped. Returns the deleted view.
+
+    Only removes the durable CodeProject doc — tearing down the bound ephemeral
+    sandbox VM is the caller's job (``codeproject/lifecycle.delete_project``), which
+    has the Daytona client; this module stays the sole doc writer. Raises
+    ``NotFound`` for a row the caller doesn't own. Emits ``CodeProjectDeleted``
+    (Rule 9) so a projects-grid fan-out can drop the card.
+    """
+    doc = await _read_owned(workspace_id, user_id, project_id)
+    if doc is None:
+        raise NotFound("code_project", project_id)
+
+    view = _doc_to_view(doc)
+    await doc.delete()
+
+    await emit(
+        CodeProjectDeleted(
+            data={
+                "id": view.id,
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "repo": view.repo,
+            }
+        )
+    )
+    return view
+
+
 async def bind_current_sandbox(
     workspace_id: str,
     user_id: str,
@@ -219,7 +301,9 @@ async def _read_owned(
 __all__ = [
     "bind_current_sandbox",
     "create_project",
+    "delete_project",
     "get_project",
     "list_projects",
+    "rename_project",
     "view_to_wire",
 ]

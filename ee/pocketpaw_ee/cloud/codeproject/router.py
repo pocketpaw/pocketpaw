@@ -5,15 +5,17 @@
 # router never raises HTTPException.
 #
 # Three routes back the redesigned ``/code`` surface:
-#   POST /codeproject          — create (or return) a durable project for a repo.
-#   GET  /codeproject          — the caller's projects grid (most-recent first).
-#   POST /codeproject/{id}/open — resolve the project to a READY sandbox to connect
-#                                 to (reuse the bound one or provision a fresh one).
+#   POST   /codeproject          — create (or return) a durable project for a repo.
+#   GET    /codeproject          — the caller's projects grid (most-recent first).
+#   POST   /codeproject/{id}/open — resolve the project to a READY sandbox to connect
+#                                   to (reuse the bound one or provision a fresh one).
+#   PATCH  /codeproject/{id}      — rename a project's display name (owner-scoped).
+#   DELETE /codeproject/{id}      — delete a project + tear down its bound VM.
 # Like the WebSandbox router, endpoints are license-gated + context-authenticated;
 # the tenancy/owner filtering in the service is the security boundary.
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.errors import Forbidden
@@ -23,6 +25,7 @@ from pocketpaw_ee.cloud.codeproject.dto import (
     CodeProjectListResponse,
     CodeProjectResponse,
     CreateProjectRequest,
+    RenameProjectRequest,
 )
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
@@ -76,3 +79,28 @@ async def open_project(
         workspace_id, ctx.user_id, project_id
     )
     return websandbox_service.view_to_wire(sandbox)
+
+
+@router.patch("/{project_id}", response_model=CodeProjectResponse)
+async def rename_project(
+    project_id: str,
+    body: RenameProjectRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> CodeProjectResponse:
+    """Rename a project's display name (owner-scoped)."""
+    workspace_id = _require_workspace(ctx)
+    view = await codeproject_service.rename_project(
+        workspace_id, ctx.user_id, project_id, body
+    )
+    return codeproject_service.view_to_wire(view)
+
+
+@router.delete("/{project_id}", status_code=204)
+async def delete_project(
+    project_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> Response:
+    """Delete a project and tear down its bound sandbox VM (owner-scoped)."""
+    workspace_id = _require_workspace(ctx)
+    await codeproject_lifecycle.delete_project(workspace_id, ctx.user_id, project_id)
+    return Response(status_code=204)

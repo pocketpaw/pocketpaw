@@ -8,7 +8,9 @@
 #
 # The ``open`` endpoint does not have its own request/response here — it takes the
 # project id from the path and returns a ``WebSandboxResponse`` (the ready
-# runtime sandbox to connect to), reusing the websandbox contract.
+# runtime sandbox to connect to), reusing the websandbox contract. ``rename`` takes
+# a ``RenameProjectRequest`` and returns the updated ``CodeProjectResponse``;
+# ``delete`` takes only the path id and returns 204.
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -25,6 +27,16 @@ class CreateProjectRequest(BaseModel):
     repo: str = Field(..., min_length=1, max_length=1024)
     name: str | None = Field(default=None, max_length=200)
     provider: str = Field(default="github", max_length=32)
+
+
+class RenameProjectRequest(BaseModel):
+    """Client-facing rename body — a new display name ONLY.
+
+    The name is trimmed + length-bounded; nothing else about the project (repo,
+    provider, runtime binding) is mutable from the wire.
+    """
+
+    name: str = Field(..., min_length=1, max_length=200)
 
 
 class CodeProjectResponse(BaseModel):
@@ -49,4 +61,5 @@ __all__ = [
     "CodeProjectListResponse",
     "CodeProjectResponse",
     "CreateProjectRequest",
+    "RenameProjectRequest",
 ]
