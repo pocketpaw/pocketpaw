@@ -1,6 +1,23 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-07-17 (fix/sites-draft-visible — a DRAFT lists in the gallery):
+# added ``create_draft_site`` — the create-site MCP handlers now mint ONE Site doc
+# at CREATE time in a NOT-YET-DEPLOYED state so a draft-first pocket (pocketpaw#1744)
+# lists in the /sites gallery immediately, instead of appearing nowhere until a
+# publish first mints a Site doc. It is keyed on the SAME stable
+# ``_id = _live_object_id(workspace, pocket)`` that publish upserts, so a later
+# publish FINDS this draft and flips it in place (``deployed=True`` + url) rather
+# than inserting a second doc — the PERF-1/PERF-2 one-doc-per-pocket invariant is
+# preserved across create → publish. It is IDEMPOTENT (an existing doc — this draft
+# or an already-live one — is returned untouched, never clobbered or duplicated),
+# is NOT a deploy, and never touches billing (a draft opens no checkout / Dodo sub —
+# only publish does). It seeds the SAME capture defaults publish's first-insert
+# seeds (signed_key / allowed_origins / event_mapping) so a first publish taking the
+# UPDATE branch over the draft keeps a working captureSignedKey + lead mapping. A
+# draft reads draft/not-live everywhere because BP-2 keys ``is_live`` on
+# ``doc.deployed`` (False here), never on doc-existence.
+#
 # Updated 2026-07-17 (fix/sites-prewarm-origin — pre-warm the origin a VIEW asks for):
 # the native-artifact pre-warm must build with the SAME origin the browser's
 # ``GET /native-artifact`` view resolves (the request Origin header), or the content
@@ -1447,6 +1464,77 @@ async def require_sites_plan(workspace_id: str) -> None:
             f"Sites requires the {needed.capitalize()} plan — upgrade, or switch "
             "to a workspace that has it.",
         )
+
+
+async def create_draft_site(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    name: str = "",
+) -> _SiteDoc:
+    """Mint the DRAFT Site doc for a freshly created site pocket so it lists in the
+    /sites gallery BEFORE it is ever published (fix/sites-draft-visible).
+
+    Draft-first create (pocketpaw#1744) persists a site POCKET but no Site doc — Site
+    docs were only minted at PUBLISH — so a draft appeared in neither the gallery's
+    All nor its Draft filter (``list_for_workspace`` reads Site docs, and a draft had
+    none). This mints ONE canonical Site doc in a NOT-YET-DEPLOYED state so the draft
+    lists naturally and reads as a draft everywhere (``pocket_status`` and the card
+    badge key on ``deployed``, not on doc-existence — BP-2), while a plain create still
+    does NOT deploy.
+
+    Dedupe invariant (PERF-1/PERF-2): the doc is keyed on the SAME stable
+    ``_id = _live_object_id(workspace_id, pocket_id)`` that ``publish`` upserts, so a
+    later publish FINDS this draft and flips it in place (``deployed=True`` + url)
+    instead of minting a second doc — exactly ONE Site doc per pocket across
+    create → publish. IDEMPOTENT: if a Site doc already exists for the pocket (this
+    draft on a duplicate create, or an already-published/live one), it is returned
+    UNCHANGED — the mint never clobbers a live doc back to draft and never duplicates.
+
+    NOT a deploy and NOT a billing event: a draft never builds, never contacts
+    Cloudflare, and never opens a checkout / Dodo subscription (only ``publish`` does).
+    It seeds the SAME capture defaults ``publish``'s first-insert seeds — a minted
+    ``signed_key``, ``allowed_origins``, ``event_mapping`` — so when publish later takes
+    the UPDATE branch over this draft (which preserves those fields), the built page's
+    ``captureSignedKey`` matches the persisted doc and lead capture works on the first
+    publish. ``publish`` reuses a stored non-empty ``signed_key``, so minting one here is
+    what keeps the built key and the doc in sync (the same invariant
+    ``test_republish_reuses_signed_key`` pins for a re-publish).
+    """
+    oid = _live_object_id(workspace_id, pocket_id)
+    # Idempotent + dedupe-safe: never mint a second doc for a pocket, and never reset
+    # an already-published/live doc back to draft. If a doc already exists (this draft
+    # on a repeat create, or a live one), return it untouched.
+    existing = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if existing is not None:
+        return existing
+
+    doc = _SiteDoc(
+        id=oid,
+        workspace=workspace_id,
+        pocket_id=pocket_id,
+        owner=user_id,
+        name=name.strip() if name else "",
+        # Not deployed yet — a plain create stops at the draft. publish stamps
+        # script_name (== the stable id) / url / deployed_at when it goes live.
+        script_name="",
+        deployed=False,
+        url="",
+        builder_origin="",
+        # Seed the capture config publish's first-insert seeds so a first publish
+        # (which finds this draft and takes the UPDATE branch, preserving these
+        # fields) keeps a working signed_key + lead mapping. Minting the key here is
+        # also what publish reuses, so the built captureSignedKey matches the doc.
+        signed_key=f"site_key_{secrets.token_urlsafe(24)}",
+        allowed_origins=_default_allowed_origins(),
+        event_mapping=_DEFAULT_EVENT_MAPPING,
+    )
+    # no-event: a DRAFT is not a published/deployed mutation — nothing downstream
+    # (search index, soul memory, ripple invalidation) keys on a draft Site doc;
+    # publish emits SitePublished when the site actually goes live.
+    await doc.insert()
+    return doc
 
 
 async def publish(
@@ -4318,6 +4406,7 @@ async def revert_pocket_version(
 
 __all__ = [
     "apply_edits",
+    "create_draft_site",
     "publish",
     "publish_pocket",
     "activate_site",

@@ -1,6 +1,18 @@
 # sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
 # create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
 #
+# Updated: 2026-07-17 (fix/sites-draft-visible — a DRAFT lists in the gallery) —
+# every create handler (landing / svelte / html / dynamic) now mints a DRAFT Site
+# doc right after the pocket is persisted, via the shared best-effort helper
+# ``_mint_draft_site`` → ``sites.service.create_draft_site``. Draft-first create
+# (pocketpaw#1744) persisted the site POCKET but no Site doc, and the /sites gallery
+# lists Site docs — so a plain create appeared in neither the All nor the Draft
+# filter until a publish first minted one. Minting the draft doc (``deployed=False``
+# — a draft, NOT a deploy, NO build, NO billing) keyed on the stable per-pocket id
+# publish upserts makes the draft list immediately and flip live in place on a later
+# publish (one doc per pocket). Best-effort: the pocket already exists (the primary
+# contract), so a mint failure logs and returns rather than failing the create.
+#
 # Updated 2026-06-14 (feat/dynamic-sites-authoring — Paw Sites "Dynamic track",
 # RFC 12 A2) — added the create tool ``create_dynamic_site``. It mirrors
 # ``create_svelte_site`` (the agent IS the author; the payload is persisted
@@ -417,6 +429,33 @@ async def _bind_session_and_emit(pocket_id: str, view: dict[str, Any], user_id: 
         )
 
 
+async def _mint_draft_site(workspace_id: str, user_id: str, pocket_id: str, name: str) -> None:
+    """Mint the DRAFT Site doc for a freshly created site pocket so it lists in the
+    /sites gallery immediately (fix/sites-draft-visible).
+
+    Draft-first create persists a site POCKET but no Site doc, and the gallery reads
+    Site docs — so without this a plain create shows in neither the All nor the Draft
+    filter until a publish first mints one. This creates ONE canonical Site doc
+    (``deployed=False`` — a draft, NOT a deploy, NO build, NO billing) keyed on the
+    stable per-pocket id publish upserts, so a later publish flips this SAME doc live
+    (one doc per pocket). Best-effort: the pocket already exists in Mongo (the primary
+    contract), so a mint failure logs and returns rather than undoing a successful
+    create — the site is simply not yet listable (the prior behaviour), never a hard
+    error. The plan gate already ran before ``agent_create``, so this adds no gate."""
+    try:
+        from pocketpaw_ee.sites.service import create_draft_site
+
+        await create_draft_site(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, name=name
+        )
+    except Exception:  # noqa: BLE001 — draft-doc mint is best-effort, never fails a create
+        logger.warning(
+            "create-site: draft Site doc mint failed for pocket %s (non-fatal)",
+            pocket_id,
+            exc_info=True,
+        )
+
+
 async def _create_landing_site_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__create_landing_site``.
 
@@ -514,6 +553,11 @@ async def _create_landing_site_handler(args: dict) -> dict:
 
     if err is not None or view is None or new_pocket_id is None:
         return _error_response(f"create failed: {err or 'create returned no view'}")
+
+    # Mint the DRAFT Site doc so the new site lists in the /sites gallery right away
+    # (draft-first create persists the pocket but no Site doc; the gallery reads Site
+    # docs). Best-effort — a draft, NOT a publish, and it never fails the create.
+    await _mint_draft_site(workspace_id, user_id, new_pocket_id, name)
 
     await _bind_session_and_emit(new_pocket_id, view, user_id)
 
@@ -699,6 +743,11 @@ async def _create_dynamic_site_handler(args: dict) -> dict:
 
     if err is not None or view is None or new_pocket_id is None:
         return _error_response(f"create failed: {err or 'create returned no view'}")
+
+    # Mint the DRAFT Site doc so the new site lists in the /sites gallery right away
+    # (draft-first create persists the pocket but no Site doc; the gallery reads Site
+    # docs). Best-effort — a draft, NOT a publish, and it never fails the create.
+    await _mint_draft_site(workspace_id, user_id, new_pocket_id, name)
 
     await _bind_session_and_emit(new_pocket_id, view, user_id)
 
@@ -910,6 +959,11 @@ async def _create_svelte_site_handler(args: dict) -> dict:
     if err is not None or view is None or new_pocket_id is None:
         return _error_response(f"create failed: {err or 'create returned no view'}")
 
+    # Mint the DRAFT Site doc so the new site lists in the /sites gallery right away
+    # (draft-first create persists the pocket but no Site doc; the gallery reads Site
+    # docs). Best-effort — a draft, NOT a publish, and it never fails the create.
+    await _mint_draft_site(workspace_id, user_id, new_pocket_id, name)
+
     await _bind_session_and_emit(new_pocket_id, view, user_id)
 
     return _success_response(
@@ -1117,6 +1171,11 @@ async def _create_html_site_handler(args: dict) -> dict:
 
     if err is not None or view is None or new_pocket_id is None:
         return _error_response(f"create failed: {err or 'create returned no view'}")
+
+    # Mint the DRAFT Site doc so the new site lists in the /sites gallery right away
+    # (draft-first create persists the pocket but no Site doc; the gallery reads Site
+    # docs). Best-effort — a draft, NOT a publish, and it never fails the create.
+    await _mint_draft_site(workspace_id, user_id, new_pocket_id, name)
 
     await _bind_session_and_emit(new_pocket_id, view, user_id)
 
