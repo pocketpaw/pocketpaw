@@ -66,6 +66,31 @@ async def start_cycle(
     return await cycles_service.agent_start_cycle(ctx, cycle_id)
 
 
+@router.post("/{cycle_id}/stop", response_model=CycleResponse)
+async def stop_cycle(
+    cycle_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> CycleResponse:
+    """Stop an active sprint — transition it back to upcoming.
+
+    Unlike close, this does not require all items to be done. Items stay
+    scoped to the sprint and the burnup chart keeps its daily data.
+    """
+    return await cycles_service.agent_stop_cycle(ctx, cycle_id)
+
+
+@router.post("/{cycle_id}/reactivate", response_model=CycleResponse)
+async def reactivate_cycle(
+    cycle_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> CycleResponse:
+    """Reactivate a completed sprint — bring it back to active.
+
+    Validates that no overlapping active cycle exists on the same pocket.
+    """
+    return await cycles_service.agent_reactivate_cycle(ctx, cycle_id)
+
+
 @router.post("/{cycle_id}/close", response_model=CycleResponse)
 async def close_cycle(
     cycle_id: str,

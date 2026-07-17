@@ -402,19 +402,14 @@ async def agent_update_cycle(
 ) -> CycleResponse:
     """Patch ``name``, ``description``, or ``start`` / ``end`` dates.
 
-    Editable only while the cycle is ``upcoming`` — once a cycle goes
-    active, its boundaries are part of the historical record. Status
-    transitions go through ``agent_close_cycle`` instead.
+    Editable at any status — the operator can rename, re-date, or adjust
+    the scope of a sprint whether it's upcoming, active, or completed.
+    Status transitions still go through dedicated start/stop/close/reactivate
+    endpoints.
     """
     body = UpdateCycleRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
     doc = await _fetch_in_workspace(workspace_id, cycle_id)
-
-    if doc.status != "upcoming":
-        raise Forbidden(
-            "cycle.not_upcoming",
-            "Only upcoming cycles can have their name, description, or dates edited",
-        )
 
     new_start = body.start if body.start is not None else doc.start
     new_end = body.end if body.end is not None else doc.end
@@ -429,6 +424,8 @@ async def agent_update_cycle(
         doc.start = body.start
     if body.end is not None:
         doc.end = body.end
+    if body.scope is not None:
+        doc.scope = body.scope
     if body.project_id is not None:
         if body.project_id:
             await _ensure_project_in_workspace(doc.workspace, body.project_id)
@@ -482,6 +479,88 @@ async def agent_start_cycle(ctx: RequestContext, cycle_id: str) -> CycleResponse
         target_type="cycle",
         target_id=cycle_id,
         metadata={"name": doc.name, "pocket_id": str(doc.pocket_id) if doc.pocket_id else None},
+    )
+    return response
+
+
+async def agent_stop_cycle(ctx: RequestContext, cycle_id: str) -> CycleResponse:
+    """Transition a cycle from ``active`` back to ``upcoming``.
+
+    Unlike ``agent_close_cycle``, this does NOT require all items to be
+    done and does NOT roll incomplete tasks forward. It simply pauses the
+    sprint — items stay scoped and the burnup chart keeps its daily
+    series. The operator can restart the sprint later with
+    ``agent_start_cycle``.
+
+    Only active cycles can be stopped.
+    """
+    workspace_id = _require_workspace(ctx)
+    doc = await _fetch_in_workspace(workspace_id, cycle_id)
+
+    if doc.status != "active":
+        raise ConflictError(
+            "cycle.not_active",
+            "Only active cycles can be stopped",
+        )
+
+    doc.status = "upcoming"
+    await doc.save()
+
+    response = _to_response(_to_domain(doc))
+    await emit(CycleUpdated(data=response.model_dump()))
+    _record_deep_work_audit(
+        workspace_id=workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.cycle.stopped",
+        target_type="cycle",
+        target_id=cycle_id,
+        metadata={"name": doc.name},
+    )
+    return response
+
+
+async def agent_reactivate_cycle(ctx: RequestContext, cycle_id: str) -> CycleResponse:
+    """Transition a cycle from ``completed`` back to ``active``.
+
+    Re-opens a completed sprint so items can be re-scoped and the sprint
+    window extended. Validates that no overlapping active cycle exists on
+    the same pocket (same constraint as ``agent_start_cycle``).
+
+    Only completed cycles can be reactivated.
+    """
+    workspace_id = _require_workspace(ctx)
+    doc = await _fetch_in_workspace(workspace_id, cycle_id)
+
+    if doc.status != "completed":
+        raise ConflictError(
+            "cycle.not_completed",
+            "Only completed cycles can be reactivated",
+        )
+
+    if doc.pocket_id is not None and await _has_active_overlap(
+        workspace_id,
+        doc.pocket_id,
+        doc.start,
+        doc.end,
+        exclude_id=cycle_id,
+    ):
+        raise ConflictError(
+            "cycle.overlap",
+            "Another active cycle on the same pocket overlaps this date range",
+        )
+
+    doc.status = "active"
+    await doc.save()
+
+    response = _to_response(_to_domain(doc))
+    await emit(CycleUpdated(data=response.model_dump()))
+    _record_deep_work_audit(
+        workspace_id=workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.cycle.reactivated",
+        target_type="cycle",
+        target_id=cycle_id,
+        metadata={"name": doc.name},
     )
     return response
 
@@ -815,7 +894,9 @@ __all__ = [
     "agent_get_cycle",
     "agent_list_cycle_items",
     "agent_list_cycles",
+    "agent_reactivate_cycle",
     "agent_start_cycle",
+    "agent_stop_cycle",
     "agent_update_cycle",
     "list_active_cycle_ids",
     "list_active_workspace_ids",
