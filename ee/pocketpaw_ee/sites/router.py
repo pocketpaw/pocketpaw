@@ -128,6 +128,13 @@
 # mirroring /editable + /dev-preview. A non-svelte pocket → 422; a missing /
 # access-denied pocket → 404 / 403 (the pockets service raises it). Delegates to
 # sites_service.get_native_artifact.
+#
+# Updated 2026-07-17 (feat/sites-native-artifact-no-build): get_native_artifact is now a
+# READ-THROUGH cache — a repeat view with unchanged source is a disk read with ZERO
+# subprocess builds (publish + the post-edit pre-warm populate the store ahead of the
+# view). fabric.write is RETAINED because a COLD miss still builds (mutates on-disk
+# state), so the endpoint can still trigger work; it is not a pure read. The wire
+# contract (request/response, origin resolution, 422/404/403) is unchanged.
 
 from __future__ import annotations
 
@@ -276,11 +283,14 @@ async def native_artifact_by_pocket(
     stylesheet(s) concatenated. The native editor injects both into a shadow root
     instead of framing an iframe.
 
-    Carries fabric.write because it ENSURES/triggers the armed build (mutates the
-    on-disk build). The builder origin — which the armed build needs to stamp
-    data-uid + the manifest — is resolved from the request's ``Origin`` header, with
-    the service applying the ``PAW_SITES_BUILDER_ORIGIN`` env fallback when it is
-    absent (the same precedence as ``/editable`` / ``/dev-preview``), so the call
+    READ-THROUGH cache (feat/sites-native-artifact-no-build): the service serves a
+    prior render from disk when the pocket's render inputs are unchanged (ZERO builds
+    — a plain VIEW never triggers a build), and builds once only on a cold miss.
+    Carries fabric.write because a cold miss still triggers the armed build (mutates
+    on-disk state) — it is not a pure read. The builder origin — which the armed build
+    needs to stamp data-uid + the manifest — is resolved from the request's ``Origin``
+    header, with the service applying the ``PAW_SITES_BUILDER_ORIGIN`` env fallback when
+    it is absent (the same precedence as ``/editable`` / ``/dev-preview``), so the call
     works with no header. A non-svelte pocket is a 422; a missing / access-denied
     pocket surfaces as a 404 / 403 (the pockets service raises it inside the
     service)."""
