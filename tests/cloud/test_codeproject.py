@@ -149,6 +149,27 @@ async def test_open_project_reprovisions_when_bound_sandbox_reaped() -> None:
     assert second.id == first.id
 
 
+async def test_open_project_reprovisions_when_vm_deleted_out_of_band() -> None:
+    """The reported bug: a day-old project's row still reads ``ready`` but Daytona
+    already deleted the VM (delete-on-stop) before the 30-min reaper reconciled the
+    row. Reuse must PROBE Daytona, see the VM is gone, and reprovision — not hand
+    back a dead sandbox that connects to nothing."""
+    project = await service.create_project(_WS, _USER, {"repo": _REPO})
+    fake = _FakeDaytonaClient()
+
+    first = await lifecycle.open_project(_WS, _USER, project.id, client=fake)
+    # The row is left ``ready`` (the reaper never ran), but Daytona reclaimed the
+    # VM on its own — get_sandbox_by_id will now raise for that id.
+    assert first.sandbox_id is not None
+    fake.deleted_out_of_band.add(first.sandbox_id)
+
+    second = await lifecycle.open_project(_WS, _USER, project.id, client=fake)
+    assert len(fake.create_calls) == 2  # dead VM detected → reprovisioned
+    assert second.status == "ready"
+    assert second.sandbox_id is not None
+    assert second.sandbox_id != first.sandbox_id  # a genuinely fresh VM
+
+
 # ---------------------------------------------------------------------------
 # open_project — CM-2a′ snapshot restore on reprovision.
 # ---------------------------------------------------------------------------

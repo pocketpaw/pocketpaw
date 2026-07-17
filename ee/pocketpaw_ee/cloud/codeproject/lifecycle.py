@@ -20,6 +20,15 @@
 # so a returning user picks up their uncommitted work + branch instead of a bare
 # re-clone. Best-effort: a restore failure leaves the fresh clone usable rather
 # than blocking the open.
+#
+# 2026-07-17 (reopen-stale-vm fix): reuse now PROBES Daytona before trusting the
+# row. The Mongo row's ``status`` is not authoritative about the VM: Daytona's own
+# aggressive lifecycle (stop 5 min → delete-on-stop) destroys an idle Code Mode VM
+# long before our 30-min idle reaper reconciles the row, so a ``ready`` row can
+# point at a Daytona sandbox that no longer exists. Reopening a day-old project
+# then bound the editor to a dead VM (no connection, empty tree). ``_reuse_if_live``
+# now confirms the bound VM actually exists and is ``started`` in Daytona; anything
+# else falls through to reprovision + snapshot restore.
 from __future__ import annotations
 
 import logging
@@ -27,7 +36,7 @@ import logging
 from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.codeproject import service as codeproject_service
 from pocketpaw_ee.cloud.codeproject.domain import CodeProjectView
-from pocketpaw_ee.cloud.daytona.client import DaytonaClient
+from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
 from pocketpaw_ee.cloud.websandbox import durability as websandbox_durability
 from pocketpaw_ee.cloud.websandbox import provision as websandbox_provision
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
@@ -39,6 +48,12 @@ logger = logging.getLogger(__name__)
 # bound Daytona id. Anything else (opening, stopped, reaped, or no bound VM) means
 # the runtime is gone and we reprovision.
 _REUSABLE_STATUS = "ready"
+
+# The one Daytona state a bound VM must be in to reuse it directly. A ``stopped``
+# or ``archived`` VM (if not already deleted) can't serve the terminal / file RPC,
+# and a Code Mode VM is delete-on-stop, so anything but ``started`` means "gone or
+# unusable" → reprovision from the durable project instead of resuming a stale VM.
+_LIVE_VM_STATE = "started"
 
 
 async def open_project(
@@ -64,7 +79,7 @@ async def open_project(
     """
     project = await codeproject_service.get_project(workspace_id, user_id, project_id)
 
-    reused = await _reuse_if_live(workspace_id, user_id, project)
+    reused = await _reuse_if_live(workspace_id, user_id, project, client)
     if reused is not None:
         # Re-stamp last-opened so the projects grid orders by real recency; the
         # bound id is unchanged, so this is just a touch.
@@ -139,12 +154,20 @@ async def _reuse_if_live(
     workspace_id: str,
     user_id: str,
     project: CodeProjectView,
+    client: DaytonaClient | None,
 ) -> WebSandboxView | None:
     """Return the project's bound sandbox iff it's still live, else None.
 
-    "Live" == a ready row with a bound Daytona id. A missing bound id, an
-    unresolvable/foreign row (``NotFound``), or any non-``ready`` status all mean
-    the runtime is gone and the caller should reprovision.
+    "Live" == a ready row with a bound Daytona id WHOSE VM still exists and is
+    ``started`` in Daytona. A missing bound id, an unresolvable/foreign row
+    (``NotFound``), any non-``ready`` row status, OR a bound VM that Daytona has
+    already destroyed/stopped all mean the runtime is gone and the caller should
+    reprovision.
+
+    The Daytona probe is what fixes reopening a stale project: the row's status
+    lags the VM's real lifecycle (Daytona deletes an idle VM in minutes; our
+    reaper reconciles the row on a 30-min sweep), so trusting the row alone bound
+    the editor to a dead VM.
     """
     if not project.current_sandbox_id:
         return None
@@ -154,9 +177,48 @@ async def _reuse_if_live(
         )
     except NotFound:
         return None
-    if sandbox.status == _REUSABLE_STATUS and sandbox.sandbox_id:
-        return sandbox
-    return None
+    if sandbox.status != _REUSABLE_STATUS or not sandbox.sandbox_id:
+        return None
+    if not await _daytona_vm_is_live(sandbox.sandbox_id, client):
+        return None
+    return sandbox
+
+
+async def _daytona_vm_is_live(sandbox_id: str, client: DaytonaClient | None) -> bool:
+    """True iff the Daytona VM ``sandbox_id`` still exists and is ``started``.
+
+    Fail-safe toward reprovision: if Daytona is unconfigured, the id no longer
+    resolves (deleted/reaped out-of-band), or the VM is in any state but
+    ``started``, return False so the caller boots a fresh VM and restores the
+    durable snapshot rather than handing back a dead runtime. A probe error is
+    treated as "not live" — a spurious reprovision is recoverable; binding a dead
+    VM is the actual outage.
+    """
+    daytona = client if client is not None else get_daytona_client()
+    if daytona is None:
+        logger.info(
+            "codeproject.open: Daytona unavailable — cannot verify VM %s, reprovisioning",
+            sandbox_id,
+        )
+        return False
+    try:
+        info = await daytona.get_sandbox_by_id(sandbox_id)
+    except Exception:  # noqa: BLE001 — any lookup failure means the VM is unreachable/gone
+        logger.info(
+            "codeproject.open: bound VM %s no longer resolves in Daytona — reprovisioning",
+            sandbox_id,
+        )
+        return False
+    state = (getattr(info, "state", "") or "").lower()
+    if state == _LIVE_VM_STATE:
+        return True
+    logger.info(
+        "codeproject.open: bound VM %s is %r (not %s) — reprovisioning",
+        sandbox_id,
+        state,
+        _LIVE_VM_STATE,
+    )
+    return False
 
 
 __all__ = ["open_project"]

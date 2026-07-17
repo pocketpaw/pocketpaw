@@ -72,6 +72,9 @@ class _FakeDaytonaClient:
     exec_invocations: list[dict] = field(default_factory=list)
     stop_calls: list[str] = field(default_factory=list)
     delete_calls: list[str] = field(default_factory=list)
+    # VM ids Daytona destroyed on its own (delete-on-stop) without going through
+    # this client's delete_sandbox — so get_sandbox_by_id raises for them.
+    deleted_out_of_band: set[str] = field(default_factory=set)
     upload_calls: list[dict] = field(default_factory=list)
     _counter: int = 0
 
@@ -126,6 +129,15 @@ class _FakeDaytonaClient:
 
     async def delete_sandbox(self, sandbox_id):  # noqa: ANN001
         self.delete_calls.append(sandbox_id)
+
+    async def get_sandbox_by_id(self, sandbox_id):  # noqa: ANN001
+        # Mirrors the real client: a deleted/reaped VM no longer resolves (raises);
+        # a live one comes back ``started``. ``deleted_out_of_band`` lets a test
+        # simulate Daytona's own delete-on-stop reclaiming an idle VM while the
+        # Mongo row still reads ``ready``.
+        if sandbox_id in self.delete_calls or sandbox_id in self.deleted_out_of_band:
+            raise RuntimeError(f"sandbox {sandbox_id} not found")
+        return SandboxInfo(id=sandbox_id, name="", state="started")
 
 
 # ---------------------------------------------------------------------------
