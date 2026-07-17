@@ -8,6 +8,15 @@
 # name) and RAISES NotFound when missing / access-denied (it does not return
 # None). theme is pulled from the rippleSpec subtree.
 #
+# Updated 2026-07-17 (fix/sites-prewarm-origin): ``publish_site`` and
+# ``apply_leaf_edits_by_pocket`` now thread the request ``Origin`` header into the
+# service as ``prewarm_origin`` so the background native-artifact pre-warm builds with
+# the SAME origin the browser's ``GET /native-artifact`` view resolves — otherwise the
+# pre-warm falls back to PAW_SITES_BUILDER_ORIGIN, its content hash never matches the
+# view's, and every view is a cold miss. The PUBLIC deploy is unchanged (still plain —
+# ``prewarm_origin`` steers only the pre-warmed armed artifact), mirroring the existing
+# Origin precedence /editable + /dev-preview + /native-artifact already use.
+#
 # Updated 2026-06-01 (Phase 4 — chat→create-site): publish_site now delegates to
 # sites_service.publish_pocket(), the shared pocket-read + publish path the new
 # in-process MCP tool also calls. The pocket-read/theme-derive logic that used to
@@ -173,6 +182,7 @@ router = APIRouter(
 @router.post("/sites/publish", response_model=SiteResponse)
 async def publish_site(
     body: PublishRequest,
+    request: Request,
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> SiteResponse:
@@ -181,11 +191,20 @@ async def publish_site(
     # tool via ``publish_pocket``. ``pockets_service.get`` (called inside) raises
     # NotFound / Forbidden itself, which the standard error envelope maps to
     # 404 / 403 — no extra existence check is needed here.
+    #
+    # ORIGIN-STABILITY (fix/sites-prewarm-origin): thread the request Origin header as
+    # ``prewarm_origin`` so the background native-artifact pre-warm builds with the
+    # SAME origin the browser's GET /native-artifact view resolves (its own request
+    # Origin) — otherwise the pre-warm falls back to PAW_SITES_BUILDER_ORIGIN, its hash
+    # never matches the view's, and every view is a cold miss. This does NOT arm the
+    # PUBLIC deploy (builder_origin stays unset here — the public site stays plain); it
+    # only steers the pre-warmed armed artifact the native editor consumes.
     doc = await sites_service.publish_pocket(
         workspace_id=ctx.workspace_id,
         user_id=ctx.user_id,
         pocket_id=body.pocket_id,
         site_plan_key=body.site_plan_key,
+        prewarm_origin=request.headers.get("origin") or None,
     )
     return sites_service._to_response(doc)
 
@@ -242,6 +261,7 @@ async def make_site_editable(
 async def apply_leaf_edits_by_pocket(
     pocket_id: str,
     body: LeafEditsRequest,
+    request: Request,
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> LeafEditsResponse:
@@ -252,12 +272,20 @@ async def apply_leaf_edits_by_pocket(
     already renders the change optimistically; skipping the per-edit iframe rebuild
     is the UX win over the old edit path). Returns one verdict per edit. A missing /
     access-denied pocket is a 404 (the pockets service raises NotFound); a non-svelte
-    pocket or an empty edit batch is a 422."""
+    pocket or an empty edit batch is a 422.
+
+    ORIGIN-STABILITY (fix/sites-prewarm-origin): thread the request Origin header as
+    ``prewarm_origin`` so the background native-artifact pre-warm this schedules builds
+    with the SAME origin the browser's GET /native-artifact view resolves (its own
+    request Origin) — the native editor calls both from the same dashboard, so without
+    this the pre-warm falls back to PAW_SITES_BUILDER_ORIGIN and its hash never matches
+    the view's (mirrors the /sites/publish fix)."""
     results = await sites_service.apply_leaf_edits(
         workspace_id=ctx.workspace_id,
         user_id=ctx.user_id,
         pocket_id=pocket_id,
         edits=[e.model_dump() for e in body.edits],
+        prewarm_origin=request.headers.get("origin") or None,
     )
     return LeafEditsResponse(
         pocket_id=pocket_id,
