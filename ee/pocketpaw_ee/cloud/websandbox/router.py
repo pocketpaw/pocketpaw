@@ -47,6 +47,13 @@
 # is a validated query param (out-of-range / the reserved terminal port refused),
 # and it's license-gated like the rest.
 #
+# Changed 2026-07-18 (BP-1b, feat/code-mode): added
+# ``GET /websandbox/browserpod/credentials`` — issues the boot credential for the
+# in-tab BrowserPod runtime. The key lives ONLY in server config (never in the
+# frontend bundle); the route is license-gated and workspace-scoped like the rest,
+# and an unconfigured deploy answers ``available:false`` so the client falls back
+# to Daytona instead of erroring. Thin adapter over ``websandbox/browserpod.py``.
+#
 # Changed 2026-07-16 (review hardening): the register route now binds the
 # repo-only ``RegisterSandboxRequest`` so a client can no longer write a
 # server-owned ``sandbox_id`` / ``status`` (that field is the key
@@ -61,6 +68,7 @@ from fastapi import APIRouter, Depends, Query, Response
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.websandbox import browserpod as websandbox_browserpod
 from pocketpaw_ee.cloud.websandbox import durability as websandbox_durability
 from pocketpaw_ee.cloud.websandbox import edit as websandbox_edit
 from pocketpaw_ee.cloud.websandbox import git as websandbox_git
@@ -68,6 +76,7 @@ from pocketpaw_ee.cloud.websandbox import preview as websandbox_preview
 from pocketpaw_ee.cloud.websandbox import provision as websandbox_provision
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
 from pocketpaw_ee.cloud.websandbox.dto import (
+    BrowserPodCredentialsResponse,
     CommitRequest,
     CreatePrRequest,
     CreateSandboxRequest,
@@ -182,6 +191,27 @@ async def get_sandbox_preview(
     """Return the iframe-embeddable public URL for a dev-server port in the VM."""
     workspace_id = _require_workspace(ctx)
     return await websandbox_preview.get_preview(workspace_id, ctx.user_id, row_id, port)
+
+
+# ---------------------------------------------------------------------------
+# BP-1b — BrowserPod boot credential. Two literal segments, so it can never be
+# captured by the single-segment ``/{row_id}`` route above.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/browserpod/credentials", response_model=BrowserPodCredentialsResponse)
+async def get_browserpod_credentials(
+    ctx: RequestContext = Depends(request_context),
+) -> BrowserPodCredentialsResponse:
+    """Issue the credential the browser needs to boot an in-tab BrowserPod pod.
+
+    The key lives ONLY in server config; it is never built into the frontend
+    bundle. License + an authenticated, workspace-scoped context gate the issue.
+    An unconfigured deploy returns ``available: false`` so the client falls back
+    to the Daytona runtime rather than erroring.
+    """
+    workspace_id = _require_workspace(ctx)
+    return await websandbox_browserpod.get_credentials(workspace_id, ctx.user_id)
 
 
 # ---------------------------------------------------------------------------
