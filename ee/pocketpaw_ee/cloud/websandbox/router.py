@@ -200,7 +200,7 @@ async def get_sandbox_preview(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/repo-archive")
+@router.get("/browserpod/repo-archive")
 async def get_repo_archive(
     repo: str = Query(..., description="owner/repo or a github.com URL"),
     ref: str | None = Query(None, description="Branch, tag or commit (default branch if omitted)"),
@@ -212,6 +212,12 @@ async def get_repo_archive(
     on BrowserPod's emulated TCP/TLS relay, and the browser cannot fetch GitHub's
     archives directly because they carry no CORS headers. Fetching server-side
     solves both, and is where a GitHub App token would live for private repos.
+
+    Path note: TWO literal segments, deliberately. A single-segment path like
+    ``/repo-archive`` is captured by the ``/{row_id}`` route above — FastAPI
+    matches in registration order — so it resolved to "look up a sandbox called
+    repo-archive" and 404'd. Any new collection-level route here needs the same
+    treatment (see ``test_websandbox_routes.py``).
     """
     workspace_id = _require_workspace(ctx)
     content = await websandbox_archive.fetch_repo_archive(
