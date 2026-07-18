@@ -43,9 +43,39 @@ logger = logging.getLogger(__name__)
 _ENV_VAR = "BROWSERPOD_API_KEY"
 
 
+def _dotenv_key() -> str:
+    """Read the key from a ``.env`` file, without touching the process env.
+
+    Deliberately ``dotenv_values`` and not ``load_dotenv``: this is a READ, and a
+    read should not mutate global process state as a side effect. It is also the
+    seam tests patch to mean "this host has no .env" — otherwise deleting the
+    environment variable in a test would still find the developer's real key on
+    disk and the "unconfigured" path could never be exercised.
+    """
+    try:  # pragma: no cover — trivial guard
+        from dotenv import dotenv_values
+    except ImportError:
+        return ""
+    return (dotenv_values().get(_ENV_VAR) or "").strip()
+
+
 def browserpod_api_key() -> str:
-    """Return the configured BrowserPod embedding key, or ``""`` when unset."""
-    return os.environ.get(_ENV_VAR, "").strip()
+    """Return the configured BrowserPod embedding key, or ``""`` when unset.
+
+    ``.env`` is loaded defensively for the same reason ``uploads/factory.py``
+    does it: this name has NO ``POCKETPAW_`` prefix, so pydantic-settings never
+    reads it, and it only reaches ``os.environ`` if something called
+    ``load_dotenv`` first — which depends on the entrypoint (the dashboard
+    lifecycle does; a bare uvicorn/cloud boot may not). Getting that wrong is
+    invisible: the broker answers ``available: false``, the frontend routes to
+    Daytona, and nothing anywhere reports an error. ``load_dotenv`` is
+    idempotent and never overrides a var already in the environment, so a real
+    deploy that exports the key properly is unaffected.
+    """
+    direct = os.environ.get(_ENV_VAR, "").strip()
+    if direct:
+        return direct
+    return _dotenv_key()
 
 
 def browserpod_enabled() -> bool:
