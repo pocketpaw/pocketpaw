@@ -68,6 +68,7 @@ from fastapi import APIRouter, Depends, Query, Response
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.websandbox import archive as websandbox_archive
 from pocketpaw_ee.cloud.websandbox import browserpod as websandbox_browserpod
 from pocketpaw_ee.cloud.websandbox import durability as websandbox_durability
 from pocketpaw_ee.cloud.websandbox import edit as websandbox_edit
@@ -197,6 +198,26 @@ async def get_sandbox_preview(
 # BP-1b — BrowserPod boot credential. Two literal segments, so it can never be
 # captured by the single-segment ``/{row_id}`` route above.
 # ---------------------------------------------------------------------------
+
+
+@router.get("/repo-archive")
+async def get_repo_archive(
+    repo: str = Query(..., description="owner/repo or a github.com URL"),
+    ref: str | None = Query(None, description="Branch, tag or commit (default branch if omitted)"),
+    ctx: RequestContext = Depends(request_context),
+) -> Response:
+    """Serve a repo's source as a zip, for seeding an in-tab BrowserPod pod.
+
+    The pod has no usable networking of its own for this: cloning inside it runs
+    on BrowserPod's emulated TCP/TLS relay, and the browser cannot fetch GitHub's
+    archives directly because they carry no CORS headers. Fetching server-side
+    solves both, and is where a GitHub App token would live for private repos.
+    """
+    workspace_id = _require_workspace(ctx)
+    content = await websandbox_archive.fetch_repo_archive(
+        workspace_id, ctx.user_id, repo, ref
+    )
+    return Response(content=content, media_type="application/zip")
 
 
 @router.get("/browserpod/credentials", response_model=BrowserPodCredentialsResponse)
