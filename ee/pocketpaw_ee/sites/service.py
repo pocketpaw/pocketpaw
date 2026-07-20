@@ -934,9 +934,7 @@ async def _prewarm_native_artifact(
     pocket = await pockets_service.get(pocket_id, user_id)
     # Only svelte sites have a native shadow-render build; ripple/html don't use this
     # path (an html site's served artifact IS its source). Nothing to arm otherwise.
-    if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(
-        pocket.get("source"), dict
-    ):
+    if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
         return
     source = pocket["source"]
     ripple_spec = pocket.get("rippleSpec") or {}

@@ -398,7 +398,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "(and on a paid tier can open a checkout), so it is the user's call, not "
         "an automatic next step. Tell the user the draft is ready, point them at "
         "the Preview, and OFFER to take it live — e.g. 'Your site is ready as a "
-        "draft — preview it under /sites, and say publish (or \"make it live\") "
+        'draft — preview it under /sites, and say publish (or "make it live") '
         "when you're happy with it.' Then STOP. Publish IN THIS SAME TURN only if "
         "the user's request ALREADY asked to go live ('publish', 'make it live', "
         "'ship it', 'put it online'): in that case call "
