@@ -93,9 +93,7 @@ class _FakeDaytonaClient:
         return SandboxInfo(id=sid, name=name, state="creating")
 
     async def wait_for_sandbox(self, sandbox_id, target_state="started", timeout=120.0):  # noqa: ANN001
-        self.wait_calls.append(
-            {"id": sandbox_id, "target_state": target_state, "timeout": timeout}
-        )
+        self.wait_calls.append({"id": sandbox_id, "target_state": target_state, "timeout": timeout})
         return SandboxInfo(id=sandbox_id, name="", state="started")
 
     async def get_project_dir(self, sandbox_id):  # noqa: ANN001
@@ -272,7 +270,8 @@ async def test_open_via_broker_wires_push_remote_when_public_url_set(monkeypatch
     assert view.status == "ready"
     # The proxy remote was wired into the VM.
     wires = [
-        inv for inv in fake.exec_invocations
+        inv
+        for inv in fake.exec_invocations
         if inv["command"].startswith("git remote set-url origin ")
     ]
     assert len(wires) == 1

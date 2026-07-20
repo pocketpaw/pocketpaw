@@ -277,9 +277,7 @@ async def test_list_repositories_empty_without_connections() -> None:
 async def test_list_repositories_503_when_connected_but_provider_off(monkeypatch) -> None:
     await service.save_connection(_WS, _USER, "inst-1")
     # No injected provider AND the real resolver returns None (App unconfigured).
-    monkeypatch.setattr(
-        connect, "get_repo_auth_provider", lambda _p: None
-    )
+    monkeypatch.setattr(connect, "get_repo_auth_provider", lambda _p: None)
     with pytest.raises(CloudError) as exc:
         await connect.list_repositories(_WS, _USER)
     assert exc.value.code == "codeconnect.github_not_configured"

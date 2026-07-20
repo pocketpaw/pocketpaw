@@ -74,9 +74,7 @@ class _FakeUploads:
         self._blobs: dict[str, bytes] = {}
         self._counter = 0
 
-    async def upload(
-        self, file, owner_id, chat_id, workspace, folder_path="/", pocket_id=None
-    ):  # noqa: ANN001
+    async def upload(self, file, owner_id, chat_id, workspace, folder_path="/", pocket_id=None):  # noqa: ANN001
         data = await file.read()
         self._counter += 1
         file_id = f"file-{self._counter}"
@@ -140,9 +138,7 @@ async def test_snapshot_tars_uploads_and_records_pointer() -> None:
     fake = _FakeDaytonaClient(tar_bytes=b"HELLO-SNAPSHOT")
     uploads = _FakeUploads()
 
-    file_id = await durability.snapshot_workspace(
-        "w1", "u1", row.id, client=fake, uploads=uploads
-    )
+    file_id = await durability.snapshot_workspace("w1", "u1", row.id, client=fake, uploads=uploads)
 
     # Tarred the workspace dir inside the VM, then downloaded the tarball.
     assert any("tar -czf" in c and WEBSANDBOX_WORKDIR in c for c in fake.exec_calls)

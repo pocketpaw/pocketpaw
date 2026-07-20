@@ -84,9 +84,7 @@ async def open_project(
     if reused is not None:
         # Re-stamp last-opened so the projects grid orders by real recency; the
         # bound id is unchanged, so this is just a touch.
-        await codeproject_service.bind_current_sandbox(
-            workspace_id, user_id, project_id, reused.id
-        )
+        await codeproject_service.bind_current_sandbox(workspace_id, user_id, project_id, reused.id)
         return reused
 
     # Provision a fresh sandbox for the repo (idempotent on the repo → reuses the
@@ -97,9 +95,7 @@ async def open_project(
     # CM-2a′: overlay the row's durable snapshot (uncommitted work + branch from a
     # prior session) onto the freshly-cloned VM, if one exists.
     await _restore_if_snapshotted(workspace_id, user_id, sandbox, client)
-    await codeproject_service.bind_current_sandbox(
-        workspace_id, user_id, project_id, sandbox.id
-    )
+    await codeproject_service.bind_current_sandbox(workspace_id, user_id, project_id, sandbox.id)
     logger.info(
         "codeproject.open: project=%s bound fresh sandbox=%s (repo=%s)",
         project_id,
@@ -131,14 +127,10 @@ async def delete_project(
     project = await codeproject_service.get_project(workspace_id, user_id, project_id)
 
     if project.current_sandbox_id:
-        await _teardown_bound_sandbox(
-            workspace_id, user_id, project.current_sandbox_id, client
-        )
+        await _teardown_bound_sandbox(workspace_id, user_id, project.current_sandbox_id, client)
 
     await codeproject_service.delete_project(workspace_id, user_id, project_id)
-    logger.info(
-        "codeproject.delete: project=%s removed (repo=%s)", project_id, project.repo
-    )
+    logger.info("codeproject.delete: project=%s removed (repo=%s)", project_id, project.repo)
 
 
 async def _teardown_bound_sandbox(
@@ -154,9 +146,7 @@ async def _teardown_bound_sandbox(
     when the project is deleted", not to fail the delete on a teardown miss.
     """
     try:
-        sandbox = await websandbox_service.get_sandbox(
-            workspace_id, user_id, sandbox_row_id
-        )
+        sandbox = await websandbox_service.get_sandbox(workspace_id, user_id, sandbox_row_id)
     except NotFound:
         return
     daytona = client if client is not None else get_daytona_client()

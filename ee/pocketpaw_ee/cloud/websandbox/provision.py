@@ -88,6 +88,7 @@ def _new_edit_branch() -> str:
     """Mint a fresh, collision-safe ``paw/edit-<8 hex>`` branch name."""
     return f"paw/edit-{uuid4().hex[:8]}"
 
+
 # ---------------------------------------------------------------------------
 # Reaper env config.
 # ---------------------------------------------------------------------------
@@ -234,9 +235,7 @@ async def open_sandbox(
     row = await websandbox_service.create_sandbox(
         workspace_id, user_id, {"repo": repo_url, "status": "pending"}
     )
-    await websandbox_service.update_status(
-        workspace_id, user_id, row.id, {"status": "opening"}
-    )
+    await websandbox_service.update_status(workspace_id, user_id, row.id, {"status": "opening"})
 
     daytona_id: str | None = None
     branch = _new_edit_branch()

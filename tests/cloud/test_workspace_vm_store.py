@@ -162,12 +162,12 @@ async def test_migration_imports_json_and_renames_file(mongo_db, tmp_path, monke
 
 
 async def test_migration_second_run_is_noop_and_non_clobbering(
-    mongo_db, tmp_path, monkeypatch  # noqa: ARG001
+    mongo_db,
+    tmp_path,
+    monkeypatch,  # noqa: ARG001
 ):
     legacy = tmp_path / "daytona_workspace_vm_map.json"
-    legacy.write_text(
-        json.dumps({"w1": {"sandbox_id": "sb-old", "sandbox_name": "old"}})
-    )
+    legacy.write_text(json.dumps({"w1": {"sandbox_id": "sb-old", "sandbox_name": "old"}}))
     monkeypatch.setattr(store, "WS_VM_MAP_PATH", legacy)
 
     # First run imports + renames.
@@ -183,8 +183,6 @@ async def test_migration_second_run_is_noop_and_non_clobbering(
     assert await get_workspace_vm_sandbox_id("w1") == "sb-new"
 
     # Re-create the legacy file to prove non-clobbering explicitly.
-    legacy.write_text(
-        json.dumps({"w1": {"sandbox_id": "sb-stale", "sandbox_name": "stale"}})
-    )
+    legacy.write_text(json.dumps({"w1": {"sandbox_id": "sb-stale", "sandbox_name": "stale"}}))
     await migrate_workspace_vm_map_to_db()
     assert await get_workspace_vm_sandbox_id("w1") == "sb-new"  # not clobbered

@@ -95,8 +95,11 @@ async def _ready_row(workspace_id: str = "w1", user_id: str = "u1"):
     return await sandbox_service.create_sandbox(
         workspace_id,
         user_id,
-        {"repo": "https://github.com/octocat/Hello-World.git", "status": "ready",
-         "sandbox_id": "dtn-1"},
+        {
+            "repo": "https://github.com/octocat/Hello-World.git",
+            "status": "ready",
+            "sandbox_id": "dtn-1",
+        },
     )
 
 
@@ -111,9 +114,12 @@ async def test_propose_edit_returns_proposal() -> None:
     fake_dt = _FakeDaytona()
 
     resp = await edit.propose_edit(
-        "w1", "u1", row.id,
+        "w1",
+        "u1",
+        row.id,
         {"path": "app.py", "instruction": "change line one"},
-        client=fake_model, daytona=fake_dt,
+        client=fake_model,
+        daytona=fake_dt,
     )
 
     assert resp.path == "app.py"
@@ -137,9 +143,12 @@ async def test_propose_edit_denies_cross_tenant() -> None:
 
     with pytest.raises(CloudError):
         await edit.propose_edit(
-            "w2", "u1", row.id,  # different workspace
+            "w2",
+            "u1",
+            row.id,  # different workspace
             {"path": "app.py", "instruction": "x"},
-            client=fake_model, daytona=fake_dt,
+            client=fake_model,
+            daytona=fake_dt,
         )
 
     # Denied BEFORE any model call or VM read.
@@ -159,9 +168,12 @@ async def test_propose_edit_rejects_traversal() -> None:
 
     with pytest.raises(CloudError) as exc:
         await edit.propose_edit(
-            "w1", "u1", row.id,
+            "w1",
+            "u1",
+            row.id,
             {"path": "../../etc/passwd", "instruction": "read secrets"},
-            client=fake_model, daytona=fake_dt,
+            client=fake_model,
+            daytona=fake_dt,
         )
     assert exc.value.code == "websandbox.edit_invalid_path"
     # No download, no model call for a traversal attempt.
@@ -181,9 +193,12 @@ async def test_propose_edit_model_failure_is_clean_error() -> None:
 
     with pytest.raises(CloudError) as exc:
         await edit.propose_edit(
-            "w1", "u1", row.id,
+            "w1",
+            "u1",
+            row.id,
             {"path": "app.py", "instruction": "x"},
-            client=fake_model, daytona=fake_dt,
+            client=fake_model,
+            daytona=fake_dt,
         )
     assert exc.value.code == "websandbox.edit_failed"
 
@@ -198,9 +213,12 @@ async def test_propose_edit_not_ready_when_unprovisioned() -> None:
 
     with pytest.raises(CloudError) as exc:
         await edit.propose_edit(
-            "w1", "u1", row.id,
+            "w1",
+            "u1",
+            row.id,
             {"path": "app.py", "instruction": "x"},
-            client=fake_model, daytona=fake_dt,
+            client=fake_model,
+            daytona=fake_dt,
         )
     assert exc.value.code == "websandbox.not_ready"
     assert fake_model.create_calls == []
@@ -217,10 +235,16 @@ async def test_propose_edit_with_selection_gathers_context() -> None:
     fake_dt = _FakeDaytona(file_bytes=b"def my_function():\n    return 1\n")
 
     await edit.propose_edit(
-        "w1", "u1", row.id,
-        {"path": "app.py", "instruction": "add a docstring",
-         "selection": {"startLine": 1, "endLine": 1}},
-        client=fake_model, daytona=fake_dt,
+        "w1",
+        "u1",
+        row.id,
+        {
+            "path": "app.py",
+            "instruction": "add a docstring",
+            "selection": {"startLine": 1, "endLine": 1},
+        },
+        client=fake_model,
+        daytona=fake_dt,
     )
 
     # A best-effort ripgrep ran under the pinned workspace dir.

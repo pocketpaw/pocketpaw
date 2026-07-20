@@ -63,9 +63,7 @@ async def list_projects(
     """List the caller's projects, most-recently-opened first (the projects grid)."""
     workspace_id = _require_workspace(ctx)
     views = await codeproject_service.list_projects(workspace_id, ctx.user_id)
-    return CodeProjectListResponse(
-        items=[codeproject_service.view_to_wire(v) for v in views]
-    )
+    return CodeProjectListResponse(items=[codeproject_service.view_to_wire(v) for v in views])
 
 
 @router.post("/{project_id}/open", response_model=WebSandboxResponse)
@@ -75,9 +73,7 @@ async def open_project(
 ) -> WebSandboxResponse:
     """Open a project → a READY sandbox to connect to (reuse or provision fresh)."""
     workspace_id = _require_workspace(ctx)
-    sandbox = await codeproject_lifecycle.open_project(
-        workspace_id, ctx.user_id, project_id
-    )
+    sandbox = await codeproject_lifecycle.open_project(workspace_id, ctx.user_id, project_id)
     return websandbox_service.view_to_wire(sandbox)
 
 
@@ -89,9 +85,7 @@ async def rename_project(
 ) -> CodeProjectResponse:
     """Rename a project's display name (owner-scoped)."""
     workspace_id = _require_workspace(ctx)
-    view = await codeproject_service.rename_project(
-        workspace_id, ctx.user_id, project_id, body
-    )
+    view = await codeproject_service.rename_project(workspace_id, ctx.user_id, project_id, body)
     return codeproject_service.view_to_wire(view)
 
 

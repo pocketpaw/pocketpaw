@@ -133,9 +133,7 @@ class PtyBridge:
             if disconnect is not None:
                 with contextlib.suppress(Exception):
                     await disconnect()
-        logger.info(
-            "pty bridge closed: sandbox=%s session=%s", self._sandbox_id, self._session_id
-        )
+        logger.info("pty bridge closed: sandbox=%s session=%s", self._sandbox_id, self._session_id)
 
 
 __all__ = ["DEFAULT_COLS", "DEFAULT_ROWS", "OutputSink", "PtyBridge"]

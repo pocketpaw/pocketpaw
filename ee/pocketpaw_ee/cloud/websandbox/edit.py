@@ -140,9 +140,7 @@ async def _gather_context(daytona: DaytonaClient, sandbox_id: str, symbol: str) 
     try:
         # -n line numbers, --max-count caps per-file hits, -g excludes the VCS dir.
         cmd = f"rg -n --max-count 5 --no-heading -g '!.git' -- {symbol!r} ."
-        resp = await daytona.execute_command(
-            sandbox_id, cmd, cwd=WEBSANDBOX_WORKDIR, timeout=15
-        )
+        resp = await daytona.execute_command(sandbox_id, cmd, cwd=WEBSANDBOX_WORKDIR, timeout=15)
     except Exception:  # noqa: BLE001 — context is best-effort; never fail the edit on it
         logger.debug("websandbox.edit: context ripgrep failed for %r", symbol, exc_info=True)
         return ""
@@ -191,9 +189,7 @@ async def _run_model(model: str, system: str, user_message: str, client) -> str:
                 exc,
             ) from exc
         if not api_key:
-            raise CloudError(
-                503, "websandbox.edit_unavailable", "The edit model is not configured"
-            )
+            raise CloudError(503, "websandbox.edit_unavailable", "The edit model is not configured")
         client = AsyncAnthropic(api_key=api_key, timeout=_EDIT_TIMEOUT_SECONDS, max_retries=1)
 
     try:

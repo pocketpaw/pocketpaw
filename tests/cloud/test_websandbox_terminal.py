@@ -496,6 +496,7 @@ async def test_touch_activity_bumps_updated_at() -> None:
     assert touched is True
 
     doc2 = await _Doc.get(PydanticObjectId(view.id))
+
     # mongomock round-trips datetimes as tz-naive; compare tz-agnostically.
     def _naive(dt: datetime) -> datetime:
         return dt.replace(tzinfo=None)
