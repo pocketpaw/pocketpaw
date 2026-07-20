@@ -349,3 +349,69 @@ async def test_composio_events_route_to_single_user():
     for cls in (ComposioConnectionVerified, ComposioConnectionMismatch):
         ev = cls(data={"workspace_id": "w1", "user_id": "u1", "toolkit": "gmail"})
         assert await r.audience(ev) == ["u1"], cls.__name__
+
+
+@pytest.mark.asyncio
+async def test_site_published_routes_to_workspace_members():
+    # The /sites gallery is per-workspace, and a publish lands async relative to
+    # the chat turn — so every workspace member with the gallery open must get the
+    # push to flip the new site to Live without a poll.
+    async def ws_members(_wid: str) -> list[str]:
+        return ["a", "b", "c"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import SitePublished
+
+    r = AudienceResolver(workspace_members=ws_members)
+    ev = SitePublished(
+        data={
+            "workspace_id": "w1",
+            "site_id": "s1",
+            "pocket_id": "pkt1",
+            "owner": "a",
+            "plan_tier": "pro",
+        }
+    )
+    assert set(await r.audience(ev)) == {"a", "b", "c"}
+
+
+@pytest.mark.asyncio
+async def test_site_published_without_workspace_id_has_no_audience():
+    # Defensive: a malformed event with no workspace_id must not fan out anywhere
+    # (it falls through to []), never to an unscoped/global audience. The fetcher
+    # raises to prove the guard short-circuits before any member lookup.
+    async def ws_members(_wid: str) -> list[str]:
+        raise AssertionError("workspace_members must not be called without a workspace_id")
+
+    from pocketpaw_ee.cloud._core.realtime.events import SitePublished
+
+    r = AudienceResolver(workspace_members=ws_members)
+    ev = SitePublished(data={"site_id": "s1", "pocket_id": "pkt1"})
+    assert await r.audience(ev) == []
+
+
+@pytest.mark.asyncio
+async def test_workspace_job_events_route_to_workspace_members():
+    # A dynamic site's provisioning job finishes in the ARQ worker, long after
+    # publish — the terminal update fans out to the workspace so the gallery can
+    # advance provisioning -> live without polling job status.
+    async def ws_members(_wid: str) -> list[str]:
+        return ["a", "b"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import (
+        WorkspaceJobQueued,
+        WorkspaceJobUpdated,
+    )
+
+    r = AudienceResolver(workspace_members=ws_members)
+    for cls in (WorkspaceJobQueued, WorkspaceJobUpdated):
+        ev = cls(
+            data={
+                "job_id": "j1",
+                "workspace_id": "w1",
+                "pocket_id": "pkt1",
+                "action": "provision",
+                "job_name": "provision_site",
+                "status": "done",
+            }
+        )
+        assert set(await r.audience(ev)) == {"a", "b"}, cls.__name__
