@@ -7,6 +7,9 @@
 # Three routes back the redesigned ``/code`` surface:
 #   POST   /codeproject          — create (or return) a durable project for a repo.
 #   GET    /codeproject          — the caller's projects grid (most-recent first).
+#   GET    /codeproject/{id}      — read ONE project without opening it. Side-effect
+#                                   free, so the client can pick a runtime
+#                                   (BrowserPod vs Daytona) without provisioning a VM.
 #   POST   /codeproject/{id}/open — resolve the project to a READY sandbox to connect
 #                                   to (reuse the bound one or provision a fresh one).
 #   PATCH  /codeproject/{id}      — rename a project's display name (owner-scoped).
@@ -64,6 +67,24 @@ async def list_projects(
     workspace_id = _require_workspace(ctx)
     views = await codeproject_service.list_projects(workspace_id, ctx.user_id)
     return CodeProjectListResponse(items=[codeproject_service.view_to_wire(v) for v in views])
+
+
+@router.get("/{project_id}", response_model=CodeProjectResponse)
+async def get_project(
+    project_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> CodeProjectResponse:
+    """Read one project WITHOUT opening it (owner-scoped).
+
+    Deliberately side-effect free, unlike ``POST /{project_id}/open``: the client
+    needs the project's shape (repo, name) to decide which runtime to open it in
+    — the in-tab BrowserPod pod or a Daytona VM — and ``open`` cold-provisions a
+    Daytona VM as a side effect. Routing on ``open`` would therefore provision a
+    VM for every project even when it is about to run entirely in the browser.
+    """
+    workspace_id = _require_workspace(ctx)
+    view = await codeproject_service.get_project(workspace_id, ctx.user_id, project_id)
+    return codeproject_service.view_to_wire(view)
 
 
 @router.post("/{project_id}/open", response_model=WebSandboxResponse)

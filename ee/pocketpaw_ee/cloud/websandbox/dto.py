@@ -175,6 +175,28 @@ class PreviewResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# BP-1b — BrowserPod (in-tab WASM runtime) boot credential.
+# ---------------------------------------------------------------------------
+
+
+class BrowserPodCredentialsResponse(BaseModel):
+    """The credential a browser needs to boot an in-tab BrowserPod pod.
+
+    Response-only (Rule 4). ``available`` is false with a null ``apiKey`` when the
+    deploy has no BROWSERPOD_API_KEY configured — the frontend then routes the
+    project to the Daytona runtime instead of treating it as an error.
+
+    NOTE: this response necessarily carries the key to the client, because
+    ``BrowserPod.boot()`` executes in the tab. Brokering it keeps the key out of
+    the frontend bundle and makes it gateable/rotatable/auditable, but it is not
+    secret from an authenticated caller — see ``websandbox/browserpod.py``.
+    """
+
+    available: bool
+    apiKey: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # WC-7/P4a — git write path (status / stage / commit / push).
 # ---------------------------------------------------------------------------
 
