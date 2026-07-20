@@ -99,14 +99,156 @@ def _assert_every_true_flag_has_a_reason(result) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_package_json_implies_install_and_native_toolchain() -> None:
+def test_package_json_implies_install() -> None:
     result = requirements.infer_from_package_json(json.dumps({"dependencies": {"express": "^4"}}))
 
     assert result.install is True
-    # An npm install of any non-trivial tree fetches or builds native binaries.
-    assert result.nativeToolchain is True
     assert result.rawSockets is False
     _assert_every_true_flag_has_a_reason(result)
+
+
+# ---------------------------------------------------------------------------
+# nativeToolchain — EVIDENCE, not assumption.
+#
+# The probe used to hardcode ``nativeToolchain=True`` for every manifest,
+# reasoning that "any non-trivial tree pulls prebuilt native binaries (esbuild,
+# rollup's native bindings, sharp, node-gyp fallbacks)". That conflated two
+# different things under one flag:
+#
+#   • a package that ships a prebuilt binary WITH a WASM fallback (esbuild,
+#     rollup) — runs fine in an in-tab runtime, which our own 2026-07-18
+#     WebContainers gate run demonstrated: npm install exit 0 over 320 packages,
+#     then a working Vite dev server on the rollup toolchain.
+#   • a package that must COMPILE native code or load a binary with no WASM
+#     path (better-sqlite3, node-gyp, sharp) — genuinely cannot.
+#
+# ``Capabilities.nativeToolchain`` in the client registry is defined as the
+# SECOND ("compile and run NATIVE code: gcc, node-gyp, native node modules"), so
+# the blanket true made every project claim a need it did not have, and no
+# in-tab runtime could ever be selected for anything. The flag is unselectable-
+# by-construction in one direction and useless in the other; these tests pin the
+# distinction.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "dependencies",
+    [
+        {"express": "^4"},
+        # The exact packages the old blanket reason cited. Both ship prebuilt
+        # binaries with a WASM/JS fallback, and both are proven to work in an
+        # in-tab runtime by the gate run.
+        {"vite": "^5", "rollup": "^4"},
+        {"esbuild": "^0.20"},
+        {"svelte": "^5", "@sveltejs/kit": "^2"},
+    ],
+)
+def test_a_plain_node_project_does_not_need_a_native_toolchain(dependencies: dict) -> None:
+    result = requirements.infer_from_package_json(json.dumps({"dependencies": dependencies}))
+
+    assert result.nativeToolchain is False, (
+        f"{sorted(dependencies)} compiles nothing native; claiming otherwise makes every "
+        f"in-tab runtime unselectable. Reasons: {result.reasons}"
+    )
+    _assert_every_true_flag_has_a_reason(result)
+
+
+@pytest.mark.parametrize(
+    "package",
+    ["better-sqlite3", "sqlite3", "sharp", "canvas", "bcrypt", "node-gyp", "serialport"],
+)
+def test_a_package_that_compiles_native_code_raises_the_flag(package: str) -> None:
+    result = requirements.infer_from_package_json(json.dumps({"dependencies": {package: "^1"}}))
+
+    assert result.nativeToolchain is True
+    assert any(package in reason for reason in result.reasons), (
+        f"the reason must name the evidence, got: {result.reasons}"
+    )
+    _assert_every_true_flag_has_a_reason(result)
+
+
+def test_a_native_dev_dependency_also_counts() -> None:
+    # A build step that compiles an addon needs the toolchain just as much as a
+    # runtime dependency does.
+    result = requirements.infer_from_package_json(
+        json.dumps({"devDependencies": {"sharp": "^0.33"}})
+    )
+
+    assert result.nativeToolchain is True
+    assert any("devDependencies" in reason for reason in result.reasons)
+
+
+@pytest.mark.parametrize(
+    "scripts",
+    [
+        {"install": "node-gyp rebuild"},
+        {"postinstall": "node-pre-gyp install --fallback-to-build"},
+        {"rebuild": "cmake-js compile"},
+        {"build:native": "make -C src/native"},
+    ],
+)
+def test_a_build_script_that_compiles_raises_the_flag(scripts: dict) -> None:
+    # The strongest possible evidence: the manifest says, in its own words, that
+    # it shells out to a compiler.
+    result = requirements.infer_from_package_json(json.dumps({"scripts": scripts}))
+
+    assert result.nativeToolchain is True
+    _assert_every_true_flag_has_a_reason(result)
+
+
+def test_gypfile_raises_the_flag() -> None:
+    # npm's own marker that this package carries a binding.gyp.
+    result = requirements.infer_from_package_json(json.dumps({"gypfile": True}))
+
+    assert result.nativeToolchain is True
+
+
+def test_a_scoped_native_package_is_matched_by_prefix() -> None:
+    result = requirements.infer_from_package_json(
+        json.dumps({"dependencies": {"@napi-rs/canvas": "^0.1"}})
+    )
+
+    assert result.nativeToolchain is True
+
+
+def test_platform_binaries_in_optional_dependencies_do_not_raise_the_flag() -> None:
+    """The regression that would silently restore the old behaviour.
+
+    Rollup, esbuild and swc all declare their per-platform prebuilt binaries as
+    ``optionalDependencies`` — ``@rollup/rollup-linux-x64-gnu`` and friends. npm
+    installs whichever matches the host and SKIPS the rest, and every one of them
+    has a JS or WASM fallback, which is exactly why the gate run's Vite app
+    worked. Scanning that section for native-looking names would mark every
+    modern frontend project as needing a compiler again.
+    """
+    result = requirements.infer_from_package_json(
+        json.dumps(
+            {
+                "dependencies": {"vite": "^5"},
+                "optionalDependencies": {
+                    "@rollup/rollup-linux-x64-gnu": "4.9.0",
+                    "@esbuild/darwin-arm64": "0.20.0",
+                },
+            }
+        )
+    )
+
+    assert result.nativeToolchain is False, (
+        f"optionalDependencies are per-platform prebuilds with fallbacks: {result.reasons}"
+    )
+
+
+def test_an_unreadable_manifest_still_routes_up() -> None:
+    """The fail-up policy is unchanged by this fix, and must stay that way.
+
+    Narrowing ``nativeToolchain`` is only safe because "we could not tell" still
+    resolves to most-capable. If a future change ever made the unknown path
+    default small, an unreachable GitHub would start routing real projects to a
+    runtime that cannot build them.
+    """
+    result = requirements.infer_from_package_json("{not json at all")
+
+    assert result.nativeToolchain is True
 
 
 @pytest.mark.parametrize(
