@@ -220,9 +220,7 @@ async def get_repo_archive(
     treatment (see ``test_websandbox_routes.py``).
     """
     workspace_id = _require_workspace(ctx)
-    content = await websandbox_archive.fetch_repo_archive(
-        workspace_id, ctx.user_id, repo, ref
-    )
+    content = await websandbox_archive.fetch_repo_archive(workspace_id, ctx.user_id, repo, ref)
     return Response(content=content, media_type="application/zip")
 
 
