@@ -8,6 +8,14 @@
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-07-17 (feat/sites-native-artifact-no-build): added ``artifact_home()``
+# (the ~/.pocketpaw/site-artifacts root for the native-artifact read-through cache,
+# mirroring build_home) and ``generator_version()`` (an artifact-format + dep epoch
+# the cache key rides so a generator/dep upgrade invalidates stored renders). These
+# back service.get_native_artifact becoming read-through: a preview VIEW no longer
+# triggers a build, so the prod box stops running a 1-2 min SvelteKit build on every
+# site view. Builds now happen only at publish and (cached/pre-warmed) at edit-arm.
+#
 # Updated 2026-07-10 (HE-3 — html publish skips the Node build): build()/_build_one()
 # now branch the STAGE-2 payload AND the build chain on the engine's CAPABILITY, via
 # ``needs_node_build(engine)`` / ``is_source_engine(engine)`` from the canonical
@@ -769,6 +777,41 @@ def _gen_cmd_argv() -> list[str]:
     "node /abs/path/paw-sites/dist/cli.js". PROD TODO: install the bin and drop
     the override."""
     return shlex.split(os.environ.get("PAW_SITES_GEN_CMD", "paw-sites-gen"))
+
+
+def artifact_home() -> Path:
+    """Root dir for the persistent per-pocket native-artifact CACHE (the read-through
+    store behind ``get_native_artifact``). Each pocket's rendered ``{body_html, css}``
+    artifacts live under ``artifact_home()/<pocket_id>/<content_hash>.json`` so a
+    preview view can serve a prior render from disk WITHOUT a subprocess build.
+
+    ``~/.pocketpaw/site-artifacts`` by default so it rides the prod ``backend-data``
+    volume alongside ``build_home()`` (``~/.pocketpaw/site-builds``); override with
+    PAW_SITES_ARTIFACT_DIR (tests point it at a temp dir so they never write the real
+    home). Mirrors ``build_home()`` / ``local_server.sites_home()``'s convention."""
+    raw = os.environ.get("PAW_SITES_ARTIFACT_DIR")
+    base = Path(raw) if raw else Path.home() / ".pocketpaw" / "site-artifacts"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+# Cache-format epoch for the native-artifact store. Bump this string whenever the
+# artifact EXTRACTION shape changes (what ``_read_native_artifact`` pulls out of a
+# build) so a code change that alters the stored ``{body_html, css}`` invalidates
+# every previously-cached artifact instead of serving a stale render.
+_ARTIFACT_FORMAT_EPOCH = "v1"
+
+
+def generator_version() -> str:
+    """A stable identifier of the paw-sites GENERATOR + artifact-format the cache is
+    keyed on, so a generator/dep upgrade (which changes the built output) invalidates
+    the native-artifact store rather than serving a render from the old toolchain.
+
+    Combines the artifact-format epoch with the pinned ripple + motion dep specs —
+    the inputs that most directly move the built HTML/CSS. It rides the content hash
+    in ``service._artifact_content_hash``; a bump to any of these yields a fresh key,
+    so the next preview rebuilds once and re-caches."""
+    return f"{_ARTIFACT_FORMAT_EPOCH}|{_ripple_dep_source()}|{_ripple_motion_dep()}"
 
 
 def _ripple_dep_source() -> str:

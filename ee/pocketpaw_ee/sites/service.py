@@ -1,6 +1,59 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-07-17 (fix/sites-draft-visible — a DRAFT lists in the gallery):
+# added ``create_draft_site`` — the create-site MCP handlers now mint ONE Site doc
+# at CREATE time in a NOT-YET-DEPLOYED state so a draft-first pocket (pocketpaw#1744)
+# lists in the /sites gallery immediately, instead of appearing nowhere until a
+# publish first mints a Site doc. It is keyed on the SAME stable
+# ``_id = _live_object_id(workspace, pocket)`` that publish upserts, so a later
+# publish FINDS this draft and flips it in place (``deployed=True`` + url) rather
+# than inserting a second doc — the PERF-1/PERF-2 one-doc-per-pocket invariant is
+# preserved across create → publish. It is IDEMPOTENT (an existing doc — this draft
+# or an already-live one — is returned untouched, never clobbered or duplicated),
+# is NOT a deploy, and never touches billing (a draft opens no checkout / Dodo sub —
+# only publish does). It seeds the SAME capture defaults publish's first-insert
+# seeds (signed_key / allowed_origins / event_mapping) so a first publish taking the
+# UPDATE branch over the draft keeps a working captureSignedKey + lead mapping. A
+# draft reads draft/not-live everywhere because BP-2 keys ``is_live`` on
+# ``doc.deployed`` (False here), never on doc-existence.
+#
+# Updated 2026-07-17 (fix/sites-prewarm-origin — pre-warm the origin a VIEW asks for):
+# the native-artifact pre-warm must build with the SAME origin the browser's
+# ``GET /native-artifact`` view resolves (the request Origin header), or the content
+# hashes differ and the pre-warmed artifact is never hit — every view stays a cold
+# miss. ``publish_pocket`` and ``apply_leaf_edits`` gained a ``prewarm_origin`` param
+# the REST routers thread the request Origin into; it steers ONLY the pre-warm's armed
+# artifact (``builder_origin=prewarm_origin or builder_origin``), never the PUBLIC
+# deploy (a ``/sites/publish`` live deploy stays plain). Chat-agent / MCP callers pass
+# no ``prewarm_origin`` (no request origin), so the pre-warm keeps its
+# PAW_SITES_BUILDER_ORIGIN env fallback — set that env to the dashboard origin in
+# deployments as a belt-and-braces default so the fallback matches the view too.
+# ``edit_svelte_component`` is UNCHANGED: it is MCP-only (no request origin) and warms
+# with the origin the site was armed/published with (``prior.builder_origin``), which
+# already equals the dashboard origin a view asks for.
+#
+# Updated 2026-07-17 (feat/sites-native-artifact-no-build — kill preview-time builds):
+# ``get_native_artifact`` is now a READ-THROUGH cache instead of building on every
+# call. It hashes the pocket's render inputs (svelte source map + theme + builder
+# origin + ``generator_client.generator_version()``) into a content hash and serves a
+# prior ``{body_html, css}`` from the new filesystem artifact store
+# (``_FilesystemArtifactStore`` → ``generator_client.artifact_home()``,
+# ``~/.pocketpaw/site-artifacts/<pocket_id>/<hash>.json``) on a HIT — ZERO subprocess
+# builds. A MISS builds once (armed, via the factored ``_build_native_artifact``),
+# stores, and returns. Builds now happen only at publish and (pre-warmed) at edit-arm,
+# never on a plain view (the prod box ran a 1-2 min SvelteKit build on every site
+# view before this). A background pre-warm (``_prewarm_native_artifact`` →
+# ``_safe_prewarm`` scheduled via ``_default_prewarm_scheduler``) repopulates the store
+# after ``apply_leaf_edits`` / ``edit_svelte_component`` mutate source and after a LIVE
+# svelte ``publish_pocket``, so the next view/arm is a hit; it is best-effort and never
+# gates the mutation. ARMED-VS-PLAIN PUBLISH FINDING: the ``/sites/publish`` live
+# deploy threads NO builder_origin (router calls ``publish_pocket`` without one), so the
+# public deploy is PLAIN — no data-uid / no ``paw-edit-manifest`` on public pages; the
+# armed artifact the native editor needs is produced by the pre-warm, NOT by shipping
+# the edit-bridge to public pages. The ``_store`` seam keeps "where the render comes
+# from" injectable so a later client-side-REPL compile wave can swap it cheaply.
+#
 # Updated 2026-07-10 (HE-2 — canonical engine module): the engine content-selection
 # checks now route through ``sites.engines`` predicates instead of inline
 # ``== "svelte"`` string equality. ``is_source_engine(engine)`` replaces the
@@ -511,6 +564,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -658,6 +712,318 @@ def _read_native_artifact(project_dir: str) -> tuple[str, str]:
     cloudflare_dir = Path(project_dir, _CLOUDFLARE_BUILD_REL)
     html = (cloudflare_dir / "index.html").read_text(encoding="utf-8")
     return _extract_body_inner(html), _extract_css(html, cloudflare_dir)
+
+
+# ---------------------------------------------------------------------------
+# Native-artifact read-through cache (feat/sites-native-artifact-no-build).
+#
+# Viewing a svelte Paw Site in the native editor USED to run a full SvelteKit build
+# on every ``GET /native-artifact`` call — fine on a fast laptop, 1-2 min on the prod
+# Hetzner box. The cache below makes a VIEW a disk read: get_native_artifact hashes
+# the pocket's current render inputs and serves a prior ``{body_html, css}`` from disk
+# on a hit; a miss builds once, stores, and returns. Builds now happen only at publish
+# and (pre-warmed in the background, then cached) at edit-arm — never on a plain view.
+# The artifact SOURCE stays behind one seam (the store) so a later "compile in the
+# client-side REPL" wave can swap where the render comes from without touching callers.
+# ---------------------------------------------------------------------------
+
+
+def _artifact_content_hash(
+    *, source: dict[str, Any], theme: dict[str, Any], builder_origin: str, gen_version: str
+) -> str:
+    """Fingerprint the inputs that determine a native artifact's rendered output — the
+    svelte source map, the theme, the builder origin (it changes the stamped
+    data-uid + edit-bridge), and the generator version (a toolchain/dep bump changes
+    the built HTML/CSS). A stable hash for an unchanged render; it changes the moment
+    any input does, which is exactly when the cached artifact is stale and a rebuild is
+    required. The store is already keyed per pocket by path, so this need only separate
+    an unchanged render from a changed one within a pocket."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for part in (
+        gen_version,
+        builder_origin or "",
+        json.dumps(source, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+        json.dumps(theme, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+    ):
+        h.update(part.encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+# Keep at most this many artifact files per pocket (current + previous by default), so
+# the store never grows unbounded as a pocket is edited. Override PAW_SITES_ARTIFACT_KEEP.
+_ARTIFACT_KEEP_DEFAULT = 2
+
+
+def _artifact_keep() -> int:
+    import os
+
+    raw = os.environ.get("PAW_SITES_ARTIFACT_KEEP")
+    try:
+        n = int(raw) if raw else _ARTIFACT_KEEP_DEFAULT
+    except (TypeError, ValueError):
+        return _ARTIFACT_KEEP_DEFAULT
+    return n if n > 0 else _ARTIFACT_KEEP_DEFAULT
+
+
+class _FilesystemArtifactStore:
+    """Default read-through store for get_native_artifact — persists a rendered
+    ``{body_html, css}`` as a JSON file at ``artifact_home()/<pocket_id>/<hash>.json``.
+
+    Tenant isolation: the path is keyed on ``pocket_id`` (resolved from a
+    tenant-scoped pockets read), so one tenant's store dir is never addressable from
+    another tenant's request. Reads and writes are best-effort — a missing / corrupt /
+    partial file reads as a MISS (return ``None``) so a bad entry degrades to a rebuild
+    rather than surfacing an error, and a failed write is swallowed (the render still
+    returns, just uncached). This class is the injection seam (the ``_store`` param) so
+    tests exercise the read-through logic with an in-memory fake and never touch disk."""
+
+    def read(self, pocket_id: str, content_hash: str) -> tuple[str, str] | None:
+        from pocketpaw_ee.sites.generator_client import artifact_home
+
+        path = artifact_home() / pocket_id / f"{content_hash}.json"
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except (FileNotFoundError, NotADirectoryError, OSError):
+            return None
+        try:
+            data = json.loads(raw)
+            body_html = data["body_html"]
+            css = data["css"]
+        except (ValueError, KeyError, TypeError):
+            return None
+        if not isinstance(body_html, str) or not isinstance(css, str):
+            return None
+        return body_html, css
+
+    def write(self, pocket_id: str, content_hash: str, body_html: str, css: str) -> None:
+        import os
+        import tempfile
+
+        from pocketpaw_ee.sites.generator_client import artifact_home
+
+        pocket_dir = artifact_home() / pocket_id
+        try:
+            pocket_dir.mkdir(parents=True, exist_ok=True)
+            payload = json.dumps(
+                {
+                    "body_html": body_html,
+                    "css": css,
+                    "stored_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            # Atomic write: a partial file must never read as a hit. Write a temp file in
+            # the same dir, then os.replace (atomic on the same filesystem).
+            fd, tmp = tempfile.mkstemp(dir=str(pocket_dir), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(payload)
+                os.replace(tmp, str(pocket_dir / f"{content_hash}.json"))
+            except OSError:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except OSError:
+            # Best-effort cache — a write failure must not break the render path.
+            logger.warning(
+                "sites.artifact_store: write failed for pocket %s", pocket_id, exc_info=True
+            )
+            return
+        self._evict(pocket_dir)
+
+    def _evict(self, pocket_dir: Path) -> None:
+        """Keep only the newest ``_artifact_keep()`` artifact files (current + previous
+        by default) in the pocket dir, deleting the oldest by mtime. Best-effort."""
+        try:
+            files = sorted(
+                (p for p in pocket_dir.glob("*.json") if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return
+        for stale in files[_artifact_keep() :]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
+
+_DEFAULT_ARTIFACT_STORE = _FilesystemArtifactStore()
+
+
+def _default_artifact_store() -> _FilesystemArtifactStore:
+    """The process-wide default native-artifact store (a filesystem store). Factored so
+    ``get_native_artifact`` / the pre-warm resolve the same instance and tests can pass
+    an in-memory ``_store`` instead."""
+    return _DEFAULT_ARTIFACT_STORE
+
+
+async def _build_native_artifact(
+    *,
+    generator: GeneratorClient,
+    theme: dict[str, Any],
+    source: dict[str, Any],
+    site_name: str,
+    builder_origin: str,
+    pocket_id: str,
+    read: Callable[[str], tuple[str, str]],
+) -> tuple[str, str]:
+    """Run the ARMED svelte build for a native artifact and extract ``(body_html, css)``.
+
+    The single build path shared by get_native_artifact's cache MISS and the
+    background pre-warm. It builds with ``builder_origin`` set (so the paw-sites
+    generator stamps ``data-uid`` on the editable leaves + embeds the
+    ``paw-edit-manifest``) through ``_build_or_cloud_error`` (a toolchain / non-zero /
+    SmokeGate failure becomes a clean CloudError, not an opaque 500), then reads the
+    built ``<body>`` inner HTML + concatenated CSS off disk. ``smoke=False`` is the
+    arm/preview gate — skip the SSR fail-check but still emit the static output. A
+    svelte pocket has no rippleSpec, so ``ripple_spec={}`` (mirrors the prior inline
+    call); PERF-3's stable per-pocket build dir keeps node_modules / bun install
+    cached across builds so the arm build reuses the publish build's install."""
+    build = await _build_or_cloud_error(
+        generator,
+        ripple_spec={},
+        theme=theme,
+        # Transient, per-pocket-stable id — cosmetic here (only rides the built page's
+        # capture config, which the native editor ignores). The build DIR is keyed on
+        # pocket_id (PERF-3), not this, so it does not affect where the output lands.
+        site_id=_preview_id(pocket_id),
+        title=site_name,
+        capture_api_base=_capture_base(),
+        capture_signed_key=f"site_key_{secrets.token_urlsafe(24)}",
+        engine="svelte",
+        source=source,
+        builder_origin=builder_origin,
+        pocket_id=pocket_id,
+        smoke=False,
+    )
+    return read(build.project_dir)
+
+
+async def _prewarm_native_artifact(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    builder_origin: str | None = None,
+    _generator: GeneratorClient | None = None,
+    _read_built: Callable[[str], tuple[str, str]] | None = None,
+    _store: Any | None = None,
+) -> None:
+    """Produce + cache the ARMED native artifact for a pocket in the BACKGROUND so the
+    next preview/arm is a read-through cache HIT instead of an on-interaction build.
+
+    Fired after a source mutation (leaf edit / component edit) and after a LIVE svelte
+    publish. It re-reads the pocket (source is the source of truth and may have just
+    changed), computes the SAME content hash ``get_native_artifact`` uses, and — only
+    if the store does not already hold that render — builds once and stores it. So a
+    mutation that lands identical source, or a re-publish of unchanged source, rebuilds
+    nothing.
+
+    Best-effort by contract: callers schedule it through ``_safe_prewarm`` (which
+    swallows + logs) so the edit / publish they own returns regardless of a pre-warm
+    failure (missing toolchain, a non-svelte pocket, a read error)."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import generator_client
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    # Only svelte sites have a native shadow-render build; ripple/html don't use this
+    # path (an html site's served artifact IS its source). Nothing to arm otherwise.
+    if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
+        return
+    source = pocket["source"]
+    ripple_spec = pocket.get("rippleSpec") or {}
+    theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
+    site_name = (pocket.get("name") or "").strip() or "Untitled site"
+    origin = (builder_origin or "").strip() or _builder_origin()
+
+    store = _store or _default_artifact_store()
+    content_hash = _artifact_content_hash(
+        source=source,
+        theme=theme,
+        builder_origin=origin,
+        gen_version=generator_client.generator_version(),
+    )
+    if store.read(pocket_id, content_hash) is not None:
+        return  # already warm — no rebuild
+    generator = _generator or GeneratorClient()
+    read = _read_built or _read_native_artifact
+    body_html, css = await _build_native_artifact(
+        generator=generator,
+        theme=theme,
+        source=source,
+        site_name=site_name,
+        builder_origin=origin,
+        pocket_id=pocket_id,
+        read=read,
+    )
+    store.write(pocket_id, content_hash, body_html, css)
+
+
+async def _safe_prewarm(**kwargs: Any) -> None:
+    """Run ``_prewarm_native_artifact`` swallowing ALL errors — pre-warm is best-effort
+    and must never break the edit / publish that scheduled it."""
+    try:
+        await _prewarm_native_artifact(**kwargs)
+    except Exception:  # noqa: BLE001 — pre-warm is best-effort, never a gate
+        logger.warning(
+            "sites.prewarm: native-artifact pre-warm failed for pocket %s",
+            kwargs.get("pocket_id"),
+            exc_info=True,
+        )
+
+
+# Background-task keepalive: asyncio holds only a WEAK ref to a bare create_task, so a
+# fire-and-forget task can be garbage-collected mid-run. Hold a strong ref until done.
+_PREWARM_TASKS: set[asyncio.Task[None]] = set()
+
+
+def _default_prewarm_scheduler(coro: Any) -> None:
+    """The production pre-warm scheduler — detach the coroutine as a background task on
+    the running loop and return immediately (off the caller's critical path). With no
+    running loop (a sync call site), close the coroutine and skip; pre-warm is
+    best-effort. Tests patch this module attr to capture the coroutine instead."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        coro.close()
+        return
+    task = loop.create_task(coro)
+    _PREWARM_TASKS.add(task)
+    task.add_done_callback(_PREWARM_TASKS.discard)
+
+
+def _schedule_native_prewarm(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    builder_origin: str | None = None,
+    _generator: GeneratorClient | None = None,
+    _read_built: Callable[[str], tuple[str, str]] | None = None,
+    _store: Any | None = None,
+) -> None:
+    """Fire a background native-artifact pre-warm for a pocket. A thin, non-async
+    wrapper the mutation / publish call sites invoke; it never blocks or raises. The
+    injected ``_generator`` seam is forwarded so a faked-generator publish/edit
+    pre-warms with the SAME fake (unit tests never shell out). The scheduler is looked
+    up on the module (``_default_prewarm_scheduler``) so tests can patch it."""
+    _default_prewarm_scheduler(
+        _safe_prewarm(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            builder_origin=builder_origin,
+            _generator=_generator,
+            _read_built=_read_built,
+            _store=_store,
+        )
+    )
 
 
 async def _build_or_cloud_error(
@@ -1098,6 +1464,77 @@ async def require_sites_plan(workspace_id: str) -> None:
         )
 
 
+async def create_draft_site(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    name: str = "",
+) -> _SiteDoc:
+    """Mint the DRAFT Site doc for a freshly created site pocket so it lists in the
+    /sites gallery BEFORE it is ever published (fix/sites-draft-visible).
+
+    Draft-first create (pocketpaw#1744) persists a site POCKET but no Site doc — Site
+    docs were only minted at PUBLISH — so a draft appeared in neither the gallery's
+    All nor its Draft filter (``list_for_workspace`` reads Site docs, and a draft had
+    none). This mints ONE canonical Site doc in a NOT-YET-DEPLOYED state so the draft
+    lists naturally and reads as a draft everywhere (``pocket_status`` and the card
+    badge key on ``deployed``, not on doc-existence — BP-2), while a plain create still
+    does NOT deploy.
+
+    Dedupe invariant (PERF-1/PERF-2): the doc is keyed on the SAME stable
+    ``_id = _live_object_id(workspace_id, pocket_id)`` that ``publish`` upserts, so a
+    later publish FINDS this draft and flips it in place (``deployed=True`` + url)
+    instead of minting a second doc — exactly ONE Site doc per pocket across
+    create → publish. IDEMPOTENT: if a Site doc already exists for the pocket (this
+    draft on a duplicate create, or an already-published/live one), it is returned
+    UNCHANGED — the mint never clobbers a live doc back to draft and never duplicates.
+
+    NOT a deploy and NOT a billing event: a draft never builds, never contacts
+    Cloudflare, and never opens a checkout / Dodo subscription (only ``publish`` does).
+    It seeds the SAME capture defaults ``publish``'s first-insert seeds — a minted
+    ``signed_key``, ``allowed_origins``, ``event_mapping`` — so when publish later takes
+    the UPDATE branch over this draft (which preserves those fields), the built page's
+    ``captureSignedKey`` matches the persisted doc and lead capture works on the first
+    publish. ``publish`` reuses a stored non-empty ``signed_key``, so minting one here is
+    what keeps the built key and the doc in sync (the same invariant
+    ``test_republish_reuses_signed_key`` pins for a re-publish).
+    """
+    oid = _live_object_id(workspace_id, pocket_id)
+    # Idempotent + dedupe-safe: never mint a second doc for a pocket, and never reset
+    # an already-published/live doc back to draft. If a doc already exists (this draft
+    # on a repeat create, or a live one), return it untouched.
+    existing = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if existing is not None:
+        return existing
+
+    doc = _SiteDoc(
+        id=oid,
+        workspace=workspace_id,
+        pocket_id=pocket_id,
+        owner=user_id,
+        name=name.strip() if name else "",
+        # Not deployed yet — a plain create stops at the draft. publish stamps
+        # script_name (== the stable id) / url / deployed_at when it goes live.
+        script_name="",
+        deployed=False,
+        url="",
+        builder_origin="",
+        # Seed the capture config publish's first-insert seeds so a first publish
+        # (which finds this draft and takes the UPDATE branch, preserving these
+        # fields) keeps a working signed_key + lead mapping. Minting the key here is
+        # also what publish reuses, so the built captureSignedKey matches the doc.
+        signed_key=f"site_key_{secrets.token_urlsafe(24)}",
+        allowed_origins=_default_allowed_origins(),
+        event_mapping=_DEFAULT_EVENT_MAPPING,
+    )
+    # no-event: a DRAFT is not a published/deployed mutation — nothing downstream
+    # (search index, soul memory, ripple invalidation) keys on a draft Site doc;
+    # publish emits SitePublished when the site actually goes live.
+    await doc.insert()
+    return doc
+
+
 async def publish(
     *,
     workspace_id: str,
@@ -1323,7 +1760,9 @@ async def _deploy_site_doc(
     cloudflare: Any | None = None,
     bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
     local_deploy: Callable[[str, str], str] | None = None,
-    workers_deploy: Callable[[str, str], Any] | None = None,
+    # HE-4: the workers deployer is engine-aware (``deploy_workers(site_id,
+    # project_dir, *, engine=..., d1_database_id=...)``), so the seam takes kwargs.
+    workers_deploy: Callable[..., Any] | None = None,
 ) -> _SiteDoc:
     """Generate, smoke-gate, deploy, and UPSERT the LIVE canonical Site doc.
 
@@ -1441,8 +1880,13 @@ async def _deploy_site_doc(
     if mode == "local":
         from pocketpaw_ee.sites import local_server
 
-        deploy = local_deploy or local_server.deploy_local
-        url = deploy(site_id, build.project_dir)
+        # HE-4: the real local deploy is engine-aware too — an html site's static
+        # tree is the project root, not .svelte-kit/cloudflare. The injected test
+        # seam stays 2-arg (fakes don't serve a real tree, so they ignore engine).
+        if local_deploy is not None:
+            url = local_deploy(site_id, build.project_dir)
+        else:
+            url = local_server.deploy_local(site_id, build.project_dir, engine=engine)
     elif mode == "workers":
         # Free workers.dev tier — STATIC sites only. A dynamic site needs a
         # per-tenant D1 + Queues (Phase 2 / use WfP), so reject it cleanly rather
@@ -1456,7 +1900,9 @@ async def _deploy_site_doc(
         from pocketpaw_ee.sites import workers_deploy as workers_deploy_mod
 
         deploy_w = workers_deploy or workers_deploy_mod.deploy_workers
-        url = await deploy_w(site_id, build.project_dir)
+        # HE-4: pass the engine so an html site deploys as an assets-only Worker
+        # (no server script), while ripple/svelte keep the SvelteKit-worker config.
+        url = await deploy_w(site_id, build.project_dir, engine=engine)
     else:  # "wfp"
         cf = cloudflare or _cf_client()
         bundle = bundle_reader(build.project_dir)
@@ -1982,6 +2428,7 @@ async def publish_pocket(
     name: str = "",
     site_plan_key: str | None = None,
     builder_origin: str | None = None,
+    prewarm_origin: str | None = None,
     preview: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
@@ -2030,6 +2477,18 @@ async def publish_pocket(
     ``builder_origin`` (SE-2b) is forwarded straight through so a publish via this
     shared path can request an editable site (the edit-bridge gates on it). It
     defaults to ``None`` (a normal, non-editable publish).
+
+    ``prewarm_origin`` is the origin the background native-artifact pre-warm should
+    build with — SEPARATE from ``builder_origin`` so it steers ONLY the pre-warmed
+    armed artifact, never the PUBLIC deploy (a live ``/sites/publish`` stays plain).
+    The REST ``/sites/publish`` router passes the request ``Origin`` header here so
+    the pre-warm produces the SAME content hash a browser's ``GET /native-artifact``
+    view (which resolves origin from its own request Origin header) will ask for;
+    otherwise the pre-warm would fall back to ``PAW_SITES_BUILDER_ORIGIN`` while the
+    view uses the dashboard origin, so their hashes never match and every view is a
+    cold miss. It defaults to ``None`` (chat-agent / MCP callers have no request
+    origin, so the pre-warm keeps the env fallback — set PAW_SITES_BUILDER_ORIGIN to
+    the dashboard origin in deployments so that fallback matches too).
 
     The generator / Cloudflare / bundle-reader / local-deploy seams are forwarded
     straight through to ``publish`` so the shared path is unit-testable without
@@ -2141,6 +2600,34 @@ async def publish_pocket(
         _bundle_reader=_bundle_reader,
         _local_deploy=_local_deploy,
     )
+
+    # feat/sites-native-artifact-no-build: a LIVE svelte publish pre-warms the native
+    # artifact cache in the BACKGROUND so the FIRST preview after publish is a
+    # read-through HIT instead of an on-view build. The live publish itself deploys the
+    # PLAIN (non-armed) public site (the /sites/publish endpoint threads no
+    # builder_origin — see the armed-vs-plain finding in the PR); the pre-warm produces
+    # the ARMED artifact the native editor needs, so the public deploy is unchanged.
+    #
+    # ORIGIN-STABILITY (fix/sites-prewarm-origin): the pre-warm must build with the SAME
+    # origin the browser's native-artifact VIEW resolves — the request Origin header —
+    # or the content hashes never match and the pre-warmed artifact is dead weight. So
+    # steer the pre-warm by ``prewarm_origin`` (the request Origin the /sites/publish
+    # router threads), falling back to ``builder_origin`` (an armed publish) and then —
+    # inside the pre-warm — the PAW_SITES_BUILDER_ORIGIN env. This does NOT touch the
+    # public deploy above (still plain on the REST path); it only picks the arm origin.
+    #
+    # Only svelte sites have a native build; a dynamic site deferred to the provision
+    # job returns deployed=False, so guard on doc.deployed too. Best-effort, off the
+    # publish's path. Forwards the injected generator so a faked publish warms with the
+    # same fake (unit tests never shell out).
+    if engine == "svelte" and getattr(doc, "deployed", False):
+        _schedule_native_prewarm(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            builder_origin=prewarm_origin or builder_origin,
+            _generator=_generator,
+        )
 
     # Stamp the per-site annual plan, open the per-site Dodo sub (degrading
     # gracefully when Dodo is unconfigured), and emit SitePublished. No checkout_url
@@ -2613,6 +3100,7 @@ async def apply_leaf_edits(
     user_id: str,
     pocket_id: str,
     edits: list[dict[str, Any]],
+    prewarm_origin: str | None = None,
     _apply: Any = None,
 ) -> list[dict[str, Any]]:
     """Persist native-editor leaf edits as a reviewable Branch draft (NE-4b).
@@ -2638,6 +3126,15 @@ async def apply_leaf_edits(
          naturally persists nothing and never churns an empty draft), each write
          auto-writing the Branch draft snapshot;
       5. return the per-uid verdicts unchanged.
+
+    ``prewarm_origin`` is the origin the background native-artifact pre-warm should
+    build with — the leaf-edits router passes the request ``Origin`` header so the
+    pre-warm produces the SAME content hash the browser's native-artifact VIEW
+    (which resolves origin from its own request Origin header) will ask for. Without
+    it the pre-warm falls back to ``PAW_SITES_BUILDER_ORIGIN`` while the view uses the
+    dashboard origin — different hash, so the warmed artifact is never hit. Defaults
+    to ``None`` (the pre-warm keeps the env fallback for callers with no request
+    origin).
 
     ``_apply`` is an injectable seam for the generator bridge (defaults to
     ``generator_client.apply_leaf_edits``) so the orchestration is unit-testable
@@ -2707,6 +3204,7 @@ async def apply_leaf_edits(
     # otherwise overwrite a live-data binding or 404 on an unknown path). Each write
     # auto-writes a Branch draft snapshotting the FULL edited map, so after the loop
     # the draft == the fully edited source. Multi-file safe.
+    changed = False
     for path, contents in new_map.items():
         if path not in files:
             continue
@@ -2714,6 +3212,25 @@ async def apply_leaf_edits(
             await pockets_service.set_svelte_source_file(
                 pocket_id, user_id, component_path=path, new_source=contents
             )
+            changed = True
+
+    # feat/sites-native-artifact-no-build: source changed → pre-warm the native
+    # artifact cache in the BACKGROUND so the next preview/arm is a read-through HIT
+    # instead of an on-view build. Only when something actually changed (a fully
+    # rejected batch persists nothing, so it warms nothing). Best-effort + off the
+    # edit's path; a pre-warm failure never affects this call.
+    #
+    # ORIGIN-STABILITY (fix/sites-prewarm-origin): warm with the request Origin the
+    # native editor called from (``prewarm_origin``) so the hash matches the browser's
+    # native-artifact view; ``None`` keeps the pre-warm's PAW_SITES_BUILDER_ORIGIN env
+    # fallback for callers with no request origin.
+    if changed:
+        _schedule_native_prewarm(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            builder_origin=prewarm_origin,
+        )
 
     return results
 
@@ -2726,37 +3243,42 @@ async def get_native_artifact(
     builder_origin: str | None = None,
     _generator: GeneratorClient | None = None,
     _read_built: Callable[[str], tuple[str, str]] | None = None,
+    _store: Any | None = None,
 ) -> dict[str, str]:
-    """Serve a svelte Paw Site's ARMED build as ``{pocket_id, body_html, css}`` so the
+    """Serve a svelte Paw Site's ARMED render as ``{pocket_id, body_html, css}`` so the
     native editor can shadow-render it (NE-5b) instead of framing an iframe.
 
-    The native-editing render path. It:
-      1. reads the pocket (the pockets service's PUBLIC ``get`` raises NotFound /
-         Forbidden itself — a missing / cross-tenant pocket surfaces as 404 / 403)
-         and asserts it is a svelte site (else ``ValidationError`` → 422), mirroring
+    READ-THROUGH cache (feat/sites-native-artifact-no-build). Viewing a site must NOT
+    trigger a build — the prior behaviour ran a full SvelteKit build on EVERY call
+    (1-2 min on the prod box). Now:
+      1. read the pocket (the pockets service's PUBLIC ``get`` raises NotFound /
+         Forbidden itself — a missing / cross-tenant pocket surfaces as 404 / 403) and
+         assert it is a svelte site (else ``ValidationError`` → 422), mirroring
          ``apply_leaf_edits`` / ``edit_svelte_component``;
-      2. ENSURES the ARMED build: it builds the pocket with ``builder_origin`` set so
-         the paw-sites generator stamps ``data-uid`` on the editable leaves AND embeds
-         the ``<script id="paw-edit-manifest">`` (SE-1 / EP-6 gate on ``builderOrigin``).
-         ``builder_origin`` defaults to the configured dashboard origin
-         (``PAW_SITES_BUILDER_ORIGIN``) exactly like ``make_site_editable``, so the
-         call works with no explicit origin. It builds via a DIRECT
-         ``GeneratorClient.build`` — the SAME arm/preview gate ``make_site_editable``
-         uses (``smoke=False`` skips the SSR FAIL-check but the static build still
-         runs; ``static_build`` stays the default ``True`` so ``.svelte-kit/cloudflare/``
-         is emitted) — instead of the full ``publish_pocket`` preview path, because
-         this is a READ: it needs neither a deploy, a Site doc, a promote, nor billing,
-         and ``build()`` RETURNS the ``project_dir`` so the built output is located
-         without reconstructing a path. PERF-3 builds into the stable
-         ``build_home()/<pocket_id>/`` so node_modules / bun install stay cached;
-      3. reads the built ``<body>`` inner HTML + concatenated CSS from that
-         ``project_dir``'s ``.svelte-kit/cloudflare/index.html`` (the SAME tree
-         ``_default_bundle_reader`` / ``local_server`` read) and returns them.
+      2. resolve the ARM inputs (source map, theme, builder origin — defaulting to the
+         configured ``PAW_SITES_BUILDER_ORIGIN`` when the caller passes none, exactly
+         like ``make_site_editable``) and hash them with the generator version into a
+         content hash;
+      3. CACHE HIT — the store already holds that render → return it from disk with
+         ZERO subprocess builds (the whole point). Publish and the post-edit pre-warm
+         populate the store ahead of the view, so a live/clean site is a hit;
+      4. CACHE MISS — build ONCE (armed: ``builder_origin`` set so the generator stamps
+         ``data-uid`` + embeds ``paw-edit-manifest``; ``smoke=False`` arm gate) through
+         ``_build_or_cloud_error`` (a toolchain / non-zero / SmokeGate failure becomes a
+         clean CloudError, not an opaque 500), read the built ``<body>`` inner HTML +
+         concatenated CSS, STORE it, and return. PERF-3's stable per-pocket build dir
+         keeps node_modules / bun install cached across builds.
 
-    ``_generator`` (defaults to a real ``GeneratorClient``) and ``_read_built``
-    (defaults to ``_read_native_artifact`` — the disk read + HTML/CSS extraction) are
-    injectable seams so the path is unit-testable without Bun / a real build."""
+    Local-mode degrade: a store miss on a box where no build has ever run just takes
+    the MISS branch (build once); a build failure still maps to a clean CloudError, so
+    the endpoint degrades cleanly rather than 500ing opaquely — unchanged from before.
+
+    ``_generator`` (defaults to a real ``GeneratorClient``), ``_read_built`` (defaults
+    to ``_read_native_artifact`` — the disk read + HTML/CSS extraction), and ``_store``
+    (defaults to the filesystem artifact store) are injectable seams so the path is
+    unit-testable without Bun / a real build / disk."""
     from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import generator_client
 
     # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
     # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
@@ -2780,39 +3302,35 @@ async def get_native_artifact(
     # data-uid + embed the manifest. Default to the configured dashboard origin when
     # the caller passes none, exactly like make_site_editable.
     origin = (builder_origin or "").strip() or _builder_origin()
-    generator = _generator or GeneratorClient()
-    # DEP-3: route the arm build through _build_or_cloud_error (the SAME helper the
-    # publish paths at ~1152 / ~1293 use) so a missing-toolchain / non-zero build /
-    # SmokeGateFailed becomes a clean CloudError (sites.generator_failed → 5xx)
-    # instead of escaping as an opaque unhandled 500. Unlike edit_svelte_component's
-    # preview build (map_smoke_gate=False, which preserves its
-    # rollback-on-SmokeGateFailed contract), this is a READ-ONLY render with no source
-    # mutation to roll back, so SmokeGateFailed is mapped too (default
-    # map_smoke_gate=True) — the caller just gets a structured error.
-    build = await _build_or_cloud_error(
-        generator,
-        ripple_spec=ripple_spec,
-        theme=theme,
-        # Transient, per-pocket-stable id — cosmetic here (it only rides the built
-        # page's capture config, which the native editor ignores). The build DIR is
-        # keyed on pocket_id (PERF-3), not this, so it does not affect where the
-        # output lands.
-        site_id=_preview_id(pocket_id),
-        title=site_name,
-        capture_api_base=_capture_base(),
-        capture_signed_key=f"site_key_{secrets.token_urlsafe(24)}",
-        engine="svelte",
+    store = _store or _default_artifact_store()
+    content_hash = _artifact_content_hash(
         source=source,
+        theme=theme,
+        builder_origin=origin,
+        gen_version=generator_client.generator_version(),
+    )
+    # READ-THROUGH: a hit serves the prior render straight off disk — no generator, no
+    # subprocess, no build. This is what makes a VIEW instant on the prod box.
+    cached = store.read(pocket_id, content_hash)
+    if cached is not None:
+        body_html, css = cached
+        return {"pocket_id": pocket_id, "body_html": body_html, "css": css}
+
+    # MISS: build once (armed), cache, return. ``_build_native_artifact`` routes through
+    # _build_or_cloud_error so a missing-toolchain / non-zero build / SmokeGateFailed
+    # becomes a clean CloudError (sites.generator_failed → 5xx), not an opaque 500.
+    generator = _generator or GeneratorClient()
+    read = _read_built or _read_native_artifact
+    body_html, css = await _build_native_artifact(
+        generator=generator,
+        theme=theme,
+        source=source,
+        site_name=site_name,
         builder_origin=origin,
         pocket_id=pocket_id,
-        # Arm/preview gate: skip the SSR FAIL-check but STILL emit the static
-        # .svelte-kit/cloudflare/ output (static_build defaults True) so there is an
-        # index.html to read.
-        smoke=False,
+        read=read,
     )
-
-    read = _read_built or _read_native_artifact
-    body_html, css = read(build.project_dir)
+    store.write(pocket_id, content_hash, body_html, css)
     return {"pocket_id": pocket_id, "body_html": body_html, "css": css}
 
 
@@ -2934,7 +3452,7 @@ async def edit_svelte_component(
     #    surfaces the reason. The prior deploy is untouched because the gate fires
     #    before publish deploys.
     try:
-        return await publish_pocket(
+        doc = await publish_pocket(
             workspace_id=workspace_id,
             user_id=user_id,
             pocket_id=pocket_id,
@@ -2954,6 +3472,19 @@ async def edit_svelte_component(
             new_source=previous_source,
         )
         raise
+
+    # feat/sites-native-artifact-no-build: the component source changed → pre-warm the
+    # native artifact cache in the BACKGROUND (re-applying the SE-2b builder origin) so
+    # the next native shadow-render is a read-through HIT. Best-effort, off this call's
+    # path; fired only after the preview republish above succeeded (no arm on rollback).
+    _schedule_native_prewarm(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        builder_origin=builder_origin or None,
+        _generator=_generator,
+    )
+    return doc
 
 
 async def _latest_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
@@ -3873,6 +4404,7 @@ async def revert_pocket_version(
 
 __all__ = [
     "apply_edits",
+    "create_draft_site",
     "publish",
     "publish_pocket",
     "activate_site",

@@ -1,0 +1,82 @@
+/* tokens.css — Quill (minimal-editorial) design system.
+ * Compiled from DESIGN.md front-matter; the shared source of truth both the
+ * ripple and svelte render engines consume. Keep in lockstep with DESIGN.md.
+ * Created: 2026-07-06 (feat/sites-crew-design-systems, SC-7b). */
+:root {
+  /* Colors — primary (garnet), secondary (ink blue), neutral (near-neutral → ink) */
+  --color-primary-50: #FBE9ED;
+  --color-primary-100: #F6CBD4;
+  --color-primary-200: #EE9BAC;
+  --color-primary-300: #E66B84;
+  --color-primary-400: #DE3F60;
+  --color-primary-500: #D12447;
+  --color-primary-600: #AE1E3B;
+  --color-primary-700: #8B1830;
+  --color-primary-800: #641122;
+  --color-primary-900: #3D0A15;
+  --color-secondary-50: #F0F2F5;
+  --color-secondary-100: #DBDFE6;
+  --color-secondary-200: #B9C1D0;
+  --color-secondary-300: #98A4B9;
+  --color-secondary-400: #7989A4;
+  --color-secondary-500: #637492;
+  --color-secondary-600: #536179;
+  --color-secondary-700: #424E61;
+  --color-secondary-800: #2F3846;
+  --color-secondary-900: #1D222B;
+  --color-neutral-50: #F3F2F2;
+  --color-neutral-100: #E1E1E0;
+  --color-neutral-200: #C6C5C3;
+  --color-neutral-300: #AAA9A6;
+  --color-neutral-400: #91908C;
+  --color-neutral-500: #7D7B77;
+  --color-neutral-600: #686764;
+  --color-neutral-700: #545250;
+  --color-neutral-800: #3C3B39;
+  --color-neutral-900: #252423;
+  --color-surface: var(--color-neutral-50);
+  --color-text: var(--color-neutral-900);
+  --color-text-muted: var(--color-neutral-600);
+
+  /* Typography */
+  --font-display: 'Newsreader', Georgia, serif;
+  --font-heading: 'Newsreader', Georgia, serif;
+  --font-body: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --text-display: 4.768rem;
+  --text-h1: 3.815rem;
+  --text-h2: 2.827rem;
+  --text-h3: 1.999rem;
+  --text-h4: 1.414rem;
+  --text-body-lg: 1.266rem;
+  --text-body: 1.062rem;
+  --text-body-sm: 0.889rem;
+  --text-caption: 0.79rem;
+  --leading-tight: 1.08;
+  --leading-body: 1.8;
+  --tracking-tight: -0.015em;
+  --tracking-caption: 0.06em;
+
+  /* Spacing — 4px base, very generous */
+  --space-xs: 0.25rem;
+  --space-sm: 0.5rem;
+  --space-md: 1rem;
+  --space-lg: 2rem;
+  --space-xl: 3.5rem;
+  --space-2xl: 6rem;
+  --space-3xl: 10rem;
+
+  /* Rounded — nearly none */
+  --radius-none: 0;
+  --radius-sm: 0.125rem;
+  --radius-md: 0.125rem;
+  --radius-lg: 0.25rem;
+  --radius-xl: 0.25rem;
+  --radius-full: 9999px;
+
+  /* Elevation — hairlines, not shadows */
+  --shadow-sm: none;
+  --shadow-md: 0 1px 0 rgba(37, 36, 35, 0.10);
+  --shadow-lg: 0 12px 40px rgba(37, 36, 35, 0.08);
+  --shadow-xl: 0 24px 60px rgba(37, 36, 35, 0.10);
+}

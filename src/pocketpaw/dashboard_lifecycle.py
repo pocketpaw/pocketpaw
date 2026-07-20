@@ -7,6 +7,10 @@ Extracted from dashboard.py — contains:
 - ``shutdown_event()`` — tears down all services
 
 Changes:
+- 2026-07-12: removed the ``bundled_kb`` (ripple-recipes) boot-time mirror.
+  The hand-authored ripple pattern recipes biased the agent toward fixed
+  layouts; design breadth now comes from live design references, not a
+  shipped scope. (chore/remove-bundled-kb-ripple-recipes)
 - 2026-07-11 (feat/external-alerting-c2c3): ``startup_event`` now autostarts the
   ``AutomationEvaluator`` (background threshold/data-change rule loop) when
   ``settings.automation_evaluator_autostart`` is true (the default) — the OSS
@@ -15,13 +19,12 @@ Changes:
 - 2026-05-22: ``startup_event`` also mirrors the built-in pocket
   templates into ``~/.pocketpaw/templates/`` via the
   ``bundled_templates`` installer — same best-effort, catch-and-log
-  pattern as the skills / kb installers, gated on
+  pattern as the skills installer, gated on
   ``auto_install_bundled_templates`` (feat/bundled-templates, 2a).
-- 2026-05-21: ``startup_event`` mirrors bundled SKILL.md files and
-  pre-compiled kb-go scopes into the user's home dir at boot via the
-  ``bundled_skills`` / ``bundled_kb`` installers. Best-effort, gated on
-  the ``auto_install_bundled_*`` settings; reuses the already-loaded
-  ``settings`` object.
+- 2026-05-21: ``startup_event`` mirrors bundled SKILL.md files into the
+  user's home dir at boot via the ``bundled_skills`` installer.
+  Best-effort, gated on ``auto_install_bundled_skills``; reuses the
+  already-loaded ``settings`` object.
 """
 
 import asyncio
@@ -244,43 +247,18 @@ async def startup_event(
             skipped = sum(1 for r in results if r.status == "skipped")
             failed = [r for r in results if r.status == "failed"]
             logger.info(
-                "Bundled skills sync: %d installed / %d updated / %d skipped / %d failed",
+                "Bundled skills sync: %d installed / %d updated / %d skipped / %d failed "
+                "— skills: %s",
                 installed,
                 updated,
                 skipped,
                 len(failed),
+                ", ".join(sorted(r.name for r in results)) or "(none)",
             )
             for r in failed:
                 logger.warning("Skill %s failed to install: %s", r.name, r.error)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Bundled-skills install failed (non-fatal): %s", exc)
-
-    # Mirror PocketPaw's pre-compiled kb-go scopes into
-    # ``~/.knowledge-base/`` so the existing ``_get_kb_context``
-    # injection can retrieve recipes at pocket-creation time.
-    # Best-effort — a failure here just means the agent loses the
-    # recipe-retrieval boost; the MCP tool + skill flow still works.
-    # Opt-out: ``POCKETPAW_AUTO_INSTALL_BUNDLED_KB_SCOPES=false``.
-    if settings.auto_install_bundled_kb_scopes:
-        try:
-            from pocketpaw.bundled_kb import install_bundled_kb_scopes
-
-            kb_results = install_bundled_kb_scopes()
-            installed = sum(1 for r in kb_results if r.status == "installed")
-            updated = sum(1 for r in kb_results if r.status == "updated")
-            skipped = sum(1 for r in kb_results if r.status == "skipped")
-            failed = [r for r in kb_results if r.status == "failed"]
-            logger.info(
-                "Bundled kb-go scopes sync: %d installed / %d updated / %d skipped / %d failed",
-                installed,
-                updated,
-                skipped,
-                len(failed),
-            )
-            for r in failed:
-                logger.warning("KB scope %s failed to install: %s", r.name, r.error)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Bundled kb-go scopes install failed (non-fatal): %s", exc)
 
     # Mirror PocketPaw's built-in pocket templates into
     # ``~/.pocketpaw/templates/`` so the create specialist can

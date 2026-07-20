@@ -1859,7 +1859,22 @@ class ClaudeSDKBackend(BaseAgentBackend):
             if plugin_dir is not None:
                 options_kwargs["plugins"] = [{"type": "local", "path": str(plugin_dir)}]
                 bundled_loaded = True
-                logger.info("SDK: loading bundled-skills plugin from %s", plugin_dir)
+                # Enumerate the actual skill dirs so operators can confirm which
+                # bundled skills reached the agent this connect (e.g. that a newly
+                # added skill is picked up after a restart).
+                try:
+                    _skills_root = plugin_dir / "skills"
+                    _skill_names = sorted(
+                        p.name for p in _skills_root.iterdir() if (p / "SKILL.md").is_file()
+                    )
+                except Exception:  # noqa: BLE001 — logging must never break the run
+                    _skill_names = []
+                logger.info(
+                    "SDK: loading bundled-skills plugin from %s — %d skills: %s",
+                    plugin_dir,
+                    len(_skill_names),
+                    ", ".join(_skill_names) or "(none found)",
+                )
 
         # Plugin-identity digest (fix/claude-sdk-warm-client-skills): folds
         # the requested skill set + the bundled flag into the cache key so a

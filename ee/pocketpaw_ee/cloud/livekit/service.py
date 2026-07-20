@@ -1258,20 +1258,39 @@ async def _create_tasks_from_meeting_notes(
 
 
 def _parse_action_item_assignee(item: str) -> tuple[str, str]:
-    """Extract ``@Name`` prefix from an action item, returning (assignee, rest)."""
+    """Extract ``@Name`` prefix from an action item, returning (assignee, rest).
+
+    Strips markdown bold markers (``**``) before matching so the ``@``
+    prefix is at position 0 regardless of whether the LLM rendered
+    ``@Name:`` or ``**@Name:**`` (the format the DeepSeek + merge
+    prompts ask for).
+    """
     import re
 
-    m = re.match(r"@(\S[\w\s]*?)\s*[:—\-]\s*(.*)", item.strip())
+    cleaned = item.strip()
+    # Strip bold markers so **@Name:** becomes @Name: (the regex requires
+    # @ at the start of the string).
+    cleaned = cleaned.replace("**", "").strip()
+
+    m = re.match(r"@(\S[\w\s]*?)\s*[:—\-]\s*(.*)", cleaned)
     if m:
         return m.group(1).strip(), m.group(2).strip()
     return "__unassigned__", item
 
 
 def _extract_action_items_from_markdown(markdown: str) -> list[str]:
-    """Extract bullet-point action items from the ## ✅ Action Items section.
+    """Extract bullet-point action items from the ✅ Action Items section.
 
     Looks for a heading matching "Action Items" (with optional emoji prefix)
-    and collects all following list items until the next heading or end of text.
+    at any heading level (``##`` or ``###``) and collects all following list
+    items until the next heading or end of text.  The DeepSeek + merge
+    prompts use ``###`` level headings; the regex also accepts ``##`` for
+    backwards-compatibility with older prompt versions and LLMs that
+    normalise heading levels.
+
+    Strips markdown bold markers (``**``) from extracted items so the
+    ``@Name:`` assignee prefix is at position 0 for
+    ``_parse_action_item_assignee``.
     """
     import re
 
@@ -1282,17 +1301,18 @@ def _extract_action_items_from_markdown(markdown: str) -> list[str]:
     for line in lines:
         stripped = line.strip()
 
-        # Detect the start of the Action Items section
+        # Detect the start of the Action Items section — accepts ``##`` or
+        # ``###`` headings, with or without emoji prefix.
         if (
-            re.match(r"^##\s*[✅📋📌⚠️🔜❓⚙️]*\s*Action\s*Items", stripped, re.IGNORECASE)
-            or re.match(r"^##\s*✅\s*Action\s*Items", stripped, re.IGNORECASE)
-            or re.match(r"^##\s*Action\s*Items", stripped, re.IGNORECASE)
+            re.match(r"^#{2,3}\s*[✅📋📌⚠️🔜❓⚙️]*\s*Action\s*Items", stripped, re.IGNORECASE)
+            or re.match(r"^#{2,3}\s*✅\s*Action\s*Items", stripped, re.IGNORECASE)
+            or re.match(r"^#{2,3}\s*Action\s*Items", stripped, re.IGNORECASE)
         ):
             in_section = True
             continue
 
         # If we hit another heading, stop
-        if in_section and stripped.startswith("## "):
+        if in_section and stripped.startswith("##"):
             break
 
         if in_section:
@@ -1302,6 +1322,9 @@ def _extract_action_items_from_markdown(markdown: str) -> list[str]:
                 m = re.match(r"\s*\d+[.)]\s+(.*)", stripped)
             if m:
                 text = m.group(1).strip()
+                # Strip bold markers so **@Name:** becomes @Name: —
+                # the assignee parser expects @ at the start of the string.
+                text = text.replace("**", "")
                 if text and text != "None" and not text.startswith("```"):
                     items.append(text)
 

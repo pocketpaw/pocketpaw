@@ -46,6 +46,11 @@
 #   (type="agent.disabled") and ``AgentEnabled`` (type="agent.enabled") for the
 #   agent soft-disable / revoke-everywhere flow. Emitted by ``agents.service``
 #   on disable / enable, mirroring ``AgentDeleted``'s payload shape.
+# Updated: 2026-07-15 (WC-1, feat/websandbox-registry) — added
+#   ``WebSandboxRegistered`` (type="websandbox.registered") and
+#   ``WebSandboxStatusChanged`` (type="websandbox.status_changed") for the Web
+#   Cursor sandbox registry. Emitted by ``websandbox.service`` on every
+#   state-mutating call per cloud rule 9.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -1032,3 +1037,62 @@ class TemporalSweepCompleted(Event):
 @dataclass
 class BeltRunUpdated(Event):
     EVENT_TYPE: ClassVar[str] = "belt_run_updated"
+
+
+# Web Cursor sandbox registry (WC-1, feat/websandbox-registry). Emitted by
+# ``websandbox.service`` on every state-mutating call per cloud rule 9 (emit on
+# every write). ``WebSandboxRegistered`` fires when a sandbox row is created /
+# re-registered for a (workspace, user, repo); ``WebSandboxStatusChanged`` fires
+# on a lifecycle transition (pending -> opening -> ready -> stopped -> reaped) or
+# when the Daytona ``sandbox_id`` is bound. ``data`` carries the row id +
+# workspace/user/repo + status so a downstream WS fan-out can refresh the IDE
+# shell without re-reading the doc.
+@dataclass
+class WebSandboxRegistered(Event):
+    EVENT_TYPE: ClassVar[str] = "websandbox.registered"
+
+
+@dataclass
+class WebSandboxStatusChanged(Event):
+    EVENT_TYPE: ClassVar[str] = "websandbox.status_changed"
+
+
+# Code Mode durable-project registry (CM-2a, feat/code-mode). The DURABLE half of
+# Code Mode's two-lifecycle model: a CodeProject outlives any single ephemeral
+# Daytona sandbox. ``CodeProjectCreated`` fires when a project is first registered
+# for a (workspace, user, provider, repo); ``CodeProjectOpened`` fires when a
+# project is opened and bound to a live sandbox (reused or freshly provisioned).
+# ``data`` carries the project id + workspace/user/repo + the bound sandbox row id
+# so a downstream fan-out can refresh the projects grid without re-reading the doc.
+@dataclass
+class CodeProjectCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "codeproject.created"
+
+
+@dataclass
+class CodeProjectOpened(Event):
+    EVENT_TYPE: ClassVar[str] = "codeproject.opened"
+
+
+# ``CodeProjectRenamed`` fires when a project's display name changes; ``data``
+# carries the project id + workspace/user + the new name. ``CodeProjectDeleted``
+# fires when a project is removed (and its bound sandbox torn down); ``data``
+# carries the project id + workspace/user so a projects-grid fan-out can drop the
+# card without a re-read.
+@dataclass
+class CodeProjectRenamed(Event):
+    EVENT_TYPE: ClassVar[str] = "codeproject.renamed"
+
+
+@dataclass
+class CodeProjectDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "codeproject.deleted"
+
+
+# Code Mode GitHub connect (CM-3, feat/code-mode). Fires when a user's GitHub App
+# installation is first bound to a (workspace, user) — the durable "this user can
+# open private repos" signal a connected-state UI reacts to. ``data`` carries the
+# connection id + workspace/user/provider + installation id.
+@dataclass
+class CodeConnectionCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "codeconnection.created"

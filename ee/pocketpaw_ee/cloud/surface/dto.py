@@ -55,11 +55,26 @@ class SurfaceMetaRequest(BaseModel):
     # "Use Svelte pages" toggle: "ripple" (default) | "svelte". Selects which
     # create-site authoring skill the preamble prefers. Optional.
     engine: str | None = None
+    # Sites refine hint — mirror SurfaceMeta. The Build/Chat toggle in the
+    # /sites/[siteId] refine chat: "chat" answers with no mutation, "build" (the
+    # default, preserving today's behavior) refines the site. Optional.
+    mode: str | None = "build"
     # Belt console hints — mirror SurfaceMeta. Set by the /belt page once the
     # user has bound a repo + branch for the run. ``repo`` is the absolute repo
     # path; ``base_branch`` is the branch to base the change off. Optional.
     repo: str | None = None
     base_branch: str | None = None
+    # Code surface hints — mirror SurfaceMeta. Set by the /code page's
+    # SurfaceMetaProvider. ``current_dir`` is the working directory;
+    # ``project_name`` is the project name; ``storage_root`` is the cloud
+    # storage key prefix; ``is_cloud_storage`` is ``"true"`` for S3-only
+    # projects (no local filesystem path). ``workspace_vm`` is ``"true"``
+    # when the project runs inside a shared Daytona sandbox. All optional.
+    current_dir: str | None = None
+    project_name: str | None = None
+    storage_root: str | None = None
+    is_cloud_storage: str | None = None
+    workspace_vm: str | None = None
 
 
 class SurfaceRequest(BaseModel):

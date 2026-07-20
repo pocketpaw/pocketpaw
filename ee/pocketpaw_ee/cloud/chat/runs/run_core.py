@@ -335,6 +335,16 @@ def _stream_ttl() -> int:
 # prompt. OFF (the default) leaves ``pool.run`` byte-for-byte the legacy path.
 _SUPERVISOR_TRUTHY = {"1", "true", "yes", "on"}
 
+# The interactive ask_user tool id (source of truth:
+# ``ee/pocketpaw_ee/agent/mcp_servers/ask.py`` ``ASK_USER_TOOL_ID``). Spelled as
+# a literal so this hot streaming path stays decoupled from the agent-tool
+# module — the same reason surface_registry spells its deny-list ids literally.
+# A ``tool_use`` for this id becomes an ``ask_user_question`` stream frame
+# (question + options) the client renders as clickable option chips, instead of
+# a generic ``tool_start``. It restores the interactive question UI on surfaces
+# where inline Ripple is off (notably /sites svelte-create).
+_ASK_USER_TOOL_ID = "mcp__pocketpaw_ask__ask_user"
+
 
 def _session_supervisor_enabled() -> bool:
     """Read the ``POCKETPAW_SESSION_SUPERVISOR`` flag (env, default OFF).
@@ -1255,7 +1265,22 @@ async def _drive_agent_loop(
                         tool_input = econtent
                     elif isinstance(econtent, str):
                         name = econtent
-                yield ("tool_start", {"tool": name, "input": tool_input})
+                if name == _ASK_USER_TOOL_ID:
+                    # Interactive question: emit an ``ask_user_question`` frame the
+                    # client renders as clickable option chips (service.ts ->
+                    # chatStore.setAskUser -> AssistantMessage chips), NOT a generic
+                    # tool_start. The agent ends its turn after asking; the user's
+                    # click returns as the next message.
+                    ask_input = tool_input if isinstance(tool_input, dict) else {}
+                    yield (
+                        "ask_user_question",
+                        {
+                            "question": ask_input.get("question", ""),
+                            "options": ask_input.get("options", []),
+                        },
+                    )
+                else:
+                    yield ("tool_start", {"tool": name, "input": tool_input})
             elif etype == "tool_result":
                 meta = getattr(event, "metadata", None) or {}
                 name = ""
@@ -1272,7 +1297,10 @@ async def _drive_agent_loop(
                     output=output,
                     handled_pocket_ids=handled_pocket_ids,
                 )
-                yield ("tool_result", {"tool": name, "output": output})
+                # The ask_user ack is internal (the question UI already rendered
+                # from the tool_use); don't surface a tool_result chip for it.
+                if name != _ASK_USER_TOOL_ID:
+                    yield ("tool_result", {"tool": name, "output": output})
             elif etype == "token_usage":
                 # Real per-run token metering (W3a). The backend (claude_sdk and
                 # every other backend) emits a ``token_usage`` AgentEvent whose

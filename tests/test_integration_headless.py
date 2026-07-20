@@ -673,18 +673,41 @@ class TestToolBridgePipelineIntegration:
 
         fn_count = next(iter(fn_counts.values()))
         cli_count = next(iter(cli_counts.values()))
-        # The extra function tool is PocketSpecialistTool, supplied by the
-        # enterprise package (pocketpaw_ee). On an OSS-only install it is
-        # absent, so the two groups match exactly; with pocketpaw_ee installed
-        # the function-tool backends carry exactly one more.
+        # On an OSS-only install there are no EE extensions, so the two groups
+        # match exactly. With pocketpaw_ee installed, function-tool backends
+        # receive extra tools from EE agent extensions (PocketSpecialistTool,
+        # Daytona sandbox tools, etc.). Compute the expected delta dynamically
+        # by checking what EE extensions contribute to each group.
         import importlib.util
 
-        specialist_delta = 1 if importlib.util.find_spec("pocketpaw_ee") else 0
-        assert fn_count == cli_count + specialist_delta, (
+        if importlib.util.find_spec("pocketpaw_ee"):
+            from pocketpaw._registry import providers as _ext_providers
+
+            fn_extra = 0
+            cli_extra = 0
+            example_fn = function_tool_backends[0]
+            example_cli = shell_cli_backends[0]
+            for ext in _ext_providers("pocketpaw.agent_extensions"):
+                try:
+                    fn_extra += len(ext.agent_tools(example_fn))
+                except Exception:
+                    pass
+                try:
+                    cli_extra += len(ext.agent_tools(example_cli))
+                except Exception:
+                    pass
+            expected_delta = fn_extra - cli_extra
+        else:
+            fn_extra = 0
+            cli_extra = 0
+            expected_delta = 0
+
+        assert fn_count == cli_count + expected_delta, (
             f"Function-tool backends ({fn_count}) should have exactly "
-            f"{specialist_delta} more tool(s) than shell-CLI backends ({cli_count}) "
-            f"— the pocket_specialist function tool, present only when "
-            f"pocketpaw_ee is installed. Got fn={fn_counts}, cli={cli_counts}."
+            f"{expected_delta} more tool(s) than shell-CLI backends ({cli_count}) "
+            f"— EE extensions contribute {fn_extra} tools to function-tool backends "
+            f"and {cli_extra} to shell-CLI backends. "
+            f"Got fn={fn_counts}, cli={cli_counts}."
         )
 
     def test_claude_sdk_backend_has_fewer_tools_than_others(self):

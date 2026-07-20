@@ -31,6 +31,7 @@ Public API (returns wire dicts for legacy router compatibility):
 - ``create``, ``list_pockets``, ``get``, ``update``, ``delete``
 - ``patterns_for_pockets`` — batch {pocket_id: Pocket.pattern} for a workspace
 - ``ensure_home_pocket`` — resolve-or-provision the user's home pocket
+- ``list_builtin_widgets`` — return enabled built-in widget definitions
 - ``create_from_ripple_spec`` — agent-generated pockets
 - ``add_widget``, ``update_widget``, ``remove_widget``, ``reorder_widgets``
 - ``generate_share_link``, ``revoke_share_link``, ``update_share_link``,
@@ -1539,6 +1540,166 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     return await _resolved_wire_dict(doc, user_id)
 
 
+async def _ensure_builtin_widgets_seeded() -> list[dict[str, Any]]:
+    """Idempotently insert the canonical built-in widget definitions.
+
+    Returns the populated widget entry dicts ready to embed into a new
+    home pocket's ``widgets[]``. This is a pure system-level seed — it
+    reads/writes the ``BuiltInWidget`` collection, never a Pocket doc.
+
+    Each entry matches the shape HomeWidgetGrid's NATIVE_WIDGETS registry
+    keys on: ``type="native"`` + ``name`` exactly matching the Svelte
+    component lookup key. The frontend's BUILT_IN_WIDGETS / DEFAULT_MISSION
+    constants were the prior (hardcoded) source of these rows.
+    """
+    from pocketpaw_ee.cloud.models.builtin_widget import (
+        BuiltInWidget as _BuiltInDoc,
+    )
+    from pocketpaw_ee.cloud.models.builtin_widget import (
+        BuiltInWidgetPosition as _BuiltInPos,
+    )
+
+    CANONICAL: list[dict[str, Any]] = [
+        {
+            "slug": "intent-of-the-day",
+            "name": "Intent of the Day",
+            "type": "native",
+            "icon": "sparkles",
+            "color": "#A78BFA",
+            "pocket_name": "Mission Control",
+            "position": _BuiltInPos(row=0, col=0, w=2, h=1),
+            "sort_order": 0,
+            "auto_seed": True,  # pre-pinned on every new home pocket
+        },
+        {
+            "slug": "mission-tray",
+            "name": "Mission · Tray",
+            "type": "native",
+            "icon": "list-todo",
+            "color": "#FCD34D",
+            "pocket_name": "Mission Control",
+            "position": _BuiltInPos(row=0, col=1, w=1, h=1),
+            "sort_order": 1,
+        },
+        {
+            "slug": "mission-agents-in-flight",
+            "name": "Mission · Agents in flight",
+            "type": "native",
+            "icon": "cpu",
+            "color": "#7DD3FC",
+            "pocket_name": "Mission Control",
+            "position": _BuiltInPos(row=0, col=2, w=1, h=1),
+            "sort_order": 2,
+        },
+        {
+            "slug": "mission-pawprints-today",
+            "name": "Mission · Pawprints today",
+            "type": "native",
+            "icon": "activity",
+            "color": "#6EE7B7",
+            "pocket_name": "Mission Control",
+            "position": _BuiltInPos(row=0, col=3, w=1, h=1),
+            "sort_order": 3,
+        },
+        {
+            "slug": "mission-active-cycle",
+            "name": "Mission · Active cycle",
+            "type": "native",
+            "icon": "target",
+            "color": "#C4B5FD",
+            "pocket_name": "Mission Control",
+            "position": _BuiltInPos(row=0, col=4, w=1, h=1),
+            "sort_order": 4,
+        },
+        {
+            "slug": "mission-team-load",
+            "name": "Mission · Team load",
+            "type": "native",
+            "icon": "users",
+            "color": "#6EE7B7",
+            "pocket_name": "Mission Control",
+            "position": _BuiltInPos(row=0, col=5, w=1, h=1),
+            "sort_order": 5,
+        },
+    ]
+
+    seeded: list[dict[str, Any]] = []
+    for entry in CANONICAL:
+        slug = entry["slug"]
+        existing = await _BuiltInDoc.find_one({"slug": slug})
+        if existing is None:
+            doc = _BuiltInDoc(**entry)
+            await doc.insert()
+        else:
+            # Refresh sort_order, position, color, icon from the canonical
+            # source — an operator can change enabled/sort_order/position
+            # at runtime; this upsert keeps the core identity fields in sync.
+            existing.name = entry["name"]
+            existing.widget_type = entry["type"]
+            existing.icon = entry["icon"]
+            existing.color = entry["color"]
+            existing.pocket_name = entry["pocket_name"]
+            existing.position = entry["position"]
+            existing.sort_order = entry["sort_order"]
+            existing.auto_seed = entry.get("auto_seed", False)
+            await existing.save()
+        seeded.append(entry)
+
+    return seeded
+
+
+async def _seed_home_pocket_widgets(doc: _PocketDoc) -> None:
+    """Attach the canonical built-in widgets to a brand-new home pocket.
+
+    Called AFTER the home pocket doc is inserted but BEFORE the event is
+    emitted, so the first `pocket.created` event broadcast includes the
+    seeded widgets. The built-in widget defs live in the `BuiltInWidget`
+    system collection; this reads them from the DB and embeds them as
+    `Widget` sub-documents.
+
+    A failed seed does NOT break pocket creation — the home pocket exists
+    with an empty widgets list, and the client's ensureIntentWidget
+    guarantee handles the render-time fallback."""
+    try:
+        defs = await _ensure_builtin_widgets_seeded()
+    except Exception:
+        logger.warning(
+            "home pocket seed: failed to resolve built-in widgets; "
+            "pocket=%s will be provisioned empty",
+            str(doc.id),
+            exc_info=True,
+        )
+        return
+
+    widget_docs: list[_WidgetDoc] = []
+    # Only pre-pin widgets marked auto_seed=True (currently just
+    # Intent of the Day). The rest are discoverable in the
+    # AddWidgetPicker "Built-in" section.
+    from pocketpaw_ee.cloud.models.pocket import WidgetPosition as _WPos
+
+    auto_seeds = [e for e in defs if e.get("auto_seed", False)]
+    for i, entry in enumerate(auto_seeds):
+        pos = entry.get("position")
+        row = pos.row if pos is not None else 0
+        col = pos.col if pos is not None else i
+        widget_docs.append(
+            _WidgetDoc(
+                name=entry["name"],
+                type=entry["type"],
+                icon=entry["icon"],
+                color=entry["color"],
+                span=f"col-span-{pos.w if pos is not None else 1} "
+                f"row-span-{pos.h if pos is not None else 1}",
+                props={"pocketName": entry.get("pocket_name", "Mission Control")},
+                position=_WPos(row=row, col=col),
+            )
+        )
+
+    if widget_docs:
+        doc.widgets = widget_docs
+        await doc.save()
+
+
 async def ensure_home_pocket(workspace_id: str, user_id: str) -> tuple[dict, bool]:
     """Resolve-or-provision the caller's home pocket.
 
@@ -1552,8 +1713,9 @@ async def ensure_home_pocket(workspace_id: str, user_id: str) -> tuple[dict, boo
     Idempotent. If the user's ``home_pocket_id`` setting points at a pocket
     that still exists and is owned by the user, that pocket is returned
     unchanged with ``created=False``. Otherwise a fresh ``type="home"``
-    pocket is created (``name="Home"``, ``visibility="private"``, no
-    widgets), its id is persisted back onto the user setting, and it is
+    pocket is created (``name="Home"``, ``visibility="private"``), seeded
+    with the canonical built-in widgets from the ``BuiltInWidget`` system
+    collection, its id is persisted back onto the user setting, and it is
     returned with ``created=True``.
 
     A stale ``home_pocket_id`` — the pocket was deleted, or it now belongs
@@ -1566,9 +1728,10 @@ async def ensure_home_pocket(workspace_id: str, user_id: str) -> tuple[dict, boo
     winner's, and returns it with ``created=False``. The home page is
     therefore single-pocket even under a provision race.
 
-    Provisioning is deliberately empty: the client owns the home page's
-    default / seed widgets. This service only guarantees a backing pocket
-    exists.
+    Built-in widgets are now seeded from the DB (the ``BuiltInWidget``
+    collection), not hardcoded in the frontend. The frontend's
+    ``DEFAULT_MISSION_WIDGETS`` constant is deprecated — the server is the
+    canonical source of which built-in widgets a new home pocket seeds.
     """
     from pocketpaw_ee.cloud.auth import service as auth_service
 
@@ -1592,6 +1755,13 @@ async def ensure_home_pocket(workspace_id: str, user_id: str) -> tuple[dict, boo
     )
     await doc.insert()
 
+    # Seed the canonical built-in widgets from the DB. A failed seed does
+    # NOT break pocket creation — the home pocket exists with an empty
+    # widgets list, and the client's ensureIntentWidget guarantee handles
+    # the render-time fallback. Seed BEFORE the CAS so the error path is
+    # identical — the pocket is already inserted either way.
+    await _seed_home_pocket_widgets(doc)
+
     # Compare-and-swap the new id onto the user. ``expected`` is whatever we
     # read above — None for a genuine first provision, the stale id when
     # re-provisioning. If the swap fails another writer beat us here.
@@ -1612,7 +1782,75 @@ async def ensure_home_pocket(workspace_id: str, user_id: str) -> tuple[dict, boo
         # is not the id of record, so report created=True and move on.
 
     await emit(PocketCreated(data=await _pocket_event_payload(doc)))
+    # Re-fetch the doc after CAS + seed so the wire dict reflects the
+    # seeded widgets.
+    doc = await _fetch_pocket(str(doc.id))
     return await _resolved_wire_dict(doc, user_id), True
+
+
+async def list_builtin_widgets() -> list[dict[str, Any]]:
+    """Return every ENABLED built-in widget definition as a flat dict list.
+
+    The frontend's AddWidgetPicker "Built-in" section calls
+    ``GET /pockets/builtin-widgets`` to populate its rail; this service
+    function backs that endpoint. Returns only enabled widgets sorted by
+    ``sort_order`` ascending, then by name.
+
+    Also used by ``ensure_home_pocket`` as the seed list for a brand-new
+    home pocket. Every reader receives the same canonical shape so the
+    wire stays consistent.
+
+    Seeds the canonical built-in widget rows on first call — for existing
+    users whose home pocket was provisioned before this feature landed,
+    the ``BuiltInWidget`` collection is empty until this endpoint (or the
+    next ``ensure_home_pocket``) touches it.
+
+    A failed read (network / collection missing) returns an empty list
+    so the frontend's picker degrades to an empty "Built-in" section
+    rather than erroring — the user can still pin from their pockets.
+    """
+    try:
+        # Ensure the canonical rows exist before querying. Idempotent —
+        # a no-op when the collection is already seeded. This covers the
+        # gap for existing users whose home pocket was provisioned before
+        # this feature landed (their `ensure_home_pocket` returned
+        # `created=False` and never ran the seed).
+        await _ensure_builtin_widgets_seeded()
+
+        from pocketpaw_ee.cloud.models.builtin_widget import BuiltInWidget as _BuiltInDoc
+
+        docs = (
+            await _BuiltInDoc.find(
+                {"enabled": True},
+            )
+            .sort(("sort_order", 1), ("name", 1))
+            .to_list()
+        )
+
+        return [
+            {
+                "slug": d.slug,
+                "name": d.name,
+                "type": d.widget_type,
+                "icon": d.icon,
+                "color": d.color,
+                "pocketName": d.pocket_name,
+                "position": {
+                    "row": d.position.row,
+                    "col": d.position.col,
+                    "w": d.position.w,
+                    "h": d.position.h,
+                },
+                "sortOrder": d.sort_order,
+            }
+            for d in docs
+        ]
+    except Exception:
+        logger.warning(
+            "list_builtin_widgets: failed to read built-in widget defs; returning empty list",
+            exc_info=True,
+        )
+        return []
 
 
 async def list_pockets(

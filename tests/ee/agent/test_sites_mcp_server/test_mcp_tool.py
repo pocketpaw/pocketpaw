@@ -26,6 +26,7 @@ class TestSitesMcpServerRegistration:
     def test_server_name_and_tool_id(self) -> None:
         from pocketpaw_ee.agent.mcp_servers.sites import (
             CREATE_DYNAMIC_SITE_TOOL_ID,
+            CREATE_HTML_SITE_TOOL_ID,
             CREATE_LANDING_SITE_TOOL_ID,
             CREATE_SVELTE_SITE_TOOL_ID,
             EDIT_SVELTE_COMPONENT_TOOL_ID,
@@ -48,12 +49,14 @@ class TestSitesMcpServerRegistration:
             EDIT_SVELTE_COMPONENT_TOOL_ID == "mcp__pocketpaw_sites_manager__edit_svelte_component"
         )
         assert CREATE_DYNAMIC_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__create_dynamic_site"
+        assert CREATE_HTML_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__create_html_site"
         assert PUBLISH_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_LANDING_SITE_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_SVELTE_SITE_TOOL_ID in SITES_TOOL_IDS
         assert EDIT_SVELTE_COMPONENT_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_DYNAMIC_SITE_TOOL_ID in SITES_TOOL_IDS
-        assert len(SITES_TOOL_IDS) == 5
+        assert CREATE_HTML_SITE_TOOL_ID in SITES_TOOL_IDS
+        assert len(SITES_TOOL_IDS) == 6
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk

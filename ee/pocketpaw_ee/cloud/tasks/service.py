@@ -556,11 +556,13 @@ async def agent_reassign_task(
     body = ReassignTaskRequest.model_validate(body)
     doc = await _fetch_task(ctx, task_id)
     if doc.creator_id != ctx.user_id and doc.assignee_id != ctx.user_id:
-        # Only the creator or current assignee can reassign. Workspace
-        # members at large must go through their own delegation path.
-        raise Forbidden(
-            "task.reassign_denied", "Only the creator or assignee can reassign this task"
-        )
+        # Workspace owners can also reassign tasks (bulk reassign from MC,
+        # picking up unassigned meeting-notes action items, etc.).
+        if not await _is_workspace_owner(ctx.user_id, doc.workspace_id):
+            raise Forbidden(
+                "task.reassign_denied",
+                "Only the creator, assignee, or workspace owner can reassign this task",
+            )
     doc.assignee = _AssigneeDoc(
         kind=body.assignee_kind,
         id=body.assignee_id,
