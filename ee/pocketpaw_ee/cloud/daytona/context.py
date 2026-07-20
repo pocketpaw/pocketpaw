@@ -7,6 +7,8 @@ active project subdirectory (when a ``project_name`` is available via the
 Returns ``None`` when no sandbox is found — the caller falls back to local FS.
 
 Updated: 2026-07-10 — workspace-level VM; legacy per-project sandbox removed.
+Updated: 2026-07-15 (fix/workspace-vm-map-to-db) — the store's workspace-VM
+    accessors are now async + DB-backed; ``await`` the two lookups here.
 """
 
 from __future__ import annotations
@@ -135,7 +137,7 @@ async def resolve_daytona_context(
         get_workspace_vm_sandbox_id,
     )
 
-    sandbox_id = get_workspace_vm_sandbox_id(workspace_id)
+    sandbox_id = await get_workspace_vm_sandbox_id(workspace_id)
     if sandbox_id:
         from pocketpaw_ee.cloud.daytona.client import get_daytona_client
 
@@ -154,7 +156,7 @@ async def resolve_daytona_context(
             )
             return None
 
-        config = get_workspace_vm_config(workspace_id)
+        config = await get_workspace_vm_config(workspace_id)
         workspace_root = config.get("root_dir", "/workspace")
 
         if project_name:
