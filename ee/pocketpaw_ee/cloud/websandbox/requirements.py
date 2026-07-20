@@ -88,12 +88,19 @@ _MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 # project that talks to Postgres or Redis directly can only run in a real VM.
 #
 # Each entry carries the CAUSE it raises the flag for, because the reason string
-# is the product here. An earlier version emitted "better-sqlite3 in dependencies
-# -> rawSockets", which is simply false — better-sqlite3 is an embedded file
-# database that opens no sockets. It still needs a real machine (it is a native
-# FFI binding an in-tab runtime cannot load), so the VERDICT was right and the
-# EXPLANATION was wrong. That is the worst combination: it survives review and
-# then sends the next debugger hunting a network problem that does not exist.
+# is the product here. This table must contain ONLY packages that open a real
+# network socket — nothing else, however much it might also need a VM.
+#
+# sqlite3 and better-sqlite3 used to live here (as "native FFI, honest reason"),
+# because before ``nativeToolchain`` was derived, rawSockets was the ONLY lever
+# that could force an embedded-database project onto a real VM. That is no longer
+# true: the native-toolchain table below now catches them for the real reason
+# they need a machine (they compile), so keeping them here would emit a
+# ``-> rawSockets`` reason for a package that opens no socket — the exact
+# mislabel this comment used to describe as "the worst combination: it survives
+# review and then sends the next debugger hunting a network problem that does not
+# exist". The routing was always safe (a VM either way); the EVIDENCE was wrong,
+# and now that a correct lever exists the wrong one is simply removed.
 #
 # ORMs matter more than drivers. Real Node apps reach Postgres through Prisma or
 # Drizzle, and `pg` is then a TRANSITIVE dependency that never appears in
@@ -102,7 +109,6 @@ _MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 # module's header says must never happen: it strands the user at first query,
 # whereas over-provisioning only costs a slower sandbox.
 _SOCKET = "opens a network socket to a database or broker"
-_NATIVE_FFI = "is a native FFI binding an in-tab runtime cannot load"
 _ORM = "is a database client whose driver is a transitive dependency"
 
 _RAW_SOCKET_PACKAGES: dict[str, str] = {
@@ -133,9 +139,9 @@ _RAW_SOCKET_PACKAGES: dict[str, str] = {
     "sequelize": _ORM,
     "typeorm": _ORM,
     "knex": _ORM,
-    # Native FFI, not sockets. Same verdict, honest reason.
-    "sqlite3": _NATIVE_FFI,
-    "better-sqlite3": _NATIVE_FFI,
+    # NOTE: sqlite3 / better-sqlite3 are deliberately NOT here — they open no
+    # socket. They are in _NATIVE_TOOLCHAIN_PACKAGES, which is the honest reason
+    # they need a VM. See the comment above.
 }
 
 # Scoped packages can never match a bare name, so they are matched by prefix.
@@ -208,36 +214,58 @@ _NATIVE_TOOLCHAIN_PACKAGES: dict[str, str] = {
     "prebuild-install": _COMPILES,
     "nan": _COMPILES,
     "node-addon-api": _COMPILES,
+    "ffi-napi": _COMPILES,
+    "re2": _COMPILES,
+    "keytar": _COMPILES,
     # Prebuilt machine code with no portable fallback. sharp wraps libvips;
-    # puppeteer and playwright each download a real browser binary.
+    # puppeteer and playwright each download a real browser binary; electron and
+    # sass-embedded each ship a platform binary with no WASM path (sass-embedded
+    # is the Dart binary — the plain `sass` package is the JS/WASM one and is NOT
+    # here).
     "sharp": _MACHINE_CODE,
     "puppeteer": _MACHINE_CODE,
     "playwright": _MACHINE_CODE,
+    "sass-embedded": _MACHINE_CODE,
+    "electron": _MACHINE_CODE,
+    "electron-builder": _MACHINE_CODE,
+    "@sentry/profiling-node": _MACHINE_CODE,
     "@tensorflow/tfjs-node": _MACHINE_CODE,
 }
 
 # Scoped native-binding families, matched by prefix for the same reason the raw
 # socket table has one. `@napi-rs/*` and `@node-rs/*` are Rust addons compiled to
-# `.node` files; `@swc/core` is a Rust binary — though note swc, like rollup,
-# also publishes a WASM build, so it sits here only when named directly.
+# `.node` files. `@playwright/*` is the canonical way Playwright enters a project
+# — `npm init playwright` installs `@playwright/test`, NOT the bare `playwright`
+# above — and every one of them drives a real downloaded browser binary, so the
+# prefix is what actually closes the common case; the bare name alone would strand
+# nearly every Playwright user on an in-tab runtime.
 _NATIVE_TOOLCHAIN_PREFIXES: dict[str, str] = {
     "@napi-rs/": _MACHINE_CODE,
     "@node-rs/": _MACHINE_CODE,
+    "@playwright/": _MACHINE_CODE,
 }
 
-# Tokens that, appearing in a `scripts` value, mean the manifest itself says it
-# shells out to a compiler. This is the strongest evidence available short of
-# resolving the tree — the project is describing its own build in its own words.
-_NATIVE_BUILD_MARKERS: tuple[str, ...] = (
-    "node-gyp",
-    "node-pre-gyp",
-    "cmake-js",
-    "prebuild",
-    "gcc ",
-    "g++ ",
-    "clang ",
-    "cargo build",
-    "make ",
+# Compiler invocations that, appearing in a `scripts` value, mean the manifest
+# itself says it shells out to a compiler — the strongest evidence available
+# short of resolving the tree, because the project is describing its own build in
+# its own words.
+#
+# Matched at a COMMAND BOUNDARY, not as a raw substring, and this is load-bearing
+# in both directions. Substring matching (the first cut) fired `make` inside
+# `cmake` and `prebuild` inside the npm `prebuild` lifecycle-script name — both
+# over-provision, which is safe for routing but re-hides the in-tab runtime for a
+# project that merely names a script `prebuild`, defeating the point of the whole
+# change. It is dropped entirely here: the `prebuild` / `prebuild-install`
+# PACKAGES are already in the toolchain table, so the marker only ever added
+# false positives. Each alternative below is bounded by a shell separator (start,
+# whitespace, `;`, `&`, `|`, or a paren) on both sides so `cmake` is its own
+# token and never the tail of another word. `cmake` is listed as its own marker
+# so it reports as cmake rather than mislabelling as make.
+_NATIVE_BUILD_RE = re.compile(
+    r"(?:^|[\s;&|()])"
+    r"(node-gyp|node-pre-gyp|cmake-js|cmake|gcc|clang|g\+\+|cargo\s+build|make)"
+    r"(?:$|[\s;&|()])",
+    re.IGNORECASE,
 )
 
 # Kept in sync with archive.py's ref rules: a ref is attacker-influenced text, so
@@ -444,7 +472,12 @@ def _match(
 
 
 def _compiling_scripts(manifest: dict[str, Any]) -> set[tuple[str, str]]:
-    """Return ``(script name, marker)`` for every script that shells out to a compiler.
+    """Return ``(script name, matched token)`` for every script that shells out to a compiler.
+
+    The matched token is carried through to the reason ("the build script runs
+    cmake …") so the evidence names what actually triggered it rather than a
+    canonical marker — the difference between "runs cmake" and the old
+    "runs make" for a ``cmake .`` command.
 
     Only the `scripts` block is read. A marker in a dependency's OWN scripts is
     invisible here — we have not resolved the tree — which is the same limit the
@@ -458,14 +491,12 @@ def _compiling_scripts(manifest: dict[str, Any]) -> set[tuple[str, str]]:
     for name, command in scripts.items():
         if not isinstance(name, str) or not isinstance(command, str):
             continue
-        # Padded so a bare "make " marker cannot match "makefile" or "cmake-js"
-        # mid-token; the command is lowercased because npm scripts are shell and
-        # casing is not meaningful for these binaries.
-        haystack = f" {command.lower()} "
-        for marker in _NATIVE_BUILD_MARKERS:
-            if marker in haystack:
-                hits.add((name, marker))
-                break
+        match = _NATIVE_BUILD_RE.search(command)
+        if match is not None:
+            # group(1) is the actual token, whitespace-normalised so
+            # "cargo   build" reads as "cargo build" in the reason.
+            token = " ".join(match.group(1).lower().split())
+            hits.add((name, token))
     return hits
 
 
@@ -509,11 +540,10 @@ def infer_from_package_json(raw: str) -> RuntimeRequirementsResponse:
             'the manifest sets "gypfile": true, so installing it runs node-gyp -> nativeToolchain'
         )
 
-    for script, marker in sorted(_compiling_scripts(manifest)):
+    for script, token in sorted(_compiling_scripts(manifest)):
         native_hits.append((script, "scripts"))
         reasons.append(
-            f'the "{script}" script runs {marker.strip()}, which needs a compiler '
-            f"-> nativeToolchain"
+            f'the "{script}" script runs {token}, which needs a compiler -> nativeToolchain'
         )
 
     return RuntimeRequirementsResponse(
