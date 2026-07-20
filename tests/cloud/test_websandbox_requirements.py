@@ -61,6 +61,12 @@ class _FakeClient:
 def _reset():
     _FakeClient.last_url = None
     _FakeClient.last_params = None
+    # The manifest cache is module-level and therefore survives between tests.
+    # Without this, a test that primed `octocat/Hello-World` made a later test
+    # pass while never touching the network — which is precisely the assertion
+    # that later test exists to make. Cross-test leakage through a cache is
+    # invisible when it makes things pass, so reset it explicitly.
+    requirements._reset_cache_for_tests()
 
 
 def _patch_client(monkeypatch: pytest.MonkeyPatch, response) -> None:
@@ -72,13 +78,19 @@ def _manifest(**sections) -> bytes:
 
 
 def _assert_every_true_flag_has_a_reason(result) -> None:
-    """The core contract: a raised flag without evidence is a guess."""
-    joined = " ".join(result.reasons).lower()
+    """The core contract: a raised flag without evidence is a guess.
+
+    Matches the emitted GRAMMAR (``... -> <flag>``) rather than searching the
+    joined text for the flag name. A substring search looked equivalent and was
+    not: the nativeToolchain reason contains the word "install", so deleting the
+    install reason entirely still passed while ``install`` stayed true — the one
+    regression this assertion exists to catch.
+    """
     assert result.reasons, "a verdict with no reasons is unexplainable"
     for flag in ("install", "nativeToolchain", "rawSockets"):
         if getattr(result, flag):
-            assert flag.lower() in joined, (
-                f"{flag} is true but no reason mentions it: {result.reasons}"
+            assert any(reason.rstrip().endswith(f"-> {flag}") for reason in result.reasons), (
+                f"{flag} is true but no reason concludes in it: {result.reasons}"
             )
 
 
@@ -269,3 +281,54 @@ async def test_unknown_runtime_reports_unavailable_not_404() -> None:
 
     assert result.available is False
     assert result.apiKey is None
+
+
+# ---------------------------------------------------------------------------
+# The manifest cache. Unauthenticated GitHub allows 60 requests/hour per egress
+# IP, shared by every tenant, so a probe that runs on every project open must
+# not pay the network for a repo it already looked at.
+# ---------------------------------------------------------------------------
+
+
+async def test_second_probe_for_the_same_repo_skips_the_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_client(monkeypatch, _FakeResponse(200, _manifest(dependencies={"pg": "^8"})))
+
+    first = await requirements.resolve_requirements("ws-1", "u-1", "acme/app")
+    _FakeClient.last_url = None
+    second = await requirements.resolve_requirements("ws-1", "u-1", "acme/app")
+
+    assert _FakeClient.last_url is None, "the second probe hit the network"
+    assert second.rawSockets is True
+    assert second.reasons == first.reasons
+
+
+async def test_a_different_ref_is_a_different_cache_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ref names a different tree, so it must not reuse another ref's answer."""
+    _patch_client(monkeypatch, _FakeResponse(200, _manifest(dependencies={"pg": "^8"})))
+
+    await requirements.resolve_requirements("ws-1", "u-1", "acme/app", "main")
+    _FakeClient.last_url = None
+    await requirements.resolve_requirements("ws-1", "u-1", "acme/app", "next")
+
+    assert _FakeClient.last_url is not None, "a new ref reused the cached answer"
+
+
+async def test_a_transient_failure_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A GitHub outage must not pin a defaulted verdict for the whole TTL.
+
+    Only answers GitHub actually gave us are cached. Caching a 5xx would mean one
+    bad minute downgrades every open of that repo for the next fifteen.
+    """
+    _patch_client(monkeypatch, _FakeResponse(503, b""))
+    degraded = await requirements.resolve_requirements("ws-1", "u-1", "acme/app")
+    assert degraded.rawSockets is True  # most-capable default
+
+    _patch_client(monkeypatch, _FakeResponse(200, _manifest(dependencies={})))
+    recovered = await requirements.resolve_requirements("ws-1", "u-1", "acme/app")
+
+    assert _FakeClient.last_url is not None, "a transient failure was cached"
+    assert recovered.rawSockets is False
