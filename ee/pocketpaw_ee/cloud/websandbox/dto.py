@@ -44,6 +44,15 @@
 # ``UpdateStatusRequest`` are INTERNAL command objects the provisioner (and tests
 # that stand in for it) use to bind server-generated runtime state, and are never
 # bound by a router. The client ``PATCH`` route was removed with the same intent.
+#
+# Changed 2026-07-20 (RR-2, feat/code-runtime-requirements): added
+# ``RuntimeRequirementsResponse`` — what a PROJECT NEEDS from a runtime
+# (install / nativeToolchain / rawSockets) plus the ``reasons`` that produced
+# each flag, so the runtime-routing decision is explainable rather than opaque.
+# Also generalized the credential response: the broker shape was never
+# BrowserPod-specific (any in-tab runtime needs a vendor key brokered the same
+# way), so the canonical name is now ``RuntimeCredentialsResponse`` and
+# ``BrowserPodCredentialsResponse`` is a deprecated alias kept for one release.
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -175,25 +184,60 @@ class PreviewResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# BP-1b — BrowserPod (in-tab WASM runtime) boot credential.
+# BP-1b / RR-2 — in-tab runtime boot credential.
 # ---------------------------------------------------------------------------
 
 
-class BrowserPodCredentialsResponse(BaseModel):
-    """The credential a browser needs to boot an in-tab BrowserPod pod.
+class RuntimeCredentialsResponse(BaseModel):
+    """The credential a browser needs to boot an in-tab runtime.
 
-    Response-only (Rule 4). ``available`` is false with a null ``apiKey`` when the
-    deploy has no BROWSERPOD_API_KEY configured — the frontend then routes the
-    project to the Daytona runtime instead of treating it as an error.
+    Response-only (Rule 4). ``available`` is false with a null ``apiKey`` in TWO
+    cases that a client cannot and need not tell apart: the runtime is not
+    configured on this deploy, and the runtime id is unknown. Both mean "route
+    this project somewhere else", so both answer the same way (see
+    ``websandbox/runtimes.py``).
 
-    NOTE: this response necessarily carries the key to the client, because
-    ``BrowserPod.boot()`` executes in the tab. Brokering it keeps the key out of
+    NOTE: this response necessarily carries the key to the client, because the
+    runtime's ``boot()`` executes in the tab. Brokering it keeps the key out of
     the frontend bundle and makes it gateable/rotatable/auditable, but it is not
     secret from an authenticated caller — see ``websandbox/browserpod.py``.
     """
 
     available: bool
     apiKey: str | None = None
+
+
+# DEPRECATED alias, kept for one release while callers move to the generalized
+# name. The shape was never BrowserPod-specific — WebContainers needs a brokered
+# browser-side key on exactly the same terms.
+BrowserPodCredentialsResponse = RuntimeCredentialsResponse
+
+
+# ---------------------------------------------------------------------------
+# RR-2 — what a project NEEDS from a runtime, resolved before anything boots.
+# ---------------------------------------------------------------------------
+
+
+class RuntimeRequirementsResponse(BaseModel):
+    """The capability demands of a project, for matching against a runtime.
+
+    Response-only (Rule 4); the repo/ref arrive as query params and tenancy comes
+    from the RequestContext.
+
+    ``reasons`` is not decoration. This response drives a user-visible routing
+    decision — fast in-tab runtime versus a slower real VM — and a decision that
+    cannot be explained cannot be debugged. Every flag raised to ``true`` carries
+    at least one reason naming the evidence that raised it, e.g.
+    ``"pg in dependencies -> rawSockets"``.
+    """
+
+    # Needs to install dependencies from a registry.
+    install: bool
+    # Needs to execute native binaries (esbuild, rollup bindings, node-gyp…).
+    nativeToolchain: bool
+    # Needs real TCP — a database driver an in-tab runtime cannot emulate.
+    rawSockets: bool
+    reasons: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
