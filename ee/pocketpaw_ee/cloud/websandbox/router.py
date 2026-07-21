@@ -23,11 +23,15 @@
 # comes only from the RequestContext, and both are license-gated like the rest.
 #
 # Changed 2026-07-15 (WC-5a, feat/websandbox-edit-agent): added the AI edit
-# endpoint — ``POST /websandbox/{row_id}/edit`` (a file + instruction → a PROPOSED
-# rewrite from a backend-side frontier model). Thin adapter over
-# ``websandbox/edit.py``; tenancy comes only from the RequestContext, and it's
-# license-gated like the rest. Generate-only — the frontend applies accepted hunks
-# via the existing file-RPC.
+# endpoint ``POST /websandbox/{row_id}/edit``. REMOVED again 2026-07-21 (CA-4) —
+# see below.
+#
+# Changed 2026-07-21 (CA-4, feat/codeagent-edit): deleted the AI edit endpoint
+# and ``websandbox/edit.py`` with it. The route was row-addressed, and it read the
+# file off the VM's disk to build context — so a runtime without a backend row
+# (WebContainers, which runs in the user's tab) had nothing for it to read, and
+# Cmd-K shipped disabled there. ``POST /codeagent/turn`` with ``mode: "edit"``
+# replaces it: the client sends the code, so one path serves both runtimes.
 #
 # Changed 2026-07-16 (WC-7/P4a, feat/code-mode): added the git write-path routes —
 # ``GET /websandbox/{row_id}/git/status`` and ``POST .../git/stage|commit|push``.
@@ -81,7 +85,6 @@ from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.websandbox import archive as websandbox_archive
 from pocketpaw_ee.cloud.websandbox import durability as websandbox_durability
-from pocketpaw_ee.cloud.websandbox import edit as websandbox_edit
 from pocketpaw_ee.cloud.websandbox import git as websandbox_git
 from pocketpaw_ee.cloud.websandbox import preview as websandbox_preview
 from pocketpaw_ee.cloud.websandbox import provision as websandbox_provision
@@ -92,8 +95,6 @@ from pocketpaw_ee.cloud.websandbox.dto import (
     CommitRequest,
     CreatePrRequest,
     CreateSandboxRequest,
-    EditRequest,
-    EditResponse,
     GitCommitResponse,
     GitPrResponse,
     GitPushResponse,
@@ -374,22 +375,6 @@ async def git_open_pr(
     """Open a GitHub pull request for the sandbox's pushed feature branch."""
     workspace_id = _require_workspace(ctx)
     return await websandbox_git.open_pr(workspace_id, ctx.user_id, row_id, body)
-
-
-# ---------------------------------------------------------------------------
-# WC-5a — AI edit agent (Cmd-K).
-# ---------------------------------------------------------------------------
-
-
-@router.post("/{row_id}/edit", response_model=EditResponse)
-async def propose_edit(
-    row_id: str,
-    body: EditRequest,
-    ctx: RequestContext = Depends(request_context),
-) -> EditResponse:
-    """Propose a model-authored rewrite of a file (generate-only, no VM write)."""
-    workspace_id = _require_workspace(ctx)
-    return await websandbox_edit.propose_edit(workspace_id, ctx.user_id, row_id, body)
 
 
 # ---------------------------------------------------------------------------
