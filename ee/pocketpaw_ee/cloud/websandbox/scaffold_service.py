@@ -36,15 +36,14 @@ async def scaffold_into_sandbox(
     client: DaytonaClient | None = None,
     bring_up=scaffold.bring_up,  # noqa: ANN001 — DI seam; tests never touch a VM
 ) -> ScaffoldIntoSandboxResponse:
-    """Compose the requested recipes and bring the project up in the sandbox.
+    """Fetch the requested starter and bring the project up in the sandbox.
 
     Authorization first, VM second — `authorize_sandbox` is the fail-closed
     oracle and it runs before anything is uploaded, exactly as the git and edit
     paths do.
 
-    Composition happens BEFORE the VM is touched. A prompt that cannot be
-    composed should fail without having half-written a project into somebody's
-    workspace.
+    The starter is fetched BEFORE the VM is touched. A download that fails
+    should fail without having half-written a project into somebody's workspace.
     """
     body = ScaffoldIntoSandboxRequest.model_validate(body)
 
@@ -64,7 +63,7 @@ async def scaffold_into_sandbox(
     composed = await codescaffold_service.compose(
         workspace_id,
         user_id,
-        {"recipes": body.recipes, "projectName": body.projectName},
+        {"starter": body.starter, "projectName": body.projectName},
     )
 
     result = await bring_up(
@@ -72,15 +71,19 @@ async def scaffold_into_sandbox(
         row.sandbox_id,
         composed.files,
         WEBSANDBOX_WORKDIR,
-        port=body.port or scaffold.DEFAULT_DEV_PORT,
+        # The starter's own port, not a global default: Next serves on 3000 and
+        # Vite on 5173, and a preview pane pointed at the wrong one shows
+        # nothing with no indication why.
+        port=body.port or composed.devPort,
+        assets=composed.assets,
     )
 
     failed = result.failed_step
     logger.info(
-        "websandbox.scaffold ws=%s row=%s recipes=%s files=%d running=%s failed=%s",
+        "websandbox.scaffold ws=%s row=%s starter=%s files=%d running=%s failed=%s",
         workspace_id,
         row_id,
-        composed.order,
+        composed.starter,
         composed.fileCount,
         result.running,
         failed.name if failed else None,
@@ -88,11 +91,7 @@ async def scaffold_into_sandbox(
 
     return ScaffoldIntoSandboxResponse(
         projectName=composed.projectName,
-        order=composed.order,
-        # Names only, and this is where CE-2's required-vars checklist will read
-        # from — the project cannot actually run until these are provided, and
-        # saying so up front beats a runtime crash in the preview pane.
-        secrets=composed.secrets,
+        starter=composed.starter,
         fileCount=composed.fileCount,
         port=result.port,
         running=result.running,

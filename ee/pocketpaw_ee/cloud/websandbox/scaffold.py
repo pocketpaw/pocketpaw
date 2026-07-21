@@ -24,6 +24,8 @@
 # the worst possible answer.
 from __future__ import annotations
 
+import base64
+import binascii
 import io
 import logging
 import os
@@ -112,8 +114,13 @@ def _safe_member_path(path: str) -> str:
     return posixpath.normpath(normalized)
 
 
-def pack_source_map(files: dict[str, str]) -> bytes:
+def pack_source_map(files: dict[str, str], assets: dict[str, str] | None = None) -> bytes:
     """Tar+gzip a source map in memory.
+
+    `assets` carries the handful of BINARY files a starter ships — a favicon, a
+    hero image — base64-encoded, because a JSON wire format cannot hold raw
+    bytes. They are decoded here and written as ordinary members, so the VM sees
+    a normal file and nothing downstream has to know about the encoding.
 
     Deterministic on purpose: entries are emitted in sorted order with a fixed
     mtime and fixed ownership, so composing the same project twice produces the
@@ -123,12 +130,23 @@ def pack_source_map(files: dict[str, str]) -> bytes:
     if not files:
         raise CloudError(400, "websandbox.scaffold_empty", "The project has no files")
 
+    decoded: dict[str, bytes] = {p: c.encode("utf-8") for p, c in files.items()}
+    for path, encoded in (assets or {}).items():
+        try:
+            decoded[path] = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            # A corrupt asset must not silently vanish from the project; a
+            # missing favicon is a mystery to whoever hits it.
+            raise CloudError(
+                400, "websandbox.scaffold_bad_asset", f"Could not decode asset: {path}"
+            ) from exc
+
     buffer = io.BytesIO()
     # mtime=0 rather than "now" — a timestamp is the one thing that would make
     # two identical projects produce different bytes.
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        for path in sorted(files):
-            data = files[path].encode("utf-8")
+        for path in sorted(decoded):
+            data = decoded[path]
             info = tarfile.TarInfo(_safe_member_path(path))
             info.size = len(data)
             info.mtime = 0
@@ -216,6 +234,8 @@ async def materialize(
     sandbox_id: str,
     files: dict[str, str],
     project_dir: str,
+    *,
+    assets: dict[str, str] | None = None,
 ) -> Step:
     """Ship a composed source map into the VM.
 
@@ -224,7 +244,7 @@ async def materialize(
     all relative, so this fills it rather than nesting a project inside it.
     """
     started = time.monotonic()
-    packed = pack_source_map(files)
+    packed = pack_source_map(files, assets)
 
     try:
         await daytona.upload_bytes(sandbox_id, packed, _STAGING_TAR)
@@ -284,6 +304,7 @@ async def bring_up(
     project_dir: str,
     *,
     port: int = DEFAULT_DEV_PORT,
+    assets: dict[str, str] | None = None,
     run_migrations: bool = True,
 ) -> BringUp:
     """Materialize a composed project and start its dev server.
@@ -294,7 +315,7 @@ async def bring_up(
     """
     result = BringUp(port=port)
 
-    result.steps.append(await materialize(daytona, sandbox_id, files, project_dir))
+    result.steps.append(await materialize(daytona, sandbox_id, files, project_dir, assets=assets))
     if not result.steps[-1].ok:
         return result
 

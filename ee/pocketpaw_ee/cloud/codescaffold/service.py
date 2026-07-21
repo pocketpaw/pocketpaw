@@ -1,36 +1,40 @@
-# service.py — Plan a project from a prompt, and compose it (CS-1).
+# service.py — Plan a project from a prompt, and fetch it (CS-1, rewritten CS-1b).
 #
-# Created 2026-07-21 (feat/codescaffold). Two operations, deliberately split:
+# Created 2026-07-21. REWRITTEN 2026-07-22 for starters. Two operations, still
+# deliberately split:
 #
-#   plan(prompt)      pure, instant, side-effect free — what we INTEND to build
-#   compose(recipes)  shells the vendored engine — the actual source map
+#   plan(prompt)      pure, instant — which framework, and what it will be called
+#   compose(starter)  fetches a pinned npm tarball and returns the source map
 #
-# The split exists so the user gets a confirmation step. Composition writes a
-# whole project's worth of code; showing "I'll set up auth and a database,
-# because you said 'sign-in'" and letting them edit that list before anything
-# happens is the difference between a tool and a slot machine. It also means the
-# expensive half never runs for a prompt that was misread.
+# The split buys a confirmation step. Scaffolding drops a whole project on
+# someone; showing "React, because you said 'react', called booking" and letting
+# them change it before anything happens is the difference between a tool and a
+# slot machine. It also means the network half never runs for a misread prompt.
 #
-# There is no persistence here and no project row. Composition returns a source
-# map to the caller; CS-2 is what materializes one into a runtime. Keeping this
-# stateless means the same endpoint serves a Daytona VM and an in-tab
-# WebContainer without knowing which asked.
+# No persistence, no project row, no runtime. Composition returns a source map;
+# materializing one is `websandbox.scaffold`'s job, and an import-linter contract
+# keeps this module from reaching a sandbox.
 from __future__ import annotations
 
+import json
 import logging
 
 from pocketpaw_ee.cloud._core.errors import CloudError
-from pocketpaw_ee.cloud.codescaffold import domain, engine
+from pocketpaw_ee.cloud.codescaffold import domain, registry
 from pocketpaw_ee.cloud.codescaffold.dto import (
-    RecipeChoice,
     ScaffoldComposeRequest,
     ScaffoldComposeResponse,
     ScaffoldPlanRequest,
     ScaffoldPlanResponse,
     ScaffoldRequirements,
+    StarterChoice,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _source(starter: domain.Starter) -> str:
+    return f"{starter.package}@{starter.version}"
 
 
 async def plan(
@@ -38,38 +42,31 @@ async def plan(
     user_id: str,
     body: ScaffoldPlanRequest | dict,
 ) -> ScaffoldPlanResponse:
-    """Turn a prompt into an intended project. Pure — no engine, no VM, no writes.
-
-    Tenancy is carried for logging and metering; there is no resource to
-    authorize against, because nothing is read or created.
-    """
+    """Turn a prompt into an intended project. Pure — no download, no VM, no writes."""
     body = ScaffoldPlanRequest.model_validate(body)
 
-    matches = domain.match_recipes(body.prompt)
-    recipe_ids = [m.id for m in matches]
+    match = domain.match_starter(body.prompt)
+    requires = domain.requirements_for(match.starter)
 
     logger.debug(
-        "codescaffold.plan ws=%s user=%s recipes=%s",
+        "codescaffold.plan ws=%s user=%s starter=%s matched=%s",
         workspace_id,
         user_id,
-        recipe_ids,
+        match.starter.id,
+        match.matched,
     )
 
-    requires = domain.requirements_for(recipe_ids)
-
     return ScaffoldPlanResponse(
-        starter=domain.STARTER,
+        starter=StarterChoice(
+            id=match.starter.id,
+            label=match.starter.label,
+            summary=match.starter.summary,
+            why=match.reason,
+            matched=match.matched,
+            source=_source(match.starter),
+        ),
         projectName=domain.derive_project_name(body.prompt),
-        recipes=[
-            RecipeChoice(
-                id=m.id,
-                capability=domain.BY_ID[m.id].capability,
-                summary=domain.BY_ID[m.id].summary,
-                why=m.reason,
-            )
-            for m in matches
-        ],
-        secrets=domain.secrets_for(recipe_ids),
+        devPort=match.starter.dev_port,
         requires=ScaffoldRequirements(
             install=requires.install,
             nativeToolchain=requires.nativeToolchain,
@@ -79,61 +76,75 @@ async def plan(
     )
 
 
+def _rename_package(files: dict[str, str], project_name: str) -> None:
+    """Stamp the project's name into `package.json`, in place.
+
+    Small, and the thing whose absence made the previous implementation's
+    `projectName` cosmetic: it was derived, returned, and then never written
+    anywhere, so every scaffolded project was called whatever the template author
+    named theirs.
+
+    Failures are swallowed by design. A template whose package.json we cannot
+    parse is a template we should still scaffold — the wrong name is a blemish,
+    a refused project is a broken feature.
+    """
+    raw = files.get("package.json")
+    if not raw or not project_name:
+        return
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("codescaffold: package.json did not parse; leaving the name alone")
+        return
+    if not isinstance(parsed, dict):
+        return
+    parsed["name"] = project_name
+    # Two-space indent + trailing newline: what every one of these templates
+    # already uses, so the diff a user sees is one line rather than the file.
+    files["package.json"] = json.dumps(parsed, indent=2) + "\n"
+
+
 async def compose(
     workspace_id: str,
     user_id: str,
     body: ScaffoldComposeRequest | dict,
 ) -> ScaffoldComposeResponse:
-    """Compose the base template plus the requested recipes into a source map.
+    """Fetch a starter and return it as a source map.
 
-    Validates the recipe ids against the catalog HERE rather than leaving it to
-    the engine. The engine would also refuse, but this is a user-supplied list
-    reaching a subprocess argv — checking it against a known set before it gets
-    there means an unknown id is a 400 with a helpful message instead of a
-    subprocess round trip and a 422.
+    Validates the id against the catalog before anything is fetched: it is a
+    user-supplied string that would otherwise reach a URL builder, and an unknown
+    id should be a 400 that names the options rather than a failed download.
     """
     body = ScaffoldComposeRequest.model_validate(body)
 
-    unknown = [r for r in body.recipes if r not in domain.BY_ID]
-    if unknown:
+    starter = domain.BY_ID.get(body.starter)
+    if starter is None:
         raise CloudError(
             400,
-            "codescaffold.unknown_recipe",
-            f"Unknown recipe(s): {', '.join(sorted(unknown))}",
+            "codescaffold.unknown_starter",
+            f"Unknown starter '{body.starter}'. Available: " + ", ".join(sorted(domain.BY_ID)),
         )
 
-    # De-duplicate while preserving the caller's order. The engine tolerates
-    # repeats (recipes are idempotent), but a repeated id in the applied order
-    # would read as a bug to anyone looking at the response.
-    requested: list[str] = []
-    for rid in body.recipes:
-        if rid not in requested:
-            requested.append(rid)
+    template = await registry.fetch_template(starter)
 
-    payload = await engine.compose(requested)
-
-    files: dict[str, str] = payload["files"]
-    order: list[str] = payload.get("order", [])
+    project_name = body.projectName or domain.FALLBACK_PROJECT_NAME
+    _rename_package(template.files, project_name)
 
     logger.info(
-        "codescaffold.compose ws=%s user=%s recipes=%s files=%d",
+        "codescaffold.compose ws=%s user=%s starter=%s files=%d",
         workspace_id,
         user_id,
-        order,
-        len(files),
+        starter.id,
+        template.file_count,
     )
 
     return ScaffoldComposeResponse(
-        starter=domain.STARTER,
-        projectName=body.projectName or domain.FALLBACK_PROJECT_NAME,
-        order=order,
-        # The ENGINE's secret list, not the catalog's. They should agree, and
-        # the tests assert they do — but the engine's is derived from the
-        # manifests it actually applied, which is the one that would be right if
-        # they ever drifted.
-        secrets=payload.get("secrets", []),
-        files=files,
-        fileCount=len(files),
+        starter=starter.id,
+        projectName=project_name,
+        devPort=starter.dev_port,
+        files=template.files,
+        assets=template.assets,
+        fileCount=template.file_count,
     )
 
 

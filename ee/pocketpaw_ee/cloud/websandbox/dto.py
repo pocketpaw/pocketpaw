@@ -326,14 +326,14 @@ class GitPrResponse(BaseModel):
 
 
 class ScaffoldIntoSandboxRequest(BaseModel):
-    """Compose these recipes and bring the project up in this sandbox.
+    """Fetch this starter and bring the project up in this sandbox.
 
-    Takes a recipe LIST rather than a prompt: the user is shown the plan and
-    allowed to edit it before anything is written, so the server receives the
-    decision, not the sentence it came from.
+    Takes a starter ID rather than a prompt: the user is shown the plan and
+    allowed to change the framework before anything is written, so the server
+    receives the decision, not the sentence it came from.
     """
 
-    recipes: list[str] = Field(default_factory=list, max_length=16)
+    starter: str = Field(..., min_length=1, max_length=64)
     projectName: str = Field(default="", max_length=64)
     #: Dev-server port. Optional — the default is Vite's own 5173.
     port: int | None = Field(default=None, ge=1, le=65535)
@@ -365,9 +365,9 @@ class ScaffoldIntoSandboxResponse(BaseModel):
     """
 
     projectName: str
-    order: list[str] = Field(default_factory=list)
-    #: Secret NAMES the project needs before it can run. Names only, always.
-    secrets: list[str] = Field(default_factory=list)
+    #: Which starter was used, echoed so a client that let the user change it can
+    #: confirm what actually landed.
+    starter: str = ""
     fileCount: int = 0
     port: int
     running: bool = False

@@ -1,111 +1,145 @@
-# test_codescaffold.py — prompt -> plan -> composed source map (CS-1).
+# test_codescaffold.py — prompt -> starter -> source map (CS-1b).
 #
-# Created 2026-07-22 (feat/codescaffold).
+# Rewritten 2026-07-22 when recipes became starters.
 #
-# Two layers, deliberately separated:
+# Three layers:
 #
-#   * The PLAN tests are pure. No node, no subprocess — matching is a function of
-#     a prompt and the catalog, and its failures should read as "the matcher is
-#     wrong", not "the box has no node".
-#   * The COMPOSE tests really shell the vendored engine. That is the point of
-#     them: the whole slice rests on the claim that the template ships and runs
-#     with nothing installed, and a mocked subprocess would prove neither. They
-#     skip (loudly) rather than fail when node is absent or too old.
+#   * MATCHING and NAMING are pure — no network, no disk.
+#   * EXTRACTION runs against tarballs the tests build in memory, so npm's
+#     packaging quirks (dotfile smuggling, binary assets, subdirectory
+#     selection) are exercised deterministically and offline.
+#   * A few LIVE tests really download from npm, behind a flag. They are the
+#     only thing that can catch a pinned package whose subdirectory moved, which
+#     is the failure this design is most exposed to.
 from __future__ import annotations
 
-import asyncio
-import shutil
-import subprocess
+import base64
+import hashlib
+import io
+import json
+import os
+import tarfile
 
 import pytest
 from pocketpaw_ee.cloud._core.errors import CloudError
-from pocketpaw_ee.cloud.codescaffold import domain, engine
+from pocketpaw_ee.cloud.codescaffold import domain, registry
 from pocketpaw_ee.cloud.codescaffold import service as scaffold_service
 
 WS = "ws-1"
 USER = "user-1"
 
-BOOKING_PROMPT = "a booking app with sign-in"
+live = pytest.mark.skipif(
+    os.environ.get("PAW_TEST_LIVE_NPM", "") == "",
+    reason="hits registry.npmjs.org; set PAW_TEST_LIVE_NPM=1 to run",
+)
 
 
-# ── The catalog itself ──────────────────────────────────────────────────────
+# ── Helpers: build a tarball shaped like a real npm package ─────────────────
 
 
-def test_catalog_matches_the_engines_manifest_list() -> None:
-    """The Python catalog and the runner's static MANIFESTS are two lists of the
-    same recipes, maintained by hand on purpose. If they drift, a prompt can
-    select a recipe the engine cannot apply — so read the runner and compare."""
-    runner = (engine.TEMPLATE_DIR / "_runner" / "compose.mjs").read_text(encoding="utf-8")
-    for recipe in domain.CATALOG:
-        assert f"recipes/{recipe.id}/recipe.ts" in runner, f"{recipe.id} missing from compose.mjs"
+def _tgz(members: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
 
 
-def test_every_catalog_recipe_has_its_payload_on_disk() -> None:
-    """Catches the vendoring failure this slice is most exposed to: a recipe that
-    exists in the catalog but whose files were dropped by an ignore rule."""
-    for recipe in domain.CATALOG:
-        manifest = engine.TEMPLATE_DIR / "recipes" / recipe.id / "recipe.ts"
-        assert manifest.is_file(), f"{recipe.id}: {manifest} did not ship"
+def _integrity(data: bytes) -> str:
+    return "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
 
 
-def test_the_runner_and_base_shipped() -> None:
-    assert engine.RUNNER.is_file()
-    assert (engine.TEMPLATE_DIR / "base" / "package.json").is_file()
+def _starter(**overrides) -> domain.Starter:  # noqa: ANN003
+    base = {
+        "id": "test",
+        "label": "Test",
+        "summary": "a test starter",
+        "package": "create-test",
+        "version": "1.0.0",
+        "integrity": "sha512-x",
+        "subdir": "template-x",
+        "dotfile_prefix": "_",
+        "keywords": ("test",),
+        "dev_port": 5173,
+    }
+    base.update(overrides)
+    return domain.Starter(**base)
+
+
+# ── The catalog ─────────────────────────────────────────────────────────────
+
+
+def test_every_starter_pins_a_sha512() -> None:
+    """A pinned VERSION without a hash still trusts whatever the network
+    returns, and these files are installed and executed in a user's sandbox."""
+    for starter in domain.STARTERS:
+        assert starter.integrity.startswith("sha512-"), starter.id
+        assert len(starter.integrity) > 80, starter.id
+
+
+def test_starter_ids_are_unique() -> None:
+    assert len({s.id for s in domain.STARTERS}) == len(domain.STARTERS)
+
+
+def test_the_default_starter_exists() -> None:
+    assert domain.DEFAULT_STARTER_ID in domain.BY_ID
+
+
+def test_the_tarball_url_uses_the_pinned_version() -> None:
+    """Resolving `/latest` would defeat the pin entirely."""
+    url = registry.tarball_url(domain.BY_ID["react"])
+
+    assert url.endswith("/create-vite/-/create-vite-9.1.1.tgz")
+    assert "latest" not in url
 
 
 # ── Matching ────────────────────────────────────────────────────────────────
 
 
-def test_the_done_when_prompt_selects_db_and_auth() -> None:
-    """CS-1's stated acceptance: "a booking app with sign-in" -> db + auth."""
-    matches = domain.match_recipes(BOOKING_PROMPT)
-
-    assert [m.id for m in matches] == ["db", "auth"]
-
-
-def test_an_implicit_dependency_says_it_is_implicit() -> None:
-    """`db` was never asked for by name. Showing "needed by auth" is the whole
-    reason `why` exists — a user is about to approve this list."""
-    by_id = {m.id: m.reason for m in domain.match_recipes(BOOKING_PROMPT)}
-
-    assert by_id["auth"] == 'you said "sign-in"'
-    assert by_id["db"] == "needed by auth"
-
-
-def test_a_direct_mention_beats_the_implicit_reason() -> None:
-    by_id = {m.id: m.reason for m in domain.match_recipes("a store with a database and login")}
-
-    assert by_id["db"] == 'you said "database"'
-
-
 @pytest.mark.parametrize(
     ("prompt", "expected"),
     [
-        ("a blog", []),
-        ("a shop that takes payments", ["db", "stripe"]),
-        ("somewhere users can sign up and pay", ["db", "auth", "stripe"]),
-        ("SIGN-IN PAGE", ["db", "auth"]),
-        ("a signin page", ["db", "auth"]),
-        ("a sign in page", ["db", "auth"]),
+        ("a react dashboard", "react"),
+        ("build me something in Vue", "vue"),
+        ("a svelte app", "svelte"),
+        ("a Next.js blog", "next"),
+        ("a nextjs blog", "next"),
+        ("use next js please", "next"),
+        ("SvelteKit todo list", "svelte"),
     ],
 )
-def test_matching_across_phrasings(prompt: str, expected: list[str]) -> None:
-    assert [m.id for m in domain.match_recipes(prompt)] == expected
+def test_matching_picks_the_named_framework(prompt: str, expected: str) -> None:
+    assert domain.match_starter(prompt).starter.id == expected
 
 
-def test_recipes_come_back_in_dependency_order() -> None:
-    """The order the engine will apply them in, so the confirmation UI reads the
-    same way the build runs."""
-    ids = [m.id for m in domain.match_recipes("payments and accounts")]
-
-    assert ids.index("db") < ids.index("auth")
-    assert ids.index("db") < ids.index("stripe")
+def test_next_wins_over_react_when_both_are_named() -> None:
+    """ "a Next.js app with React" names both, and Next is the more specific
+    claim — it already IS React. Matching order encodes that."""
+    assert domain.match_starter("a Next.js app using React").starter.id == "next"
 
 
-def test_a_keyword_inside_another_word_does_not_match() -> None:
-    """Word boundaries. Substring matching would put "db" in "adblock" and
-    "pay" in "paycheck", silently adding a database to a project."""
-    assert domain.match_recipes("an adblock dashboard for paycheck stubs") == []
+def test_an_unmatched_prompt_falls_back_and_says_so() -> None:
+    """Guessing beats refusing, but the UI has to be able to tell a guess from a
+    match so it can invite the user to change it."""
+    match = domain.match_starter("a booking app with sign-in")
+
+    assert match.starter.id == domain.DEFAULT_STARTER_ID
+    assert match.matched is False
+    assert "default" in match.reason
+
+
+def test_a_match_carries_the_users_own_words() -> None:
+    match = domain.match_starter("a REACT app")
+
+    assert match.matched is True
+    assert match.reason == 'you said "react"'
+
+
+def test_a_framework_name_inside_another_word_does_not_match() -> None:
+    """Substring matching finds "vue" in "revue" and "next" in "nextdoor"."""
+    assert domain.match_starter("a revue of nextdoor listings").matched is False
 
 
 # ── Naming ──────────────────────────────────────────────────────────────────
@@ -114,82 +148,198 @@ def test_a_keyword_inside_another_word_does_not_match() -> None:
 @pytest.mark.parametrize(
     ("prompt", "expected"),
     [
-        (BOOKING_PROMPT, "booking"),
-        ("Build me an app", "new-project"),
+        ("a react booking app", "booking"),
+        ("Next.js blog for recipes", "blog-recipes"),
+        ("build me an app", "new-project"),
         ("", "new-project"),
-        ("🎉🎉🎉", "new-project"),
-        ("2048 game clone", "p-2048-game-clone"),
+        ("🎉", "new-project"),
+        ("2048 game", "p-2048-game"),
     ],
 )
 def test_derive_project_name(prompt: str, expected: str) -> None:
-    """This becomes a directory name and a worker name, so it has to be a safe
-    slug for ANY input — including one with no usable words in it."""
     assert domain.derive_project_name(prompt) == expected
 
 
 def test_a_derived_name_is_always_a_safe_slug() -> None:
+    """This becomes a directory name AND an npm package name."""
     for prompt in ["../../etc/passwd", "a" * 500, "!!!", "My App: The Sequel!"]:
         name = domain.derive_project_name(prompt)
-        assert name
-        assert name.replace("-", "").isalnum(), name
-        assert len(name) <= 40
+        assert name and name.replace("-", "").isalnum() and len(name) <= 40
+        assert name[0].isalpha()
 
 
 # ── Requirements ────────────────────────────────────────────────────────────
 
 
-def test_a_composed_project_needs_a_native_toolchain() -> None:
-    """Every composed project targets Cloudflare Workers, so `wrangler dev` runs
-    workerd — a native binary. This is the flag that will route these projects to
-    a VM rather than an in-tab runtime, which is Decision 3 working as designed."""
-    req = domain.requirements_for(["db", "auth"])
-
-    assert req.nativeToolchain is True
-    assert req.install is True
-
-
-def test_it_does_not_claim_to_need_raw_sockets() -> None:
-    """D1 is reached through `platform.env.DB`, a binding — not a TCP connection
-    string. Over-declaring here would rule out runtimes for no reason."""
-    assert domain.requirements_for(["db", "auth", "stripe"]).rawSockets is False
-
-
-def test_every_raised_flag_carries_a_reason() -> None:
-    """The `reasons` discipline websandbox/requirements.py established: a routing
-    decision the user can see but cannot have explained is undebuggable."""
-    req = domain.requirements_for(["db"])
-
-    assert any("install" in r for r in req.reasons)
-    assert any("nativeToolchain" in r for r in req.reasons)
+def test_no_starter_needs_raw_sockets() -> None:
+    """The change the pivot bought. The old Cloudflare/D1 template needed
+    `workerd` and could only ever run in a VM; a Vite or Next dev server runs in
+    an in-tab WebContainer, so nothing here rules that runtime out."""
+    for starter in domain.STARTERS:
+        assert domain.requirements_for(starter).rawSockets is False
 
 
 def test_requirements_never_name_a_runtime() -> None:
-    """The plan emits REQUIREMENTS; the client's registry picks the runtime. A
-    runtime name leaking in here would move a product decision into the backend."""
-    blob = " ".join(domain.requirements_for(["db", "auth", "stripe"]).reasons).lower()
+    blob = " ".join(domain.requirements_for(domain.BY_ID["react"]).reasons).lower()
 
     assert "daytona" not in blob
     assert "webcontainer" not in blob
 
 
+# ── Integrity ───────────────────────────────────────────────────────────────
+
+
+def test_a_tampered_tarball_is_refused() -> None:
+    """The check that makes the pin mean something."""
+    data = _tgz({"package/template-x/a.txt": b"hello"})
+    starter = _starter(integrity=_integrity(data))
+
+    with pytest.raises(CloudError) as exc:
+        registry._verify(b"not the same bytes", starter.integrity, starter)
+
+    assert exc.value.code == "codescaffold.integrity_mismatch"
+
+
+def test_matching_bytes_pass_verification() -> None:
+    data = _tgz({"package/template-x/a.txt": b"hello"})
+
+    registry._verify(data, _integrity(data), _starter())
+
+
+def test_a_weak_integrity_algorithm_is_refused() -> None:
+    """Accepting sha1 because a registry entry used one would make the check
+    decorative."""
+    with pytest.raises(CloudError) as exc:
+        registry._verify(b"x", "sha1-abc", _starter())
+
+    assert exc.value.code == "codescaffold.bad_integrity_pin"
+
+
+# ── Extraction ──────────────────────────────────────────────────────────────
+
+
+def test_extract_takes_only_the_requested_subdirectory() -> None:
+    """create-vite carries sixteen templates and its own CLI. Fifteen of them
+    must not end up in the user's project."""
+    data = _tgz(
+        {
+            "package/package.json": b'{"name":"create-vite"}',
+            "package/template-x/index.html": b"<html>",
+            "package/template-y/index.html": b"<other>",
+        }
+    )
+
+    template = registry.extract(data, _starter())
+
+    assert set(template.files) == {"index.html"}
+
+
+def test_extract_restores_npms_smuggled_dotfiles() -> None:
+    """npm STRIPS a real .gitignore from a published tarball, so every one of
+    these packages ships an alias. Without the rename, the scaffolded project's
+    first commit includes node_modules."""
+    data = _tgz({"package/template-x/_gitignore": b"node_modules\n"})
+
+    template = registry.extract(data, _starter())
+
+    assert ".gitignore" in template.files
+    assert "_gitignore" not in template.files
+
+
+def test_a_bare_dotfile_alias_is_restored_too() -> None:
+    """create-next-app uses no prefix at all — just `gitignore`."""
+    data = _tgz({"package/tpl/gitignore": b"node_modules\n", "package/tpl/README.md": b"hi"})
+
+    template = registry.extract(data, _starter(subdir="tpl", dotfile_prefix=""))
+
+    assert ".gitignore" in template.files
+    # And it did NOT dot-prefix an ordinary file on the way past.
+    assert "README.md" in template.files
+
+
+def test_binary_files_are_carried_as_base64_not_dropped() -> None:
+    """A silently missing favicon is a mystery to whoever hits it."""
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    data = _tgz({"package/template-x/src/hero.png": png, "package/template-x/a.ts": b"x"})
+
+    template = registry.extract(data, _starter())
+
+    assert base64.b64decode(template.assets["src/hero.png"]) == png
+    assert template.files == {"a.ts": "x"}
+
+
+def test_non_utf8_content_is_carried_as_an_asset() -> None:
+    """Not on the known-binary list and not text either — carry it rather than
+    lose it."""
+    data = _tgz({"package/template-x/weird.dat": b"\xff\xfe\x00binary"})
+
+    template = registry.extract(data, _starter())
+
+    assert "weird.dat" in template.assets
+
+
+def test_a_path_escaping_the_template_is_skipped() -> None:
+    data = _tgz({"package/template-x/../../evil.sh": b"rm -rf /", "package/template-x/ok.ts": b"x"})
+
+    template = registry.extract(data, _starter())
+
+    assert list(template.files) == ["ok.ts"]
+
+
+def test_a_missing_subdirectory_is_our_bug_not_the_users() -> None:
+    """The failure this design is most exposed to: a pinned package reorganises
+    and the subdir path goes stale."""
+    data = _tgz({"package/somewhere-else/a.ts": b"x"})
+
+    with pytest.raises(CloudError) as exc:
+        registry.extract(data, _starter())
+
+    assert exc.value.status_code == 500
+    assert exc.value.code == "codescaffold.template_empty"
+
+
+def test_extra_files_fill_a_gap_but_never_override() -> None:
+    """create-next-app ships NO package.json — its CLI generates one — so we
+    supply it. If a future version starts shipping its own, theirs must win and
+    our catalog entry gets deleted."""
+    supplied = _starter(extra_files=(("package.json", '{"name":"ours"}'),))
+
+    without = registry.extract(_tgz({"package/template-x/a.ts": b"x"}), supplied)
+    assert without.files["package.json"] == '{"name":"ours"}'
+
+    with_own = registry.extract(
+        _tgz(
+            {
+                "package/template-x/a.ts": b"x",
+                "package/template-x/package.json": b'{"name":"theirs"}',
+            }
+        ),
+        supplied,
+    )
+    assert with_own.files["package.json"] == '{"name":"theirs"}'
+
+
 # ── plan() ──────────────────────────────────────────────────────────────────
 
 
-async def test_plan_answers_the_done_when() -> None:
-    result = await scaffold_service.plan(WS, USER, {"prompt": BOOKING_PROMPT})
+async def test_plan_is_pure_and_names_its_source() -> None:
+    result = await scaffold_service.plan(WS, USER, {"prompt": "a react booking app"})
 
-    assert [r.id for r in result.recipes] == ["db", "auth"]
+    assert result.starter.id == "react"
+    assert result.starter.matched is True
     assert result.projectName == "booking"
-    assert result.starter == domain.STARTER
-    assert result.requires.nativeToolchain is True
+    assert result.devPort == 5173
+    # The UI should be able to say exactly what it is about to install.
+    assert result.starter.source == "create-vite@9.1.1"
 
 
-async def test_plan_reports_secret_names_only() -> None:
-    """Names, never values — the template's contract, and what lets a plan be
-    logged and shown without carrying anything sensitive."""
-    result = await scaffold_service.plan(WS, USER, {"prompt": "sign-in and payments"})
+async def test_plan_reports_the_right_port_per_framework() -> None:
+    """Next serves on 3000 and Vite on 5173. A preview pane pointed at the wrong
+    one shows nothing, with no indication why."""
+    react = await scaffold_service.plan(WS, USER, {"prompt": "react app"})
+    nextjs = await scaffold_service.plan(WS, USER, {"prompt": "next app"})
 
-    assert result.secrets == ["AUTH_SECRET", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"]
+    assert (react.devPort, nextjs.devPort) == (5173, 3000)
 
 
 async def test_plan_rejects_an_empty_prompt() -> None:
@@ -197,211 +347,50 @@ async def test_plan_rejects_an_empty_prompt() -> None:
         await scaffold_service.plan(WS, USER, {"prompt": ""})
 
 
-async def test_plan_on_an_unmatched_prompt_still_plans() -> None:
-    """A prompt matching no recipe is not an error — the base template alone is a
-    real project."""
-    result = await scaffold_service.plan(WS, USER, {"prompt": "a blog"})
-
-    assert result.recipes == []
-    assert result.requires.install is True
+# ── compose() ───────────────────────────────────────────────────────────────
 
 
-# ── compose(): the real engine ──────────────────────────────────────────────
-
-_NODE = shutil.which("node")
-
-
-def _node_supports_strip_types() -> bool:
-    if not _NODE:
-        return False
-    try:
-        out = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            [_NODE, "--version"], capture_output=True, text=True, timeout=15
-        ).stdout.strip()
-        major, minor = (int(p) for p in out.lstrip("v").split(".")[:2])
-    except Exception:  # noqa: BLE001 — any failure means "cannot rely on it"
-        return False
-    # --experimental-strip-types landed in 22.6.
-    return (major, minor) >= (22, 6)
-
-
-requires_node = pytest.mark.skipif(
-    not _node_supports_strip_types(),
-    reason="needs node >= 22.6 for --experimental-strip-types",
-)
-
-
-@requires_node
-async def test_compose_produces_the_auth_routes() -> None:
-    """The other half of CS-1's done-when: the source map contains the auth
-    routes. Really shells the vendored engine — the claim under test is that it
-    runs with nothing installed."""
-    result = await scaffold_service.compose(WS, USER, {"recipes": ["auth"], "projectName": "demo"})
-
-    assert result.order == ["db", "auth"]
-    assert "src/routes/sign-in/+page.svelte" in result.files
-    assert "src/routes/dashboard/+page.server.ts" in result.files
-    assert result.fileCount == len(result.files) > 40
-
-
-@requires_node
-async def test_compose_stacks_migrations() -> None:
-    result = await scaffold_service.compose(WS, USER, {"recipes": ["auth"]})
-
-    migrations = sorted(p for p in result.files if p.startswith("migrations/"))
-    assert migrations == ["migrations/0001_init.sql", "migrations/0002_auth.sql"]
-
-
-@requires_node
-async def test_compose_resolves_dependencies_without_being_asked() -> None:
-    """`auth` requires `db`. Asking for one composes both, and passing the whole
-    catalog to the engine does NOT compose the whole catalog."""
-    result = await scaffold_service.compose(WS, USER, {"recipes": ["auth"]})
-
-    assert result.order == ["db", "auth"]
-    assert "stripe" not in result.order
-    assert not any("stripe" in p for p in result.files)
-
-
-@requires_node
-async def test_compose_with_no_recipes_still_yields_a_project() -> None:
-    result = await scaffold_service.compose(WS, USER, {"recipes": []})
-
-    assert result.files
-    assert "package.json" in result.files
-    assert result.order == []
-
-
-@requires_node
-async def test_the_engines_secrets_agree_with_the_catalog() -> None:
-    """Two hand-maintained lists of the same fact. The engine's is derived from
-    the manifests it actually applied, so this is the one that would be right if
-    they drifted — which is exactly why it is worth comparing."""
-    result = await scaffold_service.compose(WS, USER, {"recipes": ["auth", "stripe"]})
-
-    assert sorted(result.secrets) == sorted(domain.secrets_for(["auth", "stripe", "db"]))
-
-
-@requires_node
-async def test_no_secret_value_is_ever_in_the_composed_source() -> None:
-    """The invariant the whole secrets-by-name-only contract exists for. Recipes
-    declare names; nothing that looks like a provisioned value may appear."""
-    result = await scaffold_service.compose(WS, USER, {"recipes": ["auth", "stripe"]})
-
-    blob = "\n".join(result.files.values())
-    assert "sk_live_" not in blob
-    assert "sk_test_" not in blob
-    # A declared name may appear (as `platform.env.AUTH_SECRET`); an assignment
-    # to it must not.
-    assert "AUTH_SECRET=" not in blob
-
-
-@requires_node
-async def test_compose_does_not_leak_build_or_dependency_directories() -> None:
-    """A stray `.svelte-kit` or `node_modules` in the vendored base would be
-    composed into every generated project. It happened once during vendoring."""
-    result = await scaffold_service.compose(WS, USER, {"recipes": ["auth"]})
-
-    assert not [p for p in result.files if ".svelte-kit" in p or "node_modules" in p]
-
-
-@requires_node
-async def test_composing_twice_is_byte_identical() -> None:
-    """Recipes are idempotent one-shot codemods, so composition is a pure
-    function of the recipe list. A scaffolder that is not reproducible cannot be
-    debugged from a bug report."""
-    a = await scaffold_service.compose(WS, USER, {"recipes": ["auth"]})
-    b = await scaffold_service.compose(WS, USER, {"recipes": ["auth"]})
-
-    assert a.files == b.files
-
-
-@requires_node
-async def test_paths_are_posix_relative() -> None:
-    """Both runtimes consume this map by path — tar entries for Daytona, mount
-    keys for a WebContainer. A Windows separator or a leading slash breaks both,
-    and this backend runs on Windows in development."""
-    result = await scaffold_service.compose(WS, USER, {"recipes": ["auth"]})
-
-    for path in result.files:
-        assert "\\" not in path, path
-        assert not path.startswith("/"), path
-        assert ".." not in path.split("/"), path
-
-
-# ── compose(): refusals and failures ────────────────────────────────────────
-
-
-def _stub_binary(tmp_path, body: str) -> str:
-    """A stand-in for node: a Python script plus a launcher that runs it.
-
-    Written to disk rather than passed as an inline command because the override
-    is resolved with `Path(raw).is_file()` — a real path is exactly what an
-    operator would set, so the stub exercises the same branch production does.
-    """
-    import sys
-    import textwrap
-
-    script = tmp_path / "stub_engine.py"
-    script.write_text(textwrap.dedent(body), encoding="utf-8")
-    return f'"{sys.executable}" "{script}"'
-
-
-async def test_an_unknown_recipe_is_rejected_before_the_subprocess() -> None:
-    """User-supplied strings reach a subprocess argv. Checking them against the
-    catalog first turns a round trip into a 400 with a useful message."""
+async def test_an_unknown_starter_is_rejected_before_any_fetch() -> None:
     with pytest.raises(CloudError) as exc:
-        await scaffold_service.compose(WS, USER, {"recipes": ["auth", "rm -rf /"]})
+        await scaffold_service.compose(WS, USER, {"starter": "angular"})
 
     assert exc.value.status_code == 400
-    assert "rm -rf /" in str(exc.value.message)
+    assert "react" in str(exc.value.message)
 
 
-async def test_a_missing_node_is_a_named_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """THE paw-sites failure. Without this branch the operator gets a bare 500
-    and no clue that the box simply has no node."""
-    monkeypatch.setenv("PAW_CODESCAFFOLD_NODE", "definitely-not-a-real-binary-xyz")
+def test_the_project_name_is_stamped_into_package_json() -> None:
+    """The gap in the previous implementation: projectName was derived, returned,
+    and then never written anywhere, so every project kept the template's name."""
+    files = {"package.json": '{"name": "template", "version": "0.0.0"}'}
 
-    with pytest.raises(CloudError) as exc:
-        await scaffold_service.compose(WS, USER, {"recipes": ["auth"]})
+    scaffold_service._rename_package(files, "booking")
 
-    assert exc.value.status_code == 503
-    assert exc.value.code == "codescaffold.node_missing"
-
-
-async def test_a_broken_engine_is_a_clean_error(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """An engine that runs but prints something other than the envelope must not
-    surface as a half-composed project."""
-    stub = _stub_binary(tmp_path, "print('not json at all')")
-    monkeypatch.setenv("PAW_CODESCAFFOLD_NODE", stub)
-
-    with pytest.raises(CloudError) as exc:
-        await scaffold_service.compose(WS, USER, {"recipes": ["auth"]})
-
-    assert exc.value.status_code == 500
-    assert exc.value.code == "codescaffold.engine_failed"
+    assert json.loads(files["package.json"])["name"] == "booking"
+    assert json.loads(files["package.json"])["version"] == "0.0.0"
 
 
-async def test_a_missing_template_is_a_named_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The .dockerignore trap, made loud. A vendored tree dropped by either
-    ignore layer produces a 5xx with nothing to point at; this names it."""
-    monkeypatch.setattr(engine, "RUNNER", engine.TEMPLATE_DIR / "_runner" / "gone.mjs")
+def test_an_unparseable_package_json_is_left_alone() -> None:
+    """A template we cannot rename is still a template worth scaffolding. The
+    wrong name is a blemish; a refused project is a broken feature."""
+    files = {"package.json": "{not json"}
 
-    with pytest.raises(CloudError) as exc:
-        await scaffold_service.compose(WS, USER, {"recipes": ["auth"]})
+    scaffold_service._rename_package(files, "booking")
 
-    assert exc.value.status_code == 500
-    assert exc.value.code == "codescaffold.template_missing"
+    assert files["package.json"] == "{not json"
 
 
-async def test_a_hung_engine_times_out(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    stub = _stub_binary(tmp_path, "import time; time.sleep(30)")
-    monkeypatch.setenv("PAW_CODESCAFFOLD_NODE", stub)
-    monkeypatch.setattr(engine, "COMPOSE_TIMEOUT_SECONDS", 1)
+# ── Live: the only thing that catches a stale pin ───────────────────────────
 
-    with pytest.raises(CloudError) as exc:
-        await asyncio.wait_for(
-            scaffold_service.compose(WS, USER, {"recipes": ["auth"]}), timeout=20
-        )
 
-    assert exc.value.status_code == 504
+@live
+@pytest.mark.parametrize("starter_id", sorted(domain.BY_ID))
+async def test_every_pinned_starter_really_downloads_and_extracts(starter_id: str) -> None:
+    """Verifies the pin, the integrity hash, and the subdirectory path against
+    the real registry. Nothing offline can catch a package that reorganised."""
+    template = await registry.fetch_template(domain.BY_ID[starter_id])
+
+    assert template.files, starter_id
+    package = json.loads(template.files["package.json"])
+    # Every starter must be runnable: `npm install && npm run dev`.
+    assert "dev" in package.get("scripts", {}), starter_id
+    assert ".gitignore" in template.files, starter_id

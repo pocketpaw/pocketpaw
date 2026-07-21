@@ -633,12 +633,13 @@ allow_indirect_imports = "true"
 # it removes a hop and it would work, in exactly one runtime, and the in-tab
 # path would quietly stop being reachable.
 #
-# The subprocess in engine.py is deliberately NOT forbidden here: shelling the
-# vendored recipe engine is the design. What is forbidden is reaching a runtime.
+# The network fetch in registry.py is deliberately NOT forbidden here:
+# downloading a pinned, integrity-checked npm tarball is the design. What is
+# forbidden is reaching a runtime.
 source_modules = [
     "pocketpaw_ee.cloud.codescaffold.router",
     "pocketpaw_ee.cloud.codescaffold.service",
-    "pocketpaw_ee.cloud.codescaffold.engine",
+    "pocketpaw_ee.cloud.codescaffold.registry",
     "pocketpaw_ee.cloud.codescaffold.dto",
     "pocketpaw_ee.cloud.codescaffold.domain",
 ]

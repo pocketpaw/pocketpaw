@@ -1,192 +1,255 @@
-# domain.py — Pure scaffold rules: the recipe catalog, prompt matching, naming,
-# and the capability requirements a composed project implies (CS-1).
+# domain.py — The starter catalog and prompt matching (CS-1, rewritten CS-1b).
 #
-# Created 2026-07-21 (feat/codescaffold). No I/O, no subprocess, no FastAPI —
-# everything here is a pure function of a prompt and the catalog, so the matching
-# policy can be tested without node on the box.
+# Created 2026-07-21. REWRITTEN 2026-07-22: the vendored SvelteKit/D1 template and
+# its recipe engine are gone; starters now come from PINNED, OFFICIAL npm
+# tarballs. The old approach is recoverable at commit d233253f if the recipe
+# depth is ever wanted back.
 #
-# THE ONE DECISION WORTH RESTATING. Planning is DETERMINISTIC — keyword rules
-# over a three-entry catalog, not a model call. Two reasons, and the second is
-# the load-bearing one:
+# ── Why npm tarballs and not `git clone` ────────────────────────────────────
+# The obvious reading of "just clone a GitHub repo" does not survive contact with
+# these projects. Measured, not assumed:
 #
-#   1. It works today. Every model path in Code Mode is currently blocked on the
-#      deployment's transport (see the codeagent notes), and a scaffolder that
-#      cannot run is not a scaffolder.
-#   2. It is EXPLAINABLE. Every recipe this returns carries the phrase in the
-#      user's own prompt that selected it, so the confirmation step can say
-#      "I'll set up auth, because you said 'sign-in'" instead of asking someone
-#      to trust a black box before it writes files into their project.
+#   * React and Vue have NO standalone template repo — they live inside
+#     `vitejs/vite`, whose tarball is 12.9 MB to obtain a 20 KB template.
+#   * Next.js is the same story inside `vercel/next.js`: 51 MB.
+#   * `sveltejs/kit-template-default` does exist standalone, but its last push
+#     was 2025-11-21 — eight months stale.
 #
-# That said, this is a floor and not a ceiling: three recipes with distinctive
-# vocabulary is exactly the case keyword matching handles well, and it degrades
-# the moment the catalog grows. The upgrade path is to replace `match_recipes`
-# with a model call that returns the same `(ids, reasons)` pair — the seam is the
-# return type, and everything downstream already treats reasons as required.
+# Every one of these projects DOES ship its templates as real files inside a
+# small, versioned npm package: `create-vite` is 81 KB and carries sixteen of
+# them. That package is literally the bytes `npm create vite` writes, it is
+# pinnable (a git branch moves under you; a version does not), and it arrives as
+# a tarball — which is the shape the runtime materializer already consumes.
+#
+# ── What was given up ───────────────────────────────────────────────────────
+# The recipes. `auth` and `stripe` used to arrive working; a Vite starter is a
+# blank app. The agent has to write those features itself now, against a scaffold
+# rather than onto one. That is the trade this rewrite makes, deliberately.
 from __future__ import annotations
 
 import re
 from typing import NamedTuple
 
-# ── The catalog ─────────────────────────────────────────────────────────────
-# Mirrors `_template/_runner/compose.mjs`'s MANIFESTS by id. The duplication is
-# deliberate and the comment there says the same thing from the other side: that
-# file decides what the ENGINE can apply, this one decides what a PROMPT is
-# allowed to ask for. Adding a recipe should be two conscious edits, because the
-# thing being added writes code into somebody's project.
-
-# The only starter today. Named rather than assumed so the wire shape does not
-# have to change when a second one appears.
-STARTER = "sveltekit-cloudflare"
+#: Bumped when the extraction shape changes, so a cached tarball from an older
+#: build cannot be reused with new extraction rules.
+CATALOG_EPOCH = "v1"
 
 
-class Recipe(NamedTuple):
-    """One composable feature. `keywords` are matched case-insensitively against
-    the prompt on word boundaries; `requires` mirrors the engine's own manifest
-    so the plan can report the full closure without shelling out to node."""
+class Starter(NamedTuple):
+    """One framework starter, sourced from a pinned npm package.
+
+    ``integrity`` is the registry's own Subresource-Integrity string and is
+    VERIFIED before a single byte is extracted. This code ends up running in a
+    user's sandbox, so "we downloaded whatever the registry served" is not good
+    enough — a pinned version without a hash still trusts the network.
+
+    ``dotfile_prefix`` is per-package on purpose and is not a detail: npm strips
+    a real ``.gitignore`` out of a published tarball, so every one of these
+    projects smuggles it under a different alias — ``_gitignore`` in create-vite,
+    ``gitignore`` in create-next-app. Get it wrong and every scaffolded project
+    commits ``node_modules`` on its first commit.
+    """
 
     id: str
-    capability: str
+    label: str
     summary: str
+    package: str
+    version: str
+    integrity: str
+    #: Path inside the extracted tarball, below the npm ``package/`` root.
+    subdir: str
+    #: Filename prefix the package uses to smuggle dotfiles past npm.
+    dotfile_prefix: str
     keywords: tuple[str, ...]
-    requires: tuple[str, ...] = ()
-    secrets: tuple[str, ...] = ()
+    #: The port this starter's dev server listens on by default.
+    dev_port: int
+    #: Files WE supply, merged over the extracted tree.
+    #:
+    #: Needed by exactly one starter and worth the field. `create-next-app` ships
+    #: no `package.json` at all — its CLI GENERATES one, resolving `next` and
+    #: `react` versions at run time from flags. Pure extraction therefore yields
+    #: a Next project with no dependencies and no `dev` script. Supplying it here
+    #: keeps the fix visible and refreshable instead of hidden in a code path.
+    extra_files: tuple[tuple[str, str], ...] = ()
 
 
-CATALOG: tuple[Recipe, ...] = (
-    Recipe(
-        id="db",
-        capability="database",
-        summary="A Cloudflare D1 database with Drizzle",
-        # "database"/"db" are the direct asks. The rest are the nouns people use
-        # when they mean persistence without saying the word: an app that
-        # "stores bookings" needs a database whether or not it says so.
-        keywords=("database", "db", "sql", "store", "storage", "persist", "table", "records"),
-    ),
-    Recipe(
-        id="auth",
-        capability="authentication",
-        summary="Email and password accounts, with a protected dashboard",
-        keywords=(
-            "auth",
-            "authentication",
-            "sign-in",
-            "sign in",
-            "signin",
-            "sign-up",
-            "sign up",
-            "signup",
-            "login",
-            "log in",
-            "account",
-            "accounts",
-            "user",
-            "users",
-            "register",
-            "registration",
+# The `package.json` create-next-app WOULD have generated. It ships none of its
+# own — the CLI writes one at run time, resolving `next` and `react` from npm —
+# so pure extraction yields a Next project with no dependencies and no `dev`
+# script. Caret ranges rather than exact pins, so `npm install` picks up patches
+# and this constant is not the thing that goes stale. Kept whole and readable
+# because the day it needs updating, it needs reading first.
+_NEXT_PACKAGE_JSON = """{
+  "name": "app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "^15.5.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
+"""
+
+
+# ── The catalog ─────────────────────────────────────────────────────────────
+# Versions are pinned to the newest release at least SEVEN DAYS old, per the
+# workspace supply-chain rule. That is why `create-next-app` is pinned to 15.5.20
+# rather than 16.2.11 — the 16.x line was published inside the window. Refresh
+# with `scripts/refresh_starters.py`, which re-checks the age rule.
+STARTERS: tuple[Starter, ...] = (
+    Starter(
+        id="react",
+        label="React",
+        summary="React 19 with Vite and TypeScript",
+        package="create-vite",
+        version="9.1.1",
+        integrity=(
+            "sha512-5iqlfg6gmxRLxkYu4lZDcdeLj32usAvyec9Hb47j4OYcuSyHRwwjLi3s"
+            "bi7bcyV9QrFomWDsXhamkJzwgutNpQ=="
         ),
-        requires=("db",),
-        secrets=("AUTH_SECRET",),
+        subdir="template-react-ts",
+        dotfile_prefix="_",
+        keywords=("react", "reactjs", "react.js", "jsx", "tsx"),
+        dev_port=5173,
     ),
-    Recipe(
-        id="stripe",
-        capability="payments",
-        summary="Stripe Checkout with a verified webhook",
-        keywords=(
-            "stripe",
-            "payment",
-            "payments",
-            "pay",
-            "checkout",
-            "billing",
-            "subscription",
-            "subscriptions",
-            "purchase",
-            "sell",
+    Starter(
+        id="vue",
+        label="Vue",
+        summary="Vue 3 with Vite and TypeScript",
+        package="create-vite",
+        version="9.1.1",
+        integrity=(
+            "sha512-5iqlfg6gmxRLxkYu4lZDcdeLj32usAvyec9Hb47j4OYcuSyHRwwjLi3s"
+            "bi7bcyV9QrFomWDsXhamkJzwgutNpQ=="
         ),
-        requires=("db",),
-        secrets=("STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"),
+        subdir="template-vue-ts",
+        dotfile_prefix="_",
+        # `create-vue` is deliberately NOT the source here: it composes fragments
+        # (base + router + pinia) at generation time rather than shipping a flat
+        # template, so there is nothing in it to extract.
+        keywords=("vue", "vuejs", "vue.js"),
+        dev_port=5173,
+    ),
+    Starter(
+        id="svelte",
+        label="Svelte",
+        summary="Svelte 5 with Vite and TypeScript",
+        package="create-vite",
+        version="9.1.1",
+        integrity=(
+            "sha512-5iqlfg6gmxRLxkYu4lZDcdeLj32usAvyec9Hb47j4OYcuSyHRwwjLi3s"
+            "bi7bcyV9QrFomWDsXhamkJzwgutNpQ=="
+        ),
+        subdir="template-svelte-ts",
+        dotfile_prefix="_",
+        # This is Svelte, NOT SvelteKit, and that is a real limitation rather than
+        # a preference. SvelteKit's official scaffolder (`sv`) does not ship flat
+        # templates — its `dist/templates/minimal` is a generator manifest
+        # (`files.types=typescript.json` + an `assets/` tree with no package.json)
+        # that only the CLI can assemble. Extracting it would mean reimplementing
+        # that assembly, which is the vendoring problem this rewrite removed.
+        keywords=("svelte", "sveltekit", "svelte.js"),
+        dev_port=5173,
+    ),
+    Starter(
+        id="next",
+        label="Next.js",
+        summary="Next.js App Router with TypeScript and Tailwind",
+        package="create-next-app",
+        version="15.5.20",
+        integrity=(
+            "sha512-EtVdrmqQffcjdP0QafaiEEXZ5rr/Bqj7+L6ElHexBuAOG7zVgB4MQdsV"
+            "7M9r1a+kznFZ6+wn2HyGAF2J/xcG/Q=="
+        ),
+        subdir="dist/templates/app-tw/ts",
+        # create-next-app ships it as a bare "gitignore" — no underscore. A
+        # single shared prefix across the catalog would silently miss this one.
+        dotfile_prefix="",
+        keywords=("next", "nextjs", "next.js", "ssr", "app router"),
+        dev_port=3000,
+        # The ranges create-next-app 15.5.x resolves for a TypeScript + Tailwind
+        # app. Carets rather than exact pins, so `npm install` picks up patches
+        # without this file being the thing that goes stale.
+        extra_files=(("package.json", _NEXT_PACKAGE_JSON),),
     ),
 )
 
-BY_ID: dict[str, Recipe] = {r.id: r for r in CATALOG}
+BY_ID: dict[str, Starter] = {s.id: s for s in STARTERS}
+
+#: What an unrecognised prompt gets. React is the widest-reach default, and
+#: guessing beats refusing — the user is shown the choice and can change it
+#: before anything is built.
+DEFAULT_STARTER_ID = "react"
 
 
 class Match(NamedTuple):
-    """A chosen recipe and the evidence that chose it."""
+    """The chosen starter and the evidence that chose it."""
 
-    id: str
-    #: Why it is here — either the prompt phrase that matched, or the recipe
-    #: that pulled it in. Never empty; a choice with no reason is a bug.
+    starter: Starter
     reason: str
+    #: False when nothing in the prompt matched and the default was used. The UI
+    #: should present a guess differently from a match.
+    matched: bool
 
 
 def _mentions(prompt: str, keyword: str) -> bool:
     """Whole-word, case-insensitive containment.
 
-    Word boundaries matter more than they look. Substring matching puts "pay" in
-    "paycheck" and — the one that actually bites — "user" in "users", which is
-    fine, versus "db" in "adblock", which is not. Hyphens and spaces in a keyword
-    are treated as interchangeable so "sign-in", "sign in" and "signin" all land.
+    Boundaries matter: substring matching finds "vue" inside "revue" and — the
+    one that would actually bite — "next" inside "nextdoor". Dots and spaces in a
+    keyword are treated as optional so "next.js", "nextjs" and "next js" all land.
     """
-    pattern = (
-        r"\b" + r"[\s\-]?".join(re.escape(part) for part in re.split(r"[\s\-]+", keyword)) + r"\b"
-    )
+    parts = [re.escape(p) for p in re.split(r"[\s.]+", keyword) if p]
+    pattern = r"(?<![A-Za-z0-9])" + r"[\s.]?".join(parts) + r"(?![A-Za-z0-9])"
     return re.search(pattern, prompt, re.IGNORECASE) is not None
 
 
-def match_recipes(prompt: str) -> list[Match]:
-    """Pick the recipes a prompt is asking for, with the closure of `requires`.
+def match_starter(prompt: str) -> Match:
+    """Pick the starter a prompt is asking for.
 
-    Returned in dependency order (a required recipe before the one that needs
-    it), which is the order the engine will apply them in — so the confirmation
-    UI reads the same way the build runs.
+    Deterministic keyword matching rather than a model call: it runs today, and
+    it is explainable — the user is told which of their own words chose the
+    framework, before anything is written into their project.
 
-    A dependency pulled in implicitly is reported as such rather than silently
-    added: "a booking app with sign-in" selects `auth` on the word "sign-in" and
-    `db` because auth needs it, and the user should see both.
+    Ordering note: `next` is checked BEFORE the Vite family. "a Next.js app with
+    React" names both, and Next is the more specific claim — it already IS React.
     """
-    direct: list[Match] = []
-    for recipe in CATALOG:
-        hit = next((k for k in recipe.keywords if _mentions(prompt, k)), None)
+    for starter in _MATCH_ORDER:
+        hit = next((k for k in starter.keywords if _mentions(prompt, k)), None)
         if hit is not None:
-            direct.append(Match(recipe.id, f'you said "{hit}"'))
+            return Match(starter, f'you said "{hit}"', True)
 
-    chosen: dict[str, str] = {}
-
-    def add(recipe_id: str, reason: str) -> None:
-        # First reason wins: a direct prompt match is more useful to show than
-        # "required by X", and directs are walked first.
-        if recipe_id in chosen:
-            return
-        chosen[recipe_id] = reason
-        for dep in BY_ID[recipe_id].requires:
-            add(dep, f"needed by {recipe_id}")
-
-    for match in direct:
-        add(match.id, match.reason)
-
-    return [Match(r.id, chosen[r.id]) for r in CATALOG if r.id in chosen]
+    default = BY_ID[DEFAULT_STARTER_ID]
+    return Match(default, "no framework was named, so this is the default", False)
 
 
-def secrets_for(recipe_ids: list[str]) -> list[str]:
-    """The secret NAMES a composed project will need. Names only — that is the
-    template's contract and the reason a composed project can be handed around
-    without carrying anything sensitive. Values are CE-track work and never enter
-    the source map."""
-    seen: list[str] = []
-    for rid in recipe_ids:
-        for name in BY_ID[rid].secrets if rid in BY_ID else ():
-            if name not in seen:
-                seen.append(name)
-    return seen
+#: `next` first — see `match_starter`. Everything else keeps catalog order.
+_MATCH_ORDER: tuple[Starter, ...] = (
+    BY_ID["next"],
+    BY_ID["react"],
+    BY_ID["vue"],
+    BY_ID["svelte"],
+)
 
 
 class Requirements(NamedTuple):
-    """What a composed project needs from a RUNTIME. Mirrors
-    `websandbox.dto.RuntimeRequirementsResponse` field for field, deliberately:
-    the registry already matches that shape against adapter capabilities, and a
-    second vocabulary for the same question would need a translation layer that
-    could disagree with itself."""
+    """What a starter needs from a RUNTIME. Mirrors
+    `websandbox.dto.RuntimeRequirementsResponse` field for field so the client's
+    existing capability matcher consumes it unchanged."""
 
     install: bool
     nativeToolchain: bool
@@ -194,53 +257,34 @@ class Requirements(NamedTuple):
     reasons: list[str]
 
 
-def requirements_for(recipe_ids: list[str]) -> Requirements:
-    """The capability demands of a composed project.
+def requirements_for(starter: Starter) -> Requirements:
+    """The capability demands of a starter.
 
-    This is the plan emitting REQUIREMENTS rather than picking a runtime — the
-    whole point of the registry. Nothing here names Daytona or WebContainers;
-    the matcher decides, and it will decide differently the day an in-tab runtime
-    can run workerd.
+    Emits REQUIREMENTS, never a runtime name — the client's registry decides. The
+    interesting change since the Cloudflare template: none of these starters needs
+    `workerd`. That template could only ever run in a VM; a Vite or Next dev
+    server runs perfectly well in an in-tab WebContainer, which is precisely what
+    WebContainers were built to demo.
 
-    Every flag that is true carries a reason, per the `reasons` discipline
-    `websandbox/requirements.py` established: a routing decision the user can see
-    (fast in-tab runtime versus a slower VM) but not have explained is a decision
-    nobody can debug.
+    `nativeToolchain` is still true, because Vite and Next both resolve to
+    esbuild/rollup binaries at install time — and the WebContainers adapter
+    honestly declares it can run those.
     """
-    reasons = [
-        "the project installs its dependencies from npm -> install",
-        # True for the BASE, before any recipe. SvelteKit builds through Vite,
-        # which resolves to esbuild/rollup native binaries.
-        "the SvelteKit build runs Vite (esbuild/rollup native binaries) -> nativeToolchain",
-    ]
-    # Every composed project targets Cloudflare Workers, so `wrangler dev` —
-    # and therefore workerd, a native binary — is on the path for all of them,
-    # not just the ones that asked for a database. Stated separately from the
-    # Vite reason because it survives even if the build toolchain changes.
-    reasons.append(
-        "it runs on Cloudflare Workers, so the dev server is wrangler/workerd -> nativeToolchain"
-    )
-    if "db" in recipe_ids:
-        # Worth its own line even though the flag is already true: when the
-        # matcher rejects an in-tab runtime, "your database needs it" is the
-        # reason a user will recognise.
-        reasons.append("D1 is served by workerd in local dev -> nativeToolchain")
-
     return Requirements(
         install=True,
         nativeToolchain=True,
-        # D1 is reached through `platform.env.DB`, a binding — NOT a TCP
-        # connection string. This is the flag a Postgres-backed template would
-        # raise and this one genuinely does not.
+        # No database driver, no connection string. This is the flag that would
+        # rule out an in-tab runtime, and none of these starters raises it.
         rawSockets=False,
-        reasons=reasons,
+        reasons=[
+            "the project installs its dependencies from npm -> install",
+            f"the {starter.label} build resolves esbuild/rollup native binaries -> nativeToolchain",
+        ],
     )
 
 
 # ── Naming ──────────────────────────────────────────────────────────────────
 
-# Words that carry no identity. Dropped so "a booking app with sign-in" names
-# itself "booking" rather than "a-booking-app-with".
 _STOPWORDS = frozenset(
     {
         "a",
@@ -272,64 +316,63 @@ _STOPWORDS = frozenset(
         "simple",
         "basic",
         "small",
+        "project",
+        "new",
+        "some",
+        "clone",
     }
 )
 
 _MAX_NAME_WORDS = 3
 _MAX_NAME_CHARS = 40
 
-#: Used when a prompt yields no usable words, and by the compose path when the
-#: caller sends no name. Public because both callers need the same answer.
+#: Used when a prompt yields no usable words, and by compose when the caller
+#: sends no name.
 FALLBACK_PROJECT_NAME = "new-project"
 
 
-def _feature_words() -> frozenset[str]:
-    """Every word appearing in a recipe keyword.
+def _framework_words() -> frozenset[str]:
+    """Every word appearing in a starter keyword.
 
-    Excluded from names because they describe what the project HAS, not what it
-    IS — the recipe list already says "auth" and "payments", so repeating it in
-    the name costs the only three words available. "a booking app with sign-in"
-    should be `booking`, not `booking-sign`.
+    Excluded from names because they describe what the project is BUILT WITH, not
+    what it IS — the starter is already named in the plan, so repeating it spends
+    one of only three name words. "a react booking app" should be `booking`.
     """
     words: set[str] = set()
-    for recipe in CATALOG:
-        for keyword in recipe.keywords:
-            words.update(re.split(r"[\s\-]+", keyword.lower()))
+    for starter in STARTERS:
+        for keyword in starter.keywords:
+            words.update(re.split(r"[\s.]+", keyword.lower()))
     return frozenset(words)
 
 
 def derive_project_name(prompt: str) -> str:
     """A short kebab-case name from the prompt.
 
-    Deliberately dumb and deliberately bounded: this becomes a directory name and
-    a wrangler worker name, so it must be a safe slug no matter what was typed —
-    including an empty prompt, an emoji, or a paragraph.
+    This becomes a directory name and a `package.json` name, so it must be a safe
+    slug for ANY input — an empty prompt, an emoji, a paragraph, a path traversal.
     """
     words = [w for w in re.split(r"[^A-Za-z0-9]+", prompt.lower()) if w]
-    skip = _STOPWORDS | _feature_words()
+    skip = _STOPWORDS | _framework_words()
     kept = [w for w in words if w not in skip][:_MAX_NAME_WORDS]
-    # Nothing but stopwords and feature words ("build me an app with sign-in").
-    # There is no identity in that prompt, so name it rather than assembling a
-    # slug out of the noise.
     if not kept:
         return FALLBACK_PROJECT_NAME
     name = "-".join(kept)[:_MAX_NAME_CHARS].strip("-")
-    # A name must not start with a digit: it is used as a package/worker name.
-    if name and name[0].isdigit():
+    # npm package names may not begin with a digit or a dot.
+    if name and not name[0].isalpha():
         name = f"p-{name}"
     return name or FALLBACK_PROJECT_NAME
 
 
 __all__ = [
     "BY_ID",
+    "CATALOG_EPOCH",
+    "DEFAULT_STARTER_ID",
     "FALLBACK_PROJECT_NAME",
-    "CATALOG",
     "Match",
-    "Recipe",
     "Requirements",
-    "STARTER",
+    "STARTERS",
+    "Starter",
     "derive_project_name",
-    "match_recipes",
+    "match_starter",
     "requirements_for",
-    "secrets_for",
 ]
