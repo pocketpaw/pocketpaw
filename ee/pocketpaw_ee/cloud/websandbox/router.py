@@ -90,6 +90,7 @@ from pocketpaw_ee.cloud.websandbox import preview as websandbox_preview
 from pocketpaw_ee.cloud.websandbox import provision as websandbox_provision
 from pocketpaw_ee.cloud.websandbox import requirements as websandbox_requirements
 from pocketpaw_ee.cloud.websandbox import runtimes as websandbox_runtimes
+from pocketpaw_ee.cloud.websandbox import scaffold_service as websandbox_scaffold
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
 from pocketpaw_ee.cloud.websandbox.dto import (
     CommitRequest,
@@ -105,6 +106,8 @@ from pocketpaw_ee.cloud.websandbox.dto import (
     RuntimeCredentialsResponse,
     RuntimeRequirementsResponse,
     SandboxTreeResponse,
+    ScaffoldIntoSandboxRequest,
+    ScaffoldIntoSandboxResponse,
     SnapshotResponse,
     StageRequest,
     WebSandboxListResponse,
@@ -375,6 +378,27 @@ async def git_open_pr(
     """Open a GitHub pull request for the sandbox's pushed feature branch."""
     workspace_id = _require_workspace(ctx)
     return await websandbox_git.open_pr(workspace_id, ctx.user_id, row_id, body)
+
+
+# ---------------------------------------------------------------------------
+# CS-2 — scaffold a composed project into a provisioned sandbox.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{row_id}/scaffold", response_model=ScaffoldIntoSandboxResponse)
+async def scaffold_into_sandbox(
+    row_id: str,
+    body: ScaffoldIntoSandboxRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> ScaffoldIntoSandboxResponse:
+    """Compose a project from recipes and start its dev server in this sandbox.
+
+    Row-addressed because it MATERIALIZES into a VM — unlike `/codescaffold/*`,
+    which is runtime-blind by contract and returns a source map. That split is
+    what lets CS-3 mount the same map in a browser tab with none of this code.
+    """
+    workspace_id = _require_workspace(ctx)
+    return await websandbox_scaffold.scaffold_into_sandbox(workspace_id, ctx.user_id, row_id, body)
 
 
 # ---------------------------------------------------------------------------

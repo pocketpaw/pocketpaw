@@ -320,7 +320,67 @@ class GitPrResponse(BaseModel):
     number: int
 
 
+# ---------------------------------------------------------------------------
+# CS-2 — scaffold a composed project into a provisioned sandbox.
+# ---------------------------------------------------------------------------
+
+
+class ScaffoldIntoSandboxRequest(BaseModel):
+    """Compose these recipes and bring the project up in this sandbox.
+
+    Takes a recipe LIST rather than a prompt: the user is shown the plan and
+    allowed to edit it before anything is written, so the server receives the
+    decision, not the sentence it came from.
+    """
+
+    recipes: list[str] = Field(default_factory=list, max_length=16)
+    projectName: str = Field(default="", max_length=64)
+    #: Dev-server port. Optional — the default is Vite's own 5173.
+    port: int | None = Field(default=None, ge=1, le=65535)
+
+
+class ScaffoldStepResponse(BaseModel):
+    """One bring-up stage and how it went.
+
+    `output` is populated ONLY on failure, and that is the point of this shape:
+    CS-2's acceptance is that a failed `npm install` shows a visible failed
+    state rather than a spinner, so npm's own error text has to reach the UI.
+    A successful step carries nothing — nobody reads a clean install log.
+    """
+
+    name: str
+    ok: bool
+    exitCode: int | None = None
+    output: str = ""
+    durationMs: int = 0
+
+
+class ScaffoldIntoSandboxResponse(BaseModel):
+    """What was composed, and how far bring-up got.
+
+    ``running`` means the dev-server START command returned cleanly — NOT that
+    the server is serving. It was backgrounded, so nothing server-side could know
+    that yet; the preview pane resolving the port is what actually proves it.
+    Named honestly so it is not read as a promise.
+    """
+
+    projectName: str
+    order: list[str] = Field(default_factory=list)
+    #: Secret NAMES the project needs before it can run. Names only, always.
+    secrets: list[str] = Field(default_factory=list)
+    fileCount: int = 0
+    port: int
+    running: bool = False
+    steps: list[ScaffoldStepResponse] = Field(default_factory=list)
+    #: The first stage that failed, or null. Lets the client branch without
+    #: re-deriving it from the step list.
+    failedStep: str | None = None
+
+
 __all__ = [
+    "ScaffoldStepResponse",
+    "ScaffoldIntoSandboxResponse",
+    "ScaffoldIntoSandboxRequest",
     "CommitRequest",
     "CreatePrRequest",
     "CreateSandboxRequest",
