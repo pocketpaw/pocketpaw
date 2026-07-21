@@ -6,6 +6,9 @@
 # depends on the OSS core package `pocketpaw`.
 #
 # Changes:
+#   - 2026-07-21 (ship-1): added `asyncssh` — SSH exec transport for the /ship
+#     deploy engine's Dokku driver (ee/pocketpaw_ee/ship_engine/). Lazy-imported
+#     by AsyncSSHTransport only; the port + transcript-replay tests never load it.
 #   - 2026-07-01 (ee-cython gate): the cython build hook is now GATED OFF by
 #     default (`enable-by-default = false`) so dev / CI / editable installs stay
 #     fast and readable — the ~25-min compile only fires when
@@ -75,6 +78,12 @@ dependencies = [
     "redis[hiredis]>=5.0.0",
     # --- DNS (verified-domain TXT lookup, Wave 3 Task 12) ---
     "dnspython>=2.6.0",
+    # --- /ship deploy engine (SHIP-1) — SSH exec for the Dokku driver ---
+    # asyncssh is imported lazily inside AsyncSSHTransport._connect
+    # (ee/pocketpaw_ee/ship_engine/dokku.py), so the ShipEngine contract and
+    # the transcript-replay test path never load it. Floor 2.14.2 (2023-12,
+    # far past the workspace 7-day supply-chain minimum-age rule).
+    "asyncssh>=2.14.2",
     # --- Background worker (Tier 2 resumable chat runs) ---
     # arq is only imported by `pocketpaw_ee.cloud.chat.runs.arq_executor`
     # and `worker.py`; both are gated behind POCKETPAW_CLOUD_RUN_EXECUTOR=arq.
