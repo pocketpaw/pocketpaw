@@ -190,7 +190,8 @@ WRITE_FILE_TOOL: dict = {
         "rejects each changed region, so describe the change as proposed, never "
         "as done. Pass the WHOLE file, not a fragment and not a diff — anything "
         "you leave out is a deletion. Read the file first if you have not "
-        "already. Propose one file per turn."
+        "already. Propose ONE file per turn, and make it the file the user "
+        "selected — the first excerpt you were given."
     ),
     "input_schema": {
         "type": "object",
@@ -234,8 +235,11 @@ EDIT_SYSTEM_PROMPT = (
     "invent an API you could have read.\n\n"
     "Every path is relative to the project root, exactly as the paths in the "
     "excerpts are.\n\n"
-    "If the request is not something you can do by editing this file, say so "
-    "plainly instead of writing a near-miss."
+    "If the change really belongs in a different file, say which one and stop — "
+    "do not propose it. The user reviews one file at a time, so a proposal for "
+    "a file they are not looking at cannot be shown to them. And if the request "
+    "is not something you can do by editing a file at all, say so plainly "
+    "instead of writing a near-miss."
 )
 
 # Mode → (system prompt, tools, permitted names). One lookup so a new mode
