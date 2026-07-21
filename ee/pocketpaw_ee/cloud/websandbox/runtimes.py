@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 
-from pocketpaw_ee.cloud.websandbox import browserpod
+from pocketpaw_ee.cloud.websandbox import browserpod, webcontainer
 from pocketpaw_ee.cloud.websandbox.dto import RuntimeCredentialsResponse
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 # a runtime here is the whole cost of adding one to the credential surface.
 _CREDENTIAL_BROKERS: dict[str, Callable[[str, str], Awaitable[RuntimeCredentialsResponse]]] = {
     "browserpod": browserpod.get_credentials,
+    # Added 2026-07-21 (RR-4). The prediction in the header above — "WebContainers
+    # is the next such runtime" — cashed out at exactly the cost it promised: one
+    # line here plus a broker module. Note that ``available: false`` means
+    # something different for this runtime than for BrowserPod, and the difference
+    # is the client's to act on; see webcontainer.py's header.
+    "webcontainer": webcontainer.get_credentials,
 }
 
 

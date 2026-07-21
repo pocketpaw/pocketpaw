@@ -29,12 +29,18 @@
 #
 # An unconfigured deploy is NOT an error: it returns ``available: false`` so the
 # frontend router cleanly falls back to the Daytona runtime instead of failing.
+#
+# Modified 2026-07-21 (RR-4, feat/webcontainer-credentials): the key RESOLUTION
+# (env, then ``.env``, whitespace counts as unset) moved to ``vendor_keys.py``
+# when WebContainers needed exactly the same behaviour. Nothing about the
+# precedence, the test seam or this module's answers changed — the second caller
+# is the reason it is shared rather than copied.
 from __future__ import annotations
 
 import logging
-import os
 
 from pocketpaw_ee.cloud.websandbox.dto import BrowserPodCredentialsResponse
+from pocketpaw_ee.cloud.websandbox.vendor_keys import dotenv_value, read_vendor_key
 
 logger = logging.getLogger(__name__)
 
@@ -44,38 +50,33 @@ _ENV_VAR = "BROWSERPOD_API_KEY"
 
 
 def _dotenv_key() -> str:
-    """Read the key from a ``.env`` file, without touching the process env.
+    """``.env`` fallback for the key.
 
-    Deliberately ``dotenv_values`` and not ``load_dotenv``: this is a READ, and a
-    read should not mutate global process state as a side effect. It is also the
-    seam tests patch to mean "this host has no .env" — otherwise deleting the
+    Kept as a module-level function rather than inlined because it is the seam
+    tests patch to mean "this host has no .env" — otherwise deleting the
     environment variable in a test would still find the developer's real key on
     disk and the "unconfigured" path could never be exercised.
     """
-    try:  # pragma: no cover — trivial guard
-        from dotenv import dotenv_values
-    except ImportError:
-        return ""
-    return (dotenv_values().get(_ENV_VAR) or "").strip()
+    return dotenv_value(_ENV_VAR)
 
 
 def browserpod_api_key() -> str:
     """Return the configured BrowserPod embedding key, or ``""`` when unset.
 
-    ``.env`` is loaded defensively for the same reason ``uploads/factory.py``
+    ``.env`` is consulted defensively for the same reason ``uploads/factory.py``
     does it: this name has NO ``POCKETPAW_`` prefix, so pydantic-settings never
     reads it, and it only reaches ``os.environ`` if something called
     ``load_dotenv`` first — which depends on the entrypoint (the dashboard
     lifecycle does; a bare uvicorn/cloud boot may not). Getting that wrong is
     invisible: the broker answers ``available: false``, the frontend routes to
-    Daytona, and nothing anywhere reports an error. ``load_dotenv`` is
-    idempotent and never overrides a var already in the environment, so a real
-    deploy that exports the key properly is unaffected.
+    Daytona, and nothing anywhere reports an error.
+
+    Modified 2026-07-21 (RR-4): the resolution itself moved to
+    ``vendor_keys.read_vendor_key`` when WebContainers needed the identical
+    env-then-.env, whitespace-is-unset behaviour. Same precedence, same seam,
+    one implementation.
     """
-    direct = os.environ.get(_ENV_VAR, "").strip()
-    if direct:
-        return direct
-    return _dotenv_key()
+    return read_vendor_key(_ENV_VAR, _dotenv_key)
 
 
 def browserpod_enabled() -> bool:
