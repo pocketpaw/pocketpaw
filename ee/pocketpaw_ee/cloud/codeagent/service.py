@@ -29,6 +29,14 @@
 # Stateless still holds, and costs something: the server keeps no record of what
 # it asked for, so the client hands back each call's name and input alongside its
 # output and ``_replay_tool_exchanges`` rebuilds both halves for the model.
+#
+# Modified: 2026-07-21 (CA-4, Edit mode). The turn now runs under a MODE, and the
+# mode picks the system prompt, the offered tools, and the filter that enforces
+# them — all from one row in ``domain._MODES``, so a mode cannot be half-added.
+# Edit widens the set to include ``writeFile``; it does not remove the filter.
+# That matters more than it looks: the client executes whatever it is handed, so
+# this filter is the only thing standing between a hallucinated ``deleteEntry``
+# and a browser that would run it.
 from __future__ import annotations
 
 import logging
@@ -36,14 +44,12 @@ import os
 
 from pocketpaw_ee.cloud._core.errors import CloudError, with_cause
 from pocketpaw_ee.cloud.codeagent.domain import (
-    ASK_SYSTEM_PROMPT,
-    ASK_TOOL_NAMES,
-    ASK_TOOLS,
     MAX_OUTPUT_TOKENS,
     MAX_TOOL_ITERATIONS,
     MAX_TOOL_RESULT_CHARS,
     MODEL_TIMEOUT_SECONDS,
     build_user_content,
+    mode_config,
     pack_context,
 )
 from pocketpaw_ee.cloud.codeagent.dto import (
@@ -199,21 +205,21 @@ def _text_of(response) -> str:  # noqa: ANN001
     ).strip()
 
 
-def _tool_calls_of(response) -> list[ToolCall]:  # noqa: ANN001
+def _tool_calls_of(response, permitted: frozenset[str]) -> list[ToolCall]:  # noqa: ANN001
     """Pull the tool_use blocks the model wants executed.
 
-    A name outside ``ASK_TOOL_NAMES`` is DROPPED rather than forwarded. Ask mode
-    is meant to be read-only by construction, and the client executes whatever it
-    is handed — so if a mutating verb ever reached this list (a stale tool set, a
-    hallucinated name), forwarding it would turn "cannot edit" into "asked the
-    browser nicely not to".
+    A name outside ``permitted`` is DROPPED rather than forwarded. The client
+    executes whatever it is handed, so this filter is the enforcement and the
+    prompt is only the explanation — without it, "Ask cannot edit" would mean
+    "we asked the browser nicely not to". Edit mode WIDENS this set; it never
+    turns the check off.
     """
     calls: list[ToolCall] = []
     for block in response.content:
         if getattr(block, "type", None) != "tool_use":
             continue
         name = getattr(block, "name", "")
-        if name not in ASK_TOOL_NAMES:
+        if name not in permitted:
             logger.warning("codeagent: dropping unexpected tool call %r", name)
             continue
         calls.append(
@@ -233,30 +239,34 @@ async def run_turn(
     *,
     client=None,  # noqa: ANN001 — an AsyncAnthropic-shaped object (DI seam for tests)
 ) -> AgentTurnResponse:
-    """Run ONE step of an Ask-mode turn.
+    """Run ONE step of a turn, in whichever mode the caller asked for.
 
-    Flow: validate → pack the context to the budget → assemble the final user
-    turn → replay any tool traffic already executed → call the model → either
-    return the answer, or return the files it wants read next.
+    Flow: validate → resolve the mode's prompt and permission set → pack the
+    context to the budget → assemble the final user turn → replay any tool
+    traffic already executed → call the model → either return its answer, or
+    return the tool calls the client should run next.
 
     The loop lives on the CLIENT, and that is the design rather than a
-    limitation. The tools are `CodeFileSession`'s own read verbs, which only the
+    limitation. The tools are `CodeFileSession`'s own verbs, which only the
     client can execute — it has them against a Daytona socket and against the
     in-tab WebContainer fs. A server-side loop would have to reach into the
     browser to run them, which is the shape the whole module exists to avoid.
 
-    Read-only by construction: only the three read verbs are offered, and a call
-    naming anything else is dropped rather than forwarded — the client executes
-    what it is handed, so filtering here is the enforcement.
+    Ask is read-only by construction: only the three read verbs are offered, and
+    a call naming anything else is dropped rather than forwarded. Edit adds
+    ``writeFile`` — which the client stages for the user's per-hunk review rather
+    than applying — and nothing else.
     """
     body = AgentTurnRequest.model_validate(body)
+    system, tools, permitted = mode_config(body.mode)
 
     # Tenancy is carried for metering and logs. There is no sandbox row to
     # authorize against — the caller already owns everything it sent us.
     logger.debug(
-        "codeagent.turn ws=%s user=%s messages=%d context=%d tools=%d",
+        "codeagent.turn ws=%s user=%s mode=%s messages=%d context=%d tools=%d",
         workspace_id,
         user_id,
+        body.mode,
         len(body.messages),
         len(body.context),
         len(body.toolResults),
@@ -298,16 +308,21 @@ async def run_turn(
         )
 
     response = await _run_model(
-        ASK_SYSTEM_PROMPT,
+        system,
         messages,
-        tools=None if exhausted else ASK_TOOLS,
+        tools=None if exhausted else tools,
         client=client,
     )
 
-    calls = [] if exhausted else _tool_calls_of(response)
+    calls = [] if exhausted else _tool_calls_of(response, permitted)
     if calls:
         return AgentTurnResponse(
             done=False,
+            # Text the model wrote ALONGSIDE the calls. Ask ignores it and loops
+            # again; Edit shows it, because a `writeFile` call ends the loop at
+            # the review gate and this sentence is the model's explanation of
+            # what it changed. Dropping it would send the proposal up unlabelled.
+            answer=_text_of(response),
             toolCalls=calls,
             citedPaths=packed.kept,
             droppedPaths=packed.dropped,

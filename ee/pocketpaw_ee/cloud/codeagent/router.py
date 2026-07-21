@@ -2,7 +2,13 @@
 #
 # Created 2026-07-21 (feat/codeagent-turn). One route:
 #
-#   POST /codeagent/turn — answer one Ask-mode question about the caller's code.
+#   POST /codeagent/turn — run one step of a turn against the caller's code.
+#
+# Modified: 2026-07-21 (CA-4). The route is no longer Ask-only — the request's
+# ``mode`` selects the permission set, and Edit mode replaces the deleted
+# ``POST /websandbox/{row_id}/edit``. That old route took a sandbox row id, which
+# is exactly why Cmd-K could never work in a WebContainer: a project running in
+# the user's tab has no row. This one takes the code in the request instead.
 #
 # License-gated and context-authenticated like every other cloud router, and it
 # never raises HTTPException — `_core.http` maps CloudError to JSON.
@@ -41,6 +47,7 @@ async def run_turn(
     body: AgentTurnRequest,
     ctx: RequestContext = Depends(request_context),
 ) -> AgentTurnResponse:
-    """Answer one Ask-mode turn. Read-only — this endpoint never edits a file."""
+    """Run one step of a turn. This endpoint never writes a file itself — in Edit
+    mode it PROPOSES one, and the client holds it for the user's review."""
     workspace_id = _require_workspace(ctx)
     return await codeagent_service.run_turn(workspace_id, ctx.user_id, body)

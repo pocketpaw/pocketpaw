@@ -18,12 +18,16 @@
 # landing the workspace tarball in the tenant's blob storage.
 #
 # Changed 2026-07-15 (WC-5a, feat/websandbox-edit-agent): surfaced the
-# auto-feature-branch on the wire (``WebSandboxResponse.branch``), let the
-# provisioner bind it via ``UpdateStatusRequest.branch``, and added the AI
-# edit-agent DTOs — ``EditRequest`` (a file path + instruction + optional
-# selection range) and ``EditResponse`` (the original + PROPOSED file content the
-# frontend reviews per-hunk and writes back via the existing file-RPC). The edit
-# agent is generate-only; it never writes to the VM.
+# auto-feature-branch on the wire (``WebSandboxResponse.branch``) and let the
+# provisioner bind it via ``UpdateStatusRequest.branch``. This change also added
+# the AI edit-agent DTOs, which were REMOVED again in CA-4 — see below.
+#
+# Changed 2026-07-21 (CA-4, feat/codeagent-edit): removed ``EditRequest`` /
+# ``EditResponse`` / ``EditSelection`` along with ``websandbox/edit.py``. Taking a
+# sandbox ``row_id`` was the whole problem: a WebContainer project runs in the
+# user's tab and has no row, which is why Cmd-K shipped disabled there. Its
+# replacement is ``codeagent`` — the client sends the code it already has, so the
+# same path serves both runtimes.
 #
 # Changed 2026-07-16 (WC-8/P3b preview, feat/code-mode): added ``PreviewResponse``
 # ({url, port}) — the iframe-embeddable public URL of a dev-server port running in
@@ -316,60 +320,10 @@ class GitPrResponse(BaseModel):
     number: int
 
 
-# ---------------------------------------------------------------------------
-# WC-5a — AI edit agent (Cmd-K).
-# ---------------------------------------------------------------------------
-
-
-class EditSelection(BaseModel):
-    """A 1-indexed inclusive line range within the target file the edit scopes to.
-
-    Optional on an ``EditRequest`` — when present it focuses the model on the
-    selected lines (the rest of the file is still supplied as context). When
-    absent the whole file is the edit target.
-    """
-
-    startLine: int = Field(..., ge=1)
-    endLine: int = Field(..., ge=1)
-
-
-class EditRequest(BaseModel):
-    """Ask the backend edit agent to PROPOSE a rewrite of a file (or selection).
-
-    ``path`` is relative to the in-VM workspace dir (jailed — ``..`` / absolute
-    paths are refused). ``instruction`` is the natural-language edit. ``selection``
-    optionally narrows the edit to a line range. The agent reads the file
-    server-side, calls a frontier model, and returns the proposal — it never
-    writes anything to the VM (Rule 4: the write surface never carries a proposed
-    body; the frontend applies accepted hunks via the existing file-RPC).
-    """
-
-    path: str = Field(..., min_length=1, max_length=1024)
-    instruction: str = Field(..., min_length=1, max_length=8192)
-    selection: EditSelection | None = None
-
-
-class EditResponse(BaseModel):
-    """The edit agent's PROPOSAL — original vs. proposed file content.
-
-    The frontend diffs ``originalContent`` against ``proposedContent`` to render
-    per-hunk review and writes accepted changes back via the file-RPC. ``selection``
-    echoes the requested range (if any) so the reviewer can scope the diff.
-    """
-
-    path: str
-    originalContent: str
-    proposedContent: str
-    selection: EditSelection | None = None
-
-
 __all__ = [
     "CommitRequest",
     "CreatePrRequest",
     "CreateSandboxRequest",
-    "EditRequest",
-    "EditResponse",
-    "EditSelection",
     "GitCommitResponse",
     "GitFileEntry",
     "GitPrResponse",

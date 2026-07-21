@@ -20,6 +20,23 @@
 # is talking to. The system prompt gained the "go and look" half; it kept the
 # read-only half, because tools that can only read are the enforcement and the
 # words are only the explanation.
+#
+# Modified: 2026-07-21 (CA-4, Edit mode). Adds a SECOND permission set. Ask keeps
+# the three read verbs; Edit gets those plus ``writeFile``, and the mode picks
+# both the tool list and the system prompt. Two things about that split are
+# deliberate:
+#
+#   * ``writeFile`` in Edit mode does NOT write. The client stages it as a
+#     proposal and the user accepts or rejects it hunk by hunk, which is the
+#     review gate Cmd-K has always had. The tool description says so, because a
+#     model that believes the write already landed will describe it in the past
+#     tense and the user will believe it.
+#   * ``createEntry`` / ``deleteEntry`` / ``moveEntry`` are deliberately WITHHELD,
+#     against the letter of the CA-4 task text. Per-hunk review only exists for
+#     one file's content; there is no review UI for "the agent deleted a file",
+#     so shipping those three would add an ungated destructive path in the same
+#     slice that promises the review UX is unchanged. They land when their gate
+#     does.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
@@ -159,6 +176,86 @@ ASK_TOOLS: list[dict] = [
 
 ASK_TOOL_NAMES = frozenset(t["name"] for t in ASK_TOOLS)
 
+# ── Edit mode (CA-4) ────────────────────────────────────────────────────────
+# The same three read verbs plus one write. `writeFile` is where Cmd-K's
+# per-hunk review hangs: the client does not apply it, it STAGES it, and the
+# user accepts or rejects each hunk. The description has to say that, because a
+# model that thinks the write landed says "I've updated the file" and the user
+# has no reason to doubt it.
+WRITE_FILE_TOOL: dict = {
+    "name": "writeFile",
+    "description": (
+        "Propose the complete new contents of a file. This does NOT save "
+        "anything: the user is shown your version against theirs and accepts or "
+        "rejects each changed region, so describe the change as proposed, never "
+        "as done. Pass the WHOLE file, not a fragment and not a diff — anything "
+        "you leave out is a deletion. Read the file first if you have not "
+        "already. Propose one file per turn."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "File path relative to the project root.",
+            },
+            "content": {
+                "type": "string",
+                "description": "The entire new contents of the file.",
+            },
+        },
+        "required": ["path", "content"],
+    },
+}
+
+EDIT_TOOLS: list[dict] = [*ASK_TOOLS, WRITE_FILE_TOOL]
+EDIT_TOOL_NAMES = frozenset(t["name"] for t in EDIT_TOOLS)
+
+# Every CodeFileSession verb that changes the tree. Named here so the "Ask
+# cannot mutate" property is asserted against the real verb list rather than a
+# literal repeated in a test — if a verb is added later and Ask is widened by
+# accident, the assertion is what notices.
+MUTATING_TOOL_NAMES = frozenset({"writeFile", "createEntry", "deleteEntry", "moveEntry"})
+
+EDIT_SYSTEM_PROMPT = (
+    "You are a coding assistant embedded in an IDE. The user has selected code "
+    "and asked for a change.\n\n"
+    "Make the change by calling `writeFile` with the complete new contents of "
+    "the file. Nothing you propose is applied automatically — the user reviews "
+    "your version against theirs region by region and keeps what they want. Say "
+    "what you changed and why, in the past tense only about what you PROPOSED.\n\n"
+    "Change what was asked for and leave the rest of the file byte-for-byte "
+    "alone: every region you touch is one more thing the user has to read and "
+    "approve. Match the file's existing style, imports, and conventions rather "
+    "than your own preferences.\n\n"
+    "You also have read-only tools — list a directory, read a file, search the "
+    "project. Use them when the change depends on code you were not given: a "
+    "type you are about to use, the signature you are about to call. Do not "
+    "invent an API you could have read.\n\n"
+    "Every path is relative to the project root, exactly as the paths in the "
+    "excerpts are.\n\n"
+    "If the request is not something you can do by editing this file, say so "
+    "plainly instead of writing a near-miss."
+)
+
+# Mode → (system prompt, tools, permitted names). One lookup so a new mode
+# cannot be half-added: the prompt, the offered tools, and the filter that
+# enforces them all come from the same row.
+_MODES: dict[str, tuple[str, list[dict], frozenset[str]]] = {
+    "ask": (ASK_SYSTEM_PROMPT, ASK_TOOLS, ASK_TOOL_NAMES),
+    "edit": (EDIT_SYSTEM_PROMPT, EDIT_TOOLS, EDIT_TOOL_NAMES),
+}
+
+
+def mode_config(mode: str) -> tuple[str, list[dict], frozenset[str]]:
+    """Resolve a mode to its prompt, tool list, and permitted tool names.
+
+    An unknown mode falls back to ``ask`` rather than raising: the DTO already
+    rejects anything outside the literal, so reaching here with a bad value means
+    something upstream changed, and the safe default is the read-only one.
+    """
+    return _MODES.get(mode, _MODES["ask"])
+
 
 class PackedContext(NamedTuple):
     """The outcome of applying the budget to a turn's context.
@@ -241,6 +338,12 @@ def build_user_content(question: str, packed: PackedContext) -> str:
 
 __all__ = [
     "ASK_SYSTEM_PROMPT",
+    "ASK_TOOLS",
+    "ASK_TOOL_NAMES",
+    "EDIT_SYSTEM_PROMPT",
+    "EDIT_TOOLS",
+    "EDIT_TOOL_NAMES",
+    "MUTATING_TOOL_NAMES",
     "MAX_CONTEXT_CHARS",
     "MAX_CONTEXT_ITEMS",
     "MAX_MESSAGES",
@@ -250,6 +353,7 @@ __all__ = [
     "MODEL_TIMEOUT_SECONDS",
     "PackedContext",
     "build_user_content",
+    "mode_config",
     "pack_context",
     "render_item",
 ]

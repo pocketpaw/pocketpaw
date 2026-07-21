@@ -10,6 +10,11 @@
 # because a WebContainer project has neither — it runs in the user's tab and has
 # no server-side row at all. Anything the model is allowed to see arrives in
 # ``context``, which is why this endpoint works identically for both runtimes.
+#
+# Modified: 2026-07-21 (CA-4, Edit mode). ``AgentTurnRequest.mode`` selects the
+# permission set. It defaults to ``ask``, so a caller that omits it gets the
+# read-only tools — the failure mode of a forgotten field is "cannot edit", not
+# "can edit unexpectedly".
 from __future__ import annotations
 
 from typing import Literal
@@ -93,6 +98,11 @@ class AgentTurnRequest(BaseModel):
     """
 
     messages: list[AgentMessage] = Field(..., min_length=1, max_length=MAX_MESSAGES)
+    # Which permission set the turn runs under. ``ask`` is read-only; ``edit``
+    # adds `writeFile`, which the CLIENT stages for per-hunk review rather than
+    # applying. The default is the safe one on purpose — an omitted field, an
+    # older client, or a replayed request all land in read-only.
+    mode: Literal["ask", "edit"] = "ask"
     context: list[ContextItem] = Field(default_factory=list, max_length=MAX_CONTEXT_ITEMS)
     toolResults: list[ToolResult] = Field(
         default_factory=list,
@@ -105,9 +115,15 @@ class AgentTurnRequest(BaseModel):
 class AgentTurnResponse(BaseModel):
     """One step's outcome: either an answer, or a request to go and look.
 
-    ``done`` is the branch the client loops on. When it is false, ``answer`` is
-    empty and ``toolCalls`` is non-empty; the client executes them against its
-    own ``CodeFileSession`` and posts back. When true, ``toolCalls`` is empty.
+    ``done`` is the branch the client loops on. When it is false ``toolCalls`` is
+    non-empty and the client executes them against its own ``CodeFileSession``
+    and posts back; when true ``toolCalls`` is empty.
+
+    ``answer`` may be set on EITHER branch. On a finished turn it is the answer.
+    On an unfinished one it is whatever the model wrote alongside its calls —
+    ignored by an Ask loop that is about to go round again, and shown by Edit,
+    where a ``writeFile`` call stops the loop at the review gate and this is the
+    model's account of what it proposed.
 
     ``citedPaths`` is what actually reached the model and ``droppedPaths`` is
     what the budget cut. Reporting the drop is the point: a silently truncated
