@@ -63,6 +63,7 @@ def _starter(**overrides) -> domain.Starter:  # noqa: ANN003
         "dotfile_prefix": "_",
         "keywords": ("test",),
         "dev_port": 5173,
+        "needs_native": False,
     }
     base.update(overrides)
     return domain.Starter(**base)
@@ -89,9 +90,10 @@ def test_the_default_starter_exists() -> None:
 
 def test_the_tarball_url_uses_the_pinned_version() -> None:
     """Resolving `/latest` would defeat the pin entirely."""
-    url = registry.tarball_url(domain.BY_ID["react"])
+    starter = domain.BY_ID["react"]
+    url = registry.tarball_url(starter)
 
-    assert url.endswith("/create-vite/-/create-vite-9.1.1.tgz")
+    assert url.endswith(f"/create-vite/-/create-vite-{starter.version}.tgz")
     assert "latest" not in url
 
 
@@ -184,6 +186,91 @@ def test_requirements_never_name_a_runtime() -> None:
 
     assert "daytona" not in blob
     assert "webcontainer" not in blob
+
+
+def test_the_vite_starters_do_not_require_a_native_toolchain() -> None:
+    """THE CS-3 test, and the one that would have caught the contradiction.
+
+    Before this, `requirements_for` returned `nativeToolchain=True` for every
+    starter while the WebContainers adapter declares `nativeToolchain: false`.
+    Both statements were in the tree, neither test noticed, and the arithmetic
+    was that no scaffolded project could EVER select the in-tab runtime — the
+    pivot's headline benefit, unreachable through a blanket flag.
+
+    A Vite 7 project is rollup + esbuild, which has a working wasm path. It does
+    not need to execute native code, so it must not claim to."""
+    for starter_id in ("react", "vue", "svelte"):
+        requires = domain.requirements_for(domain.BY_ID[starter_id])
+        assert requires.nativeToolchain is False, starter_id
+        assert requires.install is True, starter_id
+
+
+def test_next_still_requires_a_native_toolchain_and_says_why() -> None:
+    """The other half, and it is not symmetry for its own sake. Next's SWC and
+    Tailwind's oxide engine have not been watched resolving inside a
+    WebContainer by anyone here, and requirements fail UP when we do not know."""
+    requires = domain.requirements_for(domain.BY_ID["next"])
+
+    assert requires.nativeToolchain is True
+    # The reason must name the toolchain, not just assert the conclusion — this
+    # string is what a user is shown when their project goes to a VM.
+    blob = " ".join(requires.reasons).lower()
+    assert "swc" in blob and "tailwind" in blob
+
+
+def test_every_starter_that_needs_native_explains_itself() -> None:
+    """A catalog invariant, so a future starter cannot route users to a slower,
+    costlier runtime with no explanation attached."""
+    for starter in domain.STARTERS:
+        if starter.needs_native:
+            assert starter.native_reason.strip(), starter.id
+
+
+def test_the_vite_pin_is_held_below_the_rolldown_line() -> None:
+    """create-vite 9.x pins Vite 8, which depends on rolldown, whose wasi
+    binding crashes in a WebContainer (webcontainer-core#2105). The pin is one
+    major back ON PURPOSE and that is invisible from the version string alone —
+    a well-meaning "bump the deps" pass would silently delete the in-tab path.
+
+    Delete this test when rolldown's wasi binding is fixed, not before."""
+    for starter_id in ("react", "vue", "svelte"):
+        starter = domain.BY_ID[starter_id]
+        assert starter.package == "create-vite"
+        major = int(starter.version.split(".")[0])
+        assert major < 9, (
+            f"{starter_id} is on create-vite {starter.version}, which pins Vite 8 "
+            "(rolldown). That toolchain does not boot in a WebContainer — see the "
+            "catalog comment before bumping this."
+        )
+
+
+# ── The catalog endpoint ────────────────────────────────────────────────────
+
+
+def test_the_catalog_lists_every_starter_with_its_requirements() -> None:
+    """CS-3's boot path resolves an already-created project's requirements from
+    this, having no prompt left to plan from."""
+    response = scaffold_service.list_starters()
+
+    assert {s.id for s in response.starters} == set(domain.BY_ID)
+    assert response.default in domain.BY_ID
+    for summary in response.starters:
+        assert summary.source.count("@") == 1
+        assert summary.devPort > 0
+        assert summary.requires.reasons
+
+
+def test_the_catalog_does_not_leak_how_a_starter_is_fetched() -> None:
+    """No package, version-with-hash, integrity or subdir on the wire. A client
+    holding those could fetch a template itself, which would route around the
+    integrity check that makes the pin mean anything."""
+    payload = scaffold_service.list_starters().model_dump()
+
+    blob = str(payload)
+    assert "integrity" not in blob
+    assert "sha512" not in blob
+    assert "subdir" not in blob
+    assert "template-react-ts" not in blob
 
 
 # ── Integrity ───────────────────────────────────────────────────────────────
@@ -330,7 +417,7 @@ async def test_plan_is_pure_and_names_its_source() -> None:
     assert result.projectName == "booking"
     assert result.devPort == 5173
     # The UI should be able to say exactly what it is about to install.
-    assert result.starter.source == "create-vite@9.1.1"
+    assert result.starter.source == f"create-vite@{domain.BY_ID['react'].version}"
 
 
 async def test_plan_reports_the_right_port_per_framework() -> None:

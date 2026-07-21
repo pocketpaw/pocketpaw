@@ -27,7 +27,9 @@ from pocketpaw_ee.cloud.codescaffold.dto import (
     ScaffoldPlanRequest,
     ScaffoldPlanResponse,
     ScaffoldRequirements,
+    ScaffoldStartersResponse,
     StarterChoice,
+    StarterSummary,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,41 @@ logger = logging.getLogger(__name__)
 
 def _source(starter: domain.Starter) -> str:
     return f"{starter.package}@{starter.version}"
+
+
+def _requirements(starter: domain.Starter) -> ScaffoldRequirements:
+    requires = domain.requirements_for(starter)
+    return ScaffoldRequirements(
+        install=requires.install,
+        nativeToolchain=requires.nativeToolchain,
+        rawSockets=requires.rawSockets,
+        reasons=requires.reasons,
+    )
+
+
+def list_starters() -> ScaffoldStartersResponse:
+    """The catalog, with no prompt and no network.
+
+    Synchronous and un-tenanted on purpose: it reads a module constant, touches
+    no row, and returns the same bytes for every caller. Making it `async` and
+    threading a workspace through would imply per-tenant catalogs, which would be
+    a lie. The ROUTER still gates it on a license and a workspace — that is about
+    who may see the product surface, not about what the answer is.
+    """
+    return ScaffoldStartersResponse(
+        starters=[
+            StarterSummary(
+                id=s.id,
+                label=s.label,
+                summary=s.summary,
+                source=_source(s),
+                devPort=s.dev_port,
+                requires=_requirements(s),
+            )
+            for s in domain.STARTERS
+        ],
+        default=domain.DEFAULT_STARTER_ID,
+    )
 
 
 async def plan(
@@ -46,7 +83,6 @@ async def plan(
     body = ScaffoldPlanRequest.model_validate(body)
 
     match = domain.match_starter(body.prompt)
-    requires = domain.requirements_for(match.starter)
 
     logger.debug(
         "codescaffold.plan ws=%s user=%s starter=%s matched=%s",
@@ -67,12 +103,7 @@ async def plan(
         ),
         projectName=domain.derive_project_name(body.prompt),
         devPort=match.starter.dev_port,
-        requires=ScaffoldRequirements(
-            install=requires.install,
-            nativeToolchain=requires.nativeToolchain,
-            rawSockets=requires.rawSockets,
-            reasons=requires.reasons,
-        ),
+        requires=_requirements(match.starter),
     )
 
 
@@ -148,4 +179,4 @@ async def compose(
     )
 
 
-__all__ = ["compose", "plan"]
+__all__ = ["compose", "list_starters", "plan"]

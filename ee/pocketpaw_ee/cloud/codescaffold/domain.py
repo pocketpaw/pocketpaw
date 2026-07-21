@@ -63,6 +63,19 @@ class Starter(NamedTuple):
     keywords: tuple[str, ...]
     #: The port this starter's dev server listens on by default.
     dev_port: int
+    #: Whether this starter's toolchain needs to RUN NATIVE CODE.
+    #:
+    #: Per-starter rather than a blanket constant, because the answer genuinely
+    #: differs and it is the single flag that decides whether a project can open
+    #: in the user's tab or has to cold-provision a cloud VM. See
+    #: `requirements_for` for the evidence behind each value — it is the most
+    #: consequential field in this file and the one most likely to be wrong.
+    needs_native: bool
+    #: One line naming the toolchain the flag above is a claim about, shown to
+    #: the user when a starter is routed away from the in-tab runtime. "Next
+    #: needs a cloud VM" is not an explanation; naming SWC and Tailwind's oxide
+    #: engine is.
+    native_reason: str = ""
     #: Files WE supply, merged over the extracted tree.
     #:
     #: Needed by exactly one starter and worth the field. `create-next-app` ships
@@ -110,31 +123,66 @@ _NEXT_PACKAGE_JSON = """{
 # workspace supply-chain rule. That is why `create-next-app` is pinned to 15.5.20
 # rather than 16.2.11 — the 16.x line was published inside the window. Refresh
 # with `scripts/refresh_starters.py`, which re-checks the age rule.
+#
+# ── WHY create-vite IS PINNED TO 8.3.0 AND NOT 9.1.1 (CS-3) ──────────────────
+#
+# It is NOT the age rule. 9.1.1 is four months old and passes it comfortably.
+# The pin is held one major back ON PURPOSE, and the reason is the whole of what
+# decides whether a scaffolded project can open in the user's browser tab:
+#
+#   create-vite 9.x pins Vite ^8, and Vite 8 replaced rollup+esbuild with
+#   ROLLDOWN (`"rolldown": "~1.1.3"`, a hard dependency) plus lightningcss.
+#   Both are native Rust. Rolldown ships `@rolldown/binding-wasm32-wasi` as a
+#   fallback and THAT FALLBACK CRASHES IN A WEBCONTAINER — `worker sent an
+#   error! Invalid atomic access index`, raised from emnapi, on this exact
+#   create-vite React template (stackblitz/webcontainer-core#2105, #2107). Our
+#   own 2026-07-18 gate run hit the same class of failure independently
+#   (rolldown#4508, #4762). lightningcss is worse: its optional deps list
+#   platform binaries and NO wasm build at all.
+#
+#   create-vite 8.3.0 pins Vite ^7.3.1 — rollup + esbuild, the toolchain
+#   StackBlitz and bolt.new run all day inside a tab.
+#
+# So the choice is: ship Vite 8 and every scaffolded project must cold-provision
+# a cloud VM, or ship Vite 7 and it can open in-tab in about a second. The
+# templates are otherwise IDENTICAL between the two versions — same
+# `template-*-ts` subdirs, same `_` dotfile prefix — so this costs one minor
+# version of Vite and buys the entire in-tab path.
+#
+# Revisit when rolldown's wasi binding is fixed. This is a two-line change (a
+# version and a hash) plus flipping `needs_native` below, and the test suite
+# will tell you if the template layout moved.
 STARTERS: tuple[Starter, ...] = (
     Starter(
         id="react",
         label="React",
         summary="React 19 with Vite and TypeScript",
         package="create-vite",
-        version="9.1.1",
+        version="8.3.0",
         integrity=(
-            "sha512-5iqlfg6gmxRLxkYu4lZDcdeLj32usAvyec9Hb47j4OYcuSyHRwwjLi3s"
-            "bi7bcyV9QrFomWDsXhamkJzwgutNpQ=="
+            "sha512-58bnPOiwODNTOV60tS/zttmTG1V1xZJThqqvpDPmp0i55fT9i2YsjWdnx7uFy0"
+            "/FmWRUv4HJeEPlq6zAW3hwTQ=="
         ),
         subdir="template-react-ts",
         dotfile_prefix="_",
         keywords=("react", "reactjs", "react.js", "jsx", "tsx"),
         dev_port=5173,
+        # Vite 7 = rollup + esbuild. esbuild ships a native binary, but it has a
+        # working wasm path that WebContainer resolves — this is the toolchain
+        # StackBlitz's own templates run in a tab. So the project does not
+        # REQUIRE the ability to execute native code, and saying it does would
+        # exile it to a VM for no reason.
+        needs_native=False,
     ),
     Starter(
         id="vue",
         label="Vue",
         summary="Vue 3 with Vite and TypeScript",
         package="create-vite",
-        version="9.1.1",
+        version="8.3.0",
         integrity=(
-            "sha512-5iqlfg6gmxRLxkYu4lZDcdeLj32usAvyec9Hb47j4OYcuSyHRwwjLi3s"
-            "bi7bcyV9QrFomWDsXhamkJzwgutNpQ=="
+            "sha512-58bnPOiwODNTOV60tS/zttmTG1V1xZJThqqvpDPmp0i55fT9i2YsjWdnx7uFy0"
+            "/FmWRUv4HJeEPlq6zAW3hwTQ=="
         ),
         subdir="template-vue-ts",
         dotfile_prefix="_",
@@ -143,16 +191,22 @@ STARTERS: tuple[Starter, ...] = (
         # template, so there is nothing in it to extract.
         keywords=("vue", "vuejs", "vue.js"),
         dev_port=5173,
+        # Vite 7 = rollup + esbuild. esbuild ships a native binary, but it has a
+        # working wasm path that WebContainer resolves — this is the toolchain
+        # StackBlitz's own templates run in a tab. So the project does not
+        # REQUIRE the ability to execute native code, and saying it does would
+        # exile it to a VM for no reason.
+        needs_native=False,
     ),
     Starter(
         id="svelte",
         label="Svelte",
         summary="Svelte 5 with Vite and TypeScript",
         package="create-vite",
-        version="9.1.1",
+        version="8.3.0",
         integrity=(
-            "sha512-5iqlfg6gmxRLxkYu4lZDcdeLj32usAvyec9Hb47j4OYcuSyHRwwjLi3s"
-            "bi7bcyV9QrFomWDsXhamkJzwgutNpQ=="
+            "sha512-58bnPOiwODNTOV60tS/zttmTG1V1xZJThqqvpDPmp0i55fT9i2YsjWdnx7uFy0"
+            "/FmWRUv4HJeEPlq6zAW3hwTQ=="
         ),
         subdir="template-svelte-ts",
         dotfile_prefix="_",
@@ -164,6 +218,12 @@ STARTERS: tuple[Starter, ...] = (
         # that assembly, which is the vendoring problem this rewrite removed.
         keywords=("svelte", "sveltekit", "svelte.js"),
         dev_port=5173,
+        # Vite 7 = rollup + esbuild. esbuild ships a native binary, but it has a
+        # working wasm path that WebContainer resolves — this is the toolchain
+        # StackBlitz's own templates run in a tab. So the project does not
+        # REQUIRE the ability to execute native code, and saying it does would
+        # exile it to a VM for no reason.
+        needs_native=False,
     ),
     Starter(
         id="next",
@@ -181,6 +241,17 @@ STARTERS: tuple[Starter, ...] = (
         dotfile_prefix="",
         keywords=("next", "nextjs", "next.js", "ssr", "app router"),
         dev_port=3000,
+        # TRUE, and unlike the Vite three this is NOT a settled question — it is
+        # an unproven claim held in the safe direction. Next 15 builds through
+        # SWC (native, with a `@next/swc-wasm-nodejs` fallback Next selects
+        # itself) and this template also pulls Tailwind v4, whose oxide engine is
+        # a native Rust binary with NO published wasm fallback. Nobody here has
+        # watched either resolve inside a WebContainer. Requirements fail UP by
+        # doctrine, so Next routes to a VM until someone proves otherwise — the
+        # cost of being wrong this way is a slower boot; the cost of the other
+        # way is a project that dies mid-install with a WASI trap.
+        needs_native=True,
+        native_reason=("Next builds with SWC and Tailwind's oxide engine, which need a cloud VM"),
         # The ranges create-next-app 15.5.x resolves for a TypeScript + Tailwind
         # app. Carets rather than exact pins, so `npm install` picks up patches
         # without this file being the thing that goes stale.
@@ -260,26 +331,39 @@ class Requirements(NamedTuple):
 def requirements_for(starter: Starter) -> Requirements:
     """The capability demands of a starter.
 
-    Emits REQUIREMENTS, never a runtime name — the client's registry decides. The
-    interesting change since the Cloudflare template: none of these starters needs
-    `workerd`. That template could only ever run in a VM; a Vite or Next dev
-    server runs perfectly well in an in-tab WebContainer, which is precisely what
-    WebContainers were built to demo.
+    Emits REQUIREMENTS, never a runtime name — the client's registry decides.
 
-    `nativeToolchain` is still true, because Vite and Next both resolve to
-    esbuild/rollup binaries at install time — and the WebContainers adapter
-    honestly declares it can run those.
+    CORRECTED 2026-07-22 (CS-3). This function used to return
+    ``nativeToolchain=True`` for every starter, with a comment claiming the
+    WebContainers adapter "honestly declares it can run those." That comment was
+    false: the adapter declares ``nativeToolchain: false`` — correctly, since
+    WebContainer executes WASM and has no x86 loader. The two statements
+    contradicted each other, and the arithmetic of that contradiction was that
+    NO starter could ever select the in-tab runtime. The pivot's headline benefit
+    was unreachable, silently, through a blanket flag.
+
+    So the flag is per-starter now, and it means what the capability actually
+    says: does this project need to RUN NATIVE CODE. See each catalog entry for
+    its evidence — that is where the claim can be checked and revised.
     """
+    reasons = ["the project installs its dependencies from npm -> install"]
+    if starter.needs_native:
+        reasons.append(
+            f"{starter.native_reason or starter.label + ' needs a native toolchain'}"
+            " -> nativeToolchain"
+        )
+    else:
+        reasons.append(
+            f"the {starter.label} toolchain has a working wasm path, so it can run in a tab"
+        )
     return Requirements(
         install=True,
-        nativeToolchain=True,
-        # No database driver, no connection string. This is the flag that would
-        # rule out an in-tab runtime, and none of these starters raises it.
+        nativeToolchain=starter.needs_native,
+        # No database driver, no connection string. This is the OTHER flag that
+        # would rule out an in-tab runtime, and no starter in the catalog raises
+        # it — a Vite or Next dev server speaks HTTP and nothing lower.
         rawSockets=False,
-        reasons=[
-            "the project installs its dependencies from npm -> install",
-            f"the {starter.label} build resolves esbuild/rollup native binaries -> nativeToolchain",
-        ],
+        reasons=reasons,
     )
 
 

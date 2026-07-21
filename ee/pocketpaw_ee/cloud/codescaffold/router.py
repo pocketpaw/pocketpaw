@@ -1,9 +1,10 @@
 # router.py — Thin FastAPI adapter for the scaffold surface (CS-1).
 #
-# Created 2026-07-21 (feat/codescaffold). Two routes:
+# Created 2026-07-21 (feat/codescaffold). Three routes:
 #
-#   POST /codescaffold/plan     prompt -> what we intend to build (pure, instant)
-#   POST /codescaffold/compose  recipes -> the composed source map
+#   GET  /codescaffold/starters  the catalog (CS-3; no prompt, no network)
+#   POST /codescaffold/plan      prompt -> what we intend to build (pure, instant)
+#   POST /codescaffold/compose   a starter id -> the source map
 #
 # License-gated and context-authenticated like every other cloud router, and it
 # never raises HTTPException — `_core.http` maps CloudError to JSON.
@@ -25,6 +26,7 @@ from pocketpaw_ee.cloud.codescaffold.dto import (
     ScaffoldComposeResponse,
     ScaffoldPlanRequest,
     ScaffoldPlanResponse,
+    ScaffoldStartersResponse,
 )
 from pocketpaw_ee.cloud.license import require_license
 
@@ -40,6 +42,20 @@ def _require_workspace(ctx: RequestContext) -> str:
     if not ctx.workspace_id:
         raise Forbidden("codescaffold.no_workspace", "No active workspace")
     return ctx.workspace_id
+
+
+@router.get("/starters", response_model=ScaffoldStartersResponse)
+async def starters(
+    ctx: RequestContext = Depends(request_context),
+) -> ScaffoldStartersResponse:
+    """The starter catalog. Reads a constant; fetches nothing.
+
+    A GET because it is the one route here that is genuinely a resource read —
+    same answer every time, safe to cache, safe to retry. `/plan` and `/compose`
+    stay POSTs (a prompt is a body, and compose does real work).
+    """
+    _require_workspace(ctx)
+    return codescaffold_service.list_starters()
 
 
 @router.post("/plan", response_model=ScaffoldPlanResponse)

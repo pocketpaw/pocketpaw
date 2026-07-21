@@ -66,6 +66,37 @@ class ScaffoldPlanResponse(BaseModel):
     requires: ScaffoldRequirements
 
 
+class StarterSummary(BaseModel):
+    """One catalog entry, without fetching anything.
+
+    Added CS-3. Two callers need the catalog with no prompt in hand, and neither
+    can use `/plan`: the workspace boot path has to resolve an ALREADY-CREATED
+    project's requirements before choosing a runtime (there is no prompt left by
+    then — the project is a row), and the landing page wants to offer the four
+    choices before the user has typed anything.
+
+    Deliberately omits `package`/`integrity`/`subdir`. Those are how we fetch it,
+    not what it is, and a client that knew them could be tempted to fetch it
+    itself — which would route around the integrity check.
+    """
+
+    id: str
+    label: str
+    summary: str
+    #: "create-vite@8.3.0" — so the UI can say exactly what it installs.
+    source: str
+    devPort: int
+    requires: ScaffoldRequirements
+
+
+class ScaffoldStartersResponse(BaseModel):
+    """The whole catalog. Small, static, and cacheable."""
+
+    starters: list[StarterSummary] = Field(default_factory=list)
+    #: Which one an unmatched prompt gets, so the UI can pre-select it.
+    default: str
+
+
 class ScaffoldComposeRequest(BaseModel):
     """Fetch this starter. Takes an id rather than a plan, because the user is
     allowed to change the framework at the confirmation step — the server
@@ -103,5 +134,7 @@ __all__ = [
     "ScaffoldPlanRequest",
     "ScaffoldPlanResponse",
     "ScaffoldRequirements",
+    "ScaffoldStartersResponse",
     "StarterChoice",
+    "StarterSummary",
 ]
