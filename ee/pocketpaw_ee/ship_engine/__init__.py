@@ -8,6 +8,8 @@
 # never drags in a specific engine.
 #
 # Created 2026-07-21 (feat/ship-1-engine-contract): new package.
+# Updated 2026-07-21 (review fixes): re-export ``InvalidSpec`` (DTO-boundary
+#   validation error added to the port).
 
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ from pocketpaw_ee.ship_engine.port import (
     DeployRequest,
     DeployResult,
     DomainResult,
+    InvalidSpec,
     LogChunk,
     MetricsSnapshot,
     ShipEngine,
@@ -38,6 +41,7 @@ __all__ = [
     "DeployRequest",
     "DeployResult",
     "DomainResult",
+    "InvalidSpec",
     "LogChunk",
     "MetricsSnapshot",
     "ShipEngine",
