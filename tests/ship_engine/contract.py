@@ -17,6 +17,9 @@
 # DTO, an exception, or a log line.
 #
 # Created 2026-07-21 (feat/ship-1-engine-contract): new module.
+# Updated 2026-07-21 (review fixes): leak-scanner regex widened to flag ANY
+#   ``scheme://userinfo@`` (a password containing ``@`` previously slipped
+#   the narrower user:pass shape).
 
 from __future__ import annotations
 
@@ -84,8 +87,11 @@ VERB_CALLS: dict[str, Callable[[ShipEngine], Awaitable[Any]]] = {
     "destroy": lambda engine: engine.destroy(APP),
 }
 
-# ``scheme://user:password@`` — credential material embedded in a URL/DSN.
-_URL_CREDS_RE = re.compile(r"\w+://[^\s/@:]+:[^\s@]+@")
+# ``scheme://userinfo@`` — credential material embedded in a URL/DSN. Any
+# userinfo before a host is treated as a leak (results should never carry
+# even a username), and matching to the LAST ``@`` catches passwords that
+# themselves contain ``@``.
+_URL_CREDS_RE = re.compile(r"\w+://[^\s/]+@")
 
 
 def iter_string_values(obj: Any) -> Iterator[str]:

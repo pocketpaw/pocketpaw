@@ -1,0 +1,9 @@
+# transcript: `dokku ps:report demo` with a corrupted Processes value — used
+# to prove a non-numeric report maps to CommandFailed, not a bare ValueError.
+EXIT: 0
+--- stdout ---
+=====> demo ps information
+       Deployed:                      true
+       Processes:                     banana
+       Running:                       true
+--- stderr ---
