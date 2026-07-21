@@ -620,6 +620,34 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.code_project"]
 
 [[tool.importlinter.contracts]]
+name = "CodeScaffold — emits a source map: never materializes into a runtime"
+type = "forbidden"
+allow_indirect_imports = "true"
+# Same shape of guard as the CodeAgent contract below, protecting the other half
+# of the same decision.
+#
+# `compose` returns {path: contents} and writes nothing. That is what lets ONE
+# endpoint serve both runtimes: Daytona materializes the map by tar-upload, a
+# WebContainer by `fs.mount`, and the scaffolder does not know which asked. The
+# tempting "improvement" is to have compose write straight into the sandbox —
+# it removes a hop and it would work, in exactly one runtime, and the in-tab
+# path would quietly stop being reachable.
+#
+# The subprocess in engine.py is deliberately NOT forbidden here: shelling the
+# vendored recipe engine is the design. What is forbidden is reaching a runtime.
+source_modules = [
+    "pocketpaw_ee.cloud.codescaffold.router",
+    "pocketpaw_ee.cloud.codescaffold.service",
+    "pocketpaw_ee.cloud.codescaffold.engine",
+    "pocketpaw_ee.cloud.codescaffold.dto",
+    "pocketpaw_ee.cloud.codescaffold.domain",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.daytona",
+    "pocketpaw_ee.cloud.websandbox",
+]
+
+[[tool.importlinter.contracts]]
 name = "CodeAgent — runtime-agnostic: never reaches a sandbox"
 type = "forbidden"
 allow_indirect_imports = "true"

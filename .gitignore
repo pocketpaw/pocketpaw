@@ -94,3 +94,11 @@ output.txt
 !/deploy/paw-sites/.gitkeep
 /deploy/ripple/*
 !/deploy/ripple/.gitkeep
+
+# Vendored scaffold template (CS-1). The recipe engine composes EVERY generated
+# project from this tree, so a file silently dropped here is a file missing from
+# every user's project — and the symptom is a build failure inside their VM, far
+# from the cause. The negations exist because `.vscode/` above matches inside the
+# vendored base; without them the composed output differs between a dev machine
+# (where the files exist) and CI/prod (where they were never committed).
+!ee/pocketpaw_ee/cloud/codescaffold/_template/**

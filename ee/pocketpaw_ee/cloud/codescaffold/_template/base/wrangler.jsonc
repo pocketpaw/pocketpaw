@@ -1,0 +1,26 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "base",
+	"compatibility_date": "2026-07-13",
+	"compatibility_flags": [
+		"nodejs_als"
+	],
+	"main": ".svelte-kit/cloudflare/_worker.js",
+	"assets": {
+		"binding": "ASSETS",
+		"directory": ".svelte-kit/cloudflare"
+	},
+	// Per-tenant Cloudflare D1 database, bound to the Worker as `env.DB`.
+	// The platform provisions the database and substitutes the real id for the
+	// `__D1_DATABASE_ID__` token at publish time. Read it via `platform.env.DB`.
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "base",
+			"database_id": "__D1_DATABASE_ID__",
+			"migrations_dir": "migrations"
+		}
+	],
+	"workers_dev": true,
+	"preview_urls": true
+}

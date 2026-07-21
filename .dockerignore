@@ -65,3 +65,10 @@ temp
 !deploy/paw-sites/**
 !deploy/ripple
 !deploy/ripple/**
+
+# Vendored scaffold template (CS-1). Same reasoning as the .gitignore negation,
+# one layer down: `build`, `dist` and `tests` above are bare patterns, and a
+# vendored tree swallowed by the build context produces a 5xx at runtime with
+# nothing to point at. Kept explicit so the template ships even if those
+# patterns are later broadened to `**/build`.
+!ee/pocketpaw_ee/cloud/codescaffold/_template/**
