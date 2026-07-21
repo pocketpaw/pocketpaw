@@ -11,6 +11,15 @@
 # to report both. It never reorders silently either — items are kept in the
 # order the client sent them, because the client sends them in priority order
 # (selection first, then the active file, then pinned @-mentions).
+#
+# Modified: 2026-07-21 (CA-2, retrieval loop). Adds ``ASK_TOOLS`` — the READ-ONLY
+# subset of CodeFileSession — plus the loop's two ceilings. The tool names mirror
+# the client's verbs exactly, which is the mechanism that keeps retrieval
+# runtime-agnostic: the client already implements them against a Daytona socket
+# and against the in-tab WebContainer fs, so nothing here learns which runtime it
+# is talking to. The system prompt gained the "go and look" half; it kept the
+# read-only half, because tools that can only read are the enforcement and the
+# words are only the explanation.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
@@ -38,6 +47,19 @@ MAX_OUTPUT_TOKENS = 4096
 # Wall-clock ceiling for the model call, in seconds.
 MODEL_TIMEOUT_SECONDS = 120
 
+# ── Retrieval loop (CA-2) ───────────────────────────────────────────────────
+# How many times the model may ask for files before it must answer. Each round
+# is a full browser -> backend -> model trip, so this bounds latency and spend,
+# not just runaway loops. Reaching it is not an error: the model is told the
+# budget is spent and answers with what it has, which beats failing a question
+# it could mostly answer.
+MAX_TOOL_ITERATIONS = 6
+
+# Per-result ceiling. The client caps what it sends too, but a server that
+# trusts a client-supplied length has no ceiling at all — one `readFile` of a
+# bundled asset would otherwise blow the context in a single round.
+MAX_TOOL_RESULT_CHARS = 40_000
+
 # ── The server-owned system prompt ──────────────────────────────────────────
 # Ask mode is READ-ONLY by construction: CA-1 exposes no tools at all, so the
 # model has no mechanism to change a file even if it wanted to. The prompt says
@@ -50,12 +72,92 @@ ASK_SYSTEM_PROMPT = (
     "changes, and nothing you say will be applied automatically. If the answer "
     "is a change, SHOW the code the user should write and say where it goes — "
     "never claim you have made the change.\n\n"
-    "You are given only the excerpts listed below. If the answer depends on code "
-    "you were not given, say precisely which file or symbol you would need "
-    "rather than guessing. A short honest answer beats a confident invented one.\n\n"
-    "Refer to files by the paths given. Be concise; the user is reading this in "
+    "You start with the excerpts the user put in front of you, and you have "
+    "read-only tools to find the rest yourself: list a directory, read a file, "
+    "and search the project. Use them when the answer depends on code you were "
+    "not given — do not guess at what a function does when you can read it. "
+    "Request several files in one step when you already know you need them; "
+    "each round trip costs the user time.\n\n"
+    "Every path you pass to a tool is relative to the project root, exactly as "
+    "the paths in the excerpts are.\n\n"
+    "If a tool comes back empty or failing, say so and work with what you have "
+    "rather than retrying it unchanged. When you have looked and still cannot "
+    "answer, say precisely what you would need. A short honest answer beats a "
+    "confident invented one.\n\n"
+    "Cite the files you actually read. Be concise; the user is reading this in "
     "a narrow side panel."
 )
+
+# ── Tools: the read-only subset of CodeFileSession ──────────────────────────
+# Names and signatures MIRROR the client's CodeFileSession verbs exactly. That
+# is the whole trick that makes retrieval runtime-agnostic: the client already
+# implements these against a Daytona socket AND against the in-tab WebContainer
+# fs, so the executor is chosen by whichever runtime booted, and nothing here
+# has to know which one it got.
+#
+# Only the three READ verbs are exposed. The mutating four (writeFile,
+# createEntry, deleteEntry, moveEntry) are CA-4's Edit-mode permission set —
+# Ask must have no mechanism to change a file, not merely instructions not to.
+ASK_TOOLS: list[dict] = [
+    {
+        "name": "listDir",
+        "description": (
+            "List one directory level of the project. Use it to orient before "
+            "reading, or when you know roughly where something lives but not "
+            "its exact filename."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Directory path relative to the project root. "
+                        "Use an empty string for the root."
+                    ),
+                }
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "readFile",
+        "description": (
+            "Read a whole file. Prefer this over guessing what a function or "
+            "type does when you know which file defines it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path relative to the project root.",
+                }
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "search",
+        "description": (
+            "Find a literal string across the project and get back matching "
+            "paths with line numbers. Use it to locate a symbol whose file you "
+            "do not know. This is a plain text search, not a regex."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Literal text to find.",
+                }
+            },
+            "required": ["query"],
+        },
+    },
+]
+
+ASK_TOOL_NAMES = frozenset(t["name"] for t in ASK_TOOLS)
 
 
 class PackedContext(NamedTuple):

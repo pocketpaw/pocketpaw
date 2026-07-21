@@ -32,7 +32,7 @@ class _Block:
 
 
 class _Response:
-    def __init__(self, blocks: list[_Block], stop_reason: str = "end_turn") -> None:
+    def __init__(self, blocks: list, stop_reason: str = "end_turn") -> None:
         self.content = blocks
         self.stop_reason = stop_reason
 
@@ -133,18 +133,22 @@ async def test_selection_line_range_reaches_the_model():
 # ── The read-only invariant ─────────────────────────────────────────────────
 
 
-async def test_ask_mode_sends_no_tools():
+async def test_ask_mode_offers_only_the_read_verbs():
     """Ask mode is read-only BY CONSTRUCTION, not by instruction.
 
-    CA-4 adds the mutating verbs behind an Edit-mode permission set. Until then
-    the model must have no mechanism to change a file, so a prompt that talks it
-    into wanting to cannot succeed.
+    The model is handed exactly the three read verbs of CodeFileSession. The
+    mutating four (writeFile, createEntry, deleteEntry, moveEntry) are CA-4's
+    Edit-mode permission set — until then a prompt that talks the model into
+    wanting to edit still has no mechanism to.
     """
     client = _client()
 
     await codeagent_service.run_turn(WS, USER, _turn(), client=client)
 
-    assert "tools" not in client.messages.calls[0]
+    # The tool SURFACE itself (names, schemas, the mutating-verb exclusion) is
+    # pinned in test_codeagent_tools.py; this only asserts Ask offers it.
+    names = {t["name"] for t in client.messages.calls[0]["tools"]}
+    assert names == {"listDir", "readFile", "search"}
 
 
 async def test_system_prompt_is_server_owned():

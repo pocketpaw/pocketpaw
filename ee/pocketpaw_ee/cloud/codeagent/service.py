@@ -18,9 +18,17 @@
 # money, so it is workspace-scoped and license-gated at the router; the ids are
 # carried here for metering and logging, not for authorization of a resource.
 #
-# CA-2 will add tool_calls to the return shape (the read-only subset of
-# CodeFileSession for Ask, plus the mutating verbs for Edit). The DI seam below
-# is deliberately the whole model call, so that stage swaps one function.
+# Modified: 2026-07-21 (CA-2, retrieval loop). ``run_turn`` is now ONE STEP of a
+# turn, not the whole turn: it either answers or returns the files the model
+# wants read. The loop lives on the client, which is the only place that can
+# execute the tools — they are `CodeFileSession`'s own read verbs, and the client
+# has them against a Daytona socket AND against the in-tab WebContainer fs. A
+# server-side loop would have to reach into the browser to run them, which is the
+# shape this module exists to avoid.
+#
+# Stateless still holds, and costs something: the server keeps no record of what
+# it asked for, so the client hands back each call's name and input alongside its
+# output and ``_replay_tool_exchanges`` rebuilds both halves for the model.
 from __future__ import annotations
 
 import logging
@@ -29,12 +37,21 @@ import os
 from pocketpaw_ee.cloud._core.errors import CloudError, with_cause
 from pocketpaw_ee.cloud.codeagent.domain import (
     ASK_SYSTEM_PROMPT,
+    ASK_TOOL_NAMES,
+    ASK_TOOLS,
     MAX_OUTPUT_TOKENS,
+    MAX_TOOL_ITERATIONS,
+    MAX_TOOL_RESULT_CHARS,
     MODEL_TIMEOUT_SECONDS,
     build_user_content,
     pack_context,
 )
-from pocketpaw_ee.cloud.codeagent.dto import AgentTurnRequest, AgentTurnResponse
+from pocketpaw_ee.cloud.codeagent.dto import (
+    AgentTurnRequest,
+    AgentTurnResponse,
+    ToolCall,
+    ToolResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +80,49 @@ def _model() -> str:
     return _DEFAULT_MODEL
 
 
-async def _run_model(system: str, messages: list[dict], *, client) -> str:  # noqa: ANN001
-    """Call the model and return its text. ``client`` is the DI seam.
+def _replay_tool_exchanges(results: list[ToolResult]) -> list[dict]:
+    """Rebuild the assistant/user block pairs for tool traffic already executed.
+
+    The server kept no record of what it asked for — that is what stateless
+    means — so both halves are reconstructed from what the client hands back.
+    Each exchange becomes an assistant turn holding the ``tool_use`` block and a
+    user turn holding the matching ``tool_result``.
+
+    They are emitted as one pair per exchange rather than batching a round's
+    calls into a single assistant turn. The model reads either shape, and one
+    pair per exchange means a client that drops or reorders a result cannot
+    produce a turn with an unanswered ``tool_use`` in it, which the API rejects
+    outright.
+    """
+    out: list[dict] = []
+    for r in results:
+        out.append(
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": r.id, "name": r.name, "input": r.input}],
+            }
+        )
+        body = r.output[:MAX_TOOL_RESULT_CHARS]
+        if len(r.output) > MAX_TOOL_RESULT_CHARS:
+            body += "\n…(truncated)"
+        out.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": r.id,
+                        "content": body or "(empty)",
+                        "is_error": r.isError,
+                    }
+                ],
+            }
+        )
+    return out
+
+
+async def _run_model(system: str, messages: list[dict], *, tools: list[dict] | None, client):  # noqa: ANN001, ANN201
+    """Call the model and return the raw response. ``client`` is the DI seam.
 
     Builds a real ``AsyncAnthropic`` only when nothing is injected, so the whole
     suite runs without a key and without a network — the same seam discipline
@@ -91,19 +149,27 @@ async def _run_model(system: str, messages: list[dict], *, client) -> str:  # no
             raise CloudError(503, "codeagent.unavailable", "The agent model is not configured")
         client = AsyncAnthropic(api_key=api_key, timeout=MODEL_TIMEOUT_SECONDS, max_retries=1)
 
+    kwargs: dict = {
+        "model": _model(),
+        "max_tokens": MAX_OUTPUT_TOKENS,
+        # Adaptive thinking is OFF unless asked for on this model family, and
+        # a question about unfamiliar code is exactly where reasoning pays.
+        # `display` stays default (omitted) — the panel renders the answer,
+        # not the reasoning, so summarising it would only cost tokens.
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": "high"},
+        "system": [{"type": "text", "text": system}],
+        "messages": messages,
+    }
+    # Omitted entirely rather than passed empty on the final round: an empty
+    # tool list is a different request shape, and leaving the key out is what
+    # makes "the model cannot call anything now" true at the API rather than
+    # merely intended.
+    if tools:
+        kwargs["tools"] = tools
+
     try:
-        response = await client.messages.create(
-            model=_model(),
-            max_tokens=MAX_OUTPUT_TOKENS,
-            # Adaptive thinking is OFF unless asked for on this model family, and
-            # a question about unfamiliar code is exactly where reasoning pays.
-            # `display` stays default (omitted) — the panel renders the answer,
-            # not the reasoning, so summarising it would only cost tokens.
-            thinking={"type": "adaptive"},
-            output_config={"effort": "high"},
-            system=[{"type": "text", "text": system}],
-            messages=messages,
-        )
+        response = await client.messages.create(**kwargs)
     except Exception as exc:  # noqa: BLE001 — surfaced as a clean 502 below
         logger.warning("codeagent: model call failed", exc_info=True)
         raise with_cause(
@@ -122,12 +188,42 @@ async def _run_model(system: str, messages: list[dict], *, client) -> str:  # no
             "The agent declined to answer this request",
         )
 
-    text = "".join(
+    return response
+
+
+def _text_of(response) -> str:  # noqa: ANN001
+    """Join the text blocks. Thinking and tool_use blocks sit alongside the
+    answer in ``content``; only text is the answer."""
+    return "".join(
         block.text for block in response.content if getattr(block, "type", None) == "text"
     ).strip()
-    if not text:
-        raise CloudError(502, "codeagent.failed", "The agent model returned no content")
-    return text
+
+
+def _tool_calls_of(response) -> list[ToolCall]:  # noqa: ANN001
+    """Pull the tool_use blocks the model wants executed.
+
+    A name outside ``ASK_TOOL_NAMES`` is DROPPED rather than forwarded. Ask mode
+    is meant to be read-only by construction, and the client executes whatever it
+    is handed — so if a mutating verb ever reached this list (a stale tool set, a
+    hallucinated name), forwarding it would turn "cannot edit" into "asked the
+    browser nicely not to".
+    """
+    calls: list[ToolCall] = []
+    for block in response.content:
+        if getattr(block, "type", None) != "tool_use":
+            continue
+        name = getattr(block, "name", "")
+        if name not in ASK_TOOL_NAMES:
+            logger.warning("codeagent: dropping unexpected tool call %r", name)
+            continue
+        calls.append(
+            ToolCall(
+                id=block.id,
+                name=name,
+                input=dict(getattr(block, "input", {}) or {}),
+            )
+        )
+    return calls
 
 
 async def run_turn(
@@ -137,25 +233,33 @@ async def run_turn(
     *,
     client=None,  # noqa: ANN001 — an AsyncAnthropic-shaped object (DI seam for tests)
 ) -> AgentTurnResponse:
-    """Answer one Ask-mode turn about the caller's code.
+    """Run ONE step of an Ask-mode turn.
 
     Flow: validate → pack the context to the budget → assemble the final user
-    turn → call the model → return the answer with an honest account of what was
-    kept and what was dropped.
+    turn → replay any tool traffic already executed → call the model → either
+    return the answer, or return the files it wants read next.
 
-    Read-only by construction: CA-1 exposes no tools, so the model has no
-    mechanism to change a file even if the prompt failed to dissuade it.
+    The loop lives on the CLIENT, and that is the design rather than a
+    limitation. The tools are `CodeFileSession`'s own read verbs, which only the
+    client can execute — it has them against a Daytona socket and against the
+    in-tab WebContainer fs. A server-side loop would have to reach into the
+    browser to run them, which is the shape the whole module exists to avoid.
+
+    Read-only by construction: only the three read verbs are offered, and a call
+    naming anything else is dropped rather than forwarded — the client executes
+    what it is handed, so filtering here is the enforcement.
     """
     body = AgentTurnRequest.model_validate(body)
 
     # Tenancy is carried for metering and logs. There is no sandbox row to
     # authorize against — the caller already owns everything it sent us.
     logger.debug(
-        "codeagent.turn ws=%s user=%s messages=%d context=%d",
+        "codeagent.turn ws=%s user=%s messages=%d context=%d tools=%d",
         workspace_id,
         user_id,
         len(body.messages),
         len(body.context),
+        len(body.toolResults),
     )
 
     packed = pack_context(body.context)
@@ -173,9 +277,52 @@ async def run_turn(
         )
     last["content"] = build_user_content(last["content"], packed)
 
-    answer = await _run_model(ASK_SYSTEM_PROMPT, messages, client=client)
+    # Tool traffic for THIS question replays after it, in the order it happened.
+    messages.extend(_replay_tool_exchanges(body.toolResults))
+
+    # Spend the budget, then withhold the tools entirely. Asking the model to
+    # "please stop looking now" would leave it free to call again; taking the
+    # tools away leaves it no option but to answer with what it has, which is a
+    # better outcome than failing a question it can mostly answer.
+    exhausted = len(body.toolResults) >= MAX_TOOL_ITERATIONS
+    if exhausted:
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "You have used your file-reading budget for this question. "
+                    "Answer now with what you have, and say plainly what you "
+                    "could not check."
+                ),
+            }
+        )
+
+    response = await _run_model(
+        ASK_SYSTEM_PROMPT,
+        messages,
+        tools=None if exhausted else ASK_TOOLS,
+        client=client,
+    )
+
+    calls = [] if exhausted else _tool_calls_of(response)
+    if calls:
+        return AgentTurnResponse(
+            done=False,
+            toolCalls=calls,
+            citedPaths=packed.kept,
+            droppedPaths=packed.dropped,
+            truncated=packed.truncated,
+        )
+
+    answer = _text_of(response)
+    if not answer:
+        # Reached when the model returned only tool_use blocks that were ALL
+        # filtered out, as well as on a genuinely empty completion. Either way
+        # there is nothing to show, and a blank bubble is worse than an error.
+        raise CloudError(502, "codeagent.failed", "The agent model returned no content")
 
     return AgentTurnResponse(
+        done=True,
         answer=answer,
         citedPaths=packed.kept,
         droppedPaths=packed.dropped,

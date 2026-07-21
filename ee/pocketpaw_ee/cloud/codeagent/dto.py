@@ -21,6 +21,7 @@ from pocketpaw_ee.cloud.codeagent.domain import (
     MAX_MESSAGE_CHARS,
     MAX_MESSAGES,
     MAX_PATH_CHARS,
+    MAX_TOOL_ITERATIONS,
 )
 
 
@@ -48,25 +49,75 @@ class AgentMessage(BaseModel):
     content: str = Field(..., max_length=MAX_MESSAGE_CHARS)
 
 
+class ToolCall(BaseModel):
+    """A request from the model for the CLIENT to go and read something.
+
+    ``id`` is the model's own correlation id and must be echoed back on the
+    matching result — the conversation is invalid to the model without the pair.
+    """
+
+    id: str = Field(..., min_length=1, max_length=128)
+    name: str = Field(..., min_length=1, max_length=64)
+    input: dict = Field(default_factory=dict)
+
+
+class ToolResult(BaseModel):
+    """What the client's ``CodeFileSession`` returned for one ``ToolCall``.
+
+    ``name`` and ``input`` are echoed back because the turn is STATELESS: the
+    server kept no record of what it asked for, so the client has to hand back
+    enough to reconstruct both halves of the exchange for the model.
+
+    ``isError`` distinguishes "I looked and there is nothing there" from "the
+    lookup itself failed", which the model should treat differently — the first
+    is an answer, the second is worth mentioning rather than silently working
+    around.
+    """
+
+    id: str = Field(..., min_length=1, max_length=128)
+    name: str = Field(..., min_length=1, max_length=64)
+    input: dict = Field(default_factory=dict)
+    output: str = Field(default="")
+    isError: bool = False
+
+
 class AgentTurnRequest(BaseModel):
-    """A single stateless turn. The client owns the conversation and replays it
-    each time; the server keeps nothing between calls."""
+    """A single stateless step. The client owns the conversation and replays it
+    each time; the server keeps nothing between calls.
+
+    ``toolResults`` accumulates within ONE question — the model asks for files,
+    the client fetches them, and both sides ride along on the next step until the
+    model answers. Earlier questions are represented by their final answers only:
+    replaying their tool traffic would re-send every file ever read for the rest
+    of the conversation, to say something the answer already says.
+    """
 
     messages: list[AgentMessage] = Field(..., min_length=1, max_length=MAX_MESSAGES)
     context: list[ContextItem] = Field(default_factory=list, max_length=MAX_CONTEXT_ITEMS)
+    toolResults: list[ToolResult] = Field(
+        default_factory=list,
+        # One over the loop cap, since a client may legitimately post the results
+        # of the final permitted round.
+        max_length=MAX_TOOL_ITERATIONS * 8,
+    )
 
 
 class AgentTurnResponse(BaseModel):
-    """The model's answer plus an honest account of what it was given.
+    """One step's outcome: either an answer, or a request to go and look.
 
-    ``citedPaths`` is what actually reached the model, and ``droppedPaths`` is
+    ``done`` is the branch the client loops on. When it is false, ``answer`` is
+    empty and ``toolCalls`` is non-empty; the client executes them against its
+    own ``CodeFileSession`` and posts back. When true, ``toolCalls`` is empty.
+
+    ``citedPaths`` is what actually reached the model and ``droppedPaths`` is
     what the budget cut. Reporting the drop is the point: a silently truncated
     context produces a confidently wrong answer with no way for the user to see
-    why, which is exactly the failure the visible budget indicator exists to
-    prevent.
+    why.
     """
 
-    answer: str
+    done: bool = True
+    answer: str = ""
+    toolCalls: list[ToolCall] = Field(default_factory=list)
     citedPaths: list[str] = Field(default_factory=list)
     droppedPaths: list[str] = Field(default_factory=list)
     truncated: bool = False
@@ -77,4 +128,6 @@ __all__ = [
     "AgentTurnRequest",
     "AgentTurnResponse",
     "ContextItem",
+    "ToolCall",
+    "ToolResult",
 ]
