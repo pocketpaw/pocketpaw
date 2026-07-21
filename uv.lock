@@ -384,6 +384,19 @@ wheels = [
 ]
 
 [[package]]
+name = "asyncssh"
+version = "2.23.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a4/95/212d3d394f2a6ccb3f95056d3b9a7ce13c2f58503cbd6a38d037ef48cb13/asyncssh-2.23.1.tar.gz", hash = "sha256:d9dc3bc0206f3e4b5d80d1c0e6a24af2b4ad4beb556884c41fb2ad1c7ca3f44f", size = 542883, upload-time = "2026-06-07T14:15:18.832Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ef/94/9aa81bde40627af70388d634152e7c53e7533788e662b8093047501a1473/asyncssh-2.23.1-py3-none-any.whl", hash = "sha256:f68e55476d41253d785bcac9a90834ae5fdea0f417bd6d7182608bda248de88e", size = 376054, upload-time = "2026-06-07T14:15:17.375Z" },
+]
+
+[[package]]
 name = "attrs"
 version = "26.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -5596,6 +5609,7 @@ version = "0.4.16"
 source = { editable = "ee" }
 dependencies = [
     { name = "arq" },
+    { name = "asyncssh" },
     { name = "beanie" },
     { name = "boto3" },
     { name = "camel-ai" },
@@ -5630,6 +5644,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "arq", specifier = ">=0.26.0" },
+    { name = "asyncssh", specifier = ">=2.14.2" },
     { name = "beanie", specifier = ">=1.26.0" },
     { name = "boto3", specifier = ">=1.34.0" },
     { name = "camel-ai", git = "https://github.com/qbtrix/camel-ai.git?rev=76ff78e8c78d0a38277e421ea9aca34904b4dc37" },
