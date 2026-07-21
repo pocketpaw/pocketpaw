@@ -238,6 +238,9 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.billing.webhooks import router as billing_webhooks_router
     from pocketpaw_ee.cloud.chat.router import router as chat_router
     from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
+    from pocketpaw_ee.cloud.codeconnect.router import router as codeconnect_router
+    from pocketpaw_ee.cloud.codegit.router import router as codegit_router
+    from pocketpaw_ee.cloud.codeproject.router import router as codeproject_router
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
     from pocketpaw_ee.cloud.credits.router import router as credits_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
@@ -260,6 +263,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.rules.router import router as rules_router
     from pocketpaw_ee.cloud.sessions.router import router as sessions_router
     from pocketpaw_ee.cloud.skills.router import router as skills_router
+    from pocketpaw_ee.cloud.websandbox.router import router as websandbox_router
     from pocketpaw_ee.cloud.workspace.router import router as workspace_router
 
     app.include_router(auth_router, prefix="/api/v1")
@@ -269,6 +273,20 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(agents_router, prefix="/api/v1")
     app.include_router(audit_router, prefix="/api/v1")
     app.include_router(audit_workspace_router, prefix="/api/v1")
+    # Web Cursor sandbox registry (WC-1) — the (workspace, user, repo) -> sandbox
+    # tenancy/auth oracle every later Web Cursor slice authorizes against.
+    app.include_router(websandbox_router, prefix="/api/v1")
+    # Code Mode durable-project registry (CM-2a) — the reap-surviving project the
+    # redesigned /code surface deep-links to; opening one resolves a ready sandbox.
+    app.include_router(codeproject_router, prefix="/api/v1")
+    # Code Mode GitHub connect (CM-3) — install-URL / callback / repo picker so a
+    # user can open PRIVATE repos; the token is minted server-side, never in the VM.
+    app.include_router(codeconnect_router, prefix="/api/v1")
+    # Code Mode git proxy (CM-3d) — the VM's git remote points here (basic-auth
+    # ticket, NOT the GitHub token); the broker mints a repo-scoped token
+    # server-side and proxies push/fetch upstream. Ticket-authed, not license/RC
+    # gated (git can't do OAuth); CSRF only fires on cookie auth, so it passes.
+    app.include_router(codegit_router, prefix="/api/v1")
     app.include_router(request_log_router, prefix="/api/v1")
     app.include_router(deep_work_log_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")
@@ -700,6 +718,13 @@ def mount_cloud(app: FastAPI) -> None:
 
     app.add_api_websocket_route("/ws/cloud", websocket_endpoint)
 
+    # Web Cursor terminal WS (WC-3) — one PTY-over-WS shell per session, bound to
+    # the owning sandbox's Daytona VM. Mounted at root (not /api/v1) so the SPA
+    # connects to ws://host/ws/websandbox/<row_id>?token=<ws_ticket>.
+    from pocketpaw_ee.cloud.websandbox.ws import terminal_websocket_endpoint
+
+    app.add_api_websocket_route("/ws/websandbox/{row_id}", terminal_websocket_endpoint)
+
     # License endpoint (no auth)
     @app.get("/api/v1/license", tags=["License"])
     async def license_info():
@@ -930,6 +955,30 @@ def mount_cloud(app: FastAPI) -> None:
         @app.on_event("shutdown")
         async def _stop_fabric_ingest() -> None:
             await stop_fabric_ingest(app)
+
+    # Web Cursor idle-TTL reaper (WC-2, feat/websandbox-vm-provision). Every
+    # ~5 minutes (POCKETPAW_WEBSANDBOX_REAP_INTERVAL_SECONDS) it reclaims
+    # dropped browser-IDE sandboxes: rows in ``ready``/``opening`` whose
+    # ``updated_at`` is older than the idle TTL
+    # (POCKETPAW_WEBSANDBOX_IDLE_TTL_SECONDS, default 1800) get their Daytona VM
+    # stopped+deleted and the row marked ``reaped``. Same scheduler gate as the
+    # cycle/decisions/ingest loops so pytest runs never spawn a background loop
+    # that outlives the test; production sets POCKETPAW_CLOUD_SCHEDULER_ENABLED=
+    # true. ``start_websandbox_reaper`` also honors its own
+    # POCKETPAW_WEBSANDBOX_REAPER_ENABLED off-switch (default true).
+    if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
+        from pocketpaw_ee.cloud.websandbox.provision import (
+            start_websandbox_reaper,
+            stop_websandbox_reaper,
+        )
+
+        @app.on_event("startup")
+        async def _start_websandbox_reaper() -> None:
+            await start_websandbox_reaper(app)
+
+        @app.on_event("shutdown")
+        async def _stop_websandbox_reaper() -> None:
+            await stop_websandbox_reaper(app)
 
     # Mandate autopilot reconciler (feat/belt-autopilot). The persisted
     # ``MandateDoc.autopilot.on`` flag is the source of truth for whether a

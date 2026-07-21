@@ -1170,17 +1170,38 @@ Response `200`:
 - `css` is the built stylesheet(s) — inline `<style>` blocks plus every linked
   stylesheet — concatenated into one string, injected as a single `<style>`.
 
-**Auth is `fabric.write`, not a read scope,** because the GET **arms a build**:
-it (re)builds the pocket with a builder origin set so the generator stamps
-`data-uid` on the editable leaves and embeds the edit manifest. The builder
-origin is resolved from the request's `Origin` header, falling back to the
-configured `PAW_SITES_BUILDER_ORIGIN` when absent (the same precedence as
-`/editable` and `/dev-preview`), so the call works with no header. **Every GET
-rebuilds** — the arm build runs on each request. The build is keyed on
-`pocket_id` in a stable directory, so `node_modules` / `bun install` stay cached
-across requests, but the compile still runs on each call; treat this as a
-heavier read. The arm build skips the SSR smoke fail-gate (`smoke=False`) but
-still emits the static output that is read.
+**Read-through cache — a plain view no longer rebuilds.** The endpoint hashes the
+pocket's render inputs (svelte source map + theme + builder origin + generator
+version) and serves a prior render from the on-disk artifact store
+(`~/.pocketpaw/site-artifacts/<pocket_id>/<hash>.json`) on a **cache hit** — zero
+subprocess builds. It builds once only on a **cold miss** (then stores the result),
+and publishing a site plus every source-changing edit **pre-warm** the store in the
+background, so a live/clean site is a hit and a view never triggers a build. A cold
+miss's build is keyed on `pocket_id` in a stable directory, so `node_modules` /
+`bun install` stay cached; it skips the SSR smoke fail-gate (`smoke=False`) but still
+emits the static output that is read.
+
+**Auth is `fabric.write`, not a read scope,** because a cold miss still **arms a
+build**: it builds the pocket with a builder origin set so the generator stamps
+`data-uid` on the editable leaves and embeds the edit manifest — the endpoint can
+still trigger on-disk work, so it is not a pure read. The builder origin is resolved
+from the request's `Origin` header, falling back to the configured
+`PAW_SITES_BUILDER_ORIGIN` when absent (the same precedence as `/editable` and
+`/dev-preview`), so the call works with no header.
+
+**Origin stability — the pre-warm must match the view.** The builder origin is part
+of the content hash, so a pre-warm only saves a view a build when it builds with the
+**same** origin that view resolves. A browser view resolves its origin from the
+request `Origin` header (the dashboard origin), so `POST /sites/publish` and
+`POST /sites/by-pocket/{id}/leaf-edits` thread their request `Origin` into the
+background pre-warm — otherwise the pre-warm would fall back to
+`PAW_SITES_BUILDER_ORIGIN` while the view uses the dashboard origin, the two hashes
+would differ, and every view would stay a cold miss. Chat-agent / MCP publishes and
+edits have no request origin, so their pre-warm keeps the env fallback: **set
+`PAW_SITES_BUILDER_ORIGIN` to the dashboard origin** (e.g.
+`https://paw.example.com`, not the `http://localhost:8888` default) in every
+deployment so that fallback matches the origin views ask for — a belt-and-braces
+default even where the request `Origin` is threaded.
 
 **CSS reader is path-traversal-guarded.** Stylesheet `href`s from the built
 `index.html` are resolved against the build tree (relative `./_app/…` and

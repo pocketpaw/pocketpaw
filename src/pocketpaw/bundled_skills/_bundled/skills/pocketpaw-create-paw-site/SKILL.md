@@ -174,9 +174,21 @@ It returns `{ ok, pocket_id, pocket }`. Keep `pocket_id` for STEP 3. If
 `ok` is false, relay the error — do **not** claim a phantom create and do
 **not** fall back to drafting a spec yourself.
 
-## STEP 3 — Publish
+## STEP 3 — Stop at the draft (publish only when asked)
 
-Publish the new pocket as a site:
+**Default: create the draft, do NOT publish.** After `create_landing_site`
+returns, the pocket exists as a reviewable **draft** the user can preview
+in-app (open **/sites** → the site's **Preview** tab). Publishing deploys it to
+the public edge (and, on a paid tier, can open a checkout), so taking it live
+is the user's call, not an automatic step.
+
+So **do NOT call `publish` by default.** Tell the user the draft is ready,
+point them at the Preview, and offer to take it live — e.g. *"Your site is
+ready as a draft. Preview it under /sites, and say **publish** (or 'make it
+live') when you're happy with it."* Then stop.
+
+**Publish in this same turn ONLY if the user's request already asked to go
+live** — "publish it", "make it live", "ship it", "put it online":
 
 ```
 mcp__pocketpaw_sites_manager__publish(pocket_id = <the id from STEP 2>)
@@ -185,8 +197,9 @@ mcp__pocketpaw_sites_manager__publish(pocket_id = <the id from STEP 2>)
 Show the user the returned `url` plus a pointer to **/sites**. Relay any
 `ok: false` error — never claim a phantom publish.
 
-If you arrived here from the `pocketpaw-create-site` skill's Path B, that
-skill owns the publish call — return the created `pocket_id` to it.
+If you arrived here from the `pocketpaw-create-site` skill's Path B, the user
+already asked to publish, so that skill owns the publish call — return the
+created `pocket_id` to it instead of publishing here.
 
 ## What the tool builds (so you know what your copy becomes)
 
@@ -232,6 +245,7 @@ your copy is the only variable. Write it well.
   page and persists it stamped `type="site"` + `pattern="landing"`.
   Returns `{ok, pocket_id, pocket}`.
 - `mcp__pocketpaw_sites_manager__publish` — publish the pocket as a live
-  site; show the user the `url`.
+  site; show the user the `url`. Call it only when the user asks to go live
+  (draft-first — STEP 3); a plain "create a site" stops at the draft.
 - `mcp__pocketpaw_pocket__list_pockets` — find an existing pocket if the
   user named one rather than describing a new site.

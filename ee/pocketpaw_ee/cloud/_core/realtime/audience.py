@@ -340,6 +340,30 @@ class AudienceResolver:
                 return []
             return await self._group(gid)
 
+        # --- Sites (published site lifecycle) -----------------------------------
+        # Workspace-scoped: the /sites gallery is a per-workspace view, and a
+        # publish lands asynchronously relative to the chat turn that started it
+        # (the agent creates + publishes server-side). Fan out to every workspace
+        # member so an open gallery flips the new site to Live on its own — no
+        # poll, no manual refresh. Payload carries {workspace_id, site_id,
+        # pocket_id, owner, plan_tier}; the client keys the gallery row off
+        # site_id / pocket_id.
+        if t == "site.published":
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
+        # --- Workspace jobs (durable ARQ job lifecycle) -------------------------
+        # Workspace-scoped: a dynamic site's provisioning runs as a durable job
+        # that completes well after the publish, in the ARQ worker. Fan out the
+        # queued/terminal update to every workspace member so the gallery/builder
+        # can advance provisioning -> live without polling job status. Payload
+        # carries {job_id, workspace_id, pocket_id, action, job_name, status}.
+        if t in {"workspace_job.queued", "workspace_job.updated"}:
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
         # Room-scoped events (typing.*) are routed by the ConnectionManager directly,
         # not via this resolver. Falling through returns [] and the bus will no-op.
         return []
