@@ -620,6 +620,34 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.code_project"]
 
 [[tool.importlinter.contracts]]
+name = "CodeAgent — runtime-agnostic: never reaches a sandbox"
+type = "forbidden"
+allow_indirect_imports = "true"
+# Unlike its siblings this contract does not guard Beanie writes — codeagent has
+# no document. It guards the decision the module exists for.
+#
+# The endpoint this replaces (websandbox/edit.py) read its context by calling
+# DaytonaClient.download_file and running an in-VM ripgrep. That is precisely
+# why the WebContainer runtime had to ship `features.cmdK: false`: a runtime
+# that lives in the user's tab has no server-side row for any of that to address.
+# CA-1 inverts it — the CLIENT reads through CodeFileSession and sends what it
+# read — and the moment someone "just fetches the file server-side" here, the
+# in-tab runtime silently loses the feature again with a green test suite.
+#
+# A human reviewer will not catch that on a diff that otherwise looks like a
+# helpful refactor. The linter will.
+source_modules = [
+    "pocketpaw_ee.cloud.codeagent.router",
+    "pocketpaw_ee.cloud.codeagent.service",
+    "pocketpaw_ee.cloud.codeagent.dto",
+    "pocketpaw_ee.cloud.codeagent.domain",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.daytona",
+    "pocketpaw_ee.cloud.websandbox",
+]
+
+[[tool.importlinter.contracts]]
 name = "CodeConnection — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"

@@ -238,6 +238,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.billing.webhooks import router as billing_webhooks_router
     from pocketpaw_ee.cloud.chat.router import router as chat_router
     from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
+    from pocketpaw_ee.cloud.codeagent.router import router as codeagent_router
     from pocketpaw_ee.cloud.codeconnect.router import router as codeconnect_router
     from pocketpaw_ee.cloud.codegit.router import router as codegit_router
     from pocketpaw_ee.cloud.codeproject.router import router as codeproject_router
@@ -279,6 +280,10 @@ def mount_cloud(app: FastAPI) -> None:
     # Code Mode durable-project registry (CM-2a) — the reap-surviving project the
     # redesigned /code surface deep-links to; opening one resolves a ready sandbox.
     app.include_router(codeproject_router, prefix="/api/v1")
+    # Code Mode agent turn (CA-1) — stateless Ask over caller-supplied context.
+    # Reaches no sandbox on purpose, which is how one endpoint serves BOTH the
+    # Daytona and the in-tab WebContainer runtime.
+    app.include_router(codeagent_router, prefix="/api/v1")
     # Code Mode GitHub connect (CM-3) — install-URL / callback / repo picker so a
     # user can open PRIVATE repos; the token is minted server-side, never in the VM.
     app.include_router(codeconnect_router, prefix="/api/v1")
