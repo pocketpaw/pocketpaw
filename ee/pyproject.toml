@@ -166,6 +166,7 @@ dependencies = [
     # uses it for the per-workspace keypair + subscribe/unsubscribe endpoints.
     "py-vapid>=1.9.0",
     "pywebpush>=2.3.0",
+    "hcloud>=2.23.0",
 ]
 
 [project.optional-dependencies]
