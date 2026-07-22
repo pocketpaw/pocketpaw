@@ -345,8 +345,16 @@ async def execute_approved_ship_action(
             await _fail("proposer is no longer authorized in this workspace")
             return
 
-        # (5) Run it.
-        ok, detail = await _run_verb(blob)
+        # (5) Run it. ``_run_verb`` already converts engine failures into a
+        # ``(False, detail)`` value; this catch covers a PROGRAMMING error inside
+        # it (a bad attribute, a broken import), which must still not break the
+        # approve response — the module's never-raises contract is absolute.
+        try:
+            ok, detail = await _run_verb(blob)
+        except Exception:  # noqa: BLE001 — never break the approve response
+            logger.exception("ship: verb execution raised unexpectedly for %s", action_id)
+            await _fail("ship action failed unexpectedly during execution")
+            return
         if not ok:
             await _fail(detail)
             return
