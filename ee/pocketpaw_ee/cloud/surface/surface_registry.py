@@ -49,6 +49,19 @@
 # instruction to call what the agent no longer has. Still a static ``profile``:
 # both sets are module-level literals, nothing lazily loaded, not meta-aware. The
 # matching preamble rewrite is in ``handlers/code.py``.
+#
+# Changes: 2026-07-22 (fix/code-surface-denies-pocket-authoring) — CD-3's deny set
+# turned out to cover only HALF the surface's wrong turns. It removed the
+# file/shell built-ins (the wrong MACHINE) but left every pocket-authoring tool
+# reachable (the wrong DELIVERABLE), because ``allow_mcp_tool_ids`` cannot touch
+# them: ``claude_sdk`` unions ``POCKET_CREATION_GRANT``, ``WIDGET_TOOL_IDS`` and
+# every ``ALWAYS_ALLOWED_MCP_SERVERS`` tool back in AFTER a mode's allow-list is
+# applied, on purpose, so "create a pocket" works from every chat mode. On /code
+# that guarantee is the bug: a user with a React project open asked for "an
+# employee management app, with components, nice design" and got a pocket and a
+# ripple ui-spec. ``_CODE_POCKET_DENY`` closes it — deny runs BEFORE the grant is
+# unioned in and is the only lever that reaches those families. Read-only pocket
+# access survives deliberately. The CODE row stays STATIC.
 
 from __future__ import annotations
 
@@ -230,6 +243,54 @@ _CODE_MODE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_code__code_mode
 # legitimate work, and neither one reaches a filesystem.
 _CODE_BUILTIN_DENY: frozenset[str] = frozenset(
     {"Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"}
+)
+
+# The pocket-AUTHORING tools the /code agent must not hold either.
+#
+# Reported from a live session: with a React project open on /code, "Let's build
+# an employee management app, with components, nice design etc" made the agent
+# create a pocket and author a ripple ui-spec instead of writing React. The user
+# asked for an app and got a dashboard.
+#
+# ``allow_mcp_tool_ids`` does NOT prevent this, which is the whole reason this
+# set exists. CD-3 scoped /code to ``code_mode``, but ``claude_sdk`` deliberately
+# lets three families survive ANY restrictive allow-list: ``POCKET_CREATION_GRANT``
+# (specialist create + planner), ``ALWAYS_ALLOWED_MCP_SERVERS`` (every tool on the
+# ``pocketpaw_pocket`` / ``_specialist`` / ``_planner`` servers), and
+# ``WIDGET_TOOL_IDS``. Those bypasses are RIGHT for a general chat surface — "create
+# a pocket" is the product's core capability and must work from anywhere — and
+# wrong for this one, where the deliverable is the user's code. Deny is applied
+# BEFORE the grant is unioned in, so it is the only lever that reaches them.
+#
+# Prose could not do this job. The preamble already says "do not build widgets,
+# charts, or a ui-spec, and do not create a pocket" and the agent did it anyway —
+# the same result /sites got before it denied these ids outright rather than
+# asking (see ``_SITES_SVELTE_CREATE_DENY``: "prose-only routing was proven to
+# fail"). Two surfaces have now independently confirmed it.
+#
+# READ-ONLY pocket access (``get_pocket`` / ``list_pockets``) is deliberately NOT
+# denied: reading a pocket cannot produce one, and a user on /code may reasonably
+# ask what a pocket contains. The line is drawn at AUTHORING.
+#
+# The widget ids are spelled out rather than imported so the CODE row stays a
+# STATIC profile (no lazy load, no resolver). ``test_code_deny_covers_every_widget
+# _tool`` pins this literal against the real ``WIDGET_TOOL_IDS``, so a widget tool
+# added later fails the suite instead of silently reopening the hole.
+_CODE_POCKET_DENY: frozenset[str] = frozenset(
+    {
+        # POCKET_CREATION_GRANT — survives the allow-list by design.
+        "mcp__pocketpaw_pocket_specialist__create",
+        "mcp__pocketpaw_pocket_planner__plan_pocket",
+        # ALWAYS_ALLOWED_MCP_SERVERS — the authoring verbs on the pocket servers.
+        "mcp__pocketpaw_pocket_specialist__edit",
+        "mcp__pocketpaw_pocket__add_widget",
+        "mcp__pocketpaw_pocket__update_widget",
+        # WIDGET_TOOL_IDS — the ripple catalog that turns "with components, nice
+        # design" into a ui-spec instead of React components.
+        "mcp__pocketpaw_widgets__get_widget_spec",
+        "mcp__pocketpaw_widgets__get_inline_widget_help",
+        "mcp__pocketpaw_widgets__start_flow",
+    }
 )
 
 
@@ -501,7 +562,7 @@ SURFACES: list[SurfaceSpec] = [
         profile=SurfaceProfile(
             ripple_mode="off",
             allow_mcp_tool_ids=_CODE_MODE_TOOL_IDS,
-            deny_mcp_tool_ids=_CODE_BUILTIN_DENY,
+            deny_mcp_tool_ids=_CODE_BUILTIN_DENY | _CODE_POCKET_DENY,
         ),
     ),
     SurfaceSpec(

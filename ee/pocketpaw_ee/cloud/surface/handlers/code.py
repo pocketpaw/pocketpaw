@@ -32,6 +32,19 @@
 # is two model calls deep (chat agent → code agent), so a redundant retrieval
 # round is paid twice, and the selection plus its file are already in context.
 #
+# Changed: 2026-07-22 (fix/code-surface-denies-pocket-authoring) — the procedure
+# block gained a paragraph on what "build an app" MEANS here. Reported from a
+# live session: with a React project open, "Let's build an employee management
+# app, with components, nice design etc" made the agent create a pocket and
+# author a ripple ui-spec. The orientation already said "do not create a pocket"
+# and lost anyway — the request's vocabulary ("app", "components", "design")
+# matches the create-pocket skill more strongly than a blanket prohibition
+# repels it. The new paragraph re-points those exact words at their ordinary
+# front-end meaning instead of restating the ban. The ENFORCEMENT is the profile's
+# widened deny set (``_CODE_POCKET_DENY``), which withholds the pocket / planner /
+# widget tools; this prose exists so the agent knows why they are absent rather
+# than discovering it as a tool error mid-turn.
+#
 # Mirrors the layout of handlers/sites.py and handlers/belt.py: an async
 # ``build_preamble`` returning an XML-ish ``<surface>`` + ``<orientation>`` +
 # ``<procedure>`` block.
@@ -116,6 +129,14 @@ def _procedure() -> str:
         "like it worked. They are withheld from you here for exactly that "
         "reason; if you find yourself reaching for one, the answer is "
         "`code_mode`.",
+        "Read a request to BUILD something as a request to build it in CODE. "
+        '"Build me an employee management app, with components and a nice '
+        "design\" means React/Vue/Svelte components and CSS in the user's "
+        "project — it does NOT mean a pocket, a dashboard, or a ripple ui-spec, "
+        'however closely the words match one. "Components", "design", '
+        '"dashboard" and "app" all keep their ordinary front-end meaning on '
+        "this surface. The pocket, planner, and widget tools are withheld from "
+        "you here for that reason; do not reach for a skill that calls them.",
         "Report only what actually happened. If `code_mode` returns an error or "
         "is unavailable, say so plainly — never describe a change as made when "
         "the tool did not confirm it. When it succeeds, briefly summarize what "
