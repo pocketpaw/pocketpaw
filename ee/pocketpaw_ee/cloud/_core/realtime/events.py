@@ -51,6 +51,11 @@
 #   ``WebSandboxStatusChanged`` (type="websandbox.status_changed") for the Web
 #   Cursor sandbox registry. Emitted by ``websandbox.service`` on every
 #   state-mutating call per cloud rule 9.
+# Updated: 2026-07-22 (SHIP-3, feat/ship-3-cloud-entity) — added the six
+#   ship.* events (box.created, app.created, app.updated, deploy.queued,
+#   deploy.status_changed, destroy.proposed) for the /ship managed-deploy
+#   surface. Emitted by ``ship.service`` + the arq deploy job on every
+#   state-mutating call per cloud rule 9.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -1096,3 +1101,45 @@ class CodeProjectDeleted(Event):
 @dataclass
 class CodeConnectionCreated(Event):
     EVENT_TYPE: ClassVar[str] = "codeconnection.created"
+
+
+# /ship managed deploys (SHIP-3, feat/ship-3-cloud-entity). Emitted by
+# ``ship.service`` and the arq deploy job on every state-mutating call per cloud
+# rule 9 (emit on every write). ``ShipBoxCreated`` fires when a provision is
+# accepted; ``ShipAppCreated`` when an app is registered on a box;
+# ``ShipAppUpdated`` when an app's domains / database link / status change;
+# ``ShipDeployQueued`` at enqueue and ``ShipDeployStatusChanged`` on each
+# ``queued -> building -> releasing -> live`` (or ``failed``) transition — the
+# worker-side emits ride the xproc bridge to the web bus, the same path
+# ``WorkspaceJobUpdated`` uses. ``ShipDestroyProposed`` fires when a DELETE parks
+# a teardown for human approval; NOTHING is destroyed by it.
+# ``data`` carries ids + workspace + status only — never SSH key material, env
+# values, or database connection strings.
+@dataclass
+class ShipBoxCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "ship.box.created"
+
+
+@dataclass
+class ShipAppCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "ship.app.created"
+
+
+@dataclass
+class ShipAppUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "ship.app.updated"
+
+
+@dataclass
+class ShipDeployQueued(Event):
+    EVENT_TYPE: ClassVar[str] = "ship.deploy.queued"
+
+
+@dataclass
+class ShipDeployStatusChanged(Event):
+    EVENT_TYPE: ClassVar[str] = "ship.deploy.status_changed"
+
+
+@dataclass
+class ShipDestroyProposed(Event):
+    EVENT_TYPE: ClassVar[str] = "ship.destroy.proposed"

@@ -24,6 +24,7 @@ from bson.errors import InvalidId
 from pocketpaw_ee.cloud._core import crypto
 from pocketpaw_ee.cloud.models.ship import (
     ShipApp,
+    ShipAppDomain,
     ShipAppStatus,
     ShipBox,
     ShipBoxStatus,
@@ -222,10 +223,18 @@ async def record_app_deployed(app: ShipApp, *, image: str, app_url: str) -> Ship
     return app
 
 
-async def record_app_domain(app: ShipApp, *, domain: str, url: str) -> ShipApp:
-    """Record a routed domain (and the URL it serves on) against the app."""
-    if domain not in app.domains:
-        app.domains.append(domain)
+async def record_app_domain(app: ShipApp, *, domain: str, tls_enabled: bool, url: str) -> ShipApp:
+    """Record a routed domain (name + TLS outcome) and the URL it serves on.
+
+    Re-adding an existing domain refreshes its TLS flag rather than duplicating
+    the row — ``add_domain`` is idempotent at the engine, so it is here too.
+    """
+    for existing in app.domains:
+        if existing.domain == domain:
+            existing.tls_enabled = tls_enabled
+            break
+    else:
+        app.domains.append(ShipAppDomain(domain=domain, tls_enabled=tls_enabled))
     if url and url not in app.urls:
         app.urls.append(url)
     await app.save()

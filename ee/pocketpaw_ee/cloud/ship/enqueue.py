@@ -10,12 +10,17 @@
 # pollable box id.
 #
 # Created 2026-07-22 (feat/ship-2-provisioning, SHIP-2): new module.
+# Changed 2026-07-22 (feat/ship-3-cloud-entity, SHIP-3): added
+# ``enqueue_deploy`` — the same web-side contract for the deploy pipeline. It
+# inserts a ``queued`` ShipDeploy and dispatches ``deploy_app_job`` positionally,
+# so ``POST /ship/apps/{id}/deploy`` returns immediately with a pollable id.
 
 from __future__ import annotations
 
 import logging
 
 from pocketpaw_ee.cloud.ship import store
+from pocketpaw_ee.cloud.ship.deploy_job import deploy_app_job  # noqa: F401 — registration ref
 from pocketpaw_ee.cloud.ship.job import provision_box_job  # noqa: F401 — registration ref
 from pocketpaw_ee.ship_engine.keygen import generate_box_keypair
 
@@ -57,6 +62,31 @@ async def enqueue_provision(
         logger.exception("ship: enqueue failed for box %s", box.id)
         raise
     return box
+
+
+async def enqueue_deploy(
+    *,
+    workspace_id: str,
+    app_id: str,
+    image: str,
+    pool_factory=None,
+) -> object:
+    """Insert a ``queued`` deploy attempt and enqueue its deploy job.
+
+    ``image`` is pinned onto the attempt at enqueue so a later app edit never
+    rewrites what this attempt shipped. Returns the inserted ShipDeploy — the
+    router answers with it immediately; the arq job advances the status.
+    """
+    deploy = await store.create_deploy(workspace_id=workspace_id, app_id=app_id, image=image)
+
+    pool = await _resolve_pool(pool_factory)
+    try:
+        # Positional enqueue — see the note in ``enqueue_provision``.
+        await pool.enqueue_job("deploy_app_job", str(deploy.id), workspace_id)
+    except Exception:
+        logger.exception("ship: deploy enqueue failed for deploy %s", deploy.id)
+        raise
+    return deploy
 
 
 async def _resolve_pool(pool_factory):
