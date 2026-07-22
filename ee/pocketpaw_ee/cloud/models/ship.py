@@ -51,7 +51,7 @@ from datetime import datetime
 from typing import Literal
 
 from beanie import Indexed
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pymongo import IndexModel
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
@@ -136,6 +136,18 @@ ShipAppStatus = Literal["created", "deploying", "live", "failed"]
 ShipBuildPath = Literal["dockerfile", "nixpacks"]
 
 
+class ShipAppDomain(BaseModel):
+    """One domain routed to an app, with the TLS outcome the engine reported.
+
+    Stored as a sub-document (not a bare string) because the /ship console shows
+    the certificate state per domain — persisting only the name would force the
+    read path to invent one.
+    """
+
+    domain: str
+    tls_enabled: bool = False
+
+
 class ShipApp(TimestampedDocument):
     """One app deployed onto a workspace's managed box.
 
@@ -167,8 +179,8 @@ class ShipApp(TimestampedDocument):
     prod: bool = False
     # Engine-reported URLs the app answers on (deploy URL + added domains).
     urls: list[str] = Field(default_factory=list)
-    # Domains routed to the app via ``add_domain``.
-    domains: list[str] = Field(default_factory=list)
+    # Domains routed to the app via ``add_domain`` (name + TLS outcome).
+    domains: list[ShipAppDomain] = Field(default_factory=list)
     # The linked database service name + the env var name the link injected.
     # The connection string itself is a secret and is NEVER stored.
     db_service: str = ""

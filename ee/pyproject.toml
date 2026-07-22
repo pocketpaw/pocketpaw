@@ -932,6 +932,26 @@ source_modules = [
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.project"]
 
+# Ship — the /ship managed-deploy entity (SHIP-2/SHIP-3). This entity's
+# doc-owning module is ``ship/store.py`` rather than ``service.py``: the SSH
+# private key on a ShipBox is Fernet-encrypted at rest, and the store is what
+# hides that envelope so no caller ever handles ciphertext. The contract pins
+# the same boundary every other entity has — the router, DTOs and domain value
+# objects must never reach a Beanie document. ``service.py`` / ``engine.py`` /
+# the two arq job modules stay off the docs too, but by review rather than by
+# contract: they annotate with the doc types under ``TYPE_CHECKING``, which
+# import-linter counts as a real import.
+[[tool.importlinter.contracts]]
+name = "Ship — Beanie writes only from store.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.ship.router",
+    "pocketpaw_ee.cloud.ship.dto",
+    "pocketpaw_ee.cloud.ship.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.ship"]
+
 [[tool.importlinter.contracts]]
 name = "Planner — Beanie writes only from service.py"
 type = "forbidden"
