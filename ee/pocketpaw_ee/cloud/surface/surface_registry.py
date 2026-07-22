@@ -32,6 +32,23 @@
 # startup assertion (``_assert_registry_complete``, run at module import)
 # guarantees every ``SurfaceKind`` has exactly one row and no row names a bogus
 # kind — resolving the design's open question (keep the enum + assert).
+#
+# Changes: 2026-07-22 (feat/code-surface-profile, CD-3) — the CODE row stopped
+# addressing the wrong machine. It used to carry
+# ``allowed_sdk_tools={"Bash","Read","Write","Edit","Glob","Grep"}``, which read
+# like "scope the agent to the coding built-ins" but is ADDITIVE — those six are
+# in the SDK's default set already, so it granted nothing and restricted nothing.
+# Meanwhile the /code agent runs on the BACKEND SERVER: the user's project lives
+# in a sandbox behind the ``code_mode`` tool, so every one of those built-ins
+# would have read and written the server's own disk and reported success. The row
+# now DENIES them (``_CODE_BUILTIN_DENY`` — deny is the only lever that removes a
+# built-in) and scopes the MCP surface to the one tool that reaches the project
+# (``_CODE_MODE_TOOL_IDS``). ``Agent`` joins the deny set too: a spawned subagent
+# is a second, unsupervised path to tools. ``skill_names`` drops to empty — the
+# `code` skill teaches nothing BUT those built-ins, so keeping it would inject an
+# instruction to call what the agent no longer has. Still a static ``profile``:
+# both sets are module-level literals, nothing lazily loaded, not meta-aware. The
+# matching preamble rewrite is in ``handlers/code.py``.
 
 from __future__ import annotations
 
@@ -172,6 +189,48 @@ _SITES_BUILTIN_DENY: frozenset[str] = frozenset(
 # base. When both PRs land, swap this literal for the imported constant (same
 # None-degrade path as the loom/media imports below). Do NOT drift the id.
 _BELT_GATE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_belt__belt_propose_change"})
+
+# The single tool the /code agent reaches the user's project through. Everything
+# the surface can do to code happens behind it: the tool owns the sandbox, the
+# file session, and the edit. Spelled as a LITERAL for the same reason
+# ``_BELT_GATE_TOOL_IDS`` above is — its canonical constant lives in a SIBLING
+# branch's in-process MCP server (server ``pocketpaw_code``, tool ``code_mode``),
+# not importable on this base. When both PRs land, swap this literal for the
+# imported constant. The id format is the SDK's ``mcp__<server>__<tool>``
+# namespacing (see ``pocketpaw.agents.sdk_mcp_widgets``). Do NOT drift the id.
+_CODE_MODE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_code__code_mode"})
+
+# Built-in SDK tools the /code agent must NOT have. Same mechanism and same
+# reasoning as ``_SITES_BUILTIN_DENY`` above: these bare tool NAMES ride in
+# ``deny_mcp_tool_ids``, and the OSS backend's deny filter subtracts ANY matching
+# id from the launch allow-list — built-ins included — so naming them here
+# physically removes them before the SDK starts.
+#
+# This is load-bearing, not tidiness. The /code agent runs on the BACKEND SERVER,
+# not in the user's project: its cwd is the per-tenant scratch jail, and the
+# user's code is only ever reachable through ``code_mode``. Left in place, the
+# built-ins let the agent read and write the SERVER's filesystem and then report
+# success — a silent wrong-machine failure with no error to notice.
+#
+# ``allowed_sdk_tools`` cannot do this job: it is ADDITIVE (unioned INTO the
+# allow-list, ``effective = (agent_tools ∪ allow) − deny``), and the file/shell
+# built-ins are in the SDK's default set already, so listing them there was a
+# no-op that merely read like a restriction. ``allow_mcp_tool_ids`` cannot either
+# — it filters only ``mcp__*`` ids and never touches built-ins. Deny is the only
+# lever.
+#
+# ``Agent`` is denied for a reason beyond parity with SITES. Under this design
+# ``code_mode`` is the ONLY path to the user's files; a spawned subagent is a
+# SECOND path, with its own tool resolution and no supervision from this profile.
+# Denying the six file/shell tools while leaving the tool that spawns a fresh
+# tool-user would just move the hole one level down.
+#
+# WebSearch / WebFetch / Skill are deliberately NOT denied, the same reasoning
+# SITES gives: researching an API or an error message to write against is
+# legitimate work, and neither one reaches a filesystem.
+_CODE_BUILTIN_DENY: frozenset[str] = frozenset(
+    {"Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"}
+)
 
 
 class _McpToolIds(NamedTuple):
@@ -420,15 +479,29 @@ SURFACES: list[SurfaceSpec] = [
         SurfaceKind.CODE,
         _route_for(SurfaceKind.CODE),
         code.build_preamble,
-        # Code: edit + run code. Ripple OFF so the agent edits code instead of
-        # building a dashboard; the SDK-tool allowlist scopes it to the coding
-        # built-ins; the `code` skill carries the edit→run→verify loop. No
-        # lazily-loaded MCP tool ids and not meta-aware, so this is a STATIC
-        # profile (no resolver needed).
+        # Code: edit + run code, but NOT on this machine. Ripple OFF so the
+        # agent edits code instead of building a dashboard. The user's project
+        # is reachable ONLY through ``code_mode`` (allow), and the file/shell
+        # built-ins are stripped (deny) because they address the backend
+        # server's own disk, not the project — see ``_CODE_BUILTIN_DENY``. Both
+        # sets are module-level literals, so this stays a STATIC profile (no
+        # lazily-loaded ids, not meta-aware, no resolver needed).
+        #
+        # ``skill_names`` is deliberately EMPTY, where it used to carry the
+        # `code` skill. That skill is not incidentally about the built-ins — it
+        # is entirely about them ("you use the built-in Bash / Read / Write /
+        # Edit / Glob / Grep tools", then a five-step loop built on them), so
+        # under the deny above it would be an injected instruction to call tools
+        # the agent no longer has: the agent attempts them, takes hard errors,
+        # and burns turns before finding the path the preamble already gave it.
+        # Absence is recoverable; contradiction is not. The skill's edit→run→
+        # verify DISCIPLINE is worth keeping and gets retargeted onto
+        # ``code_mode`` in CD-2 — rewriting SKILL.md here would teach a tool that
+        # does not exist yet, which is the same failure pointed the other way.
         profile=SurfaceProfile(
             ripple_mode="off",
-            skill_names=frozenset({"code"}),
-            allowed_sdk_tools=frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep"}),
+            allow_mcp_tool_ids=_CODE_MODE_TOOL_IDS,
+            deny_mcp_tool_ids=_CODE_BUILTIN_DENY,
         ),
     ),
     SurfaceSpec(
