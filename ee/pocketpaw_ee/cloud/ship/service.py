@@ -249,6 +249,50 @@ async def deploy_app(workspace_id: str, user_id: str, app_id: str) -> DeployView
     return view
 
 
+async def deploy_app_or_propose(
+    workspace_id: str, user_id: str, app_id: str
+) -> DeployView | DestroyProposalView:
+    """Deploy the app — unless it is PROD-flagged, in which case propose it.
+
+    The agent-facing seam (SHIP-4). A non-prod deploy is reversible and runs
+    directly; a production deploy is a gated verb, so this files an Instinct
+    proposal instead and returns the proposal view. The HTTP route keeps calling
+    ``deploy_app`` directly — an operator hitting the API with their own
+    credentials is not the same actor as an agent acting on their behalf.
+    """
+    app = await _require_app(workspace_id, app_id)
+    if not app.prod:
+        return await deploy_app(workspace_id, user_id, app_id)
+
+    if not app.image:
+        raise ValidationError(
+            "ship.app_no_image",
+            "The app has no image to deploy — set one when creating it",
+        )
+    proposal_id = await propose.propose_ship_action(
+        workspace_id=workspace_id,
+        verb="deploy_app",
+        box_id=app.box_id,
+        app_id=str(app.id),
+        target_label=f"app {app.name} (production)",
+        params={"image": app.image},
+        requested_by=user_id,
+    )
+    # A prod deploy is a gated verb, not a teardown — reuse the proposal VIEW
+    # (the wire shape is identical: what was proposed, on what, under which id)
+    # but do NOT emit ``ShipDestroyProposed``, which would tell every listener a
+    # teardown is pending when nothing is being torn down.
+    # no-event: the propose helper already opened the Decision-Graph chain; a
+    # dedicated ship.deploy_proposed event lands with the console work that
+    # renders it.
+    return DestroyProposalView(
+        workspace_id=workspace_id,
+        target_kind="app",
+        target_id=str(app.id),
+        proposal_id=proposal_id,
+    )
+
+
 async def list_deploys(workspace_id: str, app_id: str) -> list[DeployView]:
     """One app's deploy attempts, newest first."""
     # no-event: read-only path; emit only on writes (cloud rule #9).
