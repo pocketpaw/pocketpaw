@@ -162,6 +162,7 @@ from pocketpaw_ee.cloud.models.instinct_workspace_config import InstinctWorkspac
 from pocketpaw_ee.cloud.models.invite import Invite
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
+from pocketpaw_ee.cloud.models.ship import ShipBox
 from pocketpaw_ee.cloud.models.meeting import (
     Meeting,
     MeetingProviderCredentials,
@@ -321,6 +322,7 @@ __all__ = [
     "Lead",
     "LeadSource",
     "LiteLLMTenantKey",
+    "ShipBox",
     "Meeting",
     "MeetingProviderCredentials",
     "MeetingsSettings",
@@ -422,6 +424,9 @@ def get_all_documents():
         # LiteLLM per-tenant virtual-key mapping (MCG-8). Only
         # ``ee.cloud.llm_provisioning.service`` writes this.
         LiteLLMTenantKey,
+        # Managed-deploy boxes (SHIP-2). Only ``ee.cloud.ship.service`` and the
+        # ``provision_box`` builtin write this.
+        ShipBox,
         Invite,
         Group,
         InstinctApproval,

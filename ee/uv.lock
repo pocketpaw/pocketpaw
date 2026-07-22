@@ -1589,6 +1589,19 @@ wheels = [
 ]
 
 [[package]]
+name = "hcloud"
+version = "2.23.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9f/b0/f3a2e44ad8c295df58275585aecb979fb0829f0ac7d36d41db958dd85c65/hcloud-2.23.0.tar.gz", hash = "sha256:c12dce3f14404ea342d79236292a15fbc4ceeb7861724a09dd3fe60cef513e0b", size = 154918, upload-time = "2026-07-21T12:32:35.679Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/ae/bb107bd26049627c63da41868616533c004da69113cb2747e6a4e4eda949/hcloud-2.23.0-py3-none-any.whl", hash = "sha256:5a3fa1bbd1f87bfc5f0c726caebe041b9e1119b4361aafabc12fad284a2c445a", size = 111603, upload-time = "2026-07-21T12:32:34.025Z" },
+]
+
+[[package]]
 name = "hiredis"
 version = "3.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3326,6 +3339,7 @@ dependencies = [
     { name = "google-auth" },
     { name = "google-auth-oauthlib" },
     { name = "google-cloud-storage" },
+    { name = "hcloud" },
     { name = "igraph" },
     { name = "livekit-agents", extra = ["codecs"] },
     { name = "livekit-api" },
@@ -3374,6 +3388,7 @@ requires-dist = [
     { name = "google-auth-oauthlib", specifier = ">=1.2.0" },
     { name = "google-cloud-firestore", marker = "extra == 'firestore'", specifier = ">=2.27.0" },
     { name = "google-cloud-storage", specifier = ">=2.14.0" },
+    { name = "hcloud", specifier = ">=2.23.0" },
     { name = "igraph", specifier = ">=0.11" },
     { name = "livekit-agents", extras = ["codecs"], specifier = ">=1.5.9" },
     { name = "livekit-api", specifier = ">=0.6.0" },
