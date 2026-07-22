@@ -284,3 +284,61 @@ async def test_open_project_swallows_restore_failure(monkeypatch) -> None:
     second = await lifecycle.open_project(_WS, _USER, project.id, client=fake)
     assert second.status == "ready"
     assert second.id == first.id
+
+
+# ---------------------------------------------------------------------------
+# starter projects — two prompts, two projects.
+# ---------------------------------------------------------------------------
+#
+# Added 2026-07-22 reproducing a captain-reported bug: "when I try to create a
+# project by prompt then I don't see that project in the project tab."
+#
+# The cause is that idempotency is keyed on ``(workspace, user, provider, repo)``
+# and a STARTER project puts the starter id in ``repo``. For a git project that
+# key is right — cloning github.com/acme/widgets twice is the same project. For a
+# starter it conflates "which TEMPLATE" with "which PROJECT", and the catalog has
+# only four entries (react / vue / svelte / next), so two unrelated prompts
+# collide almost immediately.
+#
+# The user then gets navigated to the FIRST project, their new name is silently
+# discarded, and the projects tab still shows one row.
+
+_STARTER = "react"
+
+
+async def test_two_prompts_on_the_same_starter_make_two_projects() -> None:
+    """The bug, stated as the behaviour we want.
+
+    "A todo app" and "a blog" both plan to the react starter. They are two
+    different projects that happen to share a template.
+    """
+    todo = await service.create_project(
+        _WS, _USER, {"repo": _STARTER, "provider": "starter", "name": "todo app"}
+    )
+    blog = await service.create_project(
+        _WS, _USER, {"repo": _STARTER, "provider": "starter", "name": "blog"}
+    )
+
+    assert blog.id != todo.id, (
+        "the second prompt returned the FIRST project — the registry key treats "
+        "'which template' as 'which project', so every later prompt on this "
+        "starter is swallowed"
+    )
+    assert blog.name == "blog", "the name the user chose was discarded"
+
+    listing = await service.list_projects(_WS, _USER)
+    assert len(listing) == 2, (
+        f"the projects tab shows {len(listing)} project(s), not 2 — this is "
+        "exactly what the user reports as 'I don't see that project'"
+    )
+
+
+async def test_a_git_repo_stays_idempotent() -> None:
+    """The guard on the fix. Whatever makes starters distinct must NOT make a
+    returning user's git clone mint a duplicate — that idempotency is deliberate
+    and separately tested above."""
+    first = await service.create_project(_WS, _USER, {"repo": _REPO, "name": "Widgets"})
+    second = await service.create_project(_WS, _USER, {"repo": _REPO})
+
+    assert second.id == first.id
+    assert len(await service.list_projects(_WS, _USER)) == 1
