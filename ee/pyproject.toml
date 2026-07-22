@@ -668,6 +668,7 @@ allow_indirect_imports = "true"
 source_modules = [
     "pocketpaw_ee.cloud.codeagent.router",
     "pocketpaw_ee.cloud.codeagent.service",
+    "pocketpaw_ee.cloud.codeagent.transport",
     "pocketpaw_ee.cloud.codeagent.dto",
     "pocketpaw_ee.cloud.codeagent.domain",
 ]

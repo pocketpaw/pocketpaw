@@ -43,6 +43,7 @@ import logging
 import os
 
 from pocketpaw_ee.cloud._core.errors import CloudError, with_cause
+from pocketpaw_ee.cloud.codeagent import transport
 from pocketpaw_ee.cloud.codeagent.domain import (
     MAX_OUTPUT_TOKENS,
     MAX_TOOL_ITERATIONS,
@@ -127,6 +128,67 @@ def _replay_tool_exchanges(results: list[ToolResult]) -> list[dict]:
     return out
 
 
+def _api_key() -> str:
+    """The Anthropic key, or "" when there is none. Never raises — a config
+    import that blows up is "unconfigured", not a crash."""
+    try:
+        from pocketpaw.config import get_settings
+
+        return (get_settings().anthropic_api_key or "").strip()
+    except Exception:  # noqa: BLE001
+        logger.debug("codeagent: settings unavailable while resolving a key", exc_info=True)
+        return ""
+
+
+def _default_client():  # noqa: ANN202
+    """Pick a transport. A KEY is preferred; the CLI is the fallback that works
+    without one.
+
+    The order is not a preference for Anthropic-the-company, it is a preference
+    for the NATIVE TOOL CHANNEL. With a key we get real `tool_use` blocks,
+    schema-validated by the API. Without one, `transport.ClaudeCliClient` carries
+    the same protocol in the prompt and parses it back — correct, and one step
+    less certain, so it is second.
+
+    Reaching the CLI at all is what makes this feature work in AGENT MODE, where
+    there is no key by design and where every deployment of this product runs.
+    That is the case `codeagent` used to 503 on, in defiance of a rule written
+    down in `instinct/auto_triage.py` — see transport.py's header.
+    """
+    key = _api_key()
+    if key:
+        try:
+            from anthropic import AsyncAnthropic
+        except Exception as exc:  # noqa: BLE001
+            raise with_cause(
+                CloudError(
+                    503,
+                    "codeagent.unavailable",
+                    "An API key is set but the Anthropic SDK is not installed. "
+                    "Run `uv sync --dev --group ee`.",
+                ),
+                exc,
+            ) from exc
+        return AsyncAnthropic(api_key=key, timeout=MODEL_TIMEOUT_SECONDS, max_retries=1)
+
+    executable = transport.claude_executable()
+    if executable:
+        logger.info("codeagent: no API key; using the claude CLI at %s", executable)
+        return transport.ClaudeCliClient(executable)
+
+    # Both doors shut. The message names BOTH ways out, because which one a
+    # reader wants depends on where they are running, and "not configured" told
+    # them neither.
+    raise CloudError(
+        503,
+        "codeagent.unavailable",
+        "The agent model is not configured. Either install the Claude CLI "
+        "(so it can authenticate itself, no key needed), or set "
+        "POCKETPAW_ANTHROPIC_API_KEY to a key from console.anthropic.com. "
+        "Then restart the backend.",
+    )
+
+
 async def _run_model(system: str, messages: list[dict], *, tools: list[dict] | None, client):  # noqa: ANN001, ANN201
     """Call the model and return the raw response. ``client`` is the DI seam.
 
@@ -140,20 +202,7 @@ async def _run_model(system: str, messages: list[dict], *, tools: list[dict] | N
     must never be reported as an answer.
     """
     if client is None:
-        try:
-            from anthropic import AsyncAnthropic
-
-            from pocketpaw.config import get_settings
-
-            api_key = get_settings().anthropic_api_key
-        except Exception as exc:  # noqa: BLE001 — a missing dep is "unconfigured", not a crash
-            raise with_cause(
-                CloudError(503, "codeagent.unavailable", "The agent model is not configured"),
-                exc,
-            ) from exc
-        if not api_key:
-            raise CloudError(503, "codeagent.unavailable", "The agent model is not configured")
-        client = AsyncAnthropic(api_key=api_key, timeout=MODEL_TIMEOUT_SECONDS, max_retries=1)
+        client = _default_client()
 
     kwargs: dict = {
         "model": _model(),

@@ -214,3 +214,55 @@ async def test_a_write_call_carries_the_models_explanation() -> None:
     result = await codeagent_service.run_turn(WS, USER, _body(mode="edit"), client=client)
 
     assert result.answer == "Renamed the handler and updated its one caller."
+
+
+# ---------------------------------------------------------------------------
+# Transport selection (CA-0).
+# ---------------------------------------------------------------------------
+
+
+def test_no_key_falls_back_to_the_cli_instead_of_503ing(monkeypatch) -> None:  # noqa: ANN001
+    """THE fix for the 2026-07-22 report: a bare 503 on every Ask and Cmd-K.
+
+    The rule this violated is written down in `instinct/auto_triage.py` — agent
+    mode runs with NO key, so the LLM call must shell the `claude` CLI, NOT
+    `AsyncAnthropic`. `codeagent` was the one module reaching for the direct
+    client anyway, inherited from the deleted `websandbox/edit.py`.
+    """
+    from pocketpaw_ee.cloud.codeagent import service as codeagent_service
+    from pocketpaw_ee.cloud.codeagent import transport
+
+    monkeypatch.setattr(codeagent_service, "_api_key", lambda: "")
+    monkeypatch.setattr(transport, "claude_executable", lambda: "/usr/bin/claude")
+
+    assert isinstance(codeagent_service._default_client(), transport.ClaudeCliClient)
+
+
+def test_a_key_still_wins_over_the_cli(monkeypatch) -> None:  # noqa: ANN001
+    """Not a preference for the vendor — a preference for the NATIVE TOOL
+    CHANNEL, which the API schema-validates and the CLI protocol cannot."""
+    from pocketpaw_ee.cloud.codeagent import service as codeagent_service
+    from pocketpaw_ee.cloud.codeagent import transport
+
+    monkeypatch.setattr(codeagent_service, "_api_key", lambda: "sk-ant-test")
+    monkeypatch.setattr(transport, "claude_executable", lambda: "/usr/bin/claude")
+
+    assert not isinstance(codeagent_service._default_client(), transport.ClaudeCliClient)
+
+
+def test_with_neither_the_error_names_both_ways_out(monkeypatch) -> None:  # noqa: ANN001
+    """"Not configured" is true and useless. Which fix a reader wants depends on
+    where they are running, so the message names both."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.codeagent import service as codeagent_service
+    from pocketpaw_ee.cloud.codeagent import transport
+
+    monkeypatch.setattr(codeagent_service, "_api_key", lambda: "")
+    monkeypatch.setattr(transport, "claude_executable", lambda: None)
+
+    with pytest.raises(CloudError) as exc:
+        codeagent_service._default_client()
+
+    assert exc.value.status_code == 503
+    assert "Claude CLI" in exc.value.message
+    assert "POCKETPAW_ANTHROPIC_API_KEY" in exc.value.message
