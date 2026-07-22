@@ -24,10 +24,27 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# Names that reach the deploy engine are constrained HERE, at the boundary, the
+# same way SHIP-1's ``AppSpec`` constrains env keys: the driver shell-quotes
+# everything it interpolates, so this is not the injection defence — it is what
+# keeps unusable garbage (an app name Dokku will reject, a "domain" that is a
+# sentence) from becoming a failed SSH round trip.
+#
+# Dokku app / service names: lowercase alphanumeric, hyphens inside.
+_APP_NAME_RE = r"^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$"
+# A DNS hostname: two or more dot-separated labels, each starting and ending
+# alphanumeric with hyphens allowed inside. Written without look-around —
+# pydantic compiles patterns with the Rust regex engine, which has none.
+_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_DOMAIN_RE = rf"^{_LABEL}(?:\.{_LABEL})+$"
+# POSIX environment variable NAME (values are never accepted).
+_ENV_NAME_RE = r"^[A-Za-z_][A-Za-z0-9_]*$"
 
 # ---------------------------------------------------------------------------
 # Requests
@@ -52,7 +69,7 @@ class CreateAppRequest(BaseModel):
     API never accepts env VALUES.
     """
 
-    name: str = Field(min_length=1, max_length=63)
+    name: str = Field(min_length=1, max_length=63, pattern=_APP_NAME_RE)
     box_id: str = Field(min_length=1)
     build_path: Literal["dockerfile", "nixpacks"] = "dockerfile"
     git_ref: str = ""
@@ -60,11 +77,24 @@ class CreateAppRequest(BaseModel):
     prod: bool = False
     env_refs: list[str] = Field(default_factory=list)
 
+    @field_validator("env_refs")
+    @classmethod
+    def _names_only(cls, value: list[str]) -> list[str]:
+        """Reject anything that is not a bare env var NAME.
+
+        A caller sending ``["API_KEY=hunter2"]`` is trying to store a secret in
+        a field that is never treated as one — refuse it rather than persist it.
+        """
+        for name in value:
+            if not re.match(_ENV_NAME_RE, name):
+                raise ValueError(f"env_refs takes variable names only, got {name!r}")
+        return value
+
 
 class AddDomainRequest(BaseModel):
     """Route a domain to an app and (by default) issue TLS for it."""
 
-    domain: str = Field(min_length=1, max_length=253)
+    domain: str = Field(min_length=1, max_length=253, pattern=_DOMAIN_RE)
     enable_tls: bool = True
 
 

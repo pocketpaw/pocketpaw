@@ -217,10 +217,14 @@ async def deploy_app(workspace_id: str, user_id: str, app_id: str) -> DeployView
     if box.status != "ready":
         raise ConflictError("ship.box_not_ready", f"Box is {box.status}, not ready")
 
+    # Flip the app BEFORE dispatching. The worker may pick the job up
+    # immediately and write a terminal status; writing "deploying" afterwards
+    # would clobber it. A dispatch failure leaves the app "deploying" with a
+    # "queued" attempt — a visibly stuck deploy, which is the honest state.
+    app = await store.set_app_status(app, "deploying")
     deploy = await enqueue.enqueue_deploy(
         workspace_id=workspace_id, app_id=str(app.id), image=app.image
     )
-    app = await store.set_app_status(app, "deploying")
     view = _deploy_view(deploy)
     await emit(
         ShipDeployQueued(
