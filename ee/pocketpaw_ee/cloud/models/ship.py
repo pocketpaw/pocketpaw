@@ -85,6 +85,10 @@ class ShipBox(TimestampedDocument):
     # The box's SSH PRIVATE key, Fernet-encrypted at rest. Decrypted only inside
     # the ship service to build a driver; never serialized into a DTO or log.
     ssh_private_key_enc: str = ""
+    # The box's SSH PUBLIC key (not secret) — authorized on the box via
+    # cloud-init and re-supplied to the provisioner on a retry. Stored so the
+    # public half never has to be re-derived from the encrypted private key.
+    ssh_public_key: str = ""
     # The provider's quoted monthly price for the server type, captured at
     # provision (provenance; the cost recorder in SHIP-7 reads it).
     price_monthly: float | None = None
