@@ -11,9 +11,21 @@
 # ``current_sandbox_id`` and resolved lazily by ``codeproject/lifecycle.open_project``
 # (reuse the bound row if it's live, else provision a fresh one and rebind). The
 # orchestration lives in lifecycle.py so this module stays the sole doc writer.
+#
+# Modified 2026-07-22 (fix/starter-project-collision): ``create_project``'s
+# idempotency is now provider-dependent. It was keyed on
+# (workspace, user, provider, repo) for every provider, which is only correct
+# while ``repo`` names an IDENTITY. A starter project puts a TEMPLATE id there
+# and the catalog has four, so "build me a todo app" and "build me a blog" both
+# planned to ``react``, hit the idempotency check, and the second create returned
+# the FIRST project — the user's name was discarded, they were navigated to the
+# older project, and the projects tab still showed one row. Scaffold providers
+# now always insert; identity providers keep the existing behaviour exactly, so a
+# returning user still lands back on the same ``/code/<id>`` for a repo.
 from __future__ import annotations
 
 import logging
+import secrets
 from datetime import UTC, datetime
 
 from pocketpaw_ee.cloud._core.errors import NotFound
@@ -24,7 +36,11 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     CodeProjectOpened,
     CodeProjectRenamed,
 )
-from pocketpaw_ee.cloud.codeproject.domain import CodeProjectId, CodeProjectView
+from pocketpaw_ee.cloud.codeproject.domain import (
+    CodeProjectId,
+    CodeProjectView,
+    is_scaffold_provider,
+)
 from pocketpaw_ee.cloud.codeproject.dto import (
     CodeProjectResponse,
     CreateProjectRequest,
@@ -46,6 +62,21 @@ def _short_name(repo: str) -> str:
         trimmed = trimmed[: -len(".git")]
     tail = trimmed.rsplit("/", 1)[-1]
     return tail or trimmed
+
+
+def _registry_key(provider: str) -> str:
+    """The immutable tail of the registry key for a new row.
+
+    Empty for an identity provider, so every project for a given repo shares one
+    key and the collection's unique index enforces one-project-per-repo. A fresh
+    random token for a scaffold provider, so two projects built from the same
+    starter are two rows rather than a duplicate-key collision.
+
+    The token is minted here, at insert, and never rewritten — the whole point of
+    keying on it instead of on ``name`` is that nothing a user does later can
+    move it.
+    """
+    return secrets.token_hex(8) if is_scaffold_provider(provider) else ""
 
 
 def _doc_to_view(doc: _CodeProjectDoc) -> CodeProjectView:
@@ -87,26 +118,41 @@ async def create_project(
     user_id: str,
     body: CreateProjectRequest | dict,
 ) -> CodeProjectView:
-    """Register (or return) the durable project for a (workspace, user, provider, repo).
+    """Register (or return) the durable project for a create request.
 
-    Idempotent on the registry key: a second create for the same repo returns the
-    EXISTING project unchanged rather than minting a duplicate — a returning user
-    lands back on the same ``/code/<id>``. Only an actual insert emits
-    ``CodeProjectCreated`` (an idempotent hit is not a mutation).
+    Idempotency is PROVIDER-DEPENDENT, because ``repo`` means two different
+    things depending on who filled it in.
+
+    For an identity provider (``github``) the repo string names the project:
+    cloning ``acme/widgets`` twice is the same project, so a second create
+    returns the EXISTING row unchanged and a returning user lands back on the
+    same ``/code/<id>``. That behaviour is deliberate and unchanged.
+
+    For a scaffold provider (``starter``) the repo string names the TEMPLATE the
+    project starts from. The catalog holds four, so two unrelated prompts sharing
+    one starter is the ordinary case, not a duplicate — deduplicating there
+    silently swallowed the user's second project. Scaffold creates therefore
+    always insert. Guarding a double-submit is the caller's job (the ``/code``
+    landing page latches its confirm button and navigates away on success); it is
+    not something the registry can infer from a template id.
+
+    Only an actual insert emits ``CodeProjectCreated`` (an idempotent hit is not
+    a mutation).
     """
     body = CreateProjectRequest.model_validate(body)
 
-    existing = await _CodeProjectDoc.find_one(
-        {  # Rule 7 tenant + owner filter
-            "workspace_id": workspace_id,
-            "user_id": user_id,
-            "provider": body.provider,
-            "repo": body.repo,
-        }
-    )
-    if existing is not None:
-        # no-event: idempotent hit — nothing was written, so nothing to announce.
-        return _doc_to_view(existing)
+    if not is_scaffold_provider(body.provider):
+        existing = await _CodeProjectDoc.find_one(
+            {  # Rule 7 tenant + owner filter
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "provider": body.provider,
+                "repo": body.repo,
+            }
+        )
+        if existing is not None:
+            # no-event: idempotent hit — nothing was written, so nothing to announce.
+            return _doc_to_view(existing)
 
     doc = _CodeProjectDoc(
         workspace_id=workspace_id,
@@ -114,6 +160,7 @@ async def create_project(
         name=body.name or _short_name(body.repo),
         provider=body.provider,
         repo=body.repo,
+        registry_key=_registry_key(body.provider),
     )
     await doc.insert()
 
