@@ -64,10 +64,10 @@ async def run_deploy(
 ) -> ShipDeploy:
     """Take ``deploy`` to ``live`` (or ``failed``). Returns the updated doc.
 
-    Never raises for an engine failure — a ``ShipEngineError`` is recorded on the
-    attempt and the app is flipped ``failed``. A programming/infra error (a
-    missing encryption key, a broken bus) still propagates, matching the
-    provisioning orchestrator's posture.
+    Never raises for an engine or reachability failure (``engine.ENGINE_FAILURES``)
+    — it is recorded on the attempt and the app is flipped ``failed``. A
+    programming/infra error (a missing encryption key, a broken bus, a rejected
+    SSH key) still propagates, matching the provisioning orchestrator's posture.
     """
     factory = session_factory or ship_engine.box_session
 
@@ -77,7 +77,7 @@ async def run_deploy(
             result = await session.engine.deploy_app(
                 DeployRequest(app=AppSpec(name=app.name), image=deploy.image)
             )
-    except ShipEngineError as exc:
+    except ship_engine.ENGINE_FAILURES as exc:
         logger.warning("ship deploy failed for app=%s deploy=%s", app.id, deploy.id)
         await _mark_app(app, "failed")
         return await _advance(deploy, "failed", log_summary=_summary(exc))
@@ -160,6 +160,14 @@ def _app_payload(app: ShipApp) -> dict:
     }
 
 
-def _summary(exc: ShipEngineError) -> str:
-    """A short, already-redacted failure line for the attempt record."""
-    return str(exc)[:_SUMMARY_MAX_CHARS]
+def _summary(exc: BaseException) -> str:
+    """A short failure line for the attempt record.
+
+    SHIP-1 redacts ``CommandFailed``'s command + stderr tail before the exception
+    exists. A reachability error (``OSError``) is reported by class name only —
+    its message can carry the box's address, which does not belong in a record
+    the console renders.
+    """
+    if isinstance(exc, ShipEngineError):
+        return str(exc)[:_SUMMARY_MAX_CHARS]
+    return f"could not reach the box ({type(exc).__name__})"

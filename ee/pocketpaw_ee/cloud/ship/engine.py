@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any
 
 from pocketpaw_ee.cloud.ship import store
 from pocketpaw_ee.ship_engine.dokku import AsyncSSHTransport, DokkuDriver, SSHTransport
-from pocketpaw_ee.ship_engine.port import ShipEngine
+from pocketpaw_ee.ship_engine.port import ShipEngine, ShipEngineError
 
 if TYPE_CHECKING:
     from pocketpaw_ee.cloud.models.ship import ShipBox
@@ -52,6 +52,19 @@ BOX_METRICS_COMMAND = (
     "free -m | awk '/^Mem:/{printf \"%.1f\\n\", $3/$2*100}'; "
     "df -Pk / | awk 'NR==2{print $5}'"
 )
+
+
+# What "the box could not be driven" looks like to a caller. ``ShipEngineError``
+# is the engine refusing a command; ``OSError`` is the box being unreachable —
+# connection refused, no route, DNS failure, timeout (``TimeoutError`` is an
+# OSError subclass). Callers map these to a 409.
+#
+# Deliberately NOT included: asyncssh's auth errors. A rejected key means the
+# credential we stored is wrong, which is a defect to alert on, not an
+# operational blip to fold into a 409 — it propagates as a 500. (Naming them
+# would also force the SSH stack to load at import time, which the transport
+# goes out of its way to avoid.)
+ENGINE_FAILURES: tuple[type[BaseException], ...] = (ShipEngineError, OSError)
 
 
 @dataclass(frozen=True)

@@ -74,7 +74,7 @@ from pocketpaw_ee.cloud.ship.dto import (
     MetricsOut,
     PendingApprovalOut,
 )
-from pocketpaw_ee.ship_engine.port import CommandFailed, ShipEngineError
+from pocketpaw_ee.ship_engine.port import CommandFailed
 
 if TYPE_CHECKING:
     from pocketpaw_ee.cloud.models.ship import ShipApp, ShipBox, ShipDeploy
@@ -150,7 +150,7 @@ async def get_box_metrics(
     try:
         async with factory(box) as session:
             cpu, mem, disk = await ship_engine.read_box_metrics(session)
-    except ShipEngineError as exc:
+    except ship_engine.ENGINE_FAILURES as exc:
         raise _engine_conflict("ship.metrics_failed", exc) from exc
     return BoxMetricsView(
         workspace_id=workspace_id, box_id=str(box.id), cpu=cpu, mem=mem, disk=disk
@@ -265,7 +265,7 @@ async def add_domain(
             result = await session.engine.add_domain(
                 app.name, body.domain, enable_tls=body.enable_tls
             )
-    except ShipEngineError as exc:
+    except ship_engine.ENGINE_FAILURES as exc:
         raise _engine_conflict("ship.domain_failed", exc) from exc
 
     scheme = "https" if result.tls_enabled else "http"
@@ -319,7 +319,7 @@ async def create_db(
     try:
         async with factory(box) as session:
             result = await session.engine.db_create(app.name, service)
-    except ShipEngineError as exc:
+    except ship_engine.ENGINE_FAILURES as exc:
         raise _engine_conflict("ship.db_failed", exc) from exc
 
     app = await store.record_app_db(app, service=result.service, env_var=result.exposed_env_var)
@@ -347,7 +347,7 @@ async def get_logs(
     try:
         async with factory(box) as session:
             chunk = await session.engine.logs(app.name, num=num)
-    except ShipEngineError as exc:
+    except ship_engine.ENGINE_FAILURES as exc:
         raise _engine_conflict("ship.logs_failed", exc) from exc
     return LogsView(workspace_id=workspace_id, app_id=str(app.id), lines=tuple(chunk.lines))
 
@@ -538,12 +538,13 @@ def _mint_proposal_id() -> str:
     return f"ship-destroy-{uuid.uuid4().hex}"
 
 
-def _engine_conflict(code: str, exc: ShipEngineError) -> ConflictError:
-    """Map an engine failure to a 409 carrying an already-redacted reason.
+def _engine_conflict(code: str, exc: BaseException) -> ConflictError:
+    """Map an engine/reachability failure to a 409 with a safe reason.
 
     SHIP-1 redacts ``CommandFailed``'s command + stderr tail before the exception
-    exists, so the tail is safe to surface; any other engine error is reported by
-    class name only.
+    exists, so the tail is safe to surface; anything else (an unreachable box, a
+    timeout) is reported by class name only — a raw ``OSError`` message can carry
+    the box's address, which is not this response's job to publish.
     """
     detail = exc.stderr_tail if isinstance(exc, CommandFailed) else type(exc).__name__
     logger.warning("ship engine call failed (%s)", code)
