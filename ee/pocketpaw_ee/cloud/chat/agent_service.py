@@ -174,6 +174,13 @@ cloud Mongo client is connected — so it hard-failed EVERY workspace-less run
 ``run_core.execute_run`` now wraps the run lifecycle in ``mark_cloud_chat_run``
 and the jail fails closed only when this marker is set; otherwise it falls back
 to ``settings.file_jail_path`` (pre-ART-2 behavior).
+
+Changes: 2026-07-22 (CD-1, feat/code-delegate-channel) — added
+``has_sse_event_sink()`` beside ``push_sse_event``. Read-only introspection of
+the same ContextVar, added for Code Mode's browser-delegate channel: that caller
+pushes a frame and then PARKS waiting for the browser's reply, so a push into no
+stream has to be a fast, distinct failure rather than a silent no-op followed by
+a full-length timeout. No behaviour change to any existing push path.
 """
 
 from __future__ import annotations
@@ -380,6 +387,21 @@ def push_sse_event(name: str, data: dict[str, Any]) -> None:
         sink.put_nowait((name, data))
     except Exception:
         logger.debug("sse sink rejected %s payload", name, exc_info=True)
+
+
+def has_sse_event_sink() -> bool:
+    """True when there IS a live stream to push to.
+
+    ``push_sse_event`` is deliberately a no-op without a sink, which is right for
+    an observability frame nobody is obliged to see. It is wrong for a frame the
+    caller then WAITS on: Code Mode's ``code_delegate`` (see
+    ``cloud/codeagent/delegates.py``) parks a turn until the browser answers, so
+    pushing into nothing would park for the full timeout before reporting a
+    failure that was knowable at the push. This lets such a caller fail fast and
+    say which problem it hit — "no browser attached" rather than "the browser
+    was slow".
+    """
+    return _sse_event_sink.get() is not None
 
 
 def push_pocket_mutation(payload: dict[str, Any]) -> None:

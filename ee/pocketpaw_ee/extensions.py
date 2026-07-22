@@ -1024,6 +1024,39 @@ class CloudBeltMcpProvider:
         return list(BELT_TOOL_IDS)
 
 
+class CloudCodeMcpProvider:
+    """`pocketpaw.mcp_servers` — the Code Mode delegate in-process server
+    (``pocketpaw_code``). Hosts ``code_mode`` only.
+
+    The main chat agent drives the /code surface and reaches the user's project
+    through this one coarse tool. The handler does not open a file: it parks on
+    a future while the BROWSER does the work and posts the answer back to
+    ``POST /codeagent/resolve``, because a WebContainer project lives in the tab
+    and has no server-side row a backend could reach.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``), the same regime as the sibling belt
+    / loom / media servers: the /code surface scopes access via its profile,
+    which allows this tool id and DENIES the file/shell built-ins outright.
+    ``build_code_server`` returns None — and the loop skips it — when the
+    claude_agent_sdk isn't installed, so chat never breaks.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.code import build_code_server
+
+            return build_code_server()
+        except ImportError:
+            # claude_agent_sdk not installed — same degrade path as the other
+            # in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.code import CODE_TOOL_IDS
+
+        return list(CODE_TOOL_IDS)
+
+
 class CloudExternalActionsMcpProvider:
     """`pocketpaw.mcp_servers` — the gated external-action proposal in-process
     server (``pocketpaw_external_actions``). Hosts ``propose_external_action``
