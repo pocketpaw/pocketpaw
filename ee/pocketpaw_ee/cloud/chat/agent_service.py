@@ -1353,13 +1353,42 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     # ``surface_profile.ripple_mode="off"``) suppresses the ripple block.
     ripple_off = ctx.resolved_profile is not None and ctx.resolved_profile.ripple_mode == "off"
 
+    # A surface may replace the DELIVERABLE stack wholesale with its own system
+    # prompt. ``None`` (every surface but /code today, and the legacy
+    # ``resolved_profile is None`` path) keeps the assembly below untouched.
+    #
+    # What an override replaces: the ripple LAW, the pocket-delegation rule, the
+    # per-backend pocket prompts, and the artifact-delivery rule — everything
+    # that tells the agent what to BUILD. On a surface with a different
+    # deliverable each of those is an instruction to use a tool the profile has
+    # denied, and CD-3 already recorded what that costs ("the agent attempts
+    # them, takes hard errors, and burns turns"). ``ripple_mode="off"`` only ever
+    # covered the first two; /code showed the rest still landing.
+    #
+    # What it does NOT replace, and why the two survivors are not an oversight:
+    # ``_RUNTIME_IDENTITY_RULE`` is true on every surface (you are PocketPaw in a
+    # GUI chat; slash commands do not exist), and the Composio rules are gated on
+    # Composio actually being enabled, so prompt and tool list agree by
+    # construction. Both describe the ENVIRONMENT the agent is in. The override
+    # describes the WORK. Folding the environment rules into each surface's
+    # prompt would duplicate them per surface and let them drift.
+    override = ctx.resolved_profile.system_message_override if ctx.resolved_profile else None
     parts: list[str] = []
     parts.append(_RUNTIME_IDENTITY_RULE)
     # Artifact-delivery rule (ART-4): the agent builds files in a per-tenant jail
     # the user can't reach, so a downloadable result MUST go through
     # deliver_artifact (which lands it in tenant blob storage and returns a real
     # download URL) — not a printed container path and not a local preview server.
-    parts.append(_DELIVER_ARTIFACT_RULE)
+    #
+    # Dropped under an override, because it presumes the two things such a
+    # surface does not have. On /code the agent holds neither ``Write`` (to
+    # "write it to a file in your working directory") nor ``deliver_artifact``
+    # (``pocketpaw_deliver`` is not in the allow-list), so every step of this
+    # rule names a tool that is gone — and it describes a jail on the backend
+    # server, which is the exact wrong-machine confusion CD-3 removed from the
+    # preamble.
+    if override is None:
+        parts.append(_DELIVER_ARTIFACT_RULE)
     # Composio auth/search guidance is injected whenever Composio is
     # enabled. An enabled deployment ALWAYS surfaces at least the
     # discovery meta-tools — ``providers.py`` falls back to them when no
@@ -1380,7 +1409,15 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     # dropped for a ``type="home"`` scope. The home agent then gets exactly
     # one consistent widget-creation instruction.
     is_home = ctx.pocket_type == "home"
-    if is_home:
+    if override is not None:
+        # The surface speaks for itself. Everything below this branch — the
+        # ripple LAW, the delegation rule, the per-backend pocket prompts, the
+        # home widget prompt — is the pocket-shaped deliverable stack the
+        # override exists to replace. Appending the override INSTEAD of them
+        # (not alongside) is the whole point: the /code bug was not a missing
+        # instruction, it was two instructions, and the trained-in one won.
+        parts.append(override)
+    elif is_home:
         # The home agent's only widget-creation instruction is
         # HOME_POCKET_PROMPT (appended below). It must not also receive the
         # specialist-delegation rule (MCP backends) or the heavy
@@ -1422,7 +1459,7 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     # integration wired up" despite a configured backend. ``None`` renders as
     # "configured state unknown — call get_pocket to check". The literal
     # token never leaks because ``fill_current_pocket`` always replaces it.
-    if is_home:
+    if is_home and override is None:
         parts.append(
             fill_current_pocket(HOME_POCKET_PROMPT, ctx.pocket_id or "", ctx.backend_summary)
         )
@@ -1436,7 +1473,11 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     # for intent="pocket_create" — that flow is about a NEW pocket, so the
     # anchor's summary would mislead (mirrors the <current-pocket> tag gate
     # in build_dynamic_context). ``None`` ⇒ no block, byte-identical prompt.
-    if ctx.pocket_summary and ctx.intent != "pocket_create":
+    # Also gated off under an override: a <pocket-summary> is pocket framing, and
+    # on a surface that cannot touch a pocket it reads as an invitation to talk
+    # about one ("your other dashboard does X") rather than as the anchor context
+    # it is elsewhere.
+    if ctx.pocket_summary and ctx.intent != "pocket_create" and override is None:
         parts.append(_render_pocket_summary_block(ctx.pocket_summary))
     # ADDITIVE member orientation (pp#1367): append the pre-rendered, capped
     # "about this member" block LAST so the agent greets the caller by name and

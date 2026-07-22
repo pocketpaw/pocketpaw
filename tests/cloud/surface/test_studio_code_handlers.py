@@ -294,6 +294,46 @@ def test_code_profile_ripple_off_and_scoped_to_code_mode() -> None:
     assert profile.allow_mcp_tool_ids == frozenset({"mcp__pocketpaw_code__code_mode"})
 
 
+def test_code_profile_denies_the_skill_tool() -> None:
+    """``Skill`` is denied, which is the only way to withhold create-pocket.
+
+    The bundled skills load as a Claude Code LOCAL PLUGIN, from the SDK
+    ``plugins=`` option — independent of ``skill_names``. So an empty
+    ``skill_names`` (what CD-3 set) does NOT keep ``pocketpaw-create-pocket``
+    away from this surface, and that skill's description matches "build an app
+    with components and nice design" almost word for word. Denying the tool that
+    invokes skills is the lever that actually exists."""
+    profile = resolve_profile(SurfaceKind.CODE, SurfaceMeta())
+
+    assert "Skill" in profile.deny_mcp_tool_ids
+    # Research still works — neither reaches a filesystem or builds a pocket.
+    assert not {"WebSearch", "WebFetch"} & profile.deny_mcp_tool_ids
+
+
+def test_code_profile_carries_its_own_system_prompt() -> None:
+    """/code replaces the shared deliverable stack with its own system prompt.
+
+    The deny set makes a pocket unreachable; this makes CODE the default instead
+    of merely the permitted option. Both were needed — ``ripple_mode="off"`` plus
+    a preamble forbidding pockets still lost, because a prohibition does not
+    create a default."""
+    from pocketpaw_ee.cloud.surface.system_prompts import CODE_SYSTEM_PROMPT
+
+    profile = resolve_profile(SurfaceKind.CODE, SurfaceMeta())
+
+    assert profile.system_message_override == CODE_SYSTEM_PROMPT
+    # It has to say what the surface DOES build, not only what it must not.
+    assert "code_mode" in CODE_SYSTEM_PROMPT
+    assert "WORKING CODE" in CODE_SYSTEM_PROMPT
+    # And it must not promise a tool the profile denies.
+    for denied in ("deliver_artifact", "get_widget_spec", "pocket_specialist"):
+        assert denied not in CODE_SYSTEM_PROMPT, (
+            f"the /code system prompt names {denied}, which this surface's "
+            f"profile withholds — a prompt that promises a denied tool is the "
+            f"contradiction this override exists to remove"
+        )
+
+
 def test_code_profile_surfaces_no_skill() -> None:
     """/code carries NO skill.
 
@@ -326,7 +366,13 @@ def test_code_profile_denies_the_filesystem_builtins_and_subagents() -> None:
     # Not smuggled back in through the additive allow-list either.
     assert not (profile.allowed_sdk_tools or frozenset()) & _FILESYSTEM_BUILTINS
     # Research tools survive — neither reaches a filesystem.
-    assert not {"WebSearch", "WebFetch", "Skill"} & profile.deny_mcp_tool_ids
+    #
+    # ``Skill`` was in this list until 2026-07-22 on the same reasoning. It is
+    # now denied (see ``test_code_profile_denies_the_skill_tool``): the bundled
+    # ``pocketpaw-create-pocket`` skill loads as a local plugin regardless of
+    # ``skill_names``, so this is the only lever that withholds it, and its
+    # description is a near-exact match for the request that triggered the bug.
+    assert not {"WebSearch", "WebFetch"} & profile.deny_mcp_tool_ids
 
 
 async def test_code_profile_grants_no_filesystem_tool_in_the_effective_allowlist() -> None:
@@ -472,15 +518,23 @@ async def test_code_profile_builds_no_pocket_in_the_effective_allowlist() -> Non
         f"components in the user's project, not ripple widgets in a ui-spec."
     )
 
+    # No pocket tool of ANY kind survives — read verbs included. An earlier pass
+    # kept ``get_pocket`` / ``list_pockets`` on the reasoning that reading a
+    # pocket cannot produce one; that is true and beside the point, since a
+    # pocket the agent can inspect is a pocket it can propose. Prefix scan, so a
+    # tool added to the server later is caught without updating this test.
+    leaked_pocket = sorted(t for t in effective if t.startswith("mcp__pocketpaw_pocket"))
+    assert not leaked_pocket, (
+        f"pocket tools reached the effective allowlist on /code: {leaked_pocket}. "
+        f"The deliverable on this surface is the user's code; nothing here needs "
+        f"a pocket, in read or write."
+    )
+
     # Positive controls, so the assertions above cannot pass vacuously.
     assert "WebSearch" in effective
-    # READ-ONLY pocket access is deliberately NOT denied: listing or reading a
-    # pocket cannot produce a dashboard, and the user may legitimately ask about
-    # one from here. If this ever starts failing, the deny set has grown past
-    # what the bug called for.
-    assert "mcp__pocketpaw_pocket__list_pockets" in effective, (
-        "read-only pocket access was denied too — the fix over-reached; only the "
-        "AUTHORING tools should be withheld on /code"
+    assert "mcp__pocketpaw_code__code_mode" in effective, (
+        "code_mode itself was filtered out — the surface has lost its only door "
+        "to the user's project, so the absence assertions above prove nothing"
     )
 
 

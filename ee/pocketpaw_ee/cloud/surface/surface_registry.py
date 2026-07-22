@@ -60,8 +60,24 @@
 # that guarantee is the bug: a user with a React project open asked for "an
 # employee management app, with components, nice design" and got a pocket and a
 # ripple ui-spec. ``_CODE_POCKET_DENY`` closes it — deny runs BEFORE the grant is
-# unioned in and is the only lever that reaches those families. Read-only pocket
-# access survives deliberately. The CODE row stays STATIC.
+# unioned in and is the only lever that reaches those families.
+#
+# The row then went further, on the reading that /code should not reach a pocket
+# AT ALL. The pocket READ verbs join the deny set (a pocket the agent can inspect
+# is a pocket it can propose), and so does ``Skill`` (``_CODE_SKILL_DENY``) —
+# the bundled ``pocketpaw-create-pocket`` skill loads as a local PLUGIN, so
+# ``skill_names`` never withheld it and denying the invoking tool is the only
+# lever that does.
+#
+# And the row gained a ``system_message_override``: ``CODE_SYSTEM_PROMPT``. The
+# deny set alone would have left the agent with a pocket-shaped behavioral stack
+# it could no longer act on — the ripple LAW, the delegation rule and the
+# artifact rule all name tools that are now gone. Worse, a prohibition does not
+# create a DEFAULT: told only what not to build, the trained-in dashboard remains
+# the sole concrete plan in context. The override states the surface's own
+# deliverable instead. Both halves were needed; neither alone held.
+#
+# The CODE row stays STATIC — the prompt is a module constant like the tool ids.
 
 from __future__ import annotations
 
@@ -106,6 +122,7 @@ from pocketpaw_ee.cloud.surface.handlers import (
 from pocketpaw_ee.cloud.surface.handlers import (
     foresight as foresight_handler,
 )
+from pocketpaw_ee.cloud.surface.system_prompts import CODE_SYSTEM_PROMPT
 
 # The shape every handler module exports: an async preamble builder taking the
 # tenancy tuple + the validated client meta and returning the rendered block.
@@ -290,8 +307,40 @@ _CODE_POCKET_DENY: frozenset[str] = frozenset(
         "mcp__pocketpaw_widgets__get_widget_spec",
         "mcp__pocketpaw_widgets__get_inline_widget_help",
         "mcp__pocketpaw_widgets__start_flow",
+        # The READ verbs go too. An earlier pass kept them on the reasoning that
+        # reading a pocket cannot produce one — true in isolation, and beside the
+        # point: a pocket the agent can inspect is a pocket it can propose, and
+        # "let me look at how your other dashboard does this" is the first step
+        # back onto the path this profile exists to close. Nothing on /code needs
+        # them; the deliverable is the user's code.
+        "mcp__pocketpaw_pocket__get_pocket",
+        "mcp__pocketpaw_pocket__list_pockets",
     }
 )
+
+# ``Skill`` goes too, and it is the last door.
+#
+# The bundled skills ship as a Claude Code LOCAL PLUGIN, which is loaded from the
+# SDK ``plugins=`` option independently of ``skill_names`` — so a surface CANNOT
+# withhold ``pocketpaw-create-pocket`` by naming a narrower skill set, and CD-3's
+# empty ``skill_names`` never did. Its description ("create / build a pocket,
+# dashboard, tracker, tool, viewer ... with enterprise-quality design") matches a
+# request like "build an employee management app with components and nice design"
+# almost word for word, which is how the reported bug started.
+#
+# With every pocket tool denied above, invoking that skill can no longer BUILD
+# anything — but it would still cost the user a turn: the agent loads a long
+# instruction telling it to call ``get_widget_spec`` and ``pocket_specialist__
+# create``, attempts them, takes hard errors, and only then finds ``code_mode``.
+# CD-3 made exactly this argument when it dropped the `code` skill from the
+# profile ("absence is recoverable; contradiction is not"); the same reasoning
+# applies to a skill that teaches the wrong deliverable.
+#
+# /code needs no skill: ``CODE_SYSTEM_PROMPT`` is now the agent's whole guidance
+# here, and it is not a document the agent has to go and fetch. If a
+# code-targeted skill is ever written, removing ``Skill`` from this set is the
+# one-line change that admits it.
+_CODE_SKILL_DENY: frozenset[str] = frozenset({"Skill"})
 
 
 class _McpToolIds(NamedTuple):
@@ -562,7 +611,11 @@ SURFACES: list[SurfaceSpec] = [
         profile=SurfaceProfile(
             ripple_mode="off",
             allow_mcp_tool_ids=_CODE_MODE_TOOL_IDS,
-            deny_mcp_tool_ids=_CODE_BUILTIN_DENY | _CODE_POCKET_DENY,
+            deny_mcp_tool_ids=_CODE_BUILTIN_DENY | _CODE_POCKET_DENY | _CODE_SKILL_DENY,
+            # The surface's own system prompt, replacing the pocket-shaped
+            # behavioral stack the shared builder would otherwise assemble. See
+            # ``system_prompts.py`` for why a prohibition alone did not hold.
+            system_message_override=CODE_SYSTEM_PROMPT,
         ),
     ),
     SurfaceSpec(
