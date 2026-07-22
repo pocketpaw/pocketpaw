@@ -37,13 +37,19 @@
 # That matters more than it looks: the client executes whatever it is handed, so
 # this filter is the only thing standing between a hallucinated ``deleteEntry``
 # and a browser that would run it.
+#
+# Modified: 2026-07-22 (CD-1, delegate channel). Adds ``resolve_delegate`` — the
+# service half of ``POST /codeagent/resolve``. It is a thin pass-through to
+# ``delegates.resolve_pending`` and exists only so the router keeps ONE shape
+# (router → service) for both of its routes; the rendezvous logic itself has no
+# business in this file, which is about calling a model.
 from __future__ import annotations
 
 import logging
 import os
 
 from pocketpaw_ee.cloud._core.errors import CloudError, with_cause
-from pocketpaw_ee.cloud.codeagent import transport
+from pocketpaw_ee.cloud.codeagent import delegates, transport
 from pocketpaw_ee.cloud.codeagent.domain import (
     MAX_OUTPUT_TOKENS,
     MAX_TOOL_ITERATIONS,
@@ -56,6 +62,8 @@ from pocketpaw_ee.cloud.codeagent.domain import (
 from pocketpaw_ee.cloud.codeagent.dto import (
     AgentTurnRequest,
     AgentTurnResponse,
+    DelegateResolveRequest,
+    DelegateResolveResponse,
     ToolCall,
     ToolResult,
 )
@@ -394,4 +402,32 @@ async def run_turn(
     )
 
 
-__all__ = ["run_turn"]
+async def resolve_delegate(
+    workspace_id: str,
+    user_id: str,
+    body: DelegateResolveRequest | dict,
+) -> DelegateResolveResponse:
+    """Deliver the browser's answer to the turn parked on ``body.corrId``.
+
+    Raises ``NotFound`` when nothing is parked under that id — unknown, already
+    resolved, already timed out, or belonging to another workspace all land
+    there, deliberately (see ``delegates.resolve_pending``).
+
+    ``user_id`` is carried for logging symmetry with ``run_turn`` and is NOT an
+    authorization input: the delegate belongs to a workspace's live stream, and
+    two tabs of the same workspace legitimately share it.
+    """
+    # no-event: nothing is persisted. The whole write is waking an in-process
+    # future, and the caller it wakes is the thing that goes on to emit.
+    body = DelegateResolveRequest.model_validate(body)
+    logger.debug(
+        "codeagent.resolve ws=%s user=%s corr=%s",
+        workspace_id,
+        user_id,
+        body.corrId,
+    )
+    delegates.resolve_pending(workspace_id, body.corrId, body.result)
+    return DelegateResolveResponse(accepted=True)
+
+
+__all__ = ["resolve_delegate", "run_turn"]

@@ -15,6 +15,14 @@
 # permission set. It defaults to ``ask``, so a caller that omits it gets the
 # read-only tools — the failure mode of a forgotten field is "cannot edit", not
 # "can edit unexpectedly".
+#
+# Modified: 2026-07-22 (CD-1, delegate channel). Adds
+# ``DelegateResolveRequest`` / ``DelegateResolveResponse`` for
+# ``POST /codeagent/resolve`` — the INBOUND half of the browser-delegate
+# rendezvous (``delegates.py``). Note what is not here: no schema for ``result``.
+# The payload is whatever the Code Mode client answered with, and pinning its
+# shape at the wire would mean changing this file every time the sub-agent
+# learns a new answer shape, for a value the backend only forwards.
 from __future__ import annotations
 
 from typing import Literal
@@ -139,11 +147,37 @@ class AgentTurnResponse(BaseModel):
     truncated: bool = False
 
 
+class DelegateResolveRequest(BaseModel):
+    """The browser handing back the answer to one ``code_delegate`` frame.
+
+    ``corrId`` is the id the backend minted when it parked, echoed verbatim. It
+    is the ONLY thing tying this POST to a waiting turn, which is why it is
+    length-bounded here rather than trusted — an unbounded id would be a free
+    dictionary key on a process-global registry.
+    """
+
+    corrId: str = Field(..., min_length=1, max_length=128)
+    result: dict = Field(default_factory=dict)
+
+
+class DelegateResolveResponse(BaseModel):
+    """Acknowledgement only. There is nothing to return — the value went to the
+    parked caller, not back down this request. ``accepted`` is always true on a
+    2xx; an unresolvable ``corrId`` is a 404 (``code_delegate.not_found``), not a
+    200 with ``accepted: false``, so a client cannot mistake "nobody was waiting"
+    for success.
+    """
+
+    accepted: bool = True
+
+
 __all__ = [
     "AgentMessage",
     "AgentTurnRequest",
     "AgentTurnResponse",
     "ContextItem",
+    "DelegateResolveRequest",
+    "DelegateResolveResponse",
     "ToolCall",
     "ToolResult",
 ]
