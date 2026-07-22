@@ -73,6 +73,12 @@ dispatches through the OSS FABRIC_INGESTORS registry — gcalendar first) and
 POST /fabric/ingest/run (run one mapping immediately; misconfiguration reports
 status="error" in the body, never a 5xx).
 
+Updated: 2026-07-22 (SHIP-4, feat/ship-4-agent-surface) — the two DELETE routes
+now file REAL Instinct proposals (kind `_ship_action`), executed on approval by
+``ship.executor`` with an execute-time `ship.manage` re-check; documented the
+`pocketpaw_ship` MCP agent surface and how it is narrower than the HTTP one (a
+prod deploy proposes rather than deploys).
+
 Updated: 2026-07-22 (SHIP-3, feat/ship-3-cloud-entity) — documented the
 Ship — Managed Deploys section: the workspace-scoped /ship surface for
 provisioning a box, registering and deploying an app, routing a domain,
@@ -1282,11 +1288,18 @@ at 100. A box that is not `ready` answers `409 ship.box_not_ready`.
 runs, and the box keeps its current `status`:
 
 ```json
-{"status": "pending_approval", "proposal_id": "ship-destroy-…"}
+{"status": "pending_approval", "proposal_id": "<instinct-action-id>"}
 ```
 
-Repeating the call returns the same `proposal_id`. Wiring the proposal into the
-Instinct approval queue (and executing on approve) is SHIP-4's job.
+The `proposal_id` is a real Instinct Action id: the teardown lands in The Tray
+for a human to approve or reject. Only on approval does
+`ship.executor.execute_approved_ship_action` touch the box — the request path
+never calls the engine's destroy verb. Repeating the call returns the same
+`proposal_id` rather than filing a duplicate.
+
+The executor re-checks `ship.manage` against the proposer's **current** role
+before it runs, so an approval for a since-demoted proposer fails closed, and
+re-approving an already-executed action never fires twice.
 
 ### `POST /ship/apps`
 
@@ -1361,6 +1374,30 @@ redacts them before they leave the box:
 
 **Parks** an app teardown for human approval, exactly like the box DELETE above.
 Nothing is destroyed.
+
+### The agent surface (`pocketpaw_ship` MCP)
+
+A chat agent in a room whose pocket has the **Ship connector** bound reaches the
+same service layer through ten in-process MCP tools — `ship_list_boxes`,
+`ship_provision_box`, `ship_list_apps`, `ship_create_app`, `ship_deploy_app`,
+`ship_add_domain`, `ship_create_db`, `ship_logs`, `ship_metrics`, and
+`ship_request_destroy`. Binding the connector also auto-surfaces the bundled
+`ship` skill into that room.
+
+The agent's surface is deliberately **narrower than the HTTP one**:
+
+| Verb | Operator over HTTP | Agent over MCP |
+|------|--------------------|----------------|
+| reads, provision, create app, domain, db | runs | runs |
+| deploy to a non-prod app | runs | runs |
+| deploy to a **prod-flagged** app | runs | **proposes** |
+| destroy a box or an app | proposes | proposes |
+
+An operator calling the API with their own credentials is a different actor from
+an agent acting on their behalf, which is why the prod deploy splits. Both paths
+converge on the same Instinct gate for teardowns: the tool returns
+`{"status": "proposed", "proposal_id": "…"}` and the agent is instructed never to
+report a destroy as done.
 
 ## Fabric — Transform Mappings (source→Fabric ingest)
 
