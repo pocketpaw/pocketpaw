@@ -23,13 +23,9 @@ import pytest
 from pocketpaw_ee.cloud.ship import executor as ship_executor
 from pocketpaw_ee.cloud.ship import propose as ship_propose
 
-# The HTTP fixtures + helpers live with the router suite; reuse them rather than
-# maintaining a second copy of the client wiring.
-from tests.cloud.ship.test_ship_router import (  # noqa: F401 — w1 is a fixture
-    _app_on_box,
-    _ready_box,
-    w1,
-)
+# ``w1`` is a conftest fixture (pytest discovery); the box/app helpers are plain
+# functions imported from the same place.
+from tests.cloud.ship.conftest import _app_on_box, _ready_box
 
 
 class FakeAction:

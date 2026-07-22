@@ -14,10 +14,19 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import pytest
+import pytest_asyncio
 from cryptography.fernet import Fernet
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
+from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.ship import engine as ship_engine
+from pocketpaw_ee.cloud.ship import store
+from pocketpaw_ee.cloud.ship.router import router as ship_router
 from pocketpaw_ee.ship_engine.dokku import DokkuDriver
 from pocketpaw_ee.ship_engine.transcripts import FakeSSHTransport
 
@@ -117,3 +126,60 @@ def install_refused_engine(monkeypatch) -> None:
         yield  # pragma: no cover — never reached; keeps this an async generator
 
     monkeypatch.setattr(ship_engine, "box_session", _refused)
+
+
+# ---------------------------------------------------------------------------
+# The HTTP client fixtures + box/app helpers. They live here (not in a test
+# module) so every /ship suite — the router tests and the Instinct-gate tests —
+# gets them by pytest discovery instead of importing fixtures across modules.
+# ---------------------------------------------------------------------------
+
+
+def _build_app(workspace_id: str) -> FastAPI:
+    app = FastAPI()
+    add_error_handler(app)
+    app.include_router(ship_router)
+
+    async def _ctx() -> RequestContext:
+        return RequestContext(
+            user_id="u1",
+            workspace_id=workspace_id,
+            request_id="test",
+            scope=ScopeKind.WORKSPACE,
+            started_at=datetime.now(UTC),
+        )
+
+    app.dependency_overrides[request_context] = _ctx
+    app.dependency_overrides[require_license] = lambda: None
+    return app
+
+
+@pytest_asyncio.fixture
+async def w1(mongo_db, enc_key, arq_pool) -> AsyncClient:  # noqa: ARG001 — fixtures init state
+    transport = ASGITransport(app=_build_app("w1"))
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        yield client
+
+
+@pytest_asyncio.fixture
+async def w2(mongo_db, enc_key, arq_pool) -> AsyncClient:  # noqa: ARG001 — fixtures init state
+    transport = ASGITransport(app=_build_app("w2"))
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        yield client
+
+
+async def _ready_box(client: AsyncClient) -> str:
+    """Provision a box through the API and flip it ``ready`` (the arq job's job)."""
+    resp = await client.post("/ship/boxes", json={"provider": "hcloud"})
+    assert resp.status_code == 200, resp.text
+    box_id = resp.json()["id"]
+    box = await store.get_box("w1", box_id)
+    assert box is not None
+    await store.mark_ready(box, server_id="srv-1", ip="203.0.113.9", price_monthly=8.25)
+    return box_id
+
+
+async def _app_on_box(client: AsyncClient, box_id: str) -> str:
+    resp = await client.post("/ship/apps", json={"name": APP, "box_id": box_id, "image": IMAGE})
+    assert resp.status_code == 200, resp.text
+    return resp.json()["id"]
