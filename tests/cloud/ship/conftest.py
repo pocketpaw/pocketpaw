@@ -102,3 +102,18 @@ def install_fake_engine(monkeypatch, replies: dict[str, str] | None = None) -> l
 
     monkeypatch.setattr(ship_engine, "box_session", _fake_session)
     return issued
+
+
+def install_refused_engine(monkeypatch) -> None:
+    """Point ``engine.box_session`` at a box that refuses the SSH connection.
+
+    The message deliberately carries the box's address so a test can prove the
+    recorded summary does not echo it back.
+    """
+
+    @asynccontextmanager
+    async def _refused(box):  # noqa: ARG001 — the fake ignores the box
+        raise ConnectionRefusedError("[Errno 61] connect to 203.0.113.9 port 22")
+        yield  # pragma: no cover — never reached; keeps this an async generator
+
+    monkeypatch.setattr(ship_engine, "box_session", _refused)

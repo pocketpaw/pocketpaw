@@ -448,3 +448,17 @@ async def test_add_domain_rejects_a_non_hostname(w1, domain):
     resp = await w1.post(f"/ship/apps/{app_id}/domains", json={"domain": domain})
 
     assert resp.status_code == 422
+
+
+async def test_metrics_on_an_unreachable_box_is_a_409_not_a_500(w1, monkeypatch):
+    from tests.cloud.ship.conftest import install_refused_engine
+
+    box_id = await _ready_box(w1)
+    install_refused_engine(monkeypatch)
+
+    resp = await w1.get(f"/ship/boxes/{box_id}/metrics")
+
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "ship.metrics_failed"
+    # The box's address is not published in the error body.
+    assert "203.0.113.9" not in resp.text

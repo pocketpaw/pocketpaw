@@ -18,6 +18,7 @@ from tests.cloud.ship.conftest import (
     IMAGE,
     SECRET_MARKERS,
     install_fake_engine,
+    install_refused_engine,
 )
 
 _PRIV = "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKEKEYBODY\n-----END OPENSSH PRIVATE KEY-----\n"
@@ -161,3 +162,21 @@ async def test_the_deploy_pins_the_image_from_the_attempt_not_the_app(
 
     assert f"dokku git:from-image {APP} {IMAGE}" in issued
     assert not any("NEWER" in cmd for cmd in issued)
+
+
+async def test_an_unreachable_box_fails_the_attempt_without_leaking_its_address(
+    mongo_db,
+    enc_key,
+    monkeypatch,  # noqa: ARG001
+):
+    """A box that stops answering is an operational failure, not a crash."""
+    install_refused_engine(monkeypatch)
+    _box, _app, deploy = await _app_and_deploy()
+
+    result = await deploy_job.deploy_app_job({}, str(deploy.id), "w1")
+
+    assert result == {"ok": False, "status": "failed"}
+    landed = await store.get_deploy("w1", str(deploy.id))
+    assert landed is not None
+    # The summary names the failure class, never the box's address.
+    assert landed.log_summary == "could not reach the box (ConnectionRefusedError)"
