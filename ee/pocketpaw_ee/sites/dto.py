@@ -112,6 +112,12 @@
 # ``SiteStatusResponse`` gain ``engine`` ("svelte" | "ripple"; "" when unresolved) —
 # the sibling of DS-1a's ``pattern``, resolved from the source Pocket.engine so the
 # gallery can badge each card's engine (Custom vs Ripple) without a per-site fetch.
+# Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): ``SiteResponse`` gains
+# ``import_report`` (the persisted import summary — None for non-imported sites),
+# and two new DTOs back the import surface: ImportFromUrlRequest ({url}, shape-
+# validated in the service) and ImportFromUrlResponse ({site_id, pocket_id,
+# status:"queued"} — the 202 body; the crawler is the next stacked slice). The zip
+# import endpoint reuses SiteResponse (it publishes live through the html path).
 
 from __future__ import annotations
 
@@ -180,6 +186,11 @@ class SiteResponse(BaseModel):
     # caller can poll the job. None for a static publish, and None on a single-flight
     # no-op (a second publish while already provisioning does not enqueue a job).
     provision_job_id: str | None = None
+    # SI-4: the persisted import summary for an IMPORTED site — {pages: [{path,
+    # title}], asset_count, asset_bytes, forms: [{page, original_action, rewired}],
+    # scripts, warnings} (from-url adds status/source_url). None for every
+    # non-imported site, so the field is backward-compatible and empty-safe.
+    import_report: dict[str, Any] | None = None
 
 
 class SitePreviewResponse(BaseModel):
@@ -419,6 +430,25 @@ class LeafEditsResponse(BaseModel):
 
     pocket_id: str
     results: list[LeafEditVerdict]
+
+
+class ImportFromUrlRequest(BaseModel):
+    """Body for POST /sites/import/from-url (SI-4): the site URL to crawl-import.
+    Shape validation (http(s), real host, length cap) runs in the import service so
+    direct service callers are covered too; the crawler itself is the next stacked
+    slice — this endpoint only queues."""
+
+    url: str
+
+
+class ImportFromUrlResponse(BaseModel):
+    """202 body of POST /sites/import/from-url (SI-4): the DRAFT site minted for the
+    queued crawl. ``status`` is "queued" — the crawler slice (SI-5) has not landed,
+    so the site's import_report carries a crawler-pending warning until it does."""
+
+    site_id: str
+    pocket_id: str
+    status: str  # queued
 
 
 class NativeArtifactResponse(BaseModel):

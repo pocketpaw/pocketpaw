@@ -103,6 +103,14 @@
 # can surface it on ``SiteResponse.provision_job_id``. None for a static publish and
 # for any DB-loaded doc (the PrivateAttr defaults to None). Private so it never
 # round-trips through the DB.
+#
+# Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): added ``import_report`` —
+# the per-import summary an IMPORTED site carries ({pages, asset_count, asset_bytes,
+# forms, scripts, warnings}), persisted by the import service after the html deploy
+# and surfaced on ``SiteResponse.import_report``. Derived minimally from the zip
+# contents today; the generator-side import plan enriches it (form-rewiring
+# verdicts) once the parallel paw-sites slice lands. Defaults to an empty dict, so
+# every non-imported site and every pre-SI-4 row reads "no import" — no migration.
 
 from __future__ import annotations
 
@@ -193,6 +201,10 @@ class Site(TimestampedDocument):
     # carries the gated edit-bridge keyed on this origin. Persisted so a
     # component-edit republish can re-apply it and the site stays editable.
     builder_origin: str = ""
+    # SI-4: the import summary an IMPORTED site carries ({pages, asset_count,
+    # asset_bytes, forms, scripts, warnings}; from-url adds status/source_url).
+    # Empty for every non-imported site — no migration.
+    import_report: dict[str, Any] = Field(default_factory=dict)
     # Capture hardening config (mirrors sites_capture.SiteFormConfig fields).
     allowed_origins: list[str] = Field(default_factory=list)
     signed_key: str = ""

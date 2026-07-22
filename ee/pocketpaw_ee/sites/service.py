@@ -1,6 +1,16 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): ``publish`` /
+# ``_deploy_site_doc`` gain an OPTIONAL ``assets`` pass-through — the base64 binary
+# sideband ({path: base64}) an html IMPORT sends alongside its text ``source`` map.
+# It is forwarded to ``GeneratorClient.build`` ONLY when non-empty, so every
+# existing publish path's build call stays byte-identical (cross-repo seam note in
+# generator_client.py). ``_to_response`` also surfaces the new
+# ``Site.import_report`` (None for non-imported sites). The import orchestration
+# itself lives in the sibling ``import_service.py`` — this file only carries the
+# sideband through the existing deploy chain.
+#
 # Updated 2026-07-17 (fix/sites-draft-visible — a DRAFT lists in the gallery):
 # added ``create_draft_site`` — the create-site MCP handlers now mint ONE Site doc
 # at CREATE time in a NOT-YET-DEPLOYED state so a draft-first pocket (pocketpaw#1744)
@@ -1423,6 +1433,9 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # None for a static publish / any DB-loaded doc / a single-flight no-op).
         provision_status=getattr(doc, "provision_status", "none"),
         provision_job_id=getattr(doc, "_provision_job_id", None),
+        # SI-4: the persisted import summary for an imported site; None for every
+        # non-imported site (empty dict on the doc reads as None on the wire).
+        import_report=getattr(doc, "import_report", None) or None,
     )
 
 
@@ -1545,6 +1558,7 @@ async def publish(
     name: str = "",
     engine: str = "ripple",
     source: dict[str, str] | None = None,
+    assets: dict[str, str] | None = None,
     pattern: str | None = None,
     builder_origin: str | None = None,
     preview: bool = False,
@@ -1732,6 +1746,7 @@ async def publish(
         theme=theme,
         engine=engine,
         source=source,
+        assets=assets,
         pattern=pattern,
         builder_origin=builder_origin,
         generator=generator,
@@ -1754,6 +1769,7 @@ async def _deploy_site_doc(
     theme: dict[str, Any],
     engine: str = "ripple",
     source: dict[str, str] | None = None,
+    assets: dict[str, str] | None = None,
     pattern: str | None = None,
     builder_origin: str | None = None,
     generator: GeneratorClient | None = None,
@@ -1824,6 +1840,10 @@ async def _deploy_site_doc(
     # instead of letting a bare FileNotFoundError / RuntimeError / SmokeGateFailed
     # escape as an unhandled 500. A misconfigured image (no paw-sites-gen / bun on
     # PATH) is the bug this guards.
+    # SI-4: forward the html import's binary sideband ONLY when present, so every
+    # non-import publish's build call (and every injected fake's expected kwargs)
+    # stays byte-identical to before the assets seam existed.
+    _asset_kwargs: dict[str, Any] = {"assets": assets} if assets else {}
     build = await _build_or_cloud_error(
         gen,
         ripple_spec=ripple_spec,
@@ -1835,6 +1855,7 @@ async def _deploy_site_doc(
         engine=engine,
         source=source,
         builder_origin=builder_origin,
+        **_asset_kwargs,
         # PERF-3: build into the STABLE per-pocket working dir so node_modules
         # persists and `bun install` is cached across builds, cutting the dominant
         # per-edit cost.
