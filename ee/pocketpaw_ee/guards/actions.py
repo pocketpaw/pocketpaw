@@ -223,6 +223,16 @@ ACTIONS: dict[str, ActionRule] = {
     "fabric.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "fabric.write": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "fabric.admin": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # /ship — managed deploys onto real infrastructure.
+    # Reading boxes / apps / logs is MEMBER. ``ship.manage`` (ADMIN) gates the
+    # DESTRUCTIVE verbs — destroy, rollback, prod deploy — which never execute
+    # from a request anyway: they route through an Instinct proposal, and the
+    # executor RE-CHECKS this action against the proposer's CURRENT role, so a
+    # since-demoted proposer's approved teardown fails closed. ADMIN mirrors
+    # connector.manage: irreversible work on shared infrastructure, but not the
+    # owner-only tier that governs money or the human-in-the-loop switch itself.
+    "ship.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "ship.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Instinct — human-in-the-loop decision pipeline.
     # Propose and read are MEMBER (agents and analysts can propose + view actions).
     # Approve/reject and audit are ADMIN — governance actions with downstream
