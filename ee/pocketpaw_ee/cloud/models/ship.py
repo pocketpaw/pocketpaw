@@ -1,6 +1,6 @@
-# ee/pocketpaw_ee/cloud/models/ship.py — the provisioned-box document for /ship.
+# ee/pocketpaw_ee/cloud/models/ship.py — the /ship managed-deploy documents.
 #
-# One Beanie document backs a workspace's managed deploy boxes:
+# Three Beanie documents back a workspace's managed deploys:
 #
 #   * ``ShipBox`` — one row per provisioned box. Records the provider, the
 #     provider-side server id, the reachable IP, the lifecycle status, the
@@ -9,6 +9,15 @@
 #     the box over SSH. The key is the box's blast radius, so it never lives in
 #     plaintext at rest and never leaves this layer in a DTO — the ship service
 #     decrypts it only to hand it to the SHIP-1 driver.
+#   * ``ShipApp`` — one row per app deployed onto a box (SHIP-3). Carries the
+#     build inputs (``build_path`` / ``git_ref`` / ``image``), the routed
+#     domains + URLs, the linked database service, and the app lifecycle
+#     status. ``env_refs`` holds env var NAMES only — values are the app's own
+#     secret material and are never persisted here (the SHIP-1 ``AppSpec``
+#     security invariant, carried through to storage).
+#   * ``ShipDeploy`` — one row per deploy attempt (SHIP-3). The pollable state
+#     the HTTP surface returns immediately while the arq deploy job advances it
+#     ``queued -> building -> releasing -> live`` (or ``failed``).
 #
 # WHY store the key on the box doc (encrypted) rather than the connector state
 # store: the connector state store is keyed on connector NAME + workspace and
@@ -26,15 +35,23 @@
 # Created 2026-07-22 (feat/ship-2-provisioning, SHIP-2): new entity. Registered
 # in ``cloud.models.__init__`` (``get_all_documents()`` + ``__all__``) so
 # ``init_beanie`` wires the ``ship_boxes`` collection. Only
-# ``ee.cloud.ship.service`` (SHIP-3) and the ``provision_box`` builtin job
-# (SHIP-2) read/write this document — the same one-service-owns-one-doc
-# isolation the credit / litellm-key / foresight docs use.
+# ``ee.cloud.ship.store`` reads/writes this document — the same
+# one-module-owns-one-doc isolation the credit / litellm-key / foresight docs
+# use.
+#
+# Changed 2026-07-22 (feat/ship-3-cloud-entity, SHIP-3): added ``ShipApp`` +
+# ``ShipDeploy`` (registered alongside ``ShipBox`` in ``cloud.models.__init__``)
+# so the workspace-scoped ``/api/v1/ship`` surface has app + deploy state to
+# read. Both are workspace-indexed and read exclusively through
+# ``ee.cloud.ship.store``.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from beanie import Indexed
+from pydantic import Field
 from pymongo import IndexModel
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
@@ -95,9 +112,124 @@ class ShipBox(TimestampedDocument):
     # The provider-native server type + region the box was provisioned with.
     server_type: str = ""
     region: str = ""
+    # Set when a DELETE parked a teardown for human approval (SHIP-3). The box
+    # keeps its current ``status`` — the frozen ``BoxOut`` status vocabulary has
+    # no ``pending`` member, and a parked teardown has not changed the box's
+    # actual lifecycle state. SHIP-4 replaces the placeholder id with a real
+    # Instinct proposal id.
+    pending_destroy_proposal_id: str | None = None
 
     class Settings:
         name = "ship_boxes"
         indexes = [  # noqa: RUF012 — Beanie collection config, not shared mutable
             IndexModel([("workspace", 1), ("status", 1)], name="ix_workspace_status"),
+        ]
+
+
+# The app lifecycle. ``created`` is the birth state; a deploy job drives
+# ``deploying`` -> ``live`` / ``failed``.
+ShipAppStatus = Literal["created", "deploying", "live", "failed"]
+
+# How the app's image is produced. v1 deploys a pre-built image reference; the
+# build strategy is recorded now so the SHIP-5 build path has somewhere to read
+# it from without a migration.
+ShipBuildPath = Literal["dockerfile", "nixpacks"]
+
+
+class ShipApp(TimestampedDocument):
+    """One app deployed onto a workspace's managed box.
+
+    Tenancy: ``workspace`` is REQUIRED and every read filters on it (the ship
+    store asserts it). ``box_id`` is the owning ``ShipBox`` id — an app never
+    outlives its box.
+
+    SECURITY: ``env_refs`` carries env var NAMES only. Values are the app's
+    secret material; they live in the app's own environment on the box and are
+    never persisted, serialized, or logged here — the same invariant SHIP-1's
+    ``AppSpec``/``DbResult`` hold at the engine boundary.
+    """
+
+    # Tenancy filter — every ship read scopes on this.
+    workspace: Indexed(str)  # type: ignore[valid-type]
+    # The owning box's id (a ``ShipBox`` document id as a string).
+    box_id: str
+    # The engine-side app name (also the Dokku app name).
+    name: str
+    # How the image is built. v1 records it; the build itself is image-based.
+    build_path: ShipBuildPath = "dockerfile"
+    # The git ref the image was (or will be) built from — provenance only.
+    git_ref: str = ""
+    # The container image reference (tag included) the engine deploys.
+    image: str = ""
+    # Env var NAMES the app expects. NEVER values (see the class docstring).
+    env_refs: list[str] = Field(default_factory=list)
+    # Production flag — the console badges it; no behaviour hangs off it yet.
+    prod: bool = False
+    # Engine-reported URLs the app answers on (deploy URL + added domains).
+    urls: list[str] = Field(default_factory=list)
+    # Domains routed to the app via ``add_domain``.
+    domains: list[str] = Field(default_factory=list)
+    # The linked database service name + the env var name the link injected.
+    # The connection string itself is a secret and is NEVER stored.
+    db_service: str = ""
+    db_env_var: str = ""
+    # Lifecycle state (see ``ShipAppStatus``).
+    status: ShipAppStatus = "created"
+    # Set when a DELETE parked a teardown for human approval (SHIP-3); SHIP-4
+    # swaps the placeholder for a real Instinct proposal id.
+    pending_destroy_proposal_id: str | None = None
+
+    class Settings:
+        name = "ship_apps"
+        indexes = [  # noqa: RUF012 — Beanie collection config, not shared mutable
+            IndexModel([("workspace", 1), ("box_id", 1)], name="ix_workspace_box"),
+            IndexModel(
+                [("workspace", 1), ("box_id", 1), ("name", 1)],
+                name="ux_workspace_box_name",
+                unique=True,
+            ),
+        ]
+
+
+# The deploy lifecycle the arq deploy job walks. ``queued`` is written by the
+# web process at enqueue; the job advances it and ends on ``live`` or ``failed``.
+ShipDeployStatus = Literal["queued", "building", "releasing", "live", "failed"]
+
+
+class ShipDeploy(TimestampedDocument):
+    """One deploy attempt for a ``ShipApp``.
+
+    Tenancy: ``workspace`` is REQUIRED and every read filters on it. This is the
+    pollable record the HTTP surface hands back immediately — the long work runs
+    in the arq deploy job, which advances ``status`` and stamps ``finished_at``.
+
+    ``log_summary`` is a SHORT, already-redacted failure tail (SHIP-1's
+    ``CommandFailed`` redacts its command + stderr before construction), never a
+    raw engine transcript.
+    """
+
+    # Tenancy filter — every ship read scopes on this.
+    workspace: Indexed(str)  # type: ignore[valid-type]
+    # The deployed app's id (a ``ShipApp`` document id as a string).
+    app_id: str
+    # Lifecycle state (see ``ShipDeployStatus``).
+    status: ShipDeployStatus = "queued"
+    # When the attempt was accepted (stamped at enqueue, so it is always set).
+    started_at: datetime | None = None
+    # When the attempt reached a terminal state (``live`` / ``failed``).
+    finished_at: datetime | None = None
+    # The image reference this attempt deployed — pinned at enqueue so a later
+    # app edit never rewrites history.
+    image: str = ""
+    # A short, redacted outcome/failure summary. The log POINTER for the full
+    # transcript is the app's engine-side log stream (``GET .../logs``).
+    log_summary: str = ""
+
+    class Settings:
+        name = "ship_deploys"
+        indexes = [  # noqa: RUF012 — Beanie collection config, not shared mutable
+            IndexModel(
+                [("workspace", 1), ("app_id", 1), ("createdAt", -1)],
+                name="ix_workspace_app_created",
+            ),
         ]
