@@ -419,3 +419,32 @@ async def test_a_malformed_id_reads_as_not_found_not_a_crash(w1):
     resp = await w1.get("/ship/apps/not-an-object-id/deploys")
 
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Input constraints at the DTO boundary
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"name": "Demo App", "box_id": "x"},  # spaces / capitals aren't Dokku names
+        {"name": "-leading-hyphen", "box_id": "x"},
+        {"name": "demo", "box_id": "x", "env_refs": ["API_KEY=hunter2"]},  # a VALUE
+        {"name": "demo", "box_id": "x", "build_path": "bazel"},
+    ],
+)
+async def test_create_app_rejects_unusable_input(w1, payload):
+    resp = await w1.post("/ship/apps", json=payload)
+
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("domain", ["not a domain", "-bad.example.com", "localhost"])
+async def test_add_domain_rejects_a_non_hostname(w1, domain):
+    app_id = await _app_on_box(w1, await _ready_box(w1))
+
+    resp = await w1.post(f"/ship/apps/{app_id}/domains", json={"domain": domain})
+
+    assert resp.status_code == 422
