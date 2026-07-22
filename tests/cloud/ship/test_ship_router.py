@@ -433,12 +433,38 @@ async def test_a_malformed_id_reads_as_not_found_not_a_crash(w1):
         {"name": "-leading-hyphen", "box_id": "x"},
         {"name": "demo", "box_id": "x", "env_refs": ["API_KEY=hunter2"]},  # a VALUE
         {"name": "demo", "box_id": "x", "build_path": "bazel"},
+        # Shell metacharacters in the build inputs. The driver shell-quotes
+        # these, so this is defence in depth — but an image reference is a
+        # constrained grammar, so a value carrying `;`/`$()`/backticks is
+        # refused at the boundary rather than surviving to an SSH round trip.
+        {"name": "demo", "box_id": "x", "image": "alpine; rm -rf /"},
+        {"name": "demo", "box_id": "x", "image": "alpine$(id)"},
+        {"name": "demo", "box_id": "x", "git_ref": "main`id`"},
     ],
 )
 async def test_create_app_rejects_unusable_input(w1, payload):
     resp = await w1.post("/ship/apps", json=payload)
 
     assert resp.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "image,git_ref",
+    [
+        ("", ""),  # the "not specified yet" body
+        ("alpine:3.20", "main"),
+        ("ghcr.io/owner/repo@sha256:abc123", "v1.2.3"),
+    ],
+)
+async def test_create_app_accepts_real_build_inputs(w1, image, git_ref):
+    """The tightened image/git_ref patterns must not reject legitimate refs."""
+    box_id = await _ready_box(w1)
+    resp = await w1.post(
+        "/ship/apps",
+        json={"name": "demo", "box_id": box_id, "image": image, "git_ref": git_ref},
+    )
+
+    assert resp.status_code == 200, resp.text
 
 
 @pytest.mark.parametrize("domain", ["not a domain", "-bad.example.com", "localhost"])

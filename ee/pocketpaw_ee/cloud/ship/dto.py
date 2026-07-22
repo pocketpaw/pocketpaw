@@ -45,6 +45,15 @@ _LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 _DOMAIN_RE = rf"^{_LABEL}(?:\.{_LABEL})+$"
 # POSIX environment variable NAME (values are never accepted).
 _ENV_NAME_RE = r"^[A-Za-z_][A-Za-z0-9_]*$"
+# An OCI image reference (``registry/repo:tag`` / ``@sha256:...``) and a git ref.
+# Both reach the engine as shell arguments, so they get the same boundary
+# treatment as the app name rather than being free strings: the driver quotes
+# them, and these keep shell metacharacters out of a value that would otherwise
+# only fail deep inside an SSH round trip.
+# Empty is allowed on both: it is the "not specified" value the create body
+# carries when a client registers an app before choosing what to ship.
+_IMAGE_RE = r"^$|^[A-Za-z0-9][A-Za-z0-9._/:@-]*$"
+_GIT_REF_RE = r"^$|^[A-Za-z0-9][A-Za-z0-9._/-]*$"
 
 # ---------------------------------------------------------------------------
 # Requests
@@ -72,8 +81,8 @@ class CreateAppRequest(BaseModel):
     name: str = Field(min_length=1, max_length=63, pattern=_APP_NAME_RE)
     box_id: str = Field(min_length=1)
     build_path: Literal["dockerfile", "nixpacks"] = "dockerfile"
-    git_ref: str = ""
-    image: str = ""
+    git_ref: str = Field(default="", max_length=255, pattern=_GIT_REF_RE)
+    image: str = Field(default="", max_length=255, pattern=_IMAGE_RE)
     prod: bool = False
     env_refs: list[str] = Field(default_factory=list)
 
