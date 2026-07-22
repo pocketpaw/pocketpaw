@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import logging
 import os
-import uuid
 from typing import TYPE_CHECKING
 
 from pocketpaw_ee.cloud._core.errors import ConflictError, NotFound, ValidationError
@@ -45,7 +44,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     ShipDestroyProposed,
 )
 from pocketpaw_ee.cloud.ship import engine as ship_engine
-from pocketpaw_ee.cloud.ship import enqueue, store
+from pocketpaw_ee.cloud.ship import enqueue, propose, store
 from pocketpaw_ee.cloud.ship.domain import (
     AppId,
     AppView,
@@ -160,11 +159,20 @@ async def get_box_metrics(
 async def request_box_destroy(workspace_id: str, user_id: str, box_id: str) -> DestroyProposalView:
     """PARK a box teardown for human approval. Destroys NOTHING."""
     box = await _require_box(workspace_id, box_id)
-    proposal_id = box.pending_destroy_proposal_id or _mint_proposal_id()
-    # SHIP-4: replace the placeholder with a real Instinct proposal — raise it
-    # through the approvals service and store the returned proposal id here. The
-    # approve path (not this function) is what may ever call the engine's
-    # ``destroy`` verb.
+    # File a REAL Instinct proposal (SHIP-4). Nothing is destroyed here — the
+    # approve path (``ship.executor.execute_approved_ship_action``) is the only
+    # code that may ever call the engine's ``destroy`` verb. A box that already
+    # carries a pending proposal reuses it rather than filing a duplicate.
+    if box.pending_destroy_proposal_id:
+        proposal_id = box.pending_destroy_proposal_id
+    else:
+        proposal_id = await propose.propose_ship_action(
+            workspace_id=workspace_id,
+            verb="destroy_box",
+            box_id=str(box.id),
+            target_label=f"box {box.ip or str(box.id)}",
+            requested_by=user_id,
+        )
     box = await store.park_box_destroy(box, proposal_id=proposal_id)
     return await _emit_destroy_proposal(
         workspace_id, user_id, kind="box", target_id=str(box.id), proposal_id=proposal_id
@@ -355,11 +363,20 @@ async def get_logs(
 async def request_app_destroy(workspace_id: str, user_id: str, app_id: str) -> DestroyProposalView:
     """PARK an app teardown for human approval. Destroys NOTHING."""
     app = await _require_app(workspace_id, app_id)
-    proposal_id = app.pending_destroy_proposal_id or _mint_proposal_id()
-    # SHIP-4: replace the placeholder with a real Instinct proposal — raise it
-    # through the approvals service and store the returned proposal id here. The
-    # approve path (not this function) is what may ever call the engine's
-    # ``destroy`` verb.
+    # File a REAL Instinct proposal (SHIP-4). Nothing is destroyed here — only
+    # the approve path may call the engine's ``destroy`` verb. An app that
+    # already carries a pending proposal reuses it rather than filing a duplicate.
+    if app.pending_destroy_proposal_id:
+        proposal_id = app.pending_destroy_proposal_id
+    else:
+        proposal_id = await propose.propose_ship_action(
+            workspace_id=workspace_id,
+            verb="destroy_app",
+            box_id=app.box_id,
+            app_id=str(app.id),
+            target_label=f"app {app.name}",
+            requested_by=user_id,
+        )
     app = await store.park_app_destroy(app, proposal_id=proposal_id)
     return await _emit_destroy_proposal(
         workspace_id, user_id, kind="app", target_id=str(app.id), proposal_id=proposal_id
@@ -531,11 +548,6 @@ async def _emit_destroy_proposal(
         )
     )
     return view
-
-
-def _mint_proposal_id() -> str:
-    """A placeholder proposal id. SHIP-4 swaps this for a real Instinct id."""
-    return f"ship-destroy-{uuid.uuid4().hex}"
 
 
 def _engine_conflict(code: str, exc: BaseException) -> ConflictError:
