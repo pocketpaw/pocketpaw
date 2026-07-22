@@ -1,0 +1,46 @@
+# /ship connector — managed deploys onto real infrastructure.
+# Created: 2026-07-22 (feat/ship-4-agent-surface, SHIP-4).
+#
+# Unlike the HTTP connectors in this directory, /ship declares NO actions: the
+# agent-callable verbs live on the in-process ``pocketpaw_ship`` MCP server
+# (provision a box, deploy an app, route a domain, read logs — and PROPOSE a
+# teardown), not behind a REST adapter. This connector exists for two things:
+#
+#   1. The per-workspace infrastructure credential (the Hetzner API token). A
+#      tenant brings their own, the same BYO-credential posture the meetings
+#      connectors use — the central project never holds a shared infra key.
+#   2. The surface contribution below: binding /ship to a pocket auto-loads the
+#      bundled ``ship`` skill into that room, which teaches the verb surface and
+#      the safe-by-default rules (reads run; destroys only ever propose).
+
+name: ship
+display_name: Ship
+type: infrastructure
+icon: ship
+
+# Connector→skill/tool auto-authoring. Binding this connector to a pocket loads
+# the bundled "ship" skill into the entity room.
+#
+# allow_tools is EMPTY for the same reason GitHub's and Gmail's are: the
+# ``pocketpaw_ship`` MCP server is AMBIENT (not opt-in), so the agent can already
+# reach its tools without an additive allowlist entry, and the resolver union
+# only ADDS — it never narrows. The skill is the load-bearing contribution.
+surface_profile:
+  skill: ship
+  allow_tools: []
+  deny_tools: []
+
+auth:
+  method: bearer
+  credentials:
+    - name: HCLOUD_TOKEN
+      description: >-
+        Hetzner Cloud API token used to provision and tear down this
+        workspace's boxes. Per-workspace by design — the central project never
+        holds a shared infrastructure credential.
+      required: true
+
+# No actions: every /ship verb is served by the in-process ``pocketpaw_ship``
+# MCP server, which routes through the workspace-scoped ship service (and, for
+# destructive verbs, through the Instinct approval gate).
+actions: []

@@ -1126,6 +1126,34 @@ class CloudExternalActionsMcpProvider:
             # the other in-process servers.
             return None
 
+
+class CloudShipMcpProvider:
+    """`pocketpaw.mcp_servers` — the /ship managed-deploy in-process server
+    (``pocketpaw_ship``). Hosts the deploy verbs a chat agent may drive.
+
+    Reads and reversible writes (list / provision / create app / deploy / add
+    domain / create db / logs / metrics) execute through
+    ``ee.cloud.ship.service``. The DESTRUCTIVE verbs do not: ``ship_request_
+    destroy`` files an Instinct proposal and a PROD deploy proposes rather than
+    deploying, so a teardown only ever happens after a human approves it and the
+    ee instinct router fires
+    ``ee.cloud.ship.executor.execute_approved_ship_action``.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) — surfaces scope access via their
+    profile allowlist, the same regime the sibling belt / loom / external-action
+    servers use. ``build_ship_server`` returns None — and the loop skips it —
+    when the claude_agent_sdk isn't installed, so chat never breaks.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.ship import build_ship_server
+
+            return build_ship_server()
+        except ImportError:
+            # claude_agent_sdk not installed — same posture as the siblings.
+            return None
+
     def tool_ids(self) -> list[str]:
         from pocketpaw_ee.agent.mcp_servers.external_actions import (
             EXTERNAL_ACTIONS_TOOL_IDS,
