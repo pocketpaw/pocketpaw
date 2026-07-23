@@ -16,8 +16,12 @@
 #   * Tenant scoping: the imported site is invisible cross-tenant (empty GET
 #     /sites; the site-scoped domains read 404s).
 #   * POST /sites/import/from-url: a valid URL → 202 {site_id, status:"queued"}
-#     with a crawler-pending import_report on a NOT-deployed draft Site doc (the
-#     crawler is the next stacked slice); a malformed URL / non-http scheme → 422.
+#     with a queued import_report on a NOT-deployed draft Site doc, and the
+#     background crawl SCHEDULED (scheduler patched — nothing fetched in tests);
+#     a malformed URL / non-http scheme → 422.
+#     Updated 2026-07-23 (SI-5, feat/sites-import-crawler): the crawler seam is
+#     now real — the NotImplementedError test became a "crawl is scheduled" test;
+#     the crawler itself is covered in tests/ee/sites/test_import_crawler.py.
 #   * GeneratorClient unit: the html STAGE-2 payload carries ``input.assets`` when
 #     (and ONLY when) an assets sideband is passed — the cross-repo seam contract.
 from __future__ import annotations
@@ -314,16 +318,25 @@ async def test_import_cross_tenant_site_is_invisible(_fake_publish, monkeypatch)
 
 
 # --------------------------------------------------------------------------- #
-# from-url — queue-only (the crawler is the next stacked slice)
+# from-url — 202-queued contract + background crawl scheduling (SI-5)
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.asyncio
 async def test_from_url_returns_202_queued(beanie_test_db, monkeypatch):
     """A valid URL queues: 202 {site_id, pocket_id, status:"queued"}, the draft Site
-    doc exists NOT deployed, and its import_report carries the crawler-pending
-    warning + queued status."""
+    doc exists NOT deployed, its import_report carries the queued status, and the
+    background crawl was SCHEDULED (scheduler patched to capture — tests never
+    touch the network)."""
     from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+
+    scheduled: list[object] = []
+
+    def _capture(coro):
+        scheduled.append(coro)
+        coro.close()
+
+    monkeypatch.setattr(import_service, "_default_crawl_scheduler", _capture)
 
     app = _build_app("ws_owner", monkeypatch)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
@@ -335,6 +348,7 @@ async def test_from_url_returns_202_queued(beanie_test_db, monkeypatch):
     assert body["status"] == "queued"
     assert body["site_id"]
     assert body["pocket_id"]
+    assert len(scheduled) == 1  # SI-5: the crawl coroutine was handed to the scheduler
 
     doc = await _SiteDoc.find_one({"workspace": "ws_owner", "pocket_id": body["pocket_id"]})
     assert doc is not None
@@ -352,16 +366,6 @@ async def test_from_url_invalid_shape_is_422(beanie_test_db, monkeypatch, bad):
         resp = await c.post("/api/v1/sites/import/from-url", json={"url": bad})
     assert resp.status_code == 422, resp.text
     await _assert_nothing_minted()
-
-
-@pytest.mark.asyncio
-async def test_crawler_seam_is_explicitly_unimplemented():
-    """The crawl seam raises a clear NotImplementedError — the next stacked slice
-    (SI-5) owns it; nothing in SI-4 may silently fetch."""
-    with pytest.raises(NotImplementedError, match="next stacked slice"):
-        await import_service.crawl_site_from_url(
-            workspace_id="ws", user_id="u", site_id="s", url="https://example.com"
-        )
 
 
 # --------------------------------------------------------------------------- #

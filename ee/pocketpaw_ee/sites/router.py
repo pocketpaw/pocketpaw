@@ -157,8 +157,15 @@
 #     (now carrying import_report).
 #   * POST /sites/import/from-url — {url} → 202 {site_id, pocket_id,
 #     status:"queued"}. Validates the URL shape and mints the draft Site with a
-#     crawler-pending import_report; the crawler is the NEXT stacked slice (SI-5) —
-#     nothing is fetched here.
+#     queued import_report.
+#
+# Updated 2026-07-23 (SI-5 — feat/sites-import-crawler): the from-url crawler is
+# REAL. The endpoint contract is unchanged (202 queued), but validation now also
+# runs the crawler's SSRF shape floors (non-http(s) scheme, embedded credentials,
+# non-80/443 port, literal private/loopback/metadata IP → 422 before any write),
+# and the service schedules the same-site crawl as a background task: crawl →
+# the zip import pipeline → import_report flips to "imported"/"failed" with
+# crawl stats. See import_service.crawl_site_from_url + url_crawler.
 
 from __future__ import annotations
 
@@ -396,11 +403,12 @@ async def import_site_from_url(
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> ImportFromUrlResponse:
-    """Queue a from-url import (SI-4): validate the URL shape, mint the pocket +
-    DRAFT Site doc with a crawler-pending ``import_report``, and return 202
-    {site_id, pocket_id, status:"queued"}. NOTHING is fetched — the crawler is the
-    next stacked slice (SI-5; ``import_service.crawl_site_from_url`` is its seam).
-    A malformed URL → 422 (ValidationError through the standard envelope).
+    """Queue a from-url import (SI-4 contract, SI-5 crawler): validate the URL
+    (shape + SSRF floors — bad scheme/port/credentials or a literal non-public IP
+    → 422 before anything is minted), mint the pocket + DRAFT Site doc with a
+    queued ``import_report``, schedule the background same-site crawl, and return
+    202 {site_id, pocket_id, status:"queued"} immediately. The crawl runs the zip
+    import pipeline and flips the report to "imported"/"failed" with crawl stats.
     Tenant-scoped on ctx (fabric.write), like every sibling sites mutation."""
     queued = await import_service.import_from_url(
         workspace_id=ctx.workspace_id, user_id=ctx.user_id, url=body.url

@@ -4,6 +4,12 @@ Sole owner of writes to the ``Pocket`` Beanie document. Module-level
 ``async def`` API. The doc → domain mapping helpers (formerly in
 ``repositories.py``) live alongside the public API as private helpers.
 
+Updated: 2026-07-23 (SI-5, feat/sites-import-crawler) — added
+``set_imported_source``: the sites URL-import crawler persists its harvested
+html source map on the imported pocket through THIS service (entity isolation —
+the sites service never touches the Pocket model). Workspace-checked fail-closed,
+html-engine pockets only, background-safe (no request context required).
+
 Updated: 2026-06-28 (AW-7 template gate deny-on-no-match) — added
 ``resolve_workspace_template_default_deny`` — the effective TEMPLATE-level
 deny-by-default for a workspace (per-workspace ``instinct_template_default_deny``
@@ -2162,6 +2168,36 @@ async def set_svelte_source_file(
     # versioning is an additive history layer, never a gate on the edit.
     await _record_pocket_svelte_draft_version(doc, author=user_id)
     return await _resolved_wire_dict(doc, user_id), previous_source
+
+
+async def set_imported_source(
+    pocket_id: str,
+    *,
+    workspace_id: str,
+    source: dict[str, str],
+) -> None:
+    """Replace an IMPORTED html-engine pocket's whole ``source`` map (SI-5).
+
+    Called by the sites URL-import crawler after a successful crawl, so the
+    pocket — the durable source of truth every re-publish reads — carries the
+    harvested files. Background-safe: takes an explicit ``workspace_id`` and
+    fails CLOSED on a mismatch with the same NotFound a missing pocket raises
+    (no cross-tenant existence signal). html-engine pockets only — a spec/svelte
+    pocket must never have its content swapped by the import path.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    if doc.workspace != workspace_id:
+        raise NotFound("pocket", pocket_id)
+    if getattr(doc, "engine", "ripple") != "html":
+        raise ValidationError(
+            "pocket.not_html_site",
+            "Only an imported html-engine pocket can receive crawled source.",
+        )
+    # Reassign a fresh dict so Beanie tracks the change (mirrors
+    # set_svelte_source_file's dirty-tracking note).
+    doc.source = dict(source)
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
 
 
 async def merge_spec(
