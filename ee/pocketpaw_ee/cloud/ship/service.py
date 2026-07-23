@@ -34,6 +34,8 @@ import logging
 import os
 from typing import TYPE_CHECKING
 
+from pydantic import ValidationError as PydanticValidationError
+
 from pocketpaw_ee.cloud._core.errors import ConflictError, NotFound, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
@@ -56,6 +58,7 @@ from pocketpaw_ee.cloud.ship.domain import (
     DeployView,
     DestroyProposalView,
     DomainView,
+    EnvVarView,
     LogsView,
 )
 from pocketpaw_ee.cloud.ship.dto import (
@@ -69,9 +72,14 @@ from pocketpaw_ee.cloud.ship.dto import (
     DeployOut,
     DomainListOut,
     DomainOut,
+    EnvOut,
+    EnvVarIn,
+    EnvVarOut,
+    ImportEnvRequest,
     LogsOut,
     MetricsOut,
     PendingApprovalOut,
+    SetEnvRequest,
 )
 from pocketpaw_ee.ship_engine.port import CommandFailed
 
@@ -428,6 +436,55 @@ async def request_app_destroy(workspace_id: str, user_id: str, app_id: str) -> D
 
 
 # --------------------------------------------------------------------------- #
+# App env (SHIP-9). Every function is workspace-scoped (a foreign id 404s via
+# ``_require_app``); values are masked on the way out and never decrypted here —
+# the sole decryption is ``store.decrypt_app_env`` at deploy time.
+# --------------------------------------------------------------------------- #
+
+
+async def get_app_env(workspace_id: str, app_id: str) -> list[EnvVarView]:
+    """The app's env vars, masked. Read-only."""
+    # no-event: read-only path; emit only on writes (cloud rule #9).
+    app = await _require_app(workspace_id, app_id)
+    return _env_views(app)
+
+
+async def set_app_env(
+    workspace_id: str, user_id: str, app_id: str, body: SetEnvRequest
+) -> list[EnvVarView]:
+    """Upsert a batch of env vars (add new, overwrite existing). Returns the
+    resulting masked env."""
+    body = SetEnvRequest.model_validate(body)
+    app = await _require_app(workspace_id, app_id)
+    app = await _apply_env_writes(app, body.vars)
+    await emit(ShipAppUpdated(data={**_app_event_payload(_app_view(app)), "user_id": user_id}))
+    return _env_views(app)
+
+
+async def import_app_env(
+    workspace_id: str, user_id: str, app_id: str, body: ImportEnvRequest
+) -> list[EnvVarView]:
+    """Parse a ``.env`` blob and upsert every valid line. Invalid keys are
+    skipped (not a 422) so one stray line never rejects a bulk paste."""
+    body = ImportEnvRequest.model_validate(body)
+    app = await _require_app(workspace_id, app_id)
+    app = await _apply_env_writes(app, _dotenv_to_vars(body.dotenv))
+    await emit(ShipAppUpdated(data={**_app_event_payload(_app_view(app)), "user_id": user_id}))
+    return _env_views(app)
+
+
+async def delete_app_env(
+    workspace_id: str, user_id: str, app_id: str, key: str
+) -> list[EnvVarView]:
+    """Remove one env var. Idempotent — deleting an absent key returns the
+    unchanged (masked) env."""
+    app = await _require_app(workspace_id, app_id)
+    app = await store.delete_app_env(app, key)
+    await emit(ShipAppUpdated(data={**_app_event_payload(_app_view(app)), "user_id": user_id}))
+    return _env_views(app)
+
+
+# --------------------------------------------------------------------------- #
 # Wire mapping (ee/cloud rule 8 — mapping lives in service.py)
 # --------------------------------------------------------------------------- #
 
@@ -484,6 +541,15 @@ def db_to_wire(view: DbView) -> DbOut:
 
 def proposal_to_wire(view: DestroyProposalView) -> PendingApprovalOut:
     return PendingApprovalOut(proposal_id=view.proposal_id)
+
+
+def env_to_wire(views: list[EnvVarView]) -> EnvOut:
+    return EnvOut(
+        vars=[
+            EnvVarOut(key=v.key, masked_value=v.masked_value, scope=v.scope)  # type: ignore[arg-type]
+            for v in views
+        ]
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -543,6 +609,75 @@ def _app_event_payload(view: AppView) -> dict:
         "status": view.status,
         "urls": list(view.urls),
     }
+
+
+# The mask NEVER reveals enough to reconstruct a secret: a short value is fully
+# hidden, a longer one shows only a 3-char suffix so an operator can tell two
+# secrets apart without seeing either. Masking is the service invariant that
+# keeps plaintext off every response — the mask is computed here, at write time,
+# and stored; the read path only ever echoes it.
+_MASK_HIDDEN = "••••••"
+_MASK_MIN_LEN = 6
+
+
+def _mask_env_value(value: str) -> str:
+    if len(value) <= _MASK_MIN_LEN:
+        return _MASK_HIDDEN
+    return f"…{value[-3:]}"
+
+
+async def _apply_env_writes(app: ShipApp, vars_in: list[EnvVarIn]) -> ShipApp:
+    """Mask + hand a validated batch to the store (which encrypts + persists)."""
+    writes = [
+        store.EnvVarWrite(key=v.key, masked=_mask_env_value(v.value), scope=v.scope, value=v.value)
+        for v in vars_in
+    ]
+    return await store.upsert_app_env(app, writes)
+
+
+def _dotenv_to_vars(blob: str) -> list[EnvVarIn]:
+    """Parse a ``.env`` blob into validated ``EnvVarIn``. Blank lines and ``#``
+    comments are ignored; each line splits on the FIRST ``=``; surrounding quotes
+    are stripped. A line whose key fails the POSIX-name grammar (or whose value
+    fails validation) is SKIPPED — ``EnvVarIn`` is the single source of that
+    grammar, so the parser never re-implements it.
+    """
+    out: list[EnvVarIn] = []
+    for raw in blob.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key.startswith("export "):  # a common .env nicety
+            key = key[len("export ") :].strip()
+        value = _strip_surrounding_quotes(value.strip())
+        try:
+            out.append(EnvVarIn(key=key, value=value))
+        except PydanticValidationError:
+            continue  # skip an invalid line; a bulk paste shouldn't 422
+    return out
+
+
+def _strip_surrounding_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    return value
+
+
+def _env_views(app: ShipApp) -> list[EnvVarView]:
+    """Masked views from the app's stored env (sorted, stable order). Reads the
+    stored ``masked`` hint — NEVER decrypts."""
+    return [
+        EnvVarView(
+            workspace_id=app.workspace,
+            app_id=str(app.id),
+            key=key,
+            masked_value=var.masked,
+            scope=var.scope,
+        )
+        for key, var in sorted(app.env_vars.items())
+    ]
 
 
 async def _require_box(workspace_id: str, box_id: str) -> ShipBox:

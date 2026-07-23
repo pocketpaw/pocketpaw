@@ -20,7 +20,16 @@
 # for the same fact. ``DbOut.env_var`` is the NAME of the variable holding the
 # connection string — the string itself is a secret and never crosses the wire.
 #
+# FROZEN ENV SHAPE (SHIP-9). The /ship console (SHIP-10) is built against
+# ``EnvOut { vars: [{ key, masked_value, scope }] }`` verbatim — do NOT rename a
+# field or add a required one. ``masked_value`` is ALWAYS a masked hint (a short
+# suffix, or bullets for short values); there is no plaintext field on any
+# response, by design.
+#
 # Created 2026-07-22 (feat/ship-3-cloud-entity, SHIP-3): new module.
+# Changed 2026-07-23 (feat/ship-9-env-store, SHIP-9): added the env-management
+# request/response shapes — ``EnvVarIn`` / ``SetEnvRequest`` / ``ImportEnvRequest``
+# in, ``EnvVarOut`` / ``EnvOut`` (masked-only) out.
 
 from __future__ import annotations
 
@@ -116,6 +125,42 @@ class CreateDbRequest(BaseModel):
     service: str | None = None
 
 
+# An env var's deploy scope, echoed on the wire. Kept in lock-step with the
+# model's ``ShipEnvScope`` — the DTO is the boundary that validates it.
+EnvScope = Literal["both", "prod", "preview"]
+
+# A value is opaque (any string — a token, a DSN, a PEM), so it carries no
+# pattern. It IS length-capped: a real env var is never megabytes, and an
+# unbounded field is a needless memory-abuse vector on an authenticated route.
+_ENV_VALUE_MAX = 65536
+
+
+class EnvVarIn(BaseModel):
+    """One env var to upsert. ``key`` keeps the POSIX-name grammar (the same one
+    ``env_refs`` enforces); ``value`` is opaque and Fernet-encrypted before it is
+    stored; ``scope`` defaults to ``both``."""
+
+    key: str = Field(min_length=1, max_length=255, pattern=_ENV_NAME_RE)
+    value: str = Field(max_length=_ENV_VALUE_MAX)
+    scope: EnvScope = "both"
+
+
+class SetEnvRequest(BaseModel):
+    """Upsert a batch of env vars (``PUT .../env``). Each key is added or
+    overwritten; keys absent from the batch are left untouched."""
+
+    vars: list[EnvVarIn] = Field(default_factory=list)
+
+
+class ImportEnvRequest(BaseModel):
+    """Import a ``.env`` blob (``POST .../env/import``). Blank lines and ``#``
+    comments are ignored, each remaining line is split on the first ``=`` and
+    surrounding quotes are stripped; lines whose key is not a valid POSIX name
+    are SKIPPED (a bulk paste should not 422 on one stray line)."""
+
+    dotenv: str = Field(default="", max_length=_ENV_VALUE_MAX)
+
+
 # ---------------------------------------------------------------------------
 # Responses (the frozen shapes)
 # ---------------------------------------------------------------------------
@@ -200,3 +245,25 @@ class DbOut(BaseModel):
     service: str
     linked_app: str
     env_var: str
+
+
+# ---------------------------------------------------------------------------
+# Env (SHIP-9) — FROZEN masked-only shape (see the module comment)
+# ---------------------------------------------------------------------------
+
+
+class EnvVarOut(BaseModel):
+    """One env var as the console sees it. ``masked_value`` is ALWAYS a mask —
+    never the plaintext. There is deliberately no field that could carry the
+    value in the clear."""
+
+    key: str
+    masked_value: str
+    scope: EnvScope
+
+
+class EnvOut(BaseModel):
+    """An app's env vars, masked. Returned by every env route (GET / PUT /
+    import / DELETE) so the caller always sees the resulting state."""
+
+    vars: list[EnvVarOut] = Field(default_factory=list)

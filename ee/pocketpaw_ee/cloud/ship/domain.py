@@ -17,6 +17,10 @@
 # ``DbResult`` invariant, carried up the stack).
 #
 # Created 2026-07-22 (feat/ship-3-cloud-entity, SHIP-3): new module.
+# Changed 2026-07-23 (feat/ship-9-env-store, SHIP-9): added ``EnvVarView`` — the
+# read model for one masked env var. It carries the MASK, never the value: the
+# plaintext is only ever decrypted inside ``ship.store`` at deploy time, so a
+# view (which crosses the entity boundary) can never leak one.
 
 from __future__ import annotations
 
@@ -124,6 +128,18 @@ class BoxMetricsView:
 
 
 @dataclass(frozen=True)
+class EnvVarView:
+    """Read model for one env var. ``masked_value`` is the masked hint — the
+    plaintext value is never read out of the store except at deploy time."""
+
+    workspace_id: str
+    app_id: str
+    key: str
+    masked_value: str
+    scope: str
+
+
+@dataclass(frozen=True)
 class DestroyProposalView:
     """A PARKED teardown. Nothing was destroyed — a human still has to approve.
 
@@ -148,5 +164,6 @@ __all__ = [
     "DeployView",
     "DestroyProposalView",
     "DomainView",
+    "EnvVarView",
     "LogsView",
 ]

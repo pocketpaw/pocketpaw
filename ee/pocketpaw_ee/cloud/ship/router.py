@@ -18,12 +18,18 @@
 #   GET    /ship/apps/{id}/domains      the app's routed domains
 #   POST   /ship/apps/{id}/db           create + link a database service
 #   GET    /ship/apps/{id}/logs         recent app log lines
+#   GET    /ship/apps/{id}/env          list env vars (values MASKED)
+#   PUT    /ship/apps/{id}/env          upsert a batch of env vars
+#   POST   /ship/apps/{id}/env/import   import a .env blob
+#   DELETE /ship/apps/{id}/env/{key}    remove one env var
 #   DELETE /ship/apps/{id}              PARK a teardown — never executes it
 #
-# The two DELETEs answer ``{"status": "pending_approval", "proposal_id": ...}``.
-# Nothing is destroyed in this slice; SHIP-4 wires the real Instinct proposal.
+# The two app/box DELETEs answer ``{"status": "pending_approval", ...}``. The env
+# routes answer ``EnvOut`` — values are ALWAYS masked, never returned in the
+# clear.
 #
 # Created 2026-07-22 (feat/ship-3-cloud-entity, SHIP-3): new module.
+# Changed 2026-07-23 (feat/ship-9-env-store, SHIP-9): added the four env routes.
 
 from __future__ import annotations
 
@@ -44,9 +50,12 @@ from pocketpaw_ee.cloud.ship.dto import (
     DeployOut,
     DomainListOut,
     DomainOut,
+    EnvOut,
+    ImportEnvRequest,
     LogsOut,
     MetricsOut,
     PendingApprovalOut,
+    SetEnvRequest,
 )
 
 router = APIRouter(prefix="/ship", tags=["Ship"], dependencies=[Depends(require_license)])
@@ -195,6 +204,59 @@ async def get_logs(
     workspace_id = _require_workspace(ctx)
     view = await ship_service.get_logs(workspace_id, app_id, num=num)
     return ship_service.logs_to_wire(view)
+
+
+# ---------------------------------------------------------------------------
+# Env (SHIP-9) — values are ALWAYS masked on the way out
+# ---------------------------------------------------------------------------
+
+
+@router.get("/apps/{app_id}/env", response_model=EnvOut)
+async def get_app_env(
+    app_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> EnvOut:
+    """The app's env vars, values masked."""
+    workspace_id = _require_workspace(ctx)
+    views = await ship_service.get_app_env(workspace_id, app_id)
+    return ship_service.env_to_wire(views)
+
+
+@router.put("/apps/{app_id}/env", response_model=EnvOut)
+async def set_app_env(
+    app_id: str,
+    body: SetEnvRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> EnvOut:
+    """Upsert a batch of env vars (add new, overwrite existing). Returns the
+    resulting masked env."""
+    workspace_id = _require_workspace(ctx)
+    views = await ship_service.set_app_env(workspace_id, ctx.user_id, app_id, body)
+    return ship_service.env_to_wire(views)
+
+
+@router.post("/apps/{app_id}/env/import", response_model=EnvOut)
+async def import_app_env(
+    app_id: str,
+    body: ImportEnvRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> EnvOut:
+    """Import a ``.env`` blob (invalid lines skipped). Returns the masked env."""
+    workspace_id = _require_workspace(ctx)
+    views = await ship_service.import_app_env(workspace_id, ctx.user_id, app_id, body)
+    return ship_service.env_to_wire(views)
+
+
+@router.delete("/apps/{app_id}/env/{key}", response_model=EnvOut)
+async def delete_app_env(
+    app_id: str,
+    key: str,
+    ctx: RequestContext = Depends(request_context),
+) -> EnvOut:
+    """Remove one env var. Idempotent. Returns the masked env."""
+    workspace_id = _require_workspace(ctx)
+    views = await ship_service.delete_app_env(workspace_id, ctx.user_id, app_id, key)
+    return ship_service.env_to_wire(views)
 
 
 @router.delete("/apps/{app_id}", response_model=PendingApprovalOut)
