@@ -26,7 +26,11 @@ import tempfile
 from typing import Any
 
 from pocketpaw_ee.cloud.ship import provisioning, store
-from pocketpaw_ee.ship_engine.hcloud import HcloudProvisioner, build_hcloud_client
+from pocketpaw_ee.ship_engine.hcloud import (
+    HcloudProvisioner,
+    ProvisionError,
+    build_hcloud_client,
+)
 from pocketpaw_ee.ship_engine.port import BoxHandle
 
 logger = logging.getLogger(__name__)
@@ -85,8 +89,18 @@ async def provision_box_job(ctx: dict, box_id: str, workspace_id: str) -> dict:
         logger.warning("ship provision: box %s not found for workspace", box_id)
         return {"ok": False, "reason": "box_not_found"}
 
+    # Build the provider client BEFORE handing off to the orchestrator. A
+    # missing token (or any client-construction failure) raises ProvisionError
+    # here, OUTSIDE run_provision — so it must be caught and turned into a
+    # ``degraded`` box, or the box hangs in ``provisioning`` forever (the exact
+    # "never hang" contract run_provision guarantees for failures it sees).
     token = os.environ.get(_HCLOUD_TOKEN_ENV, "").strip()
-    provisioner = HcloudProvisioner(build_hcloud_client(token))
+    try:
+        provisioner = HcloudProvisioner(build_hcloud_client(token))
+    except ProvisionError as exc:
+        await store.mark_degraded(box, reason=str(exc))
+        logger.warning("ship provision: client construction failed for box %s", box_id)
+        return {"ok": False, "status": "degraded"}
     ssh_private_key = store.decrypt_ssh_key(box)
 
     updated = await provisioning.run_provision(
