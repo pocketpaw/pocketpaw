@@ -87,15 +87,16 @@ class _FakeDaytonaClient:
                 "auto_stop_interval": auto_stop_interval,
                 "auto_archive_interval": kwargs.get("auto_archive_interval"),
                 "auto_delete_interval": kwargs.get("auto_delete_interval"),
+                "cpu": kwargs.get("cpu"),
+                "memory": kwargs.get("memory"),
+                "disk": kwargs.get("disk"),
                 "id": sid,
             }
         )
         return SandboxInfo(id=sid, name=name, state="creating")
 
     async def wait_for_sandbox(self, sandbox_id, target_state="started", timeout=120.0):  # noqa: ANN001
-        self.wait_calls.append(
-            {"id": sandbox_id, "target_state": target_state, "timeout": timeout}
-        )
+        self.wait_calls.append({"id": sandbox_id, "target_state": target_state, "timeout": timeout})
         return SandboxInfo(id=sandbox_id, name="", state="started")
 
     async def get_project_dir(self, sandbox_id):  # noqa: ANN001
@@ -272,7 +273,8 @@ async def test_open_via_broker_wires_push_remote_when_public_url_set(monkeypatch
     assert view.status == "ready"
     # The proxy remote was wired into the VM.
     wires = [
-        inv for inv in fake.exec_invocations
+        inv
+        for inv in fake.exec_invocations
         if inv["command"].startswith("git remote set-url origin ")
     ]
     assert len(wires) == 1
@@ -444,3 +446,59 @@ async def test_reaper_marks_unprovisioned_idle_row_reaped(monkeypatch) -> None:
     assert reaped == 1
     assert fake.delete_calls == []  # nothing to delete
     assert (await sandbox_service.get_sandbox("w1", "u1", stuck.id)).status == "reaped"
+
+
+# ---------------------------------------------------------------------------
+# VM size.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_workspace_vm_is_provisioned_at_one_vcpu_and_one_gb() -> None:
+    """The size is PASSED, not inherited.
+
+    Before this, `open_sandbox` called `create_sandbox` with no resource
+    arguments and silently took that function's signature defaults — 2 vCPU /
+    4 GB. Nothing in Code Mode said what size a workspace was, and touching an
+    unrelated signature would have changed every user's bill.
+    """
+    fake = _FakeDaytonaClient()
+
+    await provision.open_sandbox(
+        "w1", "u1", {"repo": "https://github.com/octocat/Hello-World.git"}, client=fake
+    )
+
+    call = fake.create_calls[-1]
+    assert call["cpu"] == 1
+    assert call["memory"] == 1
+    assert call["disk"] == 10
+
+
+async def test_the_vm_size_can_be_raised_without_a_code_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deployment that starts OOM-killing npm installs needs a lever, and the
+    lever must not be a redeploy of this file."""
+    monkeypatch.setenv("POCKETPAW_WEBSANDBOX_CPU", "2")
+    monkeypatch.setenv("POCKETPAW_WEBSANDBOX_MEMORY_GB", "4")
+    fake = _FakeDaytonaClient()
+
+    await provision.open_sandbox(
+        "w1", "u1", {"repo": "https://github.com/octocat/Hello-World.git"}, client=fake
+    )
+
+    call = fake.create_calls[-1]
+    assert (call["cpu"], call["memory"]) == (2, 4)
+
+
+async def test_an_unparseable_vm_size_does_not_stop_a_workspace_opening(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typo in an env var is a bad VM size, not a dead feature."""
+    monkeypatch.setenv("POCKETPAW_WEBSANDBOX_MEMORY_GB", "1gb")
+    fake = _FakeDaytonaClient()
+
+    await provision.open_sandbox(
+        "w1", "u1", {"repo": "https://github.com/octocat/Hello-World.git"}, client=fake
+    )
+
+    assert fake.create_calls[-1]["memory"] == 1

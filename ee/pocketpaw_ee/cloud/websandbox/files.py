@@ -415,10 +415,7 @@ class FileRpc:
         quoted = shlex.quote(query)
         # Explicit '.' path: exec has no tty, and rg with no path arg can block on
         # stdin — a fixed search root avoids that and keeps output project-relative.
-        cmd = (
-            "rg -F --line-number --column --no-heading --color=never --smart-case "
-            f"-- {quoted} ."
-        )
+        cmd = f"rg -F --line-number --column --no-heading --color=never --smart-case -- {quoted} ."
         try:
             resp = await self._client.execute_command(
                 self._sandbox_id, cmd, cwd=root, timeout=_SEARCH_TIMEOUT_SECONDS
@@ -533,7 +530,9 @@ class FileRpc:
             return {"type": "file.error", "reqId": req_id, "op": exc.op, "message": exc.message}
         except Exception as exc:  # noqa: BLE001 — a file op must never kill the socket
             logger.warning(
-                "websandbox file op failed: type=%s sandbox=%s", mtype, self._sandbox_id,
+                "websandbox file op failed: type=%s sandbox=%s",
+                mtype,
+                self._sandbox_id,
                 exc_info=True,
             )
             op = mtype.removeprefix("file.") if mtype.startswith("file.") else mtype

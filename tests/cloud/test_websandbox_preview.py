@@ -48,8 +48,11 @@ async def _ready_row(workspace_id: str = "w1", user_id: str = "u1", sandbox_id: 
     return await sandbox_service.create_sandbox(
         workspace_id,
         user_id,
-        {"repo": "https://github.com/octocat/Hello-World.git", "status": "ready",
-         "sandbox_id": sandbox_id},
+        {
+            "repo": "https://github.com/octocat/Hello-World.git",
+            "status": "ready",
+            "sandbox_id": sandbox_id,
+        },
     )
 
 

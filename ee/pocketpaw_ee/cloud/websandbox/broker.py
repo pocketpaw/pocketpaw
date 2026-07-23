@@ -211,8 +211,7 @@ async def clone_into_vm(
     # vehicle durability.restore_workspace uses. The tarball carries a token-free
     # .git (origin already scrubbed server-side).
     untar = (
-        f"mkdir -p {project_dir} && tar -xzf {_BROKER_TMP} -C {project_dir} "
-        f"&& rm -f {_BROKER_TMP}"
+        f"mkdir -p {project_dir} && tar -xzf {_BROKER_TMP} -C {project_dir} && rm -f {_BROKER_TMP}"
     )
     await daytona.upload_bytes(sandbox_id, tar_bytes, _BROKER_TMP)
     await daytona.execute_command(sandbox_id, untar)
@@ -250,9 +249,7 @@ def _redact(text: str, secret: str) -> str:
     return text.replace(secret, "***") if secret else text
 
 
-async def _clone_and_pack_repo(
-    token: ScopedRepoToken, clean_url: str, branch: str | None
-) -> bytes:
+async def _clone_and_pack_repo(token: ScopedRepoToken, clean_url: str, branch: str | None) -> bytes:
     """Clone ``clean_url`` (with the token) into a host temp dir; return a tar.gz.
 
     Server-side only: ``git`` runs in the backend process, so the token lives in
@@ -313,9 +310,7 @@ async def _run(args: list[str], *, secret: str, timeout: int) -> None:
     if proc.returncode != 0:
         detail = _redact((err or b"").decode(errors="replace").strip(), secret)
         logger.warning("broker: %s failed (rc=%s): %s", args[0], proc.returncode, detail)
-        raise CloudError(
-            502, "websandbox.broker_clone_failed", "Failed to clone the repository"
-        )
+        raise CloudError(502, "websandbox.broker_clone_failed", "Failed to clone the repository")
 
 
 async def _run_capture(args: list[str], *, secret: str, timeout: int) -> bytes:
@@ -334,9 +329,7 @@ async def _run_capture(args: list[str], *, secret: str, timeout: int) -> bytes:
     if proc.returncode != 0:
         detail = _redact((err or b"").decode(errors="replace").strip(), secret)
         logger.warning("broker: %s failed (rc=%s): %s", args[0], proc.returncode, detail)
-        raise CloudError(
-            502, "websandbox.broker_clone_failed", "Failed to pack the repository"
-        )
+        raise CloudError(502, "websandbox.broker_clone_failed", "Failed to pack the repository")
     return out
 
 

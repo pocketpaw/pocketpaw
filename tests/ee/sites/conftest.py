@@ -1,5 +1,11 @@
 # tests/ee/sites/conftest.py
 # Created: 2026-06-18 (feat/sites-dedupe-migration, PERF-2).
+# Updated 2026-07-17 (feat/sites-native-artifact-no-build): added two autouse fixtures
+#   for the native-artifact read-through cache — ``_artifact_store_tmp`` points
+#   PAW_SITES_ARTIFACT_DIR at a temp dir so a cache MISS never writes the real home, and
+#   ``_captured_prewarms`` patches the pre-warm scheduler to capture (not run) scheduled
+#   pre-warm coroutines so the suite never spawns a stray background build; a pre-warm
+#   test requests it by name to assert scheduling / await the coroutine to run it.
 # Updated 2026-06-24 (BC-9): added an autouse ``_recording_bus_for_sites`` fixture.
 #   ``publish_pocket`` now emits ``SitePublished`` after a live publish, and
 #   ``emit()`` asserts a bus is initialised; this installs a recording bus for the
@@ -69,6 +75,41 @@ async def _sites_beanie_settings() -> Any:
 
     await init_beanie(database=db, document_models=[*ALL_DOCUMENTS, MemoryFactDoc])
     yield
+
+
+@pytest.fixture(autouse=True)
+def _artifact_store_tmp(tmp_path, monkeypatch):
+    """Redirect the native-artifact cache root (PAW_SITES_ARTIFACT_DIR) to a per-test
+    temp dir (feat/sites-native-artifact-no-build), mirroring how the build dir is kept
+    out of the real ~/.pocketpaw. get_native_artifact's default filesystem store writes
+    the rendered {body_html, css} here on a cache MISS, so without this a test that
+    exercises the miss path would pollute the developer's real home."""
+    monkeypatch.setenv("PAW_SITES_ARTIFACT_DIR", str(tmp_path / "site-artifacts"))
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _captured_prewarms(monkeypatch):
+    """Capture (do NOT run) native-artifact pre-warm coroutines the sites service
+    schedules (feat/sites-native-artifact-no-build).
+
+    ``apply_leaf_edits`` / ``edit_svelte_component`` / a live svelte ``publish_pocket``
+    fire a background pre-warm via ``_default_prewarm_scheduler``. In production that
+    detaches an ``asyncio`` task; in tests we DON'T want a stray background build, so
+    this patches the scheduler to append each scheduled coroutine to a list instead.
+    A pre-warm test requests this fixture by name to assert one was scheduled and, if it
+    wants the pre-warm to actually run + populate the store, ``await``s the captured
+    coroutine itself. Un-awaited coroutines are closed on teardown so no "coroutine was
+    never awaited" warning leaks into unrelated tests."""
+    from pocketpaw_ee.sites import service as sites_service
+
+    captured: list = []
+    monkeypatch.setattr(
+        sites_service, "_default_prewarm_scheduler", lambda coro: captured.append(coro)
+    )
+    yield captured
+    for coro in captured:
+        coro.close()
 
 
 @pytest.fixture(autouse=True)

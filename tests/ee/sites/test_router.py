@@ -50,6 +50,14 @@
 # route returns {pocket_id, body_html, css} AND threads the request Origin header as
 # the builder_origin the armed build needs. A non-svelte pocket (real service, mocked
 # ripple pocket read) is a 422.
+#
+# Updated 2026-07-17 (fix/sites-prewarm-origin): POST /sites/publish and POST
+# /sites/by-pocket/{pocket_id}/leaf-edits now thread the request Origin header into the
+# service as ``prewarm_origin`` so the background native-artifact pre-warm builds with
+# the same origin a browser view resolves. New tests patch publish_pocket /
+# apply_leaf_edits and assert the route forwards the request Origin as prewarm_origin
+# (and, for publish, that builder_origin is NOT set from the header — the public deploy
+# stays plain), plus the no-Origin-header case forwards None.
 
 from __future__ import annotations
 
@@ -1019,3 +1027,98 @@ async def test_native_artifact_route_non_svelte_is_422(beanie_test_db, monkeypat
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get("/api/v1/sites/by-pocket/pk_ripple/native-artifact")
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# fix/sites-prewarm-origin: POST /sites/publish + POST .../leaf-edits thread the
+# request Origin header into the service as ``prewarm_origin`` so the background
+# native-artifact pre-warm warms the origin a browser view will ask for. The publish
+# route must NOT arm the public deploy from the header (builder_origin stays unset).
+# ---------------------------------------------------------------------------
+
+
+def _stub_published_site_doc():
+    from bson import ObjectId
+    from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+
+    return _SiteDoc(
+        id=ObjectId(),
+        workspace="ws_owner",
+        pocket_id="pk1",
+        owner="user-test-1",
+        name="Owner Site",
+        script_name="site1",
+        deployed=True,
+        signed_key="k",
+        builder_origin="",
+    )
+
+
+@pytest.mark.asyncio
+async def test_publish_route_threads_origin_as_prewarm_origin(beanie_test_db, monkeypatch):
+    """POST /sites/publish forwards the request Origin header as ``prewarm_origin`` (so
+    the pre-warm warms the origin a browser view resolves) WITHOUT setting
+    ``builder_origin`` from it — the public deploy stays plain. publish_pocket is patched
+    (a real publish would spawn bun)."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_publish_pocket(*, prewarm_origin=None, builder_origin=None, **kw):
+        captured["prewarm_origin"] = prewarm_origin
+        captured["builder_origin"] = builder_origin
+        return _stub_published_site_doc()
+
+    monkeypatch.setattr(sites_service, "publish_pocket", _fake_publish_pocket)
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/sites/publish",
+            json={"pocket_id": "pk1"},
+            headers={"Origin": "https://paw.hzd.interacly.com"},
+        )
+    assert resp.status_code == 200, resp.text
+    assert captured["prewarm_origin"] == "https://paw.hzd.interacly.com"
+    # The public deploy is unchanged — the header must NOT arm it.
+    assert captured["builder_origin"] in (None, "")
+
+
+@pytest.mark.asyncio
+async def test_publish_route_no_origin_header_prewarm_origin_none(beanie_test_db, monkeypatch):
+    """POST /sites/publish with NO Origin header forwards ``prewarm_origin=None`` so the
+    pre-warm keeps its PAW_SITES_BUILDER_ORIGIN env fallback (a call with no browser
+    origin, e.g. server-to-server)."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_publish_pocket(*, prewarm_origin=None, **kw):
+        captured["prewarm_origin"] = prewarm_origin
+        return _stub_published_site_doc()
+
+    monkeypatch.setattr(sites_service, "publish_pocket", _fake_publish_pocket)
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/api/v1/sites/publish", json={"pocket_id": "pk1"})
+    assert resp.status_code == 200, resp.text
+    assert captured["prewarm_origin"] is None
+
+
+@pytest.mark.asyncio
+async def test_leaf_edits_route_threads_origin_as_prewarm_origin(beanie_test_db, monkeypatch):
+    """POST /sites/by-pocket/{id}/leaf-edits forwards the request Origin header as
+    ``prewarm_origin`` so the background native-artifact pre-warm warms the origin the
+    browser's native-artifact view (called from the same dashboard) will ask for.
+    apply_leaf_edits is patched to capture the forwarded origin."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_apply_leaf_edits(*, prewarm_origin=None, **kw):
+        captured["prewarm_origin"] = prewarm_origin
+        return [{"uid": "Hero:headline:0", "applied": True, "reason": None}]
+
+    monkeypatch.setattr(sites_service, "apply_leaf_edits", _fake_apply_leaf_edits)
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/sites/by-pocket/pk1/leaf-edits",
+            json={"edits": [{"uid": "Hero:headline:0", "op": {"kind": "setText", "html": "y"}}]},
+            headers={"Origin": "https://paw.hzd.interacly.com"},
+        )
+    assert resp.status_code == 200, resp.text
+    assert captured["prewarm_origin"] == "https://paw.hzd.interacly.com"

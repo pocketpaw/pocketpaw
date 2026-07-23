@@ -128,15 +128,15 @@ def _parse_branch_header(header: str) -> tuple[str | None, int, int]:
             token = token.strip()
             try:
                 if token.startswith("ahead "):
-                    ahead = int(token[len("ahead "):])
+                    ahead = int(token[len("ahead ") :])
                 elif token.startswith("behind "):
-                    behind = int(token[len("behind "):])
+                    behind = int(token[len("behind ") :])
             except ValueError:  # a malformed count is simply left at 0
                 continue
         header = header[: match.start()].strip()
     header = header.strip()
     if header.startswith("No commits yet on "):
-        return header[len("No commits yet on "):].strip() or None, ahead, behind
+        return header[len("No commits yet on ") :].strip() or None, ahead, behind
     if header.startswith("HEAD (no branch)"):
         return None, ahead, behind  # detached HEAD
     branch = header.split("...", 1)[0].strip()
@@ -314,9 +314,7 @@ async def push(
     row, daytona = await _resolve_ready(workspace_id, user_id, row_id, client)
     branch = row.branch or ""
     if not branch:
-        return GitPushResponse(
-            pushed=False, branch="", detail="No branch is checked out to push"
-        )
+        return GitPushResponse(pushed=False, branch="", detail="No branch is checked out to push")
 
     cmd = f"git push -u origin {shlex.quote(branch)} 2>&1"
     try:
@@ -332,9 +330,7 @@ async def push(
 
     output = (getattr(resp, "result", "") or "").strip()
     detail = (
-        output[:_MAX_PUSH_DETAIL_CHARS]
-        if output
-        else "Push isn't available in this environment"
+        output[:_MAX_PUSH_DETAIL_CHARS] if output else "Push isn't available in this environment"
     )
     return GitPushResponse(pushed=False, branch=branch, detail=detail)
 

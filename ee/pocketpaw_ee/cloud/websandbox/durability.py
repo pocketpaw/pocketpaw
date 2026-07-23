@@ -186,9 +186,7 @@ async def _download_snapshot(
     from pocketpaw.uploads.errors import NotFound as _UploadNotFound
 
     try:
-        _rec, chunks = await uploads.stream(
-            file_id, requester_id=user_id, workspace=workspace_id
-        )
+        _rec, chunks = await uploads.stream(file_id, requester_id=user_id, workspace=workspace_id)
     except _UploadNotFound as exc:
         raise with_cause(
             CloudError(
@@ -247,9 +245,7 @@ async def snapshot_workspace(
         )
         data = await daytona.download_file(row.sandbox_id, _SNAPSHOT_TMP)
     except Exception as exc:  # noqa: BLE001 — any VM-side failure is uniform
-        logger.warning(
-            "websandbox.snapshot: tar/download failed for row=%s", row_id, exc_info=True
-        )
+        logger.warning("websandbox.snapshot: tar/download failed for row=%s", row_id, exc_info=True)
         raise with_cause(
             CloudError(502, "websandbox.snapshot_failed", "Failed to snapshot the workspace"),
             exc,
@@ -433,9 +429,7 @@ async def mirror_file(
         workspace=workspace_id,
         folder_path="/websandbox-overlay",
     )
-    await websandbox_service.set_overlay_entry(
-        workspace_id, user_id, row_id, rel_path, rec.id
-    )
+    await websandbox_service.set_overlay_entry(workspace_id, user_id, row_id, rel_path, rec.id)
     logger.debug(
         "websandbox.mirror: row=%s path=%r -> file=%s (%d bytes)",
         row_id,

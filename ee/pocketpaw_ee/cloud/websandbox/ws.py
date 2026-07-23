@@ -167,13 +167,9 @@ async def snapshot_on_disconnect(
     which survives the VM's reaping.
     """
     try:
-        await websandbox_durability.snapshot_workspace(
-            workspace_id, user_id, row_id, client=client
-        )
+        await websandbox_durability.snapshot_workspace(workspace_id, user_id, row_id, client=client)
     except Exception:  # noqa: BLE001 — teardown must never raise on a snapshot miss
-        logger.debug(
-            "websandbox.snapshot on disconnect failed for row=%s", row_id, exc_info=True
-        )
+        logger.debug("websandbox.snapshot on disconnect failed for row=%s", row_id, exc_info=True)
 
 
 async def terminal_websocket_endpoint(

@@ -114,7 +114,10 @@ def _client(http: _FakeHttp) -> GitHubAppClient:
 def test_app_jwt_claims_are_signed_and_within_github_limits() -> None:
     client = _client(_FakeHttp({}))
     token = client.app_jwt(now=_FIXED_NOW)
-    claims = jwt.decode(token, _PUBLIC_PEM, algorithms=["RS256"],
+    claims = jwt.decode(
+        token,
+        _PUBLIC_PEM,
+        algorithms=["RS256"],
         options={"verify_exp": False, "verify_iat": False},
     )
     assert claims["iss"] == "123456"
@@ -160,9 +163,7 @@ async def test_mint_repo_token_scopes_to_single_repo_least_privilege() -> None:
 async def test_mint_repo_token_honors_explicit_scopes() -> None:
     http = _FakeHttp({"access_tokens": _token_resp()})
     client = _client(http)
-    await client.mint_repo_token(
-        "inst-1", "acme/api", scopes={"contents": "read"}, now=_FIXED_NOW
-    )
+    await client.mint_repo_token("inst-1", "acme/api", scopes={"contents": "read"}, now=_FIXED_NOW)
     assert http.calls[0]["json"]["permissions"] == {"contents": "read"}
 
 
@@ -244,8 +245,13 @@ async def test_create_pull_request_422_surfaces_github_message() -> None:
 
     with pytest.raises(GitHubAppError) as exc:
         await client.create_pull_request(
-            "inst-1", "acme/api", head="paw/edit-abc", base="main",
-            title="t", body="", now=_FIXED_NOW,
+            "inst-1",
+            "acme/api",
+            head="paw/edit-abc",
+            base="main",
+            title="t",
+            body="",
+            now=_FIXED_NOW,
         )
     assert exc.value.status_code == 422
     assert "No commits between" in exc.value.message
@@ -422,9 +428,12 @@ def test_private_key_accepts_escaped_newlines(monkeypatch) -> None:
         client = get_github_app_client()
         assert client is not None
         # A JWT that verifies proves the escaped-newline PEM parsed correctly.
-        claims = jwt.decode(client.app_jwt(now=_FIXED_NOW), _PUBLIC_PEM, algorithms=["RS256"],
-        options={"verify_exp": False, "verify_iat": False},
-    )
+        claims = jwt.decode(
+            client.app_jwt(now=_FIXED_NOW),
+            _PUBLIC_PEM,
+            algorithms=["RS256"],
+            options={"verify_exp": False, "verify_iat": False},
+        )
         assert claims["iss"] == "123456"
     finally:
         reset_github_client()

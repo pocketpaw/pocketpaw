@@ -386,9 +386,7 @@ async def drop_overlay_entry(
     prefix = rel_path.rstrip("/") + "/"
     # Reassign (not in-place mutate) so Beanie always sees the field as dirty.
     overlay = {
-        k: v
-        for k, v in (doc.overlay or {}).items()
-        if k != rel_path and not k.startswith(prefix)
+        k: v for k, v in (doc.overlay or {}).items() if k != rel_path and not k.startswith(prefix)
     }
     doc.overlay = overlay
     doc.updated_at = datetime.now(UTC)
@@ -424,7 +422,7 @@ async def move_overlay_entry(
         if k == src:
             overlay[dst] = v
         elif k.startswith(src_prefix):
-            overlay[dst_prefix + k[len(src_prefix):]] = v
+            overlay[dst_prefix + k[len(src_prefix) :]] = v
         else:
             overlay[k] = v
     doc.overlay = overlay

@@ -18,12 +18,16 @@
 # landing the workspace tarball in the tenant's blob storage.
 #
 # Changed 2026-07-15 (WC-5a, feat/websandbox-edit-agent): surfaced the
-# auto-feature-branch on the wire (``WebSandboxResponse.branch``), let the
-# provisioner bind it via ``UpdateStatusRequest.branch``, and added the AI
-# edit-agent DTOs — ``EditRequest`` (a file path + instruction + optional
-# selection range) and ``EditResponse`` (the original + PROPOSED file content the
-# frontend reviews per-hunk and writes back via the existing file-RPC). The edit
-# agent is generate-only; it never writes to the VM.
+# auto-feature-branch on the wire (``WebSandboxResponse.branch``) and let the
+# provisioner bind it via ``UpdateStatusRequest.branch``. This change also added
+# the AI edit-agent DTOs, which were REMOVED again in CA-4 — see below.
+#
+# Changed 2026-07-21 (CA-4, feat/codeagent-edit): removed ``EditRequest`` /
+# ``EditResponse`` / ``EditSelection`` along with ``websandbox/edit.py``. Taking a
+# sandbox ``row_id`` was the whole problem: a WebContainer project runs in the
+# user's tab and has no row, which is why Cmd-K shipped disabled there. Its
+# replacement is ``codeagent`` — the client sends the code it already has, so the
+# same path serves both runtimes.
 #
 # Changed 2026-07-16 (WC-8/P3b preview, feat/code-mode): added ``PreviewResponse``
 # ({url, port}) — the iframe-embeddable public URL of a dev-server port running in
@@ -44,6 +48,15 @@
 # ``UpdateStatusRequest`` are INTERNAL command objects the provisioner (and tests
 # that stand in for it) use to bind server-generated runtime state, and are never
 # bound by a router. The client ``PATCH`` route was removed with the same intent.
+#
+# Changed 2026-07-20 (RR-2, feat/code-runtime-requirements): added
+# ``RuntimeRequirementsResponse`` — what a PROJECT NEEDS from a runtime
+# (install / nativeToolchain / rawSockets) plus the ``reasons`` that produced
+# each flag, so the runtime-routing decision is explainable rather than opaque.
+# Also generalized the credential response: the broker shape was never
+# BrowserPod-specific (any in-tab runtime needs a vendor key brokered the same
+# way), so the canonical name is now ``RuntimeCredentialsResponse`` and
+# ``BrowserPodCredentialsResponse`` is a deprecated alias kept for one release.
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -175,6 +188,63 @@ class PreviewResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# BP-1b / RR-2 — in-tab runtime boot credential.
+# ---------------------------------------------------------------------------
+
+
+class RuntimeCredentialsResponse(BaseModel):
+    """The credential a browser needs to boot an in-tab runtime.
+
+    Response-only (Rule 4). ``available`` is false with a null ``apiKey`` in TWO
+    cases that a client cannot and need not tell apart: the runtime is not
+    configured on this deploy, and the runtime id is unknown. Both mean "route
+    this project somewhere else", so both answer the same way (see
+    ``websandbox/runtimes.py``).
+
+    NOTE: this response necessarily carries the key to the client, because the
+    runtime's ``boot()`` executes in the tab. Brokering it keeps the key out of
+    the frontend bundle and makes it gateable/rotatable/auditable, but it is not
+    secret from an authenticated caller — see ``websandbox/browserpod.py``.
+    """
+
+    available: bool
+    apiKey: str | None = None
+
+
+# DEPRECATED alias, kept for one release while callers move to the generalized
+# name. The shape was never BrowserPod-specific — WebContainers needs a brokered
+# browser-side key on exactly the same terms.
+BrowserPodCredentialsResponse = RuntimeCredentialsResponse
+
+
+# ---------------------------------------------------------------------------
+# RR-2 — what a project NEEDS from a runtime, resolved before anything boots.
+# ---------------------------------------------------------------------------
+
+
+class RuntimeRequirementsResponse(BaseModel):
+    """The capability demands of a project, for matching against a runtime.
+
+    Response-only (Rule 4); the repo/ref arrive as query params and tenancy comes
+    from the RequestContext.
+
+    ``reasons`` is not decoration. This response drives a user-visible routing
+    decision — fast in-tab runtime versus a slower real VM — and a decision that
+    cannot be explained cannot be debugged. Every flag raised to ``true`` carries
+    at least one reason naming the evidence that raised it, e.g.
+    ``"pg in dependencies -> rawSockets"``.
+    """
+
+    # Needs to install dependencies from a registry.
+    install: bool
+    # Needs to execute native binaries (esbuild, rollup bindings, node-gyp…).
+    nativeToolchain: bool
+    # Needs real TCP — a database driver an in-tab runtime cannot emulate.
+    rawSockets: bool
+    reasons: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # WC-7/P4a — git write path (status / stage / commit / push).
 # ---------------------------------------------------------------------------
 
@@ -251,59 +321,69 @@ class GitPrResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# WC-5a — AI edit agent (Cmd-K).
+# CS-2 — scaffold a composed project into a provisioned sandbox.
 # ---------------------------------------------------------------------------
 
 
-class EditSelection(BaseModel):
-    """A 1-indexed inclusive line range within the target file the edit scopes to.
+class ScaffoldIntoSandboxRequest(BaseModel):
+    """Fetch this starter and bring the project up in this sandbox.
 
-    Optional on an ``EditRequest`` — when present it focuses the model on the
-    selected lines (the rest of the file is still supplied as context). When
-    absent the whole file is the edit target.
+    Takes a starter ID rather than a prompt: the user is shown the plan and
+    allowed to change the framework before anything is written, so the server
+    receives the decision, not the sentence it came from.
     """
 
-    startLine: int = Field(..., ge=1)
-    endLine: int = Field(..., ge=1)
+    starter: str = Field(..., min_length=1, max_length=64)
+    projectName: str = Field(default="", max_length=64)
+    #: Dev-server port. Optional — the default is Vite's own 5173.
+    port: int | None = Field(default=None, ge=1, le=65535)
 
 
-class EditRequest(BaseModel):
-    """Ask the backend edit agent to PROPOSE a rewrite of a file (or selection).
+class ScaffoldStepResponse(BaseModel):
+    """One bring-up stage and how it went.
 
-    ``path`` is relative to the in-VM workspace dir (jailed — ``..`` / absolute
-    paths are refused). ``instruction`` is the natural-language edit. ``selection``
-    optionally narrows the edit to a line range. The agent reads the file
-    server-side, calls a frontier model, and returns the proposal — it never
-    writes anything to the VM (Rule 4: the write surface never carries a proposed
-    body; the frontend applies accepted hunks via the existing file-RPC).
+    `output` is populated ONLY on failure, and that is the point of this shape:
+    CS-2's acceptance is that a failed `npm install` shows a visible failed
+    state rather than a spinner, so npm's own error text has to reach the UI.
+    A successful step carries nothing — nobody reads a clean install log.
     """
 
-    path: str = Field(..., min_length=1, max_length=1024)
-    instruction: str = Field(..., min_length=1, max_length=8192)
-    selection: EditSelection | None = None
+    name: str
+    ok: bool
+    exitCode: int | None = None
+    output: str = ""
+    durationMs: int = 0
 
 
-class EditResponse(BaseModel):
-    """The edit agent's PROPOSAL — original vs. proposed file content.
+class ScaffoldIntoSandboxResponse(BaseModel):
+    """What was composed, and how far bring-up got.
 
-    The frontend diffs ``originalContent`` against ``proposedContent`` to render
-    per-hunk review and writes accepted changes back via the file-RPC. ``selection``
-    echoes the requested range (if any) so the reviewer can scope the diff.
+    ``running`` means the dev-server START command returned cleanly — NOT that
+    the server is serving. It was backgrounded, so nothing server-side could know
+    that yet; the preview pane resolving the port is what actually proves it.
+    Named honestly so it is not read as a promise.
     """
 
-    path: str
-    originalContent: str
-    proposedContent: str
-    selection: EditSelection | None = None
+    projectName: str
+    #: Which starter was used, echoed so a client that let the user change it can
+    #: confirm what actually landed.
+    starter: str = ""
+    fileCount: int = 0
+    port: int
+    running: bool = False
+    steps: list[ScaffoldStepResponse] = Field(default_factory=list)
+    #: The first stage that failed, or null. Lets the client branch without
+    #: re-deriving it from the step list.
+    failedStep: str | None = None
 
 
 __all__ = [
+    "ScaffoldStepResponse",
+    "ScaffoldIntoSandboxResponse",
+    "ScaffoldIntoSandboxRequest",
     "CommitRequest",
     "CreatePrRequest",
     "CreateSandboxRequest",
-    "EditRequest",
-    "EditResponse",
-    "EditSelection",
     "GitCommitResponse",
     "GitFileEntry",
     "GitPrResponse",

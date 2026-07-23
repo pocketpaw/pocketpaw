@@ -91,9 +91,7 @@ async def list_connections(
     # connection's display info (account login + avatar) so the chip can render a
     # profile image without a reinstall.
     views = await connect.list_connections(workspace_id, ctx.user_id)
-    return CodeConnectionListResponse(
-        connections=[service.view_to_wire(v) for v in views]
-    )
+    return CodeConnectionListResponse(connections=[service.view_to_wire(v) for v in views])
 
 
 @router.get("/repos", response_model=RepoListResponse)

@@ -77,6 +77,33 @@ _AUTO_DELETE_MINUTES = 0
 # Daytona boot timeout (seconds) — block until the VM is ``started`` before clone.
 _BOOT_TIMEOUT_SECONDS = 120.0
 
+
+# ---------------------------------------------------------------------------
+# VM size.
+# ---------------------------------------------------------------------------
+# Stated HERE and passed EXPLICITLY, added 2026-07-22. Until now this module
+# called ``create_sandbox`` with no resource arguments and silently inherited
+# that function's signature defaults — cpu=2, memory=4. Nothing in the Code Mode
+# tree said what size a workspace VM was, so the answer lived in a default
+# argument three modules away and changed if anyone ever touched that signature.
+#
+# 1 vCPU / 1 GB is the deliberate floor: enough for `npm install` and a Vite dev
+# server, and the size a per-user workspace should cost. Raise MEMORY first if
+# installs start getting OOM-killed — node's resolver is the memory-hungry part,
+# not the CPU count.
+# ``_env_int`` (below, with the reaper config) already does exactly this — read,
+# tolerate garbage, floor at 1 — so this reuses it rather than shipping a second
+# copy that could drift.
+def _vm_resources() -> tuple[int, int, int]:
+    """(cpu, memory GB, disk GB) for a workspace VM. Read per call, not at import,
+    so a deployment can change the size without a code change."""
+    return (
+        _env_int("POCKETPAW_WEBSANDBOX_CPU", 1),
+        _env_int("POCKETPAW_WEBSANDBOX_MEMORY_GB", 1),
+        _env_int("POCKETPAW_WEBSANDBOX_DISK_GB", 10),
+    )
+
+
 # Auto-feature-branch (WC-5a): the repo is checked out onto a fresh
 # ``paw/edit-<8 hex>`` branch in the VM so AI edits never touch the default
 # branch. The slug is derived from a uuid4 (no time/random-in-loop concerns) and
@@ -87,6 +114,7 @@ _BRANCH_CHECKOUT_TIMEOUT_SECONDS = 30
 def _new_edit_branch() -> str:
     """Mint a fresh, collision-safe ``paw/edit-<8 hex>`` branch name."""
     return f"paw/edit-{uuid4().hex[:8]}"
+
 
 # ---------------------------------------------------------------------------
 # Reaper env config.
@@ -234,17 +262,26 @@ async def open_sandbox(
     row = await websandbox_service.create_sandbox(
         workspace_id, user_id, {"repo": repo_url, "status": "pending"}
     )
-    await websandbox_service.update_status(
-        workspace_id, user_id, row.id, {"status": "opening"}
-    )
+    await websandbox_service.update_status(workspace_id, user_id, row.id, {"status": "opening"})
 
     daytona_id: str | None = None
     branch = _new_edit_branch()
     try:
         # 2. Cold-provision with the aggressive Daytona lifecycle (all MINUTES):
         #    stop after 5 idle, archive 5 after stop, delete immediately on stop.
+        cpu, memory_gb, disk_gb = _vm_resources()
+        logger.info(
+            "websandbox: provisioning row=%s at %d vCPU / %d GB RAM / %d GB disk",
+            row.id,
+            cpu,
+            memory_gb,
+            disk_gb,
+        )
         info = await daytona.create_sandbox(
             name=f"websandbox-{row.id}",
+            cpu=cpu,
+            memory=memory_gb,
+            disk=disk_gb,
             auto_stop_interval=_AUTO_STOP_MINUTES,
             auto_archive_interval=_AUTO_ARCHIVE_MINUTES,
             auto_delete_interval=_AUTO_DELETE_MINUTES,

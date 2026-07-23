@@ -971,9 +971,7 @@ async def test_ws_file_traversal_frame_is_rejected_and_never_writes(wire_termina
     tokens["good-ticket"] = user_id
 
     ws = FakeWebSocket(
-        inbound=[
-            '{"type":"file.write","reqId":"bad","path":"../../etc/passwd","content":"pwned"}'
-        ]
+        inbound=['{"type":"file.write","reqId":"bad","path":"../../etc/passwd","content":"pwned"}']
     )
     await terminal_websocket_endpoint(ws, row_id, token="good-ticket")
 

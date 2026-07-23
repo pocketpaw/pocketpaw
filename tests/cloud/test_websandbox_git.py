@@ -81,12 +81,11 @@ class _FakeGitDaytona:
         return _FakeExec(0, "")
 
 
-async def _ready_row(
-    workspace="w1", user="u1", sandbox_id="dtn-1", branch="paw/edit-abc"
-):  # noqa: ANN001
+async def _ready_row(workspace="w1", user="u1", sandbox_id="dtn-1", branch="paw/edit-abc"):  # noqa: ANN001
     view = await sandbox_service.create_sandbox(
-        workspace, user, {"repo": "https://github.com/acme/api.git",
-                          "status": "ready", "sandbox_id": sandbox_id}
+        workspace,
+        user,
+        {"repo": "https://github.com/acme/api.git", "status": "ready", "sandbox_id": sandbox_id},
     )
     if branch:
         await sandbox_service.update_status(
@@ -253,7 +252,7 @@ async def test_push_failure_returns_detail_not_500() -> None:
 
 
 async def test_stage_quotes_shell_metacharacters_in_path() -> None:
-    evil = 'a.py; rm -rf / #`whoami`'
+    evil = "a.py; rm -rf / #`whoami`"
     fake = _FakeGitDaytona()
     row_id = await _ready_row()
 
@@ -344,8 +343,12 @@ async def test_open_pr_returns_url_and_number() -> None:
     )
 
     resp = await git_svc.open_pr(
-        "w1", "u1", row_id, {"title": "Ship it", "body": "please"},
-        client=_FakeGitDaytona(), github_client=gh,
+        "w1",
+        "u1",
+        row_id,
+        {"title": "Ship it", "body": "please"},
+        client=_FakeGitDaytona(),
+        github_client=gh,
     )
 
     assert resp.url == "https://github.com/acme/api/pull/9"

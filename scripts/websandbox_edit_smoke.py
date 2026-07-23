@@ -65,7 +65,9 @@ async def main() -> int:
         print("[3/4] Calling propose_edit with the REAL model on", EDIT_PATH, "...")
         try:
             result = await edit.propose_edit(
-                WORKSPACE, USER, view.id,
+                WORKSPACE,
+                USER,
+                view.id,
                 {"path": EDIT_PATH, "instruction": INSTRUCTION},
                 daytona=daytona,  # client=None -> builds the real AsyncAnthropic
             )

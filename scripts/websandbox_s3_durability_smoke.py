@@ -45,7 +45,9 @@ class _UploadsShim:
         self._n += 1
         fid = f"smoke-{self._n}"
         self._blobs[fid] = data
-        print(f"  [uploads] stored {len(data)} bytes as {fid} (ws={workspace} folder={folder_path})")  # noqa: E501
+        print(
+            f"  [uploads] stored {len(data)} bytes as {fid} (ws={workspace} folder={folder_path})"
+        )  # noqa: E501
         return FileRecord(
             id=fid,
             storage_key=f"key/{fid}",

@@ -42,9 +42,7 @@ _GH_TOKEN = "gh-SECRET-TOKEN"
 def test_ticket_roundtrips() -> None:
     token = sign_ticket(_WS, _USER, _SBX, _REPO)
     claims = verify_ticket(token)
-    assert claims == TicketClaims(
-        workspace_id=_WS, user_id=_USER, sandbox_id=_SBX, repo=_REPO
-    )
+    assert claims == TicketClaims(workspace_id=_WS, user_id=_USER, sandbox_id=_SBX, repo=_REPO)
 
 
 def test_ticket_rejects_tampered_or_garbage() -> None:
@@ -314,12 +312,13 @@ def test_ticket_from_basic_auth_recovers_claims() -> None:
 
 def test_ticket_from_basic_auth_rejects_missing_or_bad() -> None:
     assert _ticket_from_basic_auth(SimpleNamespace(headers={})) is None
-    assert _ticket_from_basic_auth(
-        SimpleNamespace(headers={"authorization": "Bearer xyz"})
-    ) is None
-    assert _ticket_from_basic_auth(
-        SimpleNamespace(headers={"authorization": _basic("x", "not-a-ticket")})
-    ) is None
+    assert _ticket_from_basic_auth(SimpleNamespace(headers={"authorization": "Bearer xyz"})) is None
+    assert (
+        _ticket_from_basic_auth(
+            SimpleNamespace(headers={"authorization": _basic("x", "not-a-ticket")})
+        )
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------

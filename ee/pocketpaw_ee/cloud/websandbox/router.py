@@ -23,11 +23,15 @@
 # comes only from the RequestContext, and both are license-gated like the rest.
 #
 # Changed 2026-07-15 (WC-5a, feat/websandbox-edit-agent): added the AI edit
-# endpoint — ``POST /websandbox/{row_id}/edit`` (a file + instruction → a PROPOSED
-# rewrite from a backend-side frontier model). Thin adapter over
-# ``websandbox/edit.py``; tenancy comes only from the RequestContext, and it's
-# license-gated like the rest. Generate-only — the frontend applies accepted hunks
-# via the existing file-RPC.
+# endpoint ``POST /websandbox/{row_id}/edit``. REMOVED again 2026-07-21 (CA-4) —
+# see below.
+#
+# Changed 2026-07-21 (CA-4, feat/codeagent-edit): deleted the AI edit endpoint
+# and ``websandbox/edit.py`` with it. The route was row-addressed, and it read the
+# file off the VM's disk to build context — so a runtime without a backend row
+# (WebContainers, which runs in the user's tab) had nothing for it to read, and
+# Cmd-K shipped disabled there. ``POST /codeagent/turn`` with ``mode: "edit"``
+# replaces it: the client sends the code, so one path serves both runtimes.
 #
 # Changed 2026-07-16 (WC-7/P4a, feat/code-mode): added the git write-path routes —
 # ``GET /websandbox/{row_id}/git/status`` and ``POST .../git/stage|commit|push``.
@@ -47,6 +51,24 @@
 # is a validated query param (out-of-range / the reserved terminal port refused),
 # and it's license-gated like the rest.
 #
+# Changed 2026-07-18 (BP-1b, feat/code-mode): added
+# ``GET /websandbox/browserpod/credentials`` — issues the boot credential for the
+# in-tab BrowserPod runtime. The key lives ONLY in server config (never in the
+# frontend bundle); the route is license-gated and workspace-scoped like the rest,
+# and an unconfigured deploy answers ``available:false`` so the client falls back
+# to Daytona instead of erroring. Thin adapter over ``websandbox/browserpod.py``.
+#
+# Changed 2026-07-20 (RR-2, feat/code-runtime-requirements): added
+# ``GET /websandbox/runtimes/requirements`` — resolves what a PROJECT NEEDS
+# (install / nativeToolchain / rawSockets, each with the evidence that raised it)
+# from the repo's package.json, server-side, BEFORE any runtime boots. Also
+# generalized two paths whose names had gone wrong: the repo archive seeds ANY
+# in-tab runtime, not just BrowserPod, and every in-tab runtime needs a brokered
+# browser-side key — so ``/browserpod/repo-archive`` became
+# ``/runtimes/archive`` and ``/browserpod/credentials`` became
+# ``/runtimes/{runtime_id}/credentials``. The old paths remain as DEPRECATED
+# aliases for one release because the shipped frontend still calls them.
+#
 # Changed 2026-07-16 (review hardening): the register route now binds the
 # repo-only ``RegisterSandboxRequest`` so a client can no longer write a
 # server-owned ``sandbox_id`` / ``status`` (that field is the key
@@ -61,18 +83,19 @@ from fastapi import APIRouter, Depends, Query, Response
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.websandbox import archive as websandbox_archive
 from pocketpaw_ee.cloud.websandbox import durability as websandbox_durability
-from pocketpaw_ee.cloud.websandbox import edit as websandbox_edit
 from pocketpaw_ee.cloud.websandbox import git as websandbox_git
 from pocketpaw_ee.cloud.websandbox import preview as websandbox_preview
 from pocketpaw_ee.cloud.websandbox import provision as websandbox_provision
+from pocketpaw_ee.cloud.websandbox import requirements as websandbox_requirements
+from pocketpaw_ee.cloud.websandbox import runtimes as websandbox_runtimes
+from pocketpaw_ee.cloud.websandbox import scaffold_service as websandbox_scaffold
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
 from pocketpaw_ee.cloud.websandbox.dto import (
     CommitRequest,
     CreatePrRequest,
     CreateSandboxRequest,
-    EditRequest,
-    EditResponse,
     GitCommitResponse,
     GitPrResponse,
     GitPushResponse,
@@ -80,7 +103,11 @@ from pocketpaw_ee.cloud.websandbox.dto import (
     OpenSandboxRequest,
     PreviewResponse,
     RegisterSandboxRequest,
+    RuntimeCredentialsResponse,
+    RuntimeRequirementsResponse,
     SandboxTreeResponse,
+    ScaffoldIntoSandboxRequest,
+    ScaffoldIntoSandboxResponse,
     SnapshotResponse,
     StageRequest,
     WebSandboxListResponse,
@@ -185,6 +212,117 @@ async def get_sandbox_preview(
 
 
 # ---------------------------------------------------------------------------
+# RR-2 / BP-1b — the in-tab runtime surface: requirements probe, source archive,
+# and the brokered boot credential.
+#
+# PATH NOTE, and it is load-bearing: every route here has TWO literal segments,
+# deliberately. A single-segment collection path like ``/requirements`` is
+# captured by the ``/{row_id}`` route registered above — FastAPI matches in
+# REGISTRATION order — and resolves to "look up a sandbox called requirements",
+# which 404s. That is a genuinely confusing failure (the route exists, the client
+# calls the right URL, the server answers 404), and it has already happened once
+# here with ``/repo-archive``. A comment did not prevent the second occurrence,
+# so ``test_websandbox_routes.py`` asserts it instead.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/runtimes/requirements", response_model=RuntimeRequirementsResponse)
+async def get_runtime_requirements(
+    repo: str = Query(..., description="owner/repo or a github.com URL"),
+    ref: str | None = Query(None, description="Branch, tag or commit (default branch if omitted)"),
+    ctx: RequestContext = Depends(request_context),
+) -> RuntimeRequirementsResponse:
+    """Resolve what a project NEEDS from a runtime, before any runtime boots.
+
+    The runtime registry routes a project by matching its needs against each
+    runtime's capabilities, so the needs have to be answerable without booting
+    anything — otherwise the probe is chicken-and-egg, which is precisely how the
+    old path worked (boot a VM, seed the repo, read the root listing, discover it
+    was the wrong runtime, throw the VM away). The backend already fetches repo
+    source, so it answers from ``package.json`` instead.
+
+    Never 500s on an unreadable repo: an un-inspectable project resolves to the
+    most capable requirements with a reason saying so. Failing to inspect must
+    not block opening a project.
+    """
+    workspace_id = _require_workspace(ctx)
+    return await websandbox_requirements.resolve_requirements(workspace_id, ctx.user_id, repo, ref)
+
+
+@router.get("/runtimes/archive")
+async def get_runtime_archive(
+    repo: str = Query(..., description="owner/repo or a github.com URL"),
+    ref: str | None = Query(None, description="Branch, tag or commit (default branch if omitted)"),
+    ctx: RequestContext = Depends(request_context),
+) -> Response:
+    """Serve a repo's source as a zip, for seeding ANY in-tab runtime.
+
+    An in-tab runtime has no usable networking of its own for this: cloning
+    inside it runs on an emulated TCP/TLS relay, and the browser cannot fetch
+    GitHub's archives directly because they carry no CORS headers. Fetching
+    server-side solves both, and is where a GitHub App token would live for
+    private repos.
+    """
+    workspace_id = _require_workspace(ctx)
+    content = await websandbox_archive.fetch_repo_archive(workspace_id, ctx.user_id, repo, ref)
+    return Response(content=content, media_type="application/zip")
+
+
+@router.get("/runtimes/{runtime_id}/credentials", response_model=RuntimeCredentialsResponse)
+async def get_runtime_credentials(
+    runtime_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> RuntimeCredentialsResponse:
+    """Issue the credential a browser needs to boot the named in-tab runtime.
+
+    The key lives ONLY in server config; it is never built into the frontend
+    bundle. License + an authenticated, workspace-scoped context gate the issue.
+
+    An UNKNOWN runtime id answers ``available: false`` rather than 404 — the
+    caller is a router that will fall back either way, and an unconfigured
+    runtime and an unknown one should look identical to it.
+    """
+    workspace_id = _require_workspace(ctx)
+    return await websandbox_runtimes.get_runtime_credentials(runtime_id, workspace_id, ctx.user_id)
+
+
+# ---------------------------------------------------------------------------
+# DEPRECATED aliases (BP-1b paths), kept for ONE release. The shipped frontend
+# still calls these; delete once it has moved to the ``/runtimes/*`` paths above.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/browserpod/repo-archive")
+async def get_repo_archive(
+    repo: str = Query(..., description="owner/repo or a github.com URL"),
+    ref: str | None = Query(None, description="Branch, tag or commit (default branch if omitted)"),
+    ctx: RequestContext = Depends(request_context),
+) -> Response:
+    """DEPRECATED — use ``GET /websandbox/runtimes/archive``.
+
+    Renamed because the name was wrong: this archive seeds ANY in-tab runtime,
+    not just BrowserPod. Behaviour is identical; this alias exists only so the
+    already-shipped frontend keeps working for one release.
+    """
+    return await get_runtime_archive(repo=repo, ref=ref, ctx=ctx)
+
+
+@router.get("/browserpod/credentials", response_model=RuntimeCredentialsResponse)
+async def get_browserpod_credentials(
+    ctx: RequestContext = Depends(request_context),
+) -> RuntimeCredentialsResponse:
+    """DEPRECATED — use ``GET /websandbox/runtimes/browserpod/credentials``.
+
+    Renamed because every in-tab runtime needs a brokered browser-side key, not
+    just BrowserPod. Behaviour is identical — it delegates to the generalized
+    handler rather than re-implementing it, so the two paths cannot drift apart
+    while the alias lives. This exists only so the already-shipped frontend keeps
+    working for one release.
+    """
+    return await get_runtime_credentials(runtime_id="browserpod", ctx=ctx)
+
+
+# ---------------------------------------------------------------------------
 # WC-7/P4a — git write path (status / stage / commit / push).
 # ---------------------------------------------------------------------------
 
@@ -243,19 +381,24 @@ async def git_open_pr(
 
 
 # ---------------------------------------------------------------------------
-# WC-5a — AI edit agent (Cmd-K).
+# CS-2 — scaffold a composed project into a provisioned sandbox.
 # ---------------------------------------------------------------------------
 
 
-@router.post("/{row_id}/edit", response_model=EditResponse)
-async def propose_edit(
+@router.post("/{row_id}/scaffold", response_model=ScaffoldIntoSandboxResponse)
+async def scaffold_into_sandbox(
     row_id: str,
-    body: EditRequest,
+    body: ScaffoldIntoSandboxRequest,
     ctx: RequestContext = Depends(request_context),
-) -> EditResponse:
-    """Propose a model-authored rewrite of a file (generate-only, no VM write)."""
+) -> ScaffoldIntoSandboxResponse:
+    """Compose a project from recipes and start its dev server in this sandbox.
+
+    Row-addressed because it MATERIALIZES into a VM — unlike `/codescaffold/*`,
+    which is runtime-blind by contract and returns a source map. That split is
+    what lets CS-3 mount the same map in a browser tab with none of this code.
+    """
     workspace_id = _require_workspace(ctx)
-    return await websandbox_edit.propose_edit(workspace_id, ctx.user_id, row_id, body)
+    return await websandbox_scaffold.scaffold_into_sandbox(workspace_id, ctx.user_id, row_id, body)
 
 
 # ---------------------------------------------------------------------------

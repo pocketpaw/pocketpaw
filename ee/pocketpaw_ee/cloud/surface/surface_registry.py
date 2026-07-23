@@ -32,6 +32,52 @@
 # startup assertion (``_assert_registry_complete``, run at module import)
 # guarantees every ``SurfaceKind`` has exactly one row and no row names a bogus
 # kind — resolving the design's open question (keep the enum + assert).
+#
+# Changes: 2026-07-22 (feat/code-surface-profile, CD-3) — the CODE row stopped
+# addressing the wrong machine. It used to carry
+# ``allowed_sdk_tools={"Bash","Read","Write","Edit","Glob","Grep"}``, which read
+# like "scope the agent to the coding built-ins" but is ADDITIVE — those six are
+# in the SDK's default set already, so it granted nothing and restricted nothing.
+# Meanwhile the /code agent runs on the BACKEND SERVER: the user's project lives
+# in a sandbox behind the ``code_mode`` tool, so every one of those built-ins
+# would have read and written the server's own disk and reported success. The row
+# now DENIES them (``_CODE_BUILTIN_DENY`` — deny is the only lever that removes a
+# built-in) and scopes the MCP surface to the one tool that reaches the project
+# (``_CODE_MODE_TOOL_IDS``). ``Agent`` joins the deny set too: a spawned subagent
+# is a second, unsupervised path to tools. ``skill_names`` drops to empty — the
+# `code` skill teaches nothing BUT those built-ins, so keeping it would inject an
+# instruction to call what the agent no longer has. Still a static ``profile``:
+# both sets are module-level literals, nothing lazily loaded, not meta-aware. The
+# matching preamble rewrite is in ``handlers/code.py``.
+#
+# Changes: 2026-07-22 (fix/code-surface-denies-pocket-authoring) — CD-3's deny set
+# turned out to cover only HALF the surface's wrong turns. It removed the
+# file/shell built-ins (the wrong MACHINE) but left every pocket-authoring tool
+# reachable (the wrong DELIVERABLE), because ``allow_mcp_tool_ids`` cannot touch
+# them: ``claude_sdk`` unions ``POCKET_CREATION_GRANT``, ``WIDGET_TOOL_IDS`` and
+# every ``ALWAYS_ALLOWED_MCP_SERVERS`` tool back in AFTER a mode's allow-list is
+# applied, on purpose, so "create a pocket" works from every chat mode. On /code
+# that guarantee is the bug: a user with a React project open asked for "an
+# employee management app, with components, nice design" and got a pocket and a
+# ripple ui-spec. ``_CODE_POCKET_DENY`` closes it — deny runs BEFORE the grant is
+# unioned in and is the only lever that reaches those families.
+#
+# The row then went further, on the reading that /code should not reach a pocket
+# AT ALL. The pocket READ verbs join the deny set (a pocket the agent can inspect
+# is a pocket it can propose), and so does ``Skill`` (``_CODE_SKILL_DENY``) —
+# the bundled ``pocketpaw-create-pocket`` skill loads as a local PLUGIN, so
+# ``skill_names`` never withheld it and denying the invoking tool is the only
+# lever that does.
+#
+# And the row gained a ``system_message_override``: ``CODE_SYSTEM_PROMPT``. The
+# deny set alone would have left the agent with a pocket-shaped behavioral stack
+# it could no longer act on — the ripple LAW, the delegation rule and the
+# artifact rule all name tools that are now gone. Worse, a prohibition does not
+# create a DEFAULT: told only what not to build, the trained-in dashboard remains
+# the sole concrete plan in context. The override states the surface's own
+# deliverable instead. Both halves were needed; neither alone held.
+#
+# The CODE row stays STATIC — the prompt is a module constant like the tool ids.
 
 from __future__ import annotations
 
@@ -76,6 +122,7 @@ from pocketpaw_ee.cloud.surface.handlers import (
 from pocketpaw_ee.cloud.surface.handlers import (
     foresight as foresight_handler,
 )
+from pocketpaw_ee.cloud.surface.system_prompts import CODE_SYSTEM_PROMPT
 
 # The shape every handler module exports: an async preamble builder taking the
 # tenancy tuple + the validated client meta and returning the rendered block.
@@ -172,6 +219,128 @@ _SITES_BUILTIN_DENY: frozenset[str] = frozenset(
 # base. When both PRs land, swap this literal for the imported constant (same
 # None-degrade path as the loom/media imports below). Do NOT drift the id.
 _BELT_GATE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_belt__belt_propose_change"})
+
+# The single tool the /code agent reaches the user's project through. Everything
+# the surface can do to code happens behind it: the tool owns the sandbox, the
+# file session, and the edit. Spelled as a LITERAL for the same reason
+# ``_BELT_GATE_TOOL_IDS`` above is — its canonical constant lives in a SIBLING
+# branch's in-process MCP server (server ``pocketpaw_code``, tool ``code_mode``),
+# not importable on this base. When both PRs land, swap this literal for the
+# imported constant. The id format is the SDK's ``mcp__<server>__<tool>``
+# namespacing (see ``pocketpaw.agents.sdk_mcp_widgets``). Do NOT drift the id.
+_CODE_MODE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_code__code_mode"})
+
+# Built-in SDK tools the /code agent must NOT have. Same mechanism and same
+# reasoning as ``_SITES_BUILTIN_DENY`` above: these bare tool NAMES ride in
+# ``deny_mcp_tool_ids``, and the OSS backend's deny filter subtracts ANY matching
+# id from the launch allow-list — built-ins included — so naming them here
+# physically removes them before the SDK starts.
+#
+# This is load-bearing, not tidiness. The /code agent runs on the BACKEND SERVER,
+# not in the user's project: its cwd is the per-tenant scratch jail, and the
+# user's code is only ever reachable through ``code_mode``. Left in place, the
+# built-ins let the agent read and write the SERVER's filesystem and then report
+# success — a silent wrong-machine failure with no error to notice.
+#
+# ``allowed_sdk_tools`` cannot do this job: it is ADDITIVE (unioned INTO the
+# allow-list, ``effective = (agent_tools ∪ allow) − deny``), and the file/shell
+# built-ins are in the SDK's default set already, so listing them there was a
+# no-op that merely read like a restriction. ``allow_mcp_tool_ids`` cannot either
+# — it filters only ``mcp__*`` ids and never touches built-ins. Deny is the only
+# lever.
+#
+# ``Agent`` is denied for a reason beyond parity with SITES. Under this design
+# ``code_mode`` is the ONLY path to the user's files; a spawned subagent is a
+# SECOND path, with its own tool resolution and no supervision from this profile.
+# Denying the six file/shell tools while leaving the tool that spawns a fresh
+# tool-user would just move the hole one level down.
+#
+# WebSearch / WebFetch / Skill are deliberately NOT denied, the same reasoning
+# SITES gives: researching an API or an error message to write against is
+# legitimate work, and neither one reaches a filesystem.
+_CODE_BUILTIN_DENY: frozenset[str] = frozenset(
+    {"Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"}
+)
+
+# The pocket-AUTHORING tools the /code agent must not hold either.
+#
+# Reported from a live session: with a React project open on /code, "Let's build
+# an employee management app, with components, nice design etc" made the agent
+# create a pocket and author a ripple ui-spec instead of writing React. The user
+# asked for an app and got a dashboard.
+#
+# ``allow_mcp_tool_ids`` does NOT prevent this, which is the whole reason this
+# set exists. CD-3 scoped /code to ``code_mode``, but ``claude_sdk`` deliberately
+# lets three families survive ANY restrictive allow-list: ``POCKET_CREATION_GRANT``
+# (specialist create + planner), ``ALWAYS_ALLOWED_MCP_SERVERS`` (every tool on the
+# ``pocketpaw_pocket`` / ``_specialist`` / ``_planner`` servers), and
+# ``WIDGET_TOOL_IDS``. Those bypasses are RIGHT for a general chat surface — "create
+# a pocket" is the product's core capability and must work from anywhere — and
+# wrong for this one, where the deliverable is the user's code. Deny is applied
+# BEFORE the grant is unioned in, so it is the only lever that reaches them.
+#
+# Prose could not do this job. The preamble already says "do not build widgets,
+# charts, or a ui-spec, and do not create a pocket" and the agent did it anyway —
+# the same result /sites got before it denied these ids outright rather than
+# asking (see ``_SITES_SVELTE_CREATE_DENY``: "prose-only routing was proven to
+# fail"). Two surfaces have now independently confirmed it.
+#
+# READ-ONLY pocket access (``get_pocket`` / ``list_pockets``) is deliberately NOT
+# denied: reading a pocket cannot produce one, and a user on /code may reasonably
+# ask what a pocket contains. The line is drawn at AUTHORING.
+#
+# The widget ids are spelled out rather than imported so the CODE row stays a
+# STATIC profile (no lazy load, no resolver). ``test_code_deny_covers_every_widget
+# _tool`` pins this literal against the real ``WIDGET_TOOL_IDS``, so a widget tool
+# added later fails the suite instead of silently reopening the hole.
+_CODE_POCKET_DENY: frozenset[str] = frozenset(
+    {
+        # POCKET_CREATION_GRANT — survives the allow-list by design.
+        "mcp__pocketpaw_pocket_specialist__create",
+        "mcp__pocketpaw_pocket_planner__plan_pocket",
+        # ALWAYS_ALLOWED_MCP_SERVERS — the authoring verbs on the pocket servers.
+        "mcp__pocketpaw_pocket_specialist__edit",
+        "mcp__pocketpaw_pocket__add_widget",
+        "mcp__pocketpaw_pocket__update_widget",
+        # WIDGET_TOOL_IDS — the ripple catalog that turns "with components, nice
+        # design" into a ui-spec instead of React components.
+        "mcp__pocketpaw_widgets__get_widget_spec",
+        "mcp__pocketpaw_widgets__get_inline_widget_help",
+        "mcp__pocketpaw_widgets__start_flow",
+        # The READ verbs go too. An earlier pass kept them on the reasoning that
+        # reading a pocket cannot produce one — true in isolation, and beside the
+        # point: a pocket the agent can inspect is a pocket it can propose, and
+        # "let me look at how your other dashboard does this" is the first step
+        # back onto the path this profile exists to close. Nothing on /code needs
+        # them; the deliverable is the user's code.
+        "mcp__pocketpaw_pocket__get_pocket",
+        "mcp__pocketpaw_pocket__list_pockets",
+    }
+)
+
+# ``Skill`` goes too, and it is the last door.
+#
+# The bundled skills ship as a Claude Code LOCAL PLUGIN, which is loaded from the
+# SDK ``plugins=`` option independently of ``skill_names`` — so a surface CANNOT
+# withhold ``pocketpaw-create-pocket`` by naming a narrower skill set, and CD-3's
+# empty ``skill_names`` never did. Its description ("create / build a pocket,
+# dashboard, tracker, tool, viewer ... with enterprise-quality design") matches a
+# request like "build an employee management app with components and nice design"
+# almost word for word, which is how the reported bug started.
+#
+# With every pocket tool denied above, invoking that skill can no longer BUILD
+# anything — but it would still cost the user a turn: the agent loads a long
+# instruction telling it to call ``get_widget_spec`` and ``pocket_specialist__
+# create``, attempts them, takes hard errors, and only then finds ``code_mode``.
+# CD-3 made exactly this argument when it dropped the `code` skill from the
+# profile ("absence is recoverable; contradiction is not"); the same reasoning
+# applies to a skill that teaches the wrong deliverable.
+#
+# /code needs no skill: ``CODE_SYSTEM_PROMPT`` is now the agent's whole guidance
+# here, and it is not a document the agent has to go and fetch. If a
+# code-targeted skill is ever written, removing ``Skill`` from this set is the
+# one-line change that admits it.
+_CODE_SKILL_DENY: frozenset[str] = frozenset({"Skill"})
 
 
 class _McpToolIds(NamedTuple):
@@ -420,15 +589,33 @@ SURFACES: list[SurfaceSpec] = [
         SurfaceKind.CODE,
         _route_for(SurfaceKind.CODE),
         code.build_preamble,
-        # Code: edit + run code. Ripple OFF so the agent edits code instead of
-        # building a dashboard; the SDK-tool allowlist scopes it to the coding
-        # built-ins; the `code` skill carries the edit→run→verify loop. No
-        # lazily-loaded MCP tool ids and not meta-aware, so this is a STATIC
-        # profile (no resolver needed).
+        # Code: edit + run code, but NOT on this machine. Ripple OFF so the
+        # agent edits code instead of building a dashboard. The user's project
+        # is reachable ONLY through ``code_mode`` (allow), and the file/shell
+        # built-ins are stripped (deny) because they address the backend
+        # server's own disk, not the project — see ``_CODE_BUILTIN_DENY``. Both
+        # sets are module-level literals, so this stays a STATIC profile (no
+        # lazily-loaded ids, not meta-aware, no resolver needed).
+        #
+        # ``skill_names`` is deliberately EMPTY, where it used to carry the
+        # `code` skill. That skill is not incidentally about the built-ins — it
+        # is entirely about them ("you use the built-in Bash / Read / Write /
+        # Edit / Glob / Grep tools", then a five-step loop built on them), so
+        # under the deny above it would be an injected instruction to call tools
+        # the agent no longer has: the agent attempts them, takes hard errors,
+        # and burns turns before finding the path the preamble already gave it.
+        # Absence is recoverable; contradiction is not. The skill's edit→run→
+        # verify DISCIPLINE is worth keeping and gets retargeted onto
+        # ``code_mode`` in CD-2 — rewriting SKILL.md here would teach a tool that
+        # does not exist yet, which is the same failure pointed the other way.
         profile=SurfaceProfile(
             ripple_mode="off",
-            skill_names=frozenset({"code"}),
-            allowed_sdk_tools=frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep"}),
+            allow_mcp_tool_ids=_CODE_MODE_TOOL_IDS,
+            deny_mcp_tool_ids=_CODE_BUILTIN_DENY | _CODE_POCKET_DENY | _CODE_SKILL_DENY,
+            # The surface's own system prompt, replacing the pocket-shaped
+            # behavioral stack the shared builder would otherwise assemble. See
+            # ``system_prompts.py`` for why a prohibition alone did not hold.
+            system_message_override=CODE_SYSTEM_PROMPT,
         ),
     ),
     SurfaceSpec(
