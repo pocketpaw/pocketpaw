@@ -14,6 +14,11 @@
 # agent everywhere while letting in-flight runs finish. Top-level (not on
 # AgentConfig) so toggling it bumps the doc's ``updatedAt`` and the pool's
 # staleness check + explicit cache invalidation both see the change.
+# Updated 2026-07-15 (feat/agent-scoped-discover-fields, ASG-1): added additive
+# presentation fields for the Agent Gallery / Studio — ``welcome_message``,
+# ``conversation_starters``, ``voice``, ``appearance`` on AgentConfig and
+# ``tags`` on Agent. All defaulted → zero migration; ``visibility``/``owner``/
+# ``workspace`` semantics untouched.
 
 """Agent configuration document."""
 
@@ -56,6 +61,12 @@ class AgentConfig(BaseModel):
             "neuroticism": 0.2,
         }
     )
+    # Presentation fields (ASG-1) — surfaced by the Agent Gallery / Studio.
+    # All additive + defaulted, so existing docs load unchanged (no migration).
+    welcome_message: str = ""
+    conversation_starters: list[str] = Field(default_factory=list)
+    voice: dict | None = None
+    appearance: dict = Field(default_factory=dict)
 
 
 class Agent(TimestampedDocument):
@@ -71,6 +82,8 @@ class Agent(TimestampedDocument):
     # Soft-disable / revoke-everywhere (AW-4). True == the run pool refuses to
     # resolve this agent on any NEW request; in-flight runs are unaffected.
     disabled: bool = False
+    # Free-form gallery tags (ASG-1). Additive + defaulted → no migration.
+    tags: list[str] = Field(default_factory=list)
 
     class Settings:
         name = "agents"
