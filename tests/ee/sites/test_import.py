@@ -428,3 +428,45 @@ async def test_generator_html_payload_omits_assets_when_none(tmp_path):
     await client.build(**_gen_kwargs({"index.html": "<html><body><p>ok</p></body></html>"}))
     assert runner.input_json is not None
     assert "assets" not in runner.input_json
+
+
+# ---- Review fixes: crafted/abnormal members 422 (contract), never 500 ----
+
+
+async def test_import_zip_password_protected_member_is_422(beanie_test_db, monkeypatch):
+    """An encrypted member raises RuntimeError inside the per-entry read; the
+    contract maps it to sites.import_zip_invalid (422), not a 500."""
+    app = _build_app("ws_owner", monkeypatch)
+    data = bytearray(_zip_bytes({"index.html": _INDEX_HTML.encode()}))
+    data[6] |= 0x01  # encryption bit, local file header
+    cd = bytes(data).rfind(b"PK\x01\x02")
+    data[cd + 8] |= 0x01  # encryption bit, central directory (zipfile reads this one)
+    resp = await _post_zip(app, bytes(data))
+    assert resp.status_code == 422, resp.text
+    assert "import_zip_invalid" in resp.text
+    await _assert_nothing_minted()
+
+
+async def test_import_zip_unsupported_compression_is_422(beanie_test_db, monkeypatch):
+    """An exotic compression method (AES marker 99) raises NotImplementedError on
+    read; the contract maps it to 422, not a 500."""
+    app = _build_app("ws_owner", monkeypatch)
+    data = bytearray(_zip_bytes({"index.html": _INDEX_HTML.encode()}))
+    data[8:10] = (99).to_bytes(2, "little")  # local header method field
+    cd = bytes(data).rfind(b"PK\x01\x02")
+    data[cd + 10 : cd + 12] = (99).to_bytes(2, "little")  # central directory too
+    resp = await _post_zip(app, bytes(data))
+    assert resp.status_code == 422, resp.text
+    assert "import_zip_invalid" in resp.text
+    await _assert_nothing_minted()
+
+
+async def test_import_zip_control_char_entry_name_is_422(beanie_test_db, monkeypatch):
+    """Control characters in an entry name (NUL, newline) are generator-side path
+    input — rejected as unsafe, whole import fails closed."""
+    app = _build_app("ws_owner", monkeypatch)
+    data = _zip_bytes({"index.html": _INDEX_HTML.encode(), "a\nb.html": b"<p>x</p>"})
+    resp = await _post_zip(app, data)
+    assert resp.status_code == 422, resp.text
+    assert "import_zip_entry_unsafe" in resp.text
+    await _assert_nothing_minted()

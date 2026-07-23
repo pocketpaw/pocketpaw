@@ -365,8 +365,11 @@ async def import_site(
     the generator's ``assets`` base64 sideband), persist the ``import_report`` on
     the Site doc, and return the SiteResponse (carrying the report).
 
-    The 25MB upload cap is enforced HERE while reading the multipart part — the
-    body is never buffered past cap+1 bytes — and re-checked in the service for
+    The 25MB upload cap gates PROCESSING, not ingress: Starlette's multipart
+    parser spools the whole request body to a temp file before this handler
+    runs, so raw-ingress bounding belongs to the fronting proxy's body limit.
+    The handler reads at most cap+1 bytes of the part, and the cap is re-checked
+    in the service for
     direct callers. Oversized → 413; a malformed/hostile archive → 422 (the
     service's ValidationError codes map through the standard error envelope).
     Tenant-scoped on ctx (fabric.write, sites plan gate at the router level)."""

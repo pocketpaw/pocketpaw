@@ -28,6 +28,9 @@
 # Tenancy: every entry point takes workspace_id/user_id and funnels through the
 # tenant-scoped pockets + sites services; the plan gate (require_sites_plan) runs
 # before any write.
+# Edited 2026-07-23 (security review): crafted/abnormal zip members (bad CRC,
+# encrypted, exotic compression) now map to 422 instead of escaping as 500s;
+# entry names carrying control characters are rejected as unsafe.
 
 from __future__ import annotations
 
@@ -83,6 +86,11 @@ def _safe_entry_path(raw_name: str) -> str:
         raise ValidationError(
             "sites.import_zip_entry_unsafe",
             f"Zip entry {raw_name!r} is an absolute path — archives must be relative.",
+        )
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in name):
+        raise ValidationError(
+            "sites.import_zip_entry_unsafe",
+            f"Zip entry {raw_name!r} contains control characters — not a safe archive path.",
         )
     parts = [p for p in name.split("/") if p not in ("", ".")]
     if not parts:
@@ -143,7 +151,9 @@ def unpack_zip(data: bytes) -> tuple[dict[str, str], dict[str, str]]:
         or the total UNCOMPRESSED size over MAX_IMPORT_UNCOMPRESSED_BYTES
         (decompression bomb; checked incrementally, never fully inflated first);
       * ``sites.import_zip_too_many_entries`` — over MAX_IMPORT_ENTRIES;
-      * ``sites.import_zip_entry_unsafe`` — zip-slip (absolute / ``..`` / backslash);
+      * ``sites.import_zip_entry_unsafe`` — zip-slip (absolute / ``..`` / backslash /
+        control characters — NUL or newline in a to-be-written path is generator input
+        the other side of the seam should never have to defend against);
       * ``sites.import_no_index`` — no index.html at the (flattened) root, which the
         html deploy path requires (its static smoke gates on it)."""
     if len(data) > MAX_IMPORT_ZIP_BYTES:
@@ -181,8 +191,20 @@ def unpack_zip(data: bytes) -> tuple[dict[str, str], dict[str, str]]:
                 "sites.import_zip_too_large",
                 "Import zip inflates past the uncompressed-size cap (decompression bomb?).",
             )
-        with zf.open(info) as fh:
-            blob = fh.read(MAX_IMPORT_UNCOMPRESSED_BYTES + 1)
+        try:
+            with zf.open(info) as fh:
+                blob = fh.read(MAX_IMPORT_UNCOMPRESSED_BYTES + 1)
+        except (zipfile.BadZipFile, RuntimeError, NotImplementedError) as exc:
+            # Per-entry reads raise outside the ZipFile() try above: bad CRC and
+            # lying size headers surface as BadZipFile, password-protected
+            # members as RuntimeError, exotic compression methods as
+            # NotImplementedError. All are a malformed/hostile-or-unsupported
+            # archive, not a server fault — map to the same 422 contract.
+            raise ValidationError(
+                "sites.import_zip_invalid",
+                f"Zip entry {info.filename!r} is unreadable "
+                "(corrupt, encrypted, or an unsupported compression method).",
+            ) from exc
         total_uncompressed += max(0, len(blob) - info.file_size)  # header lied → true bytes
         if total_uncompressed > MAX_IMPORT_UNCOMPRESSED_BYTES:
             raise ValidationError(
