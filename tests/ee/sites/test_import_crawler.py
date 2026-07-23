@@ -476,3 +476,54 @@ async def test_endpoint_rejects_forbidden_seed_with_422(beanie_test_db, monkeypa
     with pytest.raises(ValidationError):
         await import_service.import_from_url(workspace_id=_WS, user_id=_USER, url=seed)
     assert await _SiteDoc.find_one({"workspace": _WS}) is None
+
+
+# --------------------------------------------------------------------------- #
+# Review fixes: redirect scope — off-site 30x rejected; apex->www re-seed
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_same_site_asset_redirect_offsite_is_not_imported():
+    """A same-site asset that 302s to another PUBLIC host must not be fetched or
+    imported — the redirect scope guard blocks it (SSRF was never the issue here;
+    importing foreign content into the tenant's site is)."""
+    seen: list[httpx.Request] = []
+    pages = {
+        ("example.com", "/"): _html(
+            '<html><body><link rel="stylesheet" href="/style.css"></body></html>'
+        ),
+        # same-site asset redirects off to a public third-party host
+        ("example.com", "/style.css"): httpx.Response(
+            302, headers={"location": "https://evil.example/payload.css"}
+        ),
+        ("evil.example", "/payload.css"): httpx.Response(
+            200, headers={"content-type": "text/css"}, content=b"body{color:red}"
+        ),
+    }
+    table = dict(_PUBLIC_IPS) | {"evil.example": ["203.0.113.99"]}
+    result = await _crawl(pages, table=table, seen=seen)
+    # The foreign host was never contacted and nothing foreign was imported.
+    assert all(r.headers.get("host") != "evil.example" for r in seen)
+    assert not any("payload.css" in p for p in result.files)
+    assert any("style.css" in w for w in result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_seed_apex_to_www_redirect_reseeds_and_crawls_whole_site():
+    """The seed redirecting apex->www is the common real case: re-seed to the
+    final host so the whole site imports instead of one page + cross-origin soup."""
+    seen: list[httpx.Request] = []
+    pages = {
+        ("example.com", "/"): httpx.Response(301, headers={"location": "https://www.example.com/"}),
+        ("www.example.com", "/"): _html(
+            '<html><body><h1>Home</h1><a href="/about">About</a></body></html>'
+        ),
+        ("www.example.com", "/about"): _html("<html><body><h1>About</h1></body></html>"),
+    }
+    table = dict(_PUBLIC_IPS) | {"www.example.com": ["93.184.216.34"]}
+    result = await _crawl(pages, table=table, seen=seen)
+    # Both www pages imported — the internal /about link resolved same-site.
+    assert "index.html" in result.files
+    assert any("about" in p for p in result.files), result.files.keys()
+    assert result.stats.pages_fetched == 2

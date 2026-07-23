@@ -21,14 +21,19 @@
 #     the response is aborted the moment a cap is crossed, never buffered past it),
 #     no cookies (jar cleared after every response), no auth, no env proxies
 #     (trust_env=False), an honest User-Agent.
-# Crawl scope: BFS from the seed, EXACT host match only (www./apex are treated as
-# different hosts — documented v1 limitation), depth <= 3, pages <= 50, assets <= 200,
+# Crawl scope: BFS from the seed, EXACT host match only. The seed MAY redirect
+# off-host (apex->www is the common case) — the crawl then re-seeds to the final
+# host so the whole site imports; every OTHER fetch is scope-locked, so a
+# same-site page/asset cannot 30x us into fetching foreign content. Depth <= 3,
+# pages <= 50, assets <= 200,
 # robots.txt honored (simple RobotFileParser matching for our UA + '*'; a failed
 # robots fetch degrades to a polite warning), small politeness delay between fetches.
 # Harvest: pages/assets map to safe relative paths (sanitized through import_service's
 # ``_safe_entry_path`` — the SAME rule zip entries pass), absolute same-origin URLs in
 # HTML/CSS are rewritten root-relative, CSS url()/@import refs are chased same-origin.
 # Cross-origin refs are left as-is and counted for the import report.
+# Edited 2026-07-23 (SSRF review): redirect scope guard (off-host 30x rejected
+# for non-seed fetches) + seed apex->www re-seed; opposite-scheme origin rewrite.
 
 """Same-site crawler with SSRF-hardened fetching for Paw Sites URL imports."""
 
@@ -286,8 +291,15 @@ class SafeFetcher:
                 )
         return ips[0]
 
-    async def fetch(self, url: str) -> FetchResult:
-        """GET ``url`` with the full SSRF pipeline, following redirects manually."""
+    async def fetch(self, url: str, *, allowed_host: str | None = None) -> FetchResult:
+        """GET ``url`` with the full SSRF pipeline, following redirects manually.
+
+        Every hop is SSRF-revalidated regardless. ``allowed_host`` adds an
+        orthogonal SCOPE guard: when set, a redirect that leaves that host
+        raises ``sites.import_crawl_offsite_redirect`` so a same-site asset/page
+        can't 30x us into fetching (and deploying) foreign content. The seed
+        fetch passes ``None`` — the caller re-seeds the crawl host from the
+        final URL instead (so an apex->www redirect imports the whole site)."""
         current = url
         for _hop in range(MAX_REDIRECTS + 1):
             parsed = validate_seed_url(current)
@@ -297,6 +309,12 @@ class SafeFetcher:
                 if not location:
                     raise CrawlError("redirect response carried no Location header")
                 current = urljoin(current, location)
+                if allowed_host is not None and urlparse(current).netloc.lower() != allowed_host:
+                    raise CrawlError(
+                        f"redirect left the site ({allowed_host} -> "
+                        f"{urlparse(current).netloc.lower()})",
+                        code="sites.import_crawl_offsite_redirect",
+                    )
                 continue
             return FetchResult(url=current, status=status, content_type=content_type, body=body)
         raise CrawlError(f"too many redirects (max {MAX_REDIRECTS})")
@@ -508,22 +526,51 @@ async def crawl_site(
 
     delay = POLITENESS_DELAY_SEC if politeness_delay is None else politeness_delay
     seed = validate_seed_url(url)
-    seed_netloc = seed.netloc.lower()
-    origins = [f"{seed.scheme}://{seed.netloc}", f"//{seed.netloc}"]
+    # Crawl scope is MUTABLE: if the seed redirects to another host (apex->www,
+    # the overwhelmingly common case), we re-seed to the final host after the
+    # seed fetch so the whole site imports instead of a lone page + a wall of
+    # cross-origin warnings. `scope["netloc"]`/`scope["origins"]` are what
+    # `_same_site` and the URL rewrite read, so updating them re-homes the crawl.
+    scope: dict[str, Any] = {
+        "netloc": seed.netloc.lower(),
+        # Both schemes + protocol-relative, longest-first (see _origins_for).
+        "origins": [
+            f"https://{seed.netloc}",
+            f"http://{seed.netloc}",
+            f"//{seed.netloc}",
+        ],
+    }
 
     result = CrawlResult()
     fetcher = SafeFetcher(total_byte_cap=total_byte_cap, transport=transport, resolver=resolver)
     fetched_once = False
 
-    async def _polite_fetch(target: str) -> FetchResult:
+    async def _polite_fetch(target: str, *, allowed_host: str | None = None) -> FetchResult:
         nonlocal fetched_once
         if fetched_once and delay > 0:
             await asyncio.sleep(delay)
         fetched_once = True
-        return await fetcher.fetch(target)
+        return await fetcher.fetch(target, allowed_host=allowed_host)
+
+    def _origins_for(scheme: str, netloc: str) -> list[str]:
+        # Longest first so str.replace peels "scheme://host" before "//host".
+        # Both schemes are listed: a page served over https routinely hard-codes
+        # http://its-own-host refs, and rewriting only the matching scheme would
+        # mangle the other to "http:/path".
+        return [
+            f"https://{netloc}",
+            f"http://{netloc}",
+            f"//{netloc}",
+        ]
+
+    def _reseed(final_url: str) -> None:
+        """Re-home the crawl scope to the seed's post-redirect host."""
+        final = urlparse(final_url)
+        scope["netloc"] = final.netloc.lower()
+        scope["origins"] = _origins_for(final.scheme, final.netloc)
 
     def _same_site(candidate: Any) -> bool:
-        return candidate.scheme in ("http", "https") and candidate.netloc.lower() == seed_netloc
+        return candidate.scheme in ("http", "https") and candidate.netloc.lower() == scope["netloc"]
 
     def _claim_path(rel: str, source_url: str) -> str | None:
         """Sanitize + reserve a FileMap path; None (with a warning) when unsafe
@@ -573,7 +620,12 @@ async def crawl_site(
                     )
                 continue
             try:
-                fetched = await _polite_fetch(page_url)
+                # The seed may redirect off-host (apex->www): let it, then
+                # re-seed. Every OTHER fetch is scope-locked so a same-site
+                # resource can't redirect us into importing foreign content.
+                fetched = await _polite_fetch(
+                    page_url, allowed_host=None if is_seed else scope["netloc"]
+                )
             except CrawlBudgetExceeded:
                 raise
             except (CrawlError, ValidationError, httpx.HTTPError) as exc:
@@ -584,6 +636,8 @@ async def crawl_site(
                     ) from exc
                 result.warnings.append(f"skipped {page_url} — fetch failed")
                 continue
+            if is_seed and urlparse(fetched.url).netloc.lower() != scope["netloc"]:
+                _reseed(fetched.url)
             if fetched.status != 200:
                 if is_seed:
                     raise CrawlError(
@@ -645,7 +699,9 @@ async def crawl_site(
 
             rel = _claim_path(_rel_path_for_page(parsed_final.path), page_url)
             if rel:
-                result.files[rel] = _rewrite_same_origin(html_text, origins).encode("utf-8")
+                result.files[rel] = _rewrite_same_origin(html_text, scope["origins"]).encode(
+                    "utf-8"
+                )
 
         # ------------------------------------------------------------------- #
         # Assets (CSS refs chase same-origin, so the queue can grow here).
@@ -656,7 +712,7 @@ async def crawl_site(
                 result.stats.skipped_by_robots += 1
                 continue
             try:
-                fetched = await _polite_fetch(asset_url)
+                fetched = await _polite_fetch(asset_url, allowed_host=scope["netloc"])
             except CrawlBudgetExceeded:
                 raise
             except (CrawlError, ValidationError, httpx.HTTPError):
@@ -683,7 +739,7 @@ async def crawl_site(
                         _note_cross_origin(absolute)
                         continue
                     _note_asset(_normalize(absolute))
-                result.files[rel] = _rewrite_same_origin(css_text, origins).encode("utf-8")
+                result.files[rel] = _rewrite_same_origin(css_text, scope["origins"]).encode("utf-8")
             else:
                 result.files[rel] = fetched.body
             result.stats.assets_fetched += 1
