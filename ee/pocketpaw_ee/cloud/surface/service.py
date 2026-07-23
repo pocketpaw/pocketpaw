@@ -66,6 +66,13 @@
 # tool (``_BELT_GATE_TOOL_IDS``). The gate tool id is a literal here because its
 # constant lives in a SIBLING branch's ``agent/mcp_servers/belt.py`` — the
 # import reconciles when both PRs land.
+# Changes: 2026-07-23 (feat/ship-surface-kind, SHIP-8a) — the declarative
+# ``SURFACES`` registry gains the SHIP row (the managed-deploy control plane).
+# ``resolve_profile`` sources it like every other row (SR-2): SHIP carries a
+# ``profile_resolver`` (``_ship_profile``) because it needs the lazily-loaded
+# ``SHIP_TOOL_IDS`` allow-list, so it joins FORESIGHT / FILES / STUDIO / BELT as
+# the ripple-OFF, MCP-scoped surfaces resolved off the registry — no code change
+# in this module (the registry is the single source of truth).
 
 from __future__ import annotations
 
@@ -160,7 +167,7 @@ def resolve_profile(surface_kind: SurfaceKind, meta: SurfaceMeta) -> SurfaceProf
     carries no profile) returns ``_DEFAULT_PROFILE`` (``ripple_mode="on"``), so
     the only surface that deviates from a plain ripple-on default is /sites
     svelte-create plus the explicitly-scoped FORESIGHT / FILES / STUDIO / CODE /
-    BELT rows — exactly today's behavior.
+    BELT / SHIP rows — exactly today's behavior.
     """
     spec = _spec_by_kind().get(surface_kind)
     if spec is None:
