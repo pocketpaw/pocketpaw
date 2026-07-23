@@ -31,11 +31,16 @@
 #
 # On metering, which the PRD left open: a ``code_mode`` call spends nothing
 # here. This handler calls no model — it parks on a future. The model spend
-# happens when the BROWSER calls ``POST /codeagent/turn``, which meters itself
-# (see ``codeagent/router.py``: its workspace check exists because "this route
-# spends money"). One delegated task therefore bills exactly once, on the route
-# that actually buys the tokens. There is no second meter to reconcile and
-# nothing to double-count.
+# happens on the BROWSER side, where the tab actually runs the task and buys the
+# tokens; that path meters itself. One delegated task therefore bills exactly
+# once, on the side that does the work. There is no second meter here to
+# reconcile and nothing to double-count.
+#
+# NOTE (2026-07-23): the browser used to do that work by calling the
+# ``/codeagent/turn`` sub-agent, which is now removed. The metering principle is
+# unchanged — the backend park is free, the browser-side model call is not — but
+# which endpoint the tab now hits for the work is the frontend replacement's
+# concern, not this tool's.
 #
 # The tool id namespaces as ``mcp__pocketpaw_code__code_mode``. The /code
 # SurfaceProfile hardcodes that exact string as a literal (CD-3 shipped before
@@ -128,9 +133,13 @@ def _normalize_mode(raw: Any) -> str:
         if mode in _MODES:
             return mode
         if mode:
-            logger.warning("code_mode: unrecognized mode %r, falling back to %s", raw, _DEFAULT_MODE)
+            logger.warning(
+                "code_mode: unrecognized mode %r, falling back to %s", raw, _DEFAULT_MODE
+            )
     elif raw is not None:
-        logger.warning("code_mode: non-string mode %r, falling back to %s", type(raw), _DEFAULT_MODE)
+        logger.warning(
+            "code_mode: non-string mode %r, falling back to %s", type(raw), _DEFAULT_MODE
+        )
     return _DEFAULT_MODE
 
 

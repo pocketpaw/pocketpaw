@@ -1,15 +1,17 @@
-# __init__.py — the Code Mode agent turn (CA-1).
-# Created 2026-07-21 (feat/codeagent-turn): a 4-file cloud entity (domain / dto /
-# service / router) for a STATELESS agent turn. Unlike every other Code Mode
-# module it owns no persisted state and reaches no sandbox — the client sends
-# the context it read through its own CodeFileSession, which is what lets one
-# endpoint serve both the Daytona and WebContainer runtimes. Supersedes
-# websandbox/edit.py (deleted in CA-4).
+# __init__.py — the Code Mode delegate channel.
 #
-# Modified: 2026-07-22 (CD-1). Adds a fifth file, ``delegates.py`` — the
-# browser-delegate channel. It breaks the 4-file shape on purpose: it is not
-# another entity but the transport under one route, and the same "the work
-# happens in the browser" constraint that made the turn stateless is what makes
-# a backend tool have to park on a future and wait for the tab to answer.
-# Keeping that rendezvous out of ``service.py`` keeps that file about calling a
-# model.
+# History: this package started (2026-07-21, CA-1) as a 4-file cloud entity for a
+# STATELESS agent turn — a second, self-contained model loop reached at
+# ``POST /codeagent/turn``. That turn-agent was removed 2026-07-23
+# (remove/codeagent-turn-agent): the /code surface runs on the MAIN PocketPaw
+# cloud agent now, which already streams and handles tools through the claude_sdk
+# backend, so a parallel in-module agent (with its own keyless-CLI transport and
+# prompts) was redundant and weaker.
+#
+# What remains is the browser-delegate channel (CD-1, ``delegates.py`` + the
+# ``/codeagent/resolve`` route). The main agent's ``code_mode`` tool parks on a
+# future and the browser wakes it by POSTing its answer back — the same "the work
+# happens in the browser" constraint that once made the turn stateless is what
+# makes a backend tool have to park and wait for the tab. ``service.py`` is now a
+# thin router→service pass-through for the resolve route; the rendezvous logic
+# lives in ``delegates.py``.

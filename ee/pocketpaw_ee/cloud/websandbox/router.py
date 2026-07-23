@@ -30,8 +30,10 @@
 # and ``websandbox/edit.py`` with it. The route was row-addressed, and it read the
 # file off the VM's disk to build context — so a runtime without a backend row
 # (WebContainers, which runs in the user's tab) had nothing for it to read, and
-# Cmd-K shipped disabled there. ``POST /codeagent/turn`` with ``mode: "edit"``
-# replaces it: the client sends the code, so one path serves both runtimes.
+# Cmd-K shipped disabled there. Its replacement was the ``/codeagent/turn``
+# sub-agent, which is itself now removed (2026-07-23) — the /code surface runs on
+# the main PocketPaw agent, so AI edits go through that path, not a websandbox
+# route.
 #
 # Changed 2026-07-16 (WC-7/P4a, feat/code-mode): added the git write-path routes —
 # ``GET /websandbox/{row_id}/git/status`` and ``POST .../git/stage|commit|push``.

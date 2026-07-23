@@ -45,22 +45,29 @@ logger = logging.getLogger(__name__)
 #
 # This is a MACHINE round trip, not a human decision, so ``plan_mode``'s 300s
 # (a person reading a plan and clicking approve) is the wrong reference. The
-# right lower bound is the browser's own work: the delegate frame kicks off at
-# least one ``POST /codeagent/turn``, and that call alone is capped at
-# ``MODEL_TIMEOUT_SECONDS`` = 120. Anything under two minutes would therefore
-# expire the delegate BEFORE the sub-agent's own model call could even fail, and
-# the user would be told "the browser did not answer" about a browser that was
-# still working.
+# right lower bound is the browser's own work: on receiving a delegate frame the
+# tab runs at least one model call to answer it, and a single model call is
+# comfortably a two-figure number of seconds. Anything under a couple of minutes
+# would expire the delegate BEFORE the browser's own model call could even fail,
+# and the user would be told "the browser did not answer" about a browser that
+# was still working.
 #
 # 180 is that floor plus headroom for the SSE hop and the client's own fs reads.
-# It deliberately does NOT cover the worst case — Code Mode's retrieval loop can
-# run up to ``MAX_TOOL_ITERATIONS`` rounds, which no bounded park would survive.
-# That is the correct trade: this number is a LIVENESS guarantee for the chat
-# turn, not a spend budget for the sub-agent. A long task that overruns it
-# reports a clean timeout instead of holding a stream open indefinitely.
+# It deliberately does NOT cover the worst case — a browser-side task that runs a
+# multi-round tool loop can outlast any bounded park. That is the correct trade:
+# this number is a LIVENESS guarantee for the chat turn, not a spend budget for
+# whatever the tab is doing. A long task that overruns it reports a clean timeout
+# instead of holding a stream open indefinitely.
 #
 # A spike will tune this against real delegate latencies; it is a module
 # constant so that tuning is a one-line change with no call sites to chase.
+#
+# NOTE (2026-07-23): the exact "≥120s model cap" figure this once cited came from
+# the removed ``/codeagent/turn`` sub-agent. That agent is gone; the browser now
+# answers a delegate through the main-agent path. The floor reasoning is
+# unchanged — a model call still takes real time — but the precise cap depends on
+# the browser-side replacement, so tune against a live measurement, not this
+# number.
 CODE_DELEGATE_TIMEOUT_SECONDS = 180.0
 
 # Ceiling on the payload the browser may post back. The client caps what it
@@ -325,8 +332,8 @@ async def delegate_to_browser(
     to say — "there is no browser attached" is a different problem from "the
     browser was slow".
 
-    ``registry`` and ``push`` are DI seams, matching the ``client=`` seam
-    ``service.run_turn`` uses so the suite runs with no stream and no network.
+    ``registry`` and ``push`` are DI seams so the suite runs with no live SSE
+    stream and no network — the registry is injected and the push is captured.
     """
     reg = get_pending_delegates() if registry is None else registry
 
