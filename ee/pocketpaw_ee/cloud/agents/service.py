@@ -7,9 +7,17 @@ Sole owner of writes to the ``Agent`` Beanie document. Module-level
 
 Public API:
 - ``create(ctx, workspace_id, body)``
-- ``get(agent_id)``
+- ``get(agent_id)`` — unguarded load (internal / privileged callers only)
+- ``get_for_viewer(agent_id, workspace_id, user_id)`` — visibility-gated read
+- ``can_read_agent(doc, workspace_id, user_id)`` /
+  ``can_use_agent(doc, workspace_id, user_id)`` — the canonical visibility
+  predicate (owner always; else same-workspace + ``workspace`` visibility; else
+  ``public``), mirroring the DM path in ``group_service.get_or_create_agent_dm``
+- ``ensure_can_read`` / ``ensure_can_use`` — raise ``NotFound`` when the caller
+  may not read / attach the agent (knowledge reads + group/pocket attach)
 - ``get_by_slug(workspace_id, slug)``
-- ``list_agents(workspace_id, query=None)``
+- ``list_agents(workspace_id, query=None, viewer_user_id=None)`` — pass
+  ``viewer_user_id`` on tenant reads to hide other users' ``private`` agents
 - ``update(ctx, agent_id, body)``
 - ``delete(ctx, agent_id)``
 - ``disable(ctx, agent_id)`` / ``enable(ctx, agent_id)`` — soft-disable / revoke
@@ -33,6 +41,13 @@ never leak into the scoped gallery. Also threaded the additive presentation
 fields (``welcome_message`` / ``conversation_starters`` / ``voice`` /
 ``appearance`` on config, ``tags`` on the agent) through the doc↔domain mappers,
 ``create`` and ``update`` so they persist and round-trip on the wire.
+Updated 2026-07-15 (fix/agent-visibility-enforcement, ASG-7): "private means
+private" is now enforced on READS. Added the canonical visibility predicate
+``can_read_agent`` / ``can_use_agent`` and the gated entry points
+``get_for_viewer`` / ``ensure_can_read`` / ``ensure_can_use``; ``list_agents``
+grew a ``viewer_user_id`` filter. The tenant HTTP router routes reads through
+these; the unguarded ``get`` / unfiltered ``list_agents`` stay for internal
+callers. Mutation guards (``require_agent_owner_or_admin``) are unchanged.
 """
 
 from __future__ import annotations
@@ -314,14 +329,95 @@ async def create(ctx: RequestContext, workspace_id: str, body: CreateAgentReques
     return agent
 
 
-async def get(agent_id: str) -> Agent:
+async def _load_doc_or_none(agent_id: str) -> _AgentDoc | None:
+    """Load an Agent doc by id, tolerating a malformed id (returns ``None``)."""
     try:
-        doc = await _AgentDoc.get(PydanticObjectId(agent_id))
+        return await _AgentDoc.get(PydanticObjectId(agent_id))
     except Exception:
-        doc = None
+        return None
+
+
+def can_read_agent(doc: _AgentDoc, workspace_id: str | None, user_id: str | None) -> bool:
+    """Return ``True`` if the viewer may READ this agent's config / knowledge.
+
+    Policy (the canonical visibility predicate — mirrors the DM path in
+    ``chat.group_service.get_or_create_agent_dm``): the owner always may; else a
+    same-workspace viewer may read a ``workspace``-visible agent; else anyone may
+    read a ``public`` agent. A ``private`` agent is readable only by its owner.
+    """
+    if user_id is not None and doc.owner == user_id:
+        return True
+    if (
+        doc.visibility == "workspace"
+        and workspace_id is not None
+        and doc.workspace == workspace_id
+    ):
+        return True
+    return doc.visibility == "public"
+
+
+def can_use_agent(doc: _AgentDoc, workspace_id: str | None, user_id: str | None) -> bool:
+    """Return ``True`` if the acting user may USE (attach / run) this agent.
+
+    Same policy as :func:`can_read_agent` — if you can read the agent you may
+    wire it into a group or pocket. Kept as a distinct name so attach-path call
+    sites read as a USE decision, not a READ decision.
+    """
+    return can_read_agent(doc, workspace_id, user_id)
+
+
+async def get(agent_id: str) -> Agent:
+    """Load an agent by id WITHOUT a visibility check.
+
+    Internal / privileged callers (run pool, planner, surface preambles that
+    apply their own workspace guard) use this. Tenant-facing HTTP reads must
+    use :func:`get_for_viewer` so another user's ``private`` agent stays hidden.
+    """
+    doc = await _load_doc_or_none(agent_id)
     if doc is None:
         raise NotFound("agent", agent_id)
     return _to_domain(doc)
+
+
+async def get_for_viewer(
+    agent_id: str, workspace_id: str | None, user_id: str | None
+) -> Agent:
+    """Load an agent by id, enforcing visibility for ``user_id``.
+
+    Raises ``NotFound`` when the viewer may not read the agent — a private or
+    cross-workspace agent is indistinguishable from a missing one, so a leaked
+    id never confirms its existence.
+    """
+    doc = await _load_doc_or_none(agent_id)
+    if doc is None or not can_read_agent(doc, workspace_id, user_id):
+        raise NotFound("agent", agent_id)
+    return _to_domain(doc)
+
+
+async def ensure_can_read(
+    agent_id: str, workspace_id: str | None, user_id: str | None
+) -> None:
+    """Raise ``NotFound`` unless ``user_id`` may READ the agent.
+
+    Used by the knowledge-read endpoints, which key on the ``agent:{id}`` kb
+    scope but must not serve a private agent's knowledge to a non-owner.
+    """
+    doc = await _load_doc_or_none(agent_id)
+    if doc is None or not can_read_agent(doc, workspace_id, user_id):
+        raise NotFound("agent", agent_id)
+
+
+async def ensure_can_use(
+    agent_id: str, workspace_id: str | None, user_id: str | None
+) -> None:
+    """Raise ``NotFound`` unless ``user_id`` may USE (attach) the agent.
+
+    Used by the group + pocket attach paths so a group admin / pocket editor
+    cannot wire in another user's ``private`` agent.
+    """
+    doc = await _load_doc_or_none(agent_id)
+    if doc is None or not can_use_agent(doc, workspace_id, user_id):
+        raise NotFound("agent", agent_id)
 
 
 async def get_by_slug(workspace_id: str, slug: str) -> Agent:
@@ -334,8 +430,28 @@ async def get_by_slug(workspace_id: str, slug: str) -> Agent:
     return _to_domain(doc)
 
 
-async def list_agents(workspace_id: str, *, query: str | None = None) -> list[Agent]:
+async def list_agents(
+    workspace_id: str,
+    *,
+    query: str | None = None,
+    viewer_user_id: str | None = None,
+) -> list[Agent]:
+    """List a workspace's agents.
+
+    When ``viewer_user_id`` is supplied (tenant-facing reads), the result is
+    narrowed to the set that viewer may READ within the workspace: their own
+    agents plus any ``workspace``- or ``public``-visible agent — mirroring
+    :func:`can_read_agent` scoped to the workspace. Another user's ``private``
+    agents are excluded. Internal / privileged callers (planner, kb
+    aggregation) omit ``viewer_user_id`` and get every workspace agent.
+    """
     filters: dict[str, Any] = {"workspace": workspace_id}
+    if viewer_user_id is not None:
+        filters["$or"] = [
+            {"owner": viewer_user_id},
+            {"visibility": "workspace"},
+            {"visibility": "public"},
+        ]
     if query:
         filters["name"] = {"$regex": query, "$options": "i"}
     docs = await _AgentDoc.find(filters).to_list()
@@ -691,12 +807,17 @@ async def ensure_default_agent_all_workspaces() -> int:
 
 
 __all__ = [
+    "can_read_agent",
+    "can_use_agent",
     "create",
     "delete",
     "discover",
+    "ensure_can_read",
+    "ensure_can_use",
     "ensure_default_agent_all_workspaces",
     "get",
     "get_by_slug",
+    "get_for_viewer",
     "get_persona",
     "get_scopes",
     "get_workspace",

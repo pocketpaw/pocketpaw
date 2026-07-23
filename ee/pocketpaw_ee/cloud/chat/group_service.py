@@ -3,6 +3,12 @@
 Sole owner of writes to the ``Group`` Beanie document. Module-level
 ``async def`` API. The doc → domain mapping helpers (formerly in
 ``repositories.py``) live alongside the public API as private helpers.
+
+Updated: 2026-07-15 (fix/agent-visibility-enforcement, ASG-7) — ``add_agent``
+now gates on ``agents.service.ensure_can_use`` in addition to the
+workspace-membership check, so a group admin can no longer attach another
+user's PRIVATE agent (the DM path already enforced this in
+``get_or_create_agent_dm``).
 """
 
 from __future__ import annotations
@@ -907,10 +913,21 @@ async def _require_agent_in_workspace(agent_id: str, workspace_id: str) -> None:
 
 
 async def add_agent(group_id: str, user_id: str, body: AddGroupAgentRequest) -> None:
-    """Add an agent to a group. Owner only."""
+    """Add an agent to a group. Owner only.
+
+    Visibility gate (ASG-7): the acting admin must be able to USE the agent, not
+    merely find it in the workspace. Without this a group admin could attach
+    another user's PRIVATE agent and every member would then run it. Reuses the
+    canonical predicate in ``agents.service.can_use_agent`` via ``ensure_can_use``
+    (owner always; else same-workspace + ``workspace`` visibility; else
+    ``public``) — a foreign private agent surfaces as ``NotFound``.
+    """
+    from pocketpaw_ee.cloud.agents import service as agents_service
+
     group = await _get_group_domain_or_404(group_id)
     _require_domain_group_admin(group, user_id)
     await _require_agent_in_workspace(body.agent_id, group.workspace_id)
+    await agents_service.ensure_can_use(body.agent_id, group.workspace_id, user_id)
 
     for existing in group.agents:
         if existing.agent_id == body.agent_id:
