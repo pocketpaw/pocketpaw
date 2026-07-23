@@ -1,4 +1,19 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-23 (feat/site-dedicated-agent) — auto-provision a DEDICATED
+#   concierge agent per site. (1) create_widget: when the request carries NO
+#   agent_id and the pocket resolves to a published Site, provision + bind one
+#   dedicated agent after insert (via agent_provisioning.provision_widget_on_create)
+#   and return the widget with agent_id set; a plain (non-site) widget stays unbound;
+#   FAILURE-SOFT (a provision error logs + returns the widget unbound, never 500s
+#   the create). A manual agent_id is honored and never replaced. (2)
+#   update_site_concierge_settings: flipping concierge_enabled ON provisions the
+#   site's widget when it is still unbound (provision_on_concierge_enable), also
+#   failure-soft. (3) _pawbar_frame_config now carries ``starters`` (the bound
+#   agent's conversation starters, capped 4, empty default) — the owner preview
+#   frame threads the bound agent's starters (via _bound_agent_starters); the public
+#   frame passes []. The ASG-1 identity fields (welcome_message/conversation_starters)
+#   and agent free-form tags are ABSENT on this branch, so their seeding degrades to
+#   a graceful no-op (the unbound-chat 409 invariant is unchanged).
 # Updated: 2026-07-17 (D5 owner preview frame) — added GET
 #   /paw-bar/admin/site/{site_id}/preview-frame → the concierge bar frame HTML for
 #   the OWNER to test inside the dashboard. SESSION-authed (paw_bar.read role gate)
@@ -428,6 +443,7 @@ def _pawbar_frame_config(
     api_base: str,
     parent_origin: str,
     greeting: str,
+    starters: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the ``window.__PAWBAR__`` bootstrap config shared by the public frame
     and the owner preview frame (D5).
@@ -437,6 +453,12 @@ def _pawbar_frame_config(
     only in WHERE the values come from — the public frame reads ``siteKey`` +
     ``parentOrigin`` from the world-visible key + allowlist, the owner preview from
     the resolved Site + the dashboard origin — and in the CSP ancestor they set.
+
+    ``starters`` are the bound agent's conversation starters (feat/site-dedicated-
+    agent, E3): additive, capped at 4, defaulting to an empty list so a frame with
+    no starters is unchanged. On this branch the Agent model carries no
+    ``conversation_starters`` field (the ASG-1 identity fields are absent), so
+    callers pass ``[]`` today — the wire is in place for when those fields land.
     """
     return {
         "siteKey": site_key,
@@ -447,8 +469,32 @@ def _pawbar_frame_config(
         # D1 / SS-6 — the owner's opening line; the glass app renders it (D4) and
         # falls back to its own default when "".
         "greeting": greeting or "",
+        # E3 — the bound agent's conversation starters (capped 4).
+        "starters": (starters or [])[:4],
         "tokens": {},
     }
+
+
+async def _bound_agent_starters(agent_id: str) -> list[str]:
+    """Best-effort conversation starters for a widget's BOUND agent (E3).
+
+    Returns the bound agent's ``conversation_starters`` (capped 4) for the frame
+    config, or ``[]`` when the widget is unbound, the agent is gone, or the Agent
+    model carries no ``conversation_starters`` field. NOTE: the ASG-1 identity
+    fields are ABSENT on this branch, so ``getattr`` misses and this returns ``[]``
+    today — the read is in place so starters flow the moment the field lands. Any
+    lookup failure degrades to ``[]`` (the frame must still render).
+    """
+    if not agent_id:
+        return []
+    try:
+        from pocketpaw_ee.cloud.agents import service as agents_service
+
+        agent = await agents_service.get(agent_id)
+    except Exception:  # noqa: BLE001 — a starter read must never break the frame
+        return []
+    starters = getattr(agent.config, "conversation_starters", None) or []
+    return list(starters)[:4]
 
 
 def _dashboard_origin() -> str:
@@ -520,12 +566,19 @@ async def frame(
     # validated against the allowlist. ``siteKey`` in the page is fine — it is a
     # world-visible embed key by design.
     api_base = request.url.path.rsplit("/paw-bar/frame", 1)[0]
+    # E3 — the bound agent's conversation starters ride the config. The public
+    # frame is pre-auth (keyed on the world-visible embed key, no session) and does
+    # not load the widget here, so it defaults to []; the bound-agent starters are
+    # surfaced through the owner preview frame (below), where the widget is already
+    # resolved workspace-scoped. On this branch the value is [] regardless (the
+    # Agent ``conversation_starters`` field is absent — ASG-1 not merged here).
     config = _pawbar_frame_config(
         site_key=key,
         widget_id=w or "",
         api_base=api_base,
         parent_origin=_safe_parent_origin(po, site.allowed_origins),
         greeting=site.concierge_greeting or "",
+        starters=[],
     )
     html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT)
     return HTMLResponse(
@@ -652,7 +705,18 @@ async def create_widget(
         per_customer_limit_per_min=req.per_customer_limit_per_min,
         event_mapping=req.event_mapping,
     )
-    return await _store().create_widget(widget)
+    created = await _store().create_widget(widget)
+    # Auto-provision a DEDICATED concierge agent (feat/site-dedicated-agent). Only
+    # when the caller bound NO agent_id and the pocket resolves to a published Site
+    # — a plain (non-site) widget stays unbound. Failure-soft: a provisioning error
+    # logs and returns the widget UNBOUND rather than 500-ing the create (chat then
+    # 409s and the dashboard offers a manual create). A manual agent_id is honored
+    # and never replaced (the trigger returns early on a bound widget).
+    if not req.agent_id:
+        from pocketpaw_ee.paw_bar.agent_provisioning import provision_widget_on_create
+
+        created = await provision_widget_on_create(created, workspace_id)
+    return created
 
 
 @router.get(
@@ -932,11 +996,27 @@ async def update_site_concierge_settings(
     every time), so toggling ``concierge_enabled`` off silences the bar immediately.
     """
     site = await _load_site_scoped(site_id, workspace_id)
+    # Track whether this PATCH flips the concierge ON, so we can auto-provision the
+    # dedicated agent for a site whose widget is still unbound (the owner enabling
+    # the concierge is a natural provision point, alongside widget-create).
+    enabling = (
+        "concierge_enabled" in req.model_fields_set
+        and req.concierge_enabled is True
+        and not site.concierge_enabled
+    )
     for name in req.model_fields_set:
         value = getattr(req, name)
         if value is not None:
             setattr(site, name, value)
     await site.save()
+
+    # Concierge-enable provisioning trigger (feat/site-dedicated-agent). Failure-
+    # soft: a provisioning error logs and never fails this settings PATCH.
+    if enabling:
+        from pocketpaw_ee.paw_bar.agent_provisioning import provision_on_concierge_enable
+
+        await provision_on_concierge_enable(site, workspace_id)
+
     return ConciergeSettingsResponse(
         site_id=str(site.id),
         concierge_enabled=site.concierge_enabled,
@@ -1389,6 +1469,9 @@ async def get_site_preview_frame(
         raise HTTPException(status_code=500, detail="dashboard_origin_invalid")
 
     api_base = request.url.path.split("/paw-bar/", 1)[0]
+    # E3 — thread the BOUND agent's conversation starters (capped 4). The widget was
+    # resolved workspace-scoped above, so reading its agent's starters here is safe
+    # (no cross-tenant reach). [] on this branch until the ASG-1 identity fields land.
     config = _pawbar_frame_config(
         site_key=site.signed_key,
         widget_id=widget.id,
@@ -1397,6 +1480,7 @@ async def get_site_preview_frame(
         # glass app's postMessage targetOrigin is a clean scheme://host[:port].
         parent_origin=_safe_parent_origin(dash, [dash]),
         greeting=site.concierge_greeting or "",
+        starters=await _bound_agent_starters(widget.agent_id),
     )
     html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT)
     return HTMLResponse(

@@ -1,6 +1,12 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-07-23 (feat/site-dedicated-agent): added the public
+# ``canonical_site_for_pocket(workspace_id, pocket_id)`` — a thin, tenant-scoped
+# wrapper over the private ``_canonical_site_doc`` so the paw-bar concierge
+# auto-provisioner resolves a pocket to its live Site through the SAME dedupe-aware
+# logic (never reaching into a private helper). Read-only; no write-path change.
+#
 # Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): ``publish`` /
 # ``_deploy_site_doc`` gain an OPTIONAL ``assets`` pass-through — the base64 binary
 # sideband ({path: base64}) an html IMPORT sends alongside its text ``source`` map.
@@ -2311,6 +2317,17 @@ async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | N
     # Prefer the newest doc that carries a real url (the freshest live build);
     # fall back to the newest doc overall when none has one.
     return next((d for d in docs if d.url), docs[0])
+
+
+async def canonical_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
+    """Public: the ONE canonical Site doc for (workspace, pocket_id), or None.
+
+    Thin, tenant-scoped wrapper over ``_canonical_site_doc`` so callers outside
+    this module (the paw-bar concierge auto-provisioner) resolve a pocket to its
+    live Site through the SAME dedupe-aware logic the rest of the sites stack uses,
+    without reaching into a private helper.
+    """
+    return await _canonical_site_doc(workspace_id, pocket_id)
 
 
 # ---------------------------------------------------------------------------
