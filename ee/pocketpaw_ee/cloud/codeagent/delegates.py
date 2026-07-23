@@ -1,18 +1,21 @@
 # delegates.py — The browser-delegate channel for Code Mode (CD-1).
 #
-# Created 2026-07-22 (feat/code-delegate-channel). The main chat agent is about
-# to gain ONE tool, ``code_mode``, that hands a coding task to the Code Mode
-# sub-agent. That tool runs in the BACKEND, but the work has to happen in the
-# USER'S BROWSER — a WebContainer project runs in the tab and has no server-side
-# row for a backend to reach, which is the same constraint that shaped the rest
-# of this module (see ``service.py``: the server never opens a file).
+# Created 2026-07-22 (feat/code-delegate-channel). Reshaped 2026-07-24
+# (feat/code-mode-file-tools): the main chat agent no longer hands a whole
+# ``task`` to a browser sub-agent — that sub-agent is gone. It now drives the
+# /code work in its OWN tool loop and delegates ONE file tool call at a time
+# (``readFile`` / ``writeFile`` / ``search`` / ``listDir``). Each of those tools
+# runs in the BACKEND, but the work has to happen in the USER'S BROWSER — a
+# WebContainer project runs in the tab and has no server-side row for a backend
+# to reach, which is the same constraint that shaped the rest of this module
+# (see ``service.py``: the server never opens a file).
 #
-# So the call is inverted. The backend does not execute the task; it PARKS on a
+# So the call is inverted. The backend does not execute the tool; it PARKS on a
 # future, pushes a ``code_delegate`` frame down the live SSE stream, and waits
 # for the browser to post the answer back to ``POST /codeagent/resolve``. This
 # module is both ends of that rendezvous and nothing else — it knows what a
 # correlation id is and how to wake a parked caller, and it knows nothing about
-# what the task said or what the browser did with it.
+# what the call did or what the browser returned for it.
 #
 # Modelled on ``pocketpaw.agents.plan_mode.PlanApprovalManager``, the shipped
 # precedent for parking a backend caller with a timeout. Two deliberate
@@ -309,20 +312,21 @@ def get_pending_delegates() -> PendingDelegates:
     return _registry
 
 
-async def delegate_to_browser(
+async def delegate_call_to_browser(
     workspace_id: str,
-    task: str,
-    mode: str = "ask",
+    tool: str,
+    tool_input: dict[str, Any],
     *,
     timeout: float = CODE_DELEGATE_TIMEOUT_SECONDS,
     registry: PendingDelegates | None = None,
     push: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> DelegateOutcome:
-    """Hand ``task`` to the browser's Code Mode sub-agent and wait for its answer.
+    """Hand one file tool call to the browser and wait for its result.
 
-    This is the whole outbound half of the channel and the only entry point
-    CD-2's ``code_mode`` tool needs: register a slot, push one ``code_delegate``
-    frame, park.
+    This is the whole outbound half of the channel and the only entry point the
+    ``code.py`` file tools need: register a slot, push one ``code_delegate``
+    frame carrying ``{tool, input}``, park. The browser runs the matching
+    ``CodeFileSession`` verb and resolves with ``{output, isError}``.
 
     It FAILS FAST when there is no SSE stream in scope. ``push_sse_event`` is a
     documented no-op outside a stream, so without that check a tool invoked from
@@ -350,14 +354,14 @@ async def delegate_to_browser(
                 error=ERROR_NO_CLIENT,
                 message=(
                     "No browser session is attached to this conversation, so the "
-                    "coding task cannot be run."
+                    "code cannot be reached."
                 ),
             )
         push = push_sse_event
 
     corr_id = reg.open(workspace_id)
     try:
-        push(DELEGATE_EVENT, {"corrId": corr_id, "task": task, "mode": mode})
+        push(DELEGATE_EVENT, {"corrId": corr_id, "tool": tool, "input": tool_input})
     except Exception:  # noqa: BLE001 — a failed push must not kill the turn
         logger.warning("codeagent.delegate push failed corr=%s", corr_id, exc_info=True)
         # Nobody is parked on this future yet, so drop the slot rather than
@@ -366,14 +370,14 @@ async def delegate_to_browser(
         return DelegateOutcome(
             ok=False,
             error=ERROR_NO_CLIENT,
-            message="The coding task could not be sent to the browser.",
+            message="The file operation could not be sent to the browser.",
         )
 
     logger.debug(
-        "codeagent.delegate parked corr=%s ws=%s mode=%s timeout=%.0f",
+        "codeagent.delegate parked corr=%s ws=%s tool=%s timeout=%.0f",
         corr_id,
         workspace_id,
-        mode,
+        tool,
         timeout,
     )
     return await reg.wait(corr_id, timeout=timeout)
@@ -431,7 +435,7 @@ __all__ = [
     "MAX_DELEGATE_RESULT_CHARS",
     "DelegateOutcome",
     "PendingDelegates",
-    "delegate_to_browser",
+    "delegate_call_to_browser",
     "get_pending_delegates",
     "resolve_pending",
 ]

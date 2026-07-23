@@ -19,9 +19,11 @@
 # Grep and that the profile carry them in ``allowed_sdk_tools``; both encoded the
 # stale belief that the /code agent works on a filesystem it can see. It does
 # not — it runs on the backend server, and the user's project is reachable only
-# through the ``code_mode`` tool. The replacements assert the inverse: the
-# resolved profile DENIES every file/shell built-in (plus ``Agent``), allows
-# exactly ``code_mode``, and surfaces NO skill; and the rendered preamble leaks
+# through the file tools (readFile / search / listDir / writeFile — originally a
+# single ``code_mode`` tool, replaced 2026-07-24). The replacements assert the
+# inverse: the resolved profile DENIES every file/shell built-in (plus
+# ``Agent``), allows exactly those file tools, and surfaces NO skill; the preamble
+# leaks
 # no path and names no Daytona MCP tool — including when a legacy client still
 # stamps the old ``current_dir`` / ``storage_root`` / ``workspace_vm`` /
 # ``is_cloud_storage`` hints. The registry-import assertion is exercised too,
@@ -173,11 +175,12 @@ async def test_code_handler_carries_coding_orientation() -> None:
     assert "build a pocket" not in lower
 
 
-async def test_code_handler_routes_all_work_through_code_mode() -> None:
-    """`code_mode` is named as the ONLY route to the user's project."""
+async def test_code_handler_routes_all_work_through_the_file_tools() -> None:
+    """The file tools are named as the ONLY route to the user's project."""
     preamble = await code_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/code"))
 
-    assert "code_mode" in preamble
+    for tool in ("readFile", "search", "listDir", "writeFile"):
+        assert tool in preamble, f"the preamble must name the {tool} tool"
     lower = preamble.lower()
     assert "only" in lower
 
@@ -194,16 +197,16 @@ async def test_code_handler_forbids_the_filesystem_builtins() -> None:
     assert "no filesystem" in lower
 
 
-async def test_code_handler_calls_code_mode_immediately_on_a_selection() -> None:
-    """An edit scoped to a selection the user already made goes straight to
-    `code_mode` — no exploratory retrieval first (the path is two model calls
-    deep, so a redundant round-trip is expensive)."""
+async def test_code_handler_acts_immediately_on_a_selection() -> None:
+    """An edit scoped to a selection the user already made is acted on at once —
+    no re-reading the project first (the selection and its file are already in
+    context, so a redundant round-trip is a wasted wait)."""
     preamble = await code_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/code"))
     lower = preamble.lower()
 
     assert "selection" in lower
     assert "immediately" in lower
-    assert "retrieval" in lower
+    assert "re-read" in lower
 
 
 async def test_code_handler_names_no_daytona_tool() -> None:
@@ -285,13 +288,21 @@ def test_studio_profile_ripple_off_media_tools_and_skill() -> None:
     assert VIDEO_GENERATE_TOOL_ID in profile.allow_mcp_tool_ids
 
 
-def test_code_profile_ripple_off_and_scoped_to_code_mode() -> None:
+def test_code_profile_ripple_off_and_scoped_to_the_file_tools() -> None:
     """The /code profile turns ripple OFF (so the agent edits code, not a
-    dashboard) and scopes the MCP surface to exactly the ``code_mode`` tool."""
+    dashboard) and scopes the MCP surface to exactly the four file tools the main
+    agent drives."""
     profile = resolve_profile(SurfaceKind.CODE, SurfaceMeta())
 
     assert profile.ripple_mode == "off"
-    assert profile.allow_mcp_tool_ids == frozenset({"mcp__pocketpaw_code__code_mode"})
+    assert profile.allow_mcp_tool_ids == frozenset(
+        {
+            "mcp__pocketpaw_code__readFile",
+            "mcp__pocketpaw_code__search",
+            "mcp__pocketpaw_code__listDir",
+            "mcp__pocketpaw_code__writeFile",
+        }
+    )
 
 
 def test_code_profile_denies_the_skill_tool() -> None:
@@ -322,8 +333,10 @@ def test_code_profile_carries_its_own_system_prompt() -> None:
     profile = resolve_profile(SurfaceKind.CODE, SurfaceMeta())
 
     assert profile.system_message_override == CODE_SYSTEM_PROMPT
-    # It has to say what the surface DOES build, not only what it must not.
-    assert "code_mode" in CODE_SYSTEM_PROMPT
+    # It has to say what the surface DOES build, not only what it must not — and
+    # name the tools it actually grants.
+    for tool in ("readFile", "search", "listDir", "writeFile"):
+        assert tool in CODE_SYSTEM_PROMPT
     assert "WORKING CODE" in CODE_SYSTEM_PROMPT
     # And it must not promise a tool the profile denies.
     for denied in ("deliver_artifact", "get_widget_spec", "pocket_specialist"):
@@ -400,10 +413,10 @@ async def test_code_profile_grants_no_filesystem_tool_in_the_effective_allowlist
     the eight tool names known today, so a daytona tool added later is caught
     without anyone remembering to update this test.
 
-    Note we assert only ABSENCE. ``code_mode`` itself will not appear here until
-    CD-2 lands its MCP server: ``allow_mcp_tool_ids`` is a FILTER over the tools
-    that exist, not a grant that conjures one. Its presence is pinned at the
-    profile level in ``test_code_profile_ripple_off_and_scoped_to_code_mode``."""
+    Note this test asserts only ABSENCE — the file tools' PRESENCE is pinned in
+    ``test_file_tools_reach_the_effective_allowlist`` (in test_code_mcp_server)
+    and at the profile level in
+    ``test_code_profile_ripple_off_and_scoped_to_the_file_tools``."""
     from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
     from pocketpaw.config import get_settings
 
@@ -449,8 +462,8 @@ async def test_code_profile_grants_no_filesystem_tool_in_the_effective_allowlist
     assert "WebSearch" in effective
     # And at least one MCP id must survive, or a future change that nulls out MCP
     # resolution entirely would make every `not in` above trivially true while the
-    # surface silently loses code_mode too. Not pinned to a specific server — any
-    # surviving mcp__ id proves the MCP filter ran on a populated list.
+    # surface silently loses its file tools too. Not pinned to a specific server —
+    # any surviving mcp__ id proves the MCP filter ran on a populated list.
     assert any(t.startswith("mcp__") for t in effective), (
         "no mcp__ tool survived the allow-list filter — MCP resolution produced "
         "nothing, so the absence assertions above prove nothing"
@@ -532,9 +545,9 @@ async def test_code_profile_builds_no_pocket_in_the_effective_allowlist() -> Non
 
     # Positive controls, so the assertions above cannot pass vacuously.
     assert "WebSearch" in effective
-    assert "mcp__pocketpaw_code__code_mode" in effective, (
-        "code_mode itself was filtered out — the surface has lost its only door "
-        "to the user's project, so the absence assertions above prove nothing"
+    assert "mcp__pocketpaw_code__readFile" in effective, (
+        "the file tools were filtered out — the surface has lost its door to the "
+        "user's project, so the absence assertions above prove nothing"
     )
 
 

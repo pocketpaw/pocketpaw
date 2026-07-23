@@ -42,8 +42,10 @@
 # in a sandbox behind the ``code_mode`` tool, so every one of those built-ins
 # would have read and written the server's own disk and reported success. The row
 # now DENIES them (``_CODE_BUILTIN_DENY`` — deny is the only lever that removes a
-# built-in) and scopes the MCP surface to the one tool that reaches the project
-# (``_CODE_MODE_TOOL_IDS``). ``Agent`` joins the deny set too: a spawned subagent
+# built-in) and scopes the MCP surface to the tools that reach the project
+# (``_CODE_FILE_TOOL_IDS`` — originally the single ``code_mode`` tool, now the
+# four per-call file verbs the main agent drives). ``Agent`` joins the deny set
+# too: a spawned subagent
 # is a second, unsupervised path to tools. ``skill_names`` drops to empty — the
 # `code` skill teaches nothing BUT those built-ins, so keeping it would inject an
 # instruction to call what the agent no longer has. Still a static ``profile``:
@@ -220,15 +222,24 @@ _SITES_BUILTIN_DENY: frozenset[str] = frozenset(
 # None-degrade path as the loom/media imports below). Do NOT drift the id.
 _BELT_GATE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_belt__belt_propose_change"})
 
-# The single tool the /code agent reaches the user's project through. Everything
-# the surface can do to code happens behind it: the tool owns the sandbox, the
-# file session, and the edit. Spelled as a LITERAL for the same reason
-# ``_BELT_GATE_TOOL_IDS`` above is — its canonical constant lives in a SIBLING
-# branch's in-process MCP server (server ``pocketpaw_code``, tool ``code_mode``),
-# not importable on this base. When both PRs land, swap this literal for the
-# imported constant. The id format is the SDK's ``mcp__<server>__<tool>``
-# namespacing (see ``pocketpaw.agents.sdk_mcp_widgets``). Do NOT drift the id.
-_CODE_MODE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_code__code_mode"})
+# The file tools the /code agent reaches the user's project through. The main
+# agent drives the /code work in its own tool loop and reaches the project ONLY
+# through these four verbs — each one delegates a single call to the browser,
+# which owns the file session (the project runs in the tab, not on the backend).
+# ``writeFile`` does not write: it stages a proposal for the user's per-hunk
+# review. Spelled as LITERALS for the same reason ``_BELT_GATE_TOOL_IDS`` above
+# is — their canonical constants live in the in-process MCP server (server
+# ``pocketpaw_code``), which the profile layer must not import. The id format is
+# the SDK's ``mcp__<server>__<tool>`` namespacing. Do NOT drift these ids;
+# ``test_code_mcp_server`` pins them against the server's own constants.
+_CODE_FILE_TOOL_IDS: frozenset[str] = frozenset(
+    {
+        "mcp__pocketpaw_code__readFile",
+        "mcp__pocketpaw_code__search",
+        "mcp__pocketpaw_code__listDir",
+        "mcp__pocketpaw_code__writeFile",
+    }
+)
 
 # Built-in SDK tools the /code agent must NOT have. Same mechanism and same
 # reasoning as ``_SITES_BUILTIN_DENY`` above: these bare tool NAMES ride in
@@ -238,9 +249,10 @@ _CODE_MODE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_code__code_mode
 #
 # This is load-bearing, not tidiness. The /code agent runs on the BACKEND SERVER,
 # not in the user's project: its cwd is the per-tenant scratch jail, and the
-# user's code is only ever reachable through ``code_mode``. Left in place, the
-# built-ins let the agent read and write the SERVER's filesystem and then report
-# success — a silent wrong-machine failure with no error to notice.
+# user's code is only ever reachable through the file tools (which delegate to the
+# browser). Left in place, the built-ins let the agent read and write the SERVER's
+# filesystem and then report success — a silent wrong-machine failure with no
+# error to notice.
 #
 # ``allowed_sdk_tools`` cannot do this job: it is ADDITIVE (unioned INTO the
 # allow-list, ``effective = (agent_tools ∪ allow) − deny``), and the file/shell
@@ -250,7 +262,7 @@ _CODE_MODE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_code__code_mode
 # lever.
 #
 # ``Agent`` is denied for a reason beyond parity with SITES. Under this design
-# ``code_mode`` is the ONLY path to the user's files; a spawned subagent is a
+# the file tools are the ONLY path to the user's files; a spawned subagent is a
 # SECOND path, with its own tool resolution and no supervision from this profile.
 # Denying the six file/shell tools while leaving the tool that spawns a fresh
 # tool-user would just move the hole one level down.
@@ -331,7 +343,7 @@ _CODE_POCKET_DENY: frozenset[str] = frozenset(
 # With every pocket tool denied above, invoking that skill can no longer BUILD
 # anything — but it would still cost the user a turn: the agent loads a long
 # instruction telling it to call ``get_widget_spec`` and ``pocket_specialist__
-# create``, attempts them, takes hard errors, and only then finds ``code_mode``.
+# create``, attempts them, takes hard errors, and only then finds its file tools.
 # CD-3 made exactly this argument when it dropped the `code` skill from the
 # profile ("absence is recoverable; contradiction is not"); the same reasoning
 # applies to a skill that teaches the wrong deliverable.
@@ -591,10 +603,12 @@ SURFACES: list[SurfaceSpec] = [
         code.build_preamble,
         # Code: edit + run code, but NOT on this machine. Ripple OFF so the
         # agent edits code instead of building a dashboard. The user's project
-        # is reachable ONLY through ``code_mode`` (allow), and the file/shell
-        # built-ins are stripped (deny) because they address the backend
-        # server's own disk, not the project — see ``_CODE_BUILTIN_DENY``. Both
-        # sets are module-level literals, so this stays a STATIC profile (no
+        # is reachable ONLY through the file tools ``_CODE_FILE_TOOL_IDS``
+        # (allow) — readFile / search / listDir / writeFile, each delegated one
+        # call at a time to the browser that holds the file session — and the
+        # file/shell built-ins are stripped (deny) because they address the
+        # backend server's own disk, not the project — see ``_CODE_BUILTIN_DENY``.
+        # Both sets are module-level literals, so this stays a STATIC profile (no
         # lazily-loaded ids, not meta-aware, no resolver needed).
         #
         # ``skill_names`` is deliberately EMPTY, where it used to carry the
@@ -604,13 +618,12 @@ SURFACES: list[SurfaceSpec] = [
         # under the deny above it would be an injected instruction to call tools
         # the agent no longer has: the agent attempts them, takes hard errors,
         # and burns turns before finding the path the preamble already gave it.
-        # Absence is recoverable; contradiction is not. The skill's edit→run→
-        # verify DISCIPLINE is worth keeping and gets retargeted onto
-        # ``code_mode`` in CD-2 — rewriting SKILL.md here would teach a tool that
-        # does not exist yet, which is the same failure pointed the other way.
+        # Absence is recoverable; contradiction is not. The edit→run→verify
+        # DISCIPLINE that skill carried now lives in ``CODE_SYSTEM_PROMPT``,
+        # retargeted onto the file tools above.
         profile=SurfaceProfile(
             ripple_mode="off",
-            allow_mcp_tool_ids=_CODE_MODE_TOOL_IDS,
+            allow_mcp_tool_ids=_CODE_FILE_TOOL_IDS,
             deny_mcp_tool_ids=_CODE_BUILTIN_DENY | _CODE_POCKET_DENY | _CODE_SKILL_DENY,
             # The surface's own system prompt, replacing the pocket-shaped
             # behavioral stack the shared builder would otherwise assemble. See

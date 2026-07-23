@@ -29,7 +29,7 @@ from pocketpaw_ee.cloud.codeagent.delegates import (
     MAX_DELEGATE_RESULT_CHARS,
     DelegateOutcome,
     PendingDelegates,
-    delegate_to_browser,
+    delegate_call_to_browser,
     get_pending_delegates,
     resolve_pending,
 )
@@ -68,8 +68,8 @@ async def _park(
     push: object,
     *,
     workspace_id: str = WS,
-    task: str = "add a test",
-    mode: str = "ask",
+    tool: str = "readFile",
+    tool_input: dict | None = None,
     timeout: float = SLOW,
 ) -> asyncio.Task[DelegateOutcome]:
     """Start a delegation and wait until it is actually parked.
@@ -81,10 +81,10 @@ async def _park(
     """
     before = len(reg)
     task_handle = asyncio.create_task(
-        delegate_to_browser(
+        delegate_call_to_browser(
             workspace_id,
-            task,
-            mode,
+            tool,
+            tool_input if tool_input is not None else {"path": "a.py"},
             timeout=timeout,
             registry=reg,
             push=push,  # type: ignore[arg-type]
@@ -123,13 +123,15 @@ async def test_park_then_resolve_returns_the_payload(reg, push):
     assert len(reg) == 0
 
 
-async def test_push_carries_corr_id_task_and_mode(reg, push):
-    handle = await _park(reg, push, task="rename the handler", mode="edit")
+async def test_push_carries_corr_id_tool_and_input(reg, push):
+    handle = await _park(
+        reg, push, tool="writeFile", tool_input={"path": "handler.py", "content": "x"}
+    )
 
     name, data = push.frames[0]
     assert name == DELEGATE_EVENT
-    assert data["task"] == "rename the handler"
-    assert data["mode"] == "edit"
+    assert data["tool"] == "writeFile"
+    assert data["input"] == {"path": "handler.py", "content": "x"}
     assert data["corrId"]
 
     resolve_pending(WS, data["corrId"], {}, registry=reg)
@@ -301,7 +303,9 @@ async def test_a_failed_push_gives_up_immediately(reg):
         raise RuntimeError("sink is gone")
 
     outcome = await asyncio.wait_for(
-        delegate_to_browser(WS, "task", registry=reg, push=_explode, timeout=SLOW),
+        delegate_call_to_browser(
+            WS, "readFile", {"path": "a.py"}, registry=reg, push=_explode, timeout=SLOW
+        ),
         timeout=SLOW,
     )
 
@@ -319,7 +323,7 @@ async def test_no_sse_stream_fails_fast_rather_than_parking(reg):
     is a documented no-op, so parking would burn the full budget on a failure
     that was knowable at the push."""
     outcome = await asyncio.wait_for(
-        delegate_to_browser(WS, "task", registry=reg, timeout=SLOW),
+        delegate_call_to_browser(WS, "readFile", {"path": "a.py"}, registry=reg, timeout=SLOW),
         timeout=SLOW,
     )
 
@@ -340,15 +344,20 @@ async def test_frame_reaches_a_real_attached_sse_sink(reg):
     token = attach_sse_event_sink(queue)
     try:
         handle = asyncio.create_task(
-            delegate_to_browser(WS, "refactor it", "edit", timeout=SLOW, registry=reg)
+            delegate_call_to_browser(
+                WS, "writeFile", {"path": "a.ts", "content": "x"}, timeout=SLOW, registry=reg
+            )
         )
         name, data = await asyncio.wait_for(queue.get(), timeout=SLOW)
         assert name == DELEGATE_EVENT
-        assert data["task"] == "refactor it"
-        assert data["mode"] == "edit"
+        assert data["tool"] == "writeFile"
+        assert data["input"] == {"path": "a.ts", "content": "x"}
 
-        resolve_pending(WS, data["corrId"], {"answer": "ok"}, registry=reg)
-        assert (await asyncio.wait_for(handle, timeout=SLOW)).result == {"answer": "ok"}
+        resolve_pending(WS, data["corrId"], {"output": "ok", "isError": False}, registry=reg)
+        assert (await asyncio.wait_for(handle, timeout=SLOW)).result == {
+            "output": "ok",
+            "isError": False,
+        }
     finally:
         detach_sse_event_sink(token)
 

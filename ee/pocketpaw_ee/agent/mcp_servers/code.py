@@ -1,57 +1,64 @@
-# code.py — in-process MCP server exposing the ONE tool the main chat agent
-# uses to reach the user's code: ``code_mode``. Created: 2026-07-22
-# (feat/code-mode-tool, CD-2).
+# code.py — in-process MCP server exposing the file tools the main chat agent
+# uses to reach the user's code. Created: 2026-07-22 (feat/code-mode-tool, CD-2).
+# Reshaped 2026-07-24 (feat/code-mode-file-tools).
 #
-# What this is for. The /code surface is being inverted so the MAIN PocketPaw
-# agent drives the conversation and Code Mode becomes a sub-agent it delegates
-# to. This file is the seam. The main agent gets exactly one coarse tool rather
-# than four proxied file verbs, so the sub-agent keeps its own read/write loop
-# and the main agent never learns the shape of a file session.
+# What changed and why. CD-2 gave the main agent ONE coarse tool, ``code_mode``,
+# that handed a whole task to a browser SUB-AGENT which ran its own read/write
+# loop. That sub-agent was removed (2026-07-23): the /code surface runs on the
+# MAIN PocketPaw agent, and a second, weaker in-browser agent was redundant.
+# With it gone, the reasoning that decomposed a task into individual file reads
+# and writes no longer existed anywhere — so it moves INTO the main agent, and
+# this server changes shape to match. Instead of one ``code_mode(task)`` tool,
+# it now exposes the four file verbs the agent reasons WITH:
 #
-# Why the tool does not touch a file. ``codeagent/transport.py`` recorded the
-# constraint that shaped this whole design: an MCP server runs in the BACKEND,
-# where the user's files are not. That is fatal to a tool that OPENS a file. It
-# is not fatal to this one, because ``code_mode`` never opens anything — it asks
-# the BROWSER to. The handler is an ``async def``, so it can await a future:
-# ``delegate_to_browser`` (CD-1) registers a correlation id, pushes one
-# ``code_delegate`` frame down the live SSE stream, and parks until the tab
-# POSTs the answer back. The same inversion MCP standardizes as elicitation.
+#   readFile(path)          — read a file
+#   search(query)           — search the project
+#   listDir(path)           — list a directory
+#   writeFile(path, content)— PROPOSE a full-file rewrite (staged, not written)
 #
-# Why this lives in ee/ and not src/pocketpaw/agents/. The build plan said
-# ``src/pocketpaw/agents/sdk_mcp_code.py``, next to ``sdk_mcp_widgets.py``. That
-# is the wrong side of the OSS/EE line twice over: the channel this wraps
-# (``ee.cloud.codeagent.delegates``) is EE cloud code, and the workspace
-# identity it needs comes from the per-stream ContextVars in
-# ``ee.cloud.chat.agent_service``. An OSS module importing either would invert
-# the dependency. So this clones ``belt.py`` instead — the closest sibling in
-# kind as well as in shape, since that one is also a single-tool gate that hands
-# work to something else rather than doing it. Registration is the standard
-# ``pocketpaw.mcp_servers`` entry point (``CloudCodeMcpProvider``), NOT
+# The main agent runs its own tool loop over these, exactly as a coding agent
+# does over local file tools. The difference this whole module exists for: the
+# files are not here.
+#
+# Why the tools do not touch a file. An MCP server runs in the BACKEND, where
+# the user's project is not — a WebContainer project lives in the user's tab and
+# has no server-side row a backend could open. That is fatal to a tool that
+# OPENS a file. It is not fatal to these, because they never open anything — they
+# ask the BROWSER to. Each handler is an ``async def``, so it can await a future:
+# ``delegate_call_to_browser`` (CD-1) registers a correlation id, pushes one
+# ``code_delegate`` frame carrying ``{tool, input}`` down the live SSE stream,
+# and parks until the tab POSTs the result back. The same inversion MCP
+# standardizes as elicitation.
+#
+# The write gate stays in the tab. ``writeFile`` NEVER writes. It delegates the
+# proposed content to the browser, which STAGES it for the user's per-hunk
+# review; the user accepting a hunk is the only thing that writes, and it happens
+# long after this tool has returned. So the honest result of a ``writeFile`` call
+# is "a change was proposed for review", never "the file was changed" — the
+# description and the system prompt both say so, because the model must not tell
+# the user a file was written when nothing has been.
+#
+# Why this lives in ee/ and not src/pocketpaw/agents/. The channel this wraps
+# (``ee.cloud.codeagent.delegates``) is EE cloud code, and the workspace identity
+# it needs comes from the per-stream ContextVars in ``ee.cloud.chat.agent_service``.
+# An OSS module importing either would invert the dependency. Registration is the
+# standard ``pocketpaw.mcp_servers`` entry point (``CloudCodeMcpProvider``), NOT
 # ``claude_sdk._get_mcp_servers``, which only builds the OSS-side servers.
 #
-# On metering, which the PRD left open: a ``code_mode`` call spends nothing
-# here. This handler calls no model — it parks on a future. The model spend
-# happens on the BROWSER side, where the tab actually runs the task and buys the
-# tokens; that path meters itself. One delegated task therefore bills exactly
-# once, on the side that does the work. There is no second meter here to
-# reconcile and nothing to double-count.
+# On metering: these handlers spend nothing. They call no model — they park on a
+# future. The model spend happens on the main agent's own chat turn, which meters
+# itself; the browser side runs no model at all (it just executes a file verb).
+# There is no second meter here to reconcile.
 #
-# NOTE (2026-07-23): the browser used to do that work by calling the
-# ``/codeagent/turn`` sub-agent, which is now removed. The metering principle is
-# unchanged — the backend park is free, the browser-side model call is not — but
-# which endpoint the tab now hits for the work is the frontend replacement's
-# concern, not this tool's.
-#
-# The tool id namespaces as ``mcp__pocketpaw_code__code_mode``. The /code
-# SurfaceProfile hardcodes that exact string as a literal (CD-3 shipped before
-# this file existed and could not import the constant). Do NOT drift the server
-# name or the tool name without changing ``surface_registry._CODE_MODE_TOOL_IDS``
-# in the same PR — they are matched by string, so a rename fails silently by
-# scoping the surface to a tool id nothing provides.
+# The tool ids namespace as ``mcp__pocketpaw_code__<verb>``. The /code
+# SurfaceProfile hardcodes these exact strings as literals (it shipped before this
+# file could export a constant). Do NOT drift the server name or any tool name
+# without changing ``surface_registry._CODE_FILE_TOOL_IDS`` in the same PR — they
+# are matched by string, so a rename fails silently by scoping the surface to an
+# id nothing provides. ``test_code_mcp_server`` pins both ends against each other.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
@@ -60,25 +67,27 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = "pocketpaw_code"
 
 # Claude Code namespaces in-process MCP tools as ``mcp__<server>__<tool>``.
-CODE_MODE_TOOL_ID = f"mcp__{SERVER_NAME}__code_mode"
+READ_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__readFile"
+WRITE_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__writeFile"
+SEARCH_TOOL_ID = f"mcp__{SERVER_NAME}__search"
+LIST_DIR_TOOL_ID = f"mcp__{SERVER_NAME}__listDir"
 
-# Exported as a tuple for the provider's ``tool_ids()``, mirroring
-# ``BELT_TOOL_IDS``. One entry today; the shape is what the loader expects.
-CODE_TOOL_IDS = (CODE_MODE_TOOL_ID,)
+# Exported as a tuple for the provider's ``tool_ids()``. Order is read-first so a
+# log or an allow-list dump reads in the order the agent typically calls them.
+CODE_TOOL_IDS = (
+    READ_FILE_TOOL_ID,
+    SEARCH_TOOL_ID,
+    LIST_DIR_TOOL_ID,
+    WRITE_FILE_TOOL_ID,
+)
 
-# The two permission sets the sub-agent understands. ``ask`` gets the read-only
-# verbs; ``edit`` may propose a change.
-_MODES = ("ask", "edit")
-
-# The safe default. It is deliberately the READ-ONLY mode, so that every way of
-# not-specifying a mode — omitted, null, empty, misspelled, wrong type — lands
-# on "cannot edit" rather than "can edit unexpectedly". ``dto.py`` makes the
-# same choice on the wire for the same reason.
-_DEFAULT_MODE = "ask"
-
-# A task that is empty or absent is a bug in the caller, not a request. Bounded
-# because it crosses the wire into the browser and ends up in a prompt.
-_MAX_TASK_CHARS = 8000
+# Bounds on what crosses the wire into the browser. Paths and queries are small
+# by nature; a rewrite can be a whole file. ``content`` is capped well under the
+# channel's ``MAX_DELEGATE_RESULT_CHARS`` return ceiling so a proposal and its
+# staged-summary answer both fit comfortably.
+_MAX_PATH_CHARS = 1024
+_MAX_QUERY_CHARS = 2048
+_MAX_CONTENT_CHARS = 180_000
 
 
 def _error_response(message: str) -> dict[str, Any]:
@@ -90,16 +99,18 @@ def _error_response(message: str) -> dict[str, Any]:
     }
 
 
-def _success_response(body: dict[str, Any]) -> dict[str, Any]:
-    """Build an MCP success response carrying ``body`` as JSON."""
-    return {
-        "content": [
-            {
-                "type": "text",
-                "text": json.dumps(body, separators=(",", ":"), default=str),
-            }
-        ]
-    }
+def _text_response(text: str, *, is_error: bool = False) -> dict[str, Any]:
+    """Build an MCP response carrying ``text`` verbatim.
+
+    The browser's executor already returns human/model-readable output (file
+    contents, a search listing, a staged-change sentence), so this relays it
+    rather than re-wrapping it in JSON. ``is_error`` rides the SDK's own flag so
+    the model treats a failed lookup differently from an empty one.
+    """
+    response: dict[str, Any] = {"content": [{"type": "text", "text": text}]}
+    if is_error:
+        response["is_error"] = True
+    return response
 
 
 def _workspace_id() -> str | None:
@@ -108,8 +119,8 @@ def _workspace_id() -> str | None:
 
     Only the workspace is read. The delegate is addressed to a workspace's live
     stream, and ``delegates.resolve_pending`` scopes the return leg the same
-    way; the user id is not an authorization input there, so asking for one
-    here would imply a check that is not made.
+    way; the user id is not an authorization input there, so asking for one here
+    would imply a check that is not made.
     """
     try:
         from pocketpaw_ee.cloud.chat.agent_service import current_workspace_id
@@ -119,52 +130,31 @@ def _workspace_id() -> str | None:
         return None
 
 
-def _normalize_mode(raw: Any) -> str:
-    """Coerce whatever the model sent into one of ``_MODES``.
+def _require_str(args: dict, key: str, *, max_chars: int, allow_empty: bool = False) -> str | None:
+    """Pull a bounded string argument, or return ``None`` if it is unusable.
 
-    Anything unrecognized becomes ``ask``. This is the one place the fail-safe
-    direction matters: a model that hallucinates ``mode="write"`` or sends an
-    integer must lose the ability to edit, not gain it. Logged rather than
-    rejected, because turning a garbled enum into a hard tool error would cost
-    the user a turn for something that has a correct, safe reading.
+    ``None`` means "reject" — the caller turns that into an MCP error. A separate
+    sentinel rather than an exception because a raise inside an in-process tool
+    handler reaches the model as a BROKEN tool, whereas an error response gives it
+    a sentence it can act on.
     """
-    if isinstance(raw, str):
-        mode = raw.strip().lower()
-        if mode in _MODES:
-            return mode
-        if mode:
-            logger.warning(
-                "code_mode: unrecognized mode %r, falling back to %s", raw, _DEFAULT_MODE
-            )
-    elif raw is not None:
-        logger.warning(
-            "code_mode: non-string mode %r, falling back to %s", type(raw), _DEFAULT_MODE
-        )
-    return _DEFAULT_MODE
+    value = args.get(key)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text and not allow_empty:
+        return None
+    if len(value) > max_chars:
+        return None
+    return text if not allow_empty else value
 
 
-async def _code_mode_handler(args: dict) -> dict[str, Any]:
-    """Hand one coding task to the browser's Code Mode sub-agent and wait.
+async def _delegate(tool: str, tool_input: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the workspace, delegate ONE call to the browser, relay the result.
 
-    Returns the sub-agent's payload on success. On EVERY failure path it returns
-    an MCP error rather than raising: a raise inside an in-process tool handler
-    surfaces to the model as a broken tool, whereas an error response gives it a
-    true sentence to say to the user. That distinction is the whole reason
-    ``delegate_to_browser`` returns an outcome on timeout instead of raising.
+    Every failure path returns an MCP response rather than raising, for the same
+    reason the handlers do: the caller is an agent tool.
     """
-    task = args.get("task")
-    if not isinstance(task, str) or not task.strip():
-        return _error_response("`task` is required — describe the coding task in words.")
-    task = task.strip()
-    if len(task) > _MAX_TASK_CHARS:
-        return _error_response(
-            f"`task` is too long ({len(task)} chars, limit {_MAX_TASK_CHARS}). "
-            "Describe the change rather than pasting the code — the sub-agent "
-            "reads the files itself."
-        )
-
-    mode = _normalize_mode(args.get("mode"))
-
     workspace_id = _workspace_id()
     if not workspace_id:
         # No cloud stream in scope: a CLI run, a background job, a test. The
@@ -174,23 +164,84 @@ async def _code_mode_handler(args: dict) -> dict[str, Any]:
             "the user's project from here."
         )
 
-    from pocketpaw_ee.cloud.codeagent.delegates import delegate_to_browser
+    from pocketpaw_ee.cloud.codeagent.delegates import delegate_call_to_browser
 
-    outcome = await delegate_to_browser(workspace_id, task, mode)
+    outcome = await delegate_call_to_browser(workspace_id, tool, tool_input)
 
     if not outcome.ok:
-        logger.info("code_mode delegate failed ws=%s error=%s", workspace_id, outcome.error)
+        logger.info("code.%s delegate failed ws=%s error=%s", tool, workspace_id, outcome.error)
         # Relay the channel's own message. It already distinguishes "no browser
         # attached" from "the browser was slow", and the model needs that
         # difference to say something true about what happened.
-        return _error_response(outcome.message or "The coding task could not be completed.")
+        return _error_response(outcome.message or "The file operation could not be completed.")
 
-    return _success_response(outcome.result or {})
+    result = outcome.result or {}
+    output = result.get("output")
+    if not isinstance(output, str):
+        output = ""
+    is_error = bool(result.get("isError"))
+    if is_error and not output:
+        output = "The file operation failed in the browser."
+    return _text_response(output, is_error=is_error)
+
+
+async def _read_file_handler(args: dict) -> dict[str, Any]:
+    path = _require_str(args, "path", max_chars=_MAX_PATH_CHARS)
+    if path is None:
+        return _error_response(
+            "`path` is required — the file to read, relative to the project root."
+        )
+    return await _delegate("readFile", {"path": path})
+
+
+async def _search_handler(args: dict) -> dict[str, Any]:
+    query = _require_str(args, "query", max_chars=_MAX_QUERY_CHARS)
+    if query is None:
+        return _error_response(
+            "`query` is required — the text or symbol to search the project for."
+        )
+    return await _delegate("search", {"query": query})
+
+
+async def _list_dir_handler(args: dict) -> dict[str, Any]:
+    # An empty path is legitimate here — it lists the project root — so this one
+    # verb allows the empty string rather than rejecting it.
+    path = _require_str(args, "path", max_chars=_MAX_PATH_CHARS, allow_empty=True)
+    if path is None:
+        return _error_response("`path` must be a string — the directory to list ('' for the root).")
+    return await _delegate("listDir", {"path": path})
+
+
+async def _write_file_handler(args: dict) -> dict[str, Any]:
+    """Propose a full-file rewrite. This does NOT write the file.
+
+    The proposed ``content`` is delegated to the browser, which stages it for the
+    user's per-hunk review. Nothing is written until the user accepts a hunk,
+    which happens after this returns — so a success here means "a change was
+    proposed for review", not "the file was changed".
+    """
+    path = _require_str(args, "path", max_chars=_MAX_PATH_CHARS)
+    if path is None:
+        return _error_response(
+            "`path` is required — the file to change, relative to the project root."
+        )
+    # ``content`` may legitimately be the empty string (blanking a file), so it is
+    # required-present but allowed-empty; only a non-string or an over-long body
+    # is rejected.
+    content = args.get("content")
+    if not isinstance(content, str):
+        return _error_response("`content` is required — the full new contents of the file.")
+    if len(content) > _MAX_CONTENT_CHARS:
+        return _error_response(
+            f"`content` is too long ({len(content)} chars, limit {_MAX_CONTENT_CHARS}). "
+            "Propose a change to a smaller file, or split the work across files."
+        )
+    return await _delegate("writeFile", {"path": path, "content": content})
 
 
 def build_code_server() -> tuple[str, Any] | None:
-    """Build the in-process SDK MCP server for ``code_mode``, or return ``None``
-    if the Claude Agent SDK isn't installed.
+    """Build the in-process SDK MCP server for the /code file tools, or return
+    ``None`` if the Claude Agent SDK isn't installed.
 
     Matches the ``(name, server) | None`` shape of ``build_belt_server`` so the
     backend's MCP registration loop treats it identically.
@@ -202,60 +253,119 @@ def build_code_server() -> tuple[str, Any] | None:
         return None
 
     @tool(
-        "code_mode",
+        "readFile",
         (
-            "Read, search, or change the code in the user's project. This is the "
-            "ONLY way to reach their code — the project does not live on your "
-            "machine, so the built-in file and shell tools do not address it. "
-            "Describe the task in words, the way the user gave it to you; this "
-            "tool locates the relevant code itself, so do NOT try to find files "
-            "first. Args: `task` (what to do, in plain language — required), "
-            "`mode` ('ask' to read, search, and answer questions about the code; "
-            "'edit' to change it — defaults to 'ask'). Use `mode='edit'` only "
-            "when the user actually wants the code changed. Returns the "
-            "sub-agent's result. On an error, relay the reason to the user — do "
-            "NOT claim the code was read or changed when this returned an error."
+            "Read a file from the user's project and return its contents. This is "
+            "how you look at their code — the project runs in the user's browser, "
+            "not on your machine, so the built-in file tools do not address it. "
+            "Args: `path` (the file, relative to the project root)."
         ),
         {
             "type": "object",
             "properties": {
-                "task": {
+                "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": (
-                        "The coding task in plain language, e.g. 'add a loading "
-                        "state to the submit button' or 'where is the retry "
-                        "logic'. Describe the change, don't paste the code."
-                    ),
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": list(_MODES),
-                    "default": _DEFAULT_MODE,
-                    "description": (
-                        "'ask' reads and answers (read-only); 'edit' proposes a "
-                        "change. Defaults to 'ask'."
-                    ),
+                    "description": "File path relative to the project root, e.g. 'src/App.tsx'.",
                 },
             },
-            "required": ["task"],
+            "required": ["path"],
             "additionalProperties": False,
         },
     )
-    async def code_mode(args):  # type: ignore[no-untyped-def]
-        return await _code_mode_handler(args)
+    async def read_file(args):  # type: ignore[no-untyped-def]
+        return await _read_file_handler(args)
+
+    @tool(
+        "search",
+        (
+            "Search the user's project for a string or symbol and return the "
+            "matching lines with their file and line number. Use this to locate "
+            "code before reading or changing it. Args: `query` (the text to find)."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Text or symbol to search for, e.g. 'useState' or 'Sidebar'.",
+                },
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    )
+    async def search(args):  # type: ignore[no-untyped-def]
+        return await _search_handler(args)
+
+    @tool(
+        "listDir",
+        (
+            "List the entries of a directory in the user's project, to see how it "
+            "is laid out. Args: `path` (the directory relative to the project "
+            "root; use '' or '.' for the root)."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Directory relative to the project root; '' for the root.",
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    )
+    async def list_dir(args):  # type: ignore[no-untyped-def]
+        return await _list_dir_handler(args)
+
+    @tool(
+        "writeFile",
+        (
+            "Propose the full new contents of a file in the user's project. This "
+            "does NOT save the file — it stages the change for the user to review "
+            "and accept hunk by hunk. So report it as a change PROPOSED for "
+            "review, never as a file that was written or a feature that is done; "
+            "the user has to accept it first. Pass the ENTIRE new file in "
+            "`content`, not a diff or a snippet. Args: `path` (the file), "
+            "`content` (its full new contents)."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "File path relative to the project root.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The COMPLETE new contents of the file, not a diff.",
+                },
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+    )
+    async def write_file(args):  # type: ignore[no-untyped-def]
+        return await _write_file_handler(args)
 
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[code_mode],
+        tools=[read_file, search, list_dir, write_file],
     )
     return SERVER_NAME, server
 
 
 __all__ = [
-    "CODE_MODE_TOOL_ID",
     "CODE_TOOL_IDS",
+    "LIST_DIR_TOOL_ID",
+    "READ_FILE_TOOL_ID",
+    "SEARCH_TOOL_ID",
     "SERVER_NAME",
+    "WRITE_FILE_TOOL_ID",
     "build_code_server",
 ]

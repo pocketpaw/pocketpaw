@@ -24,13 +24,17 @@
 # model that knows nothing of the current ``codeproject`` + ``CodeFileSession``
 # runtime (nothing under ``cloud/daytona/`` so much as mentions either).
 #
-# The preamble now states the single truth of this surface: the user's code is
-# reachable ONLY through the ``code_mode`` tool, and the agent has no filesystem
-# of its own here. It also tells the agent to call ``code_mode`` IMMEDIATELY when
-# the user's edit is scoped to a selection they already made — no exploratory
-# retrieval first. That is a latency mitigation, not a style note: the /code path
-# is two model calls deep (chat agent → code agent), so a redundant retrieval
-# round is paid twice, and the selection plus its file are already in context.
+# The preamble states the single truth of this surface: the user's code is
+# reachable ONLY through the file tools (``readFile`` / ``search`` / ``listDir`` /
+# ``writeFile``), and the agent has no filesystem of its own here. Updated
+# 2026-07-24 (feat/code-mode-file-tools): the surface used to expose ONE coarse
+# ``code_mode`` tool that handed a task to a browser sub-agent; that sub-agent is
+# gone and the MAIN agent now drives the work itself over these four per-call file
+# tools. ``writeFile`` STAGES a proposal for the user's per-hunk review — it does
+# not save — so the preamble is explicit that a write is a change proposed, not
+# made. It also tells the agent to act IMMEDIATELY when the user's edit is scoped
+# to a selection they already made — no re-reading the project first, since the
+# selection plus its file are already in context.
 #
 # Changed: 2026-07-22 (fix/code-surface-denies-pocket-authoring) — the procedure
 # block gained a paragraph on what "build an app" MEANS here. Reported from a
@@ -54,11 +58,11 @@
 # ``SurfaceProfile`` (see ``surface_registry.py``) sets ``ripple_mode="off"`` so
 # the agent doesn't inherit the ~20k-char "default to ui-spec" ripple LAW, DENIES
 # the file/shell built-ins AND ``Agent`` outright, and scopes the MCP surface to
-# ``code_mode``. This text is the explanation the agent gets for a restriction
-# already applied; the two must agree, so if the profile changes, change this
-# too. The profile also carries NO skill: the `code` skill teaches only the
-# denied built-ins and is retargeted onto ``code_mode`` in CD-2, so until then
-# this preamble is the whole of the agent's guidance on this surface.
+# the file tools (``_CODE_FILE_TOOL_IDS``). This text is the explanation the agent
+# gets for a restriction already applied; the two must agree, so if the profile
+# changes, change this too. The profile also carries NO skill: the `code` skill
+# taught only the denied built-ins, and its edit→run→verify discipline now lives
+# in this preamble and ``CODE_SYSTEM_PROMPT``, retargeted onto the file tools.
 
 from __future__ import annotations
 
@@ -66,14 +70,14 @@ from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
 
 
 async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
-    """Render the /code surface preamble — code reached only via ``code_mode``.
+    """Render the /code surface preamble — code reached only via the file tools.
 
     Static: the preamble does not vary with storage flavour, working
     directory, or sandbox state, because none of those are the agent's
-    concern on this surface. The ``code_mode`` tool owns the project — it
-    resolves the sandbox and the file session itself. The only thing read
-    from ``meta`` is ``project_name``, and purely so the agent can name the
-    project the user is looking at.
+    concern on this surface. The file tools (readFile / search / listDir /
+    writeFile) reach the project; the browser that runs them owns the sandbox
+    and the file session. The only thing read from ``meta`` is ``project_name``,
+    and purely so the agent can name the project the user is looking at.
     """
     route = meta.route_path or "/code"
     return (
@@ -82,8 +86,8 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
 
 
 def _orientation(project_name: str | None) -> str:
-    """Render the ``<code-orientation>`` block — what surface this is, and the
-    one door to the user's code."""
+    """Render the ``<code-orientation>`` block — what surface this is, and how
+    the user's code is reached."""
     lines = [
         "<code-orientation>",
         "The user is on the CODE surface, a coding workspace. You write and "
@@ -93,10 +97,10 @@ def _orientation(project_name: str | None) -> str:
         "about the work as 'code', 'files', 'the project', 'tests' — never as a "
         "'pocket' or 'dashboard'.",
         "The user's project does NOT live on your machine. It lives in the "
-        "user's own project workspace, and the `code_mode` tool is the ONLY way "
-        "to reach it — that tool resolves the project, reads it, and makes the "
-        "change. You have no filesystem of your own on this surface: there is no "
-        "working directory to sit in, nothing to `cd` into, and no path you can "
+        "user's own project workspace, and you reach it ONLY through your file "
+        "tools — `readFile`, `search`, `listDir`, and `writeFile`. You have no "
+        "filesystem of your own on this surface: there is no working directory "
+        "to sit in, nothing to `cd` into, no shell, and no path on disk you can "
         "usefully name.",
     ]
 
@@ -113,22 +117,24 @@ def _procedure() -> str:
     """Render the ``<code-procedure>`` block — how to do the work."""
     lines = [
         "<code-procedure>",
-        "Treat the user's message on this surface as a coding task, and do the "
-        "work by calling `code_mode`. Describe the change you want in the terms "
-        "the user gave you; the tool handles locating the code and applying the "
-        "edit.",
+        "Work the way a coding agent works. To understand the project, `search` "
+        "for the relevant code and `readFile` the files that matter; `listDir` to "
+        "see how a folder is laid out. To change the code, call `writeFile` with "
+        "the file's COMPLETE new contents. `writeFile` does not save the file: it "
+        "STAGES your change for the user to review and accept hunk by hunk, so a "
+        "`writeFile` call is a change PROPOSED, not a change made.",
         "If the user's request is scoped to a selection they have ALREADY made, "
-        "call `code_mode` IMMEDIATELY, with no exploratory retrieval first. The "
+        "act on it IMMEDIATELY, without re-reading the whole project first. The "
         "selected code and the file it came from are already in your context — "
         "going looking for them again is a wasted round-trip the user waits "
-        "through, on a path that is already two model calls deep.",
+        "through.",
         "Do NOT attempt `Bash`, `Read`, `Write`, `Edit`, `Glob`, or `Grep` on "
         "this surface. They do not reach the user's project — they address the "
         "machine you are running on, which is a different computer with none of "
         "the user's code on it. Using them would edit the wrong files and look "
         "like it worked. They are withheld from you here for exactly that "
-        "reason; if you find yourself reaching for one, the answer is "
-        "`code_mode`.",
+        "reason; if you find yourself reaching for one, the answer is your file "
+        "tools above.",
         "Read a request to BUILD something as a request to build it in CODE. "
         '"Build me an employee management app, with components and a nice '
         "design\" means React/Vue/Svelte components and CSS in the user's "
@@ -137,10 +143,12 @@ def _procedure() -> str:
         '"dashboard" and "app" all keep their ordinary front-end meaning on '
         "this surface. The pocket, planner, and widget tools are withheld from "
         "you here for that reason; do not reach for a skill that calls them.",
-        "Report only what actually happened. If `code_mode` returns an error or "
-        "is unavailable, say so plainly — never describe a change as made when "
-        "the tool did not confirm it. When it succeeds, briefly summarize what "
-        "changed and where.",
+        "Report only what actually happened, and mind the difference between "
+        "reading and writing. A `writeFile` result means your change was STAGED "
+        "for review, not saved — say 'I've proposed…', never 'I created' or 'I "
+        "updated' as if it were done. If a tool returns an error or is "
+        "unavailable, say so plainly; never describe a change as made when the "
+        "tool did not confirm it.",
         "</code-procedure>",
     ]
     return "\n".join(lines) + "\n"

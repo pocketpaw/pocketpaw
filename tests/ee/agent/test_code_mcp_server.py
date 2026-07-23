@@ -1,36 +1,45 @@
-# test_code_mcp_server.py — the ``code_mode`` in-process MCP tool (CD-2).
+# test_code_mcp_server.py — the /code file tools (feat/code-mode-file-tools).
 #
-# Created 2026-07-22 (feat/code-mode-tool). Covers the single tool the main chat
-# agent uses to reach the user's project: it resolves the workspace from the
-# per-stream ContextVars, hands the task to CD-1's delegate channel, and turns
-# whatever comes back into an MCP response.
+# Created 2026-07-22 (feat/code-mode-tool) for the single ``code_mode`` tool.
+# Rewritten 2026-07-24 when that coarse tool was replaced by the four file verbs
+# the MAIN agent drives — ``readFile`` / ``search`` / ``listDir`` / ``writeFile``.
+# Each resolves the workspace from the per-stream ContextVars, delegates ONE call
+# to CD-1's browser channel, and turns whatever comes back into an MCP response.
 #
-# Two properties carry most of the weight here.
+# Three properties carry most of the weight here.
 #
-# FIRST, the mode default fails SAFE. Every way of not-saying-a-mode — omitted,
-# null, empty, misspelled, wrong type — has to land on read-only ``ask``. The
-# failure mode of a forgotten field must be "cannot edit", never "can edit
-# unexpectedly", so these are enumerated rather than sampled.
+# FIRST, a malformed call never reaches the browser. A missing path, a non-string
+# query, an over-long rewrite — each is rejected as an MCP error before a delegate
+# is parked, because parking on a bad call would burn the channel budget on
+# something knowable at once.
 #
 # SECOND, no failure path raises. A raise inside an in-process tool handler
 # reaches the model as a broken tool; an error RESPONSE gives it a true sentence
-# to say. So a timeout, a dead stream, and a missing workspace all have to come
-# back as ``is_error`` payloads carrying the channel's own message.
+# to say. So a timeout, a dead stream, and a missing workspace all come back as
+# ``is_error`` payloads carrying the channel's own message.
+#
+# THIRD, ``writeFile`` is honest about staging. It delegates the proposed content
+# and relays the browser's staged-change sentence; the response is what the model
+# reads, and it must not read as "the file was written".
 #
 # The delegate channel itself is not re-tested here (see
-# tests/cloud/test_codeagent_delegates.py) — these drive the handler against a
-# stub and assert on what the handler does with the outcome.
+# tests/cloud/test_codeagent_delegates.py) — these drive the handlers against a
+# stub and assert on what each does with the outcome.
 from __future__ import annotations
-
-import json
 
 import pytest
 from pocketpaw_ee.agent.mcp_servers import code as code_mcp
 from pocketpaw_ee.agent.mcp_servers.code import (
-    CODE_MODE_TOOL_ID,
     CODE_TOOL_IDS,
+    LIST_DIR_TOOL_ID,
+    READ_FILE_TOOL_ID,
+    SEARCH_TOOL_ID,
     SERVER_NAME,
-    _code_mode_handler,
+    WRITE_FILE_TOOL_ID,
+    _list_dir_handler,
+    _read_file_handler,
+    _search_handler,
+    _write_file_handler,
     build_code_server,
 )
 from pocketpaw_ee.cloud.codeagent.delegates import DelegateOutcome
@@ -51,65 +60,70 @@ def captured_delegate(monkeypatch):
     handler imports it inside the function body to avoid an import cycle."""
     calls: list[dict] = []
 
-    async def _stub(workspace_id, task, mode):
-        calls.append({"workspace_id": workspace_id, "task": task, "mode": mode})
-        return DelegateOutcome(ok=True, result={"summary": "done", "filesRead": ["a.ts"]})
+    async def _stub(workspace_id, tool, tool_input):
+        calls.append({"workspace_id": workspace_id, "tool": tool, "input": tool_input})
+        return DelegateOutcome(ok=True, result={"output": "the file contents", "isError": False})
 
     monkeypatch.setattr(
-        "pocketpaw_ee.cloud.codeagent.delegates.delegate_to_browser",
+        "pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser",
         _stub,
     )
     return calls
 
 
-def _payload(response: dict) -> dict:
-    """Pull the JSON body back out of an MCP success response."""
-    return json.loads(response["content"][0]["text"])
+def _text(response: dict) -> str:
+    """Pull the relayed text back out of an MCP response."""
+    return response["content"][0]["text"]
 
 
 # ── the id contract with the /code SurfaceProfile ───────────────────────────
 
 
-def test_tool_id_matches_the_literal_the_surface_profile_hardcodes():
-    """CD-3 shipped first and could not import this constant, so it spelled the
-    id as a literal. They are matched by STRING: a rename here scopes the /code
-    surface to a tool nothing provides, and it fails silently — the agent simply
-    has no way to reach the code. Pin both halves."""
+def test_tool_ids_match_the_literals_the_surface_profile_hardcodes():
+    """The profile shipped before this module exported constants, so it spells
+    the ids as literals. They are matched by STRING: a rename here scopes the
+    /code surface to a tool nothing provides, and it fails silently — the agent
+    simply has no way to reach the code. Pin both halves."""
     assert SERVER_NAME == "pocketpaw_code"
-    assert CODE_MODE_TOOL_ID == "mcp__pocketpaw_code__code_mode"
-    assert CODE_TOOL_IDS == (CODE_MODE_TOOL_ID,)
+    assert READ_FILE_TOOL_ID == "mcp__pocketpaw_code__readFile"
+    assert SEARCH_TOOL_ID == "mcp__pocketpaw_code__search"
+    assert LIST_DIR_TOOL_ID == "mcp__pocketpaw_code__listDir"
+    assert WRITE_FILE_TOOL_ID == "mcp__pocketpaw_code__writeFile"
+    assert set(CODE_TOOL_IDS) == {
+        READ_FILE_TOOL_ID,
+        SEARCH_TOOL_ID,
+        LIST_DIR_TOOL_ID,
+        WRITE_FILE_TOOL_ID,
+    }
 
 
-def test_the_surface_profile_actually_carries_this_id():
+def test_the_surface_profile_actually_carries_every_id():
     """The other end of the same contract, read from the real profile rather
     than restated. If either side drifts, this fails instead of the surface
-    quietly losing its only tool."""
+    quietly losing a tool."""
     from pocketpaw_ee.cloud.surface.domain import SurfaceKind, SurfaceMeta
     from pocketpaw_ee.cloud.surface.service import resolve_profile
 
     profile = resolve_profile(SurfaceKind.CODE, SurfaceMeta())
     assert profile.allow_mcp_tool_ids is not None
-    assert CODE_MODE_TOOL_ID in profile.allow_mcp_tool_ids
+    for tool_id in CODE_TOOL_IDS:
+        assert tool_id in profile.allow_mcp_tool_ids
 
 
 @pytest.mark.asyncio
-async def test_code_mode_reaches_the_effective_allowlist_and_the_builtins_do_not():
+async def test_file_tools_reach_the_effective_allowlist_and_the_builtins_do_not():
     """The whole seam, end to end, through the REAL allowlist computation.
-
-    Its sibling in ``tests/cloud/surface/test_studio_code_handlers.py`` could
-    only assert ABSENCE — when CD-3 shipped, ``allow_mcp_tool_ids`` was a filter
-    over tools that existed, and no server provided ``code_mode`` yet, so the id
-    could not appear no matter how correct the profile was. This file is the
-    change that makes it appear, so this is where presence gets pinned.
 
     Asserting both directions at once is the point. Presence alone would pass on
     a surface that also still had ``Bash``; absence alone was already green on a
     surface with no way to reach the code at all. Only together do they say the
-    agent has exactly one door and it is the right one."""
-    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
-    from pocketpaw.config import get_settings
+    agent has exactly the file tools and nothing that addresses the wrong
+    machine."""
     from pocketpaw_ee.cloud.surface.domain import SurfaceKind, SurfaceMeta
     from pocketpaw_ee.cloud.surface.service import resolve_profile
+
+    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+    from pocketpaw.config import get_settings
 
     profile = resolve_profile(SurfaceKind.CODE, SurfaceMeta())
     built = await ClaudeSDKBackend(get_settings())._build_options(
@@ -125,102 +139,140 @@ async def test_code_mode_reaches_the_effective_allowlist_and_the_builtins_do_not
     )
     effective = set(built.options_kwargs["allowed_tools"])
 
-    assert CODE_MODE_TOOL_ID in effective, (
-        "the /code agent has no way to reach the user's code. Either this "
-        "server is not registered via the pocketpaw.mcp_servers entry point "
-        "(a fresh checkout needs `uv sync --dev --group ee` to pick up a NEW "
-        "entry point), or the id drifted from the literal the profile allows. "
-        f"Effective MCP ids: {sorted(t for t in effective if t.startswith('mcp__'))}"
-    )
+    for tool_id in CODE_TOOL_IDS:
+        assert tool_id in effective, (
+            "the /code agent is missing a file tool. Either this server is not "
+            "registered via the pocketpaw.mcp_servers entry point (a fresh "
+            "checkout needs `uv sync --dev --group ee` to pick up the entry "
+            "point), or an id drifted from the literal the profile allows. "
+            f"Missing: {tool_id}. Effective MCP ids: "
+            f"{sorted(t for t in effective if t.startswith('mcp__'))}"
+        )
     for tool in ("Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"):
         assert tool not in effective, f"{tool} addresses the backend's disk, not the user's project"
     assert not [t for t in effective if t.startswith("mcp__pocketpaw_daytona__")]
 
 
-# ── the round trip ──────────────────────────────────────────────────────────
+# ── each verb round-trips to the delegate with the right shape ──────────────
 
 
 @pytest.mark.asyncio
-async def test_task_round_trips_to_the_delegate_and_back(in_workspace, captured_delegate):
-    response = await _code_mode_handler({"task": "add a loading state", "mode": "edit"})
+async def test_read_file_delegates_and_relays(in_workspace, captured_delegate):
+    response = await _read_file_handler({"path": "  src/App.tsx  "})
 
     assert captured_delegate == [
-        {"workspace_id": WS, "task": "add a loading state", "mode": "edit"}
+        {"workspace_id": WS, "tool": "readFile", "input": {"path": "src/App.tsx"}}
     ]
     assert not response.get("is_error")
-    assert _payload(response) == {"summary": "done", "filesRead": ["a.ts"]}
+    assert _text(response) == "the file contents"
 
 
 @pytest.mark.asyncio
-async def test_task_is_stripped_before_it_crosses_the_wire(in_workspace, captured_delegate):
-    await _code_mode_handler({"task": "  fix the retry logic \n"})
-    assert captured_delegate[0]["task"] == "fix the retry logic"
+async def test_search_delegates_the_query(in_workspace, captured_delegate):
+    await _search_handler({"query": "Sidebar"})
+    assert captured_delegate == [
+        {"workspace_id": WS, "tool": "search", "input": {"query": "Sidebar"}}
+    ]
 
 
-# ── the mode default fails safe ─────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_list_dir_delegates_the_path(in_workspace, captured_delegate):
+    await _list_dir_handler({"path": "src/components"})
+    assert captured_delegate[0]["tool"] == "listDir"
+    assert captured_delegate[0]["input"] == {"path": "src/components"}
+
+
+@pytest.mark.asyncio
+async def test_list_dir_allows_the_empty_root_path(in_workspace, captured_delegate):
+    """Listing the project root is a normal request — the one verb where the
+    empty string is a value, not a malformed argument."""
+    await _list_dir_handler({"path": ""})
+    assert captured_delegate == [{"workspace_id": WS, "tool": "listDir", "input": {"path": ""}}]
+
+
+@pytest.mark.asyncio
+async def test_write_file_delegates_the_full_content(in_workspace, captured_delegate):
+    await _write_file_handler({"path": "src/button.tsx", "content": "export const B = 1;\n"})
+    assert captured_delegate == [
+        {
+            "workspace_id": WS,
+            "tool": "writeFile",
+            "input": {"path": "src/button.tsx", "content": "export const B = 1;\n"},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_write_file_relays_the_staged_sentence_as_success(in_workspace, monkeypatch):
+    """writeFile stages a proposal; the browser answers with a sentence
+    describing it. The handler relays that verbatim as a NON-error, so the model
+    can repeat it — 'I've proposed…', not 'I wrote…'."""
+
+    async def _staged(workspace_id, tool, tool_input):
+        return DelegateOutcome(
+            ok=True,
+            result={
+                "output": "Proposed 2 changes to `src/button.tsx` for review.",
+                "isError": False,
+            },
+        )
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser", _staged
+    )
+
+    response = await _write_file_handler({"path": "src/button.tsx", "content": "x"})
+    assert not response.get("is_error")
+    assert "Proposed 2 changes" in _text(response)
+
+
+@pytest.mark.asyncio
+async def test_write_file_allows_blanking_a_file(in_workspace, captured_delegate):
+    """Empty ``content`` is a legitimate rewrite (clearing a file), so it is
+    required-present but allowed-empty — only a non-string is rejected."""
+    await _write_file_handler({"path": "a.ts", "content": ""})
+    assert captured_delegate[0]["input"] == {"path": "a.ts", "content": ""}
+
+
+# ── malformed calls are rejected before they reach the browser ──────────────
 
 
 @pytest.mark.parametrize(
-    "args",
+    "handler,args",
     [
-        pytest.param({"task": "t"}, id="omitted"),
-        pytest.param({"task": "t", "mode": None}, id="null"),
-        pytest.param({"task": "t", "mode": ""}, id="empty"),
-        pytest.param({"task": "t", "mode": "   "}, id="whitespace"),
-        pytest.param({"task": "t", "mode": "write"}, id="hallucinated"),
-        pytest.param({"task": "t", "mode": "EDIT_ALL"}, id="unrecognized"),
-        pytest.param({"task": "t", "mode": 1}, id="int"),
-        pytest.param({"task": "t", "mode": True}, id="bool"),
-        pytest.param({"task": "t", "mode": ["edit"]}, id="list"),
+        pytest.param(_read_file_handler, {}, id="read-missing-path"),
+        pytest.param(_read_file_handler, {"path": ""}, id="read-empty-path"),
+        pytest.param(_read_file_handler, {"path": "   "}, id="read-whitespace-path"),
+        pytest.param(_read_file_handler, {"path": 42}, id="read-non-string-path"),
+        pytest.param(_search_handler, {}, id="search-missing-query"),
+        pytest.param(_search_handler, {"query": ""}, id="search-empty-query"),
+        pytest.param(_search_handler, {"query": None}, id="search-null-query"),
+        pytest.param(_list_dir_handler, {"path": 3}, id="listdir-non-string-path"),
+        pytest.param(_write_file_handler, {"content": "x"}, id="write-missing-path"),
+        pytest.param(_write_file_handler, {"path": "a.ts"}, id="write-missing-content"),
+        pytest.param(
+            _write_file_handler, {"path": "a.ts", "content": 5}, id="write-non-string-content"
+        ),
     ],
 )
 @pytest.mark.asyncio
-async def test_every_way_of_not_saying_edit_resolves_to_ask(
-    args, in_workspace, captured_delegate
+async def test_a_malformed_call_is_rejected_without_reaching_the_browser(
+    handler, args, in_workspace, captured_delegate
 ):
-    """The one direction that matters. A model that garbles this field must lose
-    the ability to edit, not gain it."""
-    await _code_mode_handler(args)
-    assert captured_delegate[0]["mode"] == "ask"
-
-
-@pytest.mark.parametrize("raw", ["edit", "EDIT", " Edit "])
-@pytest.mark.asyncio
-async def test_edit_is_honoured_when_actually_asked_for(raw, in_workspace, captured_delegate):
-    """The safe default must not be so eager that it swallows a real request —
-    otherwise /code could never edit anything."""
-    await _code_mode_handler({"task": "t", "mode": raw})
-    assert captured_delegate[0]["mode"] == "edit"
-
-
-# ── every failure is a response, never a raise ──────────────────────────────
-
-
-@pytest.mark.parametrize(
-    "args",
-    [
-        pytest.param({}, id="missing"),
-        pytest.param({"task": None}, id="null"),
-        pytest.param({"task": ""}, id="empty"),
-        pytest.param({"task": "   "}, id="whitespace"),
-        pytest.param({"task": 42}, id="int"),
-    ],
-)
-@pytest.mark.asyncio
-async def test_a_bad_task_is_rejected_without_reaching_the_browser(
-    args, in_workspace, captured_delegate
-):
-    response = await _code_mode_handler(args)
+    response = await handler(args)
     assert response["is_error"] is True
     assert captured_delegate == [], "a malformed call must not park a delegate"
 
 
 @pytest.mark.asyncio
-async def test_an_oversized_task_is_rejected_with_advice(in_workspace, captured_delegate):
-    response = await _code_mode_handler({"task": "x" * 9000})
+async def test_an_oversized_write_is_rejected_with_advice(in_workspace, captured_delegate):
+    response = await _write_file_handler({"path": "a.ts", "content": "x" * 200_000})
     assert response["is_error"] is True
-    assert "too long" in response["content"][0]["text"]
+    assert "too long" in _text(response)
     assert captured_delegate == []
+
+
+# ── every failure is a response, never a raise ──────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -229,10 +281,10 @@ async def test_no_workspace_in_scope_is_an_error_not_a_crash(monkeypatch, captur
     to scope the return leg to, so the tool must decline rather than park."""
     monkeypatch.setattr(code_mcp, "_workspace_id", lambda: None)
 
-    response = await _code_mode_handler({"task": "t"})
+    response = await _read_file_handler({"path": "a.ts"})
 
     assert response["is_error"] is True
-    assert "no active workspace" in response["content"][0]["text"].lower()
+    assert "no active workspace" in _text(response).lower()
     assert captured_delegate == []
 
 
@@ -240,9 +292,9 @@ async def test_no_workspace_in_scope_is_an_error_not_a_crash(monkeypatch, captur
 async def test_a_failed_delegate_relays_the_channels_own_message(in_workspace, monkeypatch):
     """The channel distinguishes "no browser attached" from "the browser was
     slow". The model needs that difference to say something true, so the handler
-    must pass the message through rather than substituting a generic one."""
+    passes the message through rather than substituting a generic one."""
 
-    async def _timeout(workspace_id, task, mode):
+    async def _timeout(workspace_id, tool, tool_input):
         return DelegateOutcome(
             ok=False,
             error="timeout",
@@ -250,47 +302,58 @@ async def test_a_failed_delegate_relays_the_channels_own_message(in_workspace, m
         )
 
     monkeypatch.setattr(
-        "pocketpaw_ee.cloud.codeagent.delegates.delegate_to_browser", _timeout
+        "pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser", _timeout
     )
 
-    response = await _code_mode_handler({"task": "t"})
+    response = await _read_file_handler({"path": "a.ts"})
 
     assert response["is_error"] is True
-    assert "did not finish" in response["content"][0]["text"]
-    assert "180s" in response["content"][0]["text"]
+    assert "did not finish" in _text(response)
+    assert "180s" in _text(response)
 
 
 @pytest.mark.asyncio
-async def test_a_failed_delegate_with_no_message_still_says_something(in_workspace, monkeypatch):
-    async def _bare(workspace_id, task, mode):
-        return DelegateOutcome(ok=False, error="aborted", message="")
+async def test_a_browser_side_error_result_becomes_an_error_response(in_workspace, monkeypatch):
+    """``ok`` says the round trip completed; ``isError`` in the payload says the
+    verb itself failed (a missing file, an unreadable path). That must surface to
+    the model as an error it can act on, not as a successful read of an error
+    string."""
 
-    monkeypatch.setattr("pocketpaw_ee.cloud.codeagent.delegates.delegate_to_browser", _bare)
+    async def _iserror(workspace_id, tool, tool_input):
+        return DelegateOutcome(
+            ok=True, result={"output": "no such file: a.ts", "isError": True}
+        )
 
-    response = await _code_mode_handler({"task": "t"})
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser", _iserror
+    )
+
+    response = await _read_file_handler({"path": "a.ts"})
     assert response["is_error"] is True
-    assert response["content"][0]["text"].strip() != "Error:"
+    assert "no such file" in _text(response)
 
 
 @pytest.mark.asyncio
-async def test_an_empty_success_result_is_still_a_success(in_workspace, monkeypatch):
-    """``ok`` is the signal, not truthiness of the payload. A sub-agent that
-    answered with nothing did not fail."""
+async def test_an_empty_success_output_is_still_a_success(in_workspace, monkeypatch):
+    """An empty file, or a listing of an empty directory, is a real answer — not
+    a failure. ``ok`` is the signal, not truthiness of the output."""
 
-    async def _empty(workspace_id, task, mode):
-        return DelegateOutcome(ok=True, result={})
+    async def _empty(workspace_id, tool, tool_input):
+        return DelegateOutcome(ok=True, result={"output": "", "isError": False})
 
-    monkeypatch.setattr("pocketpaw_ee.cloud.codeagent.delegates.delegate_to_browser", _empty)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser", _empty
+    )
 
-    response = await _code_mode_handler({"task": "t"})
+    response = await _read_file_handler({"path": "empty.ts"})
     assert not response.get("is_error")
-    assert _payload(response) == {}
+    assert _text(response) == ""
 
 
 # ── the server assembles ────────────────────────────────────────────────────
 
 
-def test_server_builds_with_exactly_one_tool():
+def test_server_builds_with_the_four_file_tools():
     built = build_code_server()
     if built is None:
         pytest.skip("claude_agent_sdk not installed")
@@ -299,9 +362,9 @@ def test_server_builds_with_exactly_one_tool():
     assert server is not None
 
 
-def test_provider_reports_the_tool_id():
-    """The entry-point provider is how the id reaches the SDK allowlist. A
-    provider that builds but reports no ids leaves the tool uncallable."""
+def test_provider_reports_every_tool_id():
+    """The entry-point provider is how the ids reach the SDK allowlist. A
+    provider that builds but reports the wrong ids leaves tools uncallable."""
     from pocketpaw_ee.extensions import CloudCodeMcpProvider
 
-    assert CloudCodeMcpProvider().tool_ids() == [CODE_MODE_TOOL_ID]
+    assert set(CloudCodeMcpProvider().tool_ids()) == set(CODE_TOOL_IDS)

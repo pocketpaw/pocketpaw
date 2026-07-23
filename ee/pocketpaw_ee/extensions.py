@@ -1026,17 +1026,18 @@ class CloudBeltMcpProvider:
 
 class CloudCodeMcpProvider:
     """`pocketpaw.mcp_servers` — the Code Mode delegate in-process server
-    (``pocketpaw_code``). Hosts ``code_mode`` only.
+    (``pocketpaw_code``). Hosts the four /code file tools: ``readFile`` /
+    ``search`` / ``listDir`` / ``writeFile``.
 
     The main chat agent drives the /code surface and reaches the user's project
-    through this one coarse tool. The handler does not open a file: it parks on
-    a future while the BROWSER does the work and posts the answer back to
-    ``POST /codeagent/resolve``, because a WebContainer project lives in the tab
-    and has no server-side row a backend could reach.
+    through these tools, one call at a time. No handler opens a file: each parks
+    on a future while the BROWSER runs the matching file-session verb and posts
+    the result back to ``POST /codeagent/resolve``, because a WebContainer
+    project lives in the tab and has no server-side row a backend could reach.
 
     Ambient (NOT in ``OPT_IN_MCP_SERVERS``), the same regime as the sibling belt
     / loom / media servers: the /code surface scopes access via its profile,
-    which allows this tool id and DENIES the file/shell built-ins outright.
+    which allows these tool ids and DENIES the file/shell built-ins outright.
     ``build_code_server`` returns None — and the loop skips it — when the
     claude_agent_sdk isn't installed, so chat never breaks.
     """
