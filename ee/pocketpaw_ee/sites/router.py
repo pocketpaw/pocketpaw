@@ -144,19 +144,44 @@
 # view). fabric.write is RETAINED because a COLD miss still builds (mutates on-disk
 # state), so the endpoint can still trigger work; it is not a pure read. The wire
 # contract (request/response, origin resolution, 422/404/403) is unchanged.
+#
+# Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): added the two IMPORT
+# endpoints, both tenant-scoped writes (fabric.write) under the router's sites plan
+# gate like every sibling mutation:
+#   * POST /sites/import — multipart zip upload (25MB cap enforced while reading the
+#     upload). Delegates to import_service.import_zip_site: safe in-memory unpack
+#     (zip-slip + decompression-bomb guards), mint pocket + DRAFT Site doc, publish
+#     through the existing html/static deploy path (binary files ride the
+#     generator's ``assets`` base64 sideband — cross-repo seam), persist an
+#     ``import_report`` on the Site doc, Journal event. Returns the SiteResponse
+#     (now carrying import_report).
+#   * POST /sites/import/from-url — {url} → 202 {site_id, pocket_id,
+#     status:"queued"}. Validates the URL shape and mints the draft Site with a
+#     queued import_report.
+#
+# Updated 2026-07-23 (SI-5 — feat/sites-import-crawler): the from-url crawler is
+# REAL. The endpoint contract is unchanged (202 queued), but validation now also
+# runs the crawler's SSRF shape floors (non-http(s) scheme, embedded credentials,
+# non-80/443 port, literal private/loopback/metadata IP → 422 before any write),
+# and the service schedules the same-site crawl as a background task: crawl →
+# the zip import pipeline → import_report flips to "imported"/"failed" with
+# crawl stats. See import_service.crawl_site_from_url + url_crawler.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
+from pocketpaw_ee.sites import import_service
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.dto import (
     AuditResponse,
     DevPreviewResponse,
     DomainRequest,
     DomainStatusResponse,
+    ImportFromUrlRequest,
+    ImportFromUrlResponse,
     LeafEditsRequest,
     LeafEditsResponse,
     LeafEditVerdict,
@@ -332,6 +357,63 @@ async def native_artifact_by_pocket(
         builder_origin=builder_origin,
     )
     return NativeArtifactResponse(**result)
+
+
+@router.post("/sites/import", response_model=SiteResponse)
+async def import_site(
+    file: UploadFile = File(...),
+    name: str = Form(""),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteResponse:
+    """Import an uploaded site zip (SI-4): unpack safely in memory (zip-slip +
+    decompression-bomb guards in the service), mint the html pocket + DRAFT Site
+    doc, publish through the existing html/static deploy path (binary files ride
+    the generator's ``assets`` base64 sideband), persist the ``import_report`` on
+    the Site doc, and return the SiteResponse (carrying the report).
+
+    The 25MB upload cap gates PROCESSING, not ingress: Starlette's multipart
+    parser spools the whole request body to a temp file before this handler
+    runs, so raw-ingress bounding belongs to the fronting proxy's body limit.
+    The handler reads at most cap+1 bytes of the part, and the cap is re-checked
+    in the service for
+    direct callers. Oversized → 413; a malformed/hostile archive → 422 (the
+    service's ValidationError codes map through the standard error envelope).
+    Tenant-scoped on ctx (fabric.write, sites plan gate at the router level)."""
+    cap = import_service.MAX_IMPORT_ZIP_BYTES
+    data = await file.read(cap + 1)
+    if len(data) > cap:
+        raise HTTPException(413, f"Import zip exceeds the {cap // (1024 * 1024)}MB upload cap")
+    doc = await import_service.import_zip_site(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        data=data,
+        name=name,
+    )
+    return sites_service._to_response(doc, pattern=import_service.IMPORT_PATTERN, engine="html")
+
+
+@router.post(
+    "/sites/import/from-url",
+    response_model=ImportFromUrlResponse,
+    status_code=202,
+)
+async def import_site_from_url(
+    body: ImportFromUrlRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> ImportFromUrlResponse:
+    """Queue a from-url import (SI-4 contract, SI-5 crawler): validate the URL
+    (shape + SSRF floors — bad scheme/port/credentials or a literal non-public IP
+    → 422 before anything is minted), mint the pocket + DRAFT Site doc with a
+    queued ``import_report``, schedule the background same-site crawl, and return
+    202 {site_id, pocket_id, status:"queued"} immediately. The crawl runs the zip
+    import pipeline and flips the report to "imported"/"failed" with crawl stats.
+    Tenant-scoped on ctx (fabric.write), like every sibling sites mutation."""
+    queued = await import_service.import_from_url(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, url=body.url
+    )
+    return ImportFromUrlResponse(**queued)
 
 
 @router.get("/sites", response_model=list[SiteResponse])
