@@ -1375,6 +1375,48 @@ redacts them before they leave the box:
 **Parks** an app teardown for human approval, exactly like the box DELETE above.
 Nothing is destroyed.
 
+### Environment variables (SHIP-9)
+
+An app's env vars are stored **Fernet-encrypted at rest** (the same envelope as
+the box SSH key) and are **never returned in plaintext** — every response masks
+the value to a short hint. Values are decrypted only at deploy time, merged into
+the engine's `config:set`, and redacted from every log line. `scope` is one of
+`both` (default), `prod`, or `preview`; at deploy only the vars matching the
+app's kind (its `prod` flag) plus every `both` var are applied.
+
+#### `GET /ship/apps/{app_id}/env`
+
+Lists the app's env vars, values masked:
+
+```json
+{"vars": [{"key": "API_KEY", "masked_value": "sk-…3f9", "scope": "both"}]}
+```
+
+#### `PUT /ship/apps/{app_id}/env`
+
+Upserts a batch. Each key is added or overwritten; keys absent from the body are
+left untouched. Keys use the POSIX env-name grammar; values are opaque (any
+string up to 64 KiB). Returns the full masked list.
+
+```json
+{"vars": [{"key": "API_KEY", "value": "sk-live-…", "scope": "prod"}]}
+```
+
+#### `POST /ship/apps/{app_id}/env/import`
+
+Bulk-imports a `.env` blob. Blank lines and `#` comments are ignored; each
+remaining line is split on the first `=` with surrounding quotes stripped; a line
+whose key is not a valid POSIX name is **skipped** (a paste never 422s on one
+stray line). Returns the full masked list.
+
+```json
+{"dotenv": "API_KEY=sk-live-abc\n# comment\nDEBUG=false"}
+```
+
+#### `DELETE /ship/apps/{app_id}/env/{key}`
+
+Removes one variable. Returns the remaining masked list.
+
 ### The agent surface (`pocketpaw_ship` MCP)
 
 A chat agent in a room whose pocket has the **Ship connector** bound reaches the
