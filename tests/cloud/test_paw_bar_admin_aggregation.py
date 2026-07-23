@@ -323,6 +323,52 @@ async def test_overview_reflects_kill_switch_and_greeting(client):
     assert body["greeting"] == "Back at 9am"
 
 
+@pytest.mark.asyncio
+async def test_overview_includes_agent_name_for_bound_widget(client):
+    """The overview widget block carries agent_name resolved from the agents
+    service so the E2 card can show the concierge name (feat/site-dedicated-agent)."""
+    from pocketpaw_ee.cloud.agents import service as agents_service
+    from pocketpaw_ee.cloud.agents.dto import CreateAgentRequest
+
+    c, store, _fabric = client
+    site = await _site()
+    ctx = agents_service.legacy_ctx("user:maya", "ws-1")
+    agent = await agents_service.create(
+        ctx,
+        "ws-1",
+        CreateAgentRequest(name="Brew & Co Concierge", slug="concierge-brewco"),
+    )
+    await store.create_widget(_widget(agent_id=agent.id))
+
+    body = (await c.get(f"/paw-bar/admin/site/{site.id}/overview")).json()
+    assert body["widget"]["agent_id"] == agent.id
+    assert body["widget"]["agent_name"] == "Brew & Co Concierge"
+
+
+@pytest.mark.asyncio
+async def test_overview_agent_name_absent_when_unbound(client):
+    c, store, _fabric = client
+    site = await _site()
+    await store.create_widget(_widget(agent_id=""))
+    body = (await c.get(f"/paw-bar/admin/site/{site.id}/overview")).json()
+    assert body["widget"]["agent_id"] == ""
+    assert body["widget"]["agent_name"] == ""
+
+
+@pytest.mark.asyncio
+async def test_overview_dangling_agent_id_degrades_to_empty_name(client):
+    """A bound agent_id that no longer resolves degrades to an empty agent_name
+    rather than 500-ing the overview."""
+    c, store, _fabric = client
+    site = await _site()
+    await store.create_widget(_widget(agent_id="ffffffffffffffffffffffff"))
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/overview")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["widget"]["agent_id"] == "ffffffffffffffffffffffff"
+    assert body["widget"]["agent_name"] == ""
+
+
 # --------------------------------------------------------------------------- #
 # Layer 4 — decisions filtered to the widget
 # --------------------------------------------------------------------------- #

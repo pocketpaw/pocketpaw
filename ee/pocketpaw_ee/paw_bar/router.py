@@ -14,9 +14,14 @@
 #   failure-soft. (3) _pawbar_frame_config now carries ``starters`` (the bound
 #   agent's conversation starters, capped 4, empty default) — the owner preview
 #   frame threads the bound agent's starters (via _bound_agent_starters); the public
-#   frame passes []. The ASG-1 identity fields (welcome_message/conversation_starters)
-#   and agent free-form tags are ABSENT on this branch, so their seeding degrades to
-#   a graceful no-op (the unbound-chat 409 invariant is unchanged).
+#   frame passes []. (4) GET /paw-bar/admin/site/{id}/overview's widget block now
+#   carries ``agent_name`` (the bound agent's display name, resolved via the agents
+#   service) so the E2 dashboard card can show the concierge name + detect the
+#   "<x> Concierge" dedicated pattern; empty when unbound or the agent no longer
+#   resolves (a dangling agent_id degrades to absent, never 500s the overview). The
+#   ASG-1 identity fields (welcome_message/conversation_starters) and agent free-form
+#   tags are ABSENT on this branch, so their seeding degrades to a graceful no-op
+#   (the unbound-chat 409 invariant is unchanged).
 # Updated: 2026-07-17 (D5 owner preview frame) — added GET
 #   /paw-bar/admin/site/{site_id}/preview-frame → the concierge bar frame HTML for
 #   the OWNER to test inside the dashboard. SESSION-authed (paw_bar.read role gate)
@@ -498,6 +503,25 @@ async def _bound_agent_starters(agent_id: str) -> list[str]:
         return []
     starters = getattr(agent.config, "conversation_starters", None) or []
     return list(starters)[:4]
+
+
+async def _bound_agent_name(agent_id: str) -> str:
+    """Best-effort display name of a widget's BOUND agent (E2 dashboard card).
+
+    Resolved through the SAME agents-service read path the provisioner uses, so the
+    dashboard can show the concierge name and detect the "<x> Concierge" dedicated
+    pattern. Returns "" when the widget is unbound OR the agent no longer resolves —
+    a dangling agent_id degrades to absent rather than 500-ing the overview.
+    """
+    if not agent_id:
+        return ""
+    try:
+        from pocketpaw_ee.cloud.agents import service as agents_service
+
+        agent = await agents_service.get(agent_id)
+    except Exception:  # noqa: BLE001 — a name read must never break the overview
+        return ""
+    return agent.name or ""
 
 
 def _dashboard_origin() -> str:
@@ -1107,6 +1131,12 @@ class AdminWidgetView(BaseModel):
     id: str
     spec: PawBarSpec
     agent_id: str = ""
+    # The bound agent's display name (feat/site-dedicated-agent, E2). Resolved from
+    # the agents service when ``agent_id`` is set so the dashboard card can show the
+    # concierge name and detect the "<x> Concierge" dedicated pattern. Empty when the
+    # widget is unbound OR the agent no longer resolves (a dangling agent_id degrades
+    # to "" rather than 500-ing the overview).
+    agent_name: str = ""
 
 
 class OverviewCounts(BaseModel):
@@ -1275,7 +1305,12 @@ async def get_site_overview(
     counts = OverviewCounts()
     widget_view: AdminWidgetView | None = None
     if widget is not None:
-        widget_view = AdminWidgetView(id=widget.id, spec=widget.spec, agent_id=widget.agent_id)
+        widget_view = AdminWidgetView(
+            id=widget.id,
+            spec=widget.spec,
+            agent_id=widget.agent_id,
+            agent_name=await _bound_agent_name(widget.agent_id),
+        )
         counts.pending_decisions = await _store().count_pending_decisions(widget.id)
         counts.handoffs = await _count_handoffs(widget.id, workspace_id)
     # Conversations are pocket-scoped (a Site is 1:1 with its pocket), so the
