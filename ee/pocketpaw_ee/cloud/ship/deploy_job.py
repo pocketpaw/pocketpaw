@@ -20,13 +20,18 @@
 # ``releasing`` once the engine has answered and the new container is being
 # recorded, ``live`` when the app row carries the deployed image + URL.
 #
-# SECURITY: ``AppSpec`` is built with NO env — env VALUES are never stored by
-# this entity (``env_refs`` holds names only), so a deploy can never echo a
-# secret back through the engine. A failure summary comes from SHIP-1's
-# ``CommandFailed``, whose command + stderr tail are redacted before the
-# exception is constructed.
+# SECURITY: the app's env is decrypted ONLY here (``store.decrypt_app_env`` —
+# the sole decryption seam, mirroring the box SSH key) and merged into
+# ``AppSpec.env`` for the driver's ``config:set``. ``AppSpec.env`` is
+# ``repr=False`` and the driver redacts env values from every log line, so a
+# value never reaches an event, a status record, or this module's logs. A
+# failure summary comes from SHIP-1's ``CommandFailed``, whose command + stderr
+# tail are redacted before the exception is constructed.
 #
 # Created 2026-07-22 (feat/ship-3-cloud-entity, SHIP-3): new module.
+# Changed 2026-07-23 (feat/ship-9-env-store, SHIP-9): merge the app's decrypted
+# env store into the ``DeployRequest`` so ``config:set`` carries it (previously
+# the spec was built with no env).
 
 from __future__ import annotations
 
@@ -72,10 +77,16 @@ async def run_deploy(
     factory = session_factory or ship_engine.box_session
 
     deploy = await _advance(deploy, "building")
+    # Decrypt the app's env HERE, at deploy — the sole decryption seam. It rides
+    # into ``AppSpec.env`` (``repr=False``, so a logged spec never prints it),
+    # where the driver applies it via ``config:set`` and redacts the values from
+    # every log line. It never enters an event, a status record, or this module's
+    # logs. An app with no env decrypts to ``{}`` — the prior no-env behaviour.
+    env = store.decrypt_app_env(app)
     try:
         async with factory(box) as session:
             result = await session.engine.deploy_app(
-                DeployRequest(app=AppSpec(name=app.name), image=deploy.image)
+                DeployRequest(app=AppSpec(name=app.name, env=env), image=deploy.image)
             )
     except ship_engine.ENGINE_FAILURES as exc:
         logger.warning("ship deploy failed for app=%s deploy=%s", app.id, deploy.id)
