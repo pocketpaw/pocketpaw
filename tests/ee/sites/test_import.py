@@ -161,19 +161,23 @@ async def _post_zip(app: FastAPI, data: bytes, name: str = "") -> Any:
 
 
 @pytest.mark.asyncio
-async def test_import_zip_happy_path(_fake_publish, monkeypatch):
+async def test_import_zip_happy_path(_fake_publish, _fake_run_import, monkeypatch):
     """A good zip imports end to end: Site doc minted + flipped live, the generator
-    input carries engine=html / text source / base64 assets, and the import_report
-    (pages, asset counts, forms) is persisted and returned."""
+    input carries engine=html / text source / base64 assets, forms are REWIRED to the
+    capture API, and the authoritative import_report is persisted and returned."""
     app = _build_app("ws_owner", monkeypatch)
     resp = await _post_zip(app, _good_zip(), name="My imported site")
     assert resp.status_code == 200, resp.text
     body = resp.json()
 
-    # The publish rode the html engine with the text source map + assets sideband.
+    # The publish rode the html engine with the REWIRED source map + assets sideband.
     assert _fake_publish["engine"] == "html"
     assert set(_fake_publish["source"]) == {"index.html", "about.html", "app.js"}
-    assert _fake_publish["source"]["index.html"] == _INDEX_HTML
+    # The deployed html is the rewired source, not the raw upload: the form now posts
+    # to the capture endpoint and the original action is preserved on the element.
+    deployed_index = _fake_publish["source"]["index.html"]
+    assert f"action='{sites_service._capture_base()}/capture/form'" in deployed_index
+    assert "data-paw-original-action='https://old-backend.example/submit'" in deployed_index
     assert _fake_publish["assets"] == {"img/logo.png": base64.b64encode(_PNG_BYTES).decode("ascii")}
     assert _fake_publish["pattern"] == "imported"
 
@@ -189,7 +193,7 @@ async def test_import_zip_happy_path(_fake_publish, monkeypatch):
         {
             "page": "index.html",
             "original_action": "https://old-backend.example/submit",
-            "rewired": False,
+            "rewired": True,
         }
     ]
     assert "app.js" in report["scripts"]
@@ -204,7 +208,24 @@ async def test_import_zip_happy_path(_fake_publish, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_import_zip_single_root_dir_flattens(_fake_publish, monkeypatch):
+async def test_import_rewire_failure_does_not_deploy(_fake_publish, monkeypatch):
+    """If the rewire pipeline fails, the import FAILS closed — it never falls back to
+    deploying the raw, un-rewired upload (which would leak leads to the origin site)."""
+    from pocketpaw_ee.sites import generator_client
+
+    async def _boom(files, **kw):
+        raise RuntimeError("generator import command unavailable")
+
+    monkeypatch.setattr(generator_client, "run_import", _boom)
+    app = _build_app("ws_owner", monkeypatch)
+    resp = await _post_zip(app, _good_zip(), name="My imported site")
+    assert resp.status_code >= 400, resp.text
+    # publish was never reached — nothing was deployed with un-rewired forms.
+    assert _fake_publish == {}
+
+
+@pytest.mark.asyncio
+async def test_import_zip_single_root_dir_flattens(_fake_publish, _fake_run_import, monkeypatch):
     """The `zip -r site site/` shape (one top dir holding index.html) imports as if
     that dir were the root."""
     app = _build_app("ws_owner", monkeypatch)
@@ -300,7 +321,7 @@ async def test_import_zip_not_a_zip_rejected(beanie_test_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_import_cross_tenant_site_is_invisible(_fake_publish, monkeypatch):
+async def test_import_cross_tenant_site_is_invisible(_fake_publish, _fake_run_import, monkeypatch):
     """An imported site never leaks cross-tenant: the intruder's gallery list is
     empty and the site-scoped detail read (domains) is a 404."""
     owner_app = _build_app("ws_owner", monkeypatch)
