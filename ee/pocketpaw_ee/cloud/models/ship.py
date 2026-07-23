@@ -44,6 +44,14 @@
 # so the workspace-scoped ``/api/v1/ship`` surface has app + deploy state to
 # read. Both are workspace-indexed and read exclusively through
 # ``ee.cloud.ship.store``.
+# Changed 2026-07-23 (feat/ship-9-env-store, SHIP-9): added the encrypted env
+# store to ``ShipApp`` — ``env_vars`` maps an env var NAME to a ``ShipEnvVar``
+# sub-doc holding the value Fernet-encrypted at rest (same envelope + key,
+# ``CLOUD_ENCRYPTION_KEY``, as the box SSH key) plus a non-secret display mask
+# and a ``both|prod|preview`` scope. Plaintext env VALUES never live at rest;
+# ``env_refs`` (names only) is unchanged and still carried alongside it. Only
+# ``ee.cloud.ship.store`` encrypts/decrypts the ``enc_value`` (mirrors
+# ``decrypt_ssh_key``); no other layer ever handles the plaintext.
 
 from __future__ import annotations
 
@@ -148,6 +156,31 @@ class ShipAppDomain(BaseModel):
     tls_enabled: bool = False
 
 
+# An env var's deploy scope: applied to both deploy kinds, or only to production
+# / only to preview deploys. The deploy-time merge filters on it (SHIP-9).
+ShipEnvScope = Literal["both", "prod", "preview"]
+
+
+class ShipEnvVar(BaseModel):
+    """One env var stored for an app (SHIP-9).
+
+    ``enc_value`` is a Fernet token — the plaintext value NEVER lives at rest,
+    the same envelope the box SSH key uses (``cloud._core.crypto`` +
+    ``CLOUD_ENCRYPTION_KEY``). ``masked`` is a NON-secret display hint (a short
+    suffix, or bullets for short values) the read surface returns so the console
+    can render the var without ever decrypting it — decryption happens only at
+    deploy, inside ``ship.store``. ``scope`` decides which deploy kinds the var
+    is merged into.
+
+    Only ``ee.cloud.ship.store`` reads/writes ``enc_value`` (encrypt on upsert,
+    decrypt at deploy); no router, DTO, domain, or service ever touches it.
+    """
+
+    enc_value: str
+    masked: str = ""
+    scope: ShipEnvScope = "both"
+
+
 class ShipApp(TimestampedDocument):
     """One app deployed onto a workspace's managed box.
 
@@ -155,10 +188,12 @@ class ShipApp(TimestampedDocument):
     store asserts it). ``box_id`` is the owning ``ShipBox`` id — an app never
     outlives its box.
 
-    SECURITY: ``env_refs`` carries env var NAMES only. Values are the app's
-    secret material; they live in the app's own environment on the box and are
-    never persisted, serialized, or logged here — the same invariant SHIP-1's
-    ``AppSpec``/``DbResult`` hold at the engine boundary.
+    SECURITY: ``env_refs`` carries env var NAMES only. ``env_vars`` (SHIP-9) may
+    carry VALUES, but only as Fernet ciphertext (``ShipEnvVar.enc_value``) — the
+    plaintext never lives at rest, is never serialized into a DTO/event/log, and
+    is decrypted solely inside ``ship.store`` at deploy time (the same envelope
+    the box SSH key uses). SHIP-1's ``AppSpec``/``DbResult`` hold the matching
+    invariant at the engine boundary.
     """
 
     # Tenancy filter — every ship read scopes on this.
@@ -175,6 +210,11 @@ class ShipApp(TimestampedDocument):
     image: str = ""
     # Env var NAMES the app expects. NEVER values (see the class docstring).
     env_refs: list[str] = Field(default_factory=list)
+    # Encrypted env store (SHIP-9): NAME -> ``ShipEnvVar`` (value Fernet-encrypted
+    # at rest, plus a non-secret display mask + scope). The one place an app's
+    # env VALUES are persisted — encrypted, and only ever written/read through
+    # ``ship.store``. Distinct from ``env_refs`` (names an app merely expects).
+    env_vars: dict[str, ShipEnvVar] = Field(default_factory=dict)
     # Production flag — the console badges it; no behaviour hangs off it yet.
     prod: bool = False
     # Engine-reported URLs the app answers on (deploy URL + added domains).

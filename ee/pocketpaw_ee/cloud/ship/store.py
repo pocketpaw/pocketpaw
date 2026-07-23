@@ -13,9 +13,17 @@
 # halves — ``list_boxes``, the ``ShipApp`` CRUD used by the HTTP surface, the
 # ``ShipDeploy`` attempt log the arq deploy job advances, and the two
 # ``park_*_destroy`` writers that record a parked teardown without executing it.
+# Changed 2026-07-23 (feat/ship-9-env-store, SHIP-9): this module now owns the
+# app's encrypted env store too — ``upsert_app_env`` Fernet-encrypts each value
+# before it is written (mirrors the SSH-key envelope in
+# ``create_provisioning_box``), ``delete_app_env`` removes one var, and
+# ``decrypt_app_env`` is the SOLE decryption path (mirrors ``decrypt_ssh_key``),
+# scope-filtered for the deploy-time merge. Plaintext values are handled nowhere
+# else.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from beanie import PydanticObjectId
@@ -31,6 +39,7 @@ from pocketpaw_ee.cloud.models.ship import (
     ShipBuildPath,
     ShipDeploy,
     ShipDeployStatus,
+    ShipEnvVar,
 )
 
 
@@ -258,6 +267,74 @@ async def park_app_destroy(app: ShipApp, *, proposal_id: str) -> ShipApp:
     app.pending_destroy_proposal_id = proposal_id
     await app.save()
     return app
+
+
+# --------------------------------------------------------------------------- #
+# App env store (SHIP-9) — the SOLE encrypt/decrypt seam for env VALUES.
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class EnvVarWrite:
+    """One env var to persist: the ``value`` is PLAINTEXT in, encrypted before it
+    is written. ``masked`` is the caller-computed non-secret display hint stored
+    alongside the ciphertext; ``scope`` is ``both|prod|preview``.
+
+    ``value`` is excluded from ``repr`` (like SHIP-1's ``AppSpec.env``) so a
+    logged/debugged write object never prints the secret.
+    """
+
+    key: str
+    masked: str
+    scope: str
+    value: str = field(repr=False)
+
+
+async def upsert_app_env(app: ShipApp, writes: list[EnvVarWrite]) -> ShipApp:
+    """Encrypt + upsert each env var on the app doc. New keys are added, existing
+    keys overwritten. This is the ONLY place an env value is encrypted — the
+    plaintext ``value`` becomes a Fernet token here and never lives at rest.
+
+    Encryption needs ``CLOUD_ENCRYPTION_KEY``; a missing key raises a clear setup
+    error (``crypto.encrypt``) rather than persisting a secret in the clear.
+    """
+    for w in writes:
+        app.env_vars[w.key] = ShipEnvVar(
+            enc_value=crypto.encrypt(w.value),
+            masked=w.masked,
+            scope=w.scope,  # type: ignore[arg-type] — validated at the DTO boundary
+        )
+    if writes:
+        await app.save()
+    return app
+
+
+async def delete_app_env(app: ShipApp, key: str) -> ShipApp:
+    """Remove one env var from the app. Idempotent — a missing key is a no-op."""
+    if key in app.env_vars:
+        del app.env_vars[key]
+        await app.save()
+    return app
+
+
+def decrypt_app_env(app: ShipApp) -> dict[str, str]:
+    """Decrypt the app's env for the deploy-time merge — the SOLE decryption path
+    (mirrors ``decrypt_ssh_key``). Returns ``{name: plaintext}`` filtered to the
+    vars that apply to this app's deploy kind (its ``prod`` flag). Never logged,
+    never serialized — the caller hands it straight to the engine's ``AppSpec``.
+    """
+    out: dict[str, str] = {}
+    for key, var in app.env_vars.items():
+        if _env_scope_applies(var.scope, prod=app.prod):
+            out[key] = crypto.decrypt(var.enc_value)
+    return out
+
+
+def _env_scope_applies(scope: str, *, prod: bool) -> bool:
+    """``both`` always applies; ``prod``/``preview`` only to the matching kind."""
+    if scope == "both":
+        return True
+    return scope == ("prod" if prod else "preview")
 
 
 # --------------------------------------------------------------------------- #
