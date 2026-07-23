@@ -3,6 +3,14 @@
 # machine-readable `code` emitted on denial. Tests iterate ACTIONS to
 # guarantee every guarded operation is covered.
 #
+# Updated: 2026-07-16 (D2 concierge dashboard reads) — added ``paw_bar.read``
+# (ADMIN) so the per-site Concierge dashboard reads (ee.pocketpaw_ee.paw_bar
+# .router: overview / conversations / decisions / handoffs) gate on the caller's
+# workspace ROLE instead of the coarse ``require_scope("admin")`` (which admits
+# any authenticated dashboard user). ADMIN, mirroring ``audit.read``: a site's
+# concierge conversations, decisions, and handoffs carry visitor PII and owner
+# decision context, so they must not be visible to every workspace member.
+#
 # Updated: 2026-07-11 (feat/external-alerting-c2c3) — registered
 # ``automations.read`` (MEMBER) and ``automations.manage`` (ADMIN) for the
 # always-on automation status surface (ee.cloud.automations_status.router): view
@@ -255,6 +263,13 @@ ACTIONS: dict[str, ActionRule] = {
     # pocket produced), with no credentials or decision payloads — any
     # workspace member may view it, mirroring instinct.read.
     "outcomes.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    # Paw Bar concierge dashboard — the per-site owner aggregation reads
+    # (ee.pocketpaw_ee.paw_bar.router: overview / conversations / decisions /
+    # handoffs, D2). ADMIN, mirroring audit.read (NOT the MEMBER bar of
+    # outcomes.read): a site's visitor conversations, decisions, and handoffs
+    # carry visitor PII and owner decision context, so the surface is owner/admin
+    # only and must not be visible to every workspace member.
+    "paw_bar.read": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Belt console — the develop-station read + repo-admin surface
     # (ee.cloud.belt.router, feat/belt-console-backend SC-1). read is MEMBER so
     # any team member can list discoverable repos + their own station runs.

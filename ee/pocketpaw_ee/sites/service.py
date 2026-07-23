@@ -64,6 +64,21 @@
 # the edit-bridge to public pages. The ``_store`` seam keeps "where the render comes
 # from" injectable so a later client-side-REPL compile wave can swap it cheaply.
 #
+# Updated 2026-07-14 (Paw Bar concierge seam, T1): added ``mint_foreign_site`` — a
+# minimal Site writer for a FOREIGN origin (a site we did NOT generate). It creates
+# a ``script_name=""`` / ``deployed=False`` Site that carries only the concierge
+# credential (a freshly minted ``signed_key`` + normalized ``allowed_origins`` +
+# ``scopes``); it is resolved by ``signed_key`` (via ``auth.site_keys.resolve_site_key``),
+# not by ``script_name``, so the empty script name is fine. Kept HERE, not in the
+# auth module, because this service is the sole owner of Site writes. Helper
+# ``_normalize_origin_hosts`` reduces caller-supplied origins to the bare hosts
+# ``origin_allowed`` matches on. Deliberately does NOT reuse ``_live_object_id`` (a
+# foreign concierge must not collide with a published site's stable per-pocket id).
+# Review follow-up (HIGH): ``mint_foreign_site`` now runs the pockets-service
+# ownership check (``pockets_service.get(pocket_id, owner)``) BEFORE inserting, the
+# same gate ``publish_pocket`` uses, so a caller cannot bind a concierge to another
+# workspace's pocket (which would leak that pocket's KB to the resolved context).
+#
 # Updated 2026-07-10 (HE-2 — canonical engine module): the engine content-selection
 # checks now route through ``sites.engines`` predicates instead of inline
 # ``== "svelte"`` string equality. ``is_source_engine(engine)`` replaces the
@@ -1546,6 +1561,109 @@ async def create_draft_site(
     # publish emits SitePublished when the site actually goes live.
     await doc.insert()
     return doc
+
+
+def _normalize_origin_hosts(origins: list[str]) -> list[str]:
+    """Reduce a list of origins to the bare, lowercased HOSTS ``origin_allowed``
+    matches against (T1). ``origin_allowed`` strips scheme/port/path off the
+    INBOUND ``Origin`` header and then tests bare-host membership in the stored
+    list, so the stored list must itself be bare hosts — otherwise a caller who
+    passes ``https://brewco.com:443`` would store a value the runtime match can
+    never hit. Dedupes, preserves order, drops empties."""
+    hosts: list[str] = []
+    for origin in origins:
+        host = origin.strip().lower()
+        if "://" in host:
+            host = host.split("://", 1)[1]
+        host = host.split("/", 1)[0].split(":", 1)[0]
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+async def mint_foreign_site(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    owner: str,
+    allowed_origins: list[str],
+    name: str = "",
+    scopes: list[str] | None = None,
+) -> _SiteDoc:
+    """Mint a Site for a FOREIGN origin — one PocketPaw did not generate (T1).
+
+    A normal Site is created by ``publish`` for a pocket we render into a Worker;
+    its ``script_name`` is the deployed Worker id and it is looked up by that id.
+    A Paw Bar concierge instead embeds on a site the customer already owns (a
+    Squarespace page, a hand-rolled marketing site, …). There is no Worker to
+    deploy, so this mints a Site with ``script_name=""`` and ``deployed=False``
+    whose ONLY job is to carry the concierge credential: the world-visible
+    ``signed_key`` (minted here, same ``site_key_...`` format ``publish`` seeds),
+    the ``allowed_origins`` the embed is valid from, and the ``scopes`` a resolved
+    request may exercise. It is resolved not by ``script_name`` (empty) but by that
+    ``signed_key`` — ``auth.site_keys.resolve_site_key`` does the key→Site lookup —
+    so an empty ``script_name`` is not a problem.
+
+    Site writes are owned by this service (the sole Site writer), which is why the
+    mint lives here rather than in the auth module that reads the key back.
+
+    v1 mints a FRESH doc per call (fresh ObjectId, fresh key). It deliberately does
+    NOT reuse ``_live_object_id`` — that derives a stable per-(workspace, pocket)
+    id for a PUBLISHED site, and a foreign concierge for the same pocket must not
+    collide with (or overwrite) a real published Worker doc. Idempotent binding
+    management (one canonical concierge per pocket, rotate/rebind) is a follow-up
+    (the pilot-bind slice); this primitive just creates the credential row.
+
+    Args:
+        workspace_id: Owning tenant (the Site's ``workspace``).
+        pocket_id: The pocket the concierge is grounded in (drives the KB scope
+            ``pocket:<pocket_id>`` downstream).
+        owner: The acting user. Recorded as the Site's ``owner`` AND used as the
+            identity for the pocket ownership check below — so it must be a user
+            who can access ``pocket_id``, not an arbitrary label.
+        allowed_origins: Origins the embed is valid from; normalized to bare hosts.
+        name: Optional display name.
+        scopes: Optional override of what the key may do; defaults to the Site
+            model's concierge baseline when omitted.
+
+    Returns:
+        The inserted ``Site`` doc, carrying its freshly-minted ``signed_key`` so the
+        caller can hand the embed snippet back to the owner.
+
+    Raises:
+        Forbidden: ``pocket.access_denied`` when ``owner`` cannot access
+            ``pocket_id`` (via the pockets service ownership check).
+        NotFound: when ``pocket_id`` does not exist.
+    """
+    # Ownership gate — the SAME check every other pocket-touching path in this
+    # service runs (see ``publish_pocket`` → ``pockets_service.get``). Without it a
+    # caller could mint a concierge bound to ANOTHER workspace's pocket, and the
+    # resolved CONCIERGE context would then read that victim pocket's KB
+    # (``pocket:<pocket_id>``). Run it BEFORE minting the key / inserting the doc so
+    # a denied caller leaves no orphan Site behind. ``get`` raises
+    # Forbidden("pocket.access_denied") on cross-tenant access and NotFound when the
+    # pocket is missing; we only need it for the side-effect of that check.
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    await pockets_service.get(pocket_id, owner)
+
+    site = _SiteDoc(
+        workspace=workspace_id,
+        pocket_id=pocket_id,
+        owner=owner,
+        name=name,
+        script_name="",
+        deployed=False,
+        url="",
+        allowed_origins=_normalize_origin_hosts(allowed_origins),
+        signed_key=f"site_key_{secrets.token_urlsafe(24)}",
+    )
+    # Only override the model's default scope set when the caller asked to narrow
+    # it, so the default stays the single source of truth.
+    if scopes is not None:
+        site.scopes = scopes
+    await site.insert()
+    return site
 
 
 async def publish(

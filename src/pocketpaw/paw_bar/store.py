@@ -1,4 +1,41 @@
 # ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
+# Updated: 2026-07-16 (D2 owner aggregation reads) — added two widget-keyed
+#   decision reads for the per-site Concierge dashboard: list_decisions_for_widget
+#   (recent decisions for ONE widget, newest first) and count_pending_decisions
+#   (cheap COUNT of the widget's undecided rows for the overview). Both filter on
+#   ``widget_id`` ONLY — deliberately NOT on the in-row ``workspace_id`` column,
+#   because that column stores the widget OWNER (decision_loop.resolve_workspace_id
+#   returns widget.owner, e.g. "user:maya"), NOT the physical workspace id the
+#   dashboard authenticates with. The caller resolves the widget workspace-scoped
+#   FIRST (site -> Site -> its paw-bar widget, all tenant-scoped), so a widget_id
+#   in hand already belongs to the caller's tenant; scoping the decision read on
+#   the owner column too would wrongly hide every row. This is the airtight
+#   cross-site isolation seam (one widget -> its own decisions only).
+# Updated: 2026-07-16 (C1 hardening) — count_events_since gains an optional
+#   event_type filter so the dedicated gated-action rate cap can count only
+#   proposal-generating actions ("pawbar_gated_action") separately from the
+#   overall widget traffic.
+# Updated: 2026-07-16 (Paw Bar action registry, C1) — new paw_bar_carts table:
+#   the visitor-scoped cart, keyed by (widget_id, customer_ref), holding the
+#   cart's items (a JSON list of {id,name,price_cents,currency,qty}) + currency +
+#   timestamps. get_cart reads it, upsert_cart_item merges one line (qty caps +
+#   MAX_CART_ITEMS ceiling), clear_cart empties it. Pure SQLite / no EE import —
+#   the "auto" add_to_cart path is the only writer, the checkout path reads. New
+#   table via CREATE IF NOT EXISTS, so no ALTER migration is needed (a pre-existing
+#   paw_bar.db just gains the table on next _ensure_schema). No TTL in v1
+#   (tracked as a follow-up).
+# Updated: 2026-07-14 (migration) — _ensure_schema runs _migrate_columns BEFORE
+#   executescript: additively ALTER-adds any missing workspace_id/agent_id columns
+#   to a pre-existing paw_bar_widgets (and workspace_id to paw_bar_decisions) so the
+#   SCHEMA_SQL indexes don't fail with "no such column" on a DB created before those
+#   columns. Supersedes the "no migration" note below — a deployed host CAN carry a
+#   stale paw_bar.db (the T5 pilot smoke hit exactly this).
+# Updated: 2026-07-14 (Paw Bar concierge seam, T3) — paw_bar_widgets gains an
+#   agent_id TEXT DEFAULT '' column, mirroring the workspace_id column beside it.
+#   create_widget writes it; _row_to_widget reads it (get/list/update_spec/
+#   rotate_token round-trip it for free — they SELECT * and rebuild via
+#   _row_to_widget). (The former "no migration" note is now handled by the
+#   additive migration above.)
 # Updated: 2026-07-11 (W4a spec revisions) — new paw_bar_spec_revisions table:
 #   update_spec archives the PRIOR spec with a monotonic per-widget revision
 #   number (same transaction as the update); latest_spec_revision reads the
@@ -44,8 +81,11 @@ from typing import Any
 import aiosqlite
 
 from pocketpaw.paw_bar.models import (
+    MAX_CART_ITEMS,
     DecisionState,
     DecisionStatus,
+    PawBarCart,
+    PawBarCartItem,
     PawBarEvent,
     PawBarSpec,
     PawBarWidget,
@@ -58,6 +98,7 @@ CREATE TABLE IF NOT EXISTS paw_bar_widgets (
     pocket_id TEXT NOT NULL,
     owner TEXT NOT NULL,
     workspace_id TEXT DEFAULT '',
+    agent_id TEXT DEFAULT '',
     name TEXT DEFAULT '',
     spec TEXT NOT NULL,
     allowed_domains TEXT DEFAULT '[]',
@@ -104,6 +145,19 @@ CREATE TABLE IF NOT EXISTS paw_bar_spec_revisions (
     revision INTEGER NOT NULL,
     spec TEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- C1 action registry: the visitor-scoped cart. One row per (widget_id,
+-- customer_ref); ``items`` is a JSON list of cart lines. The "auto" add_to_cart
+-- verb upserts here (visitor-owned state auto-fires — SS-2); checkout reads it.
+CREATE TABLE IF NOT EXISTS paw_bar_carts (
+    widget_id TEXT NOT NULL,
+    customer_ref TEXT NOT NULL,
+    items TEXT DEFAULT '[]',
+    currency TEXT DEFAULT 'USD',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (widget_id, customer_ref)
 );
 
 CREATE INDEX IF NOT EXISTS idx_pp_widgets_pocket ON paw_bar_widgets(pocket_id);
@@ -162,9 +216,49 @@ class PawBarStore:
         if self._initialized:
             return
         async with aiosqlite.connect(self._db_path) as db:
+            # Additive column migration BEFORE executescript. A paw_bar.db created
+            # before the W4a workspace_id add (2026-07-11) or the T3 agent_id add
+            # already has a paw_bar_widgets table, so CREATE TABLE IF NOT EXISTS
+            # no-ops and never adds the new columns — then CREATE INDEX ...
+            # (workspace_id) in SCHEMA_SQL fails with "no such column". Add any
+            # missing column first (a fresh DB has no table yet, so this is a
+            # no-op and SCHEMA_SQL builds the full schema below). Idempotent.
+            await self._migrate_columns(db)
             await db.executescript(SCHEMA_SQL)
             await db.commit()
         self._initialized = True
+
+    @staticmethod
+    async def _migrate_columns(db: aiosqlite.Connection) -> None:
+        """Add columns that post-date an already-deployed DB so the SCHEMA_SQL
+        indexes referencing them don't fail on an older table. Additive +
+        idempotent; only touches tables that already exist."""
+
+        async def _tables() -> set[str]:
+            async with db.execute("SELECT name FROM sqlite_master WHERE type='table'") as cur:
+                return {row[0] for row in await cur.fetchall()}
+
+        async def _columns(table: str) -> set[str]:
+            async with db.execute(f"PRAGMA table_info({table})") as cur:
+                return {row[1] for row in await cur.fetchall()}
+
+        existing = await _tables()
+        # paw_bar_widgets: workspace_id (W4a) + agent_id (T3). Column names are
+        # literals (never user input), so the f-string ALTER is injection-safe.
+        if "paw_bar_widgets" in existing:
+            cols = await _columns("paw_bar_widgets")
+            for name in ("workspace_id", "agent_id"):
+                if name not in cols:
+                    await db.execute(
+                        f"ALTER TABLE paw_bar_widgets ADD COLUMN {name} TEXT DEFAULT ''"
+                    )
+        # paw_bar_decisions: workspace_id (W4a) — the decision-scope reads need it.
+        if "paw_bar_decisions" in existing and "workspace_id" not in await _columns(
+            "paw_bar_decisions"
+        ):
+            await db.execute(
+                "ALTER TABLE paw_bar_decisions ADD COLUMN workspace_id TEXT DEFAULT ''"
+            )
 
     def _conn(self) -> aiosqlite.Connection:
         return aiosqlite.connect(self._db_path)
@@ -176,15 +270,16 @@ class PawBarStore:
         async with self._conn() as db:
             await db.execute(
                 "INSERT INTO paw_bar_widgets"
-                " (id, pocket_id, owner, workspace_id, name, spec, allowed_domains,"
+                " (id, pocket_id, owner, workspace_id, agent_id, name, spec, allowed_domains,"
                 " access_token, rate_limit_per_min, per_customer_limit_per_min,"
                 " event_mapping, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     widget.id,
                     widget.pocket_id,
                     widget.owner,
                     widget.workspace_id,
+                    widget.agent_id,
                     widget.name,
                     widget.spec.model_dump_json(),
                     json.dumps(widget.allowed_domains),
@@ -312,6 +407,54 @@ class PawBarStore:
         _, archived_spec = latest
         return await self.update_spec(widget_id, archived_spec, workspace_id=workspace_id)
 
+    async def update_fields(
+        self,
+        widget_id: str,
+        fields: dict[str, Any],
+        workspace_id: str | None = None,
+    ) -> PawBarWidget | None:
+        """Partial-update the admin-editable widget columns (C1 — agent binding).
+
+        ``fields`` is a whitelisted subset of ``{agent_id, name, allowed_domains,
+        rate_limit_per_min, per_customer_limit_per_min}`` — only the keys present
+        are written. ``allowed_domains`` is JSON-encoded like create. The lookup +
+        UPDATE are workspace-scoped: a cross-tenant widget id resolves to None and
+        nothing is written. Returns None when the widget doesn't exist in scope or
+        ``fields`` is empty. ``spec`` is intentionally NOT editable here — that is
+        ``update_spec`` (which archives a revision)."""
+        existing = await self.get_widget(widget_id, workspace_id=workspace_id)
+        if existing is None:
+            return None
+        allowed = {
+            "agent_id",
+            "name",
+            "allowed_domains",
+            "rate_limit_per_min",
+            "per_customer_limit_per_min",
+        }
+        assignments: list[str] = []
+        values: list[Any] = []
+        for key, val in fields.items():
+            if key not in allowed:
+                continue
+            assignments.append(f"{key} = ?")
+            values.append(json.dumps(val) if key == "allowed_domains" else val)
+        if not assignments:
+            return existing
+        assignments.append("updated_at = ?")
+        values.append(datetime.now().isoformat())
+        ws_cond, ws_params = _widget_workspace_scope(workspace_id)
+        sql = f"UPDATE paw_bar_widgets SET {', '.join(assignments)} WHERE id = ?"
+        values.append(widget_id)
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            values.extend(ws_params)
+        await self._ensure_schema()
+        async with self._conn() as db:
+            await db.execute(sql, values)
+            await db.commit()
+        return await self.get_widget(widget_id, workspace_id=workspace_id)
+
     async def rotate_token(
         self, widget_id: str, workspace_id: str | None = None
     ) -> PawBarWidget | None:
@@ -379,14 +522,22 @@ class PawBarStore:
         widget_id: str,
         since: datetime,
         customer_ref: str | None = None,
+        event_type: str | None = None,
     ) -> int:
-        """Count events in the last window — backs the rate limiter."""
+        """Count events in the last window — backs the rate limiter.
+
+        ``event_type``, when given, restricts the count to one event type — used
+        by the dedicated gated-action cap (C1) to count only proposal-generating
+        actions separately from the overall widget traffic."""
         await self._ensure_schema()
         conditions = ["widget_id = ?", "timestamp >= ?"]
         params: list[Any] = [widget_id, since.isoformat()]
         if customer_ref is not None:
             conditions.append("customer_ref = ?")
             params.append(customer_ref)
+        if event_type is not None:
+            conditions.append("type = ?")
+            params.append(event_type)
         async with self._conn() as db:
             async with db.execute(
                 f"SELECT COUNT(*) FROM paw_bar_events WHERE {' AND '.join(conditions)}",
@@ -547,7 +698,142 @@ class PawBarStore:
                 row = await cur.fetchone()
                 return self._row_to_decision(row) if row else None
 
+    async def list_decisions_for_widget(
+        self, widget_id: str, limit: int = 50
+    ) -> list[DecisionStatus]:
+        """Recent decisions for ONE widget, newest first (D2 owner dashboard).
+
+        The owner-facing read behind GET /paw-bar/admin/site/{id}/decisions: the
+        operator sees the customer requests that raised a decision on THIS site's
+        concierge widget, and whether each is still pending or has been answered.
+
+        Filters on ``widget_id`` ONLY. The row's ``workspace_id`` column holds the
+        widget OWNER (decision_loop stamps it from ``widget.owner``), not the
+        physical dashboard workspace, so it is NOT a valid tenant filter here — and
+        it doesn't need to be: the caller resolved the widget workspace-scoped
+        before this call, so ``widget_id`` already names a widget in the caller's
+        tenant. That makes this the cross-site isolation seam — a sibling site's
+        widget has a different id and never matches. Served by the existing
+        ``idx_pp_decisions_customer`` (widget_id, customer_ref, created_at DESC)
+        index; ``limit`` bounds the scan so the dashboard never loads the world.
+        """
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM paw_bar_decisions"
+                " WHERE widget_id = ?"
+                " ORDER BY created_at DESC LIMIT ?",
+                (widget_id, limit),
+            ) as cur:
+                return [self._row_to_decision(row) async for row in cur]
+
+    async def count_pending_decisions(self, widget_id: str) -> int:
+        """Count the widget's undecided (state='pending') decisions (D2 overview).
+
+        A cheap COUNT for the dashboard's ``pending_decisions`` badge — never loads
+        the rows. Same widget-only filter (and same isolation rationale) as
+        :meth:`list_decisions_for_widget`: the widget is already tenant-resolved,
+        and the in-row ``workspace_id`` column is the OWNER, not a tenant key.
+        """
+        await self._ensure_schema()
+        async with self._conn() as db:
+            async with db.execute(
+                "SELECT COUNT(*) FROM paw_bar_decisions WHERE widget_id = ? AND state = 'pending'",
+                (widget_id,),
+            ) as cur:
+                row = await cur.fetchone()
+                return row[0] if row else 0
+
+    # ---------------- Carts (C1 — visitor-scoped commerce state) ----------------
+
+    async def get_cart(self, widget_id: str, customer_ref: str) -> PawBarCart | None:
+        """Return the visitor's cart, or ``None`` when they have none yet.
+
+        Scoped to the visitor's own ``(widget_id, customer_ref)`` — the same
+        no-owner-credential model as the decision poll. The returned cart carries
+        no ``checkout_url`` (that lives on the spec); the endpoint fills it in.
+        """
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM paw_bar_carts WHERE widget_id = ? AND customer_ref = ?",
+                (widget_id, customer_ref),
+            ) as cur:
+                row = await cur.fetchone()
+                return self._row_to_cart(row) if row else None
+
+    async def upsert_cart_item(
+        self, widget_id: str, customer_ref: str, item: PawBarCartItem
+    ) -> PawBarCart:
+        """Merge one line into the visitor's cart and return the updated cart.
+
+        If the product id is already in the cart the quantities add (capped at
+        the model's per-line qty ceiling by the caller); a new id appends, up to
+        ``MAX_CART_ITEMS`` distinct lines (an over-cap add is dropped rather than
+        raising — the visitor keeps the cart they have). The cart currency tracks
+        the first line added. Idempotent per call; the executor owns the qty caps.
+        """
+        cart = await self.get_cart(widget_id, customer_ref) or PawBarCart(
+            widget_id=widget_id, customer_ref=customer_ref, currency=item.currency
+        )
+        merged = False
+        for line in cart.items:
+            if line.id == item.id:
+                line.qty += item.qty
+                merged = True
+                break
+        if not merged:
+            if len(cart.items) >= MAX_CART_ITEMS:
+                return await self._save_cart(cart)
+            cart.items.append(item)
+        return await self._save_cart(cart)
+
+    async def clear_cart(self, widget_id: str, customer_ref: str) -> None:
+        """Empty a visitor's cart (delete the row). Used after a completed handoff."""
+        await self._ensure_schema()
+        async with self._conn() as db:
+            await db.execute(
+                "DELETE FROM paw_bar_carts WHERE widget_id = ? AND customer_ref = ?",
+                (widget_id, customer_ref),
+            )
+            await db.commit()
+
+    async def _save_cart(self, cart: PawBarCart) -> PawBarCart:
+        cart.updated_at = datetime.now()
+        payload = json.dumps([item.model_dump() for item in cart.items], default=str)
+        await self._ensure_schema()
+        async with self._conn() as db:
+            await db.execute(
+                "INSERT INTO paw_bar_carts (widget_id, customer_ref, items, currency, updated_at)"
+                " VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(widget_id, customer_ref) DO UPDATE SET"
+                " items = excluded.items, currency = excluded.currency,"
+                " updated_at = excluded.updated_at",
+                (
+                    cart.widget_id,
+                    cart.customer_ref,
+                    payload,
+                    cart.currency,
+                    cart.updated_at.isoformat(),
+                ),
+            )
+            await db.commit()
+        return cart
+
     # ---------------- Helpers ----------------
+
+    def _row_to_cart(self, row: Any) -> PawBarCart:
+        raw_items = json.loads(row["items"]) if row["items"] else []
+        items = [PawBarCartItem.model_validate(i) for i in raw_items]
+        return PawBarCart(
+            widget_id=row["widget_id"],
+            customer_ref=row["customer_ref"],
+            items=items,
+            currency=row["currency"] or "USD",
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
 
     def _row_to_widget(self, row: Any) -> PawBarWidget:
         from pocketpaw.paw_bar.models import PawBarEventMapping
@@ -561,6 +847,7 @@ class PawBarStore:
             pocket_id=row["pocket_id"],
             owner=row["owner"],
             workspace_id=row["workspace_id"] or "",
+            agent_id=row["agent_id"] or "",
             name=row["name"] or "",
             spec=spec,
             allowed_domains=raw_domains,

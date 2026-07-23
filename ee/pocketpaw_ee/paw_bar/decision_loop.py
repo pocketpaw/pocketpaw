@@ -1,4 +1,21 @@
 # ee/paw_bar/decision_loop.py — Close the customer decision loop via Instinct.
+# Updated: 2026-07-16 (C1 hardening) — propose_customer_action now sanitizes the
+#   visitor-controlled portions of the owner-facing proposal: customer_ref + the
+#   args summary are run through _sanitize_for_human (strip control chars, collapse
+#   whitespace, length-cap — the summary at the same 280 chars the event path uses,
+#   which this path previously skipped) and DEMARCATED from our framing as
+#   "untrusted input" so a human approver can't be misled by injected text.
+#   Backend defense-in-depth; the Tray frontend should also escape on render.
+# Updated: 2026-07-16 (Paw Bar action registry, C1) — added
+#   ``propose_customer_action``: the gated-verb path. When a concierge action's
+#   policy is "gated", the shared executor NEVER runs the verb — it raises an
+#   Instinct proposal (kind "paw_bar_action") carrying the widget/customer/verb/
+#   args + a human-readable summary, and parks a PENDING DecisionStatus row keyed
+#   to the action id. It reuses the SAME ``_customer_reply`` blob schema + parked
+#   row as ``propose_customer_decision``, so the existing ``deliver_customer_decision``
+#   approve/reject hook (instinct router) flips the row unchanged and the visitor
+#   reads the outcome on the SAME decision poll. Owner-less widget → no proposal
+#   (same NULL-scope guard). The proposal is the only effect (SS-2).
 # Updated: 2026-07-08 — Renamed widget "Paw Print" → "Paw Bar" (module paw_print→paw_bar,
 #   source/requested_by labels paw_print→paw_bar). The separate one-word audit feed
 #   (past-tense record) is a DIFFERENT feature, unaffected.
@@ -49,9 +66,23 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_for_human(text: Any, *, cap: int) -> str:
+    """Neutralize visitor-controlled text before it lands in an owner-facing
+    Instinct proposal (C1 hardening).
+
+    Strips control characters (so an embedded newline can't inject fake framing
+    into the human approver's Tray view), collapses runs of whitespace, and caps
+    the length. This is BACKEND defense-in-depth; the Tray frontend should ALSO
+    escape on render (a separate paw-enterprise follow-up)."""
+    s = "".join(ch for ch in str(text) if ch.isprintable())
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:cap]
 
 # Schema version stamped onto the ``_customer_reply`` blob. Bump when the blob
 # shape changes so a stale pending Action approved after a deploy is handled
@@ -252,6 +283,140 @@ async def propose_customer_decision(
         return None
 
 
+async def propose_customer_action(
+    *,
+    widget: Any,
+    workspace_id: str,
+    customer_ref: str,
+    verb: str,
+    args: dict[str, Any],
+    summary: str,
+    paw_bar_store: Any,
+) -> str | None:
+    """Raise an Instinct proposal for a GATED concierge action + park a row.
+
+    The gated-verb half of the action registry (C1). The shared executor calls
+    this INSTEAD of running the verb: a gated action never executes an effect —
+    it hands a human the decision. Creates the SAME two artifacts as
+    ``propose_customer_decision`` so the existing approve/reject delivery hook
+    works unchanged:
+
+      1. An Instinct ``Action`` (category EXTERNAL) carrying a ``_customer_reply``
+         blob. The blob adds ``kind="paw_bar_action"`` + ``verb`` + ``args`` for
+         auditability, but keeps the schema + routing fields
+         (``deliver_customer_decision`` reads only those), so approval flips the
+         parked row exactly like an ingest decision.
+      2. A PENDING :class:`DecisionStatus` row keyed to the action id, event_type
+         ``paw_bar_action:<verb>``, so the visitor polls the SAME decision endpoint
+         and reads "we're looking into it" until a human decides.
+
+    ``workspace_id`` is the widget's resolved workspace (passed by the executor,
+    which resolved it from the run). Fails CLOSED on a blank workspace (no
+    NULL-scoped proposal). Returns the Action id, or ``None`` when no proposal
+    could be raised (best-effort — never raises into the action response).
+    """
+    try:
+        from pocketpaw.instinct.models import ActionCategory, ActionTrigger
+        from pocketpaw.paw_bar.models import DecisionState, DecisionStatus
+        from pocketpaw.stores import get_instinct_store
+
+        widget_id = str(getattr(widget, "id", "") or "")
+        pocket_id = str(getattr(widget, "pocket_id", "") or "")
+        ws = str(workspace_id or "").strip()
+        # Same NULL-scope guard as propose_customer_decision: an owner/workspace-
+        # less widget would raise an all-tenant-visible proposal, so skip it.
+        if not ws:
+            logger.warning(
+                "paw-bar action %s on widget %s has no workspace — SKIPPING the "
+                "gated proposal so it is not raised NULL-scoped.",
+                verb,
+                widget_id or "<unknown>",
+            )
+            return None
+
+        widget_name = str(getattr(widget, "name", "") or "") or widget_id
+        event_type = f"paw_bar_action:{verb}"
+        # Neutralize + cap the visitor-controlled portions before they land in the
+        # owner-facing proposal. ``verb`` is snake_case-validated at spec time, but
+        # ``customer_ref`` and the args ``summary`` are visitor input — sanitize
+        # them and DEMARCATE them from our framing so a human approver can never
+        # be misled by injected text. The composed summary is capped at the same
+        # 280 chars the event path uses (which this path previously skipped).
+        safe_customer = _sanitize_for_human(customer_ref, cap=128)
+        safe_summary = _sanitize_for_human(summary, cap=_MAX_SUMMARY_CHARS)
+        safe_widget_name = _sanitize_for_human(widget_name, cap=80) or widget_id
+        default_reply = (
+            f"Thanks, we've passed your '{verb}' request to the team and will "
+            "follow up shortly."
+        )
+        title = f"Visitor action on {safe_widget_name}: {verb}".strip()
+        recommendation = (
+            f"A visitor (ref {safe_customer}) asked to run the '{verb}' action via "
+            f"the '{safe_widget_name}' concierge. Visitor-provided details "
+            f"(untrusted input): [{safe_summary}]. Suggested reply: {default_reply}"
+        )
+        description = f"Action '{verb}'. Visitor details (untrusted input): [{safe_summary}]"
+
+        trigger = ActionTrigger(
+            type="connector",
+            source=f"paw_bar:{widget_id}",
+            reason=f"visitor '{verb}' action awaiting a human decision",
+        )
+        blob = {
+            "schema": _CUSTOMER_REPLY_SCHEMA,
+            "kind": "paw_bar_action",
+            "widget_id": widget_id,
+            "pocket_id": pocket_id,
+            "customer_ref": customer_ref,
+            "event_type": event_type,
+            "verb": verb,
+            "args": args,
+            "workspace_id": ws,
+            "default_reply": default_reply,
+            "payload_summary": summary,
+        }
+        store = get_instinct_store()
+        action = await store.propose(
+            pocket_id=pocket_id or widget_id,
+            title=title,
+            description=description,
+            recommendation=recommendation,
+            trigger=trigger,
+            category=ActionCategory.EXTERNAL,
+            parameters={CUSTOMER_REPLY_KEY: blob},
+            workspace_id=ws or None,
+            assignee=ws or None,
+        )
+        decision = DecisionStatus(
+            widget_id=widget_id,
+            customer_ref=customer_ref,
+            event_type=event_type,
+            instinct_action_id=str(action.id),
+            workspace_id=ws,
+            state=DecisionState.PENDING,
+            reply="",
+        )
+        await paw_bar_store.create_decision(decision)
+        logger.info(
+            "paw-bar gated action '%s' on widget %s (visitor %s) → Instinct "
+            "proposal %s (workspace=%s) + parked PENDING decision",
+            verb,
+            widget_id,
+            customer_ref,
+            action.id,
+            ws,
+        )
+        return str(action.id)
+    except Exception:  # noqa: BLE001 — the proposal is best-effort over the action
+        logger.warning(
+            "failed to raise gated-action proposal '%s' for widget %s",
+            verb,
+            getattr(widget, "id", "<unknown>"),
+            exc_info=True,
+        )
+        return None
+
+
 def customer_reply_blob(action: Any) -> dict[str, Any] | None:
     """Return the ``_customer_reply`` blob on an Action, or ``None``.
 
@@ -354,6 +519,7 @@ __all__ = [
     "CUSTOMER_REPLY_KEY",
     "customer_reply_blob",
     "deliver_customer_decision",
+    "propose_customer_action",
     "propose_customer_decision",
     "resolve_workspace_id",
 ]

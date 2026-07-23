@@ -111,6 +111,31 @@
 # contents today; the generator-side import plan enriches it (form-rewiring
 # verdicts) once the parallel paw-sites slice lands. Defaults to an empty dict, so
 # every non-imported site and every pre-SI-4 row reads "no import" — no migration.
+#
+# Updated 2026-07-14 (Paw Bar concierge seam, T1): the Site's ``signed_key`` +
+# ``allowed_origins`` (already here since RFC 12) ARE the public, origin-bound
+# embed credential a Paw Bar concierge authenticates with — no parallel key model
+# is introduced. Three additive fields make that credential a first-class scoped
+# key: ``scopes`` (what a resolved concierge request may do — chat / kb.read /
+# event.ingest by default), ``revoked`` (a kill switch the resolver fails closed
+# on), and a ``rotate_signed_key`` helper (regenerate the embed key, e.g. after a
+# leak — caller persists). A ``signed_key`` index backs the key→Site lookup
+# ``auth.site_keys.resolve_site_key`` does on every concierge request. All defaults
+# are backward-compatible (existing docs read ``revoked=False`` + the default
+# scope set), so no migration.
+#
+# Updated 2026-07-16 (Paw Bar concierge settings + kill switch, D1 — folds in
+# staffed-sites SS-6): added the owner-facing concierge controls, distinct from the
+# key-level ``revoked`` flag above. ``concierge_enabled`` is the owner's on/off kill
+# switch for the concierge itself (NOT the embed key): the three public paw-bar
+# entry points (frame / chat / action) fail closed with a 403 when it is False, so
+# an owner can silence the bar without deleting the Site or rotating the key.
+# ``revoked`` still cuts the KEY (401, anti-enumeration); ``concierge_enabled=False``
+# refuses the resolved concierge (403) — two different switches. ``concierge_greeting``
+# is the opening line the glass bar renders; it rides into the frame's
+# ``window.__PAWBAR__`` config payload. Both default backward-compatibly
+# (``concierge_enabled=True`` + ``concierge_greeting=""``), so every existing Site
+# reads as enabled with no greeting — no migration.
 
 from __future__ import annotations
 
@@ -213,9 +238,56 @@ class Site(TimestampedDocument):
     honeypot_field: str = "company_website"
     event_mapping: dict[str, Any] = Field(default_factory=dict)
     domains: list[SiteDomain] = Field(default_factory=list)
+    # Paw Bar concierge (T1): what a request authenticated with this site's
+    # public embed key (``signed_key`` + ``allowed_origins``) is allowed to do.
+    # The concierge resolver copies this onto the RequestContext.scopes, and the
+    # per-endpoint ``require_scope`` gate checks against it. Defaults to the
+    # concierge baseline; a foreign-site mint can narrow it. Existing (site-
+    # capture) docs read this default but never consult it — the capture path is
+    # its own gate — so the default is harmless for them.
+    scopes: list[str] = Field(default_factory=lambda: ["chat", "kb.read", "event.ingest"])
+    # Paw Bar concierge (T1): a kill switch for the embed key. The resolver fails
+    # closed on it (a revoked key resolves to nothing) so a leaked key can be
+    # cut off without deleting the Site. Defaults False (every existing doc is
+    # live), so no migration.
+    revoked: bool = False
+    # Paw Bar concierge (D1 / SS-6): the OWNER's on/off kill switch for the
+    # concierge — distinct from ``revoked`` (which cuts the KEY). When False, the
+    # three public entry points (frame / chat / action) refuse with a 403, so the
+    # owner can silence the bar instantly without deleting the Site or rotating the
+    # key. Re-read on EVERY request (never cached on a warm client) so a toggle
+    # takes effect immediately. Defaults True (every existing site stays live), so
+    # no migration.
+    concierge_enabled: bool = True
+    # Paw Bar concierge (D1 / SS-6): the opening line the glass bar renders. Rides
+    # into the frame's ``window.__PAWBAR__`` config as ``greeting``; the glass app
+    # reads it in a parallel slice and falls back to its own default when "".
+    # Defaults "" (no custom greeting), so no migration.
+    concierge_greeting: str = ""
+
+    def rotate_signed_key(self) -> str:
+        """Regenerate the public embed key and return the new value (T1).
+
+        Mints a fresh ``site_key_...`` token (the SAME format the sites service
+        seeds — a world-visible, origin-bound embed key, NOT a hashed secret)
+        and assigns it to ``self.signed_key``. Rotation is how a leaked embed
+        key is retired: after this, the old key no longer resolves. The caller
+        is responsible for persisting (``await site.save()``) — this mutates the
+        in-memory doc only, mirroring how other model helpers stay I/O-free.
+        """
+        import secrets
+
+        self.signed_key = f"site_key_{secrets.token_urlsafe(24)}"
+        return self.signed_key
 
     class Settings:
         name = "sites"
         indexes = [
             [("workspace", 1), ("pocket_id", 1)],
+            # T1: back the concierge key→Site lookup (resolve_site_key does a
+            # ``find_one({"signed_key": key})`` on every concierge request). Not
+            # unique: unpublished/foreign docs can share the "" default, and the
+            # resolver rejects an empty key before it ever queries, so a blank
+            # key never resolves against those rows.
+            [("signed_key", 1)],
         ]
