@@ -318,6 +318,41 @@ class TestConciergeEnableTrigger:
         bound = await store.get_widget(widget.id, workspace_id=_WS)
         assert bound is not None and bound.agent_id == "agent-manual"
 
+    @pytest.mark.asyncio
+    async def test_re_patch_enabled_on_already_enabled_site_provisions_unbound(
+        self, client
+    ) -> None:
+        """The E2 one-click hook: a site that is ALREADY enabled with an UNBOUND
+        widget still provisions on a re-PATCH of concierge_enabled=true (no
+        false->true transition required)."""
+        c, store = client
+        site = await _site(concierge_enabled=True)  # already on
+        widget = await store.create_widget(_widget(agent_id=""))
+
+        res = await c.patch(
+            f"/paw-bar/admin/site/{site.id}/settings",
+            json={"concierge_enabled": True},
+        )
+        assert res.status_code == 200
+        bound = await store.get_widget(widget.id, workspace_id=_WS)
+        assert bound is not None and bound.agent_id, "re-enable should provision + bind"
+
+    @pytest.mark.asyncio
+    async def test_re_patch_enabled_on_bound_site_is_noop(self, client) -> None:
+        """A re-PATCH of concierge_enabled=true on an already-BOUND site leaves the
+        agent untouched (idempotent, unbound-only)."""
+        c, store = client
+        site = await _site(concierge_enabled=True)
+        widget = await store.create_widget(_widget(agent_id="agent-manual"))
+
+        res = await c.patch(
+            f"/paw-bar/admin/site/{site.id}/settings",
+            json={"concierge_enabled": True},
+        )
+        assert res.status_code == 200
+        bound = await store.get_widget(widget.id, workspace_id=_WS)
+        assert bound is not None and bound.agent_id == "agent-manual"
+
 
 # --------------------------------------------------------------------------- #
 # Regression — unbound chat still 409s (no fallback-to-universal)

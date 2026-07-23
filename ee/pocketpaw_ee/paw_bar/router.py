@@ -6,8 +6,11 @@
 #   and return the widget with agent_id set; a plain (non-site) widget stays unbound;
 #   FAILURE-SOFT (a provision error logs + returns the widget unbound, never 500s
 #   the create). A manual agent_id is honored and never replaced. (2)
-#   update_site_concierge_settings: flipping concierge_enabled ON provisions the
-#   site's widget when it is still unbound (provision_on_concierge_enable), also
+#   update_site_concierge_settings: ANY PATCH that sets concierge_enabled=true
+#   provisions the site's widget when it is still unbound (not only a false->true
+#   transition — the E2 one-click "create dedicated agent" re-PATCHes enabled=true
+#   on an already-enabled site as its provision hook), via
+#   provision_on_concierge_enable; idempotent + a no-op on a bound widget; also
 #   failure-soft. (3) _pawbar_frame_config now carries ``starters`` (the bound
 #   agent's conversation starters, capped 4, empty default) — the owner preview
 #   frame threads the bound agent's starters (via _bound_agent_starters); the public
@@ -996,14 +999,16 @@ async def update_site_concierge_settings(
     every time), so toggling ``concierge_enabled`` off silences the bar immediately.
     """
     site = await _load_site_scoped(site_id, workspace_id)
-    # Track whether this PATCH flips the concierge ON, so we can auto-provision the
+    # Track whether this PATCH SETS the concierge on, so we can auto-provision the
     # dedicated agent for a site whose widget is still unbound (the owner enabling
-    # the concierge is a natural provision point, alongside widget-create).
-    enabling = (
-        "concierge_enabled" in req.model_fields_set
-        and req.concierge_enabled is True
-        and not site.concierge_enabled
-    )
+    # the concierge is a natural provision point, alongside widget-create). We fire
+    # on ANY PATCH that sets concierge_enabled=true, NOT only a false->true
+    # transition: the E2 dashboard's one-click "create dedicated agent" re-PATCHes
+    # {concierge_enabled: true} on an already-enabled site as its provision hook, so
+    # a transition guard would leave that path no way in. It stays cheap + correct
+    # because provision_on_concierge_enable only acts on an UNBOUND widget and
+    # ensure_site_agent is idempotent, so a re-PATCH on a bound site is a no-op.
+    enabling = "concierge_enabled" in req.model_fields_set and req.concierge_enabled is True
     for name in req.model_fields_set:
         value = getattr(req, name)
         if value is not None:
