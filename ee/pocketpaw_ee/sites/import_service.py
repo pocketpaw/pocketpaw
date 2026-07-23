@@ -1,5 +1,14 @@
 # ee/pocketpaw_ee/sites/import_service.py — Paw Sites IMPORT control plane (SI-4).
 #
+# Edited 2026-07-23 (SI-FIX — wire the rewire pipeline): both the zip and crawl
+# paths now run the unpacked/harvested files through the generator's ``import``
+# subcommand (``_plan_import`` -> ``generator_client.run_import``) BEFORE publish, so
+# imported ``<form>``s are actually rewired to the capture API and the report carries
+# real per-form ``rewired`` verdicts. This replaces the interim Python
+# ``derive_import_report`` (which shipped raw source + ``rewired: False``) — the
+# rewired source is what we persist on the pocket and deploy. The draft Site doc is
+# minted first so its ``signed_key`` can be baked into the forms.
+#
 # Created 2026-07-22 (feat/sites-import-endpoint): the service half of the two
 # import endpoints — POST /sites/import (zip upload) and POST /sites/import/from-url
 # (crawler-backed, next slice). Owns:
@@ -53,7 +62,6 @@ import io
 import logging
 import zipfile
 from datetime import UTC, datetime
-from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -248,84 +256,66 @@ def unpack_zip(data: bytes) -> tuple[dict[str, str], dict[str, str]]:
     return source, assets
 
 
-class _PageScan(HTMLParser):
-    """One-pass scan of an imported HTML page: <title>, <form action=...>, and
-    <script src=...> refs — the raw material for the minimal import report."""
+async def _plan_import(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    source: dict[str, str],
+    assets: dict[str, str],
+    _run_import: Any | None = None,
+) -> tuple[dict[str, str], dict[str, str], dict[str, Any]]:
+    """Run the imported files through the generator's import pipeline and return the
+    REWIRED ``(source, assets, report)``.
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.title = ""
-        self._in_title = False
-        self.form_actions: list[str] = []
-        self.script_srcs: list[str] = []
+    This is the seam that makes an imported ``<form>`` actually post to the capture
+    API. The generator's ``buildImportPlan`` + ``rewireForms`` need the site's
+    ``signed_key`` to bake into each form, so the draft Site doc (minted by
+    ``_mint_import_pocket``) must already exist — we read its key here and hand it to
+    the generator. ``publish`` reuses that same stored key, so the key in the
+    deployed forms matches the one the capture endpoint verifies.
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attr_map = {k: (v or "") for k, v in attrs}
-        if tag == "title":
-            self._in_title = True
-        elif tag == "form":
-            self.form_actions.append(attr_map.get("action", ""))
-        elif tag == "script" and attr_map.get("src"):
-            self.script_srcs.append(attr_map["src"])
+    Returns the authoritative report (per-form ``rewired`` verdicts + original
+    actions, page titles, asset tallies, warnings) verbatim from the generator; the
+    caller merges any path-specific extras (crawl stats, status)."""
+    from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "title":
-            self._in_title = False
-
-    def handle_data(self, data: str) -> None:
-        if self._in_title:
-            self.title += data
-
-
-def derive_import_report(source: dict[str, str], assets: dict[str, str]) -> dict[str, Any]:
-    """Derive the MINIMAL import report from the unpacked zip contents.
-
-    Shape: {pages: [{path, title}], asset_count, asset_bytes,
-            forms: [{page, original_action, rewired}], scripts: [...], warnings: [...]}.
-
-    ENRICHMENT SEAM (cross-repo): the paw-sites generator's import plan will
-    provide the authoritative report — including per-form REWIRING verdicts (the
-    generator rewrites <form> actions to the native capture POST) — in a parallel
-    slice. Until it lands, this derivation reports what the zip CONTAINS and marks
-    every form ``rewired: False`` (nothing is confirmed rewired yet)."""
-    pages: list[dict[str, str]] = []
-    forms: list[dict[str, Any]] = []
-    scripts: list[str] = []
-    for path in sorted(source):
-        if not path.endswith((".html", ".htm")):
-            continue
-        scan = _PageScan()
-        try:
-            scan.feed(source[path])
-        except Exception:  # noqa: BLE001 — a malformed page still lists, just untitled
-            logger.debug("import report: page %s did not parse cleanly", path)
-        pages.append({"path": path, "title": scan.title.strip()})
-        forms.extend(
-            {"page": path, "original_action": action, "rewired": False}
-            for action in scan.form_actions
+    oid = sites_service._live_object_id(workspace_id, pocket_id)
+    doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None or not doc.signed_key:
+        raise Internal(
+            "sites.import_no_draft_key",
+            "the import draft site is missing its capture signing key",
         )
-        scripts.extend(src for src in scan.script_srcs if src not in scripts)
 
-    asset_bytes = sum(len(base64.b64decode(b64)) for b64 in assets.values())
-    warnings: list[str] = []
-    if forms:
-        warnings.append(
-            "form rewiring is confirmed by the generator-side import plan (pending "
-            "paw-sites slice) — forms are listed but not yet verified as rewired"
-        )
-    if assets:
-        warnings.append(
-            "binary assets deploy at import time; re-publishing from the builder will "
-            "not carry them until the pocket asset sideband lands"
-        )
-    return {
-        "pages": pages,
-        "asset_count": len(assets),
-        "asset_bytes": asset_bytes,
-        "forms": forms,
-        "scripts": scripts,
-        "warnings": warnings,
+    # Merge text (utf-8 -> base64) + binary (already base64) into the single
+    # {path: base64} map the generator's ``import`` command ingests.
+    files: dict[str, str] = {
+        path: base64.b64encode(text.encode("utf-8")).decode("ascii")
+        for path, text in source.items()
     }
+    files.update(assets)
+
+    from pocketpaw_ee.sites import generator_client
+
+    run = _run_import if _run_import is not None else generator_client.run_import
+    try:
+        result = await run(
+            files,
+            site_id=str(oid),
+            # The SAME capture base publish passes the generator, so the action baked
+            # into the forms matches the site the capture endpoint verifies.
+            capture_api_base=sites_service._capture_base(),
+            capture_signed_key=doc.signed_key,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail CLOSED, never fall back to raw source
+        # A rewire failure must not silently deploy the un-rewired upload — that
+        # would leak the site's leads to its original form backend. Raise a clean
+        # error the zip endpoint maps to a 5xx and the crawl path turns into a
+        # failed report.
+        raise Internal(
+            "sites.import_rewire_failed", "the imported site could not be processed"
+        ) from exc
+    return result["source"], result.get("assets", {}), result["report"]
 
 
 def _emit_import_journal(
@@ -402,6 +392,7 @@ async def import_zip_site(
     _generator: Any | None = None,
     _cloudflare: Any | None = None,
     _local_deploy: Any | None = None,
+    _run_import: Any | None = None,
 ) -> Any:
     """Import an uploaded site zip end to end: unpack safely → mint pocket + draft
     Site doc → publish through the EXISTING html/static deploy path (with the
@@ -418,7 +409,17 @@ async def import_zip_site(
     pocket_id = await _mint_import_pocket(
         workspace_id=workspace_id, user_id=user_id, name=site_name, source=source
     )
-    report = derive_import_report(source, assets)
+    # Run the files through the generator's import pipeline: forms get rewired to the
+    # capture API, links/titles resolved, and an authoritative report produced. The
+    # REWIRED source (not the raw upload) is what we store + deploy.
+    source, assets, report = await _plan_import(
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        source=source,
+        assets=assets,
+        _run_import=_run_import,
+    )
+    report["status"] = "imported"
 
     doc = await sites_service.publish(
         workspace_id=workspace_id,
@@ -429,10 +430,8 @@ async def import_zip_site(
         name=site_name,
         engine="html",
         source=source,
-        # CROSS-REPO SEAM: ``assets`` is the base64 binary sideband the paw-sites
-        # generator is gaining in a parallel slice ({path: base64} written verbatim
-        # into the static tree). Until that lands, a generator that ignores the key
-        # deploys the text tree only — the report's warning covers it.
+        # ``assets`` is the base64 binary sideband ({path: base64}) the html
+        # generator writes verbatim into the static tree.
         assets=assets or None,
         pattern=IMPORT_PATTERN,
         _generator=_generator,
@@ -523,6 +522,7 @@ async def crawl_site_from_url(
     _generator: Any | None = None,
     _cloudflare: Any | None = None,
     _local_deploy: Any | None = None,
+    _run_import: Any | None = None,
 ) -> Any:
     """SI-5: crawl ``url`` (same-site, SSRF-pinned — see url_crawler) and run the
     harvest through the SAME import pipeline as the zip path: text/binary split →
@@ -577,7 +577,21 @@ async def crawl_site_from_url(
         )
         return doc
 
-    report = derive_import_report(source, assets)
+    try:
+        # Same rewire pipeline as the zip path: forms get pointed at the capture
+        # API and an authoritative report comes back. The REWIRED source is what we
+        # persist + deploy.
+        source, assets, report = await _plan_import(
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            source=source,
+            assets=assets,
+            _run_import=_run_import,
+        )
+    except Exception as exc:  # noqa: BLE001 — a planning failure is a safe failed report
+        logger.warning("sites import: planning crawl of %s failed", url, exc_info=True)
+        await _mark_import_failed(doc, url=url, message=_safe_crawl_failure(exc))
+        return doc
     report["warnings"].extend(crawl.warnings)
     report["crawl"] = crawl.stats.as_dict()
     report["status"] = "imported"

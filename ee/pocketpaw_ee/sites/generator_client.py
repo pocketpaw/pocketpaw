@@ -1020,6 +1020,69 @@ class _SubprocessRunner:
         return await self.build_static(project_dir, gate=True)
 
 
+async def run_import(
+    files: dict[str, str],
+    *,
+    site_id: str,
+    capture_api_base: str,
+    capture_signed_key: str,
+    _exec: Any = None,
+) -> dict[str, Any]:
+    """Run imported files through the paw-sites ``import`` generator subcommand and
+    return ``{source, assets, report}`` — the rewired html source map, the base64
+    binary sideband, and the authoritative import report.
+
+    This is what makes an imported ``<form>`` actually post to the capture API: the
+    generator runs buildImportPlan + rewireForms over ``files`` (path -> base64
+    bytes) using ``siteConfig`` (the site id + capture base + the site's signed
+    key), rewrites each form's action to ``{captureApiBase}/capture/form`` with the
+    hidden paw_* fields, and returns the rewired source plus a report whose keys are
+    the exact snake_case shape the Site doc + /sites report panel read.
+
+    Shells out to the SAME tokenised generator command as apply_leaf_edits
+    (``_gen_cmd_argv()`` + ``import --input <tempfile>``) and emits exactly ONE JSON
+    line on stdout. A PURE transform — no bun install / build / workerd — so it is
+    fast and safe to call inline on the import path before publish. Failure surfaces
+    as a ``RuntimeError`` (non-zero exit carries the CLI stderr; a wedged run is a
+    failed run, mirroring generate()/apply_leaf_edits). ``_exec`` is the injectable
+    subprocess-exec seam tests stub so the bridge is unit-testable without Bun."""
+    input_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            input_path = fh.name
+            json.dump(
+                {
+                    "files": files,
+                    "siteConfig": {
+                        "siteId": site_id,
+                        "captureApiBase": capture_api_base,
+                        "captureSignedKey": capture_signed_key,
+                    },
+                },
+                fh,
+            )
+        timeout_s = _build_timeout_sec()
+        proc = await (_exec or asyncio.create_subprocess_exec)(
+            *_gen_cmd_argv(),
+            "import",
+            "--input",
+            input_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = await _communicate_bounded(proc, timeout_s, "import")
+        except _BuildTimeout as exc:
+            raise RuntimeError(f"import timed out after {exc.timeout_s}s") from exc
+        if proc.returncode != 0:
+            raise RuntimeError(f"import failed: {stderr.decode()}")
+        return json.loads(stdout.decode().strip().splitlines()[-1])
+    finally:
+        if input_path and os.path.exists(input_path):
+            os.unlink(input_path)
+
+
 async def apply_leaf_edits(
     source: dict[str, str],
     edits: list[dict[str, Any]],

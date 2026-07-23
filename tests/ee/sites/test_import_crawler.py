@@ -365,7 +365,7 @@ async def _queue_import(monkeypatch, url: str = "https://example.com/") -> dict[
 
 
 @pytest.mark.asyncio
-async def test_from_url_import_happy_path(_fake_publish, monkeypatch):
+async def test_from_url_import_happy_path(_fake_publish, _fake_run_import, monkeypatch):
     """2-page fixture site with css + img: the crawl runs the SAME pipeline as
     the zip path — text/binary split, publish with the assets sideband, report
     persisted with crawl stats — and the harvested source lands on the pocket."""
