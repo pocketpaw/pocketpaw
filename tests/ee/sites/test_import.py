@@ -206,6 +206,17 @@ async def test_import_zip_happy_path(_fake_publish, _fake_run_import, monkeypatc
     assert len(rows) == 1
     assert rows[0]["import_report"]["asset_count"] == 1
 
+    # The pocket stores the REWIRED source, not the raw upload — so a later
+    # re-publish from the builder redeploys forms that still post to capture.
+    from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
+
+    pocket = await _PocketDoc.find_one({"workspace": "ws_owner"})
+    assert pocket is not None
+    stored_index = (pocket.source or {})["index.html"]
+    # The stored form posts to capture, with the original preserved on the element.
+    assert f"action='{sites_service._capture_base()}/capture/form'" in stored_index
+    assert "data-paw-original-action='https://old-backend.example/submit'" in stored_index
+
 
 @pytest.mark.asyncio
 async def test_import_rewire_failure_does_not_deploy(_fake_publish, monkeypatch):

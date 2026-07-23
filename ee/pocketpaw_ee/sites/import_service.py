@@ -1,5 +1,9 @@
 # ee/pocketpaw_ee/sites/import_service.py — Paw Sites IMPORT control plane (SI-4).
 #
+# Edited 2026-07-23 (SI-FIX review): the zip path now persists the REWIRED source on
+# the pocket too (set_imported_source), not just the deployed artifact — a re-publish
+# from the builder was reading the raw upload and redeploying un-rewired forms.
+#
 # Edited 2026-07-23 (SI-FIX — wire the rewire pipeline): both the zip and crawl
 # paths now run the unpacked/harvested files through the generator's ``import``
 # subcommand (``_plan_import`` -> ``generator_client.run_import``) BEFORE publish, so
@@ -420,6 +424,15 @@ async def import_zip_site(
         _run_import=_run_import,
     )
     report["status"] = "imported"
+
+    # Persist the REWIRED source on the pocket (the durable re-publish source),
+    # mirroring the crawl path. The pocket was minted above with the RAW upload to
+    # get its signed_key; without this overwrite a later re-publish from the builder
+    # would read the raw source and redeploy forms that still post to the origin
+    # backend — leaking the site's leads.
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    await pockets_service.set_imported_source(pocket_id, workspace_id=workspace_id, source=source)
 
     doc = await sites_service.publish(
         workspace_id=workspace_id,
