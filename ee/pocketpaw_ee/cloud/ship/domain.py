@@ -128,6 +128,23 @@ class BoxMetricsView:
 
 
 @dataclass(frozen=True)
+class AppMetricsView:
+    """One app's health: process state (always) + real per-container resource
+    usage (``None`` when the box could not report it — the view shows "—", never
+    a false 0). ``cpu``/``mem`` come from ``docker stats``, ``disk`` from the
+    box's root filesystem."""
+
+    workspace_id: str
+    app_id: str
+    deployed: bool
+    running: bool
+    processes: int
+    cpu: float | None
+    mem: float | None
+    disk: float | None
+
+
+@dataclass(frozen=True)
 class EnvVarView:
     """Read model for one env var. ``masked_value`` is the masked hint — the
     plaintext value is never read out of the store except at deploy time."""
@@ -157,6 +174,7 @@ __all__ = [
     "AppId",
     "AppView",
     "BoxId",
+    "AppMetricsView",
     "BoxMetricsView",
     "BoxView",
     "DbView",

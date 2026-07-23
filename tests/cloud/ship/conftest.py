@@ -52,6 +52,13 @@ SHIP3_REPLIES: dict[str, str] = {
     f"dokku mongo:link {SERVICE} {APP}": "mongo_link.txt",
     f"dokku logs {APP} --num 100": "logs.txt",
     ship_engine.BOX_METRICS_COMMAND: "box_metrics.txt",
+    # App-level metrics (SHIP-12): ps:report state + df + real docker stats.
+    f"dokku ps:report {APP}": "ps_report.txt",
+    "df -Pk /": "df_root.txt",
+    (
+        f"docker stats --no-stream --no-trunc "
+        f"--format '{{{{.CPUPerc}}}} {{{{.MemPerc}}}}' --filter name={APP}."
+    ): "docker_stats.txt",
 }
 
 # The same surface, but the image deploy fails.

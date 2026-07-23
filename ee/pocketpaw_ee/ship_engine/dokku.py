@@ -69,6 +69,7 @@ from pocketpaw_ee.ship_engine.port import (
     DomainResult,
     LogChunk,
     MetricsSnapshot,
+    ShipEngineError,
     VerbNotSupported,
 )
 
@@ -375,13 +376,44 @@ class DokkuDriver:
                 exit_code=0,
                 stderr_tail=f"unparseable ps:report value: Processes: {raw_processes!r}",
             ) from None
+        cpu_pct, mem_pct = await self._container_usage(app)
         return MetricsSnapshot(
             app=app,
             deployed=fields.get("deployed", "").lower() == "true",
             running=fields.get("running", "").lower() == "true",
             processes=processes,
             disk_used_pct=_parse_df_used_pct(disk.stdout),
+            cpu_pct=cpu_pct,
+            mem_pct=mem_pct,
         )
+
+    async def _container_usage(self, app: str) -> tuple[float | None, float | None]:
+        """Real per-app CPU% + memory% from ``docker stats`` — Dokku's own
+        ``ps:report`` reports only process STATE, never resource usage.
+
+        BEST-EFFORT: any failure (old Docker, a down container, a stats format
+        change) returns ``(None, None)`` so a metrics read degrades to
+        process-state-only rather than failing. Dokku names an app's containers
+        ``<app>.<proc>.<n>``; ``--filter name=<app>.`` scopes stats to this app,
+        and ``--no-stream`` takes one sample instead of streaming. The value is
+        interpolated through ``shlex.quote`` like every other app name.
+        """
+        quoted = shlex.quote(app)
+        # A filter-substring match on the app's container name prefix. The
+        # trailing dot pins it to ``<app>.`` so app ``web`` never matches
+        # ``webapp``. ``{{.CPUPerc}} {{.MemPerc}}`` prints e.g. ``12.34% 5.60%``.
+        command = (
+            f"docker stats --no-stream --no-trunc "
+            f"--format '{{{{.CPUPerc}}}} {{{{.MemPerc}}}}' "
+            f"--filter name={quoted}."
+        )
+        try:
+            result = await self._run("metrics", command, check=False)
+        except ShipEngineError:
+            return None, None
+        if result.exit_code != 0:
+            return None, None
+        return _parse_docker_stats(result.stdout)
 
     async def destroy(self, app: str) -> None:
         await self._run("destroy", f"dokku --force apps:destroy {shlex.quote(app)}")
@@ -440,3 +472,39 @@ def _parse_df_used_pct(stdout: str) -> float:
             except ValueError:
                 continue
     return -1.0
+
+
+def _parse_docker_stats(stdout: str) -> tuple[float | None, float | None]:
+    """Parse ``docker stats --format '{{.CPUPerc}} {{.MemPerc}}'`` output into
+    ``(cpu_pct, mem_pct)``, averaged across the app's containers.
+
+    Each line is ``"12.34% 5.60%"`` for one container; an app may run several
+    (web + worker), so the returned figure is the mean of each column — a single
+    "this app is using X" number for the metrics tile. A line that doesn't parse
+    is skipped; no parseable line at all yields ``(None, None)`` (render "—",
+    never a false 0). Empty output (no running container) is the common
+    ``(None, None)`` case.
+    """
+    cpus: list[float] = []
+    mems: list[float] = []
+    for line in stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        cpu = _as_pct(parts[0])
+        mem = _as_pct(parts[1])
+        if cpu is not None:
+            cpus.append(cpu)
+        if mem is not None:
+            mems.append(mem)
+    cpu_avg = round(sum(cpus) / len(cpus), 1) if cpus else None
+    mem_avg = round(sum(mems) / len(mems), 1) if mems else None
+    return cpu_avg, mem_avg
+
+
+def _as_pct(token: str) -> float | None:
+    """A ``docker stats`` percentage token (``"12.34%"``) to a float, or None."""
+    try:
+        return float(token.rstrip("%"))
+    except ValueError:
+        return None

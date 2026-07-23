@@ -210,6 +210,23 @@ class MetricsOut(BaseModel):
     disk: float
 
 
+class AppMetricsOut(BaseModel):
+    """One app's health: process state (always present) + real per-container
+    resource usage. FROZEN — the /ship console's app Metrics tab consumes this.
+
+    ``cpu``/``mem``/``disk`` are percentages (0.0–100.0) or ``null`` when the box
+    could not report them (an old Docker, a down container) — the UI renders "—"
+    for a null, never a misleading 0. Process state (``deployed``/``running``/
+    ``processes``) always comes back; it is what Dokku itself reports."""
+
+    deployed: bool
+    running: bool
+    processes: int
+    cpu: float | None = None
+    mem: float | None = None
+    disk: float | None = None
+
+
 class PendingApprovalOut(BaseModel):
     """The answer to a DELETE: the teardown is PARKED, not performed. FROZEN."""
 

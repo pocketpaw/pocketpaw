@@ -90,6 +90,9 @@ async def test_metrics_parses_ps_report_and_df() -> None:
     assert result.running is True
     assert result.processes == 1
     assert result.disk_used_pct == 38.0
+    # Real per-container CPU/mem from `docker stats` (SHIP-12), rounded to 1dp.
+    assert result.cpu_pct == 12.3
+    assert result.mem_pct == 5.6
 
 
 async def test_db_create_reports_env_var_name_not_dsn() -> None:
@@ -219,6 +222,22 @@ async def test_metrics_unparseable_ps_report_maps_to_command_failed() -> None:
         await DokkuDriver(FakeSSHTransport(replies)).metrics(c.APP)
     # The raw unparseable value is named in the error — not a bare ValueError.
     assert "banana" in str(exc_info.value)
+
+
+async def test_metrics_docker_stats_failure_degrades_to_none() -> None:
+    """A `docker stats` failure (old Docker, down container) must NOT fail the
+    whole metrics read — process state still comes back, cpu/mem read None."""
+    stats_cmd = (
+        f"docker stats --no-stream --no-trunc "
+        f"--format '{{{{.CPUPerc}}}} {{{{.MemPerc}}}}' --filter name={c.APP}."
+    )
+    replies = {**HAPPY_REPLIES, stats_cmd: "docker_stats_fail.txt"}
+    result = await DokkuDriver(FakeSSHTransport(replies)).metrics(c.APP)
+    # Process state survives; resource usage degrades to None (renders "—").
+    assert result.deployed is True
+    assert result.running is True
+    assert result.cpu_pct is None
+    assert result.mem_pct is None
 
 
 # --------------------------------------------------------------------- #

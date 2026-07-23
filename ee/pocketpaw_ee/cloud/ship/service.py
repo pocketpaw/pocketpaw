@@ -49,6 +49,7 @@ from pocketpaw_ee.cloud.ship import engine as ship_engine
 from pocketpaw_ee.cloud.ship import enqueue, propose, store
 from pocketpaw_ee.cloud.ship.domain import (
     AppId,
+    AppMetricsView,
     AppView,
     BoxId,
     BoxMetricsView,
@@ -63,6 +64,7 @@ from pocketpaw_ee.cloud.ship.domain import (
 )
 from pocketpaw_ee.cloud.ship.dto import (
     AddDomainRequest,
+    AppMetricsOut,
     AppOut,
     BoxOut,
     CreateAppRequest,
@@ -412,6 +414,39 @@ async def get_logs(
     return LogsView(workspace_id=workspace_id, app_id=str(app.id), lines=tuple(chunk.lines))
 
 
+async def get_app_metrics(
+    workspace_id: str,
+    app_id: str,
+    *,
+    session_factory: ship_engine.BoxSessionFactory | None = None,
+) -> AppMetricsView:
+    """Read one app's live health: process state + REAL per-container CPU/mem.
+
+    Dokku's ``ps:report`` gives only deploy/run STATE; the driver adds real
+    CPU%/mem% from ``docker stats`` (``None`` when the box can't report them, so
+    the view shows "—" not a false 0). A box that is not ``ready`` is a 409, not
+    a fabricated row — mirrors ``get_box_metrics``.
+    """
+    # no-event: read-only path; emit only on writes (cloud rule #9).
+    app, box = await _require_app_on_ready_box(workspace_id, app_id)
+    factory = session_factory or ship_engine.box_session
+    try:
+        async with factory(box) as session:
+            snap = await session.engine.metrics(app.name)
+    except ship_engine.ENGINE_FAILURES as exc:
+        raise _engine_conflict("ship.metrics_failed", exc) from exc
+    return AppMetricsView(
+        workspace_id=workspace_id,
+        app_id=str(app.id),
+        deployed=snap.deployed,
+        running=snap.running,
+        processes=snap.processes,
+        cpu=snap.cpu_pct,
+        mem=snap.mem_pct,
+        disk=snap.disk_used_pct if snap.disk_used_pct >= 0 else None,
+    )
+
+
 async def request_app_destroy(workspace_id: str, user_id: str, app_id: str) -> DestroyProposalView:
     """PARK an app teardown for human approval. Destroys NOTHING."""
     app = await _require_app(workspace_id, app_id)
@@ -525,6 +560,17 @@ def logs_to_wire(view: LogsView) -> LogsOut:
 
 def metrics_to_wire(view: BoxMetricsView) -> MetricsOut:
     return MetricsOut(cpu=view.cpu, mem=view.mem, disk=view.disk)
+
+
+def app_metrics_to_wire(view: AppMetricsView) -> AppMetricsOut:
+    return AppMetricsOut(
+        deployed=view.deployed,
+        running=view.running,
+        processes=view.processes,
+        cpu=view.cpu,
+        mem=view.mem,
+        disk=view.disk,
+    )
 
 
 def domain_to_wire(view: DomainView) -> DomainOut:

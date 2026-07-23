@@ -39,6 +39,10 @@ HAPPY_REPLIES: dict[str, str] = {
     f"dokku logs {c.APP} --num 100": "logs.txt",
     f"dokku ps:report {c.APP}": "ps_report.txt",
     "df -Pk /": "df_root.txt",
+    (
+        f"docker stats --no-stream --no-trunc "
+        f"--format '{{{{.CPUPerc}}}} {{{{.MemPerc}}}}' --filter name={c.APP}."
+    ): "docker_stats.txt",
     f"dokku --force apps:destroy {c.APP}": "apps_destroy.txt",
 }
 

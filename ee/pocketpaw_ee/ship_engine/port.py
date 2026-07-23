@@ -232,6 +232,13 @@ class MetricsSnapshot:
     ``deployed``/``running`` are the engine's process-level flags,
     ``processes`` the running process count, ``disk_used_pct`` the box's
     root-filesystem usage (0.0–100.0).
+
+    ``cpu_pct``/``mem_pct`` are the app's REAL per-container resource usage
+    from ``docker stats`` (Dokku's ``ps:report`` gives only process STATE, not
+    resource usage). They are ``None`` when the box could not report them (an
+    old Docker, a container that is down) — a metrics view shows "—" rather than
+    a false 0. The whole snapshot degrades gracefully: process state without
+    resource numbers is still useful.
     """
 
     app: str
@@ -239,6 +246,8 @@ class MetricsSnapshot:
     running: bool
     processes: int
     disk_used_pct: float
+    cpu_pct: float | None = None
+    mem_pct: float | None = None
 
 
 # --------------------------------------------------------------------------- #

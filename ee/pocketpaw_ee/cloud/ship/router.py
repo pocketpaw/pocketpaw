@@ -41,6 +41,7 @@ from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.ship import service as ship_service
 from pocketpaw_ee.cloud.ship.dto import (
     AddDomainRequest,
+    AppMetricsOut,
     AppOut,
     BoxOut,
     CreateAppRequest,
@@ -204,6 +205,16 @@ async def get_logs(
     workspace_id = _require_workspace(ctx)
     view = await ship_service.get_logs(workspace_id, app_id, num=num)
     return ship_service.logs_to_wire(view)
+
+
+@router.get("/apps/{app_id}/metrics", response_model=AppMetricsOut)
+async def get_app_metrics(
+    app_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> AppMetricsOut:
+    workspace_id = _require_workspace(ctx)
+    view = await ship_service.get_app_metrics(workspace_id, app_id)
+    return ship_service.app_metrics_to_wire(view)
 
 
 # ---------------------------------------------------------------------------

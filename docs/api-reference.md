@@ -1375,6 +1375,19 @@ redacts them before they leave the box:
 **Parks** an app teardown for human approval, exactly like the box DELETE above.
 Nothing is destroyed.
 
+### `GET /ship/apps/{app_id}/metrics`
+
+One app's live health: process state (from Dokku) plus **real per-container
+CPU/memory** (from `docker stats` — Dokku's own `ps:report` gives only process
+state, not resource usage). `cpu`/`mem`/`disk` are percentages or `null` when the
+box could not report them (an old Docker, a down container) — render "—" for a
+null, never a misleading 0. Process state always comes back.
+
+```json
+{"deployed": true, "running": true, "processes": 1,
+ "cpu": 12.3, "mem": 5.6, "disk": 38.0}
+```
+
 ### Environment variables (SHIP-9)
 
 An app's env vars are stored **Fernet-encrypted at rest** (the same envelope as

@@ -112,6 +112,9 @@ async def test_metrics_returns_typed_result(engine_case: EngineCase) -> None:
     assert result.running is True
     assert result.processes >= 1
     assert 0.0 <= result.disk_used_pct <= 100.0
+    # Real per-container usage (None when the box can't report it).
+    assert result.cpu_pct is None or 0.0 <= result.cpu_pct <= 100.0
+    assert result.mem_pct is None or 0.0 <= result.mem_pct <= 100.0
     assert_no_secret_material(result, engine_case.secret_markers)
 
 
