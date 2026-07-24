@@ -1630,6 +1630,9 @@ async def execute_run(spec: RunSpec) -> None:
         user_id=spec.user_id,
         agent_id_hint=spec.agent_id,
         expected_workspace_id=spec.workspace_id,
+        # CX-3: on /code the resolver routes an unhinted turn to the dedicated
+        # code agent (exclusive file-tool policy). No-op on every other surface.
+        surface=spec.surface,
     )
     # Even with the spec fallback, a doc + spec that BOTH lack a usable workspace
     # must fail cleanly here — never attach an empty identity downstream (the

@@ -181,6 +181,16 @@ the same ContextVar, added for Code Mode's browser-delegate channel: that caller
 pushes a frame and then PARKS waiting for the browser's reply, so a push into no
 stream has to be a fast, distinct failure rather than a silent no-op followed by
 a full-length timeout. No behaviour change to any existing push path.
+
+Changes: 2026-07-24 (CX-3, feat/code-agent-exclusive-tools) —
+``resolve_scope_context`` (and ``_resolve_session`` / ``_resolve_pocket``)
+gained a ``surface`` param, and ``_get_code_agent_id`` was added. On the CODE
+surface, an unhinted turn resolves to the dedicated ``code`` agent (slug
+``code``), lazy-seeded via ``agents.service.seed_code_agent`` on miss, instead
+of the default ``pocketpaw`` agent — so the exclusive file-tool policy is
+applied backend-authoritatively (the frontend need not pass the id). Guarded
+narrowly on CODE + no explicit ``agent_id_hint``; every other surface's
+resolution is byte-identical.
 """
 
 from __future__ import annotations
@@ -211,7 +221,7 @@ from pocketpaw.ripple import (
 from pocketpaw.ripple._pockets import _MCP_POCKET_BACKENDS
 from pocketpaw.stores import current_workspace as _oss_current_workspace
 from pocketpaw_ee.cloud.shared.errors import CloudError, Forbidden, NotFound
-from pocketpaw_ee.cloud.surface import SurfaceContext, SurfaceProfile
+from pocketpaw_ee.cloud.surface import SurfaceContext, SurfaceKind, SurfaceProfile
 
 logger = logging.getLogger(__name__)
 
@@ -947,6 +957,52 @@ async def _get_default_workspace_agent_id(workspace_id: str) -> str | None:
         return None
 
 
+async def _get_code_agent_id(workspace_id: str) -> str | None:
+    """Resolve the workspace's dedicated ``code`` agent id, LAZY-SEEDING on miss.
+
+    The ``/code`` surface is backend-authoritative (CX-3): a CODE-surface turn
+    must resolve to this agent, whose stored config carries the exclusive
+    file-tool policy (``tool_mode="exclusive"`` + ``tools=_CODE_FILE_TOOL_IDS``),
+    so the run is capped to exactly the four file tools — no pocket/planner/
+    widget grant. A workspace that predates the code-agent seed (or one whose
+    boot back-fill hasn't run) still works on its FIRST /code turn because this
+    helper seeds when the agent is absent. Returns ``None`` only when both the
+    lookup and the seed fail — the caller then falls back to the default agent
+    rather than erroring.
+    """
+    if not workspace_id:
+        return None
+    try:
+        from pocketpaw_ee.cloud.models.agent import Agent
+
+        agent = await Agent.find_one(Agent.workspace == workspace_id, Agent.slug == "code")
+        if agent is not None:
+            return str(agent.id)
+
+        # Lazy-seed. Resolve the workspace owner (mirrors the boot back-fill's
+        # ``ws.owner``) and delegate the write to the agents service — the sole
+        # owner of Agent writes. A bad/missing workspace doc degrades to an empty
+        # owner rather than blocking the seed.
+        owner_id = ""
+        try:
+            from beanie import PydanticObjectId
+
+            from pocketpaw_ee.cloud.models.workspace import Workspace
+
+            ws = await Workspace.get(PydanticObjectId(workspace_id))
+            owner_id = str(getattr(ws, "owner", "") or "") if ws is not None else ""
+        except Exception:
+            logger.debug("code-agent seed: workspace owner lookup failed for ws=%s", workspace_id)
+
+        from pocketpaw_ee.cloud.agents import service as agents_service
+
+        doc, _created = await agents_service.seed_code_agent(workspace_id, owner_id)
+        return str(doc.id) if doc is not None else None
+    except Exception:
+        logger.exception("code agent lookup/seed failed for ws=%s", workspace_id)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Scope resolution
 # ---------------------------------------------------------------------------
@@ -999,6 +1055,7 @@ async def resolve_scope_context(
     user_id: str,
     agent_id_hint: str | None,
     expected_workspace_id: str | None = None,
+    surface: str | None = None,
 ) -> ScopeContext:
     """Resolve a ``ScopeContext`` for a cloud agent chat request.
 
@@ -1008,6 +1065,13 @@ async def resolve_scope_context(
     field is empty/missing and (b) REJECT a caller whose workspace DISAGREES
     with a non-empty doc workspace (cross-tenant guard). Defaults to ``None`` —
     legacy / non-worker callers keep today's doc-only behavior.
+
+    ``surface`` is the client's raw surface hint (``body.surface`` /
+    ``spec.surface``). On the CODE surface, and only when the caller passed no
+    explicit ``agent_id_hint``, target resolution routes to the dedicated
+    ``code`` agent (lazy-seeded) instead of the default ``pocketpaw`` agent so
+    the exclusive file-tool policy applies backend-authoritatively (CX-3). Every
+    other surface leaves resolution byte-identical. Defaults to ``None``.
 
     Raises:
         InvalidScope: ``scope`` is not one of dm/group/pocket/session.
@@ -1022,9 +1086,13 @@ async def resolve_scope_context(
         raise InvalidScope(scope) from e
 
     if kind is ScopeKind.POCKET:
-        return await _resolve_pocket(scope_id, user_id, agent_id_hint, expected_workspace_id)
+        return await _resolve_pocket(
+            scope_id, user_id, agent_id_hint, expected_workspace_id, surface
+        )
     if kind is ScopeKind.SESSION:
-        return await _resolve_session(scope_id, user_id, agent_id_hint, expected_workspace_id)
+        return await _resolve_session(
+            scope_id, user_id, agent_id_hint, expected_workspace_id, surface
+        )
     return await _resolve_group_like(kind, scope_id, user_id, agent_id_hint, expected_workspace_id)
 
 
@@ -1033,6 +1101,7 @@ async def _resolve_session(
     user_id: str,
     agent_id_hint: str | None,
     expected_workspace_id: str | None = None,
+    surface: str | None = None,
 ) -> ScopeContext:
     session = await _get_session(scope_id)
     if session is None or getattr(session, "deleted_at", None) is not None:
@@ -1078,6 +1147,17 @@ async def _resolve_session(
             pocket_summary = _pocket_summary_data(pocket)
 
     target = agent_id_hint or getattr(session, "agent", None)
+    # /code is backend-authoritative (CX-3). When the surface is CODE and the
+    # caller passed no explicit ``agent_id_hint``, resolve to the dedicated
+    # ``code`` agent (lazy-seeded) — its exclusive file-tool config is what makes
+    # "build an employee management app…" write code instead of a pocket. This
+    # takes precedence over the session's stored agent and the default fallback
+    # so the exclusivity holds even when the frontend omits the id. Guarded
+    # narrowly on CODE — every other surface keeps byte-identical resolution.
+    if agent_id_hint is None and surface == SurfaceKind.CODE.value:
+        code_id = await _get_code_agent_id(workspace_id)
+        if code_id:
+            target = code_id
     if not target:
         # Sessions created via ``createPocketSession`` don't yet pin an agent
         # — fall back to the workspace's default ``pocketpaw`` agent (same
@@ -1168,6 +1248,7 @@ async def _resolve_pocket(
     user_id: str,
     agent_id_hint: str | None,
     expected_workspace_id: str | None = None,
+    surface: str | None = None,
 ) -> ScopeContext:
     pocket = await _get_pocket(scope_id)
     if pocket is None:
@@ -1210,6 +1291,15 @@ async def _resolve_pocket(
         target = agent_id_hint
     else:
         target = agent_ids[0]
+        # /code is backend-authoritative (CX-3): a CODE-surface turn with no
+        # explicit hint routes to the dedicated ``code`` agent (lazy-seeded),
+        # overriding the pocket's default agent, so the exclusive file-tool
+        # policy applies. Guarded narrowly on CODE — non-CODE pocket chats keep
+        # byte-identical resolution.
+        if surface == SurfaceKind.CODE.value:
+            code_id = await _get_code_agent_id(workspace_id)
+            if code_id:
+                target = code_id
 
     # Build the participant list: owner first, then team, then shared-with,
     # deduped. Pocket.owner is a required field on the model, so the falsy

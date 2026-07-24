@@ -100,6 +100,12 @@ read-only: the ``pocketpaw_fabric`` server grew three ontology modification
 tools (``fabric_link_create`` / ``fabric_link_delete`` at MEMBER tier,
 ``fabric_type_update`` RBAC-gated on ``fabric.admin``), mirroring the REST
 routes. ``tool_ids()`` picks them up automatically via ``FABRIC_TOOL_IDS``.
+
+Updated: 2026-07-24 (CX-3, feat/code-agent-exclusive-tools) —
+``CloudLifecycleHook.on_startup`` now also back-fills the dedicated ``code``
+agent (``ensure_code_agent_all_workspaces``) beside the default ``pocketpaw``
+one, so existing workspaces resolve ``/code`` turns to the exclusive-file-tool
+agent without waiting for the first-turn lazy seed.
 """
 
 from __future__ import annotations
@@ -309,6 +315,11 @@ class CloudLifecycleHook:
         await seed_workspace(admin)
         # Back-fill the pocketpaw agent for workspaces that predate agent seeding.
         await ensure_default_agent_all_workspaces()
+        # Back-fill the dedicated /code agent (exclusive file-tool set) beside it
+        # so an existing workspace resolves /code turns without a first-turn seed.
+        from pocketpaw_ee.cloud.agents.service import ensure_code_agent_all_workspaces
+
+        await ensure_code_agent_all_workspaces()
 
         # Persist Haiku-generated chat titles into MongoDB.
         try:
