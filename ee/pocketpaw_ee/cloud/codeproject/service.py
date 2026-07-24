@@ -35,6 +35,16 @@
 # ``set_snapshot`` on WebSandbox — no lifecycle transition to announce). This
 # module stays the sole writer of the CodeProject doc (Rule 2). The orchestration
 # that drives them (tar/untar + S3 upload) lives in ``websandbox/durability.py``.
+#
+# Modified 2026-07-24 (feat/code-initial-prompt): ``create_project`` now persists
+# the optional ``initial_prompt`` (the WHAT-to-build description) on an actual
+# INSERT only — a github idempotent hit returns the existing row untouched, so a
+# repeat create never overwrites a project's prompt. The prompt + its
+# ``initial_prompt_consumed`` flag flow doc -> view -> wire (mirroring
+# ``snapshot_file_id``). Added ``mark_initial_prompt_consumed`` — an owner-scoped
+# (Rule 7) op that sets the consumed flag on build-turn START and re-arms it to
+# False on a retry-build; idempotent (already-in-state is a clean no-op) and
+# ``# no-event:`` (a build-turn bookkeeping flag, not a lifecycle transition).
 from __future__ import annotations
 
 import logging
@@ -56,6 +66,7 @@ from pocketpaw_ee.cloud.codeproject.domain import (
 )
 from pocketpaw_ee.cloud.codeproject.dto import (
     CodeProjectResponse,
+    ConsumePromptRequest,
     CreateProjectRequest,
     RenameProjectRequest,
 )
@@ -105,6 +116,8 @@ def _doc_to_view(doc: _CodeProjectDoc) -> CodeProjectView:
         updated_at=doc.updated_at,
         snapshot_file_id=doc.snapshot_file_id,
         overlay=dict(doc.overlay or {}),
+        initial_prompt=doc.initial_prompt,
+        initial_prompt_consumed=doc.initial_prompt_consumed,
         current_sandbox_id=doc.current_sandbox_id,
         last_opened_at=doc.last_opened_at,
     )
@@ -119,6 +132,8 @@ def view_to_wire(view: CodeProjectView) -> CodeProjectResponse:
         name=view.name,
         provider=view.provider,
         repo=view.repo,
+        initialPrompt=view.initial_prompt,
+        initialPromptConsumed=view.initial_prompt_consumed,
         snapshotFileId=view.snapshot_file_id,
         currentSandboxId=view.current_sandbox_id,
         lastOpenedAt=view.last_opened_at.isoformat() if view.last_opened_at else None,
@@ -175,6 +190,11 @@ async def create_project(
         provider=body.provider,
         repo=body.repo,
         registry_key=_registry_key(body.provider),
+        # The WHAT-to-build description, recorded ONLY on this actual insert — an
+        # idempotent hit returned above unchanged, so a repeat create never
+        # overwrites an existing project's prompt.
+        initial_prompt=body.initial_prompt,
+        initial_prompt_consumed=False,
     )
     await doc.insert()
 
@@ -263,6 +283,41 @@ async def rename_project(
             }
         )
     )
+    return _doc_to_view(doc)
+
+
+async def mark_initial_prompt_consumed(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    body: ConsumePromptRequest | dict,
+) -> CodeProjectView:
+    """Set (or re-arm) the project's ``initial_prompt_consumed`` flag.
+
+    Tenant- and owner-scoped (Rule 7 via ``_read_owned``): a caller can only touch
+    a project they own; a foreign / missing id raises ``NotFound``. The frontend
+    calls this with ``consumed=True`` when a build turn STARTS so a reopen doesn't
+    re-run the same auto-build, and with ``consumed=False`` on a retry-build to
+    re-arm the prompt. Validated at entry (Rule 6). Idempotent: setting the flag to
+    the value it already holds writes nothing and returns the current view.
+    """
+    body = ConsumePromptRequest.model_validate(body)
+
+    doc = await _read_owned(workspace_id, user_id, project_id)
+    if doc is None:
+        raise NotFound("code_project", project_id)
+
+    if doc.initial_prompt_consumed == body.consumed:
+        # no-event: already in the requested state — nothing was written.
+        return _doc_to_view(doc)
+
+    doc.initial_prompt_consumed = body.consumed
+    doc.updated_at = datetime.now(UTC)
+    await doc.save()
+    # no-event: the consumed flag is build-turn bookkeeping the frontend owns end
+    # to end (it sets it on turn start, re-arms it on retry) — no downstream
+    # handler reacts to it, and a projects-grid fan-out must not read it as a
+    # lifecycle transition. Same reasoning as the durability pointer writes above.
     return _doc_to_view(doc)
 
 
@@ -511,6 +566,7 @@ __all__ = [
     "drop_project_overlay_entry",
     "get_project",
     "list_projects",
+    "mark_initial_prompt_consumed",
     "move_project_overlay_entry",
     "rename_project",
     "set_project_overlay_entry",

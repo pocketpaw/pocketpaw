@@ -41,6 +41,14 @@ replaying a stale write over a since-deleted file). This makes a project-keyed
 durable store — snapshot pointer + overlay — that round-trips through S3
 independent of any runtime. Additive: the sandbox-keyed WebSandbox durability
 path is unchanged. No new index — read only via the owner-scoped project row.
+
+Modified 2026-07-24 (feat/code-initial-prompt): added ``initial_prompt`` (the
+natural-language description of WHAT to build, captured when a ``/code`` project
+is created from a prompt) and ``initial_prompt_consumed`` (whether the auto-run
+build turn has already been kicked off for it). The frontend reads the prompt on
+first open to auto-run one build turn and flips ``consumed`` on turn START; a
+retry-build re-arms it. Both are nullable/defaulted so every existing row stays
+valid. No new index — read only via the owner-scoped project row.
 """
 
 from __future__ import annotations
@@ -90,6 +98,15 @@ class CodeProject(Document):
     # snapshot supersedes it). Null until the first mirror. No new index — read
     # only via the owner-scoped project row.
     overlay: dict[str, str] = Field(default_factory=dict)
+    # The natural-language build prompt captured when a ``/code`` project is
+    # created from a description — WHAT to build. Null for projects opened from an
+    # existing repo with nothing to auto-build. The frontend reads it on first open
+    # to auto-run one build turn.
+    initial_prompt: str | None = None
+    # Whether the auto-run build turn has been kicked off for ``initial_prompt``.
+    # Set True on build-turn START (so a reopen doesn't re-run it); a retry-build
+    # re-arms it to False. Independent of whether the build succeeded.
+    initial_prompt_consumed: bool = False
     # The CURRENT ephemeral sandbox (a WebSandbox row id), or null when none is
     # live (never opened, or the VM was reaped). ``open_project`` resolves this.
     current_sandbox_id: str | None = None

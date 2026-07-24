@@ -16,6 +16,12 @@
 # ``overlay`` for websandbox restore). Like WebSandbox, overlay is view-only — it
 # is NOT surfaced on the wire ``CodeProjectResponse``; it is internal durability
 # bookkeeping, not a client-facing field.
+#
+# Modified 2026-07-24 (feat/code-initial-prompt): added ``initial_prompt`` and
+# ``initial_prompt_consumed`` to CodeProjectView. Unlike ``overlay`` these DO flow
+# to the wire (``initialPrompt`` / ``initialPromptConsumed``) — the frontend reads
+# the prompt on first open to auto-run one build turn and the consumed flag to
+# avoid re-running it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -76,6 +82,11 @@ class CodeProjectView:
     # The write-through per-file durability overlay (``relpath -> FileRecord id``),
     # keyed on the project. View-only, mirroring WebSandboxView — not on the wire.
     overlay: dict[str, str] = field(default_factory=dict)
+    # The natural-language build prompt captured at create-from-description time
+    # (WHAT to build), and whether the auto-run build turn has been kicked off for
+    # it. Both flow to the wire, unlike ``overlay``.
+    initial_prompt: str | None = None
+    initial_prompt_consumed: bool = False
     # The current ephemeral sandbox (a WebSandbox row id), null when none is live.
     current_sandbox_id: str | None = None
     last_opened_at: datetime | None = None
