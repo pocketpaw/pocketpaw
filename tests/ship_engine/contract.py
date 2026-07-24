@@ -57,10 +57,14 @@ DEPLOY_REQUEST = DeployRequest(app=APP_SPEC, image=IMAGE)
 
 # The v1 deploy_source scenario: a private git repo built from ``main`` with an
 # access token. The token is a secret marker (registered in the case) — it must
-# NEVER surface in a result DTO, an exception, or a log line.
+# NEVER surface in a result DTO, an exception, or a log line. Redaction is
+# marker-based (exact string), so the literal is deliberately NOT a valid
+# GitHub-PAT shape: the underscores break the CI secret-scanner's
+# ``ghp_[A-Za-z0-9]{36}`` pattern. Keep it that way — a real-looking token here
+# only trips the scanner without making the redaction test any stronger.
 GIT_REPO = "https://github.com/paw-demo/app.git"
 GIT_REF = "main"
-GIT_TOKEN = "ghp_S3cr3tGitTokenDoNotLeakABCDEF0123456789"
+GIT_TOKEN = "ghp_EXAMPLE_do_not_leak_contract_marker"
 GIT_SOURCE = GitSource(repo_url=GIT_REPO, ref=GIT_REF, token=GIT_TOKEN)
 
 
