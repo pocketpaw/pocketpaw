@@ -1241,9 +1241,9 @@ leak).
 
 Long work never blocks the request. `POST /ship/boxes` and
 `POST /ship/apps/{id}/deploy` enqueue an ARQ job and return immediately with a
-pollable record; the engine-backed routes (domains, database, logs, metrics)
-run inline over SSH and answer `409` with `code: ship.*_failed` when the deploy
-engine refuses.
+pollable record; the engine-backed routes (domains, database, scale, checks,
+logs, metrics) run inline over SSH and answer `409` with `code: ship.*_failed`
+when the deploy engine refuses.
 
 **Secrets never cross this surface.** A box's SSH key is decrypted only inside
 the engine session and shredded with it. App env **names** are accepted and
@@ -1352,14 +1352,39 @@ add time.
 ### `POST /ship/apps/{app_id}/db`
 
 Create a database service and link it to the app. Body is optional; `service`
-defaults to `<app-name>-db`. Returns:
+defaults to `<app-name>-db`. `db_type` picks the engine — `postgres`, `redis`,
+or `mongo` (default `mongo`); the box installs all three plugins at provision
+time. The injected variable name follows the engine (`DATABASE_URL` for
+postgres, `REDIS_URL` for redis, `MONGO_URL` for mongo). Returns:
 
 ```json
-{"service": "demo-db", "linked_app": "demo", "env_var": "MONGO_URL"}
+{"service": "demo-db", "linked_app": "demo", "env_var": "DATABASE_URL"}
 ```
 
 `env_var` is the NAME of the variable the link injected. The connection string
 is a secret and never crosses the wire.
+
+### `PUT /ship/apps/{app_id}/scale`
+
+Set how many containers run per process type. The body is a `scale` map of
+process name → count; a count of `0` stops that process. Process names use the
+Procfile grammar (`^[a-z][a-z0-9_-]*$`). Applies on the next deploy. Returns the
+app with its new `scale`:
+
+```json
+{"scale": {"web": 2, "worker": 1}}
+```
+
+### `PUT /ship/apps/{app_id}/checks`
+
+Configure zero-downtime deploys. `zero_downtime` (default `true`) toggles Dokku's
+settle-and-drain deploy — the new container must pass its checks before the old
+one is retired; `healthcheck_path` is the optional HTTP path the check hits.
+Both apply on the next deploy. Returns the app's current settings:
+
+```json
+{"zero_downtime": true, "healthcheck_path": "/healthz"}
+```
 
 ### `GET /ship/apps/{app_id}/logs?num=<n>`
 
@@ -1433,11 +1458,11 @@ Removes one variable. Returns the remaining masked list.
 ### The agent surface (`pocketpaw_ship` MCP)
 
 A chat agent in a room whose pocket has the **Ship connector** bound reaches the
-same service layer through ten in-process MCP tools — `ship_list_boxes`,
+same service layer through twelve in-process MCP tools — `ship_list_boxes`,
 `ship_provision_box`, `ship_list_apps`, `ship_create_app`, `ship_deploy_app`,
-`ship_add_domain`, `ship_create_db`, `ship_logs`, `ship_metrics`, and
-`ship_request_destroy`. Binding the connector also auto-surfaces the bundled
-`ship` skill into that room.
+`ship_add_domain`, `ship_create_db`, `ship_set_scale`, `ship_set_checks`,
+`ship_logs`, `ship_metrics`, and `ship_request_destroy`. Binding the connector
+also auto-surfaces the bundled `ship` skill into that room.
 
 The agent's surface is deliberately **narrower than the HTTP one**:
 

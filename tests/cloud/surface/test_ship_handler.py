@@ -110,9 +110,10 @@ def test_ship_profile_ripple_off_scoped_to_ship_tools_and_skill() -> None:
 
     assert profile.ripple_mode == "off"
     assert "ship" in profile.skill_names
-    # MCP allow-list: exactly the 10 ship verb tools.
+    # MCP allow-list: exactly the 12 ship verb tools (Wave 2 added set_scale +
+    # set_checks).
     assert profile.allow_mcp_tool_ids is not None
-    assert len(SHIP_TOOL_IDS) == 10
+    assert len(SHIP_TOOL_IDS) == 12
     for tool_id in SHIP_TOOL_IDS:
         assert tool_id in profile.allow_mcp_tool_ids
     # Ship drives infra through MCP verbs, not code — no SDK-tool allowlist.

@@ -45,6 +45,8 @@ SHIP_TOOL_IDS = tuple(
         "ship_deploy_app",
         "ship_add_domain",
         "ship_create_db",
+        "ship_set_scale",
+        "ship_set_checks",
         "ship_logs",
         "ship_metrics",
         "ship_request_destroy",
@@ -240,13 +242,63 @@ async def _create_db_handler(args: dict) -> dict:
     app_id = str(args.get("app_id") or "")
     if not app_id:
         return _error_response("ship_create_db requires an `app_id`.")
+    db_type = str(args.get("db_type") or "").strip() or None
     try:
-        view = await service.create_db(ws, user, app_id, CreateDbRequest())
+        body = CreateDbRequest(**({"db_type": db_type} if db_type else {}))
+        view = await service.create_db(ws, user, app_id, body)
     except Exception as exc:  # noqa: BLE001
         return _view_error(exc, "create the database")
     # The connection string is a secret and is NEVER returned — the app reads it
     # from the injected env var, whose NAME is all the agent needs.
     return _success_response({"service": view.service, "env_var": view.env_var})
+
+
+async def _set_scale_handler(args: dict) -> dict:
+    ws, user, err = await _with_identity("ship_set_scale")
+    if err:
+        return err
+    from pocketpaw_ee.cloud.ship import service
+    from pocketpaw_ee.cloud.ship.dto import SetScaleRequest
+
+    app_id = str(args.get("app_id") or "")
+    if not app_id:
+        return _error_response("ship_set_scale requires an `app_id`.")
+    raw = args.get("scale") or {}
+    if not isinstance(raw, dict) or not raw:
+        return _error_response("ship_set_scale requires a `scale` map, e.g. {\"web\": 2}.")
+    try:
+        scale = {str(k): int(v) for k, v in raw.items()}
+        view = await service.set_scale(ws, user, app_id, SetScaleRequest(scale=scale))
+    except Exception as exc:  # noqa: BLE001
+        return _view_error(exc, "scale the app")
+    return _success_response({"app_id": view.id, "scale": dict(view.scale)})
+
+
+async def _set_checks_handler(args: dict) -> dict:
+    ws, user, err = await _with_identity("ship_set_checks")
+    if err:
+        return err
+    from pocketpaw_ee.cloud.ship import service
+    from pocketpaw_ee.cloud.ship.dto import SetChecksRequest
+
+    app_id = str(args.get("app_id") or "")
+    if not app_id:
+        return _error_response("ship_set_checks requires an `app_id`.")
+    try:
+        body = SetChecksRequest(
+            zero_downtime=bool(args.get("zero_downtime", True)),
+            healthcheck_path=str(args.get("healthcheck_path") or ""),
+        )
+        view = await service.set_checks(ws, user, app_id, body)
+    except Exception as exc:  # noqa: BLE001
+        return _view_error(exc, "configure deploy checks")
+    return _success_response(
+        {
+            "app_id": view.id,
+            "zero_downtime": view.zero_downtime,
+            "healthcheck_path": view.healthcheck_path,
+        }
+    )
 
 
 async def _logs_handler(args: dict) -> dict:
@@ -465,19 +517,73 @@ def build_ship_server() -> tuple[str, Any] | None:
     @tool(
         "ship_create_db",
         (
-            "Attach a database to an app. Returns the service name and the NAME "
-            "of the env var holding the connection string — never the credential "
-            "itself."
+            "Attach a database to an app. `db_type` is postgres, redis, or mongo "
+            "(defaults to mongo). Returns the service name and the NAME of the env "
+            "var holding the connection string — never the credential itself."
         ),
         {
             "type": "object",
-            "properties": {"app_id": {"type": "string", "minLength": 1}},
+            "properties": {
+                "app_id": {"type": "string", "minLength": 1},
+                "db_type": {
+                    "type": "string",
+                    "enum": ["postgres", "redis", "mongo"],
+                    "description": "Which database engine to provision + link.",
+                },
+            },
             "required": ["app_id"],
             "additionalProperties": False,
         },
     )
     async def ship_create_db(args):  # type: ignore[no-untyped-def]
         return await _create_db_handler(args)
+
+    @tool(
+        "ship_set_scale",
+        (
+            "Set how many containers run per process type (e.g. {\"web\": 2, "
+            "\"worker\": 1}). Scaling to 0 stops a process. Runs immediately."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "app_id": {"type": "string", "minLength": 1},
+                "scale": {
+                    "type": "object",
+                    "description": "Process name -> container count, e.g. {\"web\": 2}.",
+                    "additionalProperties": {"type": "integer", "minimum": 0},
+                },
+            },
+            "required": ["app_id", "scale"],
+            "additionalProperties": False,
+        },
+    )
+    async def ship_set_scale(args):  # type: ignore[no-untyped-def]
+        return await _set_scale_handler(args)
+
+    @tool(
+        "ship_set_checks",
+        (
+            "Configure zero-downtime deploy checks for an app. `zero_downtime` "
+            "toggles Dokku's settle-and-drain deploy (on by default); an optional "
+            "`healthcheck_path` is the HTTP path the check hits."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "app_id": {"type": "string", "minLength": 1},
+                "zero_downtime": {"type": "boolean"},
+                "healthcheck_path": {
+                    "type": "string",
+                    "description": "HTTP health path, e.g. /healthz (optional).",
+                },
+            },
+            "required": ["app_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def ship_set_checks(args):  # type: ignore[no-untyped-def]
+        return await _set_checks_handler(args)
 
     @tool(
         "ship_logs",
@@ -537,6 +643,8 @@ def build_ship_server() -> tuple[str, Any] | None:
             ship_deploy_app,
             ship_add_domain,
             ship_create_db,
+            ship_set_scale,
+            ship_set_checks,
             ship_logs,
             ship_metrics,
             ship_request_destroy,

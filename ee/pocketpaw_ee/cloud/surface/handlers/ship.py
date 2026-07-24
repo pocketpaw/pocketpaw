@@ -8,6 +8,12 @@
 # creates a pocket. Without this preamble the surface falls back to GENERIC and
 # the agent defaults to a ui-spec dashboard instead of running the deploy loop.
 #
+# Updated: 2026-07-24 (feat/ship-17-databases, SHIP-17 / Wave 2) — the verbs
+# list now names the runtime-config tools: ``ship_create_db`` gained the
+# postgres/redis/mongo choice, and ``ship_set_scale`` (containers-per-process)
+# + ``ship_set_checks`` (zero-downtime deploy checks + healthcheck path) join
+# the roster so the agent can scale and configure zero-downtime deploys.
+#
 # Mirrors handlers/belt.py + handlers/code.py: an async ``build_preamble``
 # returning an XML-ish ``<surface kind="ship" .../>`` + ``<ship-orientation>`` +
 # ``<ship-procedure>`` block. The procedure teaches:
@@ -62,7 +68,11 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "`mcp__pocketpaw_ship__ship_deploy_app` (deploy an app's image), "
         "`mcp__pocketpaw_ship__ship_add_domain` (route a domain to an app and "
         "issue TLS), `mcp__pocketpaw_ship__ship_create_db` (attach a database — "
-        "you get back the env-var NAME, never the credential itself), "
+        "postgres, redis, or mongo; you get back the env-var NAME, never the "
+        "credential itself), `mcp__pocketpaw_ship__ship_set_scale` (set how many "
+        "containers run per process type, e.g. web=2 worker=1; 0 stops a "
+        "process), `mcp__pocketpaw_ship__ship_set_checks` (toggle zero-downtime "
+        "deploy checks and set an app's healthcheck path), "
         "`mcp__pocketpaw_ship__ship_logs` (an app's recent log lines), and "
         "`mcp__pocketpaw_ship__ship_metrics` (a box's live CPU / memory / disk).\n"
         "2. THE SAFETY RULE — load-bearing. Reads and reversible writes are yours "
