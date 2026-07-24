@@ -1,6 +1,8 @@
 """HerdrRuntime — a thin, flagged, fail-open adapter for the ``herdr`` terminal multiplexer.
 
 Created: 2026-07-18 (feat/herdr-runtime-adapter, HR-1).
+Updated: 2026-07-24 (HR-1b) — added ``close()`` pane teardown (the ``spawn``
+counterpart every consumer that opens a pane needs to end it and its process).
 
 What this is
 ------------
@@ -483,6 +485,16 @@ class HerdrRuntime:
             "agent": rec.get("agent"),
             "agent_status": rec.get("agent_status"),
         }
+
+    async def close(self, ref: PaneRef | str) -> None:
+        """Close a pane and end its process (``herdr pane close``).
+
+        The teardown counterpart to :pymeth:`spawn`. herdr has no separate
+        "kill" verb — ``pane close`` ends the pane and whatever agent/command
+        runs in it. Raises :class:`HerdrUnavailable` if herdr can't service the
+        call; callers doing best-effort cleanup typically suppress it.
+        """
+        await self._run_json(["pane", "close", self._target(ref)])
 
     # -- worktrees ----------------------------------------------------------
 

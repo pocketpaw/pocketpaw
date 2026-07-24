@@ -88,6 +88,9 @@ case "$1 $2" in
   "worktree remove")
     echo '{"id":"cli:worktree:remove","result":{"type":"worktree_removed","forced":false,"path":"/tmp/wt/x","workspace_id":"w9"}}'
     ;;
+  "pane close")
+    echo '{"id":"cli:pane:close","result":{"type":"pane_closed","pane_id":"w2:p1"}}'
+    ;;
   *)
     echo "{\"id\":\"cli:unknown\",\"error\":{\"code\":\"unknown_command\",\"message\":\"fake herdr got: $*\"}}"
     ;;
@@ -325,6 +328,26 @@ async def test_spawn_returns_paneref(runtime):
     assert isinstance(ref, PaneRef)
     assert ref.pane_id == "w4:p1"
     assert ref.workspace_id == "w4"
+
+
+@pytest.mark.asyncio
+async def test_close_invokes_pane_close(runtime, monkeypatch, tmp_path):
+    cap = tmp_path / "close_args.txt"
+    monkeypatch.setenv("HERDR_CAPTURE_FILE", str(cap))
+    assert await runtime.close(PaneRef(pane_id="w4:p1")) is None
+    assert cap.read_text().split() == ["pane", "close", "w4:p1"]
+
+
+@pytest.mark.asyncio
+async def test_close_accepts_raw_pane_id(runtime):
+    assert await runtime.close("w2:p1") is None
+
+
+@pytest.mark.asyncio
+async def test_close_raises_when_unavailable(fake_herdr_on_path):
+    rt = _make_runtime(herdr_runtime_enabled=False)
+    with pytest.raises(HerdrUnavailable):
+        await rt.close("w2:p1")
 
 
 @pytest.mark.asyncio
