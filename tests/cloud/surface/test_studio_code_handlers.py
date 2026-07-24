@@ -50,6 +50,20 @@
 # have gone green against the OLD profile too — that one named all six built-ins
 # in the additive ``allowed_sdk_tools`` and shipped them anyway — so the negative
 # has to be asserted against the COMPUTED result, not the declaration.
+#
+# Changes: 2026-07-24 (feat/code-surface-cleanup, CX-4) — dropped the two
+# pocket-authoring guards (``test_code_profile_builds_no_pocket_in_the_effective_
+# allowlist`` and ``test_code_deny_covers_every_widget_tool_and_the_pocket_
+# creation_grant``) and the ``_POCKET_AUTHORING_TOOLS`` literal they read. The
+# surface profile's ``_CODE_POCKET_DENY`` MCP deny-list they pinned was removed:
+# MCP tool restriction for /code is now enforced structurally by the dedicated
+# ``code`` agent's ``tool_mode="exclusive"`` policy, and the pocket repro dying at
+# the allowlist level is proven in ``tests/cloud/agents/test_code_agent_seed.py``.
+# The BUILT-IN denies this surface still owns (file/shell + ``Agent``, and
+# ``Skill``) — which the MCP cap cannot reach — stay guarded here by
+# ``test_code_profile_denies_the_filesystem_builtins_and_subagents``,
+# ``test_code_profile_grants_no_filesystem_tool_in_the_effective_allowlist``, and
+# ``test_code_profile_denies_the_skill_tool``.
 
 from __future__ import annotations
 
@@ -118,20 +132,6 @@ async def test_studio_handler_relays_provider_errors() -> None:
 # The file/shell built-ins the /code agent must not hold. They address the
 # backend server, which is not the machine the user's project is on.
 _FILESYSTEM_BUILTINS = frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep"})
-
-# The pocket-AUTHORING tools the /code agent must not hold. Each one is a way to
-# answer "build me an app" with a dashboard instead of code. Read-only pocket
-# access (``get_pocket`` / ``list_pockets``) is deliberately absent from this set
-# — reading a pocket cannot produce one.
-_POCKET_AUTHORING_TOOLS = frozenset(
-    {
-        "mcp__pocketpaw_pocket_specialist__create",
-        "mcp__pocketpaw_pocket_specialist__edit",
-        "mcp__pocketpaw_pocket_planner__plan_pocket",
-        "mcp__pocketpaw_pocket__add_widget",
-        "mcp__pocketpaw_pocket__update_widget",
-    }
-)
 
 # The Daytona MCP tool names the old preamble advertised. They address an older
 # cloud-projects model that knows nothing of the current codeproject +
@@ -470,114 +470,20 @@ async def test_code_profile_grants_no_filesystem_tool_in_the_effective_allowlist
     )
 
 
-async def test_code_profile_builds_no_pocket_in_the_effective_allowlist() -> None:
-    """The /code agent must not be able to BUILD A POCKET.
-
-    Reported from a live session: with a React project open on /code, "Let's
-    build an employee management app, with components, nice design etc" made the
-    agent create a pocket and start authoring a ripple ui-spec instead of writing
-    React. The user asked for an app; the agent shipped a dashboard.
-
-    The preamble already forbids this in prose ("do not build widgets, charts, or
-    a ui-spec, and do not create a pocket"), and the prose lost — exactly as the
-    /sites svelte-create comment predicted when it denied the same two tools
-    rather than asking nicely.
-
-    The reason the deny was needed is that ``allow_mcp_tool_ids`` CANNOT express
-    it. CD-3 scoped /code to ``code_mode``, but ``claude_sdk`` deliberately lets
-    two families survive any restrictive allow-list: ``POCKET_CREATION_GRANT``
-    (create + plan) and ``ALWAYS_ALLOWED_MCP_SERVERS`` (the whole
-    ``pocketpaw_pocket*`` family), plus ``WIDGET_TOOL_IDS`` unioned into the
-    grant. Those bypasses are correct for a general chat surface — "create a
-    pocket" is the core capability — and wrong for this one, where the
-    deliverable is code. Deny runs BEFORE the grant is applied and is the only
-    lever that reaches them.
-
-    Asserted against the COMPUTED allowlist, not the declaration, for the same
-    reason the filesystem test above is: the bypasses live in the computation."""
-    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
-    from pocketpaw.config import get_settings
-
-    profile = resolve_profile(SurfaceKind.CODE, SurfaceMeta())
-    backend = ClaudeSDKBackend(get_settings())
-
-    built = await backend._build_options(
-        "Let's build an employee management app, with components, nice design etc",
-        system_prompt="you are on the code surface",
-        history=None,
-        session_key=None,
-        deny_mcp_tool_ids=profile.deny_mcp_tool_ids,
-        allow_sdk_tools=profile.allowed_sdk_tools or frozenset(),
-        allow_mcp_tool_ids=profile.allow_mcp_tool_ids,
-        skill_names=profile.skill_names,
-        stderr_sink=[],
-    )
-    effective = set(built.options_kwargs["allowed_tools"])
-
-    for tool in sorted(_POCKET_AUTHORING_TOOLS):
-        assert tool not in effective, (
-            f"{tool} reached the SDK's effective allowlist on /code — the agent "
-            f"can build a pocket instead of writing the user's code. Effective "
-            f"allowlist: {sorted(effective)}"
-        )
-
-    # The ripple widget catalog, by prefix so a widget tool added later is caught
-    # without anyone remembering to update this test. These are the tools that
-    # turn "with components, nice design" into a ui-spec.
-    leaked_widgets = sorted(t for t in effective if t.startswith("mcp__pocketpaw_widgets__"))
-    assert not leaked_widgets, (
-        f"ripple widget tools reached the effective allowlist on /code: "
-        f"{leaked_widgets}. 'Components' on this surface means React/Vue "
-        f"components in the user's project, not ripple widgets in a ui-spec."
-    )
-
-    # No pocket tool of ANY kind survives — read verbs included. An earlier pass
-    # kept ``get_pocket`` / ``list_pockets`` on the reasoning that reading a
-    # pocket cannot produce one; that is true and beside the point, since a
-    # pocket the agent can inspect is a pocket it can propose. Prefix scan, so a
-    # tool added to the server later is caught without updating this test.
-    leaked_pocket = sorted(t for t in effective if t.startswith("mcp__pocketpaw_pocket"))
-    assert not leaked_pocket, (
-        f"pocket tools reached the effective allowlist on /code: {leaked_pocket}. "
-        f"The deliverable on this surface is the user's code; nothing here needs "
-        f"a pocket, in read or write."
-    )
-
-    # Positive controls, so the assertions above cannot pass vacuously.
-    assert "WebSearch" in effective
-    assert "mcp__pocketpaw_code__readFile" in effective, (
-        "the file tools were filtered out — the surface has lost its door to the "
-        "user's project, so the absence assertions above prove nothing"
-    )
-
-
-def test_code_deny_covers_every_widget_tool_and_the_pocket_creation_grant() -> None:
-    """The /code deny set is spelled as literals; pin it against the real sources.
-
-    ``_CODE_POCKET_DENY`` enumerates ids rather than importing them, so the CODE
-    row can stay a STATIC profile with no lazy load. The cost of a literal is
-    drift: a tool added to ``WIDGET_TOOL_IDS`` or ``POCKET_CREATION_GRANT`` later
-    would bypass the allow-list exactly as before and nobody would notice, because
-    both are grant families that survive any restrictive allow-list. This test is
-    what makes the literal safe — it fails the moment a new one appears."""
-    from pocketpaw.agents.claude_sdk import POCKET_CREATION_GRANT
-    from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
-
-    profile = resolve_profile(SurfaceKind.CODE, SurfaceMeta())
-
-    missing_widgets = frozenset(WIDGET_TOOL_IDS) - profile.deny_mcp_tool_ids
-    assert not missing_widgets, (
-        f"ripple widget tools not denied on /code: {sorted(missing_widgets)}. "
-        f"WIDGET_TOOL_IDS is unioned into the MCP grant in claude_sdk, so it "
-        f"survives allow_mcp_tool_ids — add these to _CODE_POCKET_DENY."
-    )
-
-    missing_grant = POCKET_CREATION_GRANT - profile.deny_mcp_tool_ids
-    assert not missing_grant, (
-        f"pocket-creation grant tools not denied on /code: {sorted(missing_grant)}. "
-        f"POCKET_CREATION_GRANT bypasses every restrictive allow-list by design — "
-        f"add these to _CODE_POCKET_DENY."
-    )
+# NOTE (2026-07-24, CX-4): the "/code must not BUILD A POCKET" guarantee no longer
+# lives at the SURFACE level and so is no longer asserted here. It used to be
+# enforced by the surface profile's ``_CODE_POCKET_DENY`` MCP deny-list, which this
+# file pinned via ``test_code_profile_builds_no_pocket_in_the_effective_allowlist``
+# and ``test_code_deny_covers_every_widget_tool_and_the_pocket_creation_grant``.
+# Both were REMOVED with the deny-list: MCP tool restriction for /code is now
+# enforced structurally by the dedicated ``code`` agent's exclusive tool policy
+# (``tool_mode="exclusive"`` caps the run's ``mcp__*`` surface to exactly the four
+# file ids). The pocket repro dying at the allowlist level is now proven end to end
+# in ``tests/cloud/agents/test_code_agent_seed.py::
+# test_seeded_code_agent_config_drives_exclusive_allowlist``. What THIS surface
+# profile still owns — and still tests below — is the BUILT-IN tools the MCP cap
+# cannot reach: the file/shell built-ins + ``Agent`` (``_CODE_BUILTIN_DENY``) and
+# ``Skill`` (``_CODE_SKILL_DENY``).
 
 
 def test_code_profile_is_static_and_meta_independent() -> None:
