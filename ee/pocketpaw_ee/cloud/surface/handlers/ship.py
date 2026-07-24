@@ -13,6 +13,10 @@
 # postgres/redis/mongo choice, and ``ship_set_scale`` (containers-per-process)
 # + ``ship_set_checks`` (zero-downtime deploy checks + healthcheck path) join
 # the roster so the agent can scale and configure zero-downtime deploys.
+# Updated: 2026-07-24 (feat/ship-18-ops, SHIP-18 / Wave 3) — the verbs list adds
+# the operations-depth tools: ``ship_set_resources`` (cpu/memory ceilings),
+# ``ship_create_volume`` (persistent storage), and ``ship_restart`` /
+# ``ship_rebuild`` (reversible bounces). All run inline — none are teardowns.
 #
 # Mirrors handlers/belt.py + handlers/code.py: an async ``build_preamble``
 # returning an XML-ish ``<surface kind="ship" .../>`` + ``<ship-orientation>`` +
@@ -73,8 +77,13 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "containers run per process type, e.g. web=2 worker=1; 0 stops a "
         "process), `mcp__pocketpaw_ship__ship_set_checks` (toggle zero-downtime "
         "deploy checks and set an app's healthcheck path), "
-        "`mcp__pocketpaw_ship__ship_logs` (an app's recent log lines), and "
-        "`mcp__pocketpaw_ship__ship_metrics` (a box's live CPU / memory / disk).\n"
+        "`mcp__pocketpaw_ship__ship_set_resources` (cap an app's CPU / memory), "
+        "`mcp__pocketpaw_ship__ship_create_volume` (attach persistent storage so "
+        "data survives redeploys), `mcp__pocketpaw_ship__ship_restart` / "
+        "`mcp__pocketpaw_ship__ship_rebuild` (bounce or rebuild an app — both "
+        "reversible), `mcp__pocketpaw_ship__ship_logs` (an app's recent log "
+        "lines), and `mcp__pocketpaw_ship__ship_metrics` (a box's live CPU / "
+        "memory / disk).\n"
         "2. THE SAFETY RULE — load-bearing. Reads and reversible writes are yours "
         "to run. But TEARING ANYTHING DOWN never happens directly: destroying a "
         "box or an app, rolling back, or deploying to a PRODUCTION app only ever "

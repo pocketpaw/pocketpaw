@@ -47,6 +47,10 @@ SHIP_TOOL_IDS = tuple(
         "ship_create_db",
         "ship_set_scale",
         "ship_set_checks",
+        "ship_set_resources",
+        "ship_create_volume",
+        "ship_restart",
+        "ship_rebuild",
         "ship_logs",
         "ship_metrics",
         "ship_request_destroy",
@@ -303,6 +307,80 @@ async def _set_checks_handler(args: dict) -> dict:
             "healthcheck_path": view.healthcheck_path,
         }
     )
+
+
+async def _set_resources_handler(args: dict) -> dict:
+    ws, user, err = await _with_identity("ship_set_resources")
+    if err:
+        return err
+    from pocketpaw_ee.cloud.ship import service
+    from pocketpaw_ee.cloud.ship.dto import SetResourcesRequest
+
+    app_id = str(args.get("app_id") or "")
+    if not app_id:
+        return _error_response("ship_set_resources requires an `app_id`.")
+    try:
+        body = SetResourcesRequest(
+            cpu=int(args.get("cpu") or 0),
+            memory_mb=int(args.get("memory_mb") or 0),
+        )
+        view = await service.set_resources(ws, user, app_id, body)
+    except Exception as exc:  # noqa: BLE001
+        return _view_error(exc, "set resource limits")
+    return _success_response(
+        {"app_id": view.id, "cpu_limit": view.cpu_limit, "memory_limit_mb": view.memory_limit_mb}
+    )
+
+
+async def _create_volume_handler(args: dict) -> dict:
+    ws, user, err = await _with_identity("ship_create_volume")
+    if err:
+        return err
+    from pocketpaw_ee.cloud.ship import service
+    from pocketpaw_ee.cloud.ship.dto import CreateVolumeRequest
+
+    app_id = str(args.get("app_id") or "")
+    if not app_id:
+        return _error_response("ship_create_volume requires an `app_id`.")
+    name = str(args.get("name") or "").strip() or None
+    mount_path = str(args.get("mount_path") or "")
+    try:
+        body = CreateVolumeRequest(**({"name": name} if name else {}), mount_path=mount_path)
+        view = await service.create_volume(ws, user, app_id, body)
+    except Exception as exc:  # noqa: BLE001
+        return _view_error(exc, "create the volume")
+    # host_path is a box-side directory, not a secret — safe to report back.
+    return _success_response(
+        {
+            "app_id": view.id,
+            "volumes": [{"name": n, "mount_path": m, "host_path": h} for (n, m, h) in view.volumes],
+        }
+    )
+
+
+async def _restart_handler(args: dict) -> dict:
+    return await _lifecycle_handler(args, action="restart")
+
+
+async def _rebuild_handler(args: dict) -> dict:
+    return await _lifecycle_handler(args, action="rebuild")
+
+
+async def _lifecycle_handler(args: dict, *, action: str) -> dict:
+    ws, user, err = await _with_identity(f"ship_{action}")
+    if err:
+        return err
+    from pocketpaw_ee.cloud.ship import service
+
+    app_id = str(args.get("app_id") or "")
+    if not app_id:
+        return _error_response(f"ship_{action} requires an `app_id`.")
+    verb = service.restart_app if action == "restart" else service.rebuild_app
+    try:
+        view = await verb(ws, user, app_id)
+    except Exception as exc:  # noqa: BLE001
+        return _view_error(exc, f"{action} the app")
+    return _success_response({"app_id": view.app_id, "action": view.action})
 
 
 async def _logs_handler(args: dict) -> dict:
@@ -590,6 +668,77 @@ def build_ship_server() -> tuple[str, Any] | None:
         return await _set_checks_handler(args)
 
     @tool(
+        "ship_set_resources",
+        (
+            "Set an app's CPU and/or memory ceilings (the cost-control lever). "
+            "`cpu` is in Dokku's CPU units, `memory_mb` in megabytes; a 0 leaves "
+            "that dimension unlimited, but set at least one. Applies on next start."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "app_id": {"type": "string", "minLength": 1},
+                "cpu": {"type": "integer", "minimum": 0},
+                "memory_mb": {"type": "integer", "minimum": 0},
+            },
+            "required": ["app_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def ship_set_resources(args):  # type: ignore[no-untyped-def]
+        return await _set_resources_handler(args)
+
+    @tool(
+        "ship_create_volume",
+        (
+            "Attach a persistent volume to an app so its data survives redeploys. "
+            "`mount_path` is the absolute container path (e.g. /data); `name` is "
+            "optional and defaults to <app>-data. Takes effect on the next deploy."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "app_id": {"type": "string", "minLength": 1},
+                "mount_path": {
+                    "type": "string",
+                    "description": "Absolute container path to mount at, e.g. /data.",
+                },
+                "name": {"type": "string", "description": "Volume name (optional)."},
+            },
+            "required": ["app_id", "mount_path"],
+            "additionalProperties": False,
+        },
+    )
+    async def ship_create_volume(args):  # type: ignore[no-untyped-def]
+        return await _create_volume_handler(args)
+
+    @tool(
+        "ship_restart",
+        "Restart an app's containers — a graceful, reversible bounce.",
+        {
+            "type": "object",
+            "properties": {"app_id": {"type": "string", "minLength": 1}},
+            "required": ["app_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def ship_restart(args):  # type: ignore[no-untyped-def]
+        return await _restart_handler(args)
+
+    @tool(
+        "ship_rebuild",
+        "Rebuild an app from its current source/image and restart it (reversible).",
+        {
+            "type": "object",
+            "properties": {"app_id": {"type": "string", "minLength": 1}},
+            "required": ["app_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def ship_rebuild(args):  # type: ignore[no-untyped-def]
+        return await _rebuild_handler(args)
+
+    @tool(
         "ship_logs",
         "Read an app's recent log lines.",
         {
@@ -649,6 +798,10 @@ def build_ship_server() -> tuple[str, Any] | None:
             ship_create_db,
             ship_set_scale,
             ship_set_checks,
+            ship_set_resources,
+            ship_create_volume,
+            ship_restart,
+            ship_rebuild,
             ship_logs,
             ship_metrics,
             ship_request_destroy,

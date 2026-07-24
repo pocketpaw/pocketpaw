@@ -38,6 +38,9 @@ and serves real traffic.** That shapes how you work.
 | `ship_create_db` | Attach a database (postgres, redis, or mongo) and link it to an app |
 | `ship_set_scale` | Set how many containers run per process type (`web=2 worker=1`; `0` stops one) |
 | `ship_set_checks` | Toggle zero-downtime deploy checks and set the healthcheck path |
+| `ship_set_resources` | Cap an app's CPU and memory (cost control) |
+| `ship_create_volume` | Attach persistent storage so data survives redeploys |
+| `ship_restart` / `ship_rebuild` | Bounce an app, or rebuild it from source — both reversible |
 | `ship_logs` | An app's recent log lines |
 | `ship_metrics` | A box's live CPU / memory / disk |
 
@@ -92,6 +95,13 @@ Provisioning a box and getting an app live:
    checks turn on zero-downtime deploys (Dokku settles and drains the old
    container before cutting over) and set the HTTP healthcheck path. Both apply
    to the next deploy — set checks before a production deploy, not after.
+8. **Day-2 operations.** `ship_set_resources` caps an app's CPU and memory (the
+   cost-control lever, and useful when one app is starving its neighbours on a
+   shared box). `ship_create_volume` attaches persistent storage at an absolute
+   mount path, so a database or an upload directory survives a redeploy instead
+   of vanishing with the container. `ship_restart` bounces the containers and
+   `ship_rebuild` rebuilds from source — both are reversible, so you can run them
+   without a proposal, but say what you did and check `ship_logs` after.
 
 ## Guardrails
 

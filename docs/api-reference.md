@@ -1242,8 +1242,8 @@ leak).
 Long work never blocks the request. `POST /ship/boxes` and
 `POST /ship/apps/{id}/deploy` enqueue an ARQ job and return immediately with a
 pollable record; the engine-backed routes (domains, database, scale, checks,
-logs, metrics) run inline over SSH and answer `409` with `code: ship.*_failed`
-when the deploy engine refuses.
+resources, volumes, restart, rebuild, logs, metrics) run inline over SSH and
+answer `409` with `code: ship.*_failed` when the deploy engine refuses.
 
 **Secrets never cross this surface.** A box's SSH key is decrypted only inside
 the engine session and shredded with it. App env **names** are accepted and
@@ -1386,6 +1386,39 @@ Both apply on the next deploy. Returns the app's current settings:
 {"zero_downtime": true, "healthcheck_path": "/healthz"}
 ```
 
+### `PUT /ship/apps/{app_id}/resources`
+
+Set the app's CPU and/or memory ceilings (the cost-control lever, `resource:limit`).
+`cpu` is in Dokku's CPU units, `memory_mb` in megabytes; a `0` leaves that
+dimension unlimited, but at least one must be non-zero. Applies on the next
+container start. Returns the app with its new `cpu_limit` / `memory_limit_mb`:
+
+```json
+{"cpu_limit": 1000, "memory_limit_mb": 512}
+```
+
+### `POST /ship/apps/{app_id}/volumes`
+
+Create a persistent volume and mount it into the app (`storage:create` +
+`storage:mount`). `mount_path` is the absolute container path; `name` is optional
+and defaults to `<app-name>-data`. The data survives redeploys (a host bind
+mount). Returns the app with its `volumes` list:
+
+```json
+{"volumes": [{"name": "demo-data", "mount_path": "/data",
+              "host_path": "/var/lib/dokku/data/storage/demo-data"}]}
+```
+
+### `POST /ship/apps/{app_id}/restart` · `POST /ship/apps/{app_id}/rebuild`
+
+Restart (`ps:restart`) or rebuild-from-source (`ps:rebuild`) the app. Both are
+reversible bounces — the app comes back — so they run inline, not through the
+Instinct gate, and they change no persisted config. Each answers a confirmation:
+
+```json
+{"app_id": "665…", "action": "restart"}
+```
+
 ### `GET /ship/apps/{app_id}/logs?num=<n>`
 
 Recent app log lines, newest last (`num` defaults to 100, max 1000). The engine
@@ -1458,9 +1491,10 @@ Removes one variable. Returns the remaining masked list.
 ### The agent surface (`pocketpaw_ship` MCP)
 
 A chat agent in a room whose pocket has the **Ship connector** bound reaches the
-same service layer through twelve in-process MCP tools — `ship_list_boxes`,
+same service layer through sixteen in-process MCP tools — `ship_list_boxes`,
 `ship_provision_box`, `ship_list_apps`, `ship_create_app`, `ship_deploy_app`,
 `ship_add_domain`, `ship_create_db`, `ship_set_scale`, `ship_set_checks`,
+`ship_set_resources`, `ship_create_volume`, `ship_restart`, `ship_rebuild`,
 `ship_logs`, `ship_metrics`, and `ship_request_destroy`. Binding the connector
 also auto-surfaces the bundled `ship` skill into that room.
 
