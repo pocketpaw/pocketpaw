@@ -26,12 +26,23 @@
 # ``repr=False`` and the driver redacts env values from every log line, so a
 # value never reaches an event, a status record, or this module's logs. A
 # failure summary comes from SHIP-1's ``CommandFailed``, whose command + stderr
-# tail are redacted before the exception is constructed.
+# tail are redacted before the exception is constructed. The private-repo token
+# (SHIP-14) is decrypted ONLY here too (``store.decrypt_repo_token``) and rides
+# into ``GitSource.token`` (``repr=False``); the driver builds the tokenized clone
+# URL inside its redacting chokepoint, so the token never reaches an event, a
+# status record, or a log either.
 #
 # Created 2026-07-22 (feat/ship-3-cloud-entity, SHIP-3): new module.
 # Changed 2026-07-23 (feat/ship-9-env-store, SHIP-9): merge the app's decrypted
 # env store into the ``DeployRequest`` so ``config:set`` carries it (previously
 # the spec was built with no env).
+# Changed 2026-07-23 (feat/ship-14-source-deploy, SHIP-14): the git path — when
+# ``app.source_kind == "git"`` the orchestrator decrypts the repo token and calls
+# the engine's ``deploy_source(GitSource)`` (build from the repo) instead of
+# ``deploy_app(image)``. The env merge is identical. The repo + ref are read from
+# the app at run time (v1 does not pin the git ref onto the attempt the way the
+# image path pins its tag); a build failure is recorded ``failed`` with the log
+# tail, never a hang.
 
 from __future__ import annotations
 
@@ -42,7 +53,7 @@ from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import ShipAppUpdated, ShipDeployStatusChanged
 from pocketpaw_ee.cloud.ship import engine as ship_engine
 from pocketpaw_ee.cloud.ship import store
-from pocketpaw_ee.ship_engine.port import AppSpec, DeployRequest, ShipEngineError
+from pocketpaw_ee.ship_engine.port import AppSpec, DeployRequest, GitSource, ShipEngineError
 
 if TYPE_CHECKING:
     from pocketpaw_ee.cloud.models.ship import (
@@ -83,11 +94,23 @@ async def run_deploy(
     # every log line. It never enters an event, a status record, or this module's
     # logs. An app with no env decrypts to ``{}`` — the prior no-env behaviour.
     env = store.decrypt_app_env(app)
+    spec = AppSpec(name=app.name, env=env)
     try:
         async with factory(box) as session:
-            result = await session.engine.deploy_app(
-                DeployRequest(app=AppSpec(name=app.name, env=env), image=deploy.image)
-            )
+            if app.source_kind == "git":
+                # Decrypt the private-repo token HERE, the sole seam — it rides
+                # into ``GitSource.token`` (``repr=False``) and the driver injects
+                # it into the clone URL only inside its redacting chokepoint.
+                source = GitSource(
+                    repo_url=app.repo_url,
+                    ref=app.repo_ref or "main",
+                    token=store.decrypt_repo_token(app) or None,
+                )
+                result = await session.engine.deploy_source(spec, source)
+            else:
+                result = await session.engine.deploy_app(
+                    DeployRequest(app=spec, image=deploy.image)
+                )
     except ship_engine.ENGINE_FAILURES as exc:
         logger.warning("ship deploy failed for app=%s deploy=%s", app.id, deploy.id)
         await _mark_app(app, "failed")
