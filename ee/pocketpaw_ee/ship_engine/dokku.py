@@ -71,6 +71,14 @@
 #   name. Added ``set_healthcheck`` (``checks:enable`` / ``checks:disable``) and
 #   ``scale`` (``ps:scale``) — both funnel through the same ``_run`` chokepoint, and
 #   ``scale`` validates process names/counts before interpolating them.
+# Updated 2026-07-24 (feat/ship-18-ops, SHIP-18): Wave 3. Added ``set_resources``
+#   (``resource:limit --cpu/--memory``), ``create_volume`` (``storage:create`` +
+#   ``storage:mount --container-dir``, the modern k3s-ready named-entry form), and
+#   ``restart`` / ``rebuild`` (``ps:restart`` / ``ps:rebuild``). All four go through
+#   the same ``_run`` chokepoint; ``create_volume`` shape-validates the entry name
+#   (``_VOLUME_NAME_RE``) and the absolute container path (``_CONTAINER_PATH_RE``)
+#   before either reaches a command, and ``set_resources`` coerces cpu/memory to
+#   ints and rejects an all-zero call (which Dokku would treat as a read, not a set).
 
 from __future__ import annotations
 
@@ -97,12 +105,15 @@ from pocketpaw_ee.ship_engine.port import (
     GitSource,
     HealthcheckResult,
     InvalidSpec,
+    LifecycleResult,
     LogChunk,
     MetricsSnapshot,
+    ResourceResult,
     ScaleResult,
     ShipEngineError,
     SourceSpec,
     VerbNotSupported,
+    VolumeResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -120,6 +131,12 @@ DEFAULT_TIMEOUTS: dict[str, float] = {
     "set_healthcheck": 60.0,
     # ps:scale spins containers up/down — more than interactive, less than a deploy.
     "scale": 300.0,
+    # resource:limit just writes config; storage:create + mount touch the disk.
+    "set_resources": 60.0,
+    "create_volume": 120.0,
+    # ps:restart bounces containers; ps:rebuild re-runs the build, so it's deploy-scale.
+    "restart": 300.0,
+    "rebuild": 600.0,
     "backup": 900.0,
     "rollback": 600.0,
     "logs": 30.0,
@@ -208,6 +225,19 @@ _DB_PLUGINS: dict[DbType, tuple[str, str]] = {
 # against this before it interpolates ``proc=count`` into a command — the counts
 # are ints, so a validated key + an int value has no shell surface at all.
 _PROC_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+# A storage-entry name (``storage:create <name>``): lowercase alphanumeric with
+# hyphens/underscores inside. ``create_volume`` validates the name before it goes
+# near a command — the entry also names a real box directory
+# (``/var/lib/dokku/data/storage/<name>``), so a hostile name could otherwise
+# smuggle path syntax. The container mount path must be ABSOLUTE and free of the
+# ``:`` Dokku uses as its host:container separator (and of whitespace), so a mount
+# path can never split into extra Dokku arguments.
+_VOLUME_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+_CONTAINER_PATH_RE = re.compile(r"^/[^\s:]+$")
+
+# Where Dokku's ``storage:create`` places a named entry's backing directory.
+_STORAGE_ROOT = "/var/lib/dokku/data/storage"
 
 
 # --------------------------------------------------------------------------- #
@@ -466,6 +496,58 @@ class DokkuDriver:
         pairs = " ".join(f"{proc}={int(count)}" for proc, count in sorted(scale.items()))
         await self._run("scale", f"dokku ps:scale {shlex.quote(app)} {pairs}")
         return ScaleResult(app=app, scale=dict(scale))
+
+    async def set_resources(self, app: str, *, cpu: int = 0, memory_mb: int = 0) -> ResourceResult:
+        # cpu/memory are ints coerced below, so the flag values carry no shell
+        # syntax; the app name is quoted. At least one dimension must be set —
+        # ``resource:limit`` with no flags PRINTS limits rather than setting any,
+        # so an all-zero call would silently no-op.
+        cpu, memory_mb = int(cpu), int(memory_mb)
+        if cpu < 0 or memory_mb < 0:
+            raise InvalidSpec(
+                f"resource limits must be non-negative: cpu={cpu} memory_mb={memory_mb}"
+            )
+        if cpu == 0 and memory_mb == 0:
+            raise InvalidSpec("set_resources requires a non-zero cpu or memory_mb")
+        flags = []
+        if cpu:
+            flags.append(f"--cpu {cpu}")
+        if memory_mb:
+            flags.append(f"--memory {memory_mb}")
+        await self._run(
+            "set_resources", f"dokku resource:limit {' '.join(flags)} {shlex.quote(app)}"
+        )
+        return ResourceResult(app=app, cpu=cpu, memory_mb=memory_mb)
+
+    async def create_volume(self, app: str, *, name: str, mount_path: str) -> VolumeResult:
+        # The name becomes a real box directory and the mount path a Dokku argument,
+        # so both are shape-validated before they reach a command (defense in depth
+        # behind the shlex-quoting). The modern named-entry form is used
+        # (``storage:create`` + ``storage:mount ... --container-dir``) so the same
+        # call works on a future k3s scheduler, not just docker-local.
+        if not _VOLUME_NAME_RE.match(name):
+            raise InvalidSpec(f"invalid volume name: {name!r}")
+        if not _CONTAINER_PATH_RE.match(mount_path):
+            raise InvalidSpec(
+                f"volume mount_path must be an absolute path without ':': {mount_path!r}"
+            )
+        await self._run("create_volume", f"dokku storage:create {shlex.quote(name)}")
+        await self._run(
+            "create_volume",
+            f"dokku storage:mount {shlex.quote(app)} {shlex.quote(name)} "
+            f"--container-dir {shlex.quote(mount_path)}",
+        )
+        return VolumeResult(
+            app=app, name=name, mount_path=mount_path, host_path=f"{_STORAGE_ROOT}/{name}"
+        )
+
+    async def restart(self, app: str) -> LifecycleResult:
+        await self._run("restart", f"dokku ps:restart {shlex.quote(app)}")
+        return LifecycleResult(app=app, action="restart")
+
+    async def rebuild(self, app: str) -> LifecycleResult:
+        await self._run("rebuild", f"dokku ps:rebuild {shlex.quote(app)}")
+        return LifecycleResult(app=app, action="rebuild")
 
     async def backup(self, service: str, dest_path: str) -> BackupResult:
         # v1 LIMITATION (documented in the module comment): the dump lands on

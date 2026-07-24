@@ -7,7 +7,7 @@
 # routes, the /ship console) depends only on this module, so swapping the
 # engine never touches a consumer.
 #
-# Twelve typed verbs, each speaking frozen framework-free dataclasses (the same
+# Sixteen typed verbs, each speaking frozen framework-free dataclasses (the same
 # convention as ``cloud/billing/domain.py`` — a driver adapts its CLI/API
 # output into these; consumers never see engine-specific text):
 #
@@ -18,6 +18,10 @@
 #   db_create       app, svc, type  -> DbResult        (db up + linked to app)
 #   set_healthcheck app, enabled    -> HealthcheckResult (zero-downtime checks)
 #   scale           app, {proc:n}   -> ScaleResult     (process counts applied)
+#   set_resources   app, cpu, mem   -> ResourceResult  (cpu/mem ceilings applied)
+#   create_volume   app, name, path -> VolumeResult    (persistent volume mounted)
+#   restart         app             -> LifecycleResult (containers bounced)
+#   rebuild         app             -> LifecycleResult (app rebuilt + restarted)
 #   backup          service, path   -> BackupResult    (db dump landed at path)
 #   rollback        app, image      -> DeployResult    (previous image re-deployed)
 #   logs            app, num        -> LogChunk        (recent app log lines)
@@ -54,6 +58,15 @@
 #   built-in zero-downtime ``checks``. (C) ``scale(app, {proc: count}) -> ScaleResult``
 #   exposes ``ps:scale``. All three keep the invariants — no secret on a result DTO,
 #   everything through the driver's redacting chokepoint.
+# Updated 2026-07-24 (feat/ship-18-ops, SHIP-18): Wave 3 "operations depth" —
+#   four additive verbs, none carrying a secret. (A) ``set_resources(app, cpu,
+#   memory_mb) -> ResourceResult`` exposes Dokku's ``resource:limit`` (cpu + memory
+#   ceilings, the BYO cost-control seam). (B) ``create_volume(app, name, mount_path)
+#   -> VolumeResult`` exposes ``storage:create`` + ``storage:mount`` (a persistent
+#   bind mount that survives redeploys). (C)/(D) ``restart`` / ``rebuild`` ->
+#   ``LifecycleResult`` expose ``ps:restart`` / ``ps:rebuild`` (reversible bounces,
+#   NOT teardowns — so they run inline, not through the Instinct gate). Same
+#   invariants: additive, default-off, everything through the redacting chokepoint.
 
 from __future__ import annotations
 
@@ -298,6 +311,51 @@ class ScaleResult:
 
 
 @dataclass(frozen=True)
+class ResourceResult:
+    """The resource ceilings now in force for an app (BYO cost control).
+
+    ``cpu`` and ``memory_mb`` are the limits the engine applied via Dokku's
+    ``resource:limit`` — ``cpu`` in Dokku's CPU units, ``memory_mb`` in megabytes.
+    ``0`` means that dimension is unset (no ceiling). The limit applies to the
+    app's next container start. Carries no secret.
+    """
+
+    app: str
+    cpu: int = 0
+    memory_mb: int = 0
+
+
+@dataclass(frozen=True)
+class VolumeResult:
+    """A persistent volume created and mounted into an app.
+
+    ``name`` is the storage entry's label, ``mount_path`` the container path it is
+    mounted at, and ``host_path`` the box-side directory backing it
+    (``/var/lib/dokku/data/storage/<name>``). The data survives redeploys — a host
+    bind mount, not an ephemeral container layer — and takes effect on the app's
+    next deploy/rebuild. Carries no secret.
+    """
+
+    app: str
+    name: str
+    mount_path: str
+    host_path: str
+
+
+@dataclass(frozen=True)
+class LifecycleResult:
+    """The lifecycle action the engine performed on an app.
+
+    ``action`` is ``"restart"`` or ``"rebuild"``. Both are reversible bounces (the
+    app comes back), NOT teardowns — a failure raises ``CommandFailed`` rather than
+    returning one of these. Carries no secret.
+    """
+
+    app: str
+    action: str
+
+
+@dataclass(frozen=True)
 class BackupResult:
     """A database dump written to ``dest_path`` (engine-local in v1 — see the
     driver for the offsite limitation). ``size_bytes`` is the dump's size."""
@@ -403,6 +461,39 @@ class ShipEngine(Protocol):
 
     async def scale(self, app: str, scale: Mapping[str, int]) -> ScaleResult:
         """Set ``app``'s per-process container counts (``{"web": 2, ...}``)."""
+        ...
+
+    async def set_resources(self, app: str, *, cpu: int = 0, memory_mb: int = 0) -> ResourceResult:
+        """Set ``app``'s CPU and/or memory ceilings (the BYO cost-control seam).
+
+        Exposes Dokku's ``resource:limit``. ``cpu`` is in Dokku's CPU units,
+        ``memory_mb`` in megabytes; a ``0`` leaves that dimension unlimited. The
+        limit applies to the app's next container start. At least one of the two
+        must be non-zero (the caller validates this at its DTO boundary).
+        """
+        ...
+
+    async def create_volume(self, app: str, *, name: str, mount_path: str) -> VolumeResult:
+        """Create a persistent volume ``name`` and mount it into ``app``.
+
+        Exposes ``storage:create`` + ``storage:mount`` (the modern named-entry
+        form, k3s-ready). ``mount_path`` is the container path the volume appears
+        at; the data survives redeploys (a host bind mount). Takes effect on the
+        app's next deploy/rebuild.
+        """
+        ...
+
+    async def restart(self, app: str) -> LifecycleResult:
+        """Restart ``app``'s containers — a graceful bounce (``ps:restart``).
+
+        Reversible (the app comes back up), so it runs inline, not through the
+        Instinct gate.
+        """
+        ...
+
+    async def rebuild(self, app: str) -> LifecycleResult:
+        """Rebuild ``app`` from its current source/image and restart it
+        (``ps:rebuild``). Reversible, like ``restart``."""
         ...
 
     async def backup(self, service: str, dest_path: str) -> BackupResult:
