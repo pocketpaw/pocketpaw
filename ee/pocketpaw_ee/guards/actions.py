@@ -55,6 +55,12 @@
 # ban-capable writes (resolve a decision, PATCH the egress deny/allow config)
 # AND its read feed exposes who-tried-to-egress-what; the whole surface is
 # owner-only, mirroring workspace.delete / billing.manage / instinct.activate.
+#
+# Updated: 2026-07-24 (feat/herdr-cockpit-sse, HR-10a) — added ``cockpit.read``
+# (ADMIN) gating both routes of the herdr cockpit telemetry surface
+# (ee.cloud.herdr_cockpit.router). ADMIN (not MEMBER) because herdr panes are not
+# paw-workspace-scoped, so a member-visible cockpit on a shared box could leak
+# other tenants' panes; see the entry's inline note and the router's TODO(track-b).
 
 from __future__ import annotations
 
@@ -280,6 +286,14 @@ ACTIONS: dict[str, ActionRule] = {
     # action guards every route (reads included) because the decision feed
     # itself carries who-tried-to-egress-what, which is sensitive.
     "security.manage": ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
+    # Herdr cockpit — the read-only pane-telemetry surface (ee.cloud.herdr_cockpit
+    # .router, HR-10a). ADMIN because herdr panes are NOT paw-workspace-scoped
+    # (herdr mints its own workspace ids), so on a shared box a member-visible
+    # cockpit could leak other tenants' panes. ADMIN + the default-off
+    # ``herdr_runtime_enabled`` flag keeps v1 safe on the dedicated-box case; a
+    # single read action gates both the stream and the preview. TODO(track-b):
+    # scope panes to the caller's workspace before relaxing this for multi-tenant.
+    "cockpit.read": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
 }
 
 
