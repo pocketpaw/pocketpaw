@@ -20,6 +20,12 @@
 # ``decrypt_app_env`` is the SOLE decryption path (mirrors ``decrypt_ssh_key``),
 # scope-filtered for the deploy-time merge. Plaintext values are handled nowhere
 # else.
+# Changed 2026-07-23 (feat/ship-14-source-deploy, SHIP-14): the app's deploy
+# SOURCE lives here too — ``create_app`` and ``set_app_source`` Fernet-encrypt the
+# private-repo token before it is written (the same envelope as the env store),
+# and ``decrypt_repo_token`` is its SOLE decryption path (mirrors
+# ``decrypt_ssh_key`` / ``decrypt_app_env``), read only by the deploy job. The
+# plaintext token is handled nowhere else.
 
 from __future__ import annotations
 
@@ -40,6 +46,7 @@ from pocketpaw_ee.cloud.models.ship import (
     ShipDeploy,
     ShipDeployStatus,
     ShipEnvVar,
+    ShipSourceKind,
 )
 
 
@@ -171,8 +178,17 @@ async def create_app(
     image: str,
     env_refs: list[str],
     prod: bool,
+    source_kind: ShipSourceKind = "image",
+    repo_url: str = "",
+    repo_ref: str = "main",
+    repo_token: str | None = None,
 ) -> ShipApp:
-    """Insert a fresh app in ``created``. ``env_refs`` are NAMES only."""
+    """Insert a fresh app in ``created``. ``env_refs`` are NAMES only.
+
+    ``repo_token`` is PLAINTEXT in; it is Fernet-encrypted before the doc is
+    written (mirrors the SSH-key / env-value envelope) — a ``None``/empty token is
+    a public repo and stores empty ciphertext. The plaintext never lives at rest.
+    """
     app = ShipApp(
         workspace=workspace_id,
         box_id=box_id,
@@ -182,6 +198,10 @@ async def create_app(
         image=image,
         env_refs=list(env_refs),
         prod=prod,
+        source_kind=source_kind,
+        repo_url=repo_url,
+        repo_ref=repo_ref,
+        repo_token_enc=crypto.encrypt(repo_token) if repo_token else "",
     )
     await app.insert()
     return app
@@ -267,6 +287,45 @@ async def park_app_destroy(app: ShipApp, *, proposal_id: str) -> ShipApp:
     app.pending_destroy_proposal_id = proposal_id
     await app.save()
     return app
+
+
+# --------------------------------------------------------------------------- #
+# App deploy source (SHIP-14) — the SOLE encrypt/decrypt seam for the repo token.
+# --------------------------------------------------------------------------- #
+
+
+async def set_app_source(
+    app: ShipApp,
+    *,
+    source_kind: ShipSourceKind,
+    repo_url: str,
+    repo_ref: str,
+    repo_token: str | None,
+) -> ShipApp:
+    """Point the app at a deploy source (``image`` or ``git``).
+
+    ``repo_token`` is PLAINTEXT in and Fernet-encrypted before write — the SOLE
+    encrypt seam for it, mirroring the env store. Its three-way semantics:
+    ``None`` LEAVES the stored token untouched (re-point a ref without re-entering
+    the credential); an EMPTY string CLEARS it (a public repo); a non-empty string
+    replaces it. The plaintext never lives at rest.
+    """
+    app.source_kind = source_kind
+    app.repo_url = repo_url
+    app.repo_ref = repo_ref
+    if repo_token is not None:
+        app.repo_token_enc = crypto.encrypt(repo_token) if repo_token else ""
+    await app.save()
+    return app
+
+
+def decrypt_repo_token(app: ShipApp) -> str:
+    """Decrypt the app's private-repo token for the deploy job — the SOLE
+    decryption path (mirrors ``decrypt_ssh_key`` / ``decrypt_app_env``). Empty
+    ciphertext (a public repo) returns "". Never logged, never serialized."""
+    if not app.repo_token_enc:
+        return ""
+    return crypto.decrypt(app.repo_token_enc)
 
 
 # --------------------------------------------------------------------------- #

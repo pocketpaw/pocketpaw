@@ -52,6 +52,13 @@
 # ``env_refs`` (names only) is unchanged and still carried alongside it. Only
 # ``ee.cloud.ship.store`` encrypts/decrypts the ``enc_value`` (mirrors
 # ``decrypt_ssh_key``); no other layer ever handles the plaintext.
+# Changed 2026-07-23 (feat/ship-14-source-deploy, SHIP-14): ``ShipApp`` gained a
+# deploy SOURCE — ``source_kind`` (``image`` default keeps today's behavior, or
+# ``git``), ``repo_url`` / ``repo_ref`` for the git kind, and ``repo_token_enc``,
+# the private-repo access token Fernet-encrypted at rest EXACTLY like the env
+# store / box SSH key (``cloud._core.crypto`` + ``CLOUD_ENCRYPTION_KEY``). The
+# plaintext token never lives at rest, never serializes into a DTO/event/log, and
+# is decrypted solely inside ``ship.store`` (``decrypt_repo_token``) at deploy.
 
 from __future__ import annotations
 
@@ -143,6 +150,11 @@ ShipAppStatus = Literal["created", "deploying", "live", "failed"]
 # it from without a migration.
 ShipBuildPath = Literal["dockerfile", "nixpacks"]
 
+# Where the app's code comes from at deploy (SHIP-14). ``image`` (default) is the
+# pre-built-image path — today's behavior, unchanged. ``git`` pulls + builds a
+# repo (``repo_url`` / ``repo_ref``) via the engine's ``deploy_source`` verb.
+ShipSourceKind = Literal["image", "git"]
+
 
 class ShipAppDomain(BaseModel):
     """One domain routed to an app, with the TLS outcome the engine reported.
@@ -208,6 +220,18 @@ class ShipApp(TimestampedDocument):
     git_ref: str = ""
     # The container image reference (tag included) the engine deploys.
     image: str = ""
+    # Where the app's code comes from (SHIP-14). ``image`` (default) keeps the
+    # pre-built-image path; ``git`` builds from ``repo_url`` @ ``repo_ref``.
+    source_kind: ShipSourceKind = "image"
+    # The git clone URL + ref for ``source_kind == "git"`` (empty otherwise).
+    repo_url: str = ""
+    repo_ref: str = "main"
+    # The private-repo access token, Fernet-encrypted at rest (empty = public
+    # repo). SECURITY: the plaintext token is NEVER stored, serialized into a
+    # DTO/event/log, and is decrypted solely inside ``ship.store``
+    # (``decrypt_repo_token``) at deploy — the same envelope the env store and box
+    # SSH key use.
+    repo_token_enc: str = ""
     # Env var NAMES the app expects. NEVER values (see the class docstring).
     env_refs: list[str] = Field(default_factory=list)
     # Encrypted env store (SHIP-9): NAME -> ``ShipEnvVar`` (value Fernet-encrypted

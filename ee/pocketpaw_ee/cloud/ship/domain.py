@@ -50,7 +50,12 @@ class BoxView:
 
 @dataclass(frozen=True)
 class AppView:
-    """Read model for one app deployed onto a box."""
+    """Read model for one app deployed onto a box.
+
+    ``source_kind`` / ``repo_url`` / ``repo_ref`` describe the deploy source
+    (SHIP-14). The private-repo TOKEN is never a view field — it is decrypted
+    solely inside ``ship.store`` at deploy time and never crosses this boundary.
+    """
 
     id: AppId
     workspace_id: str
@@ -64,6 +69,10 @@ class AppView:
     urls: tuple[str, ...] = ()
     # Env var NAMES the app expects — never values.
     env_refs: tuple[str, ...] = ()
+    # Deploy source (SHIP-14) — never the token.
+    source_kind: str = "image"
+    repo_url: str = ""
+    repo_ref: str = "main"
     pending_destroy_proposal_id: str | None = None
 
 

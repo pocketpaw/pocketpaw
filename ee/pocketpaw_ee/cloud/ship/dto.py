@@ -9,11 +9,15 @@
 # and do NOT add a REQUIRED one:
 #
 #   BoxOut     {id, provider, ip, status, price_monthly?}
-#   AppOut     {id, name, box_id, status, urls[]}
+#   AppOut     {id, name, box_id, status, urls[], source_kind, repo_url, repo_ref}
 #   DeployOut  {id, app_id, status, started_at, finished_at?}
 #   LogsOut    {lines[]}
 #   MetricsOut {cpu, mem, disk}
 #   delete     {status: "pending_approval", proposal_id}
+#
+# ``AppOut``'s ``source_kind`` / ``repo_url`` / ``repo_ref`` (SHIP-14) are ADDITIVE
+# with defaults (no token field — the private-repo token is write-only, never
+# serialized). ``SetSourceRequest`` sets them via ``PUT /ship/apps/{id}/source``.
 #
 # ``DomainOut`` / ``DbOut`` are not part of the frozen five; they mirror SHIP-1's
 # ``DomainResult`` / ``DbResult`` so the wire never invents a second vocabulary
@@ -30,6 +34,10 @@
 # Changed 2026-07-23 (feat/ship-9-env-store, SHIP-9): added the env-management
 # request/response shapes — ``EnvVarIn`` / ``SetEnvRequest`` / ``ImportEnvRequest``
 # in, ``EnvVarOut`` / ``EnvOut`` (masked-only) out.
+# Changed 2026-07-23 (feat/ship-14-source-deploy, SHIP-14): added the deploy-
+# source shapes — ``SetSourceRequest`` (+ the same fields on ``CreateAppRequest``)
+# in, ``source_kind`` / ``repo_url`` / ``repo_ref`` on ``AppOut`` out. The
+# private-repo ``token`` is REQUEST-only — no response ever carries it.
 
 from __future__ import annotations
 
@@ -37,7 +45,7 @@ import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Names that reach the deploy engine are constrained HERE, at the boundary, the
 # same way SHIP-1's ``AppSpec`` constrains env keys: the driver shell-quotes
@@ -63,6 +71,21 @@ _ENV_NAME_RE = r"^[A-Za-z_][A-Za-z0-9_]*$"
 # carries when a client registers an app before choosing what to ship.
 _IMAGE_RE = r"^$|^[A-Za-z0-9][A-Za-z0-9._/:@-]*$"
 _GIT_REF_RE = r"^$|^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+# A git clone URL (SHIP-14): empty ("not specified"), a ``scheme://…`` URL
+# (https/http/git/ssh), or an scp-style ``git@host:path``. Constrained to a
+# URL-safe charset — no spaces, quotes, or shell metacharacters — so a "repo"
+# that is really a sentence or an injection attempt dies at the boundary rather
+# than deep in an SSH round trip (the driver shell-quotes it regardless). Written
+# without look-around (pydantic's Rust regex engine has none). The access token
+# is NEVER part of this URL — it is a separate, encrypted field.
+_REPO_URL_RE = (
+    r"^$"
+    r"|^(?:https?|git|ssh)://[A-Za-z0-9._~:/@%+-]+$"
+    r"|^git@[A-Za-z0-9._~:/@%+-]+$"
+)
+# A repo access token is an opaque secret (a PAT / deploy token) — no pattern,
+# just a sane length cap so an authenticated route can't be memory-abused.
+_REPO_TOKEN_MAX = 4096
 
 # ---------------------------------------------------------------------------
 # Requests
@@ -94,6 +117,13 @@ class CreateAppRequest(BaseModel):
     image: str = Field(default="", max_length=255, pattern=_IMAGE_RE)
     prod: bool = False
     env_refs: list[str] = Field(default_factory=list)
+    # Deploy source (SHIP-14). ``image`` (default) keeps the pre-built-image path;
+    # ``git`` builds from ``repo_url`` @ ``repo_ref``. ``token`` is the optional
+    # private-repo credential — REQUEST-only, never echoed on any response.
+    source_kind: Literal["image", "git"] = "image"
+    repo_url: str = Field(default="", max_length=512, pattern=_REPO_URL_RE)
+    repo_ref: str = Field(default="main", max_length=255, pattern=_GIT_REF_RE)
+    token: str | None = Field(default=None, max_length=_REPO_TOKEN_MAX)
 
     @field_validator("env_refs")
     @classmethod
@@ -107,6 +137,14 @@ class CreateAppRequest(BaseModel):
             if not re.match(_ENV_NAME_RE, name):
                 raise ValueError(f"env_refs takes variable names only, got {name!r}")
         return value
+
+    @model_validator(mode="after")
+    def _git_needs_a_repo(self) -> CreateAppRequest:
+        """A ``git`` source is meaningless without a repo URL — reject it here
+        rather than let it become an app that can never deploy."""
+        if self.source_kind == "git" and not self.repo_url:
+            raise ValueError("source_kind 'git' requires a repo_url")
+        return self
 
 
 class AddDomainRequest(BaseModel):
@@ -123,6 +161,28 @@ class CreateDbRequest(BaseModel):
     """
 
     service: str | None = None
+
+
+class SetSourceRequest(BaseModel):
+    """Point an app at a deploy source (``PUT /ship/apps/{id}/source``, SHIP-14).
+
+    Same URL/ref validation discipline as the create body. ``token`` is the
+    optional private-repo credential — REQUEST-only, Fernet-encrypted at rest,
+    never returned. Its absence (``None``) LEAVES an existing token untouched (so
+    a client can re-point the ref without re-sending the credential); an empty
+    string CLEARS it (a public repo).
+    """
+
+    source_kind: Literal["image", "git"] = "git"
+    repo_url: str = Field(default="", max_length=512, pattern=_REPO_URL_RE)
+    repo_ref: str = Field(default="main", max_length=255, pattern=_GIT_REF_RE)
+    token: str | None = Field(default=None, max_length=_REPO_TOKEN_MAX)
+
+    @model_validator(mode="after")
+    def _git_needs_a_repo(self) -> SetSourceRequest:
+        if self.source_kind == "git" and not self.repo_url:
+            raise ValueError("source_kind 'git' requires a repo_url")
+        return self
 
 
 # An env var's deploy scope, echoed on the wire. Kept in lock-step with the
@@ -177,13 +237,21 @@ class BoxOut(BaseModel):
 
 
 class AppOut(BaseModel):
-    """One app on a box. FROZEN — see the module comment."""
+    """One app on a box. FROZEN — see the module comment.
+
+    ``source_kind`` / ``repo_url`` / ``repo_ref`` (SHIP-14) are additive with
+    defaults. There is deliberately NO token field — the private-repo credential
+    is write-only and never crosses the wire.
+    """
 
     id: str
     name: str
     box_id: str
     status: str
     urls: list[str] = Field(default_factory=list)
+    source_kind: Literal["image", "git"] = "image"
+    repo_url: str = ""
+    repo_ref: str = "main"
 
 
 class DeployOut(BaseModel):

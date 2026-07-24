@@ -150,13 +150,24 @@ async def test_create_and_list_apps(w1):
 
     assert created.status_code == 200, created.text
     body = created.json()
-    assert set(body) == {"id", "name", "box_id", "status", "urls"}
+    assert set(body) == {
+        "id",
+        "name",
+        "box_id",
+        "status",
+        "urls",
+        "source_kind",
+        "repo_url",
+        "repo_ref",
+    }
     assert (body["name"], body["box_id"], body["status"], body["urls"]) == (
         APP,
         box_id,
         "created",
         [],
     )
+    # An app created without a source defaults to the pre-built-image path.
+    assert body["source_kind"] == "image"
 
     listed = (await w1.get("/ship/apps")).json()
     assert [a["id"] for a in listed] == [body["id"]]
@@ -243,6 +254,10 @@ async def test_deploy_transitions_are_observable_through_the_deploys_route(w1, m
         "box_id": box_id,
         "status": "live",
         "urls": ["http://demo.paw.example"],
+        # An image-source app (the default) carries the source fields at defaults.
+        "source_kind": "image",
+        "repo_url": "",
+        "repo_ref": "main",
     }
 
 

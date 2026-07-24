@@ -82,6 +82,7 @@ from pocketpaw_ee.cloud.ship.dto import (
     MetricsOut,
     PendingApprovalOut,
     SetEnvRequest,
+    SetSourceRequest,
 )
 from pocketpaw_ee.ship_engine.port import CommandFailed
 
@@ -210,6 +211,10 @@ async def create_app(workspace_id: str, user_id: str, body: CreateAppRequest) ->
         image=body.image,
         env_refs=body.env_refs,
         prod=body.prod,
+        source_kind=body.source_kind,
+        repo_url=body.repo_url,
+        repo_ref=body.repo_ref,
+        repo_token=body.token,
     )
     view = _app_view(app)
     await emit(ShipAppCreated(data={**_app_event_payload(view), "user_id": user_id}))
@@ -222,14 +227,33 @@ async def list_apps(workspace_id: str, *, box_id: str | None = None) -> list[App
     return [_app_view(app) for app in await store.list_apps(workspace_id, box_id=box_id)]
 
 
+async def set_app_source(
+    workspace_id: str, user_id: str, app_id: str, body: SetSourceRequest
+) -> AppView:
+    """Point the app at a deploy source (``image`` or ``git``). Returns the app
+    view (masked — the private-repo token is never echoed).
+
+    The token is handed to the store, which is the SOLE place it is encrypted; it
+    never lives in a view, a wire DTO, an event, or a log.
+    """
+    body = SetSourceRequest.model_validate(body)
+    app = await _require_app(workspace_id, app_id)
+    app = await store.set_app_source(
+        app,
+        source_kind=body.source_kind,
+        repo_url=body.repo_url,
+        repo_ref=body.repo_ref,
+        repo_token=body.token,
+    )
+    view = _app_view(app)
+    await emit(ShipAppUpdated(data={**_app_event_payload(view), "user_id": user_id}))
+    return view
+
+
 async def deploy_app(workspace_id: str, user_id: str, app_id: str) -> DeployView:
     """Enqueue a deploy for the app. Returns immediately with a pollable attempt."""
     app = await _require_app(workspace_id, app_id)
-    if not app.image:
-        raise ValidationError(
-            "ship.app_no_image",
-            "The app has no image to deploy — set one when creating it",
-        )
+    _require_deployable_source(app)
     # The box must exist and be reachable before we spend a worker slot on it.
     box = await _require_box(workspace_id, app.box_id)
     if box.status != "ready":
@@ -274,11 +298,7 @@ async def deploy_app_or_propose(
     if not app.prod:
         return await deploy_app(workspace_id, user_id, app_id)
 
-    if not app.image:
-        raise ValidationError(
-            "ship.app_no_image",
-            "The app has no image to deploy — set one when creating it",
-        )
+    _require_deployable_source(app)
     proposal_id = await propose.propose_ship_action(
         workspace_id=workspace_id,
         verb="deploy_app",
@@ -541,6 +561,9 @@ def app_to_wire(view: AppView) -> AppOut:
         box_id=view.box_id,
         status=view.status,
         urls=list(view.urls),
+        source_kind=view.source_kind,  # type: ignore[arg-type] — the doc's Literal is the same set
+        repo_url=view.repo_url,
+        repo_ref=view.repo_ref,
     )
 
 
@@ -628,6 +651,9 @@ def _app_view(app: ShipApp) -> AppView:
         prod=app.prod,
         urls=tuple(app.urls),
         env_refs=tuple(app.env_refs),
+        source_kind=app.source_kind,
+        repo_url=app.repo_url,
+        repo_ref=app.repo_ref,
         pending_destroy_proposal_id=app.pending_destroy_proposal_id,
     )
 
@@ -741,6 +767,25 @@ async def _require_app(workspace_id: str, app_id: str) -> ShipApp:
     if app is None:
         raise NotFound("ship.app", app_id)
     return app
+
+
+def _require_deployable_source(app: ShipApp) -> None:
+    """Reject a deploy for an app that has nothing to ship (SHIP-14).
+
+    A ``git`` app needs a ``repo_url``; an ``image`` app needs an ``image``. The
+    two error codes stay distinct so the console can guide the fix precisely.
+    """
+    if app.source_kind == "git":
+        if not app.repo_url:
+            raise ValidationError(
+                "ship.app_no_source",
+                "The app has no repo to deploy — set a git source first",
+            )
+    elif not app.image:
+        raise ValidationError(
+            "ship.app_no_image",
+            "The app has no image to deploy — set one when creating it",
+        )
 
 
 async def _require_app_on_ready_box(workspace_id: str, app_id: str) -> tuple[ShipApp, ShipBox]:

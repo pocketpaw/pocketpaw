@@ -10,8 +10,9 @@
 #   GET    /ship/boxes                  list the workspace's boxes
 #   GET    /ship/boxes/{id}/metrics     live cpu / mem / disk for one box
 #   DELETE /ship/boxes/{id}             PARK a teardown — never executes it
-#   POST   /ship/apps                   register an app on a box
+#   POST   /ship/apps                   register an app on a box (optional source)
 #   GET    /ship/apps?box_id=           list apps (optionally one box's)
+#   PUT    /ship/apps/{id}/source       point the app at a deploy source (git/image)
 #   POST   /ship/apps/{id}/deploy       enqueue a deploy (empty body)
 #   GET    /ship/apps/{id}/deploys      the app's deploy attempts, newest first
 #   POST   /ship/apps/{id}/domains      route a domain + issue TLS
@@ -30,6 +31,9 @@
 #
 # Created 2026-07-22 (feat/ship-3-cloud-entity, SHIP-3): new module.
 # Changed 2026-07-23 (feat/ship-9-env-store, SHIP-9): added the four env routes.
+# Changed 2026-07-23 (feat/ship-14-source-deploy, SHIP-14): added
+# ``PUT /ship/apps/{id}/source`` — point an app at a git repo or a pre-built
+# image; the response is masked (never echoes the private-repo token).
 
 from __future__ import annotations
 
@@ -57,6 +61,7 @@ from pocketpaw_ee.cloud.ship.dto import (
     MetricsOut,
     PendingApprovalOut,
     SetEnvRequest,
+    SetSourceRequest,
 )
 
 router = APIRouter(prefix="/ship", tags=["Ship"], dependencies=[Depends(require_license)])
@@ -139,12 +144,25 @@ async def list_apps(
     return [ship_service.app_to_wire(v) for v in views]
 
 
+@router.put("/apps/{app_id}/source", response_model=AppOut)
+async def set_app_source(
+    app_id: str,
+    body: SetSourceRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> AppOut:
+    """Point the app at a deploy source (git repo or pre-built image). The
+    response is masked — the private-repo token is never echoed."""
+    workspace_id = _require_workspace(ctx)
+    view = await ship_service.set_app_source(workspace_id, ctx.user_id, app_id, body)
+    return ship_service.app_to_wire(view)
+
+
 @router.post("/apps/{app_id}/deploy", response_model=DeployOut)
 async def deploy_app(
     app_id: str,
     ctx: RequestContext = Depends(request_context),
 ) -> DeployOut:
-    """Enqueue a deploy. Takes no body — the app already carries its image."""
+    """Enqueue a deploy. Takes no body — the app already carries its source."""
     workspace_id = _require_workspace(ctx)
     view = await ship_service.deploy_app(workspace_id, ctx.user_id, app_id)
     return ship_service.deploy_to_wire(view)
