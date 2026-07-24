@@ -3,6 +3,14 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Updated: 2026-07-24 (CX-2, feat/code-agent-exclusive-tools) — ``run`` and
+  ``prewarm`` accept ``exclusive_mcp_tools: bool = False`` and forward it to the
+  backend ONLY when True (same withhold-when-empty idiom as ``model_override`` /
+  ``skill_names``). Only the Claude SDK backend consumes it — there it CAPS the
+  MCP surface to ``allow_mcp_tool_ids`` alone (no universal grant), so a
+  ``tool_mode="exclusive"`` agent (e.g. /code) gets EXACTLY its declared ids.
+  ``False`` = the unchanged grant-union path for every existing run.
+
 Updated: 2026-07-08 (CS-13, feat/per-send-model-override) — ``run`` accepts an
   optional ``model_override: str | None`` (the client's per-send model choice) and
   forwards it to the backend's ``run`` ONLY when non-None (the same
@@ -371,6 +379,7 @@ class AgentPool:
         allow_mcp_tool_ids: frozenset[str] | None = None,
         system_message_override: str | None = None,
         skill_names: frozenset[str] = frozenset(),
+        exclusive_mcp_tools: bool = False,
     ) -> None:
         """Eagerly warm the agent's CLI subprocess for ``session_key`` before its
         first turn, so the first ``run`` reuses it instead of paying the cold
@@ -441,6 +450,11 @@ class AgentPool:
             prewarm_kwargs["allow_mcp_tool_ids"] = allow_mcp_tool_ids
         if effective_skills:
             prewarm_kwargs["skill_names"] = effective_skills
+        # Per-agent exclusive-tool cap (CX-2). Mirror ``run`` so the prewarmed
+        # client's options (and cache key) match turn 1's — forwarded only when
+        # True; the caller passes the agent's declared ids as ``allow_mcp_tool_ids``.
+        if exclusive_mcp_tools:
+            prewarm_kwargs["exclusive_mcp_tools"] = exclusive_mcp_tools
         await backend_prewarm(**prewarm_kwargs)
 
     async def run(
@@ -460,6 +474,7 @@ class AgentPool:
         warm_client: LeasedClient | None = None,
         on_client_built: Callable[[Any, str, Callable], None] | None = None,
         model_override: str | None = None,
+        exclusive_mcp_tools: bool = False,
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -517,6 +532,13 @@ class AgentPool:
         backend's ``run`` ONLY when set, so the 6 non-Claude backends keep their
         narrower signature and only the Claude SDK backend acts on it (where it wins
         over smart-routing / ``claude_sdk_model``). ``None`` = the unchanged path.
+
+        ``exclusive_mcp_tools`` (CX-2) is the per-agent exclusive-tool signal. It
+        rides the SAME withhold-when-empty contract: forwarded to the backend's
+        ``run`` ONLY when ``True``, so the 6 non-Claude backends keep their narrower
+        signature and only the Claude SDK backend acts on it (there it CAPS the MCP
+        surface to ``allow_mcp_tool_ids`` alone — no universal grant). ``False``
+        (the default) = the unchanged grant-union path.
         """
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
@@ -615,6 +637,13 @@ class AgentPool:
             # this turn. None = legacy path, unchanged for every existing run.
             if model_override is not None:
                 run_kwargs["model_override"] = model_override
+            # Per-agent exclusive-tool cap (CX-2). Same withhold-when-empty rule:
+            # only the Claude SDK backend accepts ``exclusive_mcp_tools`` (it caps
+            # the MCP surface to ``allow_mcp_tool_ids`` alone); the other backends
+            # keep the narrower signature, so it is forwarded ONLY when True.
+            # False = legacy grant-union path, unchanged for every existing run.
+            if exclusive_mcp_tools:
+                run_kwargs["exclusive_mcp_tools"] = exclusive_mcp_tools
             async for event in instance.backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
                 yield event

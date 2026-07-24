@@ -25,6 +25,11 @@ Updated 2026-07-02 (feat/aiam-agent-revoke, AW-4 follow-up): ``get_persona``
 now returns ``None`` for a soft-disabled agent (reusing the doc it already
 loads — no extra read), so ``agent_bridge``'s smart-relevance LLM probe never
 fires for an agent ``pool.get`` would refuse to run.
+Updated 2026-07-24 (CX-2, feat/code-agent-exclusive-tools): ``tool_mode`` is
+threaded through the doc↔spec mappers (``_config_to_domain`` / ``_config_to_doc``)
+and the config-dict update path (``_apply_update``) so an "exclusive" policy
+round-trips and survives an update. Defaults to "additive", so every existing
+agent maps byte-for-byte as before.
 """
 
 from __future__ import annotations
@@ -71,6 +76,7 @@ def _config_to_domain(c: _AgentConfigDoc) -> AgentConfigSpec:
         model=c.model,
         system_prompt=c.system_prompt,
         tools=tuple(c.tools),
+        tool_mode=c.tool_mode,
         trust_level=c.trust_level,
         temperature=c.temperature,
         max_tokens=c.max_tokens,
@@ -91,6 +97,7 @@ def _config_to_doc(c: AgentConfigSpec) -> _AgentConfigDoc:
         model=c.model,
         system_prompt=c.system_prompt,
         tools=list(c.tools),
+        tool_mode=c.tool_mode,
         trust_level=c.trust_level,
         temperature=c.temperature,
         max_tokens=c.max_tokens,
@@ -179,6 +186,7 @@ def _apply_update(current: AgentConfigSpec, body: UpdateAgentRequest) -> AgentCo
             model=c.get("model", current.model),
             system_prompt=c.get("system_prompt", current.system_prompt),
             tools=tuple(c.get("tools", list(current.tools))),
+            tool_mode=c.get("tool_mode", current.tool_mode),
             trust_level=c.get("trust_level", current.trust_level),
             temperature=c.get("temperature", current.temperature),
             max_tokens=c.get("max_tokens", current.max_tokens),
