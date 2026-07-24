@@ -52,10 +52,31 @@
 # reuse branch is covered too, and it never fires for scaffold projects — copying
 # one shared row's state into N sibling starter projects is the very stomping this
 # task removes.
+#
+# 2026-07-25 (B3, feat/code-scaffold-on-vm): a SCAFFOLD project can now open on the
+# Daytona runtime. It could not before — its ``repo`` is a starter template id, and
+# ``open_sandbox`` fail-closes on anything that isn't a clean http(s) URL, so the
+# open was rejected before a VM existed and scaffold projects were in-tab only.
+# The fix is a different door, not a weaker lock: ``open_bare_sandbox`` provisions
+# an EMPTY VM (no clone, no remote, no branch) and ``scaffold_into_sandbox``
+# materializes the starter into it. ``_validate_repo_url`` is untouched and still
+# guards every clone.
+#
+# Sequencing is load-bearing: scaffold FIRST, restore SECOND. The template is the
+# baseline; the durable snapshot + overlay are the user's work, so they land ON TOP
+# of it and win every conflict. Reversing it would have the template overwrite the
+# user's edits.
+#
+# The re-scaffold guard is structural: the scaffold call sits ONLY in the
+# cold-provision branch, so it runs against a VM this call just created and which
+# is therefore empty by construction. The reuse branch returns before it, so a live
+# VM (or a reopen that reuses one) is never re-materialized over. See
+# ``_scaffold_baseline`` for why this is the guard rather than a VM probe.
 from __future__ import annotations
 
 import contextlib
 import logging
+from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.codeproject import service as codeproject_service
@@ -63,6 +84,7 @@ from pocketpaw_ee.cloud.codeproject.domain import CodeProjectView, is_scaffold_p
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
 from pocketpaw_ee.cloud.websandbox import durability as websandbox_durability
 from pocketpaw_ee.cloud.websandbox import provision as websandbox_provision
+from pocketpaw_ee.cloud.websandbox import scaffold_service as websandbox_scaffold
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
 from pocketpaw_ee.cloud.websandbox.domain import WebSandboxView
 
@@ -85,21 +107,30 @@ async def open_project(
     user_id: str,
     project_id: str,
     client: DaytonaClient | None = None,
+    *,
+    bring_up: Any = None,
 ) -> WebSandboxView:
     """Open a durable project, returning a ready sandbox to connect to.
 
     Flow:
       1. Load the project (tenant + owner scoped; ``NotFound`` if not owned).
       2. If it's bound to a sandbox that is still live (``ready`` + Daytona id),
-         reuse it and re-stamp ``last_opened_at``.
-      3. Otherwise cold-provision a fresh sandbox for the project's repo (via
-         ``websandbox.provision.open_sandbox`` — idempotent on the repo, so this
-         reuses the project's stable WebSandbox row and boots a new VM into it),
-         then restore the PROJECT's durable state into it and bind it.
+         reuse it and re-stamp ``last_opened_at``. Nothing is re-materialized on
+         this branch — the VM already holds the user's work.
+      3. Otherwise cold-provision a FRESH sandbox for the project:
+         * a repo project clones (``open_sandbox``, which validates the URL);
+         * a scaffold project provisions an EMPTY VM (``open_bare_sandbox``) and
+           materializes its starter into it — its ``repo`` is a template id, so
+           there is nothing to clone and the clone validator must not see it.
+         Then restore the PROJECT's durable state ON TOP and bind it.
 
     Returns the ready ``WebSandboxView``. The bound-but-invalid case (the VM was
     reaped, or the id no longer resolves) falls through to reprovision — "if the
     id is invalid or unavailable, make a new sandbox."
+
+    ``bring_up`` is the same kind of DI seam as ``client``: it is threaded to
+    ``scaffold_into_sandbox`` so a test can drive the whole scaffold open without a
+    real VM. ``None`` means "use the real one"; no production caller passes it.
     """
     project = await codeproject_service.get_project(workspace_id, user_id, project_id)
     # B2 rollout: lift any legacy sandbox-keyed durable state onto the project
@@ -114,22 +145,110 @@ async def open_project(
         await codeproject_service.bind_current_sandbox(workspace_id, user_id, project_id, reused.id)
         return reused
 
-    # Provision a fresh sandbox for the repo (idempotent on the repo → reuses the
+    # Provision a fresh sandbox (idempotent on the registry key → reuses the
     # project's stable WebSandbox row, boots a new VM into it) and bind it.
-    sandbox = await websandbox_provision.open_sandbox(
-        workspace_id, user_id, {"repo": project.repo}, client=client
-    )
+    if is_scaffold_provider(project.provider):
+        sandbox = await websandbox_provision.open_bare_sandbox(
+            workspace_id, user_id, _scaffold_registry_key(project), client=client
+        )
+        # The BASELINE, written before any durable state: this VM was created
+        # moments ago and is empty, so materializing the template into it cannot
+        # overwrite anything.
+        await _scaffold_baseline(workspace_id, user_id, project, sandbox, client, bring_up)
+    else:
+        sandbox = await websandbox_provision.open_sandbox(
+            workspace_id, user_id, {"repo": project.repo}, client=client
+        )
     # CM-2a′ / B2: overlay the PROJECT's durable snapshot (uncommitted work +
     # branch from a prior session) onto the freshly-cloned VM, if one exists.
+    # B3: for a scaffold project this lands ON TOP of the starter above — the
+    # template is the baseline, the durable state is the user's work.
     await _restore_if_snapshotted(workspace_id, user_id, project, sandbox, client)
     await codeproject_service.bind_current_sandbox(workspace_id, user_id, project_id, sandbox.id)
     logger.info(
-        "codeproject.open: project=%s bound fresh sandbox=%s (repo=%s)",
+        "codeproject.open: project=%s bound fresh sandbox=%s (provider=%s repo=%s)",
         project_id,
         sandbox.id,
+        project.provider,
         project.repo,
     )
     return sandbox
+
+
+def _scaffold_registry_key(project: CodeProjectView) -> str:
+    """The WebSandbox registry key for a scaffold project — one row per PROJECT.
+
+    A sandbox row is unique per (workspace, user, key). Passing the raw template id
+    as that key would give every project built from ``react`` ONE row, and the row
+    is what binds a project to a VM: opening project B would rebind (and tear down)
+    project A's VM, and ``_reuse_if_live`` would then hand project A the sandbox
+    holding project B's files. That is the same shared-row collision B2 removed from
+    the durability pointers, so the key is namespaced by the project id and the
+    collision cannot occur.
+
+    The template id stays in the key because a key is also a debugging aid — a row
+    reading ``starter:react:<id>`` says what it is without a second lookup. It is
+    stable across opens (both parts are immutable), so idempotent reuse still holds.
+    """
+    return f"starter:{project.repo}:{project.id}"
+
+
+async def _scaffold_baseline(
+    workspace_id: str,
+    user_id: str,
+    project: CodeProjectView,
+    sandbox: WebSandboxView,
+    client: DaytonaClient | None,
+    bring_up: Any,
+) -> None:
+    """Materialize the project's starter into a freshly-provisioned, EMPTY VM.
+
+    The re-scaffold guard is the CALL SITE, not a flag: this only ever runs in
+    ``open_project``'s cold-provision branch, immediately after
+    ``open_bare_sandbox`` returned a VM it created in this same call. Such a VM is
+    empty by construction, so writing the template into it cannot destroy work. A
+    reopen that finds a live VM returns from the reuse branch above and never
+    reaches here; a reopen that finds a dead VM gets a new empty one, where the
+    template is again the correct baseline and the restore that follows puts the
+    user's own files back over it.
+
+    Deliberately NOT guarded by probing the VM for emptiness instead: the workdir
+    is a home directory that already contains shell dotfiles, so "is it empty" has
+    no honest answer, and a guard that reads ambiguous evidence is worse than one
+    that relies on an invariant the code itself maintains.
+
+    Best-effort, like the restore that follows it. A codescaffold outage (an
+    unreachable registry, a starter pulled from the catalog) must not strand a
+    returning user whose real work is in the durable state — an empty VM plus a
+    successful restore is recoverable, a failed open is not. A failed bring-up STEP
+    (a broken ``npm install``) does not raise at all; it is reported and logged, and
+    the files are still on disk.
+    """
+    body = {"starter": project.repo, "projectName": project.name}
+    extra = {} if bring_up is None else {"bring_up": bring_up}
+    try:
+        result = await websandbox_scaffold.scaffold_into_sandbox(
+            workspace_id, user_id, sandbox.id, body, client=client, **extra
+        )
+    except Exception:  # noqa: BLE001 — never block the open on the baseline
+        logger.warning(
+            "codeproject.open: scaffold failed for project=%s (starter=%s); "
+            "continuing with an empty VM",
+            project.id,
+            project.repo,
+            exc_info=True,
+        )
+        return
+    logger.info(
+        "codeproject.open: scaffolded project=%s starter=%s into daytona=%s "
+        "(files=%d, running=%s, failedStep=%s)",
+        project.id,
+        result.starter,
+        sandbox.sandbox_id,
+        result.fileCount,
+        result.running,
+        result.failedStep,
+    )
 
 
 async def delete_project(
