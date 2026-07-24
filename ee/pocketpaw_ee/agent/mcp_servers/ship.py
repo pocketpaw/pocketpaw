@@ -164,11 +164,19 @@ async def _create_app_handler(args: dict) -> dict:
     from pocketpaw_ee.cloud.ship.dto import CreateAppRequest
 
     try:
+        # An agent points /ship at a git repo (source_kind="git" + repo_url) so
+        # "write code -> ship it" needs no pre-built image. The token (private
+        # repos) is accepted but NEVER echoed back — the app-wire view omits it.
+        source_kind = str(args.get("source_kind") or "").strip() or None
         body = CreateAppRequest(
             name=str(args.get("name") or ""),
             box_id=str(args.get("box_id") or ""),
             image=str(args.get("image") or ""),
             git_ref=str(args.get("git_ref") or ""),
+            **({"source_kind": source_kind} if source_kind else {}),
+            **({"repo_url": str(args["repo_url"])} if args.get("repo_url") else {}),
+            **({"repo_ref": str(args["repo_ref"])} if args.get("repo_ref") else {}),
+            **({"token": str(args["token"])} if args.get("token") else {}),
         )
         view = await service.create_app(ws, user, body)
     except Exception as exc:  # noqa: BLE001
@@ -381,15 +389,37 @@ def build_ship_server() -> tuple[str, Any] | None:
         "ship_create_app",
         (
             "Register an app on a box. `name` is a Dokku app name (lowercase "
-            "alphanumeric + hyphens). Provide `image` to have something to deploy."
+            "alphanumeric + hyphens). Two source options: pass `source_kind='git'` "
+            "with a `repo_url` (+ optional `repo_ref`, default 'main') to build and "
+            "run from SOURCE CODE — the engine detects the stack (buildpack / "
+            "nixpacks / Dockerfile), no pre-built image needed; or pass `image` for "
+            "a pre-built container. For a private repo add `token` (write-only, "
+            "never returned)."
         ),
         {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "minLength": 1},
                 "box_id": {"type": "string", "minLength": 1},
-                "image": {"type": "string", "description": "Container image reference."},
-                "git_ref": {"type": "string", "description": "Source ref, when relevant."},
+                "source_kind": {
+                    "type": "string",
+                    "enum": ["image", "git"],
+                    "description": "'git' builds from repo_url; 'image' runs a prebuilt image.",
+                },
+                "repo_url": {
+                    "type": "string",
+                    "description": "Git repo to build from (when source_kind='git').",
+                },
+                "repo_ref": {
+                    "type": "string",
+                    "description": "Branch/tag/commit to deploy (default 'main').",
+                },
+                "token": {
+                    "type": "string",
+                    "description": "Access token for a PRIVATE repo. Write-only; never echoed.",
+                },
+                "image": {"type": "string", "description": "Prebuilt container image reference."},
+                "git_ref": {"type": "string", "description": "Legacy source ref, when relevant."},
             },
             "required": ["name", "box_id"],
             "additionalProperties": False,
