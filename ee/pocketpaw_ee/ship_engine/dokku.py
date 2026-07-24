@@ -26,7 +26,14 @@
 #                    injected into the clone URL ONLY here, inside the redacting
 #                    chokepoint, and never reaches a result or an error.
 #   add_domain     — domains:add → letsencrypt:enable (when enable_tls)
-#   db_create      — mongo:create → mongo:link (the mongo plugin)
+#   db_create      — <plugin>:create → <plugin>:link, plugin ∈ {postgres, redis,
+#                    mongo} keyed on db_type (default mongo). The link injects a
+#                    <SVC>_URL config var whose NAME is returned; the DSN value is
+#                    a secret and is redacted from every log line + never on a DTO.
+#   set_healthcheck— checks:enable / checks:disable (Dokku's built-in
+#                    zero-downtime deploy checks). An optional HTTP health path is
+#                    recorded on the app; Dokku applies it from app.json at deploy.
+#   scale          — ps:scale <app> web=N worker=M (Procfile process types)
 #   backup         — mongo:export > dest_path, then stat for the size.
 #                    v1 LIMITATION: the dump lands on the BOX's local disk —
 #                    offsite/object-storage backup is a later slice.
@@ -58,6 +65,12 @@
 #   with the same env ``config:set`` as ``deploy_app``. A private-repo token is
 #   built into an ``x-access-token`` clone URL only inside the chokepoint, where
 #   the existing URL-credential redaction scrubs it from every log line and error.
+# Updated 2026-07-24 (feat/ship-17-databases, SHIP-17): Wave 2. ``db_create`` now
+#   takes a ``db_type`` and drives the matching plugin (``_DB_PLUGINS``) instead of
+#   hardcoding mongo; ``_parse_exposed_env_var`` takes the plugin's default var
+#   name. Added ``set_healthcheck`` (``checks:enable`` / ``checks:disable``) and
+#   ``scale`` (``ps:scale``) — both funnel through the same ``_run`` chokepoint, and
+#   ``scale`` validates process names/counts before interpolating them.
 
 from __future__ import annotations
 
@@ -77,13 +90,16 @@ from pocketpaw_ee.ship_engine.port import (
     BoxSpec,
     CommandFailed,
     DbResult,
+    DbType,
     DeployRequest,
     DeployResult,
     DomainResult,
     GitSource,
+    HealthcheckResult,
     InvalidSpec,
     LogChunk,
     MetricsSnapshot,
+    ScaleResult,
     ShipEngineError,
     SourceSpec,
     VerbNotSupported,
@@ -101,6 +117,9 @@ DEFAULT_TIMEOUTS: dict[str, float] = {
     "deploy_source": 900.0,
     "add_domain": 300.0,  # letsencrypt:enable does an ACME round-trip
     "db_create": 300.0,
+    "set_healthcheck": 60.0,
+    # ps:scale spins containers up/down — more than interactive, less than a deploy.
+    "scale": 300.0,
     "backup": 900.0,
     "rollback": 600.0,
     "logs": 30.0,
@@ -171,6 +190,24 @@ def _tokenized_git_url(repo_url: str, token: str | None) -> str:
     if not repo_url.startswith(prefix):
         return repo_url
     return f"{prefix}x-access-token:{quote(token, safe='')}@{repo_url[len(prefix) :]}"
+
+
+# db_type -> (Dokku plugin name, the env var the plugin's :link injects). The
+# plugin name equals the type today, but the mapping stays explicit so a type
+# whose plugin differs (or whose injected var differs) is a one-line change. The
+# injected NAME is also the fallback ``_parse_exposed_env_var`` returns if the
+# link output can't be parsed — these are the dokku plugins' documented defaults.
+_DB_PLUGINS: dict[DbType, tuple[str, str]] = {
+    "postgres": ("postgres", "DATABASE_URL"),
+    "redis": ("redis", "REDIS_URL"),
+    "mongo": ("mongo", "MONGO_URL"),
+}
+
+# A Procfile process type (``web``, ``worker``, ``release``): lowercase
+# alphanumeric with hyphens/underscores inside. ``scale`` validates every key
+# against this before it interpolates ``proc=count`` into a command — the counts
+# are ints, so a validated key + an int value has no shell surface at all.
+_PROC_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 # --------------------------------------------------------------------------- #
@@ -391,16 +428,46 @@ class DokkuDriver:
             await self._run("add_domain", f"dokku letsencrypt:enable {shlex.quote(app)}")
         return DomainResult(app=app, domain=domain, tls_enabled=enable_tls)
 
-    async def db_create(self, app: str, service: str) -> DbResult:
-        await self._run("db_create", f"dokku mongo:create {shlex.quote(service)}")
+    async def db_create(
+        self, app: str, service: str, db_type: DbType = "mongo"
+    ) -> DbResult:
+        plugin, default_env_var = _DB_PLUGINS[db_type]
+        await self._run("db_create", f"dokku {plugin}:create {shlex.quote(service)}")
         linked = await self._run(
-            "db_create", f"dokku mongo:link {shlex.quote(service)} {shlex.quote(app)}"
+            "db_create", f"dokku {plugin}:link {shlex.quote(service)} {shlex.quote(app)}"
         )
         return DbResult(
             service=service,
             linked_app=app,
-            exposed_env_var=_parse_exposed_env_var(linked.stdout),
+            exposed_env_var=_parse_exposed_env_var(linked.stdout, default=default_env_var),
         )
+
+    async def set_healthcheck(
+        self, app: str, *, enabled: bool, path: str = ""
+    ) -> HealthcheckResult:
+        # Dokku's zero-downtime checks are a per-app toggle: enable runs the
+        # settle-and-drain deploy checks, disable turns them off. The HTTP health
+        # ``path`` is not a checks:* argument — Dokku reads it from the app's
+        # app.json healthcheck at deploy — so v1 records it on the app (the caller
+        # persists it) and only the enable/disable toggle hits the engine here.
+        verb = "enable" if enabled else "disable"
+        await self._run("set_healthcheck", f"dokku checks:{verb} {shlex.quote(app)}")
+        return HealthcheckResult(app=app, zero_downtime=enabled, path=path)
+
+    async def scale(self, app: str, scale: Mapping[str, int]) -> ScaleResult:
+        if not scale:
+            raise InvalidSpec("scale requires at least one process=count pair")
+        for proc, count in scale.items():
+            if not _PROC_NAME_RE.match(proc):
+                raise InvalidSpec(f"invalid process type: {proc!r}")
+            if int(count) < 0:
+                raise InvalidSpec(f"invalid scale count for {proc!r}: {count!r}")
+        # Keys are validated against _PROC_NAME_RE and values coerced to int, so
+        # the ``proc=count`` tokens carry no shell syntax; the app name is quoted.
+        # Sorted for a deterministic command surface (transcript-testable).
+        pairs = " ".join(f"{proc}={int(count)}" for proc, count in sorted(scale.items()))
+        await self._run("scale", f"dokku ps:scale {shlex.quote(app)} {pairs}")
+        return ScaleResult(app=app, scale=dict(scale))
 
     async def backup(self, service: str, dest_path: str) -> BackupResult:
         # v1 LIMITATION (documented in the module comment): the dump lands on
@@ -508,19 +575,21 @@ def _parse_app_url(stdout: str) -> str:
     return match.group(1) if match else ""
 
 
-def _parse_exposed_env_var(stdout: str) -> str:
-    """Pull the injected env-var NAME from ``mongo:link`` output.
+def _parse_exposed_env_var(stdout: str, *, default: str = "MONGO_URL") -> str:
+    """Pull the injected env-var NAME from a ``<plugin>:link`` output.
 
     The link step prints ``-----> Setting config vars`` then an indented
-    ``MONGO_URL: <dsn>`` line — the NAME is the contract-safe part; the DSN
-    value is a secret and is never returned.
+    ``DATABASE_URL: <dsn>`` (or ``REDIS_URL`` / ``MONGO_URL``) line — the NAME is
+    the contract-safe part; the DSN value is a secret and is never returned.
+    ``default`` is the plugin's documented injection name, returned when the
+    output can't be parsed.
     """
     for line in stdout.splitlines():
         stripped = line.strip()
         match = re.match(r"^([A-Z][A-Z0-9_]*):\s", stripped)
         if match:
             return match.group(1)
-    return "MONGO_URL"  # dokku-mongo's documented default injection
+    return default
 
 
 def _parse_ps_report(stdout: str) -> dict[str, str]:

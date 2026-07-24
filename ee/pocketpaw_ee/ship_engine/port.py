@@ -7,20 +7,22 @@
 # routes, the /ship console) depends only on this module, so swapping the
 # engine never touches a consumer.
 #
-# Ten typed verbs, each speaking frozen framework-free dataclasses (the same
+# Twelve typed verbs, each speaking frozen framework-free dataclasses (the same
 # convention as ``cloud/billing/domain.py`` — a driver adapts its CLI/API
 # output into these; consumers never see engine-specific text):
 #
-#   provision_box  BoxSpec        -> BoxHandle      (create + prepare a VPS)
-#   deploy_app     DeployRequest  -> DeployResult   (app exists + image runs)
-#   deploy_source  app, SourceSpec-> DeployResult   (app exists + source built)
-#   add_domain     app, domain    -> DomainResult   (domain routed, TLS on)
-#   db_create      app, service   -> DbResult       (db up + linked to app)
-#   backup         service, path  -> BackupResult   (db dump landed at path)
-#   rollback       app, image     -> DeployResult   (previous image re-deployed)
-#   logs           app, num       -> LogChunk       (recent app log lines)
-#   metrics        app            -> MetricsSnapshot (process + disk health)
-#   destroy        app            -> None           (app gone)
+#   provision_box   BoxSpec         -> BoxHandle       (create + prepare a VPS)
+#   deploy_app      DeployRequest   -> DeployResult    (app exists + image runs)
+#   deploy_source   app, SourceSpec -> DeployResult    (app exists + source built)
+#   add_domain      app, domain     -> DomainResult    (domain routed, TLS on)
+#   db_create       app, svc, type  -> DbResult        (db up + linked to app)
+#   set_healthcheck app, enabled    -> HealthcheckResult (zero-downtime checks)
+#   scale           app, {proc:n}   -> ScaleResult     (process counts applied)
+#   backup          service, path   -> BackupResult    (db dump landed at path)
+#   rollback        app, image      -> DeployResult    (previous image re-deployed)
+#   logs            app, num        -> LogChunk        (recent app log lines)
+#   metrics         app             -> MetricsSnapshot (process + disk health)
+#   destroy         app             -> None            (app gone)
 #
 # A driver that cannot perform a verb raises ``VerbNotSupported`` (e.g. the
 # Dokku driver does not provision boxes — that belongs to the SHIP-2
@@ -44,13 +46,21 @@
 #   is REQUEST-side only — it never crosses into a result DTO, an exception, or a
 #   log line (the driver builds any tokenized URL only inside its ``_run``
 #   chokepoint and redacts it).
+# Updated 2026-07-24 (feat/ship-17-databases, SHIP-17): Wave 2 "expose the
+#   engine" — three additive verbs/shapes. (A) ``db_create`` gained a ``db_type``
+#   (``DbType`` = postgres/redis/mongo, the 90% set; default ``mongo`` keeps SHIP-3
+#   behaviour) so one seam drives every Dokku database plugin, not just mongo.
+#   (B) ``set_healthcheck(app, enabled, path) -> HealthcheckResult`` exposes Dokku's
+#   built-in zero-downtime ``checks``. (C) ``scale(app, {proc: count}) -> ScaleResult``
+#   exposes ``ps:scale``. All three keep the invariants — no secret on a result DTO,
+#   everything through the driver's redacting chokepoint.
 
 from __future__ import annotations
 
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 # --------------------------------------------------------------------------- #
 # Errors
@@ -238,18 +248,53 @@ class DomainResult:
     tls_enabled: bool
 
 
+# The database engines a driver can stand up. The 90% set Railway headlines;
+# Dokku ships six official plugins (mysql / clickhouse / elasticsearch follow
+# the identical ``<svc>:create`` + ``<svc>:link`` shape and slot in behind the
+# same verb later). ``mongo`` is the default so SHIP-3's behaviour is unchanged.
+DbType = Literal["postgres", "redis", "mongo"]
+
+
 @dataclass(frozen=True)
 class DbResult:
     """A database service created and linked to an app.
 
     ``exposed_env_var`` is the NAME of the env var the link injected (e.g.
-    ``MONGO_URL``). The connection string itself is a secret and never
-    appears on this DTO — the app reads it from its own environment.
+    ``DATABASE_URL`` for postgres, ``REDIS_URL``, ``MONGO_URL``). The connection
+    string itself is a secret and never appears on this DTO — the app reads it
+    from its own environment.
     """
 
     service: str
     linked_app: str
     exposed_env_var: str
+
+
+@dataclass(frozen=True)
+class HealthcheckResult:
+    """The zero-downtime health-check state now in force for an app.
+
+    ``zero_downtime`` reports whether Dokku's ``checks`` are enabled (the engine
+    default is on — a settling probe + connection-draining on release, the
+    Heroku dyno-shutdown parity). ``path`` is the optional HTTP health path the
+    app carries; "" means the engine's default TCP-port check. Carries no secret.
+    """
+
+    app: str
+    zero_downtime: bool
+    path: str = ""
+
+
+@dataclass(frozen=True)
+class ScaleResult:
+    """The process counts now applied to an app.
+
+    ``scale`` maps a Procfile process type (``web``, ``worker``, …) to its
+    running container count, as the engine set it. Carries no secret.
+    """
+
+    app: str
+    scale: Mapping[str, int]
 
 
 @dataclass(frozen=True)
@@ -335,8 +380,31 @@ class ShipEngine(Protocol):
         """Route ``domain`` to ``app``; issue a TLS cert when ``enable_tls``."""
         ...
 
-    async def db_create(self, app: str, service: str) -> DbResult:
-        """Create database service ``service`` and link it to ``app``."""
+    async def db_create(
+        self, app: str, service: str, db_type: DbType = "mongo"
+    ) -> DbResult:
+        """Create a ``db_type`` database ``service`` and link it to ``app``.
+
+        Every ``db_type`` drives the SAME plugin shape (``<svc>:create`` then
+        ``<svc>:link <app>``, which injects a connection-string env var); only
+        the plugin and the injected var NAME differ. ``mongo`` is the default so
+        an existing caller is unchanged.
+        """
+        ...
+
+    async def set_healthcheck(
+        self, app: str, *, enabled: bool, path: str = ""
+    ) -> HealthcheckResult:
+        """Enable or disable ``app``'s zero-downtime health checks.
+
+        Exposes the engine's BUILT-IN zero-downtime deploy checks (a settling
+        probe + connection-draining on release). ``path`` is an optional HTTP
+        health path recorded for the app; the engine applies it at deploy.
+        """
+        ...
+
+    async def scale(self, app: str, scale: Mapping[str, int]) -> ScaleResult:
+        """Set ``app``'s per-process container counts (``{"web": 2, ...}``)."""
         ...
 
     async def backup(self, service: str, dest_path: str) -> BackupResult:
