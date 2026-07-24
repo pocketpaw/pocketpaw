@@ -48,6 +48,7 @@ from tests.ship_engine.dokku_wiring import (
 )
 
 _DOKKU_LOGGER = "pocketpaw_ee.ship_engine.dokku"
+_VOL = f"{c.APP}-data"  # a Wave 3 storage-entry name for the standard app
 
 
 # --------------------------------------------------------------------- #
@@ -202,6 +203,78 @@ async def test_metrics_parses_ps_report_and_df() -> None:
 async def test_db_create_reports_env_var_name_not_dsn() -> None:
     result = await DokkuDriver(make_happy_transport()).db_create(c.APP, c.SERVICE)
     assert result.exposed_env_var == "MONGO_URL"
+
+
+# --------------------------------------------------------------------- #
+# Wave 3 (SHIP-18) — resource limits, volumes, lifecycle
+# --------------------------------------------------------------------- #
+
+
+async def test_set_resources_issues_limit_with_both_flags() -> None:
+    cmd = f"dokku resource:limit --cpu 1000 --memory 512 {c.APP}"
+    transport = FakeSSHTransport({cmd: "resource_limit.txt"})
+    result = await DokkuDriver(transport).set_resources(c.APP, cpu=1000, memory_mb=512)
+    assert transport.calls == [cmd]
+    assert result.cpu == 1000
+    assert result.memory_mb == 512
+
+
+async def test_set_resources_omits_the_unset_dimension() -> None:
+    cmd = f"dokku resource:limit --memory 512 {c.APP}"
+    transport = FakeSSHTransport({cmd: "resource_limit.txt"})
+    result = await DokkuDriver(transport).set_resources(c.APP, memory_mb=512)
+    assert transport.calls == [cmd]
+    assert result.cpu == 0
+    assert result.memory_mb == 512
+
+
+async def test_set_resources_rejects_an_all_zero_call() -> None:
+    with pytest.raises(InvalidSpec):
+        await DokkuDriver(FakeSSHTransport({})).set_resources(c.APP)
+
+
+async def test_create_volume_creates_then_mounts() -> None:
+    create = f"dokku storage:create {_VOL}"
+    mount = f"dokku storage:mount {c.APP} {_VOL} --container-dir /data"
+    transport = FakeSSHTransport({create: "storage_create.txt", mount: "storage_mount.txt"})
+    result = await DokkuDriver(transport).create_volume(c.APP, name=_VOL, mount_path="/data")
+    assert transport.calls == [create, mount]
+    assert result.mount_path == "/data"
+    assert result.host_path == f"/var/lib/dokku/data/storage/{_VOL}"
+
+
+async def test_create_volume_rejects_a_relative_mount_path() -> None:
+    with pytest.raises(InvalidSpec):
+        await DokkuDriver(FakeSSHTransport({})).create_volume(c.APP, name=_VOL, mount_path="data")
+
+
+async def test_create_volume_rejects_a_mount_path_with_a_colon() -> None:
+    # ``:`` is Dokku's host:container separator — a mount path can't smuggle one.
+    with pytest.raises(InvalidSpec):
+        await DokkuDriver(FakeSSHTransport({})).create_volume(c.APP, name=_VOL, mount_path="/a:/b")
+
+
+async def test_create_volume_rejects_a_hostile_name() -> None:
+    with pytest.raises(InvalidSpec):
+        await DokkuDriver(FakeSSHTransport({})).create_volume(
+            c.APP, name="../../etc", mount_path="/data"
+        )
+
+
+async def test_restart_issues_ps_restart() -> None:
+    cmd = f"dokku ps:restart {c.APP}"
+    transport = FakeSSHTransport({cmd: "ps_restart.txt"})
+    result = await DokkuDriver(transport).restart(c.APP)
+    assert transport.calls == [cmd]
+    assert result.action == "restart"
+
+
+async def test_rebuild_issues_ps_rebuild() -> None:
+    cmd = f"dokku ps:rebuild {c.APP}"
+    transport = FakeSSHTransport({cmd: "ps_rebuild.txt"})
+    result = await DokkuDriver(transport).rebuild(c.APP)
+    assert transport.calls == [cmd]
+    assert result.action == "rebuild"
 
 
 # --------------------------------------------------------------------- #
