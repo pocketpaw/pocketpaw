@@ -7,12 +7,13 @@
 # routes, the /ship console) depends only on this module, so swapping the
 # engine never touches a consumer.
 #
-# Nine typed verbs, each speaking frozen framework-free dataclasses (the same
+# Ten typed verbs, each speaking frozen framework-free dataclasses (the same
 # convention as ``cloud/billing/domain.py`` — a driver adapts its CLI/API
 # output into these; consumers never see engine-specific text):
 #
 #   provision_box  BoxSpec        -> BoxHandle      (create + prepare a VPS)
 #   deploy_app     DeployRequest  -> DeployResult   (app exists + image runs)
+#   deploy_source  app, SourceSpec-> DeployResult   (app exists + source built)
 #   add_domain     app, domain    -> DomainResult   (domain routed, TLS on)
 #   db_create      app, service   -> DbResult       (db up + linked to app)
 #   backup         service, path  -> BackupResult   (db dump landed at path)
@@ -35,6 +36,14 @@
 #   validation in ``AppSpec.__post_init__`` (hostile names now fail at the DTO
 #   boundary, before any command string exists), and ``AppSpec.env`` is
 #   ``repr=False`` so a logged/debugged spec never prints secret values.
+# Updated 2026-07-23 (feat/ship-14-source-deploy, SHIP-14): added the
+#   source-agnostic ``deploy_source(app, SourceSpec) -> DeployResult`` verb + the
+#   ``SourceSpec`` tagged union (``GitSource`` today; ``ArchiveSource`` reserved
+#   for the archive/agent path later). ``deploy_app(image)`` stays for the
+#   pre-built path. ``GitSource.token`` is ``repr=False`` and, like ``AppSpec.env``,
+#   is REQUEST-side only — it never crosses into a result DTO, an exception, or a
+#   log line (the driver builds any tokenized URL only inside its ``_run``
+#   chokepoint and redacts it).
 
 from __future__ import annotations
 
@@ -143,11 +152,47 @@ class AppSpec:
 @dataclass(frozen=True)
 class DeployRequest:
     """Deploy ``image`` (a pre-built container image reference, tag included)
-    as ``app``. v1 is image-based deploy only — git-push builds are a later
-    slice."""
+    as ``app``. The pre-built-image path; source builds go through
+    ``deploy_source`` + a ``SourceSpec`` instead."""
 
     app: AppSpec
     image: str
+
+
+# --------------------------------------------------------------------------- #
+# Source specs (frozen tagged union — the deploy_source input)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class SourceSpec:
+    """Base of the deploy-source tagged union consumed by ``deploy_source``.
+
+    A source describes WHERE the app's code comes from, leaving the build to the
+    engine (buildpack / nixpacks / Dockerfile auto-detection). ``GitSource`` is
+    the v1 member; an ``ArchiveSource`` sibling (a tarball of an agent's work
+    dir) is reserved for later — the verb is source-agnostic so it bolts on
+    without a second seam. Never instantiated directly; a driver matches on the
+    concrete member.
+    """
+
+
+@dataclass(frozen=True)
+class GitSource(SourceSpec):
+    """Deploy from a git repository the engine clones/fetches and builds.
+
+    ``repo_url`` is the plain, secret-free clone URL (``https://host/owner/repo``
+    or ``.git``); ``ref`` is the branch/tag/SHA to build (default ``main``).
+    ``token`` is an OPTIONAL access token for a private repo — it is
+    REQUEST-side only, ``repr=False`` so a logged spec never prints it, and a
+    driver injects it into a clone URL ONLY inside its redacting ``_run``
+    chokepoint. ``None`` means a public repo (a plain URL). Like ``AppSpec.env``,
+    the token never appears in a result DTO, an exception, or a log line.
+    """
+
+    repo_url: str
+    ref: str = "main"
+    token: str | None = field(default=None, repr=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -272,6 +317,18 @@ class ShipEngine(Protocol):
 
     async def deploy_app(self, request: DeployRequest) -> DeployResult:
         """Ensure the app exists, apply its env, and run ``request.image``."""
+        ...
+
+    async def deploy_source(self, app: AppSpec, source: SourceSpec) -> DeployResult:
+        """Ensure the app exists, apply its env, and build+run ``source``.
+
+        The source-agnostic sibling of ``deploy_app``: instead of a pre-built
+        image, the engine builds the app from ``source`` (a git repo in v1) with
+        its own build-source auto-detection. A build failure raises
+        ``CommandFailed`` with a redacted log tail — never a silent hang. Any
+        secret carried by the source (a private-repo token) never reaches the
+        returned ``DeployResult`` or a raised error.
+        """
         ...
 
     async def add_domain(self, app: str, domain: str, *, enable_tls: bool = True) -> DomainResult:

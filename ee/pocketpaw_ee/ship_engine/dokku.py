@@ -19,6 +19,12 @@
 #   provision_box  — raises VerbNotSupported (provisioning is SHIP-2's job)
 #   deploy_app     — apps:exists (create if missing) → config:set --no-restart
 #                    (when env present) → git:from-image
+#   deploy_source  — apps:exists (create if missing) → config:set --no-restart
+#                    (when env present) → git:sync --build <repo> <ref>. Dokku
+#                    clones/fetches the repo and auto-detects the build source
+#                    (buildpack / nixpacks / Dockerfile). A private-repo token is
+#                    injected into the clone URL ONLY here, inside the redacting
+#                    chokepoint, and never reaches a result or an error.
 #   add_domain     — domains:add → letsencrypt:enable (when enable_tls)
 #   db_create      — mongo:create → mongo:link (the mongo plugin)
 #   backup         — mongo:export > dest_path, then stat for the size.
@@ -47,6 +53,11 @@
 #     ``ValueError``;
 #   * redaction patterns tightened: URL credentials may contain ``@``; env
 #     assignments cover shlex-quoted values containing quotes.
+# Updated 2026-07-23 (feat/ship-14-source-deploy, SHIP-14): added ``deploy_source``
+#   for a ``GitSource`` — ``git:sync --build`` through the same ``_run`` chokepoint,
+#   with the same env ``config:set`` as ``deploy_app``. A private-repo token is
+#   built into an ``x-access-token`` clone URL only inside the chokepoint, where
+#   the existing URL-credential redaction scrubs it from every log line and error.
 
 from __future__ import annotations
 
@@ -57,8 +68,10 @@ import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import quote
 
 from pocketpaw_ee.ship_engine.port import (
+    AppSpec,
     BackupResult,
     BoxHandle,
     BoxSpec,
@@ -67,9 +80,12 @@ from pocketpaw_ee.ship_engine.port import (
     DeployRequest,
     DeployResult,
     DomainResult,
+    GitSource,
+    InvalidSpec,
     LogChunk,
     MetricsSnapshot,
     ShipEngineError,
+    SourceSpec,
     VerbNotSupported,
 )
 
@@ -80,6 +96,9 @@ logger = logging.getLogger(__name__)
 # long budgets. Everything else is an interactive-scale command.
 DEFAULT_TIMEOUTS: dict[str, float] = {
     "deploy_app": 600.0,
+    # git:sync clones the repo AND runs the full build (buildpack / nixpacks /
+    # Dockerfile) in one command — the longest single call the driver makes.
+    "deploy_source": 900.0,
     "add_domain": 300.0,  # letsencrypt:enable does an ACME round-trip
     "db_create": 300.0,
     "backup": 900.0,
@@ -131,6 +150,27 @@ def _env_pairs(env: Mapping[str, str]) -> list[str]:
     defense-in-depth behind ``AppSpec``'s DTO-level key validation.
     """
     return [shlex.quote(f"{key}={value}") for key, value in sorted(env.items())]
+
+
+def _tokenized_git_url(repo_url: str, token: str | None) -> str:
+    """Build the clone URL ``git:sync`` receives, injecting ``token`` for a
+    private repo.
+
+    ``token=None`` returns ``repo_url`` unchanged (a public repo, plain URL). A
+    token is placed as the ``x-access-token`` userinfo of an ``https://`` URL —
+    the GitHub/GitLab PAT-over-HTTPS convention — and URL-encoded so a token with
+    reserved characters can't break the URL (and can't smuggle a ``/`` past the
+    ``scheme://userinfo@`` redaction). The credential therefore rides exactly
+    where ``_URL_CREDS_RE`` scrubs it from every logged command and error. A
+    token on a non-``https`` URL (``git://``, ``ssh``) is meaningless, so the URL
+    is returned untouched rather than mangled.
+    """
+    if not token:
+        return repo_url
+    prefix = "https://"
+    if not repo_url.startswith(prefix):
+        return repo_url
+    return f"{prefix}x-access-token:{quote(token, safe='')}@{repo_url[len(prefix) :]}"
 
 
 # --------------------------------------------------------------------------- #
@@ -313,6 +353,37 @@ class DokkuDriver:
             f"dokku git:from-image {shlex.quote(app)} {shlex.quote(request.image)}",
         )
         return DeployResult(app=app, image=request.image, app_url=_parse_app_url(deployed.stdout))
+
+    async def deploy_source(self, app: AppSpec, source: SourceSpec) -> DeployResult:
+        if not isinstance(source, GitSource):
+            # GitSource is the only v1 member; an ArchiveSource sibling lands on
+            # this same verb later. An unknown member is a programming error,
+            # surfaced as a typed contract error, not a bare TypeError mid-build.
+            raise InvalidSpec(f"unsupported source kind: {type(source).__name__}")
+        name = app.name
+        exists = await self._run(
+            "deploy_source", f"dokku apps:exists {shlex.quote(name)}", check=False
+        )
+        if exists.exit_code != 0:
+            await self._run("deploy_source", f"dokku apps:create {shlex.quote(name)}")
+        if app.env:
+            pairs = " ".join(_env_pairs(app.env))
+            await self._run(
+                "deploy_source",
+                f"dokku config:set --no-restart {shlex.quote(name)} {pairs}",
+            )
+        # Inject the token (if any) into the clone URL HERE, inside the redacting
+        # chokepoint: the tokenized URL is scrubbed from every log line + error by
+        # _URL_CREDS_RE, and source.token (repr=False) never reaches the result.
+        build_url = _tokenized_git_url(source.repo_url, source.token)
+        synced = await self._run(
+            "deploy_source",
+            f"dokku git:sync --build {shlex.quote(name)} "
+            f"{shlex.quote(build_url)} {shlex.quote(source.ref)}",
+        )
+        # The result carries the PLAIN, token-free repo_url as provenance (the
+        # engine built from this source) — never the tokenized URL.
+        return DeployResult(app=name, image=source.repo_url, app_url=_parse_app_url(synced.stdout))
 
     async def add_domain(self, app: str, domain: str, *, enable_tls: bool = True) -> DomainResult:
         await self._run("add_domain", f"dokku domains:add {shlex.quote(app)} {shlex.quote(domain)}")

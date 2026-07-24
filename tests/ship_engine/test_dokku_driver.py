@@ -22,11 +22,20 @@ import logging
 import shlex
 
 import pytest
-from pocketpaw_ee.ship_engine import AppSpec, CommandFailed, DeployRequest, VerbNotSupported
+from pocketpaw_ee.ship_engine import (
+    AppSpec,
+    CommandFailed,
+    DeployRequest,
+    GitSource,
+    InvalidSpec,
+    SourceSpec,
+    VerbNotSupported,
+)
 from pocketpaw_ee.ship_engine.dokku import (
     AsyncSSHTransport,
     DokkuDriver,
     _env_pairs,
+    _tokenized_git_url,
     redact,
 )
 from pocketpaw_ee.ship_engine.transcripts import FakeSSHTransport, load_transcript
@@ -72,6 +81,101 @@ async def test_deploy_skips_create_when_app_exists() -> None:
     transport = FakeSSHTransport(replies)
     await DokkuDriver(transport).deploy_app(c.DEPLOY_REQUEST)
     assert f"dokku apps:create {c.APP}" not in transport.calls
+
+
+# --------------------------------------------------------------------- #
+# deploy_source — build from a git repo (SHIP-14)
+# --------------------------------------------------------------------- #
+
+# The EXACT tokenized clone URL the driver builds for the standard GitSource.
+_TOKENIZED_GIT_URL = f"https://x-access-token:{c.GIT_TOKEN}@github.com/paw-demo/app.git"
+
+
+async def test_deploy_source_creates_app_sets_env_then_git_syncs() -> None:
+    transport = make_happy_transport()
+    result = await DokkuDriver(transport).deploy_source(c.APP_SPEC, c.GIT_SOURCE)
+    assert transport.calls == [
+        f"dokku apps:exists {c.APP}",
+        f"dokku apps:create {c.APP}",
+        f"dokku config:set --no-restart {c.APP} "
+        "API_KEY=hunter2-super-secret-value MONGO_PASSWORD=passw0rd-abc",
+        f"dokku git:sync --build {c.APP} {_TOKENIZED_GIT_URL} {c.GIT_REF}",
+    ]
+    # The result carries the PLAIN repo_url as provenance, never the tokenized one.
+    assert result.image == c.GIT_REPO
+    assert result.app_url == "http://demo.paw.example"
+
+
+async def test_deploy_source_public_repo_uses_a_plain_url() -> None:
+    # token=None → a public repo → the clone URL has no injected credential.
+    plain_cmd = f"dokku git:sync --build {c.APP} {c.GIT_REPO} main"
+    replies = {
+        f"dokku apps:exists {c.APP}": "apps_exists_ok.txt",  # exists → no create
+        plain_cmd: "git_sync.txt",
+    }
+    transport = FakeSSHTransport(replies)
+    source = GitSource(repo_url=c.GIT_REPO, ref="main", token=None)
+    await DokkuDriver(transport).deploy_source(AppSpec(name=c.APP), source)
+    assert plain_cmd in transport.calls
+    assert not any("x-access-token" in call for call in transport.calls)
+
+
+async def test_deploy_source_token_never_reaches_log_output(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Sanity first: the token really flows through the chokepoint in the clone
+    # URL — otherwise this test proves nothing.
+    caplog.set_level(logging.DEBUG, logger=_DOKKU_LOGGER)
+    transport = make_happy_transport()
+    await DokkuDriver(transport).deploy_source(c.APP_SPEC, c.GIT_SOURCE)
+
+    assert any(c.GIT_TOKEN in call for call in transport.calls)  # entered
+    assert c.GIT_TOKEN not in caplog.text  # never logged
+    assert "[redacted]@" in caplog.text  # the URL-credential redaction ran
+
+
+async def test_deploy_source_build_failure_maps_to_command_failed() -> None:
+    # A build failure (nonzero git:sync exit) surfaces as CommandFailed with the
+    # redacted stderr tail — never a silent hang. The token stays scrubbed.
+    git_sync_cmd = f"dokku git:sync --build {c.APP} {_TOKENIZED_GIT_URL} {c.GIT_REF}"
+    replies = {**HAPPY_REPLIES, git_sync_cmd: "git_sync_build_fail.txt"}
+    with pytest.raises(CommandFailed) as exc_info:
+        await DokkuDriver(FakeSSHTransport(replies)).deploy_source(c.APP_SPEC, c.GIT_SOURCE)
+    exc = exc_info.value
+    assert exc.exit_code == 1
+    assert "buildpack" in exc.stderr_tail  # the real build-failure hint survives
+    assert "[redacted]@" in exc.command  # the tokenized URL was scrubbed
+    assert c.GIT_TOKEN not in str(exc)
+
+
+async def test_deploy_source_rejects_an_unknown_source_kind() -> None:
+    # Only GitSource is wired in v1; a bare SourceSpec is a typed contract error.
+    with pytest.raises(InvalidSpec):
+        await DokkuDriver(make_happy_transport()).deploy_source(AppSpec(name=c.APP), SourceSpec())
+
+
+def test_tokenized_git_url_public_passes_through() -> None:
+    assert _tokenized_git_url("https://github.com/o/r.git", None) == "https://github.com/o/r.git"
+
+
+def test_tokenized_git_url_injects_x_access_token() -> None:
+    out = _tokenized_git_url("https://github.com/o/r.git", "tok123")
+    assert out == "https://x-access-token:tok123@github.com/o/r.git"
+
+
+def test_tokenized_git_url_leaves_non_https_untouched() -> None:
+    # A token is meaningless on a non-https URL — don't mangle it.
+    assert _tokenized_git_url("git://host/o/r.git", "tok") == "git://host/o/r.git"
+
+
+def test_tokenized_git_url_encodes_reserved_characters() -> None:
+    # A token with a '/' must be percent-encoded so it can't break the URL nor
+    # smuggle a path segment past the scheme://userinfo@ redaction.
+    out = _tokenized_git_url("https://github.com/o/r.git", "a/b@c")
+    assert "a/b@c" not in out
+    assert out == "https://x-access-token:a%2Fb%40c@github.com/o/r.git"
+    # And the redaction still scrubs the whole userinfo.
+    assert redact(out) == "https://[redacted]@github.com/o/r.git"
 
 
 async def test_backup_exports_then_sizes_the_dump() -> None:

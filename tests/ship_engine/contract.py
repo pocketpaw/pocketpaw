@@ -32,6 +32,7 @@ from pocketpaw_ee.ship_engine import (
     AppSpec,
     BoxSpec,
     DeployRequest,
+    GitSource,
     ShipEngine,
 )
 
@@ -53,6 +54,14 @@ ENV: Mapping[str, str] = {
 BOX_SPEC = BoxSpec(name="paw-box-1", region="fsn1", size="cx22")
 APP_SPEC = AppSpec(name=APP, env=ENV)
 DEPLOY_REQUEST = DeployRequest(app=APP_SPEC, image=IMAGE)
+
+# The v1 deploy_source scenario: a private git repo built from ``main`` with an
+# access token. The token is a secret marker (registered in the case) — it must
+# NEVER surface in a result DTO, an exception, or a log line.
+GIT_REPO = "https://github.com/paw-demo/app.git"
+GIT_REF = "main"
+GIT_TOKEN = "ghp_S3cr3tGitTokenDoNotLeakABCDEF0123456789"
+GIT_SOURCE = GitSource(repo_url=GIT_REPO, ref=GIT_REF, token=GIT_TOKEN)
 
 
 @dataclass(frozen=True)
@@ -78,6 +87,7 @@ class EngineCase:
 VERB_CALLS: dict[str, Callable[[ShipEngine], Awaitable[Any]]] = {
     "provision_box": lambda engine: engine.provision_box(BOX_SPEC),
     "deploy_app": lambda engine: engine.deploy_app(DEPLOY_REQUEST),
+    "deploy_source": lambda engine: engine.deploy_source(APP_SPEC, GIT_SOURCE),
     "add_domain": lambda engine: engine.add_domain(APP, DOMAIN),
     "db_create": lambda engine: engine.db_create(APP, SERVICE),
     "backup": lambda engine: engine.backup(SERVICE, BACKUP_PATH),

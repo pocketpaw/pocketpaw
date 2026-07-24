@@ -10,6 +10,9 @@
 # Created 2026-07-21 (feat/ship-1-engine-contract): new package.
 # Updated 2026-07-21 (review fixes): re-export ``InvalidSpec`` (DTO-boundary
 #   validation error added to the port).
+# Updated 2026-07-23 (feat/ship-14-source-deploy, SHIP-14): re-export the
+#   ``SourceSpec`` tagged union + its ``GitSource`` member (the deploy_source
+#   input).
 
 from __future__ import annotations
 
@@ -23,11 +26,13 @@ from pocketpaw_ee.ship_engine.port import (
     DeployRequest,
     DeployResult,
     DomainResult,
+    GitSource,
     InvalidSpec,
     LogChunk,
     MetricsSnapshot,
     ShipEngine,
     ShipEngineError,
+    SourceSpec,
     VerbNotSupported,
 )
 
@@ -41,10 +46,12 @@ __all__ = [
     "DeployRequest",
     "DeployResult",
     "DomainResult",
+    "GitSource",
     "InvalidSpec",
     "LogChunk",
     "MetricsSnapshot",
     "ShipEngine",
     "ShipEngineError",
+    "SourceSpec",
     "VerbNotSupported",
 ]

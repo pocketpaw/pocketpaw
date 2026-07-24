@@ -59,6 +59,17 @@ async def test_deploy_app_returns_typed_result(engine_case: EngineCase) -> None:
     assert_no_secret_material(result, engine_case.secret_markers)
 
 
+async def test_deploy_source_returns_typed_result(engine_case: EngineCase) -> None:
+    # The source-deploy sibling: build+run from a git repo. The private-repo
+    # token is a registered secret marker, so the no-leak scan proves it never
+    # reaches the returned DeployResult (nor the plain repo_url it carries).
+    result = await engine_case.make_happy().deploy_source(c.APP_SPEC, c.GIT_SOURCE)
+    assert isinstance(result, DeployResult)
+    assert result.app == c.APP
+    assert isinstance(result.app_url, str)
+    assert_no_secret_material(result, engine_case.secret_markers)
+
+
 async def test_add_domain_returns_typed_result(engine_case: EngineCase) -> None:
     result = await engine_case.make_happy().add_domain(c.APP, c.DOMAIN)
     assert isinstance(result, DomainResult)
