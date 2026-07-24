@@ -74,6 +74,15 @@
 # user's edits is a far worse failure than writing them to the older anchor. The
 # anchor choice is made once, in ``build_durability_hooks``, so it is a single
 # testable decision rather than three copies of the same branch.
+#
+# 2026-07-25 (B4, feat/code-cross-runtime-restore): a FAILED durable write is no
+# longer invisible. The hooks are wrapped in ``_visible_durability`` and the
+# disconnect snapshot logs at WARNING instead of debug. WHY: the project store fails
+# CLOSED on a cloud whose ``POCKETPAW_UPLOAD_ADAPTER`` isn't ``s3``, and both the
+# per-file hooks (via ``FileRpc``) and the disconnect snapshot swallow that — so a
+# misconfigured deploy persisted NOTHING while every save reported ok, with the only
+# trace at debug. Still swallowed (a durability hiccup must not break a file write
+# that already landed); just diagnosable now, with the anchor and path in the line.
 from __future__ import annotations
 
 import asyncio
@@ -190,6 +199,35 @@ async def resolve_owning_project(workspace_id: str, user_id: str, row_id: str) -
     return project.id if project is not None else None
 
 
+def _visible_durability(op: str, anchor: str, hook: Any) -> Any:
+    """Wrap a durability hook so a failure is swallowed but never INVISIBLE (B4).
+
+    ``FileRpc`` already swallows a hook failure at DEBUG, which is right about the
+    swallowing (a durability hiccup must not turn a landed file write into a client
+    error) and wrong about the level. The project store fails CLOSED on a
+    misconfigured cloud (``POCKETPAW_UPLOAD_ADAPTER != s3`` → a 503 from
+    ``_require_s3_for_project_store``), so EVERY save on such a deploy raises here:
+    the user's edits are not persisted anywhere and the only trace is a debug line
+    nobody has enabled. Logging at WARNING with the anchor (durable project, or the
+    sandbox row when degraded) and the path makes that diagnosable from ordinary
+    production logs. Swallowing is unchanged.
+    """
+
+    async def _wrapped(*args: Any) -> None:
+        try:
+            await hook(*args)
+        except Exception:  # noqa: BLE001 — durability is best-effort; the file op landed
+            logger.warning(
+                "websandbox.durability: %s failed for %s path=%r — the edit is NOT persisted",
+                op,
+                anchor,
+                args[0] if args else "?",
+                exc_info=True,
+            )
+
+    return _wrapped
+
+
 def build_durability_hooks(
     workspace_id: str,
     user_id: str,
@@ -209,9 +247,12 @@ def build_durability_hooks(
     ``None`` (a sandbox opened outside the project flow) the hooks keep the
     original sandbox-keyed behaviour: degrade, never drop the write.
 
-    All three are best-effort at the call site — ``FileRpc`` swallows a hook
-    failure so durability never fails the file op itself.
+    All three are best-effort — a durability failure must never fail the file op
+    itself — but they are wrapped in ``_visible_durability`` so the failure is
+    LOGGED AT WARNING with its anchor and path instead of vanishing into debug.
     """
+    anchor = f"project={project_id}" if project_id else f"sandbox_row={row_id}"
+
     if project_id:
 
         async def _mirror(rel_path: str, data: bytes) -> None:
@@ -229,7 +270,11 @@ def build_durability_hooks(
                 workspace_id, user_id, project_id, src_rel, dst_rel
             )
 
-        return _mirror, _drop, _move
+        return (
+            _visible_durability("write-through mirror", anchor, _mirror),
+            _visible_durability("overlay drop", anchor, _drop),
+            _visible_durability("overlay re-key", anchor, _move),
+        )
 
     async def _mirror_row(rel_path: str, data: bytes) -> None:
         await websandbox_durability.mirror_file(
@@ -246,7 +291,11 @@ def build_durability_hooks(
         # restore replays the file where it now lives (WC-4c).
         await websandbox_durability.move_overlay(workspace_id, user_id, row_id, src_rel, dst_rel)
 
-    return _mirror_row, _drop_row, _move_row
+    return (
+        _visible_durability("write-through mirror", anchor, _mirror_row),
+        _visible_durability("overlay drop", anchor, _drop_row),
+        _visible_durability("overlay re-key", anchor, _move_row),
+    )
 
 
 async def snapshot_on_disconnect(
@@ -274,8 +323,10 @@ async def snapshot_on_disconnect(
     back to the sandbox-keyed snapshot rather than skipping the capture.
 
     Best-effort by design: a snapshot failure (VM already gone, S3 down, an
-    unprovisioned row) must NEVER surface on socket teardown — it is logged at
-    debug and swallowed.
+    unprovisioned row) must NEVER surface on socket teardown — it is swallowed. It
+    is logged at WARNING though (B4): this is the capture that makes a whole
+    session's work durable, so losing it silently is indistinguishable from data
+    loss on the next open.
     """
     try:
         if project_id and daytona_id:
@@ -287,10 +338,12 @@ async def snapshot_on_disconnect(
                 workspace_id, user_id, row_id, client=client
             )
     except Exception:  # noqa: BLE001 — teardown must never raise on a snapshot miss
-        logger.debug(
-            "websandbox.snapshot on disconnect failed for row=%s project=%s",
+        logger.warning(
+            "websandbox.snapshot on disconnect failed for row=%s project=%s daytona=%s — "
+            "this session's workspace was NOT captured",
             row_id,
             project_id,
+            daytona_id,
             exc_info=True,
         )
 

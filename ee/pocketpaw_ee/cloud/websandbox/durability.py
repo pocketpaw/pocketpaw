@@ -79,11 +79,30 @@
 # read path ``restore_project`` uses, same ``_require_s3_for_project_store``
 # fail-closed guard on the write, same ``uploads=`` DI seam. ADDITIVE: nothing
 # above is touched.
+#
+# Changed 2026-07-25 (B4, feat/code-cross-runtime-restore): ``read_project_overlay``
+# is now TWO-TIER, closing a cross-runtime data-visibility bug. WHY: a project can
+# open in either runtime, but the two tiers were read asymmetrically — work done in
+# a Daytona VM ends up in ``snapshot_file_id`` (and ``set_project_snapshot`` CLEARS
+# the overlay, correctly, because the tar supersedes it), while the in-tab read-back
+# looked ONLY at ``overlay``. So Daytona → disconnect → reopen IN-TAB returned ``{}``
+# and the browser re-materialized the bare starter scaffold: the user's work looked
+# deleted while it sat safe in S3 inside a tarball no browser can read. The read-back
+# now composes the SAME two tiers ``restore_project`` replays into a VM — snapshot
+# tar expanded in memory as the baseline, overlay applied on top (freshest wins) —
+# so whatever either runtime saved is retrievable from either runtime. It is a READ
+# -side fix only: no write path and no snapshot semantics changed. Two concerns the
+# VM path doesn't have are handled here because the payload crosses a JSON wire into
+# a browser: regenerable trees (``node_modules``/``.git``/build output, which the tar
+# carries with no excludes) are filtered out, and tar members are treated as
+# UNTRUSTED — absolute/traversing names and non-regular entries (symlinks, hardlinks,
+# devices) are skipped rather than materialized.
 from __future__ import annotations
 
 import io
 import logging
 import os
+import tarfile
 from pathlib import Path
 from typing import Any
 
@@ -908,25 +927,170 @@ def _overlay_max_files() -> int:
     return count
 
 
-def _require_safe_rel_path(rel_path: str) -> str:
-    """Normalize a client-supplied overlay path; reject anything that escapes.
+def _normalize_rel_path(rel_path: str) -> str | None:
+    """Normalize a path to the overlay's relpath shape; ``None`` if it escapes.
 
-    The VM paths came out of the ``file.write`` jail; these come straight off the
-    wire, so the jail check moves to the write boundary. Leading slashes and
-    ``./`` segments are stripped (a client-side FS spells the same file both
-    ways, and the overlay key must be stable or a later delete won't match the
-    earlier write), while an empty path or any ``..`` traversal is a clean 422 —
-    the overlay key becomes a real path again on both restore paths
-    (``_overlay_abs_path`` in a VM, the client's FS in a tab).
+    ONE jail, two callers with different failure modes — the write boundary turns
+    ``None`` into a 422 (``_require_safe_rel_path``), the snapshot expander skips
+    the entry — so there is a single definition of "a safe project-relative path".
+    Leading slashes and ``./`` segments are stripped (a client-side FS spells the
+    same file both ways, and the overlay key must be stable or a later delete
+    won't match the earlier write); an empty path or any ``..`` traversal escapes.
     """
     candidate = (rel_path or "").strip().lstrip("/")
     segments = [s for s in candidate.split("/") if s not in ("", ".")]
     if not segments or any(s == ".." for s in segments):
+        return None
+    return "/".join(segments)
+
+
+def _require_safe_rel_path(rel_path: str) -> str:
+    """Normalize a client-supplied overlay path; reject anything that escapes.
+
+    The VM paths came out of the ``file.write`` jail; these come straight off the
+    wire, so the jail check moves to the write boundary. An empty path or any
+    ``..`` traversal is a clean 422 — the overlay key becomes a real path again on
+    both restore paths (``_overlay_abs_path`` in a VM, the client's FS in a tab).
+    """
+    safe = _normalize_rel_path(rel_path)
+    if safe is None:
         raise ValidationError(
             "codeproject.invalid_file_path",
             f"{rel_path!r} is not a valid project-relative file path",
         )
-    return "/".join(segments)
+    return safe
+
+
+# Path segments dropped when a snapshot tar is expanded for the BROWSER read-back.
+# ``snapshot_project`` tars the whole workspace with no excludes (right for a VM
+# restore, which wants a byte-identical tree), but every tree here is regenerable
+# or meaningless in a tab: ``npm install`` restores ``node_modules``, a build
+# restores ``dist``/``build``/``.next``/``.svelte-kit``, ``.turbo``/``.cache``/
+# ``coverage`` are derived artifacts, and ``.git`` is a binary object store the
+# in-tab runtime has no client for. They are also the bulk of the bytes — shipping
+# them through a JSON string map would be hundreds of MB the browser throws away.
+# Not applied to the VM restore path, which legitimately wants the whole tree.
+_SNAPSHOT_EXCLUDED_SEGMENTS = frozenset(
+    {
+        "node_modules",
+        ".git",
+        "dist",
+        "build",
+        ".next",
+        ".svelte-kit",
+        ".turbo",
+        ".cache",
+        "coverage",
+    }
+)
+
+
+def _is_excluded_snapshot_path(rel_path: str) -> bool:
+    """True when any segment of ``rel_path`` names a regenerable/irrelevant tree."""
+    return any(seg in _SNAPSHOT_EXCLUDED_SEGMENTS for seg in rel_path.split("/"))
+
+
+def _tar_member_rel_path(name: str) -> str | None:
+    """Jail a TAR member name into the overlay's relpath shape; ``None`` to skip.
+
+    A tar is untrusted input: it is expanded into the user's in-tab filesystem, so
+    a member that names an absolute path or climbs out of the workspace must never
+    become a write. Snapshot tars are built with ``-C <workdir> .``, so ordinary
+    members arrive as ``./src/app.ts`` and normalize to the same ``src/app.ts`` key
+    the overlay uses — which is what lets the two tiers merge by path at all.
+    Backslashes are rejected outright rather than normalized: they are not a path
+    separator here, so a ``..\\..\\x`` member would slip past the segment check.
+    """
+    raw = (name or "").strip()
+    if raw.startswith("/") or "\\" in raw:
+        return None
+    return _normalize_rel_path(raw)
+
+
+def _expand_snapshot_tar(data: bytes, *, project_id: str, cap: int) -> tuple[dict[str, str], int]:
+    """Expand a snapshot tarball in memory into ``({relpath: text}, total bytes)``.
+
+    The BASELINE tier of the browser read-back — the in-memory counterpart of
+    ``restore_project``'s ``tar -xzf`` into a VM. Written by ``tar -czf`` so the
+    blob is gzipped; ``r:*`` auto-detects anyway.
+
+    Three classes of member never make it into the payload:
+      * non-regular entries (directories, symlinks, hardlinks, devices) — a
+        directory carries no content and a link is a tar-smuggling vector with no
+        meaning in a browser FS;
+      * unsafe names (absolute or ``..``-traversing) and regenerable trees
+        (``_SNAPSHOT_EXCLUDED_SEGMENTS``);
+      * non-UTF-8 blobs — the transport is a JSON string map, so a binary file
+        can't be carried. Skipped with a warning rather than failing the whole
+        restore, mirroring how the overlay read-back tolerates one bad entry.
+
+    The byte cap is enforced from the member HEADER before anything is read, so a
+    huge (or zip-bomb) snapshot bounds memory instead of consuming it. Exceeding it
+    raises LOUD (413) — see ``read_project_overlay`` for why a truncated payload is
+    the one outcome to avoid.
+    """
+    files: dict[str, str] = {}
+    total = 0
+    skipped_unsafe = skipped_excluded = skipped_binary = 0
+    # A corrupt or truncated archive raises on open OR mid-iteration; both are the
+    # same failure — the baseline is unreadable — and both must be LOUD. Returning
+    # the overlay alone would look like a project that lost most of its files.
+    # ``EOFError``/``OSError`` join ``TarError`` because the decompressor, not
+    # tarfile, is what fails on a truncated gzip stream (``gzip.BadGzipFile`` is an
+    # OSError, a half-written blob raises EOFError).
+    try:
+        archive = tarfile.open(fileobj=io.BytesIO(data), mode="r:*")
+        with archive:
+            for member in archive:
+                if not member.isfile():
+                    continue
+                rel_path = _tar_member_rel_path(member.name)
+                if rel_path is None:
+                    skipped_unsafe += 1
+                    logger.warning(
+                        "codeproject.read_overlay: skipping unsafe snapshot entry for "
+                        "project=%s name=%r",
+                        project_id,
+                        member.name,
+                    )
+                    continue
+                if _is_excluded_snapshot_path(rel_path):
+                    skipped_excluded += 1
+                    continue
+                if total + member.size > cap:
+                    raise CloudError(
+                        413,
+                        "codeproject.overlay_too_large",
+                        f"Project files total over the {cap / 1024 / 1024:.0f} MB limit",
+                    )
+                handle = archive.extractfile(member)
+                blob = handle.read() if handle is not None else b""
+                try:
+                    files[rel_path] = blob.decode("utf-8")
+                except UnicodeDecodeError:
+                    skipped_binary += 1
+                    continue
+                total += len(blob)
+    except (tarfile.TarError, EOFError, OSError) as exc:
+        raise with_cause(
+            CloudError(
+                502,
+                "codeproject.snapshot_unreadable",
+                "The project's stored snapshot could not be read",
+            ),
+            exc,
+        ) from exc
+    logger.debug(
+        "codeproject.read_overlay: snapshot expanded for project=%s -> %d file(s), %d bytes "
+        "(skipped %d excluded, %d binary, %d unsafe)",
+        project_id,
+        len(files),
+        total,
+        skipped_excluded,
+        skipped_binary,
+        skipped_unsafe,
+    )
+    return files, total
 
 
 async def put_project_file(
@@ -997,27 +1161,44 @@ async def read_project_overlay(
     *,
     uploads: Any = None,
 ) -> dict[str, str]:
-    """Read a project's whole overlay back as ``{relpath: content}``.
+    """Read a project's whole durable state back as ``{relpath: content}``.
 
-    The restore payload for the in-tab runtime, and the counterpart of
-    ``restore_project``'s tier-2 replay: instead of writing each blob into a VM,
-    it returns them to the client, which re-materializes the scaffold baseline
-    and replays this map over it. Owner-scoped through ``get_project`` (a project
-    the caller doesn't own reads as ``NotFound`` before any blob is touched), and
-    each blob comes back through the same owner-scoped ``stream(...)`` path
-    ``_download_snapshot`` wraps — a foreign or vanished blob can't be read out
-    of this endpoint.
+    The restore payload for the in-tab runtime, and the read-side counterpart of
+    ``restore_project`` — which is exactly why it composes the SAME two tiers, in
+    the same order, instead of writing them into a VM:
+      1. ``snapshot_file_id`` — the full-workspace tarball a Daytona session wrote
+         on disconnect. Fetched from blob storage and expanded IN MEMORY as the
+         baseline, minus the trees a browser can't use (see
+         ``_expand_snapshot_tar``).
+      2. ``overlay`` — the per-file write-through tier, applied ON TOP so the
+         freshest bytes win, exactly as the VM replay orders them.
 
-    Both caps fail LOUD rather than truncating: a silently partial restore looks
-    like the user's files were deleted, which is worse than a 413 that says the
-    project outgrew the in-browser runtime. Individually unreadable entries (a
-    reaped blob, a non-UTF-8 file the JSON transport can't carry) are skipped
-    with a warning instead — one bad file must not sink the rest, the same rule
-    ``restore_project`` replays under.
+    Both tiers are read because a project is not bound to one runtime (B4). Reading
+    only the overlay meant a project last touched in DAYTONA came back empty here —
+    ``set_project_snapshot`` clears the overlay once its contents are inside the tar
+    — so reopening it in a tab re-materialized the bare scaffold and the user's work
+    looked deleted while it sat safe in S3. A project that never saw a VM has no
+    snapshot and this collapses to the overlay-only behaviour it always had.
+
+    Owner-scoped through ``get_project`` (a project the caller doesn't own reads as
+    ``NotFound`` before any blob is touched), and every blob — tar and overlay entry
+    alike — comes back through the same owner-scoped ``stream(...)`` path
+    ``_download_snapshot`` wraps, so a foreign or vanished blob can't be read out of
+    this endpoint.
+
+    Caps stay LOUD (413) rather than truncating, INCLUDING for the snapshot-derived
+    baseline: filtering already removed everything that isn't user work, so what is
+    left over the cap IS the user's project, and a silently partial restore looks
+    like their files were deleted. A 413 that says the project outgrew the in-browser
+    runtime is recoverable — it still opens in the VM runtime, whose restore has no
+    such cap. What IS dropped silently is only the non-user-work classes: excluded
+    trees, and individually unreadable/undecodable entries (a reaped blob, a binary
+    file the JSON transport can't carry), which are skipped with a warning so one bad
+    file doesn't sink the rest — the same rule ``restore_project`` replays under.
     """
     project = await codeproject_service.get_project(workspace_id, user_id, project_id)
     overlay = project.overlay or {}
-    if not overlay:
+    if not project.snapshot_file_id and not overlay:
         return {}
 
     max_files = _overlay_max_files()
@@ -1030,8 +1211,18 @@ async def read_project_overlay(
 
     up = uploads if uploads is not None else build_uploads()
     cap = _overlay_max_bytes()
-    total = 0
     files: dict[str, str] = {}
+    total = 0
+
+    # Tier 1 — the snapshot tar (baseline). A download or expansion failure raises:
+    # the baseline going missing is not "one bad file", it is most of the project.
+    if project.snapshot_file_id:
+        snapshot_bytes = await _download_snapshot(
+            up, project.snapshot_file_id, workspace_id=workspace_id, user_id=user_id
+        )
+        files, total = _expand_snapshot_tar(snapshot_bytes, project_id=project_id, cap=cap)
+
+    # Tier 2 — the overlay, applied on top (freshest wins).
     for rel_path in sorted(overlay):
         file_id = overlay[rel_path]
         try:
@@ -1044,26 +1235,39 @@ async def read_project_overlay(
                 file_id,
             )
             continue
-        total += len(data)
-        if total > cap:
-            raise CloudError(
-                413,
-                "codeproject.overlay_too_large",
-                f"Project files total over the {cap / 1024 / 1024:.0f} MB limit",
-            )
         try:
-            files[rel_path] = data.decode("utf-8")
+            text = data.decode("utf-8")
         except UnicodeDecodeError:
             logger.warning(
                 "codeproject.read_overlay: skipping non-UTF-8 entry for project=%s path=%r",
                 project_id,
                 rel_path,
             )
+            continue
+        # The baseline copy is superseded, so its bytes leave the budget with it —
+        # a file present in both tiers must not be counted twice against the cap.
+        superseded = len(files[rel_path].encode("utf-8")) if rel_path in files else 0
+        total += len(data) - superseded
+        if total > cap:
+            raise CloudError(
+                413,
+                "codeproject.overlay_too_large",
+                f"Project files total over the {cap / 1024 / 1024:.0f} MB limit",
+            )
+        files[rel_path] = text
+
+    if len(files) > max_files:
+        raise CloudError(
+            413,
+            "codeproject.overlay_too_many_files",
+            f"Project holds {len(files)} persisted files, over the {max_files} file limit",
+        )
     logger.debug(
-        "codeproject.read_overlay: project=%s -> %d file(s), %d bytes",
+        "codeproject.read_overlay: project=%s -> %d file(s), %d bytes (snapshot=%s)",
         project_id,
         len(files),
         total,
+        project.snapshot_file_id,
     )
     return files
 
