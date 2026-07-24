@@ -157,10 +157,43 @@ class AddDomainRequest(BaseModel):
 class CreateDbRequest(BaseModel):
     """Create a database service and link it to the app.
 
-    ``service`` defaults to ``<app-name>-db`` when omitted.
+    ``service`` defaults to ``<app-name>-db`` when omitted. ``db_type`` selects
+    the Dokku plugin (postgres / redis / mongo); it defaults to ``mongo`` so the
+    SHIP-3 behaviour is unchanged for callers that omit it.
     """
 
     service: str | None = None
+    db_type: Literal["postgres", "redis", "mongo"] = "mongo"
+
+
+class SetScaleRequest(BaseModel):
+    """Set the app's process scale (``PUT /ship/apps/{id}/scale``, SHIP-17).
+
+    ``scale`` maps a Procfile process type to a container count, e.g.
+    ``{"web": 2, "worker": 1}``. Counts are non-negative; a process set to 0 is
+    stopped. Process names use the same POSIX-ish shape Dokku accepts.
+    """
+
+    scale: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("scale")
+    @classmethod
+    def _valid_scale(cls, value: dict[str, int]) -> dict[str, int]:
+        for proc, count in value.items():
+            if not re.match(r"^[a-z][a-z0-9_-]*$", proc):
+                raise ValueError(f"invalid process name: {proc!r}")
+            if count < 0:
+                raise ValueError(f"process count must be >= 0, got {count} for {proc!r}")
+        return value
+
+
+class SetChecksRequest(BaseModel):
+    """Configure zero-downtime deploy checks (``PUT /ship/apps/{id}/checks``,
+    SHIP-17). ``zero_downtime`` toggles Dokku's built-in checks; an optional
+    ``healthcheck_path`` is the HTTP path the check hits."""
+
+    zero_downtime: bool = True
+    healthcheck_path: str = Field(default="", max_length=512)
 
 
 class SetSourceRequest(BaseModel):
@@ -236,12 +269,23 @@ class BoxOut(BaseModel):
     price_monthly: float | None = None
 
 
+class DatabaseOut(BaseModel):
+    """One linked database on an app. ``env_var`` is the NAME of the variable the
+    plugin's link injected (e.g. ``DATABASE_URL``) — the connection string itself
+    is a secret and never crosses the wire."""
+
+    name: str
+    db_type: str
+    env_var: str
+
+
 class AppOut(BaseModel):
     """One app on a box. FROZEN — see the module comment.
 
-    ``source_kind`` / ``repo_url`` / ``repo_ref`` (SHIP-14) are additive with
-    defaults. There is deliberately NO token field — the private-repo credential
-    is write-only and never crosses the wire.
+    ``source_kind`` / ``repo_url`` / ``repo_ref`` (SHIP-14) and ``databases`` /
+    ``scale`` / ``zero_downtime`` / ``healthcheck_path`` (SHIP-17) are additive
+    with defaults. There is deliberately NO token field (the private-repo
+    credential is write-only) and no DB connection string (secret, box-only).
     """
 
     id: str
@@ -252,6 +296,10 @@ class AppOut(BaseModel):
     source_kind: Literal["image", "git"] = "image"
     repo_url: str = ""
     repo_ref: str = "main"
+    databases: list[DatabaseOut] = Field(default_factory=list)
+    scale: dict[str, int] = Field(default_factory=dict)
+    zero_downtime: bool = True
+    healthcheck_path: str = ""
 
 
 class DeployOut(BaseModel):

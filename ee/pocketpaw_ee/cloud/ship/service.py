@@ -70,6 +70,7 @@ from pocketpaw_ee.cloud.ship.dto import (
     CreateAppRequest,
     CreateBoxRequest,
     CreateDbRequest,
+    DatabaseOut,
     DbOut,
     DeployOut,
     DomainListOut,
@@ -81,7 +82,9 @@ from pocketpaw_ee.cloud.ship.dto import (
     LogsOut,
     MetricsOut,
     PendingApprovalOut,
+    SetChecksRequest,
     SetEnvRequest,
+    SetScaleRequest,
     SetSourceRequest,
 )
 from pocketpaw_ee.ship_engine.port import CommandFailed
@@ -400,11 +403,13 @@ async def create_db(
     factory = session_factory or ship_engine.box_session
     try:
         async with factory(box) as session:
-            result = await session.engine.db_create(app.name, service)
+            result = await session.engine.db_create(app.name, service, body.db_type)
     except ship_engine.ENGINE_FAILURES as exc:
         raise _engine_conflict("ship.db_failed", exc) from exc
 
-    app = await store.record_app_db(app, service=result.service, env_var=result.exposed_env_var)
+    app = await store.record_app_db(
+        app, service=result.service, env_var=result.exposed_env_var, db_type=body.db_type
+    )
     await emit(ShipAppUpdated(data={**_app_event_payload(_app_view(app)), "user_id": user_id}))
     return DbView(
         workspace_id=workspace_id,
@@ -413,6 +418,58 @@ async def create_db(
         service=result.service,
         env_var=result.exposed_env_var,
     )
+
+
+async def set_scale(
+    workspace_id: str,
+    user_id: str,
+    app_id: str,
+    body: SetScaleRequest,
+    *,
+    session_factory: ship_engine.BoxSessionFactory | None = None,
+) -> AppView:
+    """Set the app's per-process container counts (SHIP-17, ``ps:scale``)."""
+    body = SetScaleRequest.model_validate(body)
+    app, box = await _require_app_on_ready_box(workspace_id, app_id)
+    factory = session_factory or ship_engine.box_session
+    try:
+        async with factory(box) as session:
+            await session.engine.scale(app.name, body.scale)
+    except ship_engine.ENGINE_FAILURES as exc:
+        raise _engine_conflict("ship.scale_failed", exc) from exc
+
+    app = await store.set_app_scale(app, scale=body.scale)
+    view = _app_view(app)
+    await emit(ShipAppUpdated(data={**_app_event_payload(view), "user_id": user_id}))
+    return view
+
+
+async def set_checks(
+    workspace_id: str,
+    user_id: str,
+    app_id: str,
+    body: SetChecksRequest,
+    *,
+    session_factory: ship_engine.BoxSessionFactory | None = None,
+) -> AppView:
+    """Configure zero-downtime deploy checks (SHIP-17, Dokku ``checks``)."""
+    body = SetChecksRequest.model_validate(body)
+    app, box = await _require_app_on_ready_box(workspace_id, app_id)
+    factory = session_factory or ship_engine.box_session
+    try:
+        async with factory(box) as session:
+            await session.engine.set_healthcheck(
+                app.name, enabled=body.zero_downtime, path=body.healthcheck_path
+            )
+    except ship_engine.ENGINE_FAILURES as exc:
+        raise _engine_conflict("ship.checks_failed", exc) from exc
+
+    app = await store.set_app_checks(
+        app, zero_downtime=body.zero_downtime, healthcheck_path=body.healthcheck_path
+    )
+    view = _app_view(app)
+    await emit(ShipAppUpdated(data={**_app_event_payload(view), "user_id": user_id}))
+    return view
 
 
 async def get_logs(
@@ -564,6 +621,12 @@ def app_to_wire(view: AppView) -> AppOut:
         source_kind=view.source_kind,  # type: ignore[arg-type] — the doc's Literal is the same set
         repo_url=view.repo_url,
         repo_ref=view.repo_ref,
+        databases=[
+            DatabaseOut(name=n, db_type=t, env_var=v) for (n, t, v) in view.databases
+        ],
+        scale=dict(view.scale),
+        zero_downtime=view.zero_downtime,
+        healthcheck_path=view.healthcheck_path,
     )
 
 
@@ -654,6 +717,10 @@ def _app_view(app: ShipApp) -> AppView:
         source_kind=app.source_kind,
         repo_url=app.repo_url,
         repo_ref=app.repo_ref,
+        databases=tuple((d.name, d.db_type, d.env_var) for d in app.databases),
+        scale=dict(app.scale),
+        zero_downtime=app.zero_downtime,
+        healthcheck_path=app.healthcheck_path,
         pending_destroy_proposal_id=app.pending_destroy_proposal_id,
     )
 

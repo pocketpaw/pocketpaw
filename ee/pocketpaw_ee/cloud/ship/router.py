@@ -60,7 +60,9 @@ from pocketpaw_ee.cloud.ship.dto import (
     LogsOut,
     MetricsOut,
     PendingApprovalOut,
+    SetChecksRequest,
     SetEnvRequest,
+    SetScaleRequest,
     SetSourceRequest,
 )
 
@@ -212,6 +214,30 @@ async def create_db(
         workspace_id, ctx.user_id, app_id, body or CreateDbRequest()
     )
     return ship_service.db_to_wire(view)
+
+
+@router.put("/apps/{app_id}/scale", response_model=AppOut)
+async def set_app_scale(
+    app_id: str,
+    body: SetScaleRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> AppOut:
+    """Set the app's per-process container counts (SHIP-17, ``ps:scale``)."""
+    workspace_id = _require_workspace(ctx)
+    view = await ship_service.set_scale(workspace_id, ctx.user_id, app_id, body)
+    return ship_service.app_to_wire(view)
+
+
+@router.put("/apps/{app_id}/checks", response_model=AppOut)
+async def set_app_checks(
+    app_id: str,
+    body: SetChecksRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> AppOut:
+    """Configure zero-downtime deploy checks (SHIP-17, Dokku ``checks``)."""
+    workspace_id = _require_workspace(ctx)
+    view = await ship_service.set_checks(workspace_id, ctx.user_id, app_id, body)
+    return ship_service.app_to_wire(view)
 
 
 @router.get("/apps/{app_id}/logs", response_model=LogsOut)

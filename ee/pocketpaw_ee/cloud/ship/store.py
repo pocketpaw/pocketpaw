@@ -38,6 +38,7 @@ from bson.errors import InvalidId
 from pocketpaw_ee.cloud._core import crypto
 from pocketpaw_ee.cloud.models.ship import (
     ShipApp,
+    ShipAppDatabase,
     ShipAppDomain,
     ShipAppStatus,
     ShipBox,
@@ -270,14 +271,46 @@ async def record_app_domain(app: ShipApp, *, domain: str, tls_enabled: bool, url
     return app
 
 
-async def record_app_db(app: ShipApp, *, service: str, env_var: str) -> ShipApp:
-    """Record the linked database service + the env var NAME the link injected.
+async def record_app_db(
+    app: ShipApp, *, service: str, env_var: str, db_type: str = "mongo"
+) -> ShipApp:
+    """Record a linked database service + the env var NAME the link injected.
 
     The connection string is a secret and is never stored — SHIP-1's ``DbResult``
-    deliberately exposes only the variable's name.
+    deliberately exposes only the variable's name. SHIP-17: appends to the
+    ``databases`` list (the multi-db record) AND keeps the scalar ``db_service``/
+    ``db_env_var`` pointing at the first-linked db for back-compat. A re-link of
+    the same service name refreshes its entry rather than duplicating it.
     """
-    app.db_service = service
-    app.db_env_var = env_var
+    if not app.db_service:
+        app.db_service = service
+        app.db_env_var = env_var
+    for existing in app.databases:
+        if existing.name == service:
+            existing.db_type = db_type
+            existing.env_var = env_var
+            break
+    else:
+        app.databases.append(
+            ShipAppDatabase(name=service, db_type=db_type, env_var=env_var)
+        )
+    await app.save()
+    return app
+
+
+async def set_app_scale(app: ShipApp, *, scale: dict[str, int]) -> ShipApp:
+    """Persist the app's process scale (SHIP-17). Replaces the map wholesale."""
+    app.scale = dict(scale)
+    await app.save()
+    return app
+
+
+async def set_app_checks(
+    app: ShipApp, *, zero_downtime: bool, healthcheck_path: str
+) -> ShipApp:
+    """Persist the app's zero-downtime + healthcheck settings (SHIP-17)."""
+    app.zero_downtime = zero_downtime
+    app.healthcheck_path = healthcheck_path
     await app.save()
     return app
 

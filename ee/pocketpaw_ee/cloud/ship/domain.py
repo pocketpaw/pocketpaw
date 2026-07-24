@@ -73,6 +73,12 @@ class AppView:
     source_kind: str = "image"
     repo_url: str = ""
     repo_ref: str = "main"
+    # Runtime config (SHIP-17). ``databases`` carries (name, db_type, env_var)
+    # tuples — never a connection string. ``scale`` is process -> count.
+    databases: tuple[tuple[str, str, str], ...] = ()
+    scale: dict[str, int] = field(default_factory=dict)
+    zero_downtime: bool = True
+    healthcheck_path: str = ""
     pending_destroy_proposal_id: str | None = None
 
 

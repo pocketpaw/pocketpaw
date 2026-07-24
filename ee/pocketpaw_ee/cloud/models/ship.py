@@ -168,6 +168,17 @@ class ShipAppDomain(BaseModel):
     tls_enabled: bool = False
 
 
+class ShipAppDatabase(BaseModel):
+    """One database linked to an app (SHIP-17). ``env_var`` is the NAME of the
+    variable the plugin's ``:link`` injected (e.g. ``DATABASE_URL``) — the
+    connection string is a secret and is NEVER stored. A sub-document (not a bare
+    string) because the /ship console shows type + injected var per database."""
+
+    name: str
+    db_type: str
+    env_var: str
+
+
 # An env var's deploy scope: applied to both deploy kinds, or only to production
 # / only to preview deploys. The deploy-time merge filters on it (SHIP-9).
 ShipEnvScope = Literal["both", "prod", "preview"]
@@ -247,8 +258,20 @@ class ShipApp(TimestampedDocument):
     domains: list[ShipAppDomain] = Field(default_factory=list)
     # The linked database service name + the env var name the link injected.
     # The connection string itself is a secret and is NEVER stored.
+    # (SHIP-3 scalar fields — kept for the first-linked db; SHIP-17's
+    # ``databases`` list is the multi-db record the console reads.)
     db_service: str = ""
     db_env_var: str = ""
+    # SHIP-17: every linked database (postgres / redis / mongo), the console's
+    # source of truth. Additive — the scalars above stay for back-compat.
+    databases: list[ShipAppDatabase] = Field(default_factory=list)
+    # SHIP-17: process scale (Procfile process type -> container count). Empty =
+    # Dokku's default (one web). Applied via ``ps:scale``.
+    scale: dict[str, int] = Field(default_factory=dict)
+    # SHIP-17: zero-downtime deploy checks (Dokku's ``checks`` plugin, on by
+    # default) + an optional HTTP health path.
+    zero_downtime: bool = True
+    healthcheck_path: str = ""
     # Lifecycle state (see ``ShipAppStatus``).
     status: ShipAppStatus = "created"
     # Set when a DELETE parked a teardown for human approval (SHIP-3); SHIP-4
