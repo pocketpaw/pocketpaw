@@ -30,6 +30,17 @@ needed).
 Relation to WebSandbox: WebSandbox stays the EPHEMERAL runtime row (Daytona VM +
 lifecycle); CodeProject is the durable owner and points at the current one via
 ``current_sandbox_id`` (the WebSandbox row id), null when none is live.
+
+Modified 2026-07-24 (feat/code-durable-project-store): added ``overlay`` — the
+incremental per-file durability tier, keyed on the PROJECT rather than the
+ephemeral WebSandbox row. Mirrors ``WebSandbox.overlay`` (``relpath ->
+FileRecord id``): each mirrored editor save records an entry here, ``restore``
+replays them onto a fresh clone, and ``set_project_snapshot`` CLEARS it (a full
+snapshot supersedes the overlay, and clearing on snapshot is what avoids
+replaying a stale write over a since-deleted file). This makes a project-keyed
+durable store — snapshot pointer + overlay — that round-trips through S3
+independent of any runtime. Additive: the sandbox-keyed WebSandbox durability
+path is unchanged. No new index — read only via the owner-scoped project row.
 """
 
 from __future__ import annotations
@@ -72,6 +83,13 @@ class CodeProject(Document):
     # The project's files live HERE between sandboxes — this is why the project
     # survives VM reaping. Null until the first backup.
     snapshot_file_id: str | None = None
+    # The write-through per-file durability overlay, keyed on the PROJECT (mirrors
+    # ``WebSandbox.overlay``): ``relpath -> FileRecord id`` for each editor-saved
+    # file mirrored to blob storage since the last full project snapshot. Replayed
+    # onto a fresh clone on restore; cleared by ``set_project_snapshot`` (a full
+    # snapshot supersedes it). Null until the first mirror. No new index — read
+    # only via the owner-scoped project row.
+    overlay: dict[str, str] = Field(default_factory=dict)
     # The CURRENT ephemeral sandbox (a WebSandbox row id), or null when none is
     # live (never opened, or the VM was reaped). ``open_project`` resolves this.
     current_sandbox_id: str | None = None

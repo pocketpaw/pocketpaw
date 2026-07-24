@@ -49,6 +49,21 @@
 # Both take DI seams (``client=None`` → get_daytona_client, ``uploads=None`` →
 # a per-call EEUploadService) so tests inject fakes and never hit real Daytona
 # or S3.
+#
+# Changed 2026-07-24 (F, feat/code-durable-project-store): added the PROJECT-KEYED
+# sibling path — ``snapshot_project`` / ``restore_project`` / ``mirror_file_to_project``
+# / ``drop_project_overlay`` / ``move_project_overlay``. Same S3 vehicle, same VM
+# tar/untar mechanics, same DI seams; only the POINTER anchor differs — these
+# read/write the snapshot + overlay via ``codeproject/service`` (on the durable
+# CodeProject row) instead of ``websandbox/service`` (on the ephemeral WebSandbox
+# row), so a project's files round-trip through blob storage independent of any
+# runtime and independent of the WebSandbox row. The VM to snapshot/restore is
+# passed as an explicit Daytona ``sandbox_id`` (not resolved from a WebSandbox
+# row), the runtime-agnostic seam B2 will wire up. ADDITIVE: the sandbox-keyed
+# functions above are untouched. The project-keyed durable WRITE path
+# (``snapshot_project`` / ``mirror_file_to_project``) hard-requires S3 in cloud
+# via ``_require_s3_for_project_store`` — silent non-persistence to local disk is
+# worse than a loud 503.
 from __future__ import annotations
 
 import io
@@ -58,11 +73,21 @@ from pathlib import Path
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import CloudError, ConflictError, with_cause
+from pocketpaw_ee.cloud.codeproject import service as codeproject_service
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
+from pocketpaw_ee.cloud.shared.db import is_multi_tenant_cloud
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
 from pocketpaw_ee.cloud.websandbox.constants import WEBSANDBOX_WORKDIR
 
 logger = logging.getLogger(__name__)
+
+# Blob-storage folders for the project-keyed durable store — grouped separately
+# from the sandbox-keyed ``/websandbox-*`` folders so a tenant's project
+# snapshots/overlay are distinguishable in their Files.
+_PROJECT_SNAPSHOT_FOLDER = "/code-project-snapshots"
+_PROJECT_OVERLAY_FOLDER = "/code-project-overlay"
+
+_TRUTHY = {"1", "true", "yes", "on"}
 
 # The in-VM staging path for the tarball (outside the workspace dir so it never
 # tars itself and a stale copy never re-enters a future snapshot).
@@ -476,11 +501,342 @@ async def move_overlay(
     await websandbox_service.move_overlay_entry(workspace_id, user_id, row_id, src_rel, dst_rel)
 
 
+# ===========================================================================
+# Project-keyed durable store (F, feat/code-durable-project-store).
+#
+# The durable half of the /code build-and-persist loop. Same S3 vehicle and VM
+# tar/untar as the sandbox-keyed path above; the ONLY difference is the pointer
+# anchor — snapshot + overlay live on the durable ``CodeProject`` row (via
+# ``codeproject/service``), so a project's files survive VM reaping and any
+# WebSandbox row. The VM is passed as an explicit Daytona ``sandbox_id`` rather
+# than resolved from a WebSandbox row, keeping this independent of the ephemeral
+# runtime row (B2 will wire the resolution). Tenancy is enforced by the
+# owner-scoped ``get_project`` (a project the caller doesn't own reads as
+# NotFound).
+# ===========================================================================
+
+
+def _require_s3_for_project_store() -> None:
+    """Hard-require S3-backed blob storage for the durable project store in cloud.
+
+    The ART-4 boot guard (``uploads/bootstrap.verify_cloud_storage_backend``) only
+    WARNs on a non-s3 adapter unless ``POCKETPAW_REQUIRE_S3_IN_CLOUD`` is set. For
+    the durable PROJECT store a warn is not enough: a project-keyed write that
+    lands on the box's local disk instead of the tenant's object store looks like
+    it persisted but is gone with the container — silent non-persistence, worse
+    than a loud failure. So the project-keyed durable WRITE path fails CLOSED —
+    a clean 503 ``CloudError`` (not a crash) — when running in cloud
+    (``is_multi_tenant_cloud()``, the same signal the jail and ART-4 guard read)
+    and ``POCKETPAW_UPLOAD_ADAPTER`` is not ``s3``.
+
+    No-op OFF multi-tenant cloud (OSS / dedicated installs never initialized the
+    cloud DB): there is no tenant object store to require, so local-disk uploads
+    are correct there and this must not raise.
+    """
+    if not is_multi_tenant_cloud():
+        return
+    adapter = os.environ.get("POCKETPAW_UPLOAD_ADAPTER", "local").strip().lower()
+    if adapter == "s3":
+        return
+    raise CloudError(
+        503,
+        "codeproject.durable_store_requires_s3",
+        "The durable project store requires S3-backed blob storage in cloud "
+        f"(POCKETPAW_UPLOAD_ADAPTER={adapter!r}, expected 's3'); a local adapter "
+        "writes project snapshots to the box's disk, which vanishes with the "
+        "container. Set POCKETPAW_UPLOAD_ADAPTER=s3 and the S3_* settings.",
+    )
+
+
+async def _upload_project_blob(
+    uploads: Any,
+    data: bytes,
+    *,
+    workspace_id: str,
+    user_id: str,
+    filename: str,
+    folder: str,
+    content_type: str,
+) -> str:
+    """Land bytes in the tenant's blob storage; return the FileRecord id.
+
+    The project-keyed analog of ``_upload_snapshot`` / ``mirror_file``'s inline
+    upload — a single wrapper both project write paths share, so the sandbox-keyed
+    helpers stay untouched. Wraps the bytes in a Starlette ``UploadFile`` (a dict
+    ``headers`` carrying the declared content-type is all ``UploadFile.content_type``
+    reads) and calls the workspace + owner-scoped ``upload`` (the ART-4 S3 path).
+    """
+    from fastapi import UploadFile
+
+    upload = UploadFile(
+        file=io.BytesIO(data),
+        filename=filename,
+        headers={"content-type": content_type},  # type: ignore[arg-type]
+    )
+    rec = await uploads.upload(
+        upload,
+        owner_id=user_id,
+        chat_id=None,
+        workspace=workspace_id,
+        folder_path=folder,
+    )
+    return rec.id
+
+
+async def snapshot_project(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    sandbox_id: str,
+    *,
+    client: DaytonaClient | None = None,
+    uploads: Any = None,
+) -> str:
+    """Snapshot a project's live VM workspace to blob storage; return the pointer.
+
+    Mirrors ``snapshot_workspace`` but anchors the pointer on the durable
+    ``CodeProject`` row. Resolves the project owner-scoped (``get_project`` raises
+    ``NotFound`` for a project the caller doesn't own), then ``tar -czf`` the
+    workspace dir in ``sandbox_id`` → ``download_file`` the tarball → size-cap →
+    upload to S3 (folder ``/code-project-snapshots``) → ``set_project_snapshot``
+    the returned FileRecord id (which also clears the overlay). Returns that id.
+
+    The ``sandbox_id`` is the live Daytona VM to snapshot, passed explicitly (not
+    resolved from a WebSandbox row) so this stays independent of the ephemeral
+    runtime row. Fails CLOSED on a non-s3 upload adapter in cloud before any VM
+    op. A tarball over the size cap raises a clean CloudError before any upload.
+    """
+    _require_s3_for_project_store()
+    daytona = _require_client(client)
+
+    # Owner-scoped tenancy gate: NotFound for a project the caller doesn't own.
+    await codeproject_service.get_project(workspace_id, user_id, project_id)
+
+    try:
+        await daytona.execute_command(
+            sandbox_id,
+            f"tar -czf {_SNAPSHOT_TMP} -C {WEBSANDBOX_WORKDIR} .",
+        )
+        data = await daytona.download_file(sandbox_id, _SNAPSHOT_TMP)
+    except Exception as exc:  # noqa: BLE001 — any VM-side failure is uniform
+        logger.warning(
+            "codeproject.snapshot: tar/download failed for project=%s", project_id, exc_info=True
+        )
+        raise with_cause(
+            CloudError(502, "codeproject.snapshot_failed", "Failed to snapshot the project"),
+            exc,
+        ) from exc
+
+    cap = _snapshot_max_bytes()
+    if len(data) > cap:
+        raise CloudError(
+            413,
+            "codeproject.snapshot_too_large",
+            f"Project snapshot is {len(data) / 1024 / 1024:.1f} MB, over the "
+            f"{cap / 1024 / 1024:.0f} MB limit",
+        )
+
+    up = uploads if uploads is not None else build_uploads()
+    file_id = await _upload_project_blob(
+        up,
+        data,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        filename=f"code-project-snapshot-{project_id}.tgz",
+        folder=_PROJECT_SNAPSHOT_FOLDER,
+        content_type=_SNAPSHOT_MIME,
+    )
+    await codeproject_service.set_project_snapshot(workspace_id, user_id, project_id, file_id)
+    logger.info(
+        "codeproject.snapshot: project=%s daytona=%s -> file=%s (%d bytes)",
+        project_id,
+        sandbox_id,
+        file_id,
+        len(data),
+    )
+    return file_id
+
+
+async def restore_project(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    sandbox_id: str,
+    *,
+    client: DaytonaClient | None = None,
+    uploads: Any = None,
+) -> None:
+    """Restore a project's durable state into a (fresh) VM: snapshot then overlay.
+
+    Mirrors ``restore_workspace`` but reads the pointer off the durable
+    ``CodeProject`` row (via the owner-scoped ``get_project`` view — so it also
+    enforces tenancy). Applies the two tiers in order into ``sandbox_id``:
+      1. ``snapshot_file_id`` — the full-workspace tarball (baseline): fetched
+         from S3, ``upload_bytes`` into the VM, ``tar -xzf`` over the dir.
+      2. ``overlay`` — the write-through per-file tier (edits since the last
+         snapshot): each ``relpath -> FileRecord id`` is fetched and written over
+         the tree. Cleared whenever a snapshot is taken, so replay is always the
+         freshest source state, never a stale resurrection.
+
+    A project with NEITHER a snapshot nor an overlay is a clean 409 (nothing to
+    restore). No S3 guard here — restore is a READ path; the guard protects the
+    WRITE path so a project never silently persists to disk in the first place.
+    """
+    daytona = _require_client(client)
+
+    project = await codeproject_service.get_project(workspace_id, user_id, project_id)
+    overlay = project.overlay or {}
+    if not project.snapshot_file_id and not overlay:
+        raise ConflictError(
+            "codeproject.no_snapshot", "This project has no durable state to restore"
+        )
+
+    up = uploads if uploads is not None else build_uploads()
+
+    # Tier 1 — the full-workspace snapshot (baseline).
+    if project.snapshot_file_id:
+        data = await _download_snapshot(
+            up, project.snapshot_file_id, workspace_id=workspace_id, user_id=user_id
+        )
+        untar = f"mkdir -p {WEBSANDBOX_WORKDIR} && tar -xzf {_SNAPSHOT_TMP} -C {WEBSANDBOX_WORKDIR}"
+        try:
+            await daytona.upload_bytes(sandbox_id, data, _SNAPSHOT_TMP)
+            await daytona.execute_command(sandbox_id, untar)
+        except Exception as exc:  # noqa: BLE001 — any VM-side failure is uniform
+            logger.warning(
+                "codeproject.restore: snapshot untar failed for project=%s",
+                project_id,
+                exc_info=True,
+            )
+            raise with_cause(
+                CloudError(502, "codeproject.restore_failed", "Failed to restore the project"),
+                exc,
+            ) from exc
+        logger.info(
+            "codeproject.restore: project=%s daytona=%s <- snapshot=%s (%d bytes)",
+            project_id,
+            sandbox_id,
+            project.snapshot_file_id,
+            len(data),
+        )
+
+    # Tier 2 — replay the write-through overlay (freshest edits) over the tree.
+    replayed = 0
+    for rel_path, file_id in overlay.items():
+        abs_path = _overlay_abs_path(rel_path)
+        if abs_path is None:
+            logger.warning("codeproject.restore: skipping unsafe overlay path %r", rel_path)
+            continue
+        try:
+            file_bytes = await _download_snapshot(
+                up, file_id, workspace_id=workspace_id, user_id=user_id
+            )
+            parent = abs_path.rsplit("/", 1)[0]
+            await daytona.execute_command(sandbox_id, f"mkdir -p {parent}")
+            await daytona.upload_bytes(sandbox_id, file_bytes, abs_path)
+            replayed += 1
+        except Exception:  # noqa: BLE001 — one bad overlay file must not sink the rest
+            logger.warning(
+                "codeproject.restore: overlay replay failed for project=%s path=%r",
+                project_id,
+                rel_path,
+                exc_info=True,
+            )
+    if replayed:
+        logger.info(
+            "codeproject.restore: project=%s daytona=%s replayed %d overlay file(s)",
+            project_id,
+            sandbox_id,
+            replayed,
+        )
+
+
+async def mirror_file_to_project(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    rel_path: str,
+    data: bytes,
+    *,
+    uploads: Any = None,
+) -> str:
+    """Write-through one editor-saved file to blob storage; record the project overlay.
+
+    The project-keyed analog of ``mirror_file``: uploads the bytes to the tenant's
+    blob storage (folder ``/code-project-overlay``) and records ``rel_path ->
+    FileRecord id`` on the durable project via ``set_project_overlay_entry``.
+    Returns the FileRecord id. Fails CLOSED on a non-s3 upload adapter in cloud.
+    """
+    _require_s3_for_project_store()
+    up = uploads if uploads is not None else build_uploads()
+    basename = (rel_path or "file").rsplit("/", 1)[-1] or "file"
+    file_id = await _upload_project_blob(
+        up,
+        data,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        filename=f"overlay-{project_id}-{basename}",
+        folder=_PROJECT_OVERLAY_FOLDER,
+        content_type="application/octet-stream",
+    )
+    await codeproject_service.set_project_overlay_entry(
+        workspace_id, user_id, project_id, rel_path, file_id
+    )
+    logger.debug(
+        "codeproject.mirror: project=%s path=%r -> file=%s (%d bytes)",
+        project_id,
+        rel_path,
+        file_id,
+        len(data),
+    )
+    return file_id
+
+
+async def drop_project_overlay(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    rel_path: str,
+) -> None:
+    """Drop the project overlay entry for a deleted file (delete-side sibling).
+
+    Delegates the doc write to the service (Rule 2). Dropping is always safe: the
+    file falls back to the snapshot tier on restore instead of being resurrected
+    from the overlay. A directory delete drops every child entry too.
+    """
+    await codeproject_service.drop_project_overlay_entry(
+        workspace_id, user_id, project_id, rel_path
+    )
+
+
+async def move_project_overlay(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    src_rel: str,
+    dst_rel: str,
+) -> None:
+    """Re-key the project overlay entry for a renamed file (move-side sibling).
+
+    Delegates the doc write to the service (Rule 2). The FileRecord id is
+    unchanged — only the overlay key moves — so restore replays the same durable
+    blob at the new path. A directory move re-keys every child entry too.
+    """
+    await codeproject_service.move_project_overlay_entry(
+        workspace_id, user_id, project_id, src_rel, dst_rel
+    )
+
+
 __all__ = [
     "build_uploads",
     "drop_overlay",
+    "drop_project_overlay",
     "mirror_file",
+    "mirror_file_to_project",
     "move_overlay",
+    "move_project_overlay",
+    "restore_project",
     "restore_workspace",
+    "snapshot_project",
     "snapshot_workspace",
 ]
