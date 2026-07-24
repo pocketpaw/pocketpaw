@@ -9,9 +9,16 @@
 # and ``is_scaffold_provider`` — the named test for "this project's ``repo`` field
 # holds a TEMPLATE id, not a repo IDENTITY". ``create_project``'s idempotency
 # reads it to decide whether a second create is the same project or a new one.
+#
+# Modified 2026-07-24 (feat/code-durable-project-store): added ``overlay`` to
+# CodeProjectView so the project-keyed durability path can read the snapshot +
+# overlay tiers off a single ``get_project`` (mirrors how WebSandboxView carries
+# ``overlay`` for websandbox restore). Like WebSandbox, overlay is view-only — it
+# is NOT surfaced on the wire ``CodeProjectResponse``; it is internal durability
+# bookkeeping, not a client-facing field.
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import NewType
 
@@ -66,6 +73,9 @@ class CodeProjectView:
     updated_at: datetime
     # Durable blob-storage snapshot pointer — the project's files between VMs.
     snapshot_file_id: str | None = None
+    # The write-through per-file durability overlay (``relpath -> FileRecord id``),
+    # keyed on the project. View-only, mirroring WebSandboxView — not on the wire.
+    overlay: dict[str, str] = field(default_factory=dict)
     # The current ephemeral sandbox (a WebSandbox row id), null when none is live.
     current_sandbox_id: str | None = None
     last_opened_at: datetime | None = None

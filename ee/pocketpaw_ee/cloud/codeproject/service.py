@@ -22,6 +22,19 @@
 # older project, and the projects tab still showed one row. Scaffold providers
 # now always insert; identity providers keep the existing behaviour exactly, so a
 # returning user still lands back on the same ``/code/<id>`` for a repo.
+#
+# Modified 2026-07-24 (feat/code-durable-project-store): added the project-keyed
+# durability pointer ops — ``set_project_snapshot`` (records the S3 snapshot
+# pointer and CLEARS the overlay, since a full snapshot supersedes it),
+# ``set_project_overlay_entry`` / ``drop_project_overlay_entry`` /
+# ``move_project_overlay_entry`` (the incremental per-file tier). These mirror the
+# WebSandbox service ops one-for-one but anchor the pointer on the durable PROJECT
+# row instead of the ephemeral sandbox row, so a project's files round-trip
+# through blob storage independent of any runtime. All are owner-scoped (Rule 7),
+# and all are ``# no-event:`` durability bookkeeping (same reasoning as
+# ``set_snapshot`` on WebSandbox — no lifecycle transition to announce). This
+# module stays the sole writer of the CodeProject doc (Rule 2). The orchestration
+# that drives them (tar/untar + S3 upload) lives in ``websandbox/durability.py``.
 from __future__ import annotations
 
 import logging
@@ -91,6 +104,7 @@ def _doc_to_view(doc: _CodeProjectDoc) -> CodeProjectView:
         created_at=doc.created_at,
         updated_at=doc.updated_at,
         snapshot_file_id=doc.snapshot_file_id,
+        overlay=dict(doc.overlay or {}),
         current_sandbox_id=doc.current_sandbox_id,
         last_opened_at=doc.last_opened_at,
     )
@@ -324,6 +338,151 @@ async def bind_current_sandbox(
     return _doc_to_view(doc)
 
 
+# ---------------------------------------------------------------------------
+# Project-keyed durability pointers (feat/code-durable-project-store).
+#
+# The durable half of Code Mode's build-and-persist loop: a project's file
+# snapshot + per-file overlay live in the tenant's blob storage, and these ops
+# record/mutate the POINTERS on the durable project row. They mirror the
+# WebSandbox service ops (``set_snapshot`` / ``set_overlay_entry`` /
+# ``drop_overlay_entry`` / ``move_overlay_entry``) one-for-one, so the project
+# store behaves identically to the sandbox store — only the anchor differs. The
+# tar/untar + S3 upload orchestration that calls these lives in
+# ``websandbox/durability.py`` (the layer allowed to import EEUploadService);
+# this module stays the sole writer of the CodeProject doc (Rule 2). All are
+# owner-scoped (Rule 7 via ``_read_owned``) and ``# no-event:`` (durability
+# bookkeeping, not a lifecycle transition — same reasoning as WebSandbox's
+# ``set_snapshot``).
+# ---------------------------------------------------------------------------
+
+
+async def set_project_snapshot(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    file_id: str,
+) -> CodeProjectView:
+    """Record the durable project-snapshot pointer; clear the overlay.
+
+    Tenant- and owner-scoped (Rule 7 via ``_read_owned``): only the owning caller
+    can bind a snapshot to their own project. ``file_id`` is the blob-storage
+    ``FileRecord`` id produced by ``EEUploadService.upload`` in the durability
+    module — a durable pointer to the tarball of the project's files. A full
+    snapshot supersedes the incremental overlay, so the overlay is CLEARED here
+    (mirroring ``WebSandbox.set_snapshot``): everything the overlay held is now
+    inside the snapshot tar, and clearing it is what keeps restore from replaying
+    a stale write over a since-deleted file. Raises ``NotFound`` when no owned row
+    matches.
+    """
+    doc = await _read_owned(workspace_id, user_id, project_id)
+    if doc is None:
+        raise NotFound("code_project", project_id)
+    doc.snapshot_file_id = file_id
+    doc.overlay = {}
+    doc.updated_at = datetime.now(UTC)
+    await doc.save()
+    # no-event: the snapshot pointer is durability bookkeeping, not a lifecycle
+    # transition — no downstream handler reacts to it, and emitting a project
+    # event would falsely signal a state change to a projects-grid fan-out.
+    return _doc_to_view(doc)
+
+
+async def set_project_overlay_entry(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    rel_path: str,
+    file_id: str,
+) -> CodeProjectView:
+    """Record one write-through overlay entry (``rel_path -> FileRecord id``).
+
+    Tenant- and owner-scoped (Rule 7 via ``_read_owned``): only the owning caller
+    can mirror a file onto their own project. Called best-effort from the file
+    write path after the byte-for-byte VM write, so every editor save is durable
+    in blob storage the moment it lands — a crash / idle-out before the next full
+    snapshot no longer loses the edit. Last-write-wins per path. Raises
+    ``NotFound`` when no owned row matches.
+    """
+    doc = await _read_owned(workspace_id, user_id, project_id)
+    if doc is None:
+        raise NotFound("code_project", project_id)
+    # Reassign (not in-place mutate) so Beanie always sees the field as dirty.
+    overlay = dict(doc.overlay or {})
+    overlay[rel_path] = file_id
+    doc.overlay = overlay
+    doc.updated_at = datetime.now(UTC)
+    await doc.save()
+    # no-event: incremental durability bookkeeping, same reasoning as set_project_snapshot.
+    return _doc_to_view(doc)
+
+
+async def drop_project_overlay_entry(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    rel_path: str,
+) -> CodeProjectView:
+    """Drop overlay entries for ``rel_path`` (and anything under it) from a project.
+
+    Tenant- and owner-scoped (Rule 7 via ``_read_owned``). Called best-effort from
+    the file delete path after the VM delete: DROPPING an overlay entry is always
+    safe — it just falls back to the snapshot tier on restore, and it stops a
+    since-deleted file being resurrected from the overlay. A directory delete
+    drops every child under ``rel_path + '/'`` too. Raises ``NotFound`` when no
+    owned row matches.
+    """
+    doc = await _read_owned(workspace_id, user_id, project_id)
+    if doc is None:
+        raise NotFound("code_project", project_id)
+    prefix = rel_path.rstrip("/") + "/"
+    # Reassign (not in-place mutate) so Beanie always sees the field as dirty.
+    overlay = {
+        k: v for k, v in (doc.overlay or {}).items() if k != rel_path and not k.startswith(prefix)
+    }
+    doc.overlay = overlay
+    doc.updated_at = datetime.now(UTC)
+    await doc.save()
+    # no-event: incremental durability bookkeeping, same reasoning as set_project_snapshot.
+    return _doc_to_view(doc)
+
+
+async def move_project_overlay_entry(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    src: str,
+    dst: str,
+) -> CodeProjectView:
+    """Re-key overlay entries from ``src`` to ``dst`` (rename == move).
+
+    Tenant- and owner-scoped (Rule 7 via ``_read_owned``). Called best-effort from
+    the file move path after the VM move. The re-key is safe: the FileRecord id
+    (the actual blob) is unchanged — only its overlay KEY moves — so restore
+    replays the same content at the file's new path. A directory move re-keys
+    every child under ``src + '/'`` to the matching ``dst + '/'`` path; a path
+    with no overlay entry is a clean no-op. Raises ``NotFound`` when no owned row
+    matches.
+    """
+    doc = await _read_owned(workspace_id, user_id, project_id)
+    if doc is None:
+        raise NotFound("code_project", project_id)
+    src_prefix = src.rstrip("/") + "/"
+    dst_prefix = dst.rstrip("/") + "/"
+    overlay: dict[str, str] = {}
+    for k, v in (doc.overlay or {}).items():
+        if k == src:
+            overlay[dst] = v
+        elif k.startswith(src_prefix):
+            overlay[dst_prefix + k[len(src_prefix) :]] = v
+        else:
+            overlay[k] = v
+    doc.overlay = overlay
+    doc.updated_at = datetime.now(UTC)
+    await doc.save()
+    # no-event: incremental durability bookkeeping, same reasoning as set_project_snapshot.
+    return _doc_to_view(doc)
+
+
 async def _read_owned(
     workspace_id: str,
     user_id: str,
@@ -349,8 +508,12 @@ __all__ = [
     "bind_current_sandbox",
     "create_project",
     "delete_project",
+    "drop_project_overlay_entry",
     "get_project",
     "list_projects",
+    "move_project_overlay_entry",
     "rename_project",
+    "set_project_overlay_entry",
+    "set_project_snapshot",
     "view_to_wire",
 ]
