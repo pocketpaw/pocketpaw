@@ -19,7 +19,7 @@
 #   PUT    /codeproject/{id}/file  — persist ONE file written by the in-browser
 #                                   runtime (write-through to blob storage).
 #   DELETE /codeproject/{id}/file  — drop one file so it isn't restored again.
-#   GET    /codeproject/{id}/files — the project's persisted overlay, the restore
+#   GET    /codeproject/{id}/files — the project's whole persisted state, the restore
 #                                   payload the in-tab runtime replays.
 # Like the WebSandbox router, endpoints are license-gated + context-authenticated;
 # the tenancy/owner filtering in the service is the security boundary.
@@ -36,6 +36,12 @@
 # pull the whole set back on a reopen. Storage lives in ``websandbox/durability.py``
 # (the layer allowed to touch EEUploadService); like the websandbox snapshot /
 # restore routes, this router calls it directly and stays a thin adapter.
+#
+# Modified 2026-07-25 (B4, feat/code-cross-runtime-restore): docs only. The GET
+# /files payload is no longer "the overlay" — ``read_project_overlay`` now composes
+# the snapshot tar AND the overlay, so a project last saved in the Daytona runtime
+# is retrievable in-tab instead of coming back empty. No route, DTO, or wire shape
+# changed; the docstring here would otherwise describe the pre-fix behaviour.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, Response
@@ -196,8 +202,10 @@ async def read_project_files(
 ) -> ProjectFilesResponse:
     """Read every persisted file back (owner-scoped) — the restore payload.
 
-    The delta only: the client re-materializes the starter scaffold from the
-    starter id, then replays this map over it.
+    Both durability tiers, merged: the snapshot tar a Daytona session wrote (minus
+    the regenerable trees) as the baseline, with the per-file overlay on top. The
+    client re-materializes the starter scaffold from the starter id, then replays
+    this map over it — so a project saved in EITHER runtime reopens intact here.
     """
     workspace_id = _require_workspace(ctx)
     files = await websandbox_durability.read_project_overlay(workspace_id, ctx.user_id, project_id)
