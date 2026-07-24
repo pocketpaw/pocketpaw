@@ -25,6 +25,12 @@
 # The delegate channel itself is not re-tested here (see
 # tests/cloud/test_codeagent_delegates.py) — these drive the handlers against a
 # stub and assert on what each does with the outcome.
+#
+# Extended 2026-07-24 (CX-1) with three ``_build_options`` cases proving the
+# ``exclusive_mcp_tools`` cap: (a) exclusive + a declared allow-list yields
+# EXACTLY those ids (grant suppressed), (b) exclusive + None strips ALL mcp ids,
+# (c) the default path still applies the pocket/widget/atlas grant. A
+# deterministic candidate pool is injected so the suppression is provable.
 from __future__ import annotations
 
 import pytest
@@ -151,6 +157,105 @@ async def test_file_tools_reach_the_effective_allowlist_and_the_builtins_do_not(
     for tool in ("Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"):
         assert tool not in effective, f"{tool} addresses the backend's disk, not the user's project"
     assert not [t for t in effective if t.startswith("mcp__pocketpaw_daytona__")]
+
+
+# ── exclusive_mcp_tools caps the surface to exactly the declared ids (CX-1) ──
+
+
+def _mcp_ids(built) -> set[str]:
+    """The ``mcp__*`` ids that survived ``_build_options`` scoping."""
+    return {t for t in built.options_kwargs["allowed_tools"] if t.startswith("mcp__")}
+
+
+async def _build_with(backend, *, allow, exclusive):
+    """Run ``_build_options`` with a deterministic candidate MCP pool.
+
+    The pool is monkeypatched (via the fixture) to contain the four code file
+    ids PLUS one widget id, one atlas id, and one planner (grant) id — so the
+    suppression is provable: an exclusive turn must strip the grant ids that a
+    default turn keeps. A test where the grant id was never a candidate would
+    prove nothing."""
+    return await backend._build_options(
+        "refactor this",
+        system_prompt="you are on the code surface",
+        history=None,
+        session_key=None,
+        deny_mcp_tool_ids=frozenset(),
+        allow_sdk_tools=frozenset(),
+        allow_mcp_tool_ids=allow,
+        skill_names=frozenset(),
+        stderr_sink=[],
+        exclusive_mcp_tools=exclusive,
+    )
+
+
+@pytest.fixture
+def backend_with_grant_pool(monkeypatch):
+    """A backend whose ``_collect_mcp_tool_ids`` yields a deterministic pool:
+    the four code file ids + a widget id + an atlas id + a planner grant id."""
+    from pocketpaw.agents.claude_sdk import POCKET_CREATION_GRANT, ClaudeSDKBackend
+    from pocketpaw.agents.sdk_mcp_atlas import ATLAS_TOOL_IDS
+    from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
+    from pocketpaw.config import get_settings
+    from pocketpaw_ee.cloud.surface.surface_registry import _CODE_FILE_TOOL_IDS
+
+    widget_id = next(iter(WIDGET_TOOL_IDS))
+    atlas_id = next(iter(ATLAS_TOOL_IDS))
+    planner_id = "mcp__pocketpaw_pocket_planner__plan_pocket"
+    assert planner_id in POCKET_CREATION_GRANT
+
+    pool = [*sorted(_CODE_FILE_TOOL_IDS), widget_id, atlas_id, planner_id]
+    backend = ClaudeSDKBackend(get_settings())
+    monkeypatch.setattr(backend, "_collect_mcp_tool_ids", lambda: list(pool))
+    return backend, widget_id, atlas_id, planner_id
+
+
+@pytest.mark.asyncio
+async def test_exclusive_caps_to_exactly_the_declared_ids(backend_with_grant_pool):
+    """(a) exclusive + a declared allow-list ⇒ the effective MCP surface is
+    EXACTLY those ids; the universal pocket/widget/atlas grant is NOT unioned
+    back in."""
+    from pocketpaw_ee.cloud.surface.surface_registry import _CODE_FILE_TOOL_IDS
+
+    backend, widget_id, atlas_id, planner_id = backend_with_grant_pool
+    built = await _build_with(backend, allow=_CODE_FILE_TOOL_IDS, exclusive=True)
+
+    assert _mcp_ids(built) == set(_CODE_FILE_TOOL_IDS)
+    # the grant ids that were candidates are gone
+    assert widget_id not in _mcp_ids(built)
+    assert atlas_id not in _mcp_ids(built)
+    assert planner_id not in _mcp_ids(built)
+    assert not [t for t in _mcp_ids(built) if t.startswith("mcp__pocketpaw_pocket")]
+
+
+@pytest.mark.asyncio
+async def test_exclusive_with_no_allowlist_strips_all_mcp(backend_with_grant_pool):
+    """(b) exclusive + ``allow_mcp_tool_ids=None`` ⇒ the empty permitted set
+    strips EVERY ``mcp__`` id. This is the precedence rule that lets an
+    exclusive agent win over even a broad surface."""
+    backend, *_ = backend_with_grant_pool
+    built = await _build_with(backend, allow=None, exclusive=True)
+
+    assert _mcp_ids(built) == set()
+
+
+@pytest.mark.asyncio
+async def test_default_path_still_applies_the_grant(backend_with_grant_pool):
+    """(c) the DEFAULT path (signal off) is unchanged: the grant still applies,
+    so a widget id and an atlas id present in the candidate pool SURVIVE the
+    same allow-list that case (a) capped away."""
+    from pocketpaw_ee.cloud.surface.surface_registry import _CODE_FILE_TOOL_IDS
+
+    backend, widget_id, atlas_id, planner_id = backend_with_grant_pool
+    built = await _build_with(backend, allow=_CODE_FILE_TOOL_IDS, exclusive=False)
+
+    effective = _mcp_ids(built)
+    # the declared ids are still there
+    assert set(_CODE_FILE_TOOL_IDS) <= effective
+    # and the grant ids that (a) stripped now survive — proving suppression
+    assert widget_id in effective
+    assert atlas_id in effective
+    assert planner_id in effective
 
 
 # ── each verb round-trips to the delegate with the right shape ──────────────
