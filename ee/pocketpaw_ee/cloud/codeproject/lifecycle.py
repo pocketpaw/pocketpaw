@@ -29,6 +29,29 @@
 # then bound the editor to a dead VM (no connection, empty tree). ``_reuse_if_live``
 # now confirms the bound VM actually exists and is ``started`` in Daytona; anything
 # else falls through to reprovision + snapshot restore.
+#
+# 2026-07-25 (B2, feat/code-daytona-project-anchor): restore now reads the durable
+# state off the PROJECT, not off the sandbox row. The old anchor was a bug waiting
+# to fire: a WebSandbox row is unique per (workspace, user, repo), and a scaffold
+# project puts a TEMPLATE id in ``repo``, so every project built from the same
+# starter shared ONE row and would have stomped each other's snapshot + overlay.
+# Anchoring on the project id removes that by construction and makes the stated
+# "CodeProject = durable / WebSandbox = ephemeral" split true rather than
+# aspirational. ``open_project`` therefore restores via ``restore_project`` into the
+# freshly-provisioned VM's Daytona id.
+#
+# The same change adds the one-way rollout backfill: ``_backfill_legacy_durability``
+# lifts a repo project's legacy sandbox-keyed pointers onto the project before
+# anything reads them. It runs LAZILY here rather than as a boot-time sweep because
+# (a) this is the only moment the legacy state matters — it has to be on the project
+# before the first project-keyed restore or mirror, and an open is exactly when that
+# happens; (b) it already has the tenancy context (workspace + user + owned project)
+# a global sweep would have to invent; and (c) it is idempotent by construction, so
+# every later open re-checks for free instead of needing a one-shot migration to be
+# scheduled, monitored, and re-run. It sits at the TOP of ``open_project`` so the
+# reuse branch is covered too, and it never fires for scaffold projects — copying
+# one shared row's state into N sibling starter projects is the very stomping this
+# task removes.
 from __future__ import annotations
 
 import contextlib
@@ -36,7 +59,7 @@ import logging
 
 from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.codeproject import service as codeproject_service
-from pocketpaw_ee.cloud.codeproject.domain import CodeProjectView
+from pocketpaw_ee.cloud.codeproject.domain import CodeProjectView, is_scaffold_provider
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
 from pocketpaw_ee.cloud.websandbox import durability as websandbox_durability
 from pocketpaw_ee.cloud.websandbox import provision as websandbox_provision
@@ -72,13 +95,17 @@ async def open_project(
       3. Otherwise cold-provision a fresh sandbox for the project's repo (via
          ``websandbox.provision.open_sandbox`` — idempotent on the repo, so this
          reuses the project's stable WebSandbox row and boots a new VM into it),
-         then bind it onto the project.
+         then restore the PROJECT's durable state into it and bind it.
 
     Returns the ready ``WebSandboxView``. The bound-but-invalid case (the VM was
     reaped, or the id no longer resolves) falls through to reprovision — "if the
     id is invalid or unavailable, make a new sandbox."
     """
     project = await codeproject_service.get_project(workspace_id, user_id, project_id)
+    # B2 rollout: lift any legacy sandbox-keyed durable state onto the project
+    # BEFORE anything reads it. Idempotent, so this is a cheap no-op on every
+    # subsequent open.
+    project = await _backfill_legacy_durability(workspace_id, user_id, project)
 
     reused = await _reuse_if_live(workspace_id, user_id, project, client)
     if reused is not None:
@@ -92,9 +119,9 @@ async def open_project(
     sandbox = await websandbox_provision.open_sandbox(
         workspace_id, user_id, {"repo": project.repo}, client=client
     )
-    # CM-2a′: overlay the row's durable snapshot (uncommitted work + branch from a
-    # prior session) onto the freshly-cloned VM, if one exists.
-    await _restore_if_snapshotted(workspace_id, user_id, sandbox, client)
+    # CM-2a′ / B2: overlay the PROJECT's durable snapshot (uncommitted work +
+    # branch from a prior session) onto the freshly-cloned VM, if one exists.
+    await _restore_if_snapshotted(workspace_id, user_id, project, sandbox, client)
     await codeproject_service.bind_current_sandbox(workspace_id, user_id, project_id, sandbox.id)
     logger.info(
         "codeproject.open: project=%s bound fresh sandbox=%s (repo=%s)",
@@ -162,43 +189,130 @@ async def _teardown_bound_sandbox(
 async def _restore_if_snapshotted(
     workspace_id: str,
     user_id: str,
+    project: CodeProjectView,
     sandbox: WebSandboxView,
     client: DaytonaClient | None,
 ) -> None:
-    """Restore the sandbox row's durable state into its fresh VM, if any.
+    """Restore the PROJECT's durable state into the freshly-provisioned VM, if any.
 
-    The WebSandbox row is stable across reprovisions, so both durability tiers
-    survive on the row when we reprovision: the ``snapshot_file_id`` (captured on
-    a prior clean disconnect) AND the write-through ``overlay`` (per-file edits
-    mirrored since the last snapshot — the tier that covers a crash / idle-out
-    before any disconnect snapshot). Restore fires when EITHER exists; a row with
-    neither (first open, or nothing edited) is a clean no-op.
+    Both durability tiers live on the durable project row (B2): the
+    ``snapshot_file_id`` (captured on a prior clean disconnect) AND the
+    write-through ``overlay`` (per-file edits mirrored since the last snapshot —
+    the tier that covers a crash / idle-out before any disconnect snapshot).
+    Restore fires when EITHER exists; a project with neither (first open, or
+    nothing edited) is a clean no-op.
+
+    The anchor moved off the WebSandbox row deliberately. That row is unique per
+    (workspace, user, repo), so N projects sharing a starter template shared one
+    row and one set of pointers; reading the project instead makes each project's
+    durable state its own. The row is still what tells us WHICH VM to untar into —
+    ``sandbox.sandbox_id``, the live Daytona id.
 
     Best-effort by design: a restore failure (VM gone, S3 down, corrupt tarball)
     is logged and swallowed — the fresh clone from ``open_sandbox`` is still a
     usable workspace, so a durability miss must never fail the open.
     """
-    if not sandbox.snapshot_file_id and not sandbox.overlay:
+    if not project.snapshot_file_id and not project.overlay:
+        return
+    if not sandbox.sandbox_id:
+        # No bound VM to untar into (provision handed back an unready row). The
+        # durable state stays on the project untouched for the next open.
+        logger.warning(
+            "codeproject.open: project=%s has durable state but sandbox=%s has no VM; "
+            "skipping restore",
+            project.id,
+            sandbox.id,
+        )
         return
     try:
-        await websandbox_durability.restore_workspace(
-            workspace_id, user_id, sandbox.id, client=client
+        await websandbox_durability.restore_project(
+            workspace_id, user_id, project.id, sandbox.sandbox_id, client=client
         )
         logger.info(
-            "codeproject.open: restored durable state into sandbox=%s "
+            "codeproject.open: restored durable state for project=%s into daytona=%s "
             "(snapshot=%s, overlay=%d file(s))",
-            sandbox.id,
-            sandbox.snapshot_file_id,
-            len(sandbox.overlay or {}),
+            project.id,
+            sandbox.sandbox_id,
+            project.snapshot_file_id,
+            len(project.overlay or {}),
         )
     except Exception:  # noqa: BLE001 — a fresh clone is still usable; never block open
         logger.warning(
-            "codeproject.open: snapshot restore failed for sandbox=%s (snapshot=%s); "
+            "codeproject.open: snapshot restore failed for project=%s (snapshot=%s); "
             "continuing with the fresh clone",
-            sandbox.id,
-            sandbox.snapshot_file_id,
+            project.id,
+            project.snapshot_file_id,
             exc_info=True,
         )
+
+
+async def _backfill_legacy_durability(
+    workspace_id: str,
+    user_id: str,
+    project: CodeProjectView,
+) -> CodeProjectView:
+    """Lift legacy sandbox-keyed durable state onto the project. Returns the view.
+
+    The one-way rollout migration for B2. Before the cutover, a project's
+    uncommitted work was recorded on the WebSandbox row it was bound to; after it,
+    restore reads the project. Without this copy, a returning user with real work
+    on the old anchor reopens to a bare re-clone — silent data loss at exactly the
+    moment durability is supposed to pay off.
+
+    Conditions, all of which make it safe to run on every open:
+      * the project must hold NO durable state of its own (the service enforces
+        this too, so a race can't clobber fresher work);
+      * the project must be bound to a resolvable, owned sandbox row carrying
+        something to adopt;
+      * the project must NOT be a scaffold project. Its ``repo`` is a template id,
+        so its sandbox row is shared with every sibling built from the same
+        starter — adopting that row's state would copy one project's files into N
+        others, which is the exact stomping this cutover removes. Scaffold projects
+        never persisted through this path anyway (the Daytona adapter refuses a
+        non-repo source), so there is nothing to lose by skipping them.
+
+    Best-effort: any failure returns the project unchanged rather than blocking the
+    open. The legacy fields are left in place, so a missed backfill is retried on
+    the next open instead of being lost.
+    """
+    if project.snapshot_file_id or project.overlay:
+        return project
+    if not project.current_sandbox_id or is_scaffold_provider(project.provider):
+        return project
+    try:
+        sandbox = await websandbox_service.get_sandbox(
+            workspace_id, user_id, project.current_sandbox_id
+        )
+    except NotFound:
+        return project
+    if not sandbox.snapshot_file_id and not sandbox.overlay:
+        return project
+    try:
+        adopted = await codeproject_service.adopt_legacy_durability(
+            workspace_id,
+            user_id,
+            project.id,
+            sandbox.snapshot_file_id,
+            dict(sandbox.overlay or {}),
+        )
+    except Exception:  # noqa: BLE001 — a backfill miss must never block the open
+        logger.warning(
+            "codeproject.open: legacy durability backfill failed for project=%s "
+            "(sandbox=%s); continuing without it",
+            project.id,
+            project.current_sandbox_id,
+            exc_info=True,
+        )
+        return project
+    logger.info(
+        "codeproject.open: adopted legacy durable state for project=%s from sandbox=%s "
+        "(snapshot=%s, overlay=%d file(s))",
+        project.id,
+        project.current_sandbox_id,
+        adopted.snapshot_file_id,
+        len(adopted.overlay or {}),
+    )
+    return adopted
 
 
 async def _reuse_if_live(

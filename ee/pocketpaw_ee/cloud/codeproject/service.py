@@ -36,6 +36,24 @@
 # module stays the sole writer of the CodeProject doc (Rule 2). The orchestration
 # that drives them (tar/untar + S3 upload) lives in ``websandbox/durability.py``.
 #
+# Modified 2026-07-25 (B2, feat/code-daytona-project-anchor): added the two ops the
+# Daytona cutover needs, because the runtime knows only its EPHEMERAL sandbox row
+# and the durable state now lives on the PROJECT.
+#   * ``find_project_for_sandbox`` — the reverse of ``bind_current_sandbox``: given
+#     a WebSandbox row id, which owned project is currently bound to it? The
+#     terminal socket has a row id and needs a project id to mirror/snapshot
+#     against. Ordered by ``last_opened_at`` desc because the bind is not unique:
+#     a WebSandbox row is keyed (workspace, user, repo), so two projects built from
+#     the same starter template can point at ONE row — the most recently opened is
+#     the one the user is actually looking at.
+#   * ``adopt_legacy_durability`` — the rollout backfill. Copies a legacy
+#     sandbox-keyed ``snapshot_file_id`` / ``overlay`` onto the project so an
+#     existing repo project's uncommitted work survives the cutover. Idempotent and
+#     NON-destructive by construction: it writes only when the project holds no
+#     durable state of its own, so a second call (or a later open) can never
+#     clobber state the project has since accumulated. The WebSandbox fields are
+#     left readable — this PR moves WHO the Daytona path writes, not what exists.
+#
 # Modified 2026-07-24 (feat/code-initial-prompt): ``create_project`` now persists
 # the optional ``initial_prompt`` (the WHAT-to-build description) on an actual
 # INSERT only — a github idempotent hit returns the existing row untouched, so a
@@ -393,6 +411,51 @@ async def bind_current_sandbox(
     return _doc_to_view(doc)
 
 
+async def find_project_for_sandbox(
+    workspace_id: str,
+    user_id: str,
+    sandbox_row_id: str,
+) -> CodeProjectView | None:
+    """Which owned project is currently bound to this ephemeral sandbox row?
+
+    The reverse of ``bind_current_sandbox``, and the seam the Daytona runtime
+    needs: a terminal socket is opened against a WebSandbox ROW id, but durable
+    state is anchored on the PROJECT, so the socket has to resolve its owner
+    before it can mirror or snapshot.
+
+    Returns ``None`` rather than raising when nothing is bound — a sandbox opened
+    outside the project flow (the plain ``/websandbox`` REST surface) has no owning
+    project, and that is a normal state the caller degrades on, not an error.
+
+    The bind is deliberately NOT treated as unique. A WebSandbox row is keyed
+    (workspace, user, repo) while a project is not, so two scaffold projects
+    started from the same template id can legitimately point at one row. Ordering
+    by ``last_opened_at`` desc picks the project the user most recently opened —
+    which is the one whose editor this socket belongs to, since ``open_project``
+    re-stamps that field on every open right before the socket connects. ``_id``
+    desc breaks a tie: BSON datetimes are millisecond-precision, so two binds
+    inside one millisecond would otherwise order arbitrarily, and an arbitrary
+    durable anchor is not something to leave to chance.
+
+    Tenant- AND owner-filtered (Rule 7): another tenant's project bound to the same
+    row id is invisible here.
+    """
+    docs = (
+        await _CodeProjectDoc.find(
+            {  # Rule 7 tenant + owner filter
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "current_sandbox_id": sandbox_row_id,
+            }
+        )
+        .sort([("last_opened_at", -1), ("_id", -1)])
+        .to_list()
+    )
+    if not docs:
+        return None
+    return _doc_to_view(docs[0])
+
+
 # ---------------------------------------------------------------------------
 # Project-keyed durability pointers (feat/code-durable-project-store).
 #
@@ -538,6 +601,59 @@ async def move_project_overlay_entry(
     return _doc_to_view(doc)
 
 
+async def adopt_legacy_durability(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    snapshot_file_id: str | None,
+    overlay: dict[str, str] | None,
+) -> CodeProjectView:
+    """Adopt legacy sandbox-keyed durable state onto the project (B2 backfill).
+
+    Durability used to be anchored on the EPHEMERAL WebSandbox row. B2 moved the
+    Daytona path onto the durable project, so an existing project whose only
+    durable state sits on its old sandbox row would otherwise reopen empty. This
+    lifts that state across, once.
+
+    Two guarantees make it safe to call on every open (Rule: non-destructive):
+      * It writes ONLY when the project holds no durable state of its own — no
+        snapshot pointer and an empty overlay. A project that has since snapshotted
+        or mirrored anything is returned untouched, so a stale legacy pointer can
+        never overwrite fresher work.
+      * Nothing is deleted. The WebSandbox fields stay readable for the whole
+        rollout window; this copies, it does not move.
+
+    Tenant- and owner-scoped (Rule 7 via ``_read_owned``); raises ``NotFound`` when
+    no owned row matches. Passing nothing to adopt is a clean no-op.
+    """
+    doc = await _read_owned(workspace_id, user_id, project_id)
+    if doc is None:
+        raise NotFound("code_project", project_id)
+
+    if doc.snapshot_file_id or doc.overlay:
+        # no-event: the project already owns durable state — adopting would be a
+        # regression, so this is deliberately a read.
+        return _doc_to_view(doc)
+    legacy_overlay = dict(overlay or {})
+    if not snapshot_file_id and not legacy_overlay:
+        # no-event: nothing to adopt.
+        return _doc_to_view(doc)
+
+    doc.snapshot_file_id = snapshot_file_id
+    doc.overlay = legacy_overlay
+    doc.updated_at = datetime.now(UTC)
+    await doc.save()
+    logger.info(
+        "codeproject.adopt_legacy_durability: project=%s <- snapshot=%s, overlay=%d file(s)",
+        project_id,
+        snapshot_file_id,
+        len(legacy_overlay),
+    )
+    # no-event: durability bookkeeping, same reasoning as set_project_snapshot — a
+    # migration copy is not a lifecycle transition a projects-grid should react to.
+    return _doc_to_view(doc)
+
+
 async def _read_owned(
     workspace_id: str,
     user_id: str,
@@ -560,10 +676,12 @@ async def _read_owned(
 
 
 __all__ = [
+    "adopt_legacy_durability",
     "bind_current_sandbox",
     "create_project",
     "delete_project",
     "drop_project_overlay_entry",
+    "find_project_for_sandbox",
     "get_project",
     "list_projects",
     "mark_initial_prompt_consumed",

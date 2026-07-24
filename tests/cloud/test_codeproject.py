@@ -17,9 +17,10 @@
 #     provisioning a second one.
 #   * open_project REPROVISIONS when the bound sandbox is invalid/unavailable
 #     (reaped) — "if the id is invalid or unavailable, make a new sandbox."
-#   * (CM-2a′) open_project RESTORES the row's durable snapshot into the fresh VM
-#     on reprovision when one exists, and skips restore when there's no snapshot;
-#     a restore failure is swallowed (the fresh clone is still returned ready).
+#   * (CM-2a′, re-anchored in B2) open_project RESTORES the PROJECT's durable
+#     snapshot into the fresh VM on reprovision when one exists, and skips restore
+#     when there's no snapshot; a restore failure is swallowed (the fresh clone is
+#     still returned ready).
 from __future__ import annotations
 
 import pytest
@@ -214,8 +215,16 @@ async def test_open_project_reprovisions_when_vm_deleted_out_of_band() -> None:
 
 
 # ---------------------------------------------------------------------------
-# open_project — CM-2a′ snapshot restore on reprovision.
+# open_project — CM-2a′ snapshot restore on reprovision, PROJECT-anchored (B2).
 # ---------------------------------------------------------------------------
+#
+# Adapted 2026-07-25 (B2, feat/code-daytona-project-anchor). These three tests
+# asserted the same behaviour against the OLD anchor: durable state was staged on
+# the WebSandbox row (``sandbox_service.set_snapshot`` / ``set_overlay_entry``) and
+# restore went through ``restore_workspace(row_id)``. The behaviour under test is
+# unchanged — restore fires on reprovision when either tier exists, and a failure
+# is swallowed — only the anchor moved, so the staging now goes through the project
+# service and the spy asserts the project id + the fresh VM's Daytona id.
 
 
 async def test_open_project_restores_snapshot_on_reprovision(monkeypatch) -> None:
@@ -224,46 +233,55 @@ async def test_open_project_restores_snapshot_on_reprovision(monkeypatch) -> Non
 
     restored: list[dict] = []
 
-    async def _spy_restore(workspace_id, user_id, row_id, *, client=None):  # noqa: ANN001
-        restored.append({"workspace_id": workspace_id, "user_id": user_id, "row_id": row_id})
+    async def _spy_restore(workspace_id, user_id, project_id, sandbox_id, *, client=None):  # noqa: ANN001
+        restored.append(
+            {
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "project_id": project_id,
+                "sandbox_id": sandbox_id,
+            }
+        )
 
-    monkeypatch.setattr(lifecycle.websandbox_durability, "restore_workspace", _spy_restore)
+    monkeypatch.setattr(lifecycle.websandbox_durability, "restore_project", _spy_restore)
 
-    # First open: a fresh row with no snapshot → nothing to restore.
+    # First open: a fresh project with no snapshot → nothing to restore.
     first = await lifecycle.open_project(_WS, _USER, project.id, client=fake)
     assert restored == []
 
-    # A clean disconnect captured a snapshot onto the stable row; then the VM was
-    # reaped out from under the project.
-    await sandbox_service.set_snapshot(_WS, _USER, first.id, "file-123")
+    # A clean disconnect captured a snapshot onto the durable PROJECT; then the VM
+    # was reaped out from under it.
+    await service.set_project_snapshot(_WS, _USER, project.id, "file-123")
     await sandbox_service.mark_reaped(first.id)
 
-    # Reopening reprovisions a fresh VM AND restores the row's snapshot into it.
+    # Reopening reprovisions a fresh VM AND restores the project's snapshot into it.
     second = await lifecycle.open_project(_WS, _USER, project.id, client=fake)
     assert second.id == first.id
     assert len(restored) == 1
-    assert restored[0]["row_id"] == second.id
+    assert restored[0]["project_id"] == project.id
+    # Restored into the FRESH VM, addressed by its Daytona id (not the row id).
+    assert restored[0]["sandbox_id"] == second.sandbox_id
 
 
 async def test_open_project_restores_overlay_only_on_reprovision(monkeypatch) -> None:
-    # The crash-before-any-snapshot case: the row carries a write-through overlay
-    # but no snapshot. Restore must still fire.
+    # The crash-before-any-snapshot case: the project carries a write-through
+    # overlay but no snapshot. Restore must still fire.
     project = await service.create_project(_WS, _USER, {"repo": _REPO})
     fake = _FakeDaytonaClient()
 
     restored: list[str] = []
 
-    async def _spy_restore(workspace_id, user_id, row_id, *, client=None):  # noqa: ANN001
-        restored.append(row_id)
+    async def _spy_restore(workspace_id, user_id, project_id, sandbox_id, *, client=None):  # noqa: ANN001
+        restored.append(project_id)
 
-    monkeypatch.setattr(lifecycle.websandbox_durability, "restore_workspace", _spy_restore)
+    monkeypatch.setattr(lifecycle.websandbox_durability, "restore_project", _spy_restore)
 
     first = await lifecycle.open_project(_WS, _USER, project.id, client=fake)
-    await sandbox_service.set_overlay_entry(_WS, _USER, first.id, "a.ts", "file-1")
+    await service.set_project_overlay_entry(_WS, _USER, project.id, "a.ts", "file-1")
     await sandbox_service.mark_reaped(first.id)
 
-    second = await lifecycle.open_project(_WS, _USER, project.id, client=fake)
-    assert restored == [second.id]
+    await lifecycle.open_project(_WS, _USER, project.id, client=fake)
+    assert restored == [project.id]
 
 
 async def test_open_project_swallows_restore_failure(monkeypatch) -> None:
@@ -271,13 +289,13 @@ async def test_open_project_swallows_restore_failure(monkeypatch) -> None:
     fake = _FakeDaytonaClient()
 
     first = await lifecycle.open_project(_WS, _USER, project.id, client=fake)
-    await sandbox_service.set_snapshot(_WS, _USER, first.id, "file-123")
+    await service.set_project_snapshot(_WS, _USER, project.id, "file-123")
     await sandbox_service.mark_reaped(first.id)
 
-    async def _boom_restore(workspace_id, user_id, row_id, *, client=None):  # noqa: ANN001
+    async def _boom_restore(workspace_id, user_id, project_id, sandbox_id, *, client=None):  # noqa: ANN001
         raise RuntimeError("boom: restore failed")
 
-    monkeypatch.setattr(lifecycle.websandbox_durability, "restore_workspace", _boom_restore)
+    monkeypatch.setattr(lifecycle.websandbox_durability, "restore_project", _boom_restore)
 
     # A restore failure is best-effort: the open still returns a ready sandbox
     # (the fresh clone), not an error.
