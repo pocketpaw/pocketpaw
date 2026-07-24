@@ -13,9 +13,15 @@
 #   POST   /codeproject/{id}/open — resolve the project to a READY sandbox to connect
 #                                   to (reuse the bound one or provision a fresh one).
 #   PATCH  /codeproject/{id}      — rename a project's display name (owner-scoped).
+#   PATCH  /codeproject/{id}/consume-prompt — mark the initial build prompt consumed
+#                                   on build-turn start, or re-arm it on a retry.
 #   DELETE /codeproject/{id}      — delete a project + tear down its bound VM.
 # Like the WebSandbox router, endpoints are license-gated + context-authenticated;
 # the tenancy/owner filtering in the service is the security boundary.
+#
+# Modified 2026-07-24 (feat/code-initial-prompt): added the consume-prompt PATCH
+# route so the frontend can flip ``initial_prompt_consumed`` when it kicks off the
+# auto-run build turn (and re-arm it on a retry-build).
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Response
@@ -27,6 +33,7 @@ from pocketpaw_ee.cloud.codeproject import service as codeproject_service
 from pocketpaw_ee.cloud.codeproject.dto import (
     CodeProjectListResponse,
     CodeProjectResponse,
+    ConsumePromptRequest,
     CreateProjectRequest,
     RenameProjectRequest,
 )
@@ -107,6 +114,24 @@ async def rename_project(
     """Rename a project's display name (owner-scoped)."""
     workspace_id = _require_workspace(ctx)
     view = await codeproject_service.rename_project(workspace_id, ctx.user_id, project_id, body)
+    return codeproject_service.view_to_wire(view)
+
+
+@router.patch("/{project_id}/consume-prompt", response_model=CodeProjectResponse)
+async def consume_prompt(
+    project_id: str,
+    body: ConsumePromptRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> CodeProjectResponse:
+    """Mark the initial build prompt consumed on build-turn start (owner-scoped).
+
+    ``consumed=True`` (the default) latches the prompt so a reopen doesn't re-run
+    the auto-build; ``consumed=False`` re-arms it for a retry-build. Idempotent.
+    """
+    workspace_id = _require_workspace(ctx)
+    view = await codeproject_service.mark_initial_prompt_consumed(
+        workspace_id, ctx.user_id, project_id, body
+    )
     return codeproject_service.view_to_wire(view)
 
 

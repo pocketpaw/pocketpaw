@@ -342,3 +342,105 @@ async def test_a_git_repo_stays_idempotent() -> None:
 
     assert second.id == first.id
     assert len(await service.list_projects(_WS, _USER)) == 1
+
+
+# ---------------------------------------------------------------------------
+# initial build prompt — persist on create, expose on the wire, mark consumed.
+# ---------------------------------------------------------------------------
+#
+# A1 (feat/code-initial-prompt): creating a /code project from a description
+# records WHAT to build on the durable row, exposes it on the wire so the frontend
+# can auto-run one build turn on first open, and offers an owner-scoped op to latch
+# it consumed on turn start (re-armable on a retry-build).
+
+
+async def test_create_persists_initial_prompt_unconsumed_and_exposes_it() -> None:
+    view = await service.create_project(
+        _WS,
+        _USER,
+        {
+            "repo": _STARTER,
+            "provider": "starter",
+            "name": "todo app",
+            "initial_prompt": "build a todo app",
+        },
+    )
+    assert view.initial_prompt == "build a todo app"
+    assert view.initial_prompt_consumed is False
+
+    # It survives a reload and reaches the camelCase wire response.
+    reloaded = await service.get_project(_WS, _USER, view.id)
+    assert reloaded.initial_prompt == "build a todo app"
+    wire = service.view_to_wire(reloaded)
+    assert wire.initialPrompt == "build a todo app"
+    assert wire.initialPromptConsumed is False
+
+
+async def test_create_without_initial_prompt_leaves_it_null() -> None:
+    view = await service.create_project(_WS, _USER, {"repo": _REPO})
+    assert view.initial_prompt is None
+    assert view.initial_prompt_consumed is False
+    assert service.view_to_wire(view).initialPrompt is None
+
+
+async def test_github_idempotent_recreate_does_not_overwrite_prompt() -> None:
+    first = await service.create_project(
+        _WS, _USER, {"repo": _REPO, "initial_prompt": "the original prompt"}
+    )
+    # A second create for the same git repo is an idempotent hit — the existing
+    # row is returned UNCHANGED, so a stray prompt on the re-create can't clobber it.
+    second = await service.create_project(
+        _WS, _USER, {"repo": _REPO, "initial_prompt": "a different prompt"}
+    )
+    assert second.id == first.id
+    assert second.initial_prompt == "the original prompt"
+
+
+async def test_mark_initial_prompt_consumed_sets_true() -> None:
+    project = await service.create_project(
+        _WS, _USER, {"repo": _STARTER, "provider": "starter", "initial_prompt": "build it"}
+    )
+    assert project.initial_prompt_consumed is False
+
+    updated = await service.mark_initial_prompt_consumed(_WS, _USER, project.id, {})
+    assert updated.initial_prompt_consumed is True
+    # The prompt itself is untouched — only the flag flips.
+    assert updated.initial_prompt == "build it"
+    assert (await service.get_project(_WS, _USER, project.id)).initial_prompt_consumed is True
+
+
+async def test_mark_initial_prompt_consumed_can_reset() -> None:
+    project = await service.create_project(
+        _WS, _USER, {"repo": _STARTER, "provider": "starter", "initial_prompt": "build it"}
+    )
+    await service.mark_initial_prompt_consumed(_WS, _USER, project.id, {"consumed": True})
+    # A retry-build re-arms the prompt.
+    rearmed = await service.mark_initial_prompt_consumed(
+        _WS, _USER, project.id, {"consumed": False}
+    )
+    assert rearmed.initial_prompt_consumed is False
+
+
+async def test_mark_initial_prompt_consumed_already_consumed_is_noop() -> None:
+    project = await service.create_project(
+        _WS, _USER, {"repo": _STARTER, "provider": "starter", "initial_prompt": "build it"}
+    )
+    once = await service.mark_initial_prompt_consumed(_WS, _USER, project.id, {"consumed": True})
+    # Marking it consumed again is a clean no-op, not an error.
+    twice = await service.mark_initial_prompt_consumed(_WS, _USER, project.id, {"consumed": True})
+    assert once.initial_prompt_consumed is True
+    assert twice.initial_prompt_consumed is True
+
+
+async def test_mark_initial_prompt_consumed_is_owner_scoped() -> None:
+    mine = await service.create_project(
+        _WS, _USER, {"repo": _STARTER, "provider": "starter", "initial_prompt": "build it"}
+    )
+    # Another user in the same workspace can't consume my project's prompt.
+    with pytest.raises(NotFound):
+        await service.mark_initial_prompt_consumed(_WS, "user-2", mine.id, {"consumed": True})
+    # A different workspace can't either.
+    with pytest.raises(NotFound):
+        await service.mark_initial_prompt_consumed("ws-2", _USER, mine.id, {"consumed": True})
+    # Still un-consumed for the real owner — no cross-tenant write leaked through.
+    assert (await service.get_project(_WS, _USER, mine.id)).initial_prompt_consumed is False
