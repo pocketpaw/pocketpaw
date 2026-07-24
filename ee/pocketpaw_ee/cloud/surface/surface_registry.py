@@ -80,6 +80,17 @@
 # deliverable instead. Both halves were needed; neither alone held.
 #
 # The CODE row stays STATIC — the prompt is a module constant like the tool ids.
+#
+# Changes: 2026-07-24 (feat/code-surface-cleanup, CX-4) — removed the
+# ``_CODE_POCKET_DENY`` MCP deny-list from the CODE profile. Since CX-3, /code
+# routes to a dedicated ``code`` agent whose ``tool_mode="exclusive"`` policy caps
+# the run's ``mcp__*`` tools to exactly the four file ids at run time; every id
+# ``_CODE_POCKET_DENY`` named was an ``mcp__*`` id that cap already strips, so the
+# surface deny-list was dead weight. The division of labor is now explicit: the
+# code AGENT enforces MCP tool restriction (structurally, via exclusivity), and the
+# SURFACE profile denies only the BUILT-IN tools the MCP cap cannot reach —
+# ``_CODE_BUILTIN_DENY`` (backend-disk tools + ``Agent``) and ``_CODE_SKILL_DENY``
+# (``Skill``), both KEPT unchanged.
 
 from __future__ import annotations
 
@@ -274,63 +285,28 @@ _CODE_BUILTIN_DENY: frozenset[str] = frozenset(
     {"Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent"}
 )
 
-# The pocket-AUTHORING tools the /code agent must not hold either.
+# The pocket-AUTHORING tools the /code agent must not hold used to live here as
+# ``_CODE_POCKET_DENY`` — an MCP deny-list spelling out the pocket / planner /
+# widget ids so they could not survive back into the allow-list via
+# ``POCKET_CREATION_GRANT`` / ``ALWAYS_ALLOWED_MCP_SERVERS`` / ``WIDGET_TOOL_IDS``.
+# It was REMOVED 2026-07-24 (CX-4). MCP tool restriction for /code is now enforced
+# STRUCTURALLY, one layer up: /code routes to a dedicated ``code`` agent whose
+# config is ``tool_mode="exclusive"`` + ``tools=_CODE_FILE_TOOL_IDS``, and at run
+# time that exclusive policy CAPS the run's ``mcp__*`` surface to exactly those
+# four file tools — no pocket / widget / atlas / planner id can reach the allow-list
+# regardless of any grant (proven by
+# ``tests/cloud/agents/test_code_agent_seed.py::
+# test_seeded_code_agent_config_drives_exclusive_allowlist``). With the cap moved to
+# the agent, an MCP deny-list on the surface is dead weight — every id it named is an
+# ``mcp__*`` id the exclusivity already strips.
 #
-# Reported from a live session: with a React project open on /code, "Let's build
-# an employee management app, with components, nice design etc" made the agent
-# create a pocket and author a ripple ui-spec instead of writing React. The user
-# asked for an app and got a dashboard.
-#
-# ``allow_mcp_tool_ids`` does NOT prevent this, which is the whole reason this
-# set exists. CD-3 scoped /code to ``code_mode``, but ``claude_sdk`` deliberately
-# lets three families survive ANY restrictive allow-list: ``POCKET_CREATION_GRANT``
-# (specialist create + planner), ``ALWAYS_ALLOWED_MCP_SERVERS`` (every tool on the
-# ``pocketpaw_pocket`` / ``_specialist`` / ``_planner`` servers), and
-# ``WIDGET_TOOL_IDS``. Those bypasses are RIGHT for a general chat surface — "create
-# a pocket" is the product's core capability and must work from anywhere — and
-# wrong for this one, where the deliverable is the user's code. Deny is applied
-# BEFORE the grant is unioned in, so it is the only lever that reaches them.
-#
-# Prose could not do this job. The preamble already says "do not build widgets,
-# charts, or a ui-spec, and do not create a pocket" and the agent did it anyway —
-# the same result /sites got before it denied these ids outright rather than
-# asking (see ``_SITES_SVELTE_CREATE_DENY``: "prose-only routing was proven to
-# fail"). Two surfaces have now independently confirmed it.
-#
-# READ-ONLY pocket access (``get_pocket`` / ``list_pockets``) is deliberately NOT
-# denied: reading a pocket cannot produce one, and a user on /code may reasonably
-# ask what a pocket contains. The line is drawn at AUTHORING.
-#
-# The widget ids are spelled out rather than imported so the CODE row stays a
-# STATIC profile (no lazy load, no resolver). ``test_code_deny_covers_every_widget
-# _tool`` pins this literal against the real ``WIDGET_TOOL_IDS``, so a widget tool
-# added later fails the suite instead of silently reopening the hole.
-_CODE_POCKET_DENY: frozenset[str] = frozenset(
-    {
-        # POCKET_CREATION_GRANT — survives the allow-list by design.
-        "mcp__pocketpaw_pocket_specialist__create",
-        "mcp__pocketpaw_pocket_planner__plan_pocket",
-        # ALWAYS_ALLOWED_MCP_SERVERS — the authoring verbs on the pocket servers.
-        "mcp__pocketpaw_pocket_specialist__edit",
-        "mcp__pocketpaw_pocket__add_widget",
-        "mcp__pocketpaw_pocket__update_widget",
-        # WIDGET_TOOL_IDS — the ripple catalog that turns "with components, nice
-        # design" into a ui-spec instead of React components.
-        "mcp__pocketpaw_widgets__get_widget_spec",
-        "mcp__pocketpaw_widgets__get_inline_widget_help",
-        "mcp__pocketpaw_widgets__start_flow",
-        # The READ verbs go too. An earlier pass kept them on the reasoning that
-        # reading a pocket cannot produce one — true in isolation, and beside the
-        # point: a pocket the agent can inspect is a pocket it can propose, and
-        # "let me look at how your other dashboard does this" is the first step
-        # back onto the path this profile exists to close. Nothing on /code needs
-        # them; the deliverable is the user's code.
-        "mcp__pocketpaw_pocket__get_pocket",
-        "mcp__pocketpaw_pocket__list_pockets",
-    }
-)
+# The exclusivity cap covers ONLY ``mcp__*`` ids, though. It does NOT and
+# structurally CANNOT touch the SDK's built-in tools, so the surface's remaining
+# denies below stay: ``_CODE_BUILTIN_DENY`` (Bash/Read/Write/… + Agent — the
+# backend-disk tools) and ``_CODE_SKILL_DENY`` (``Skill``) both deny BUILT-INS that
+# no MCP allow-list — exclusive or not — can reach.
 
-# ``Skill`` goes too, and it is the last door.
+# ``Skill`` is denied, and it is the last door.
 #
 # The bundled skills ship as a Claude Code LOCAL PLUGIN, which is loaded from the
 # SDK ``plugins=`` option independently of ``skill_names`` — so a surface CANNOT
@@ -340,13 +316,15 @@ _CODE_POCKET_DENY: frozenset[str] = frozenset(
 # request like "build an employee management app with components and nice design"
 # almost word for word, which is how the reported bug started.
 #
-# With every pocket tool denied above, invoking that skill can no longer BUILD
-# anything — but it would still cost the user a turn: the agent loads a long
-# instruction telling it to call ``get_widget_spec`` and ``pocket_specialist__
-# create``, attempts them, takes hard errors, and only then finds its file tools.
-# CD-3 made exactly this argument when it dropped the `code` skill from the
-# profile ("absence is recoverable; contradiction is not"); the same reasoning
-# applies to a skill that teaches the wrong deliverable.
+# With the code agent's exclusivity capping the pocket MCP tools out of reach,
+# invoking that skill can no longer BUILD anything — but it would still cost the
+# user a turn: the agent loads a long instruction telling it to call
+# ``get_widget_spec`` and ``pocket_specialist__create``, attempts them, takes hard
+# errors, and only then finds its file tools. ``Skill`` is a BUILT-IN, so the MCP
+# cap does not reach it — this surface deny is what keeps the skill from firing on
+# the exact repro prompt at all. CD-3 made the same argument when it dropped the
+# `code` skill from the profile ("absence is recoverable; contradiction is not");
+# it applies equally to a skill that teaches the wrong deliverable.
 #
 # /code needs no skill: ``CODE_SYSTEM_PROMPT`` is now the agent's whole guidance
 # here, and it is not a document the agent has to go and fetch. If a
@@ -611,6 +589,16 @@ SURFACES: list[SurfaceSpec] = [
         # Both sets are module-level literals, so this stays a STATIC profile (no
         # lazily-loaded ids, not meta-aware, no resolver needed).
         #
+        # The deny set covers only BUILT-IN tools now. Restricting the MCP surface
+        # for /code is no longer this profile's job: /code routes to the dedicated
+        # ``code`` agent, whose ``tool_mode="exclusive"`` policy caps the run's
+        # ``mcp__*`` tools to exactly the four file ids at run time — so the old
+        # ``_CODE_POCKET_DENY`` MCP deny-list became dead weight and was removed
+        # (CX-4). What the exclusivity cap CANNOT reach are the built-ins, which is
+        # exactly what ``_CODE_BUILTIN_DENY`` (backend-disk tools + ``Agent``) and
+        # ``_CODE_SKILL_DENY`` (``Skill`` — the create-pocket plugin's invoker)
+        # still deny here.
+        #
         # ``skill_names`` is deliberately EMPTY, where it used to carry the
         # `code` skill. That skill is not incidentally about the built-ins — it
         # is entirely about them ("you use the built-in Bash / Read / Write /
@@ -624,7 +612,7 @@ SURFACES: list[SurfaceSpec] = [
         profile=SurfaceProfile(
             ripple_mode="off",
             allow_mcp_tool_ids=_CODE_FILE_TOOL_IDS,
-            deny_mcp_tool_ids=_CODE_BUILTIN_DENY | _CODE_POCKET_DENY | _CODE_SKILL_DENY,
+            deny_mcp_tool_ids=_CODE_BUILTIN_DENY | _CODE_SKILL_DENY,
             # The surface's own system prompt, replacing the pocket-shaped
             # behavioral stack the shared builder would otherwise assemble. See
             # ``system_prompts.py`` for why a prohibition alone did not hold.
