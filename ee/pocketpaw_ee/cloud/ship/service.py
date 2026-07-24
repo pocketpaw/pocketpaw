@@ -60,6 +60,7 @@ from pocketpaw_ee.cloud.ship.domain import (
     DestroyProposalView,
     DomainView,
     EnvVarView,
+    LifecycleView,
     LogsView,
 )
 from pocketpaw_ee.cloud.ship.dto import (
@@ -70,6 +71,7 @@ from pocketpaw_ee.cloud.ship.dto import (
     CreateAppRequest,
     CreateBoxRequest,
     CreateDbRequest,
+    CreateVolumeRequest,
     DatabaseOut,
     DbOut,
     DeployOut,
@@ -79,13 +81,16 @@ from pocketpaw_ee.cloud.ship.dto import (
     EnvVarIn,
     EnvVarOut,
     ImportEnvRequest,
+    LifecycleOut,
     LogsOut,
     MetricsOut,
     PendingApprovalOut,
     SetChecksRequest,
     SetEnvRequest,
+    SetResourcesRequest,
     SetScaleRequest,
     SetSourceRequest,
+    VolumeOut,
 )
 from pocketpaw_ee.ship_engine.port import CommandFailed
 
@@ -472,6 +477,108 @@ async def set_checks(
     return view
 
 
+async def set_resources(
+    workspace_id: str,
+    user_id: str,
+    app_id: str,
+    body: SetResourcesRequest,
+    *,
+    session_factory: ship_engine.BoxSessionFactory | None = None,
+) -> AppView:
+    """Set the app's CPU/memory ceilings (SHIP-18, Dokku ``resource:limit``)."""
+    body = SetResourcesRequest.model_validate(body)
+    app, box = await _require_app_on_ready_box(workspace_id, app_id)
+    factory = session_factory or ship_engine.box_session
+    try:
+        async with factory(box) as session:
+            await session.engine.set_resources(app.name, cpu=body.cpu, memory_mb=body.memory_mb)
+    except ship_engine.ENGINE_FAILURES as exc:
+        raise _engine_conflict("ship.resources_failed", exc) from exc
+
+    app = await store.set_app_resources(app, cpu=body.cpu, memory_mb=body.memory_mb)
+    view = _app_view(app)
+    await emit(ShipAppUpdated(data={**_app_event_payload(view), "user_id": user_id}))
+    return view
+
+
+async def create_volume(
+    workspace_id: str,
+    user_id: str,
+    app_id: str,
+    body: CreateVolumeRequest,
+    *,
+    session_factory: ship_engine.BoxSessionFactory | None = None,
+) -> AppView:
+    """Create a persistent volume and mount it into the app (SHIP-18)."""
+    body = CreateVolumeRequest.model_validate(body)
+    app, box = await _require_app_on_ready_box(workspace_id, app_id)
+    name = (body.name or f"{app.name}-data").strip()
+    factory = session_factory or ship_engine.box_session
+    try:
+        async with factory(box) as session:
+            result = await session.engine.create_volume(
+                app.name, name=name, mount_path=body.mount_path
+            )
+    except ship_engine.ENGINE_FAILURES as exc:
+        raise _engine_conflict("ship.volume_failed", exc) from exc
+
+    app = await store.record_app_volume(
+        app, name=result.name, mount_path=result.mount_path, host_path=result.host_path
+    )
+    view = _app_view(app)
+    await emit(ShipAppUpdated(data={**_app_event_payload(view), "user_id": user_id}))
+    return view
+
+
+async def restart_app(
+    workspace_id: str,
+    user_id: str,
+    app_id: str,
+    *,
+    session_factory: ship_engine.BoxSessionFactory | None = None,
+) -> LifecycleView:
+    """Restart the app's containers (SHIP-18, ``ps:restart``). Reversible bounce —
+    no persisted state changes, so no store write."""
+    return await _lifecycle(workspace_id, app_id, action="restart", session_factory=session_factory)
+
+
+async def rebuild_app(
+    workspace_id: str,
+    user_id: str,
+    app_id: str,
+    *,
+    session_factory: ship_engine.BoxSessionFactory | None = None,
+) -> LifecycleView:
+    """Rebuild the app from its source/image and restart it (SHIP-18,
+    ``ps:rebuild``). Reversible — no persisted state changes."""
+    return await _lifecycle(workspace_id, app_id, action="rebuild", session_factory=session_factory)
+
+
+async def _lifecycle(
+    workspace_id: str,
+    app_id: str,
+    *,
+    action: str,
+    session_factory: ship_engine.BoxSessionFactory | None,
+) -> LifecycleView:
+    """Shared body for the reversible lifecycle verbs (restart / rebuild).
+
+    Both drive the engine and return a confirmation; neither persists state, so
+    there is nothing to store and no ShipAppUpdated to emit (the app's recorded
+    config is unchanged — a follow-up ``GET`` reflects the live status).
+    """
+    app, box = await _require_app_on_ready_box(workspace_id, app_id)
+    factory = session_factory or ship_engine.box_session
+    try:
+        async with factory(box) as session:
+            engine_verb = session.engine.restart if action == "restart" else session.engine.rebuild
+            result = await engine_verb(app.name)
+    except ship_engine.ENGINE_FAILURES as exc:
+        raise _engine_conflict(f"ship.{action}_failed", exc) from exc
+
+    return LifecycleView(workspace_id=workspace_id, app_id=str(app.id), action=result.action)
+
+
 async def get_logs(
     workspace_id: str,
     app_id: str,
@@ -625,7 +732,14 @@ def app_to_wire(view: AppView) -> AppOut:
         scale=dict(view.scale),
         zero_downtime=view.zero_downtime,
         healthcheck_path=view.healthcheck_path,
+        volumes=[VolumeOut(name=n, mount_path=m, host_path=h) for (n, m, h) in view.volumes],
+        cpu_limit=view.cpu_limit,
+        memory_limit_mb=view.memory_limit_mb,
     )
+
+
+def lifecycle_to_wire(view: LifecycleView) -> LifecycleOut:
+    return LifecycleOut(app_id=view.app_id, action=view.action)  # type: ignore[arg-type]
 
 
 def deploy_to_wire(view: DeployView) -> DeployOut:
@@ -719,6 +833,9 @@ def _app_view(app: ShipApp) -> AppView:
         scale=dict(app.scale),
         zero_downtime=app.zero_downtime,
         healthcheck_path=app.healthcheck_path,
+        volumes=tuple((v.name, v.mount_path, v.host_path) for v in app.volumes),
+        cpu_limit=app.cpu_limit,
+        memory_limit_mb=app.memory_limit_mb,
         pending_destroy_proposal_id=app.pending_destroy_proposal_id,
     )
 

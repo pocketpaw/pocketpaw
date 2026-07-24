@@ -18,6 +18,12 @@
 #   POST   /ship/apps/{id}/domains      route a domain + issue TLS
 #   GET    /ship/apps/{id}/domains      the app's routed domains
 #   POST   /ship/apps/{id}/db           create + link a database service
+#   PUT    /ship/apps/{id}/scale        set per-process container counts
+#   PUT    /ship/apps/{id}/checks       configure zero-downtime deploy checks
+#   PUT    /ship/apps/{id}/resources    set cpu / memory ceilings
+#   POST   /ship/apps/{id}/volumes      create + mount a persistent volume
+#   POST   /ship/apps/{id}/restart      restart the app's containers
+#   POST   /ship/apps/{id}/rebuild      rebuild from source and restart
 #   GET    /ship/apps/{id}/logs         recent app log lines
 #   GET    /ship/apps/{id}/env          list env vars (values MASKED)
 #   PUT    /ship/apps/{id}/env          upsert a batch of env vars
@@ -34,6 +40,10 @@
 # Changed 2026-07-23 (feat/ship-14-source-deploy, SHIP-14): added
 # ``PUT /ship/apps/{id}/source`` — point an app at a git repo or a pre-built
 # image; the response is masked (never echoes the private-repo token).
+# Changed 2026-07-24 (feat/ship-18-ops, SHIP-18): added the Wave 3 ops routes —
+# ``PUT .../resources`` (cpu/mem ceilings), ``POST .../volumes`` (persistent
+# storage), ``POST .../restart`` + ``POST .../rebuild`` (reversible bounces, they
+# answer ``LifecycleOut``, not the app).
 
 from __future__ import annotations
 
@@ -51,17 +61,20 @@ from pocketpaw_ee.cloud.ship.dto import (
     CreateAppRequest,
     CreateBoxRequest,
     CreateDbRequest,
+    CreateVolumeRequest,
     DbOut,
     DeployOut,
     DomainListOut,
     DomainOut,
     EnvOut,
     ImportEnvRequest,
+    LifecycleOut,
     LogsOut,
     MetricsOut,
     PendingApprovalOut,
     SetChecksRequest,
     SetEnvRequest,
+    SetResourcesRequest,
     SetScaleRequest,
     SetSourceRequest,
 )
@@ -238,6 +251,52 @@ async def set_app_checks(
     workspace_id = _require_workspace(ctx)
     view = await ship_service.set_checks(workspace_id, ctx.user_id, app_id, body)
     return ship_service.app_to_wire(view)
+
+
+@router.put("/apps/{app_id}/resources", response_model=AppOut)
+async def set_app_resources(
+    app_id: str,
+    body: SetResourcesRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> AppOut:
+    """Set the app's CPU/memory ceilings (SHIP-18, Dokku ``resource:limit``)."""
+    workspace_id = _require_workspace(ctx)
+    view = await ship_service.set_resources(workspace_id, ctx.user_id, app_id, body)
+    return ship_service.app_to_wire(view)
+
+
+@router.post("/apps/{app_id}/volumes", response_model=AppOut)
+async def create_volume(
+    app_id: str,
+    body: CreateVolumeRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> AppOut:
+    """Create a persistent volume and mount it into the app (SHIP-18)."""
+    workspace_id = _require_workspace(ctx)
+    view = await ship_service.create_volume(workspace_id, ctx.user_id, app_id, body)
+    return ship_service.app_to_wire(view)
+
+
+@router.post("/apps/{app_id}/restart", response_model=LifecycleOut)
+async def restart_app(
+    app_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> LifecycleOut:
+    """Restart the app's containers (SHIP-18, ``ps:restart``) — a reversible bounce."""
+    workspace_id = _require_workspace(ctx)
+    view = await ship_service.restart_app(workspace_id, ctx.user_id, app_id)
+    return ship_service.lifecycle_to_wire(view)
+
+
+@router.post("/apps/{app_id}/rebuild", response_model=LifecycleOut)
+async def rebuild_app(
+    app_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> LifecycleOut:
+    """Rebuild the app from source and restart it (SHIP-18, ``ps:rebuild``)."""
+    workspace_id = _require_workspace(ctx)
+    view = await ship_service.rebuild_app(workspace_id, ctx.user_id, app_id)
+    return ship_service.lifecycle_to_wire(view)
 
 
 @router.get("/apps/{app_id}/logs", response_model=LogsOut)

@@ -163,6 +163,9 @@ async def test_create_and_list_apps(w1):
         "scale",
         "zero_downtime",
         "healthcheck_path",
+        "volumes",
+        "cpu_limit",
+        "memory_limit_mb",
     }
     assert (body["name"], body["box_id"], body["status"], body["urls"]) == (
         APP,
@@ -266,6 +269,9 @@ async def test_deploy_transitions_are_observable_through_the_deploys_route(w1, m
         "scale": {},
         "zero_downtime": True,
         "healthcheck_path": "",
+        "volumes": [],
+        "cpu_limit": 0,
+        "memory_limit_mb": 0,
     }
 
 

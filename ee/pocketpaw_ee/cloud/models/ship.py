@@ -59,6 +59,11 @@
 # store / box SSH key (``cloud._core.crypto`` + ``CLOUD_ENCRYPTION_KEY``). The
 # plaintext token never lives at rest, never serializes into a DTO/event/log, and
 # is decrypted solely inside ``ship.store`` (``decrypt_repo_token``) at deploy.
+# Changed 2026-07-24 (feat/ship-18-ops, SHIP-18): ``ShipApp`` gained Wave 3
+# operations state — a ``volumes`` list of ``ShipAppVolume`` sub-docs (persistent
+# storage mounts) and the ``cpu_limit`` / ``memory_limit_mb`` resource ceilings.
+# All additive with defaults; none carry a secret. Written only through
+# ``ee.cloud.ship.store``.
 
 from __future__ import annotations
 
@@ -179,6 +184,18 @@ class ShipAppDatabase(BaseModel):
     env_var: str
 
 
+class ShipAppVolume(BaseModel):
+    """One persistent volume mounted into an app (SHIP-18). ``name`` is the Dokku
+    storage entry, ``mount_path`` the container path it appears at, ``host_path``
+    the box-side directory backing it. Data survives redeploys. A sub-document (not
+    a bare string) because the /ship console shows the mount + backing path per
+    volume. Carries no secret."""
+
+    name: str
+    mount_path: str
+    host_path: str
+
+
 # An env var's deploy scope: applied to both deploy kinds, or only to production
 # / only to preview deploys. The deploy-time merge filters on it (SHIP-9).
 ShipEnvScope = Literal["both", "prod", "preview"]
@@ -272,6 +289,14 @@ class ShipApp(TimestampedDocument):
     # default) + an optional HTTP health path.
     zero_downtime: bool = True
     healthcheck_path: str = ""
+    # SHIP-18: persistent volumes mounted into the app (``storage:create`` +
+    # ``storage:mount``). Data survives redeploys; the console reads this list.
+    volumes: list[ShipAppVolume] = Field(default_factory=list)
+    # SHIP-18: resource ceilings applied via ``resource:limit`` (BYO cost control).
+    # ``cpu_limit`` is in Dokku's CPU units, ``memory_limit_mb`` in megabytes; 0 =
+    # unset (no ceiling).
+    cpu_limit: int = 0
+    memory_limit_mb: int = 0
     # Lifecycle state (see ``ShipAppStatus``).
     status: ShipAppStatus = "created"
     # Set when a DELETE parked a teardown for human approval (SHIP-3); SHIP-4

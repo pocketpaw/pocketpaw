@@ -79,6 +79,12 @@ class AppView:
     scale: dict[str, int] = field(default_factory=dict)
     zero_downtime: bool = True
     healthcheck_path: str = ""
+    # Operations config (SHIP-18). ``volumes`` carries (name, mount_path,
+    # host_path) tuples; ``cpu_limit`` / ``memory_limit_mb`` are resource ceilings
+    # (0 = unset). None carry a secret.
+    volumes: tuple[tuple[str, str, str], ...] = ()
+    cpu_limit: int = 0
+    memory_limit_mb: int = 0
     pending_destroy_proposal_id: str | None = None
 
 
@@ -120,6 +126,17 @@ class DbView:
     linked_app: str
     service: str
     env_var: str
+
+
+@dataclass(frozen=True)
+class LifecycleView:
+    """The result of a lifecycle action on an app (SHIP-18, ``restart`` /
+    ``rebuild``). Both are reversible bounces, so the view simply confirms what
+    the engine did. Carries no secret."""
+
+    workspace_id: str
+    app_id: str
+    action: str
 
 
 @dataclass(frozen=True)

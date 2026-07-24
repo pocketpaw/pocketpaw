@@ -38,6 +38,10 @@
 # source shapes — ``SetSourceRequest`` (+ the same fields on ``CreateAppRequest``)
 # in, ``source_kind`` / ``repo_url`` / ``repo_ref`` on ``AppOut`` out. The
 # private-repo ``token`` is REQUEST-only — no response ever carries it.
+# Changed 2026-07-24 (feat/ship-18-ops, SHIP-18): Wave 3 ops-depth shapes.
+# ``SetResourcesRequest`` (cpu/memory ceilings) + ``CreateVolumeRequest`` (name +
+# absolute mount_path) in; ``VolumeOut`` + ``LifecycleOut`` and the additive
+# ``volumes`` / ``cpu_limit`` / ``memory_limit_mb`` fields on ``AppOut`` out.
 
 from __future__ import annotations
 
@@ -86,6 +90,10 @@ _REPO_URL_RE = (
 # A repo access token is an opaque secret (a PAT / deploy token) — no pattern,
 # just a sane length cap so an authenticated route can't be memory-abused.
 _REPO_TOKEN_MAX = 4096
+# A container mount path (SHIP-18): absolute, with no ``:`` (Dokku's
+# host:container separator) or whitespace, so it can never split into extra
+# Dokku arguments. Written without look-around (pydantic's Rust regex engine).
+_MOUNT_PATH_RE = r"^/[^\s:]+$"
 
 # ---------------------------------------------------------------------------
 # Requests
@@ -196,6 +204,38 @@ class SetChecksRequest(BaseModel):
     healthcheck_path: str = Field(default="", max_length=512)
 
 
+class SetResourcesRequest(BaseModel):
+    """Set an app's resource ceilings (``PUT /ship/apps/{id}/resources``, SHIP-18).
+
+    ``cpu`` is in Dokku's CPU units, ``memory_mb`` in megabytes. Both are
+    non-negative; a ``0`` leaves that dimension unlimited, but at least one must be
+    non-zero — an all-zero call reads limits in Dokku rather than setting any, so
+    it would silently no-op.
+    """
+
+    cpu: int = Field(default=0, ge=0, le=1_000_000)
+    memory_mb: int = Field(default=0, ge=0, le=1_048_576)
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> SetResourcesRequest:
+        if self.cpu == 0 and self.memory_mb == 0:
+            raise ValueError("set at least one of cpu or memory_mb")
+        return self
+
+
+class CreateVolumeRequest(BaseModel):
+    """Create a persistent volume and mount it into the app
+    (``POST /ship/apps/{id}/volumes``, SHIP-18).
+
+    ``name`` defaults to ``<app-name>-data`` when omitted (the service fills it
+    in). ``mount_path`` is the absolute container path the volume appears at; the
+    data survives redeploys.
+    """
+
+    name: str | None = Field(default=None, max_length=63, pattern=_APP_NAME_RE)
+    mount_path: str = Field(min_length=1, max_length=512, pattern=_MOUNT_PATH_RE)
+
+
 class SetSourceRequest(BaseModel):
     """Point an app at a deploy source (``PUT /ship/apps/{id}/source``, SHIP-14).
 
@@ -279,13 +319,24 @@ class DatabaseOut(BaseModel):
     env_var: str
 
 
+class VolumeOut(BaseModel):
+    """One persistent volume mounted into an app (SHIP-18). ``host_path`` is the
+    box-side directory backing the mount; the data survives redeploys. Carries no
+    secret."""
+
+    name: str
+    mount_path: str
+    host_path: str
+
+
 class AppOut(BaseModel):
     """One app on a box. FROZEN — see the module comment.
 
-    ``source_kind`` / ``repo_url`` / ``repo_ref`` (SHIP-14) and ``databases`` /
-    ``scale`` / ``zero_downtime`` / ``healthcheck_path`` (SHIP-17) are additive
-    with defaults. There is deliberately NO token field (the private-repo
-    credential is write-only) and no DB connection string (secret, box-only).
+    ``source_kind`` / ``repo_url`` / ``repo_ref`` (SHIP-14), ``databases`` /
+    ``scale`` / ``zero_downtime`` / ``healthcheck_path`` (SHIP-17), and
+    ``volumes`` / ``cpu_limit`` / ``memory_limit_mb`` (SHIP-18) are additive with
+    defaults. There is deliberately NO token field (the private-repo credential is
+    write-only) and no DB connection string (secret, box-only).
     """
 
     id: str
@@ -300,6 +351,9 @@ class AppOut(BaseModel):
     scale: dict[str, int] = Field(default_factory=dict)
     zero_downtime: bool = True
     healthcheck_path: str = ""
+    volumes: list[VolumeOut] = Field(default_factory=list)
+    cpu_limit: int = 0
+    memory_limit_mb: int = 0
 
 
 class DeployOut(BaseModel):
@@ -378,6 +432,15 @@ class DbOut(BaseModel):
     service: str
     linked_app: str
     env_var: str
+
+
+class LifecycleOut(BaseModel):
+    """The result of a lifecycle action on an app (SHIP-18). ``action`` is the
+    verb the engine ran (``restart`` / ``rebuild``); both are reversible bounces,
+    so the response simply confirms what was done."""
+
+    app_id: str
+    action: Literal["restart", "rebuild"]
 
 
 # ---------------------------------------------------------------------------

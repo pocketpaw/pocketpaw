@@ -41,6 +41,7 @@ from pocketpaw_ee.cloud.models.ship import (
     ShipAppDatabase,
     ShipAppDomain,
     ShipAppStatus,
+    ShipAppVolume,
     ShipBox,
     ShipBoxStatus,
     ShipBuildPath,
@@ -307,6 +308,32 @@ async def set_app_checks(app: ShipApp, *, zero_downtime: bool, healthcheck_path:
     """Persist the app's zero-downtime + healthcheck settings (SHIP-17)."""
     app.zero_downtime = zero_downtime
     app.healthcheck_path = healthcheck_path
+    await app.save()
+    return app
+
+
+async def record_app_volume(app: ShipApp, *, name: str, mount_path: str, host_path: str) -> ShipApp:
+    """Record a persistent volume mounted into an app (SHIP-18).
+
+    Appends to the ``volumes`` list; a re-mount of the same volume name refreshes
+    its entry rather than duplicating it. Carries no secret (the backing directory
+    is a path, not a credential).
+    """
+    for existing in app.volumes:
+        if existing.name == name:
+            existing.mount_path = mount_path
+            existing.host_path = host_path
+            break
+    else:
+        app.volumes.append(ShipAppVolume(name=name, mount_path=mount_path, host_path=host_path))
+    await app.save()
+    return app
+
+
+async def set_app_resources(app: ShipApp, *, cpu: int, memory_mb: int) -> ShipApp:
+    """Persist the app's resource ceilings (SHIP-18). Replaces both values."""
+    app.cpu_limit = cpu
+    app.memory_limit_mb = memory_mb
     await app.save()
     return app
 

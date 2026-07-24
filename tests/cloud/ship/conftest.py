@@ -59,6 +59,12 @@ SHIP3_REPLIES: dict[str, str] = {
     f"dokku checks:enable {APP}": "checks_enable.txt",
     f"dokku checks:disable {APP}": "checks_disable.txt",
     f"dokku ps:scale {APP} web=2 worker=1": "ps_scale.txt",
+    # Wave 3 (SHIP-18): resource limits, persistent volumes, lifecycle bounces.
+    f"dokku resource:limit --cpu 1000 --memory 512 {APP}": "resource_limit.txt",
+    f"dokku storage:create {APP}-data": "storage_create.txt",
+    f"dokku storage:mount {APP} {APP}-data --container-dir /data": "storage_mount.txt",
+    f"dokku ps:restart {APP}": "ps_restart.txt",
+    f"dokku ps:rebuild {APP}": "ps_rebuild.txt",
     f"dokku logs {APP} --num 100": "logs.txt",
     ship_engine.BOX_METRICS_COMMAND: "box_metrics.txt",
     # App-level metrics (SHIP-12): ps:report state + df + real docker stats.
