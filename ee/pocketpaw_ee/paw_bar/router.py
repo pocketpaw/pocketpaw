@@ -414,7 +414,13 @@ def _safe_parent_origin(po: str, allowed_origins: list[str]) -> str:
     return f"{scheme}://{hostport}"
 
 
-def _pawbar_bootstrap_html(config: dict[str, Any], asset_mount: str) -> str:
+# Dark page background for the OWNER preview frame only (not the public embed), so
+# the transparent glass bar sits on a dark surface matching the dashboard instead of
+# a white canvas. A near-black neutral tuned to the paw-enterprise dark theme.
+_PREVIEW_PAGE_BG = "#0d0e12"
+
+
+def _pawbar_bootstrap_html(config: dict[str, Any], asset_mount: str, page_bg: str = "") -> str:
     """Render the glass frame document: seed ``window.__PAWBAR__`` then load the app.
 
     The config dict is ``json.dumps``'d with ``<`` escaped to ``\\u003c`` so no
@@ -423,9 +429,19 @@ def _pawbar_bootstrap_html(config: dict[str, Any], asset_mount: str) -> str:
     ``</script>`` sequence or inject markup. Assets load from ``asset_mount`` (the
     root-absolute StaticFiles mount), so the document is valid wherever the API
     router is mounted.
+
+    ``page_bg`` is empty for the PUBLIC embed (the bar body stays transparent so it
+    sits over the customer's real page) and set ONLY by the owner preview frame to a
+    dark surface: a transparent-body iframe otherwise paints a white canvas backdrop,
+    which clashes with the dark dashboard the preview is embedded in. The value is a
+    hard-coded CSS color the server controls (never request-derived), so the inline
+    ``<style>`` cannot be injected.
     """
     config_json = json.dumps(config).replace("<", "\\u003c")
     v = _asset_version()
+    preview_style = (
+        f'<style>html,body{{background:{page_bg};color-scheme:dark}}</style>\n' if page_bg else ""
+    )
     return (
         "<!doctype html>\n"
         '<html lang="en">\n'
@@ -434,6 +450,7 @@ def _pawbar_bootstrap_html(config: dict[str, Any], asset_mount: str) -> str:
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         "<title>Paw Bar</title>\n"
         f'<link rel="stylesheet" href="{asset_mount}/pawbar.css?v={v}">\n'
+        f"{preview_style}"
         "</head>\n"
         "<body>\n"
         '<div id="pawbar-root"></div>\n'
@@ -1522,7 +1539,10 @@ async def get_site_preview_frame(
         greeting=site.concierge_greeting or "",
         starters=await _bound_agent_starters(widget.agent_id),
     )
-    html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT)
+    # Preview-only dark page so the transparent bar reads as sitting on the dark
+    # dashboard, not a white canvas. The public /paw-bar/frame passes no page_bg
+    # (stays transparent over the customer's real site).
+    html = _pawbar_bootstrap_html(config, PAWBAR_APP_MOUNT, page_bg=_PREVIEW_PAGE_BG)
     return HTMLResponse(
         content=html,
         headers={"Content-Security-Policy": csp, "Cache-Control": "no-store"},
