@@ -621,9 +621,7 @@ def app_to_wire(view: AppView) -> AppOut:
         source_kind=view.source_kind,  # type: ignore[arg-type] — the doc's Literal is the same set
         repo_url=view.repo_url,
         repo_ref=view.repo_ref,
-        databases=[
-            DatabaseOut(name=n, db_type=t, env_var=v) for (n, t, v) in view.databases
-        ],
+        databases=[DatabaseOut(name=n, db_type=t, env_var=v) for (n, t, v) in view.databases],
         scale=dict(view.scale),
         zero_downtime=view.zero_downtime,
         healthcheck_path=view.healthcheck_path,

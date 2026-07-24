@@ -380,9 +380,7 @@ class ShipEngine(Protocol):
         """Route ``domain`` to ``app``; issue a TLS cert when ``enable_tls``."""
         ...
 
-    async def db_create(
-        self, app: str, service: str, db_type: DbType = "mongo"
-    ) -> DbResult:
+    async def db_create(self, app: str, service: str, db_type: DbType = "mongo") -> DbResult:
         """Create a ``db_type`` database ``service`` and link it to ``app``.
 
         Every ``db_type`` drives the SAME plugin shape (``<svc>:create`` then

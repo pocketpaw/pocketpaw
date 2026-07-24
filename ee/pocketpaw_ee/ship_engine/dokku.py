@@ -428,9 +428,7 @@ class DokkuDriver:
             await self._run("add_domain", f"dokku letsencrypt:enable {shlex.quote(app)}")
         return DomainResult(app=app, domain=domain, tls_enabled=enable_tls)
 
-    async def db_create(
-        self, app: str, service: str, db_type: DbType = "mongo"
-    ) -> DbResult:
+    async def db_create(self, app: str, service: str, db_type: DbType = "mongo") -> DbResult:
         plugin, default_env_var = _DB_PLUGINS[db_type]
         await self._run("db_create", f"dokku {plugin}:create {shlex.quote(service)}")
         linked = await self._run(

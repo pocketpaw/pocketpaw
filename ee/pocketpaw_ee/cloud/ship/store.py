@@ -291,9 +291,7 @@ async def record_app_db(
             existing.env_var = env_var
             break
     else:
-        app.databases.append(
-            ShipAppDatabase(name=service, db_type=db_type, env_var=env_var)
-        )
+        app.databases.append(ShipAppDatabase(name=service, db_type=db_type, env_var=env_var))
     await app.save()
     return app
 
@@ -305,9 +303,7 @@ async def set_app_scale(app: ShipApp, *, scale: dict[str, int]) -> ShipApp:
     return app
 
 
-async def set_app_checks(
-    app: ShipApp, *, zero_downtime: bool, healthcheck_path: str
-) -> ShipApp:
+async def set_app_checks(app: ShipApp, *, zero_downtime: bool, healthcheck_path: str) -> ShipApp:
     """Persist the app's zero-downtime + healthcheck settings (SHIP-17)."""
     app.zero_downtime = zero_downtime
     app.healthcheck_path = healthcheck_path

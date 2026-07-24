@@ -89,9 +89,13 @@ async def _with_identity(tool_name: str):
     """Resolve identity or return the error envelope. Returns (ws, user, err)."""
     workspace_id, user_id = _identity()
     if not workspace_id or not user_id:
-        return None, None, _error_response(
-            f"{tool_name} requires workspace and user context "
-            "(call it from a cloud chat session)."
+        return (
+            None,
+            None,
+            _error_response(
+                f"{tool_name} requires workspace and user context "
+                "(call it from a cloud chat session)."
+            ),
         )
     _audit(workspace_id, user_id, tool_name)
     return workspace_id, user_id, None
@@ -265,7 +269,7 @@ async def _set_scale_handler(args: dict) -> dict:
         return _error_response("ship_set_scale requires an `app_id`.")
     raw = args.get("scale") or {}
     if not isinstance(raw, dict) or not raw:
-        return _error_response("ship_set_scale requires a `scale` map, e.g. {\"web\": 2}.")
+        return _error_response('ship_set_scale requires a `scale` map, e.g. {"web": 2}.')
     try:
         scale = {str(k): int(v) for k, v in raw.items()}
         view = await service.set_scale(ws, user, app_id, SetScaleRequest(scale=scale))
@@ -541,8 +545,8 @@ def build_ship_server() -> tuple[str, Any] | None:
     @tool(
         "ship_set_scale",
         (
-            "Set how many containers run per process type (e.g. {\"web\": 2, "
-            "\"worker\": 1}). Scaling to 0 stops a process. Runs immediately."
+            'Set how many containers run per process type (e.g. {"web": 2, '
+            '"worker": 1}). Scaling to 0 stops a process. Runs immediately.'
         ),
         {
             "type": "object",
@@ -550,7 +554,7 @@ def build_ship_server() -> tuple[str, Any] | None:
                 "app_id": {"type": "string", "minLength": 1},
                 "scale": {
                     "type": "object",
-                    "description": "Process name -> container count, e.g. {\"web\": 2}.",
+                    "description": 'Process name -> container count, e.g. {"web": 2}.',
                     "additionalProperties": {"type": "integer", "minimum": 0},
                 },
             },
