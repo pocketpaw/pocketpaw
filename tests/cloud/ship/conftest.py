@@ -50,6 +50,15 @@ SHIP3_REPLIES: dict[str, str] = {
     f"dokku letsencrypt:enable {APP}": "letsencrypt_enable.txt",
     f"dokku mongo:create {SERVICE}": "mongo_create.txt",
     f"dokku mongo:link {SERVICE} {APP}": "mongo_link.txt",
+    # Wave 2 (SHIP-17): postgres/redis database plugins, zero-downtime checks,
+    # and process scaling — the same box-free transcript replay.
+    f"dokku postgres:create {SERVICE}": "postgres_create.txt",
+    f"dokku postgres:link {SERVICE} {APP}": "postgres_link.txt",
+    f"dokku redis:create {SERVICE}": "redis_create.txt",
+    f"dokku redis:link {SERVICE} {APP}": "redis_link.txt",
+    f"dokku checks:enable {APP}": "checks_enable.txt",
+    f"dokku checks:disable {APP}": "checks_disable.txt",
+    f"dokku ps:scale {APP} web=2 worker=1": "ps_scale.txt",
     f"dokku logs {APP} --num 100": "logs.txt",
     ship_engine.BOX_METRICS_COMMAND: "box_metrics.txt",
     # App-level metrics (SHIP-12): ps:report state + df + real docker stats.

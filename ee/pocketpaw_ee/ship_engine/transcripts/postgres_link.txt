@@ -1,0 +1,9 @@
+# transcript: `dokku postgres:link demo-db demo` — injects DATABASE_URL (secret
+# DSN in the echo; driver must redact it from logs and keep it off DTOs).
+EXIT: 0
+--- stdout ---
+-----> Setting config vars
+       DATABASE_URL:  postgres://postgres:s3cr3tpass8f2a@dokku-postgres-demo-db:5432/demo_db
+-----> Restarting app demo
+-----> Releasing demo...
+--- stderr ---

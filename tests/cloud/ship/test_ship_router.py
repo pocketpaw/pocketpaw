@@ -159,6 +159,10 @@ async def test_create_and_list_apps(w1):
         "source_kind",
         "repo_url",
         "repo_ref",
+        "databases",
+        "scale",
+        "zero_downtime",
+        "healthcheck_path",
     }
     assert (body["name"], body["box_id"], body["status"], body["urls"]) == (
         APP,
@@ -258,6 +262,10 @@ async def test_deploy_transitions_are_observable_through_the_deploys_route(w1, m
         "source_kind": "image",
         "repo_url": "",
         "repo_ref": "main",
+        "databases": [],
+        "scale": {},
+        "zero_downtime": True,
+        "healthcheck_path": "",
     }
 
 

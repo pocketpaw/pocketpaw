@@ -1,0 +1,7 @@
+# transcript: `dokku ps:scale demo web=2 worker=1` — sets per-process counts.
+EXIT: 0
+--- stdout ---
+-----> Scaling demo processes: web=2 worker=1
+-----> Deploying demo...
+=====> Application deployed
+--- stderr ---

@@ -69,6 +69,10 @@ runcmd:
   - [ sh, -c, "wget -qO /tmp/bootstrap.sh {dokku_bootstrap}" ]
   - [ sh, -c, "DOKKU_TAG=v{DOKKU_VERSION} bash /tmp/bootstrap.sh" ]
   - [ sh, -c, "curl -fsSL https://nixpacks.com/install.sh | VERSION={NIXPACKS_VERSION} bash" ]
+  - [ sh, -c, "dokku plugin:install https://github.com/dokku/dokku-postgres.git postgres" ]
+  - [ sh, -c, "dokku plugin:install https://github.com/dokku/dokku-redis.git redis" ]
+  - [ sh, -c, "dokku plugin:install https://github.com/dokku/dokku-mongo.git mongo" ]
+  - [ sh, -c, "dokku plugin:install https://github.com/dokku/dokku-letsencrypt.git letsencrypt" ]
   - [ sh, -c, "{authorize_dokku}" ]
   - [ sh, -c, "echo '{key}' | dokku ssh-keys:add admin" ]
 """
