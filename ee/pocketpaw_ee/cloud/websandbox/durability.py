@@ -64,6 +64,21 @@
 # (``snapshot_project`` / ``mirror_file_to_project``) hard-requires S3 in cloud
 # via ``_require_s3_for_project_store`` — silent non-persistence to local disk is
 # worse than a loud 503.
+#
+# Changed 2026-07-25 (B1, feat/code-project-file-sync): added the BROWSER-runtime
+# siblings — ``put_project_file`` / ``drop_project_file`` / ``read_project_overlay``.
+# Every project-keyed function above tars or untars a Daytona VM, i.e. the bytes
+# live in a VM the backend can reach. On the in-tab (WebContainer) runtime there is
+# no VM: the filesystem is in the user's browser, so the bytes arrive FROM the
+# client on a write and must be handed BACK to it on a reopen. These three close
+# that loop over the same two-tier model, minus the snapshot tier — the baseline is
+# the starter scaffold, deterministically re-materializable client-side from the
+# starter id and therefore never uploaded, so the overlay alone is the whole
+# durable delta. Restore = re-materialize the scaffold, then replay the overlay.
+# Same S3 vehicle, same ``_upload_project_blob``, same owner-scoped ``stream(...)``
+# read path ``restore_project`` uses, same ``_require_s3_for_project_store``
+# fail-closed guard on the write, same ``uploads=`` DI seam. ADDITIVE: nothing
+# above is touched.
 from __future__ import annotations
 
 import io
@@ -72,7 +87,12 @@ import os
 from pathlib import Path
 from typing import Any
 
-from pocketpaw_ee.cloud._core.errors import CloudError, ConflictError, with_cause
+from pocketpaw_ee.cloud._core.errors import (
+    CloudError,
+    ConflictError,
+    ValidationError,
+    with_cause,
+)
 from pocketpaw_ee.cloud.codeproject import service as codeproject_service
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
 from pocketpaw_ee.cloud.shared.db import is_multi_tenant_cloud
@@ -827,14 +847,238 @@ async def move_project_overlay(
     )
 
 
+# ===========================================================================
+# Browser-runtime project file sync (B1, feat/code-project-file-sync).
+#
+# The in-tab (WebContainer) runtime has no VM, so the three functions here are
+# the client-side counterparts of ``mirror_file_to_project`` /
+# ``drop_project_overlay`` / ``restore_project``: the bytes arrive from the
+# browser on a write and are streamed back to it on a reopen, instead of being
+# tarred out of and untarred into a Daytona VM.
+#
+# Only the OVERLAY tier is involved. The baseline is the starter scaffold, which
+# the client re-materializes deterministically from the starter id
+# (``codescaffold.compose``), so a fresh project stores nothing and the overlay
+# IS the durable delta. That also means these never write ``snapshot_file_id``:
+# ``set_project_snapshot`` clears the overlay, which would discard exactly the
+# state this path persists.
+# ===========================================================================
+
+# Read-back caps for the browser restore payload. The whole overlay is
+# materialized in memory as one JSON response, so both a per-file byte ceiling
+# and a file-count ceiling are enforced — a source tree is small, and an
+# unbounded read is a memory + latency hazard for the tab as much as the box.
+# Env-tunable in the same shape as ``POCKETPAW_WEBSANDBOX_SNAPSHOT_MAX_MB``.
+_DEFAULT_OVERLAY_MAX_MB = 10.0
+_DEFAULT_OVERLAY_MAX_FILES = 2000
+
+
+def _overlay_max_bytes() -> int:
+    """Overlay byte cap (``POCKETPAW_CODEPROJECT_OVERLAY_MAX_MB``).
+
+    Applied twice: as the per-file ceiling on a write (so one runaway file can
+    never land) and as the cumulative ceiling on the read-back (so the restore
+    payload stays bounded no matter how the overlay grew).
+    """
+    raw = os.environ.get("POCKETPAW_CODEPROJECT_OVERLAY_MAX_MB", "").strip()
+    mb = _DEFAULT_OVERLAY_MAX_MB
+    if raw:
+        try:
+            mb = float(raw)
+        except ValueError:
+            logger.warning(
+                "ignoring non-numeric POCKETPAW_CODEPROJECT_OVERLAY_MAX_MB=%r; using %s", raw, mb
+            )
+    return int(mb * 1024 * 1024)
+
+
+def _overlay_max_files() -> int:
+    """Overlay file-count cap (``POCKETPAW_CODEPROJECT_OVERLAY_MAX_FILES``)."""
+    raw = os.environ.get("POCKETPAW_CODEPROJECT_OVERLAY_MAX_FILES", "").strip()
+    count = _DEFAULT_OVERLAY_MAX_FILES
+    if raw:
+        try:
+            count = int(raw)
+        except ValueError:
+            logger.warning(
+                "ignoring non-numeric POCKETPAW_CODEPROJECT_OVERLAY_MAX_FILES=%r; using %s",
+                raw,
+                count,
+            )
+    return count
+
+
+def _require_safe_rel_path(rel_path: str) -> str:
+    """Normalize a client-supplied overlay path; reject anything that escapes.
+
+    The VM paths came out of the ``file.write`` jail; these come straight off the
+    wire, so the jail check moves to the write boundary. Leading slashes and
+    ``./`` segments are stripped (a client-side FS spells the same file both
+    ways, and the overlay key must be stable or a later delete won't match the
+    earlier write), while an empty path or any ``..`` traversal is a clean 422 —
+    the overlay key becomes a real path again on both restore paths
+    (``_overlay_abs_path`` in a VM, the client's FS in a tab).
+    """
+    candidate = (rel_path or "").strip().lstrip("/")
+    segments = [s for s in candidate.split("/") if s not in ("", ".")]
+    if not segments or any(s == ".." for s in segments):
+        raise ValidationError(
+            "codeproject.invalid_file_path",
+            f"{rel_path!r} is not a valid project-relative file path",
+        )
+    return "/".join(segments)
+
+
+async def put_project_file(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    rel_path: str,
+    content: str,
+    *,
+    uploads: Any = None,
+) -> tuple[str, str]:
+    """Persist one browser-written file; return ``(normalized path, FileRecord id)``.
+
+    The write half of the in-tab loop, and the counterpart of
+    ``mirror_file_to_project`` for a runtime whose filesystem the backend can't
+    read: the client hands us the text it just wrote to its in-tab FS and we
+    write it through to the tenant's blob storage + the project's overlay, so the
+    edit outlives the tab. Delegates to ``mirror_file_to_project`` so both
+    runtimes share ONE upload + pointer path (and therefore one S3 fail-closed
+    guard, one blob folder, one last-write-wins rule per path) — the only things
+    added here are the wire-facing concerns: path jailing and a size ceiling.
+
+    Text only, because the transport is a JSON string (the in-tab FS deals in
+    source files). Encoded UTF-8 so the read-back is byte-identical.
+    """
+    _require_s3_for_project_store()  # fail closed before validating or uploading
+    safe_path = _require_safe_rel_path(rel_path)
+    data = content.encode("utf-8")
+
+    cap = _overlay_max_bytes()
+    if len(data) > cap:
+        raise CloudError(
+            413,
+            "codeproject.file_too_large",
+            f"{safe_path!r} is {len(data) / 1024 / 1024:.1f} MB, over the "
+            f"{cap / 1024 / 1024:.0f} MB per-file limit",
+        )
+
+    file_id = await mirror_file_to_project(
+        workspace_id, user_id, project_id, safe_path, data, uploads=uploads
+    )
+    return safe_path, file_id
+
+
+async def drop_project_file(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    rel_path: str,
+) -> str:
+    """Drop a browser-deleted file from the project overlay; return the dropped path.
+
+    Normalizes through the SAME ``_require_safe_rel_path`` as the write so the
+    key actually matches what the write stored — a delete that missed would leave
+    the file to reappear on the next restore, which is the exact bug this tier
+    exists to prevent. Delegates the pointer write to ``drop_project_overlay``
+    (and through it to the service, Rule 2). A directory path drops every child.
+    """
+    safe_path = _require_safe_rel_path(rel_path)
+    await drop_project_overlay(workspace_id, user_id, project_id, safe_path)
+    return safe_path
+
+
+async def read_project_overlay(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    *,
+    uploads: Any = None,
+) -> dict[str, str]:
+    """Read a project's whole overlay back as ``{relpath: content}``.
+
+    The restore payload for the in-tab runtime, and the counterpart of
+    ``restore_project``'s tier-2 replay: instead of writing each blob into a VM,
+    it returns them to the client, which re-materializes the scaffold baseline
+    and replays this map over it. Owner-scoped through ``get_project`` (a project
+    the caller doesn't own reads as ``NotFound`` before any blob is touched), and
+    each blob comes back through the same owner-scoped ``stream(...)`` path
+    ``_download_snapshot`` wraps — a foreign or vanished blob can't be read out
+    of this endpoint.
+
+    Both caps fail LOUD rather than truncating: a silently partial restore looks
+    like the user's files were deleted, which is worse than a 413 that says the
+    project outgrew the in-browser runtime. Individually unreadable entries (a
+    reaped blob, a non-UTF-8 file the JSON transport can't carry) are skipped
+    with a warning instead — one bad file must not sink the rest, the same rule
+    ``restore_project`` replays under.
+    """
+    project = await codeproject_service.get_project(workspace_id, user_id, project_id)
+    overlay = project.overlay or {}
+    if not overlay:
+        return {}
+
+    max_files = _overlay_max_files()
+    if len(overlay) > max_files:
+        raise CloudError(
+            413,
+            "codeproject.overlay_too_many_files",
+            f"Project holds {len(overlay)} persisted files, over the {max_files} file limit",
+        )
+
+    up = uploads if uploads is not None else build_uploads()
+    cap = _overlay_max_bytes()
+    total = 0
+    files: dict[str, str] = {}
+    for rel_path in sorted(overlay):
+        file_id = overlay[rel_path]
+        try:
+            data = await _download_snapshot(up, file_id, workspace_id=workspace_id, user_id=user_id)
+        except CloudError:
+            logger.warning(
+                "codeproject.read_overlay: unreadable blob for project=%s path=%r file=%s",
+                project_id,
+                rel_path,
+                file_id,
+            )
+            continue
+        total += len(data)
+        if total > cap:
+            raise CloudError(
+                413,
+                "codeproject.overlay_too_large",
+                f"Project files total over the {cap / 1024 / 1024:.0f} MB limit",
+            )
+        try:
+            files[rel_path] = data.decode("utf-8")
+        except UnicodeDecodeError:
+            logger.warning(
+                "codeproject.read_overlay: skipping non-UTF-8 entry for project=%s path=%r",
+                project_id,
+                rel_path,
+            )
+    logger.debug(
+        "codeproject.read_overlay: project=%s -> %d file(s), %d bytes",
+        project_id,
+        len(files),
+        total,
+    )
+    return files
+
+
 __all__ = [
     "build_uploads",
     "drop_overlay",
+    "drop_project_file",
     "drop_project_overlay",
     "mirror_file",
     "mirror_file_to_project",
     "move_overlay",
     "move_project_overlay",
+    "put_project_file",
+    "read_project_overlay",
     "restore_project",
     "restore_workspace",
     "snapshot_project",

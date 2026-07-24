@@ -18,6 +18,13 @@
 # ``initialPrompt`` + ``initialPromptConsumed`` so the frontend can auto-run one
 # build turn on first open and know when it's already been kicked off. Added
 # ``ConsumePromptRequest`` for the mark-consumed / re-arm PATCH route.
+#
+# Modified 2026-07-25 (B1, feat/code-project-file-sync): added the browser-runtime
+# file-sync trio — ``PutProjectFileRequest`` (one client-written file),
+# ``ProjectFileWriteResponse`` (the acknowledged path + durable blob pointer) and
+# ``ProjectFilesResponse`` (the whole overlay as the restore payload). ``content``
+# is a string because the in-tab filesystem carries source text over JSON; the
+# byte ceiling lives in ``websandbox/durability.py`` next to the storage, not here.
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -61,6 +68,45 @@ class ConsumePromptRequest(BaseModel):
     consumed: bool = True
 
 
+class PutProjectFileRequest(BaseModel):
+    """One file the in-browser runtime just wrote — its path and its text.
+
+    ``path`` is project-relative; the service normalizes it and rejects anything
+    that escapes the project (absolute paths, ``..`` traversal). ``content`` is
+    the whole file, last-write-wins per path — this is a write-through of an
+    editor save, not a patch. An empty string is a legitimate empty file.
+    """
+
+    path: str = Field(..., min_length=1, max_length=1024)
+    content: str = ""
+
+
+class ProjectFileWriteResponse(BaseModel):
+    """Acknowledgement of one persisted file.
+
+    ``path`` echoes back the NORMALIZED key the overlay actually stored (which
+    can differ from what the client sent — a leading slash is stripped), so the
+    client can key its own dirty-tracking on the same string the later delete
+    and read-back use.
+    """
+
+    ok: bool = True
+    path: str
+    fileId: str
+
+
+class ProjectFilesResponse(BaseModel):
+    """The project's whole persisted overlay: ``{relative path: file content}``.
+
+    The restore payload for the in-tab runtime. It carries the DELTA only — the
+    starter scaffold baseline is re-materialized client-side from the starter id,
+    so a project that has never been edited returns an empty map rather than the
+    scaffold.
+    """
+
+    files: dict[str, str]
+
+
 class CodeProjectResponse(BaseModel):
     id: str
     workspaceId: str
@@ -86,5 +132,8 @@ __all__ = [
     "CodeProjectResponse",
     "ConsumePromptRequest",
     "CreateProjectRequest",
+    "ProjectFileWriteResponse",
+    "ProjectFilesResponse",
+    "PutProjectFileRequest",
     "RenameProjectRequest",
 ]
