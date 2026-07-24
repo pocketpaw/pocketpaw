@@ -30,6 +30,13 @@ threaded through the doc↔spec mappers (``_config_to_domain`` / ``_config_to_do
 and the config-dict update path (``_apply_update``) so an "exclusive" policy
 round-trips and survives an update. Defaults to "additive", so every existing
 agent maps byte-for-byte as before.
+Updated 2026-07-24 (CX-3, feat/code-agent-exclusive-tools): added
+``seed_code_agent`` / ``ensure_code_agent_all_workspaces`` — the dedicated
+``code`` slug agent for the ``/code`` surface. Its config is
+``tool_mode="exclusive"`` + ``tools=_CODE_FILE_TOOL_IDS`` (the four file tools)
+and its persona reuses ``CODE_SYSTEM_PROMPT``, so every run it does is capped to
+exactly those ids — no pocket/planner/widget grant. Idempotent, mirrors the
+default-agent seed + boot back-fill.
 """
 
 from __future__ import annotations
@@ -649,10 +656,102 @@ async def ensure_default_agent_all_workspaces() -> int:
     return seeded
 
 
+async def seed_code_agent(
+    workspace_id: str, owner_id: str
+) -> tuple[_AgentDoc, bool] | tuple[None, bool]:
+    """Create the dedicated ``code`` Agent for a workspace if missing (CX-3).
+
+    This is the backend-authoritative target for the ``/code`` surface. Unlike
+    the default ``pocketpaw`` agent, its config carries ``tool_mode="exclusive"``
+    and ``tools=<the four file tools>``, so the CX-1/CX-2 policy caps every run
+    it does to EXACTLY those ids — no pocket / planner / widget grant. That is
+    what makes "build an employee management app…" produce file-tool calls
+    against the user's project instead of a pocket.
+
+    The persona reuses ``CODE_SYSTEM_PROMPT`` (the CODE surface's own override)
+    verbatim so the agent identity and the surface prompt cannot drift, and the
+    tool ids come from ``_CODE_FILE_TOOL_IDS`` (the same constant the CODE
+    ``SurfaceProfile`` allows). It carries NO create-pocket skill: the CODE
+    surface deliberately ships none (see the long comment at
+    surface_registry.py:614), so ``skill_refs`` is empty.
+
+    Idempotent (find-by-slug short-circuit). Returns ``(agent, created)`` —
+    ``created`` is ``True`` only when this call inserted a new row. Returns
+    ``(None, False)`` if the insert raises (callers wrap in try/except).
+    """
+    # Local imports keep the surface package off this module's import graph and
+    # avoid any cycle; the constants are cheap module-level frozensets/strings.
+    from pocketpaw_ee.cloud.surface.surface_registry import _CODE_FILE_TOOL_IDS
+    from pocketpaw_ee.cloud.surface.system_prompts import CODE_SYSTEM_PROMPT
+
+    existing = await _AgentDoc.find_one(
+        _AgentDoc.workspace == workspace_id, _AgentDoc.slug == "code"
+    )
+    if existing is not None:
+        return existing, False
+
+    agent = _AgentDoc(
+        workspace=workspace_id,
+        name="Code",
+        slug="code",
+        avatar="",
+        owner=owner_id,
+        visibility="workspace",
+        config=_AgentConfigDoc(
+            system_prompt=CODE_SYSTEM_PROMPT,
+            tool_mode="exclusive",
+            tools=list(_CODE_FILE_TOOL_IDS),
+            # No create-pocket / widget skill — the CODE surface ships none.
+            skill_refs=[],
+            soul_persona="Code",
+        ),
+    )
+    await agent.insert()
+    logger.info(
+        "Dedicated 'code' agent seeded in workspace %s (id: %s)",
+        workspace_id,
+        agent.id,
+    )
+    await emit(
+        AgentCreated(
+            data={
+                "agent_id": str(agent.id),
+                "workspace_id": workspace_id,
+                "owner_id": owner_id,
+                "name": agent.name,
+                "slug": agent.slug,
+                "visibility": agent.visibility,
+            }
+        )
+    )
+    return agent, True
+
+
+async def ensure_code_agent_all_workspaces() -> int:
+    """Back-fill the dedicated ``code`` agent for every existing workspace.
+
+    Called on every boot beside ``ensure_default_agent_all_workspaces`` so the
+    ``/code`` target exists regardless of install age. Returns the number of
+    agents actually created this run.
+    """
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
+
+    seeded = 0
+    async for ws in _WorkspaceDoc.find_all():
+        try:
+            _, created = await seed_code_agent(str(ws.id), str(ws.owner))
+            if created:
+                seeded += 1
+        except Exception as exc:
+            logger.warning("Failed to back-fill code agent for ws=%s: %s", ws.id, exc)
+    return seeded
+
+
 __all__ = [
     "create",
     "delete",
     "discover",
+    "ensure_code_agent_all_workspaces",
     "ensure_default_agent_all_workspaces",
     "get",
     "get_by_slug",
@@ -662,6 +761,7 @@ __all__ = [
     "is_owner_or_workspace_admin",
     "legacy_ctx",
     "list_agents",
+    "seed_code_agent",
     "seed_default_agent",
     "set_scopes",
     "suggest_for_mentions",

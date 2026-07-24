@@ -169,6 +169,9 @@ async def post_agent_chat(
             user_id=user_id,
             agent_id_hint=body.agent_id,
             expected_workspace_id=workspace_id,
+            # CX-3: on /code the resolver routes an unhinted turn to the code
+            # agent (exclusive file-tool policy). No-op on every other surface.
+            surface=body.surface,
         )
         ctx.intent = body.intent
     except InvalidScope:
