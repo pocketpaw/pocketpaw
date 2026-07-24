@@ -58,6 +58,22 @@
 # ``_drop`` (on_delete → overlay drop), ``_move`` (on_move → overlay re-key) — so
 # a create/save is mirrored, a delete isn't resurrected, and a rename replays at
 # its new path on restore.
+#
+# 2026-07-25 (B2, feat/code-daytona-project-anchor): those durability hooks — and
+# the disconnect snapshot — now target the DURABLE PROJECT instead of the ephemeral
+# sandbox row. The row is unique per (workspace, user, repo), and a scaffold project
+# puts a TEMPLATE id in ``repo``, so N projects from one starter shared a single row
+# and would have overwritten each other's snapshot + overlay. The socket only knows
+# its row, so it resolves the owning project once at connect time
+# (``codeproject_service.find_project_for_sandbox``) and routes every durability
+# write through the project id from then on.
+#
+# The socket DEGRADES rather than dropping writes: a sandbox opened outside the
+# project flow (the plain ``/websandbox`` REST surface) has no owning project, so
+# the hooks fall back to the sandbox-keyed functions exactly as before. Losing a
+# user's edits is a far worse failure than writing them to the older anchor. The
+# anchor choice is made once, in ``build_durability_hooks``, so it is a single
+# testable decision rather than three copies of the same branch.
 from __future__ import annotations
 
 import asyncio
@@ -65,12 +81,15 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from fastapi import Query, WebSocket, WebSocketDisconnect
 
 from pocketpaw_ee.cloud._core.errors import CloudError
 from pocketpaw_ee.cloud.auth import service as auth_service
 from pocketpaw_ee.cloud.auth.ws_tickets import consume_ws_ticket
+from pocketpaw_ee.cloud.codeproject import service as codeproject_service
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
 from pocketpaw_ee.cloud.license import get_license
 from pocketpaw_ee.cloud.websandbox import durability as websandbox_durability
@@ -146,13 +165,100 @@ class TerminalConnectionManager:
 manager = TerminalConnectionManager()
 
 
+async def resolve_owning_project(workspace_id: str, user_id: str, row_id: str) -> str | None:
+    """The durable project this sandbox row belongs to, or ``None`` (B2).
+
+    The socket is opened against a WebSandbox ROW, but durable state is anchored on
+    the PROJECT, so the anchor has to be resolved once at connect time. ``None``
+    means "no owning project" — a sandbox opened straight off the ``/websandbox``
+    REST surface — and the caller degrades to the sandbox-keyed path.
+
+    A lookup FAILURE also resolves to ``None`` on purpose: degrading to the older
+    anchor still persists the user's edits somewhere, whereas propagating the error
+    would refuse the socket over a durability detail.
+    """
+    try:
+        project = await codeproject_service.find_project_for_sandbox(workspace_id, user_id, row_id)
+    except Exception:  # noqa: BLE001 — a resolution miss degrades, never denies
+        logger.warning(
+            "websandbox.ws: owning-project lookup failed for row=%s; "
+            "falling back to sandbox-keyed durability",
+            row_id,
+            exc_info=True,
+        )
+        return None
+    return project.id if project is not None else None
+
+
+def build_durability_hooks(
+    workspace_id: str,
+    user_id: str,
+    row_id: str,
+    project_id: str | None,
+    uploads: Any,
+) -> tuple[
+    Callable[[str, bytes], Awaitable[None]],
+    Callable[[str], Awaitable[None]],
+    Callable[[str, str], Awaitable[None]],
+]:
+    """Build the (on_write, on_delete, on_move) FileRpc durability hooks (B2).
+
+    ONE place decides the anchor. With a ``project_id`` every editor save, delete,
+    and rename is written through against the durable project — the fix for N
+    projects on one starter template sharing a single repo-keyed sandbox row. With
+    ``None`` (a sandbox opened outside the project flow) the hooks keep the
+    original sandbox-keyed behaviour: degrade, never drop the write.
+
+    All three are best-effort at the call site — ``FileRpc`` swallows a hook
+    failure so durability never fails the file op itself.
+    """
+    if project_id:
+
+        async def _mirror(rel_path: str, data: bytes) -> None:
+            await websandbox_durability.mirror_file_to_project(
+                workspace_id, user_id, project_id, rel_path, data, uploads=uploads
+            )
+
+        async def _drop(rel_path: str) -> None:
+            await websandbox_durability.drop_project_overlay(
+                workspace_id, user_id, project_id, rel_path
+            )
+
+        async def _move(src_rel: str, dst_rel: str) -> None:
+            await websandbox_durability.move_project_overlay(
+                workspace_id, user_id, project_id, src_rel, dst_rel
+            )
+
+        return _mirror, _drop, _move
+
+    async def _mirror_row(rel_path: str, data: bytes) -> None:
+        await websandbox_durability.mirror_file(
+            workspace_id, user_id, row_id, rel_path, data, uploads=uploads
+        )
+
+    async def _drop_row(rel_path: str) -> None:
+        # Delete-side durability: drop the overlay entry so a deleted file is not
+        # resurrected on restore (WC-4c).
+        await websandbox_durability.drop_overlay(workspace_id, user_id, row_id, rel_path)
+
+    async def _move_row(src_rel: str, dst_rel: str) -> None:
+        # Rename-side durability: re-key the overlay entry to the new path so
+        # restore replays the file where it now lives (WC-4c).
+        await websandbox_durability.move_overlay(workspace_id, user_id, row_id, src_rel, dst_rel)
+
+    return _mirror_row, _drop_row, _move_row
+
+
 async def snapshot_on_disconnect(
     workspace_id: str,
     user_id: str,
     row_id: str,
     client: DaytonaClient | None,
+    *,
+    project_id: str | None = None,
+    daytona_id: str | None = None,
 ) -> None:
-    """Best-effort workspace snapshot when a terminal socket closes (CM-2a′).
+    """Best-effort workspace snapshot when a terminal socket closes (CM-2a′, B2).
 
     The durable half of Code Mode is the S3 snapshot; the Daytona VM is pure
     scratch. With the aggressive Daytona lifecycle (stop 5 / delete-on-stop), a
@@ -161,15 +267,32 @@ async def snapshot_on_disconnect(
     still alive. ``codeproject.lifecycle.open_project`` restores the latest
     snapshot on the next open.
 
+    The pointer lands on the durable PROJECT when the socket resolved one, keyed by
+    ``project_id`` and taken from the live VM ``daytona_id`` (the project-keyed
+    snapshot addresses the VM directly rather than through the row). Without both —
+    a sandbox opened outside the project flow, or a row with no bound VM — it falls
+    back to the sandbox-keyed snapshot rather than skipping the capture.
+
     Best-effort by design: a snapshot failure (VM already gone, S3 down, an
     unprovisioned row) must NEVER surface on socket teardown — it is logged at
-    debug and swallowed. The snapshot pointer lands on the stable WebSandbox row,
-    which survives the VM's reaping.
+    debug and swallowed.
     """
     try:
-        await websandbox_durability.snapshot_workspace(workspace_id, user_id, row_id, client=client)
+        if project_id and daytona_id:
+            await websandbox_durability.snapshot_project(
+                workspace_id, user_id, project_id, daytona_id, client=client
+            )
+        else:
+            await websandbox_durability.snapshot_workspace(
+                workspace_id, user_id, row_id, client=client
+            )
     except Exception:  # noqa: BLE001 — teardown must never raise on a snapshot miss
-        logger.debug("websandbox.snapshot on disconnect failed for row=%s", row_id, exc_info=True)
+        logger.debug(
+            "websandbox.snapshot on disconnect failed for row=%s project=%s",
+            row_id,
+            project_id,
+            exc_info=True,
+        )
 
 
 async def terminal_websocket_endpoint(
@@ -261,6 +384,11 @@ async def terminal_websocket_endpoint(
         await websocket.close(code=_CLOSE_LICENSE, reason="Sandbox runtime unavailable")
         return
 
+    # B2: resolve the DURABLE anchor once, now that the row is owner-authorized.
+    # Every durability write below (mirror / drop / move / disconnect snapshot)
+    # targets this project id; ``None`` degrades to the sandbox-keyed path.
+    project_id = await resolve_owning_project(workspace_id, user_id, row_id)
+
     # Every gate passed — accept the socket (unless Path 3 already did) and open
     # the PTY. ``accepted`` keeps accept() exactly-once across both paths.
     if not accepted:
@@ -288,26 +416,15 @@ async def terminal_websocket_endpoint(
     # dir (resolved lazily on first use); it reuses the already-owner-authorized
     # client + sandbox_id and never re-authorizes per frame.
     #
-    # Write-through durability (CM-2a′): build ONE overlay uploads service for the
-    # session and pass FileRpc a mirror closure bound to this tenant + row. Each
-    # editor save then also lands in blob storage; a mirror failure is swallowed
-    # inside FileRpc so it never fails the save.
+    # Write-through durability (CM-2a′, re-anchored in B2): build ONE overlay
+    # uploads service for the session and pass FileRpc hooks bound to this tenant
+    # and to the DURABLE PROJECT that owns this row (resolved once, above). Each
+    # editor save then also lands in blob storage against the project; a mirror
+    # failure is swallowed inside FileRpc so it never fails the save.
     overlay_uploads = websandbox_durability.build_uploads()
-
-    async def _mirror(rel_path: str, data: bytes) -> None:
-        await websandbox_durability.mirror_file(
-            workspace_id, user_id, row_id, rel_path, data, uploads=overlay_uploads
-        )
-
-    async def _drop(rel_path: str) -> None:
-        # Delete-side durability: drop the overlay entry so a deleted file is not
-        # resurrected on restore (WC-4c). Best-effort — swallowed inside FileRpc.
-        await websandbox_durability.drop_overlay(workspace_id, user_id, row_id, rel_path)
-
-    async def _move(src_rel: str, dst_rel: str) -> None:
-        # Rename-side durability: re-key the overlay entry to the new path so
-        # restore replays the file where it now lives (WC-4c). Best-effort.
-        await websandbox_durability.move_overlay(workspace_id, user_id, row_id, src_rel, dst_rel)
+    _mirror, _drop, _move = build_durability_hooks(
+        workspace_id, user_id, row_id, project_id, overlay_uploads
+    )
 
     file_rpc = FileRpc(client, row.sandbox_id, on_write=_mirror, on_delete=_drop, on_move=_move)
 
@@ -367,15 +484,25 @@ async def terminal_websocket_endpoint(
     finally:
         # Teardown: kill the pty session so the shell doesn't leak in the VM.
         await manager.unregister(websocket)
-        # CM-2a′ durability: capture the workspace to S3 on this clean disconnect
-        # so a returning user restores their uncommitted work. Best-effort — a
-        # snapshot miss never turns a normal close into an error.
-        await snapshot_on_disconnect(workspace_id, user_id, row_id, client)
+        # CM-2a′ durability, project-anchored (B2): capture the workspace to S3 on
+        # this clean disconnect so a returning user restores their uncommitted
+        # work. Best-effort — a snapshot miss never turns a normal close into an
+        # error.
+        await snapshot_on_disconnect(
+            workspace_id,
+            user_id,
+            row_id,
+            client,
+            project_id=project_id,
+            daytona_id=row.sandbox_id,
+        )
 
 
 __all__ = [
     "TerminalConnectionManager",
+    "build_durability_hooks",
     "manager",
+    "resolve_owning_project",
     "snapshot_on_disconnect",
     "terminal_websocket_endpoint",
 ]
