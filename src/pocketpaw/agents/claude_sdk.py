@@ -299,6 +299,57 @@ from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy
 logger = logging.getLogger(__name__)
 
 
+def _scrub_nul_chars(options_kwargs: dict[str, Any]) -> list[str]:
+    """Strip NUL characters out of the assembled options, IN PLACE.
+
+    Returns the dotted/indexed paths that carried one, most useful field first as
+    encountered, so the caller can log WHERE it came from.
+
+    Why this exists: Windows ``CreateProcess`` refuses a command line, an
+    environment block, or a cwd containing a NUL, and the SDK passes all three
+    through untouched. One NUL anywhere in the option set therefore kills the spawn
+    before the agent exists, with an error that names nothing:
+
+        CLIConnectionError: Failed to start Claude Code: embedded null character
+
+    Every turn on that path then fails identically and there is no way to tell from
+    the message whether the offender was the system prompt, a tool id, an env value,
+    or the working directory. POSIX is not immune either — ``execve`` takes
+    NUL-terminated strings, so a NUL truncates the argument silently instead of
+    failing loudly, which is worse.
+
+    Stripping is always safe: a NUL is not valid in a prompt, a tool id, a model
+    name, a path, or an env value, so there is no case where preserving one is
+    correct. Reporting the path is the part that earns this function's keep — it
+    turns an un-debuggable spawn failure into a working run plus a breadcrumb
+    naming the source.
+    """
+    offenders: list[str] = []
+
+    def walk(value: Any, path: str) -> Any:
+        if isinstance(value, str):
+            if "\0" in value:
+                offenders.append(path)
+                return value.replace("\0", "")
+            return value
+        # dict / list are rebuilt in place so the caller's object is the cleaned one.
+        # Anything else (numbers, bools, None, hooks, session_store, transports) is
+        # returned untouched — the guard must never coerce an opaque collaborator.
+        if isinstance(value, dict):
+            for key, item in list(value.items()):
+                value[key] = walk(item, f"{path}[{key!r}]")
+            return value
+        if isinstance(value, list):
+            for i, item in enumerate(value):
+                value[i] = walk(item, f"{path}[{i}]")
+            return value
+        return value
+
+    for key, item in list(options_kwargs.items()):
+        options_kwargs[key] = walk(item, key)
+    return offenders
+
+
 class _BuiltOptions(NamedTuple):
     """The product of ``ClaudeSDKBackend._build_options`` (feat/claude-sdk-prewarm).
 
@@ -2058,6 +2109,22 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # (and legacy) behavior.
         if session_handle is not None and session_handle.session_store is not None:
             options_kwargs["session_store"] = session_handle.session_store
+
+        # LAST gate before the options become a subprocess. A NUL anywhere in here
+        # — an arg, an env value, the cwd — makes the CLI spawn fail with
+        # "embedded null character" and names nothing, so every turn on the path
+        # dies identically and undiagnosably. Strip it and say where it was; see
+        # ``_scrub_nul_chars``. Must stay after EVERY kwarg is set (env and the
+        # per-send model override are assigned above) and before
+        # ``_ClaudeAgentOptions`` is constructed.
+        nul_paths = _scrub_nul_chars(options_kwargs)
+        if nul_paths:
+            logger.error(
+                "SDK: stripped NUL character(s) from options before spawn — "
+                "fields: %s. The run proceeds with them removed; this is a BUG at "
+                "whatever produced these values, please report the field list.",
+                ", ".join(nul_paths),
+            )
 
         # Create options (after all kwargs are set, including model)
         options = self._ClaudeAgentOptions(**options_kwargs)
