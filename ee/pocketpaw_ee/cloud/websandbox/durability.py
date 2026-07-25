@@ -827,6 +827,100 @@ async def mirror_file_to_project(
     return file_id
 
 
+async def put_project_files(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    files: dict[str, str],
+    *,
+    uploads: Any = None,
+) -> int:
+    """Replace the project's whole per-file store from a client-supplied map.
+
+    The in-tab analog of ``sync_project_files``: the browser holds the project's
+    filesystem, so IT is the only thing that can enumerate one. It walks its own
+    FS once (after materializing a starter, say) and hands the result here.
+
+    Why this exists as a BULK op rather than N calls to ``put_project_file``:
+    completeness has to be a property of a write that either wholly happened or
+    did not. ``overlay_complete`` is what licenses the restore-time prune to
+    delete a file the store does not list, so a store marked complete after a
+    partial upload would license deleting exactly the files that failed to
+    upload. Uploading everything FIRST and swapping the map in one write makes
+    that unrepresentable: a failure raises before the swap, and the project keeps
+    its previous state and its previous completeness.
+
+    Caps are the same ones the VM sync answers to, and they fail LOUD — a store
+    silently missing files is the input to a destructive prune.
+    """
+    _require_s3_for_project_store()
+    # Authorize BEFORE uploading. The swap at the end is owner-scoped and would
+    # reject a foreign caller anyway, but only after their bytes were already in
+    # the tenant's storage — an unauthorized request should not be able to spend
+    # storage on its way to a 404.
+    await codeproject_service.get_project(workspace_id, user_id, project_id)
+
+    max_files = _overlay_max_files()
+    if len(files) > max_files:
+        raise CloudError(
+            413,
+            "codeproject.overlay_too_many_files",
+            f"Project holds {len(files)} files, over the {max_files} file limit",
+        )
+
+    file_cap = _file_max_bytes()
+    total_cap = _overlay_max_bytes()
+    encoded: dict[str, bytes] = {}
+    total = 0
+    for raw_path, content in files.items():
+        safe_path = _require_safe_rel_path(raw_path)
+        data = (content or "").encode("utf-8")
+        if len(data) > file_cap:
+            raise CloudError(
+                413,
+                "codeproject.file_too_large",
+                f"{safe_path!r} is {len(data)} bytes, over the per-file limit",
+            )
+        total += len(data)
+        if total > total_cap:
+            raise CloudError(
+                413,
+                "codeproject.overlay_too_large",
+                f"Project exceeds the {total_cap}-byte store limit",
+            )
+        encoded[safe_path] = data
+
+    up = uploads if uploads is not None else build_uploads()
+    overlay: dict[str, str] = {}
+    for safe_path, data in encoded.items():
+        basename = safe_path.rsplit("/", 1)[-1] or "file"
+        overlay[safe_path] = await _upload_project_blob(
+            up,
+            data,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            filename=f"overlay-{project_id}-{basename}",
+            folder=_PROJECT_OVERLAY_FOLDER,
+            content_type="application/octet-stream",
+        )
+
+    # Every byte is durable before the map moves — so this swap is the moment the
+    # store becomes both authoritative and complete, and never a moment earlier.
+    await codeproject_service.replace_project_overlay(
+        workspace_id,
+        user_id,
+        project_id,
+        overlay,
+        complete=True,
+    )
+    logger.info(
+        "codeproject.sync(in-tab): project=%s stored %d files",
+        project_id,
+        len(overlay),
+    )
+    return len(overlay)
+
+
 async def drop_project_overlay(
     workspace_id: str,
     user_id: str,
