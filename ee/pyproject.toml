@@ -666,12 +666,24 @@ allow_indirect_imports = "true"
 #
 # A human reviewer will not catch that on a diff that otherwise looks like a
 # helpful refactor. The linter will.
+#
+# The list was stale until 2026-07-25 and took CI down with it. It named
+# ``transport`` and ``domain``, both deleted with the client-side sub-agent, and
+# import-linter treats an unresolvable source module as a hard error rather than
+# skipping it — so every run on a clean checkout died with "Module
+# 'pocketpaw_ee.cloud.codeagent.domain' does not exist" before a single contract
+# was evaluated. It passes on a developer machine, because a leftover
+# ``__pycache__/domain.cpython-312.pyc`` is enough for the graph builder to
+# resolve the name. Delete the pycache before trusting a local green here.
+#
+# ``delegates`` replaces them, and it is the module that most needs this guard:
+# it IS the client-reads-and-sends inversion described above, so a server-side
+# fetch smuggled in there would defeat the contract at its source.
 source_modules = [
     "pocketpaw_ee.cloud.codeagent.router",
     "pocketpaw_ee.cloud.codeagent.service",
-    "pocketpaw_ee.cloud.codeagent.transport",
+    "pocketpaw_ee.cloud.codeagent.delegates",
     "pocketpaw_ee.cloud.codeagent.dto",
-    "pocketpaw_ee.cloud.codeagent.domain",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.daytona",
