@@ -116,6 +116,11 @@ class CodeProjectResponse(BaseModel):
     repo: str
     initialPrompt: str | None = None
     initialPromptConsumed: bool = False
+    # Whether the per-file store holds the WHOLE project rather than a delta over
+    # a baseline. On the wire because the in-tab runtime needs it to decide
+    # whether it may prune: replaying a COMPLETE store means a file the store
+    # doesn't list was deleted, while replaying a partial one means no such thing.
+    overlayComplete: bool = False
     snapshotFileId: str | None = None
     currentSandboxId: str | None = None
     lastOpenedAt: str | None = None  # ISO-8601 UTC, or null

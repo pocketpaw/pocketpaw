@@ -170,6 +170,7 @@ def view_to_wire(view: CodeProjectView) -> CodeProjectResponse:
         repo=view.repo,
         initialPrompt=view.initial_prompt,
         initialPromptConsumed=view.initial_prompt_consumed,
+        overlayComplete=view.overlay_complete,
         snapshotFileId=view.snapshot_file_id,
         currentSandboxId=view.current_sandbox_id,
         lastOpenedAt=view.last_opened_at.isoformat() if view.last_opened_at else None,
