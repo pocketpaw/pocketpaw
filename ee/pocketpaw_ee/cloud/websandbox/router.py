@@ -23,11 +23,17 @@
 # comes only from the RequestContext, and both are license-gated like the rest.
 #
 # Changed 2026-07-15 (WC-5a, feat/websandbox-edit-agent): added the AI edit
-# endpoint — ``POST /websandbox/{row_id}/edit`` (a file + instruction → a PROPOSED
-# rewrite from a backend-side frontier model). Thin adapter over
-# ``websandbox/edit.py``; tenancy comes only from the RequestContext, and it's
-# license-gated like the rest. Generate-only — the frontend applies accepted hunks
-# via the existing file-RPC.
+# endpoint ``POST /websandbox/{row_id}/edit``. REMOVED again 2026-07-21 (CA-4) —
+# see below.
+#
+# Changed 2026-07-21 (CA-4, feat/codeagent-edit): deleted the AI edit endpoint
+# and ``websandbox/edit.py`` with it. The route was row-addressed, and it read the
+# file off the VM's disk to build context — so a runtime without a backend row
+# (WebContainers, which runs in the user's tab) had nothing for it to read, and
+# Cmd-K shipped disabled there. Its replacement was the ``/codeagent/turn``
+# sub-agent, which is itself now removed (2026-07-23) — the /code surface runs on
+# the main PocketPaw agent, so AI edits go through that path, not a websandbox
+# route.
 #
 # Changed 2026-07-16 (WC-7/P4a, feat/code-mode): added the git write-path routes —
 # ``GET /websandbox/{row_id}/git/status`` and ``POST .../git/stage|commit|push``.
@@ -81,19 +87,17 @@ from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.websandbox import archive as websandbox_archive
 from pocketpaw_ee.cloud.websandbox import durability as websandbox_durability
-from pocketpaw_ee.cloud.websandbox import edit as websandbox_edit
 from pocketpaw_ee.cloud.websandbox import git as websandbox_git
 from pocketpaw_ee.cloud.websandbox import preview as websandbox_preview
 from pocketpaw_ee.cloud.websandbox import provision as websandbox_provision
 from pocketpaw_ee.cloud.websandbox import requirements as websandbox_requirements
 from pocketpaw_ee.cloud.websandbox import runtimes as websandbox_runtimes
+from pocketpaw_ee.cloud.websandbox import scaffold_service as websandbox_scaffold
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
 from pocketpaw_ee.cloud.websandbox.dto import (
     CommitRequest,
     CreatePrRequest,
     CreateSandboxRequest,
-    EditRequest,
-    EditResponse,
     GitCommitResponse,
     GitPrResponse,
     GitPushResponse,
@@ -104,6 +108,8 @@ from pocketpaw_ee.cloud.websandbox.dto import (
     RuntimeCredentialsResponse,
     RuntimeRequirementsResponse,
     SandboxTreeResponse,
+    ScaffoldIntoSandboxRequest,
+    ScaffoldIntoSandboxResponse,
     SnapshotResponse,
     StageRequest,
     WebSandboxListResponse,
@@ -377,19 +383,24 @@ async def git_open_pr(
 
 
 # ---------------------------------------------------------------------------
-# WC-5a — AI edit agent (Cmd-K).
+# CS-2 — scaffold a composed project into a provisioned sandbox.
 # ---------------------------------------------------------------------------
 
 
-@router.post("/{row_id}/edit", response_model=EditResponse)
-async def propose_edit(
+@router.post("/{row_id}/scaffold", response_model=ScaffoldIntoSandboxResponse)
+async def scaffold_into_sandbox(
     row_id: str,
-    body: EditRequest,
+    body: ScaffoldIntoSandboxRequest,
     ctx: RequestContext = Depends(request_context),
-) -> EditResponse:
-    """Propose a model-authored rewrite of a file (generate-only, no VM write)."""
+) -> ScaffoldIntoSandboxResponse:
+    """Compose a project from recipes and start its dev server in this sandbox.
+
+    Row-addressed because it MATERIALIZES into a VM — unlike `/codescaffold/*`,
+    which is runtime-blind by contract and returns a source map. That split is
+    what lets CS-3 mount the same map in a browser tab with none of this code.
+    """
     workspace_id = _require_workspace(ctx)
-    return await websandbox_edit.propose_edit(workspace_id, ctx.user_id, row_id, body)
+    return await websandbox_scaffold.scaffold_into_sandbox(workspace_id, ctx.user_id, row_id, body)
 
 
 # ---------------------------------------------------------------------------

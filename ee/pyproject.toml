@@ -251,6 +251,7 @@ ask = "pocketpaw_ee.extensions:CloudAskMcpProvider"
 deliver = "pocketpaw_ee.extensions:CloudDeliverMcpProvider"
 loom = "pocketpaw_ee.extensions:CloudLoomMcpProvider"
 belt = "pocketpaw_ee.extensions:CloudBeltMcpProvider"
+code = "pocketpaw_ee.extensions:CloudCodeMcpProvider"
 external_actions = "pocketpaw_ee.extensions:CloudExternalActionsMcpProvider"
 fabric = "pocketpaw_ee.extensions:CloudFabricMcpProvider"
 instinct = "pocketpaw_ee.extensions:CloudInstinctMcpProvider"
@@ -618,6 +619,64 @@ source_modules = [
     "pocketpaw_ee.cloud.codeproject.lifecycle",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.code_project"]
+
+[[tool.importlinter.contracts]]
+name = "CodeScaffold — emits a source map: never materializes into a runtime"
+type = "forbidden"
+allow_indirect_imports = "true"
+# Same shape of guard as the CodeAgent contract below, protecting the other half
+# of the same decision.
+#
+# `compose` returns {path: contents} and writes nothing. That is what lets ONE
+# endpoint serve both runtimes: Daytona materializes the map by tar-upload, a
+# WebContainer by `fs.mount`, and the scaffolder does not know which asked. The
+# tempting "improvement" is to have compose write straight into the sandbox —
+# it removes a hop and it would work, in exactly one runtime, and the in-tab
+# path would quietly stop being reachable.
+#
+# The network fetch in registry.py is deliberately NOT forbidden here:
+# downloading a pinned, integrity-checked npm tarball is the design. What is
+# forbidden is reaching a runtime.
+source_modules = [
+    "pocketpaw_ee.cloud.codescaffold.router",
+    "pocketpaw_ee.cloud.codescaffold.service",
+    "pocketpaw_ee.cloud.codescaffold.registry",
+    "pocketpaw_ee.cloud.codescaffold.dto",
+    "pocketpaw_ee.cloud.codescaffold.domain",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.daytona",
+    "pocketpaw_ee.cloud.websandbox",
+]
+
+[[tool.importlinter.contracts]]
+name = "CodeAgent — runtime-agnostic: never reaches a sandbox"
+type = "forbidden"
+allow_indirect_imports = "true"
+# Unlike its siblings this contract does not guard Beanie writes — codeagent has
+# no document. It guards the decision the module exists for.
+#
+# The endpoint this replaces (websandbox/edit.py) read its context by calling
+# DaytonaClient.download_file and running an in-VM ripgrep. That is precisely
+# why the WebContainer runtime had to ship `features.cmdK: false`: a runtime
+# that lives in the user's tab has no server-side row for any of that to address.
+# CA-1 inverts it — the CLIENT reads through CodeFileSession and sends what it
+# read — and the moment someone "just fetches the file server-side" here, the
+# in-tab runtime silently loses the feature again with a green test suite.
+#
+# A human reviewer will not catch that on a diff that otherwise looks like a
+# helpful refactor. The linter will.
+source_modules = [
+    "pocketpaw_ee.cloud.codeagent.router",
+    "pocketpaw_ee.cloud.codeagent.service",
+    "pocketpaw_ee.cloud.codeagent.transport",
+    "pocketpaw_ee.cloud.codeagent.dto",
+    "pocketpaw_ee.cloud.codeagent.domain",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.daytona",
+    "pocketpaw_ee.cloud.websandbox",
+]
 
 [[tool.importlinter.contracts]]
 name = "CodeConnection — Beanie writes only from service.py"

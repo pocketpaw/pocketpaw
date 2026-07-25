@@ -1,5 +1,14 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-07-24 (CX-1, feat/code-agent-cx1) — ``_build_options`` / ``run`` /
+  ``prewarm`` grow an ``exclusive_mcp_tools: bool = False`` keyword. When True, the
+  MCP scoping block CAPS the tool surface to ``allow_mcp_tool_ids`` alone — no
+  POCKET_CREATION_GRANT, no widget/atlas ids, and NOT the
+  ALWAYS_ALLOWED_MCP_SERVERS escape hatch — so a dedicated agent (e.g. /code) gets
+  EXACTLY the declared ids. ``exclusive_mcp_tools=True`` with
+  ``allow_mcp_tool_ids=None`` strips ALL ``mcp__`` ids (empty permitted set), so an
+  exclusive agent wins over even a broad surface. ``False`` (the default) keeps the
+  legacy grant-union scoping byte-for-byte. Built-in SDK tools are never touched.
 Updated: 2026-07-08 (CS-13, feat/per-send-model-override) — ``run`` /
   ``_build_options`` grow an optional ``model_override: str | None = None``
   keyword. When set, it is applied as the LAST word in the model-selection block,
@@ -1565,6 +1574,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         stderr_sink: list[str],
         session_handle: SessionHandle | None = None,
         model_override: str | None = None,
+        exclusive_mcp_tools: bool = False,
     ) -> _BuiltOptions:
         """Assemble the ``ClaudeAgentOptions`` a turn (or a prewarm) will run on.
 
@@ -1796,7 +1806,29 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # Built-in SDK tools (Read/Write/Bash/...) are NEVER filtered here —
         # only ``mcp__*`` ids — so scoping a mode can't strip core tools.
         # Applied AFTER deny so a denied id can't sneak back via the grant.
-        if allow_mcp_tool_ids is not None:
+        #
+        # ``exclusive_mcp_tools`` (CX-1) is the exact-toolset signal: an
+        # EXCLUSIVE turn CAPS the MCP surface to ``allow_mcp_tool_ids`` alone —
+        # no POCKET_CREATION_GRANT, no widget/atlas ids, and NOT the
+        # ALWAYS_ALLOWED_MCP_SERVERS escape hatch — so a dedicated agent (e.g.
+        # /code) gets EXACTLY the ids it declared and nothing the universal
+        # grant would otherwise union back in. Precedence rule: an exclusive
+        # turn with ``allow_mcp_tool_ids=None`` strips ALL ``mcp__`` ids (an
+        # empty permitted set), which is how an exclusive agent wins even over a
+        # broad surface. The default (signal off) path below is byte-for-byte
+        # the legacy grant-union scoping.
+        if exclusive_mcp_tools:
+            permitted = allow_mcp_tool_ids or frozenset()
+            before_count = len(allowed_tools)
+            allowed_tools = [
+                t for t in allowed_tools if not t.startswith("mcp__") or t in permitted
+            ]
+            if len(allowed_tools) < before_count:
+                logger.info(
+                    "Exclusive MCP-allow: capped to exactly %s (no general grant)",
+                    sorted(permitted),
+                )
+        elif allow_mcp_tool_ids is not None:
             from pocketpaw.agents.sdk_mcp_atlas import ATLAS_TOOL_IDS
             from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
 
@@ -2113,6 +2145,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         allow_sdk_tools: frozenset[str] = frozenset(),
         allow_mcp_tool_ids: frozenset[str] | None = None,
         skill_names: frozenset[str] = frozenset(),
+        exclusive_mcp_tools: bool = False,
     ) -> None:
         """Eagerly ``connect()`` the warm CLI subprocess for a session before its
         first turn, so the first real ``run`` reuses it instead of paying the
@@ -2162,6 +2195,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 allow_sdk_tools=allow_sdk_tools,
                 allow_mcp_tool_ids=allow_mcp_tool_ids,
                 skill_names=skill_names,
+                exclusive_mcp_tools=exclusive_mcp_tools,
                 stderr_sink=[],
             )
             # Remember the digest we may have adopted a dir under, so a failed
@@ -2351,6 +2385,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         warm_client: LeasedClient | None = None,
         on_client_built: Callable[[Any, str, Callable], None] | None = None,
         model_override: str | None = None,
+        exclusive_mcp_tools: bool = False,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
@@ -2517,6 +2552,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 skill_names=skill_names,
                 session_handle=session_handle,
                 model_override=model_override,
+                exclusive_mcp_tools=exclusive_mcp_tools,
                 stderr_sink=_stderr_lines,
             )
             options = _built.options
