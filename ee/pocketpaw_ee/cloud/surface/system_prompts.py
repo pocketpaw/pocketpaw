@@ -49,11 +49,19 @@ from __future__ import annotations
 # changes, change this text in the same commit — a system prompt that promises a
 # denied tool is the failure this whole file exists to remove.
 #
-# The writeFile paragraph is load-bearing, not manners. ``writeFile`` STAGES a
-# proposal for the user's per-hunk review; nothing is written until the user
-# accepts. A model that reports "I created the file" after one writeFile call has
-# told the user something false, and the user will act on it — so the prompt is
-# explicit that a proposal is not a saved file.
+# The writeFile paragraph used to be the longest thing in this file and it is now
+# two sentences. Until 2026-07-25 ``writeFile`` STAGED a proposal for the user's
+# per-hunk review and nothing was written until they accepted, so most of the
+# prompt's honesty budget went on stopping the model from saying "I created the
+# file" when it had not. The review gate is gone and the write is real, which
+# retires that whole problem — and every word spent on it. What is left in
+# ``<code-surface-honesty>`` is the part that was never about the gate: do not
+# claim a test passed or a feature works because you wrote the code for it.
+#
+# Keeping the deleted text would be worse than useless. A prompt that tells the
+# model to say "I've proposed a change" after a call that saved a file teaches it
+# to describe its own work inaccurately, in the one direction that makes a user
+# distrust a change that actually landed.
 CODE_SYSTEM_PROMPT = """\
 <code-surface-role>
 You are PocketPaw's coding agent. The user is in a code editor looking at a real
@@ -95,9 +103,10 @@ see how a folder is laid out. Do not ask the user where something is if you can
 find it yourself.
 
 To change the code, call `writeFile` with the file's COMPLETE new contents — not
-a diff, not a snippet. `writeFile` does not save the file: it stages your
-proposed contents for the user to review and accept hunk by hunk. So a
-`writeFile` call is a change PROPOSED, never a change made.
+a diff, not a snippet. It saves the file, and creates it if it does not exist
+yet, so adding a new file is the same call. What you send REPLACES the file:
+anything you leave out is gone, which is why you `readFile` before changing
+something you have not read this turn.
 
 If the request is scoped to a selection the user has already put in front of you,
 act on it directly rather than re-reading the whole project first. For a task
@@ -106,14 +115,10 @@ back, then decide the next. Do not narrate a plan you have not started.
 </code-surface-procedure>
 
 <code-surface-honesty>
-Report only what actually happened, and mind the difference between reading and
-writing.
-
-A `readFile`, `search`, or `listDir` result is the code as it is — quote it, work
-from it. A `writeFile` result means your change was STAGED for review, and the
-user still has to accept it; say "I've proposed…" or "I've drafted a change
-to…", never "I created" or "I updated" as if it were done. Never describe a file
-as written, a test as passing, or a feature as built when nothing confirmed it.
+Report what the tools actually told you. A successful `writeFile` means the file
+was saved, so say you wrote it — but writing the code for something is not the
+same as it working. Do not describe a test as passing or a feature as done when
+nothing checked it; say what you changed and what you expect it to do.
 
 If a tool returns an error, or reports no browser session attached, say so
 plainly and stop — do not claim work you could not do. A wrong claim here is

@@ -18,9 +18,12 @@
 # to say. So a timeout, a dead stream, and a missing workspace all come back as
 # ``is_error`` payloads carrying the channel's own message.
 #
-# THIRD, ``writeFile`` is honest about staging. It delegates the proposed content
-# and relays the browser's staged-change sentence; the response is what the model
-# reads, and it must not read as "the file was written".
+# THIRD, ``writeFile`` relays what the browser says it did. It delegates the
+# content and hands the browser's own sentence back verbatim; that sentence is
+# the model's only evidence of what happened, so the handler must not embellish
+# it in either direction. Until 2026-07-25 that meant guarding against a write
+# reading as done when it had only been staged for review; the review gate is
+# gone and the sentence is now a plain past-tense "Wrote …".
 #
 # The delegate channel itself is not re-tested here (see
 # tests/cloud/test_codeagent_delegates.py) — these drive the handlers against a
@@ -308,27 +311,22 @@ async def test_write_file_delegates_the_full_content(in_workspace, captured_dele
 
 
 @pytest.mark.asyncio
-async def test_write_file_relays_the_staged_sentence_as_success(in_workspace, monkeypatch):
-    """writeFile stages a proposal; the browser answers with a sentence
-    describing it. The handler relays that verbatim as a NON-error, so the model
-    can repeat it — 'I've proposed…', not 'I wrote…'."""
+async def test_write_file_relays_the_browsers_sentence_as_success(in_workspace, monkeypatch):
+    """The browser writes the file and answers with a sentence saying so. The
+    handler relays that verbatim as a NON-error, so the model repeats what
+    actually happened rather than a phrasing this layer invented."""
 
-    async def _staged(workspace_id, tool, tool_input):
+    async def _wrote(workspace_id, tool, tool_input):
         return DelegateOutcome(
             ok=True,
-            result={
-                "output": "Proposed 2 changes to `src/button.tsx` for review.",
-                "isError": False,
-            },
+            result={"output": "Wrote `src/button.tsx`.", "isError": False},
         )
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser", _staged
-    )
+    monkeypatch.setattr("pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser", _wrote)
 
     response = await _write_file_handler({"path": "src/button.tsx", "content": "x"})
     assert not response.get("is_error")
-    assert "Proposed 2 changes" in _text(response)
+    assert "Wrote `src/button.tsx`." in _text(response)
 
 
 @pytest.mark.asyncio

@@ -237,8 +237,8 @@ _BELT_GATE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_belt__belt_prop
 # agent drives the /code work in its own tool loop and reaches the project ONLY
 # through these four verbs — each one delegates a single call to the browser,
 # which owns the file session (the project runs in the tab, not on the backend).
-# ``writeFile`` does not write: it stages a proposal for the user's per-hunk
-# review. Spelled as LITERALS for the same reason ``_BELT_GATE_TOOL_IDS`` above
+# ``writeFile`` saves the file (it staged a proposal for per-hunk review until
+# 2026-07-25). Spelled as LITERALS for the same reason ``_BELT_GATE_TOOL_IDS`` above
 # is — their canonical constants live in the in-process MCP server (server
 # ``pocketpaw_code``), which the profile layer must not import. The id format is
 # the SDK's ``mcp__<server>__<tool>`` namespacing. Do NOT drift these ids;

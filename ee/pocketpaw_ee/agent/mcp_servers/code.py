@@ -14,7 +14,7 @@
 #   readFile(path)          — read a file
 #   search(query)           — search the project
 #   listDir(path)           — list a directory
-#   writeFile(path, content)— PROPOSE a full-file rewrite (staged, not written)
+#   writeFile(path, content)— write a full-file rewrite
 #
 # The main agent runs its own tool loop over these, exactly as a coding agent
 # does over local file tools. The difference this whole module exists for: the
@@ -30,13 +30,19 @@
 # and parks until the tab POSTs the result back. The same inversion MCP
 # standardizes as elicitation.
 #
-# The write gate stays in the tab. ``writeFile`` NEVER writes. It delegates the
-# proposed content to the browser, which STAGES it for the user's per-hunk
-# review; the user accepting a hunk is the only thing that writes, and it happens
-# long after this tool has returned. So the honest result of a ``writeFile`` call
-# is "a change was proposed for review", never "the file was changed" — the
-# description and the system prompt both say so, because the model must not tell
-# the user a file was written when nothing has been.
+# The write happens in the tab, but it HAPPENS. ``writeFile`` delegates the
+# content to the browser, which puts it on the runtime's filesystem and answers
+# with a sentence saying so — and this tool does not return until it has. A
+# success here means the file was changed.
+#
+# It used to mean the opposite (until 2026-07-25): the browser staged the content
+# behind a per-hunk review panel and nothing landed until the user accepted it,
+# so the only honest result was "a change was proposed". That gate is gone — it
+# was a toll on every turn of a surface built around asking an agent to build
+# things — and its removal is why the tool description below reads in the past
+# tense and why ``<code-surface-honesty>`` in the system prompt shrank to almost
+# nothing. Both of them existed to stop the model claiming a write that had not
+# happened. The write happens now.
 #
 # Why this lives in ee/ and not src/pocketpaw/agents/. The channel this wraps
 # (``ee.cloud.codeagent.delegates``) is EE cloud code, and the workspace identity
@@ -213,12 +219,11 @@ async def _list_dir_handler(args: dict) -> dict[str, Any]:
 
 
 async def _write_file_handler(args: dict) -> dict[str, Any]:
-    """Propose a full-file rewrite. This does NOT write the file.
+    """Write the full new contents of a file.
 
-    The proposed ``content`` is delegated to the browser, which stages it for the
-    user's per-hunk review. Nothing is written until the user accepts a hunk,
-    which happens after this returns — so a success here means "a change was
-    proposed for review", not "the file was changed".
+    The ``content`` is delegated to the browser, which writes it to the runtime's
+    filesystem and answers with a sentence describing what it did. This does not
+    return until then, so a success here means the file was changed.
     """
     path = _require_str(args, "path", max_chars=_MAX_PATH_CHARS)
     if path is None:
@@ -234,7 +239,7 @@ async def _write_file_handler(args: dict) -> dict[str, Any]:
     if len(content) > _MAX_CONTENT_CHARS:
         return _error_response(
             f"`content` is too long ({len(content)} chars, limit {_MAX_CONTENT_CHARS}). "
-            "Propose a change to a smaller file, or split the work across files."
+            "Write a smaller file, or split the work across files."
         )
     return await _delegate("writeFile", {"path": path, "content": content})
 
@@ -324,13 +329,13 @@ def build_code_server() -> tuple[str, Any] | None:
     @tool(
         "writeFile",
         (
-            "Propose the full new contents of a file in the user's project. This "
-            "does NOT save the file — it stages the change for the user to review "
-            "and accept hunk by hunk. So report it as a change PROPOSED for "
-            "review, never as a file that was written or a feature that is done; "
-            "the user has to accept it first. Pass the ENTIRE new file in "
-            "`content`, not a diff or a snippet. Args: `path` (the file), "
-            "`content` (its full new contents)."
+            "Write the full new contents of a file in the user's project. The file "
+            "is saved when this returns, and the path is created if it does not "
+            "exist yet — so use this to add new files as well as to change "
+            "existing ones. Pass the ENTIRE new file in `content`, not a diff or a "
+            "snippet: whatever you send REPLACES the file, so anything you leave "
+            "out is deleted. Read the file first unless you are creating it. "
+            "Args: `path` (the file), `content` (its full new contents)."
         ),
         {
             "type": "object",
