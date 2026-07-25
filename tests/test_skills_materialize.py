@@ -137,3 +137,58 @@ def test_cleanup_removes_dir(installed_skills):
     assert not root.exists()
     cleanup_run_skills(None)  # no raise
     cleanup_run_skills(root)  # idempotent
+
+
+# --- P1: bundled skills are resolvable by name ---------------------------
+# Added 2026-07-25 (feat/bundled-skills-per-surface): a surface that names
+# skills must be able to name a BUNDLED one. The SkillLoader only scans
+# SKILL_PATHS (~/.agents, ~/.claude, ~/.pocketpaw), so a bundled skill was
+# reachable by name only via the boot-time ~/.claude/skills mirror — which
+# POCKETPAW_AUTO_INSTALL_BUNDLED_SKILLS=false turns off. These pin the
+# packaged _bundled/skills/ dir as a resolution source of LAST resort.
+
+
+@pytest.fixture
+def fake_bundled(tmp_path, monkeypatch):
+    """Point ``bundled_skills_plugin_dir()`` at a throwaway packaged bundle."""
+    from pocketpaw.skills import materialize as materialize_mod
+
+    bundle_root = tmp_path / "_bundled"
+    (bundle_root / "skills").mkdir(parents=True)
+    _make_skill_dir(bundle_root / "skills", "code-react")
+    _make_skill_dir(bundle_root / "skills", "github")  # name clash on purpose
+    monkeypatch.setattr(materialize_mod, "_bundled_plugin_root", lambda: bundle_root, raising=False)
+    return bundle_root
+
+
+def test_resolves_bundled_skill_absent_from_loader(installed_skills, fake_bundled):
+    """A bundled skill the SkillLoader never saw still materializes by name."""
+    root = materialize_run_skills(["code-react"])
+    try:
+        assert root is not None, "bundled skill must resolve without the ~/.claude mirror"
+        assert (root / "skills" / "code-react" / "SKILL.md").is_file()
+    finally:
+        cleanup_run_skills(root)
+
+
+def test_installed_skill_wins_over_bundled_on_name_clash(installed_skills, fake_bundled):
+    """An installed skill overrides a bundled one of the same name."""
+    root = materialize_run_skills(["github"])
+    try:
+        assert root is not None
+        body = (root / "skills" / "github" / "SKILL.md").read_text(encoding="utf-8")
+        assert "Body for github." in body
+        # The installed fixture carries ref.md; the bundled one does not.
+        assert (root / "skills" / "github" / "ref.md").is_file(), (
+            "installed skill dir must win, assets and all"
+        )
+    finally:
+        cleanup_run_skills(root)
+
+
+def test_bundled_fallback_is_inert_when_no_bundle_present(installed_skills, monkeypatch):
+    """No packaged bundle → unchanged behavior, no crash."""
+    from pocketpaw.skills import materialize as materialize_mod
+
+    monkeypatch.setattr(materialize_mod, "_bundled_plugin_root", lambda: None, raising=False)
+    assert materialize_run_skills(["code-react"]) is None
