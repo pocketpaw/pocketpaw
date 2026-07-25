@@ -15,6 +15,18 @@
 # replays at its new path). ws.py binds them as the FileRpc on_delete / on_move
 # hooks, the delete/rename counterparts of the on_write mirror.
 #
+# Changed 2026-07-25 (fix/codeproject-never-store-generated-trees): the exclusion
+# of the regenerable trees is now enforced on the WRITE side, not just assumed of
+# the callers. It previously lived only in the walks that CHOOSE what to send — the
+# tar ``--exclude`` here and ``listProjectFiles`` in the client — so nothing stopped
+# a caller from naming ``node_modules/...`` directly and putting a regenerable file
+# in the tenant's S3. Both upload entry points now answer to
+# ``_SNAPSHOT_EXCLUDED_SEGMENTS``: ``mirror_file_to_project`` REFUSES (400
+# ``codeproject.path_not_durable``) before spending storage, and
+# ``put_project_files`` SKIPS, because a whole-filesystem write should be normalized
+# rather than rejected. Deletes stay unguarded on purpose — dropping an entry that
+# should never have existed is how an already-polluted store gets cleaned.
+#
 # The Daytona VM is pure scratch and gets reaped (WC-2). Code durability is git
 # (push); this module makes a user's UNCOMMITTED work + workspace state durable
 # by snapshotting the in-VM workspace dir to the tenant's blob storage (S3,
@@ -801,8 +813,26 @@ async def mirror_file_to_project(
     blob storage (folder ``/code-project-overlay``) and records ``rel_path ->
     FileRecord id`` on the durable project via ``set_project_overlay_entry``.
     Returns the FileRecord id. Fails CLOSED on a non-s3 upload adapter in cloud.
+
+    REFUSES a regenerable tree (``node_modules``, ``.git``, build output, caches).
+    This is the ONE upload path both runtimes share, so the guard belongs here: it
+    covers the in-tab write, the VM mirror, and anything added later, in one place.
+    Until this existed the exclusion lived only in the walks that CHOOSE what to
+    send (the client's ``listProjectFiles``, the VM's tar ``--exclude``) — so a
+    caller that named such a path directly, like an editor save on a file the user
+    opened inside ``node_modules``, put a regenerable file in the tenant's S3 and
+    on the project overlay. Loud rather than silent: nothing legitimate asks to
+    durably store a file that ``npm install`` regenerates, so a caller that does
+    has a bug worth surfacing.
     """
     _require_s3_for_project_store()
+    if _is_excluded_snapshot_path(rel_path):
+        raise CloudError(
+            400,
+            "codeproject.path_not_durable",
+            f"{rel_path!r} is inside a regenerable tree "
+            f"({', '.join(sorted(_SNAPSHOT_EXCLUDED_SEGMENTS))}) and is never stored",
+        )
     up = uploads if uploads is not None else build_uploads()
     basename = (rel_path or "file").rsplit("/", 1)[-1] or "file"
     file_id = await _upload_project_blob(
@@ -871,9 +901,25 @@ async def put_project_files(
     file_cap = _file_max_bytes()
     total_cap = _overlay_max_bytes()
     encoded: dict[str, bytes] = {}
+    skipped: list[str] = []
     total = 0
     for raw_path, content in files.items():
         safe_path = _require_safe_rel_path(raw_path)
+        # DROP the regenerable trees instead of refusing the request. Unlike a
+        # single-file write (which names one path and is a bug if that path is
+        # node_modules), this call's contract is "here is my whole filesystem" —
+        # normalizing what the client over-reported is the right server behavior,
+        # and failing the whole write would break saving for a client whose only
+        # sin is a stale filter. Dropped BEFORE the size caps too, so an
+        # over-reported node_modules can't push a legitimate project over a limit.
+        #
+        # Safe for the prune despite `overlay_complete`: the restore-time prune is
+        # built from this same exclusion set, so it never considers these paths and
+        # a store that omits them cannot license deleting an installed
+        # node_modules. See the set's own header.
+        if _is_excluded_snapshot_path(safe_path):
+            skipped.append(safe_path)
+            continue
         data = (content or "").encode("utf-8")
         if len(data) > file_cap:
             raise CloudError(
@@ -889,6 +935,16 @@ async def put_project_files(
                 f"Project exceeds the {total_cap}-byte store limit",
             )
         encoded[safe_path] = data
+
+    if skipped:
+        # Never silent: a client that keeps sending these is a client whose walk is
+        # not filtering, and the count is how anyone finds out.
+        logger.info(
+            "codeproject.put_files: skipped %d regenerable path(s) for project=%s (e.g. %s)",
+            len(skipped),
+            project_id,
+            ", ".join(skipped[:3]),
+        )
 
     up = uploads if uploads is not None else build_uploads()
     overlay: dict[str, str] = {}
