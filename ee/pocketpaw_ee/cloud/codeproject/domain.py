@@ -9,9 +9,29 @@
 # and ``is_scaffold_provider`` — the named test for "this project's ``repo`` field
 # holds a TEMPLATE id, not a repo IDENTITY". ``create_project``'s idempotency
 # reads it to decide whether a second create is the same project or a new one.
+#
+# Modified 2026-07-24 (feat/code-durable-project-store): added ``overlay`` to
+# CodeProjectView so the project-keyed durability path can read the snapshot +
+# overlay tiers off a single ``get_project`` (mirrors how WebSandboxView carries
+# ``overlay`` for websandbox restore). Like WebSandbox, overlay is view-only — it
+# is NOT surfaced on the wire ``CodeProjectResponse``; it is internal durability
+# bookkeeping, not a client-facing field.
+#
+# Modified 2026-07-25 (feat/code-s3-authoritative): added ``overlay_complete`` —
+# view-only like ``overlay`` (durability bookkeeping, never on the wire). It says
+# whether ``overlay`` is a COMPLETE image of the workspace or just the delta of
+# files that passed a write hook, which is the difference between "this path is
+# absent because the user deleted it" and "this path is absent because nothing ever
+# mirrored it". Restore reads it before doing anything destructive.
+#
+# Modified 2026-07-24 (feat/code-initial-prompt): added ``initial_prompt`` and
+# ``initial_prompt_consumed`` to CodeProjectView. Unlike ``overlay`` these DO flow
+# to the wire (``initialPrompt`` / ``initialPromptConsumed``) — the frontend reads
+# the prompt on first open to auto-run one build turn and the consumed flag to
+# avoid re-running it.
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import NewType
 
@@ -66,6 +86,16 @@ class CodeProjectView:
     updated_at: datetime
     # Durable blob-storage snapshot pointer — the project's files between VMs.
     snapshot_file_id: str | None = None
+    # The AUTHORITATIVE per-file store (``relpath -> FileRecord id``), keyed on the
+    # project. View-only, mirroring WebSandboxView — not on the wire.
+    overlay: dict[str, str] = field(default_factory=dict)
+    # Whether ``overlay`` is a complete image of the workspace (see the model).
+    overlay_complete: bool = False
+    # The natural-language build prompt captured at create-from-description time
+    # (WHAT to build), and whether the auto-run build turn has been kicked off for
+    # it. Both flow to the wire, unlike ``overlay``.
+    initial_prompt: str | None = None
+    initial_prompt_consumed: bool = False
     # The current ephemeral sandbox (a WebSandbox row id), null when none is live.
     current_sandbox_id: str | None = None
     last_opened_at: datetime | None = None

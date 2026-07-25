@@ -8,10 +8,10 @@
 #
 #   POST /codeagent/resolve — hand a delegated task's result back to the backend.
 #
-# It is the return leg of a call the BACKEND started: the main agent's
-# ``code_mode`` tool pushes a ``code_delegate`` SSE frame and parks, the browser
-# does the work (it is the only side that can — a WebContainer project lives in
-# the tab), and this route wakes the parked turn. It spends no money and calls no
+# It is the return leg of a call the BACKEND started: one of the main agent's
+# file tools pushes a ``code_delegate`` SSE frame and parks, the browser runs the
+# file-session verb (it is the only side that can — a WebContainer project lives
+# in the tab), and this route wakes the parked tool. It spends no money and calls no
 # model; the workspace check here is genuine tenancy, since the correlation id it
 # carries names another user's parked turn if it names anything at all.
 #

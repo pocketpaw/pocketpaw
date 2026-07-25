@@ -10,8 +10,8 @@
 # the weaker one, so it went.
 #
 # What remains is the INBOUND half of the browser-delegate rendezvous. The main
-# agent's ``code_mode`` tool parks on a future (``delegates.delegate_to_browser``)
-# and the browser wakes it by POSTing here. This service function is a thin
+# agent's file tools each park on a future (``delegates.delegate_call_to_browser``)
+# and the browser wakes them by POSTing here. This service function is a thin
 # pass-through to ``delegates.resolve_pending``; it exists only so the router
 # keeps ONE shape (router → service) for the ``/codeagent/resolve`` route. The
 # rendezvous logic itself lives in ``delegates.py``.

@@ -100,6 +100,12 @@ read-only: the ``pocketpaw_fabric`` server grew three ontology modification
 tools (``fabric_link_create`` / ``fabric_link_delete`` at MEMBER tier,
 ``fabric_type_update`` RBAC-gated on ``fabric.admin``), mirroring the REST
 routes. ``tool_ids()`` picks them up automatically via ``FABRIC_TOOL_IDS``.
+
+Updated: 2026-07-24 (CX-3, feat/code-agent-exclusive-tools) —
+``CloudLifecycleHook.on_startup`` now also back-fills the dedicated ``code``
+agent (``ensure_code_agent_all_workspaces``) beside the default ``pocketpaw``
+one, so existing workspaces resolve ``/code`` turns to the exclusive-file-tool
+agent without waiting for the first-turn lazy seed.
 """
 
 from __future__ import annotations
@@ -309,6 +315,11 @@ class CloudLifecycleHook:
         await seed_workspace(admin)
         # Back-fill the pocketpaw agent for workspaces that predate agent seeding.
         await ensure_default_agent_all_workspaces()
+        # Back-fill the dedicated /code agent (exclusive file-tool set) beside it
+        # so an existing workspace resolves /code turns without a first-turn seed.
+        from pocketpaw_ee.cloud.agents.service import ensure_code_agent_all_workspaces
+
+        await ensure_code_agent_all_workspaces()
 
         # Persist Haiku-generated chat titles into MongoDB.
         try:
@@ -1026,17 +1037,18 @@ class CloudBeltMcpProvider:
 
 class CloudCodeMcpProvider:
     """`pocketpaw.mcp_servers` — the Code Mode delegate in-process server
-    (``pocketpaw_code``). Hosts ``code_mode`` only.
+    (``pocketpaw_code``). Hosts the four /code file tools: ``readFile`` /
+    ``search`` / ``listDir`` / ``writeFile``.
 
     The main chat agent drives the /code surface and reaches the user's project
-    through this one coarse tool. The handler does not open a file: it parks on
-    a future while the BROWSER does the work and posts the answer back to
-    ``POST /codeagent/resolve``, because a WebContainer project lives in the tab
-    and has no server-side row a backend could reach.
+    through these tools, one call at a time. No handler opens a file: each parks
+    on a future while the BROWSER runs the matching file-session verb and posts
+    the result back to ``POST /codeagent/resolve``, because a WebContainer
+    project lives in the tab and has no server-side row a backend could reach.
 
     Ambient (NOT in ``OPT_IN_MCP_SERVERS``), the same regime as the sibling belt
     / loom / media servers: the /code surface scopes access via its profile,
-    which allows this tool id and DENIES the file/shell built-ins outright.
+    which allows these tool ids and DENIES the file/shell built-ins outright.
     ``build_code_server`` returns None — and the loop skips it — when the
     claude_agent_sdk isn't installed, so chat never breaks.
     """
