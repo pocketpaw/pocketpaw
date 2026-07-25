@@ -173,6 +173,17 @@ Updated: 2026-06-07 (feat/entity-pocket-profile-field, entity-rooms A2) — ``ru
   connect), so the run goes through a fresh stateless query whose options carry
   the plugin; the temp dir is removed in the outer ``finally``. Empty
   ``skill_names`` is a no-op. Crosses the EE→OSS boundary as a plain frozenset.
+Updated: 2026-07-25 (feat/bundled-skills-per-surface) — a non-empty
+  ``skill_names`` now SUPPRESSES the wholesale bundled-skills plugin
+  (``_should_load_bundled_plugin``). Before this, the two plugin entries were
+  independent: the bundled plugin loaded from ``plugins=`` regardless of
+  ``skill_names``, so a surface could not withhold a bundled skill by naming a
+  narrower set — ``SurfaceProfile.skill_names`` was additive-only, and /code had
+  to deny the ``Skill`` BUILT-IN outright to keep ``pocketpaw-create-pocket``
+  from firing on "build an app with components and nice design". With the gate,
+  naming skills yields exactly those (``materialize_run_skills`` resolves
+  bundled names too, via its new packaged fallback) and naming none keeps the
+  full bundled set, so general chat is byte-for-byte unchanged.
 Updated: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①) —
   ``run`` also accepts ``allow_sdk_tools: frozenset[str]``, the per-entity
   ADDITIVE SDK-tool allowlist (resolved upstream from the entity pocket's
@@ -1279,6 +1290,25 @@ class ClaudeSDKBackend(BaseAgentBackend):
         return system_prompt[:cut]
 
     @staticmethod
+    def _should_load_bundled_plugin(*, enabled: bool, skill_names: frozenset[str]) -> bool:
+        """Whether to load the WHOLE bundled-skills plugin this connect.
+
+        The bundled skills ship as a local plugin passed via SDK ``plugins=``,
+        which loads independently of ``skill_names``. That made a surface's
+        skill allowlist advisory rather than binding: naming a narrow set could
+        not withhold ``pocketpaw-create-pocket``, whose description matches
+        "build an app with components and nice design" almost word for word.
+        /code had to deny the ``Skill`` built-in outright to stop it.
+
+        Gating the wholesale load on an EMPTY ``skill_names`` makes the
+        allowlist binding — name skills and the run gets exactly those (each
+        materialized by ``materialize_run_skills``, bundled ones included);
+        name none and the full bundled set loads as before, so general chat is
+        unchanged. ``sdk_load_bundled_skills=False`` still disables it outright.
+        """
+        return enabled and not skill_names
+
+    @staticmethod
     def _plugin_digest(skill_names: frozenset[str], *, bundled: bool) -> str:
         """Stable digest of the agent's plugin IDENTITY for the cache key.
 
@@ -1852,7 +1882,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # ``skills=`` option is also gated by setting_sources, but
         # ``plugins=`` is not. Toggle via ``sdk_load_bundled_skills``.
         bundled_loaded = False
-        if self.settings.sdk_load_bundled_skills:
+        if self._should_load_bundled_plugin(
+            enabled=self.settings.sdk_load_bundled_skills, skill_names=skill_names
+        ):
             from pocketpaw.bundled_skills import bundled_skills_plugin_dir
 
             plugin_dir = bundled_skills_plugin_dir()
