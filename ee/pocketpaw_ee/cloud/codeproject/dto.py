@@ -95,13 +95,35 @@ class ProjectFileWriteResponse(BaseModel):
     fileId: str
 
 
+class PutProjectFilesRequest(BaseModel):
+    """The in-tab runtime's whole project: ``{relative path: file content}``.
+
+    A REPLACEMENT, not a patch — a path absent from this map is absent from the
+    project, which is what lets a delete stick. The browser is the only thing
+    that can enumerate a filesystem living in a browser tab, so it walks its own
+    FS and posts the result. Excluded trees (``node_modules``, ``.git``, build
+    output) are filtered client-side before they get here, the same way the VM
+    sync filters them.
+    """
+
+    files: dict[str, str] = Field(default_factory=dict)
+
+
+class PutProjectFilesResponse(BaseModel):
+    """How many files the store now holds, after a whole-project replacement."""
+
+    ok: bool = True
+    stored: int
+
+
 class ProjectFilesResponse(BaseModel):
     """The project's whole persisted overlay: ``{relative path: file content}``.
 
-    The restore payload for the in-tab runtime. It carries the DELTA only — the
-    starter scaffold baseline is re-materialized client-side from the starter id,
-    so a project that has never been edited returns an empty map rather than the
-    scaffold.
+    The restore payload for the in-tab runtime. Once the store is COMPLETE (see
+    ``overlayComplete``) this is the whole project rather than a delta over a
+    baseline — which is what lets the client replay it and then delete anything
+    the map does not mention. An empty map means a project nothing has stored
+    yet, not a project with no files.
     """
 
     files: dict[str, str]

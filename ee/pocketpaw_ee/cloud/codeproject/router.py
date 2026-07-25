@@ -58,6 +58,8 @@ from pocketpaw_ee.cloud.codeproject.dto import (
     ProjectFilesResponse,
     ProjectFileWriteResponse,
     PutProjectFileRequest,
+    PutProjectFilesRequest,
+    PutProjectFilesResponse,
     RenameProjectRequest,
 )
 from pocketpaw_ee.cloud.license import require_license
@@ -181,6 +183,30 @@ async def put_project_file(
         workspace_id, ctx.user_id, project_id, body.path, body.content
     )
     return ProjectFileWriteResponse(ok=True, path=path, fileId=file_id)
+
+
+@router.put("/{project_id}/files", response_model=PutProjectFilesResponse)
+async def put_project_files(
+    project_id: str,
+    body: PutProjectFilesRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> PutProjectFilesResponse:
+    """Replace the in-tab project's whole store, marking it COMPLETE (owner-scoped).
+
+    The client walks the filesystem it hosts and posts everything at once. That
+    is the only way the store can become complete for a tab-hosted project — a
+    per-file PUT can never know whether it was the last one — and completeness is
+    what licenses the restore-time prune to treat an unlisted file as deleted.
+
+    All-or-nothing: every byte is uploaded before the map is swapped, so a failure
+    leaves the project exactly as it was rather than marking a partial store
+    complete.
+    """
+    workspace_id = _require_workspace(ctx)
+    stored = await websandbox_durability.put_project_files(
+        workspace_id, ctx.user_id, project_id, body.files
+    )
+    return PutProjectFilesResponse(ok=True, stored=stored)
 
 
 @router.delete("/{project_id}/file", status_code=204)
