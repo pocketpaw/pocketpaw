@@ -330,6 +330,36 @@ def _scrub_nul_chars(options_kwargs: dict[str, Any]) -> list[str]:
         if isinstance(value, str):
             if "\0" in value:
                 offenders.append(path)
+                # Log the TEXT AROUND the NUL, not just the field name. The field
+                # alone is not actionable: ``system_prompt`` is tens of thousands of
+                # characters assembled from a surface preamble, the soul, the
+                # about-member block, KB context and history, so "it was in
+                # system_prompt" narrows nothing. The surrounding text names the
+                # actual producer — that is how the first instance of this was
+                # traced to a `.tgz` workspace snapshot the KB had indexed as text
+                # and was injecting as raw gzip.
+                #
+                # ``env`` values are REDACTED to a length + offset: that is where
+                # API keys and tokens live, and a log line is the wrong place for
+                # them. The variable NAME is already in ``path``, which is the part
+                # that identifies the source.
+                i = value.index("\0")
+                if path.startswith("env["):
+                    logger.error(
+                        "SDK: NUL in %s — value length %d, first NUL at offset %d "
+                        "(value redacted: env carries credentials)",
+                        path,
+                        len(value),
+                        i,
+                    )
+                else:
+                    logger.error(
+                        "SDK: NUL in %s at offset %d of %d — context: %r",
+                        path,
+                        i,
+                        len(value),
+                        value[max(0, i - 120) : i + 120],
+                    )
                 return value.replace("\0", "")
             return value
         # dict / list are rebuilt in place so the caller's object is the cleaned one.
