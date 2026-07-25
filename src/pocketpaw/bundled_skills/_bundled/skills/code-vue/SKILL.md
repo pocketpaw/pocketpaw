@@ -153,17 +153,16 @@ export function useOnline() {
 }
 ```
 
-Call composables synchronously at the top of `<script setup>`. Calling one
-inside a callback, a conditional, or after an `await` detaches it from the
-component instance, and its lifecycle hooks silently never fire.
+Call composables synchronously at the top of `<script setup>`. Calling one in a
+callback, a conditional, or after an `await` detaches it from the component
+instance and its lifecycle hooks silently never fire.
 
 ## Slots, provide/inject, ids
 
-- Slots for layout composition: `<slot name="footer" :item="item" />`, consumed
-  as `<template #footer="{ item }">`.
-- `provide`/`inject` for ambient values across depth. Type the key with
-  `InjectionKey<T>` so the injected value is not `unknown`.
-- `useId()` for stable `id`/`aria-describedby` pairs instead of a counter.
+- Slots for composition: `<slot name="footer" :item="item" />`, consumed as
+  `<template #footer="{ item }">`.
+- `provide`/`inject` for ambient values across depth; type the key with
+  `InjectionKey<T>`. `useId()` gives stable `id`/`aria-describedby` pairs.
 
 ## Styling
 
@@ -229,9 +228,9 @@ registered on the app instance before any import of them resolves.
 - Every watcher that starts async work cleans it up with `onWatcherCleanup`.
 - Props are read-only; two-way binding goes through `defineModel` or an emit.
 - Composables are called synchronously at setup top level.
-- `v-for` keys on a stable id, never an index.
-- No `v-if` sharing an element with `v-for`.
+- `v-for` keys on a stable id, never an index, and never shares an element
+  with `v-if`.
 - Injected values are typed with an `InjectionKey`.
 - Type-only imports use `import type`; no `enum`, no parameter properties.
-- No import of a package that is not in `package.json`.
-- Nothing secret sits behind a `VITE_` variable.
+- No import of a package absent from `package.json`, and nothing secret sits
+  behind a `VITE_` variable.
