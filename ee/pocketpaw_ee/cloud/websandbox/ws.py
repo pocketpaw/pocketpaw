@@ -83,6 +83,16 @@
 # misconfigured deploy persisted NOTHING while every save reported ok, with the only
 # trace at debug. Still swallowed (a durability hiccup must not break a file write
 # that already landed); just diagnosable now, with the anchor and path in the line.
+#
+# 2026-07-25 (S1, feat/code-s3-authoritative): the disconnect capture for a
+# PROJECT-anchored socket is now ``sync_project_files`` (a per-file re-image of the
+# workspace) instead of ``snapshot_project`` (one whole-workspace tarball). WHY: the
+# tarball could not express a DELETE — replaying it resurrected every file the user
+# removed, and taking it CLEARED the per-file overlay that could have recorded the
+# absence. The per-file store is now the whole truth, and a sync is what keeps it
+# complete for everything that never passes a write hook (a clone, a scaffold,
+# generated output). The degrade path is untouched: a sandbox with no owning project
+# still writes the sandbox-keyed tarball, which remains its only durability.
 from __future__ import annotations
 
 import asyncio
@@ -307,39 +317,44 @@ async def snapshot_on_disconnect(
     project_id: str | None = None,
     daytona_id: str | None = None,
 ) -> None:
-    """Best-effort workspace snapshot when a terminal socket closes (CM-2a′, B2).
+    """Best-effort workspace capture when a terminal socket closes (CM-2a′, B2, S1).
 
-    The durable half of Code Mode is the S3 snapshot; the Daytona VM is pure
-    scratch. With the aggressive Daytona lifecycle (stop 5 / delete-on-stop), a
-    disconnected VM is reclaimed within minutes — so a CLEAN disconnect (tab
-    close, navigate away) is the moment to capture the workspace while the VM is
-    still alive. ``codeproject.lifecycle.open_project`` restores the latest
-    snapshot on the next open.
+    The durable half of Code Mode is blob storage; the Daytona VM is pure scratch.
+    With the aggressive Daytona lifecycle (stop 5 / delete-on-stop), a disconnected
+    VM is reclaimed within minutes — so a CLEAN disconnect (tab close, navigate
+    away) is the moment to capture the workspace while the VM is still alive.
+    ``codeproject.lifecycle.open_project`` reconstructs it on the next open.
 
-    The pointer lands on the durable PROJECT when the socket resolved one, keyed by
-    ``project_id`` and taken from the live VM ``daytona_id`` (the project-keyed
-    snapshot addresses the VM directly rather than through the row). Without both —
-    a sandbox opened outside the project flow, or a row with no bound VM — it falls
-    back to the sandbox-keyed snapshot rather than skipping the capture.
+    A PROJECT-anchored socket now runs ``sync_project_files`` — a per-file re-image
+    of the workspace — where it used to write one whole-workspace TARBALL (S1). The
+    tar could not represent a DELETE: replaying it resurrected every file the user
+    removed during the session, and the write-through overlay that could have
+    recorded the absence was cleared by the snapshot. Syncing enumerates what
+    exists, so a deleted file is simply absent from the store afterwards. The
+    capture still needs both a ``project_id`` and a live ``daytona_id``; without
+    them (a sandbox opened outside the project flow, or a row with no bound VM) it
+    falls back to the sandbox-keyed tarball snapshot rather than skipping the
+    capture — that legacy path is unchanged and still the only durability such a
+    sandbox has.
 
-    Best-effort by design: a snapshot failure (VM already gone, S3 down, an
+    Best-effort by design: a capture failure (VM already gone, S3 down, an
     unprovisioned row) must NEVER surface on socket teardown — it is swallowed. It
-    is logged at WARNING though (B4): this is the capture that makes a whole
-    session's work durable, so losing it silently is indistinguishable from data
-    loss on the next open.
+    is logged at WARNING though (B4): this is what makes a whole session's work
+    durable, so losing it silently is indistinguishable from data loss on the next
+    open.
     """
     try:
         if project_id and daytona_id:
-            await websandbox_durability.snapshot_project(
+            await websandbox_durability.sync_project_files(
                 workspace_id, user_id, project_id, daytona_id, client=client
             )
         else:
             await websandbox_durability.snapshot_workspace(
                 workspace_id, user_id, row_id, client=client
             )
-    except Exception:  # noqa: BLE001 — teardown must never raise on a snapshot miss
+    except Exception:  # noqa: BLE001 — teardown must never raise on a capture miss
         logger.warning(
-            "websandbox.snapshot on disconnect failed for row=%s project=%s daytona=%s — "
+            "websandbox.capture on disconnect failed for row=%s project=%s daytona=%s — "
             "this session's workspace was NOT captured",
             row_id,
             project_id,

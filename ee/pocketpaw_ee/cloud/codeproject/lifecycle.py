@@ -72,6 +72,17 @@
 # is therefore empty by construction. The reuse branch returns before it, so a live
 # VM (or a reopen that reuses one) is never re-materialized over. See
 # ``_scaffold_baseline`` for why this is the guard rather than a VM probe.
+#
+# 2026-07-25 (S1, feat/code-s3-authoritative): the cold-provision branch gained a
+# third step — ``_seed_project_files``, after the restore. WHY: the per-file store in
+# blob storage is now the project's whole truth (the tarball tier is retired because
+# a tarball cannot express a DELETE, so replaying it resurrected removed files), and
+# the write-through hooks only ever see files that pass through the editor. A clone's
+# tree and a materialized scaffold pass through nothing, so without an explicit sync
+# the store would be missing most of the project until its first clean disconnect —
+# and a session that crashes or idles out never has one. Ordering is load-bearing
+# again: scaffold, then restore, THEN sync, so what gets photographed is the user's
+# real workspace rather than the bare baseline.
 from __future__ import annotations
 
 import contextlib
@@ -164,6 +175,11 @@ async def open_project(
     # B3: for a scaffold project this lands ON TOP of the starter above — the
     # template is the baseline, the durable state is the user's work.
     await _restore_if_snapshotted(workspace_id, user_id, project, sandbox, client)
+    # S1: the content that just landed (a clone's tree, a materialized scaffold)
+    # never passed a write hook, so nothing in blob storage knows about it until
+    # something enumerates the workspace. Seed the store NOW rather than at the
+    # first disconnect.
+    await _seed_project_files(workspace_id, user_id, project, sandbox, client)
     await codeproject_service.bind_current_sandbox(workspace_id, user_id, project_id, sandbox.id)
     logger.info(
         "codeproject.open: project=%s bound fresh sandbox=%s (provider=%s repo=%s)",
@@ -314,12 +330,11 @@ async def _restore_if_snapshotted(
 ) -> None:
     """Restore the PROJECT's durable state into the freshly-provisioned VM, if any.
 
-    Both durability tiers live on the durable project row (B2): the
-    ``snapshot_file_id`` (captured on a prior clean disconnect) AND the
-    write-through ``overlay`` (per-file edits mirrored since the last snapshot —
-    the tier that covers a crash / idle-out before any disconnect snapshot).
-    Restore fires when EITHER exists; a project with neither (first open, or
-    nothing edited) is a clean no-op.
+    The durable state lives on the project row (B2): the authoritative per-file
+    ``overlay``, plus — for a project whose state predates S1 — a legacy
+    ``snapshot_file_id`` that ``restore_project`` migrates into per-file entries on
+    its way past. Restore fires when EITHER exists; a project with neither (first
+    open, or nothing edited) is a clean no-op.
 
     The anchor moved off the WebSandbox row deliberately. That row is unique per
     (workspace, user, repo), so N projects sharing a starter template shared one
@@ -363,6 +378,57 @@ async def _restore_if_snapshotted(
             project.snapshot_file_id,
             exc_info=True,
         )
+
+
+async def _seed_project_files(
+    workspace_id: str,
+    user_id: str,
+    project: CodeProjectView,
+    sandbox: WebSandboxView,
+    client: DaytonaClient | None,
+) -> None:
+    """Re-image the project's per-file store from the freshly-materialized VM (S1).
+
+    The per-file store is the project's whole truth now, and the write-through hooks
+    only ever see what passes through the editor. Everything that lands another way
+    — a ``git clone``'s tree, a scaffold materialized by ``_scaffold_baseline``,
+    anything a bring-up step generates — is invisible to them. The retired tarball
+    used to cover that gap on disconnect; syncing here covers it from the START, so
+    a project is complete in blob storage the moment it opens rather than only after
+    its first clean disconnect (a session that crashes or idles out never had one).
+
+    Runs only on the COLD-PROVISION branch, which is the only branch where new
+    unseen content lands: the reuse branch returns before it, against a VM whose
+    files are already synced. It runs AFTER the restore so the sync photographs the
+    user's real workspace — running it before would capture the bare clone/scaffold
+    and re-add every file the user had deleted, which is the exact bug this whole
+    change removes.
+
+    Best-effort, like the scaffold and restore around it: a sync failure leaves the
+    project on whatever the store already held and is retried on the next disconnect
+    or open. Blocking an open on a durability capture would be the worse trade.
+    """
+    if not sandbox.sandbox_id:
+        return
+    try:
+        overlay = await websandbox_durability.sync_project_files(
+            workspace_id, user_id, project.id, sandbox.sandbox_id, client=client
+        )
+    except Exception:  # noqa: BLE001 — never block the open on a durability capture
+        logger.warning(
+            "codeproject.open: file sync failed for project=%s (daytona=%s); the store "
+            "still holds the previous state",
+            project.id,
+            sandbox.sandbox_id,
+            exc_info=True,
+        )
+        return
+    logger.info(
+        "codeproject.open: synced project=%s from daytona=%s (%d file(s) in the store)",
+        project.id,
+        sandbox.sandbox_id,
+        len(overlay),
+    )
 
 
 async def _backfill_legacy_durability(

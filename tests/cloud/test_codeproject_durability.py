@@ -14,17 +14,26 @@
 # which is exactly how these tests prove "no WebSandbox row involved".
 #
 # Covers:
-#   * round-trip: snapshot + overlay write to a project by id, then restore the
-#     bytes byte-for-byte — with NO WebSandbox row created anywhere.
+#   * round-trip: the per-file store is written by id, then restored byte-for-byte
+#     — with NO WebSandbox row created anywhere.
 #   * independence: two projects sharing the SAME starter ``repo`` in one
-#     workspace hold independent snapshot + overlay pointers (no collision).
-#   * snapshot clears the overlay (a full snapshot supersedes it).
+#     workspace hold independent stores (no collision).
 #   * overlay drop / move re-key the durable project pointer.
 #   * S3 guard: the project-keyed durable WRITE path RAISES a clean CloudError in
 #     cloud when the upload adapter isn't s3; does NOT raise on a non-cloud/OSS
 #     install.
+#
+# Updated 2026-07-25 (S1, feat/code-s3-authoritative): every ``snapshot_project``
+# case became a ``sync_project_files`` case. The tarball tier is retired (a tar
+# cannot express a DELETE, so replaying it resurrected removed files) and the
+# per-file store is the whole truth, so what these prove now is that a workspace
+# re-image lands one blob per file and that a full snapshot no longer wipes the
+# store. The delete/completeness behaviour has its own suite:
+# ``test_codeproject_s3_authoritative.py``.
 from __future__ import annotations
 
+import io
+import tarfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -128,6 +137,22 @@ class _FakeUploads:
         return rec, _iter()
 
 
+def _tar(files: dict[str, bytes]) -> bytes:
+    """A REAL gzipped tar shaped like ``tar -czf ... -C <workdir> .`` output.
+
+    The sync path reads the workspace THROUGH a tarball (one round trip instead of
+    one download per file), so the fake VM has to hand back a real archive rather
+    than a canned string. Members are named ``./x`` exactly as tar writes them.
+    """
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as archive:
+        for name, blob in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(blob)
+            archive.addfile(info, io.BytesIO(blob))
+    return buf.getvalue()
+
+
 async def _project(workspace=_WS, user=_USER, repo="react", provider="starter", name=None):  # noqa: ANN001
     """Create a durable project row (starter by default, so two share one repo)."""
     body = {"repo": repo, "provider": provider}
@@ -142,49 +167,49 @@ async def _project(workspace=_WS, user=_USER, repo="react", provider="starter", 
 # ---------------------------------------------------------------------------
 
 
-async def test_snapshot_uploads_and_records_pointer_on_project() -> None:
+async def test_sync_uploads_every_workspace_file_and_records_the_store() -> None:
     project = await _project()
-    fake = _FakeDaytonaClient(tar_bytes=b"HELLO-SNAPSHOT")
+    fake = _FakeDaytonaClient(tar_bytes=_tar({"./a.ts": b"AAA", "./dir/b.ts": b"BBB"}))
     uploads = _FakeUploads()
 
-    file_id = await durability.snapshot_project(
+    overlay = await durability.sync_project_files(
         _WS, _USER, project.id, _SANDBOX, client=fake, uploads=uploads
     )
 
-    # Tarred the workspace dir in the VM, then downloaded the tarball.
+    # Tarred the workspace dir in the VM as a TRANSPORT, then downloaded it once.
     assert any("tar -czf" in c and WEBSANDBOX_WORKDIR in c for c in fake.exec_calls)
-    assert fake.download_calls == ["/tmp/ws-snapshot.tgz"]
+    assert fake.download_calls == ["/tmp/code-project-sync.tgz"]
 
-    # Uploaded the exact bytes, workspace + owner scoped, in the PROJECT snapshots
-    # folder — grouped separately from the sandbox-keyed folder.
-    assert len(uploads.upload_calls) == 1
-    up = uploads.upload_calls[0]
-    assert up["workspace"] == _WS
-    assert up["owner_id"] == _USER
-    assert up["folder_path"] == "/code-project-snapshots"
-    assert up["data"] == b"HELLO-SNAPSHOT"
-    assert up["content_type"] == "application/gzip"
+    # One blob PER FILE — workspace + owner scoped, in the overlay folder. Nothing
+    # lands in the retired snapshots folder.
+    assert len(uploads.upload_calls) == 2
+    assert {u["folder_path"] for u in uploads.upload_calls} == {"/code-project-overlay"}
+    assert {u["workspace"] for u in uploads.upload_calls} == {_WS}
+    assert {u["owner_id"] for u in uploads.upload_calls} == {_USER}
+    assert {u["data"] for u in uploads.upload_calls} == {b"AAA", b"BBB"}
 
-    # The durable pointer is returned AND persisted on the PROJECT row.
-    assert file_id == "file-1"
+    # The store is the whole map, persisted on the PROJECT row and marked verified.
+    assert set(overlay) == {"a.ts", "dir/b.ts"}
     fetched = await codeproject_service.get_project(_WS, _USER, project.id)
-    assert fetched.snapshot_file_id == "file-1"
+    assert fetched.overlay == overlay
+    assert fetched.overlay_complete is True
+    assert fetched.snapshot_file_id is None
 
     # No WebSandbox row was ever created — the store is project-keyed.
     assert await _WebSandboxDoc.find_all().to_list() == []
 
 
-async def test_round_trip_snapshot_and_overlay_restores_bytes_no_websandbox() -> None:
+async def test_round_trip_sync_and_overlay_restores_bytes_no_websandbox() -> None:
     project = await _project()
     uploads = _FakeUploads()
 
-    # A disconnect snapshot (clears overlay), then a fresh session's edits mirror in.
-    await durability.snapshot_project(
+    # A disconnect sync, then a fresh session's edits mirror in on top.
+    await durability.sync_project_files(
         _WS,
         _USER,
         project.id,
         _SANDBOX,
-        client=_FakeDaytonaClient(tar_bytes=b"SNAP-DATA"),
+        client=_FakeDaytonaClient(tar_bytes=_tar({"./from-the-vm.ts": b"VM"})),
         uploads=uploads,
     )
     await durability.mirror_file_to_project(_WS, _USER, project.id, "a.ts", b"AAA", uploads=uploads)
@@ -198,13 +223,12 @@ async def test_round_trip_snapshot_and_overlay_restores_bytes_no_websandbox() ->
         _WS, _USER, project.id, "dtn-fresh", client=fresh, uploads=uploads
     )
 
-    # Snapshot untarred first...
-    assert fresh.upload_calls[0]["remote_path"] == "/tmp/ws-snapshot.tgz"
-    assert fresh.upload_calls[0]["data"] == b"SNAP-DATA"
-    assert any("tar -xzf" in c and WEBSANDBOX_WORKDIR in c for c in fresh.exec_calls)
+    # No tarball is fetched or untarred — the per-file store is the whole truth.
+    assert not any("tar -xzf" in c for c in fresh.exec_calls)
 
-    # ...then each overlay file written byte-for-byte into the jail at WORKDIR/relpath.
+    # Every file is written byte-for-byte into the jail at WORKDIR/relpath.
     written = {u["remote_path"]: u["data"] for u in fresh.upload_calls}
+    assert written[f"{WEBSANDBOX_WORKDIR}/from-the-vm.ts"] == b"VM"
     assert written[f"{WEBSANDBOX_WORKDIR}/a.ts"] == b"AAA"
     assert written[f"{WEBSANDBOX_WORKDIR}/dir/b.ts"] == b"BBB"
     assert any(f"mkdir -p {WEBSANDBOX_WORKDIR}/dir" in c for c in fresh.exec_calls)
@@ -213,7 +237,7 @@ async def test_round_trip_snapshot_and_overlay_restores_bytes_no_websandbox() ->
     assert await _WebSandboxDoc.find_all().to_list() == []
 
 
-async def test_mirror_records_overlay_and_snapshot_clears_it() -> None:
+async def test_mirror_records_the_store_and_a_legacy_snapshot_no_longer_wipes_it() -> None:
     project = await _project()
     uploads = _FakeUploads()
 
@@ -228,11 +252,13 @@ async def test_mirror_records_overlay_and_snapshot_clears_it() -> None:
         "src/app.ts": "file-1"
     }
 
-    # A full snapshot supersedes the incremental overlay → overlay is wiped.
-    await durability.snapshot_project(
-        _WS, _USER, project.id, _SANDBOX, client=_FakeDaytonaClient(), uploads=uploads
-    )
-    assert (await codeproject_service.get_project(_WS, _USER, project.id)).overlay == {}
+    # Recording a legacy tarball pointer must NOT clear the store. It used to (a
+    # "full snapshot supersedes the delta"), and that is precisely what threw away
+    # the only tier able to record a deletion.
+    await codeproject_service.set_project_snapshot(_WS, _USER, project.id, "legacy-tar")
+    kept = await codeproject_service.get_project(_WS, _USER, project.id)
+    assert kept.overlay == {"src/app.ts": "file-1"}
+    assert kept.snapshot_file_id == "legacy-tar"
 
 
 async def test_restore_overlay_only_no_snapshot() -> None:
@@ -304,8 +330,13 @@ async def test_two_projects_same_starter_hold_independent_state() -> None:
     assert todo.id != blog.id
 
     uploads = _FakeUploads()
-    await durability.snapshot_project(
-        _WS, _USER, todo.id, _SANDBOX, client=_FakeDaytonaClient(tar_bytes=b"TODO"), uploads=uploads
+    await durability.sync_project_files(
+        _WS,
+        _USER,
+        todo.id,
+        _SANDBOX,
+        client=_FakeDaytonaClient(tar_bytes=_tar({"./synced.ts": b"S"})),
+        uploads=uploads,
     )
     await durability.mirror_file_to_project(_WS, _USER, todo.id, "todo.ts", b"T", uploads=uploads)
     await durability.mirror_file_to_project(_WS, _USER, blog.id, "blog.ts", b"B", uploads=uploads)
@@ -313,10 +344,10 @@ async def test_two_projects_same_starter_hold_independent_state() -> None:
     todo_view = await codeproject_service.get_project(_WS, _USER, todo.id)
     blog_view = await codeproject_service.get_project(_WS, _USER, blog.id)
 
-    # Snapshot landed only on todo; each overlay is the project's own.
-    assert todo_view.snapshot_file_id is not None
-    assert blog_view.snapshot_file_id is None
-    assert todo_view.overlay == {"todo.ts": "file-2"}
+    # The sync landed only on todo; each store is the project's own.
+    assert todo_view.overlay_complete is True
+    assert blog_view.overlay_complete is False
+    assert todo_view.overlay == {"synced.ts": "file-1", "todo.ts": "file-2"}
     assert blog_view.overlay == {"blog.ts": "file-3"}
 
 
@@ -325,7 +356,7 @@ async def test_two_projects_same_starter_hold_independent_state() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_snapshot_denies_cross_tenant_caller() -> None:
+async def test_sync_denies_cross_tenant_caller() -> None:
     project = await _project(workspace=_WS, user=_USER)
     fake = _FakeDaytonaClient()
     uploads = _FakeUploads()
@@ -333,7 +364,7 @@ async def test_snapshot_denies_cross_tenant_caller() -> None:
     from pocketpaw_ee.cloud._core.errors import NotFound
 
     with pytest.raises(NotFound):
-        await durability.snapshot_project(
+        await durability.sync_project_files(
             "w2", _USER, project.id, _SANDBOX, client=fake, uploads=uploads
         )
     assert fake.exec_calls == []
@@ -346,7 +377,7 @@ async def test_snapshot_denies_cross_tenant_caller() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_snapshot_write_raises_in_cloud_without_s3(monkeypatch) -> None:
+async def test_sync_write_raises_in_cloud_without_s3(monkeypatch) -> None:
     project = await _project()
     fake = _FakeDaytonaClient()
     uploads = _FakeUploads()
@@ -356,7 +387,7 @@ async def test_snapshot_write_raises_in_cloud_without_s3(monkeypatch) -> None:
     monkeypatch.setenv("POCKETPAW_UPLOAD_ADAPTER", "local")
 
     with pytest.raises(CloudError) as exc:
-        await durability.snapshot_project(
+        await durability.sync_project_files(
             _WS, _USER, project.id, _SANDBOX, client=fake, uploads=uploads
         )
     assert exc.value.code == "codeproject.durable_store_requires_s3"
@@ -381,18 +412,18 @@ async def test_mirror_write_raises_in_cloud_without_s3(monkeypatch) -> None:
     assert uploads.upload_calls == []
 
 
-async def test_snapshot_write_ok_in_cloud_with_s3(monkeypatch) -> None:
+async def test_sync_write_ok_in_cloud_with_s3(monkeypatch) -> None:
     project = await _project()
-    fake = _FakeDaytonaClient(tar_bytes=b"OK")
+    fake = _FakeDaytonaClient(tar_bytes=_tar({"./ok.ts": b"OK"}))
     uploads = _FakeUploads()
 
     monkeypatch.setattr(durability, "is_multi_tenant_cloud", lambda: True)
     monkeypatch.setenv("POCKETPAW_UPLOAD_ADAPTER", "s3")
 
-    file_id = await durability.snapshot_project(
+    overlay = await durability.sync_project_files(
         _WS, _USER, project.id, _SANDBOX, client=fake, uploads=uploads
     )
-    assert file_id == "file-1"
+    assert overlay == {"ok.ts": "file-1"}
 
 
 async def test_write_does_not_raise_off_cloud(monkeypatch) -> None:

@@ -42,6 +42,22 @@ durable store — snapshot pointer + overlay — that round-trips through S3
 independent of any runtime. Additive: the sandbox-keyed WebSandbox durability
 path is unchanged. No new index — read only via the owner-scoped project row.
 
+Modified 2026-07-25 (feat/code-s3-authoritative): the per-file ``overlay`` is now
+the AUTHORITATIVE store and the tarball tier is retired as a source of truth. This
+REVERSES the 2026-07-24 note above ("``set_project_snapshot`` CLEARS it"), for a
+structural reason: a tarball is an unmodifiable blob, so a DELETE could not be
+represented in it — replaying the baseline resurrected every file the user had
+removed, on both runtimes, and clearing the overlay on snapshot threw away the only
+tier that COULD represent the absence. Under the new model the overlay is a complete
+image of the workspace (seeded by ``durability.sync_project_files``, which enumerates
+the VM and drops entries for paths that no longer exist), so a delete is simply the
+removal of an entry and there is nothing left to resurrect it. Two consequences here:
+``snapshot_file_id`` is now a LEGACY pointer, read once by the migration in
+``durability.restore_project`` (expand the tar into per-file entries) and then
+cleared forever; and ``overlay_complete`` records whether the overlay has been
+verified against a real workspace, which is what makes the destructive operations
+(pruning stale files out of a restored VM) safe to run at all.
+
 Modified 2026-07-24 (feat/code-initial-prompt): added ``initial_prompt`` (the
 natural-language description of WHAT to build, captured when a ``/code`` project
 is created from a prompt) and ``initial_prompt_consumed`` (whether the auto-run
@@ -87,17 +103,31 @@ class CodeProject(Document):
     # rename collide two rows into a DuplicateKeyError, and would make a
     # re-create under a since-renamed name mint a surprise duplicate.
     registry_key: str = ""
-    # Durable blob-storage snapshot pointer (an EEUploadService FileRecord id).
-    # The project's files live HERE between sandboxes — this is why the project
-    # survives VM reaping. Null until the first backup.
+    # LEGACY blob-storage tarball pointer (an EEUploadService FileRecord id).
+    # Written by the retired ``snapshot_project`` path; no longer produced. It is
+    # read exactly ONCE more, by the migration in ``durability.restore_project``,
+    # which expands the tar into per-file ``overlay`` entries and clears this back
+    # to None so the baseline can never resurrect a deleted file again.
     snapshot_file_id: str | None = None
-    # The write-through per-file durability overlay, keyed on the PROJECT (mirrors
-    # ``WebSandbox.overlay``): ``relpath -> FileRecord id`` for each editor-saved
-    # file mirrored to blob storage since the last full project snapshot. Replayed
-    # onto a fresh clone on restore; cleared by ``set_project_snapshot`` (a full
-    # snapshot supersedes it). Null until the first mirror. No new index — read
-    # only via the owner-scoped project row.
+    # The AUTHORITATIVE per-file store, keyed on the PROJECT: ``relpath ->
+    # FileRecord id``, one blob-storage object per file. Written by the editor
+    # write-through hooks, by the browser file-sync route, and — for everything
+    # that never passes a write hook (a clone, a scaffold, generated output) — by
+    # ``durability.sync_project_files``, which enumerates the VM workspace and
+    # DROPS entries whose paths no longer exist. Restore reconstructs the workspace
+    # from this map alone. No new index — read only via the owner-scoped row.
     overlay: dict[str, str] = Field(default_factory=dict)
+    # Whether ``overlay`` has been verified to be a COMPLETE image of the project's
+    # workspace (every non-regenerable file), rather than a partial delta of the
+    # files that happened to pass through a write hook. Set by
+    # ``sync_project_files`` and by the legacy-tarball migration; False for a
+    # project whose only writes came from the in-tab runtime, whose baseline (the
+    # starter scaffold) is re-materialized client-side and never stored.
+    #
+    # It exists to gate DESTRUCTIVE reconciliation: restore prunes workspace files
+    # missing from the overlay only when this is True, because "absent from the
+    # overlay" means "deleted by the user" only once the overlay is known complete.
+    overlay_complete: bool = False
     # The natural-language build prompt captured when a ``/code`` project is
     # created from a description — WHAT to build. Null for projects opened from an
     # existing repo with nothing to auto-build. The frontend reads it on first open

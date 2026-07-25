@@ -392,7 +392,9 @@ async def test_put_ok_in_cloud_with_s3(monkeypatch) -> None:  # noqa: ANN001
 async def test_write_over_the_per_file_cap_is_rejected(monkeypatch) -> None:  # noqa: ANN001
     project = await _project()
     uploads = _FakeUploads()
-    monkeypatch.setenv("POCKETPAW_CODEPROJECT_OVERLAY_MAX_MB", "0.000001")  # ~1 byte
+    # The PER-FILE knob, split from the aggregate one in S1: the aggregate had to
+    # grow to hold a whole source tree, and one runaway file must stay bounded.
+    monkeypatch.setenv("POCKETPAW_CODEPROJECT_FILE_MAX_MB", "0.000001")  # ~1 byte
 
     with pytest.raises(CloudError) as exc:
         await durability.put_project_file(

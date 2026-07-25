@@ -35,9 +35,10 @@ from pocketpaw_ee.cloud.websandbox import durability
 from pocketpaw_ee.cloud.websandbox import provision as websandbox_provision
 from pocketpaw_ee.cloud.websandbox import service as sandbox_service
 from pocketpaw_ee.cloud.websandbox import ws as terminal_ws
+from pocketpaw_ee.cloud.websandbox.constants import WEBSANDBOX_WORKDIR
 
 from tests.cloud.test_codeproject_durability import _FakeDaytonaClient as _FakeVmClient
-from tests.cloud.test_codeproject_durability import _FakeUploads
+from tests.cloud.test_codeproject_durability import _FakeUploads, _tar
 from tests.cloud.test_websandbox_provision import _FakeDaytonaClient as _FakeProvisionClient
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
@@ -82,12 +83,15 @@ async def _starter_row():
 # ---------------------------------------------------------------------------
 
 
-async def test_full_chain_mirrors_snapshots_and_restores_against_the_project(uploads) -> None:  # noqa: ANN001
-    """provision -> mirror -> snapshot on disconnect -> reprovision -> restore.
+async def test_full_chain_mirrors_captures_and_restores_against_the_project(uploads) -> None:  # noqa: ANN001
+    """provision -> mirror -> capture on disconnect -> reprovision -> restore.
 
     Every durable pointer is read off the CodeProject; the WebSandbox row's
     ``snapshot_file_id`` / ``overlay`` are never written, so nothing in the chain
     depends on the ephemeral row surviving.
+
+    The disconnect capture is a per-file SYNC since S1, not a tarball snapshot, so
+    what the chain carries across is the store itself.
     """
     project = await codeproject_service.create_project(_WS, _USER, {"repo": _REPO})
     prov = _FakeProvisionClient()
@@ -111,8 +115,12 @@ async def test_full_chain_mirrors_snapshots_and_restores_against_the_project(upl
     row = await sandbox_service.get_sandbox(_WS, _USER, sandbox.id)
     assert row.overlay == {}, "the mirror still wrote to the EPHEMERAL row"
 
-    # 3. A clean disconnect snapshots the live VM onto the project.
-    vm = _FakeVmClient(tar_bytes=b"SNAPSHOT-TAR")
+    # 3. A clean disconnect re-images the live VM's workspace onto the project. The
+    #    tree carries a file the write hook never saw (a clone's own file) — the
+    #    whole reason the capture enumerates the VM instead of trusting the hooks.
+    vm = _FakeVmClient(
+        tar_bytes=_tar({"./src/app.ts": b"EDITED-IN-THE-VM", "./README.md": b"# hi"})
+    )
     await terminal_ws.snapshot_on_disconnect(
         _WS,
         _USER,
@@ -121,21 +129,24 @@ async def test_full_chain_mirrors_snapshots_and_restores_against_the_project(upl
         project_id=project_id,
         daytona_id=sandbox.sandbox_id,
     )
-    snapshotted = await codeproject_service.get_project(_WS, _USER, project.id)
-    assert snapshotted.snapshot_file_id is not None
-    assert snapshotted.overlay == {}, "a full snapshot supersedes the overlay"
+    captured = await codeproject_service.get_project(_WS, _USER, project.id)
+    assert set(captured.overlay) == {"src/app.ts", "README.md"}
+    assert captured.overlay_complete is True
+    assert captured.snapshot_file_id is None, "the retired tarball tier was written to"
     row = await sandbox_service.get_sandbox(_WS, _USER, sandbox.id)
-    assert row.snapshot_file_id is None, "the snapshot pointer landed on the EPHEMERAL row"
+    assert row.snapshot_file_id is None, "the capture landed on the EPHEMERAL row"
+    assert row.overlay == {}
 
     # 4. The VM is reaped; reopening reprovisions and restores from the PROJECT.
     await sandbox_service.mark_reaped(sandbox.id)
     second = await lifecycle.open_project(_WS, _USER, project.id, client=prov)
     assert second.sandbox_id != sandbox.sandbox_id  # genuinely fresh VM
 
-    untarred = [c for c in prov.upload_calls if c["path"] == _SNAPSHOT_TMP]
-    assert untarred, "the project's snapshot was never pushed into the fresh VM"
-    assert untarred[-1]["data"] == b"SNAPSHOT-TAR"
-    assert untarred[-1]["id"] == second.sandbox_id
+    # Every stored file was pushed into the fresh VM, and no tarball was untarred.
+    pushed = {c["path"]: c["data"] for c in prov.upload_calls if c["id"] == second.sandbox_id}
+    assert pushed[f"{WEBSANDBOX_WORKDIR}/src/app.ts"] == b"EDITED-IN-THE-VM"
+    assert pushed[f"{WEBSANDBOX_WORKDIR}/README.md"] == b"# hi"
+    assert _SNAPSHOT_TMP not in pushed
 
 
 async def test_delete_and_move_hooks_also_target_the_project(uploads) -> None:  # noqa: ANN001
