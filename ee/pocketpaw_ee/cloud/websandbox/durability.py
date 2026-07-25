@@ -97,11 +97,41 @@
 # carries with no excludes) are filtered out, and tar members are treated as
 # UNTRUSTED — absolute/traversing names and non-regular entries (symlinks, hardlinks,
 # devices) are skipped rather than materialized.
+#
+# Changed 2026-07-25 (S1, feat/code-s3-authoritative): the PER-FILE overlay is now the
+# project's whole truth and the tarball tier is RETIRED as a source of truth. This
+# reverses the CM-2a′ two-tier design documented above, and the reason is that a
+# tarball is an unmodifiable blob: a DELETE has no representation inside it. Replaying
+# the baseline resurrected every file the user removed — on both runtimes — and
+# ``set_project_snapshot`` clearing the overlay destroyed the one tier that could have
+# recorded the absence. A tombstone list would have patched the symptom; making the
+# per-file store COMPLETE makes a delete the removal of an entry, with nothing left to
+# resurrect it. Bytes still flow through ``EEUploadService`` (not presigned/direct-to-S3)
+# so the pluggable adapter and local/OSS installs keep working. Concretely:
+#   * ``snapshot_project`` is GONE. Nothing writes a whole-workspace tarball any more.
+#   * ``sync_project_files`` replaces it: tar the workspace as a TRANSPORT (one round
+#     trip instead of one per file), expand it in memory, write every member through
+#     to its own blob, and swap the whole map in with ONE service write. Files that
+#     never pass a write hook — a ``git clone``'s tree, a materialized scaffold,
+#     generated output — are how the store becomes complete; a path that no longer
+#     exists is DROPPED, which is how a delete survives.
+#   * ``restore_project`` reconstructs the VM from the overlay ALONE, then PRUNES
+#     workspace files the overlay doesn't list (a fresh clone/scaffold re-materializes
+#     files the user deleted, so replay-only would hand the resurrection bug straight
+#     back). The prune is gated on ``overlay_complete`` — "absent from the overlay"
+#     only means "deleted" once the overlay has been verified against a real workspace.
+#   * a project whose state PREDATES this change still carries ``snapshot_file_id``
+#     and a partial overlay. ``_migrate_legacy_snapshot`` expands that tar ONCE into
+#     per-file entries (existing entries win — they are fresher), then clears the
+#     pointer so it never runs again. It is idempotent and non-destructive: if any
+#     member fails to carry across, the pointer is KEPT and the untar fallback still
+#     materializes the session, so a partial migration retries instead of losing data.
 from __future__ import annotations
 
 import io
 import logging
 import os
+import shlex
 import tarfile
 from pathlib import Path
 from typing import Any
@@ -113,6 +143,7 @@ from pocketpaw_ee.cloud._core.errors import (
     with_cause,
 )
 from pocketpaw_ee.cloud.codeproject import service as codeproject_service
+from pocketpaw_ee.cloud.codeproject.domain import CodeProjectView
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
 from pocketpaw_ee.cloud.shared.db import is_multi_tenant_cloud
 from pocketpaw_ee.cloud.websandbox import service as websandbox_service
@@ -120,11 +151,27 @@ from pocketpaw_ee.cloud.websandbox.constants import WEBSANDBOX_WORKDIR
 
 logger = logging.getLogger(__name__)
 
-# Blob-storage folders for the project-keyed durable store — grouped separately
-# from the sandbox-keyed ``/websandbox-*`` folders so a tenant's project
-# snapshots/overlay are distinguishable in their Files.
-_PROJECT_SNAPSHOT_FOLDER = "/code-project-snapshots"
+# Blob-storage folder for the project-keyed per-file store — grouped separately
+# from the sandbox-keyed ``/websandbox-*`` folders so a tenant's project files are
+# distinguishable in their Files. There is no snapshot folder constant any more:
+# S1 retired the tarball tier, so nothing writes ``/code-project-snapshots``. The
+# tars already there are still readable, by FileRecord id, for the one-time
+# migration in ``_migrate_legacy_snapshot``.
 _PROJECT_OVERLAY_FOLDER = "/code-project-overlay"
+
+# The in-VM staging path for the file-sync transport tarball. Distinct from
+# ``_SNAPSHOT_TMP`` so a sync can never collide with (or be mistaken for) the
+# retired snapshot blob, and outside the workspace dir so it never tars itself.
+_PROJECT_SYNC_TMP = "/tmp/code-project-sync.tgz"  # noqa: S108 — a sandbox VM path, not host
+
+# Seconds allowed for the in-VM tar / find commands the sync + prune run. The
+# Daytona client's default (30s) is tuned for interactive one-liners; walking a
+# real source tree is slower, and a timeout here costs the whole capture.
+_SYNC_EXEC_TIMEOUT_SECONDS = 120
+
+# Paths deleted per ``rm`` invocation when restore prunes a stale file. Bounded so a
+# big prune can't exceed the shell's argument limit.
+_PRUNE_CHUNK = 100
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
@@ -622,80 +669,6 @@ async def _upload_project_blob(
     return rec.id
 
 
-async def snapshot_project(
-    workspace_id: str,
-    user_id: str,
-    project_id: str,
-    sandbox_id: str,
-    *,
-    client: DaytonaClient | None = None,
-    uploads: Any = None,
-) -> str:
-    """Snapshot a project's live VM workspace to blob storage; return the pointer.
-
-    Mirrors ``snapshot_workspace`` but anchors the pointer on the durable
-    ``CodeProject`` row. Resolves the project owner-scoped (``get_project`` raises
-    ``NotFound`` for a project the caller doesn't own), then ``tar -czf`` the
-    workspace dir in ``sandbox_id`` → ``download_file`` the tarball → size-cap →
-    upload to S3 (folder ``/code-project-snapshots``) → ``set_project_snapshot``
-    the returned FileRecord id (which also clears the overlay). Returns that id.
-
-    The ``sandbox_id`` is the live Daytona VM to snapshot, passed explicitly (not
-    resolved from a WebSandbox row) so this stays independent of the ephemeral
-    runtime row. Fails CLOSED on a non-s3 upload adapter in cloud before any VM
-    op. A tarball over the size cap raises a clean CloudError before any upload.
-    """
-    _require_s3_for_project_store()
-    daytona = _require_client(client)
-
-    # Owner-scoped tenancy gate: NotFound for a project the caller doesn't own.
-    await codeproject_service.get_project(workspace_id, user_id, project_id)
-
-    try:
-        await daytona.execute_command(
-            sandbox_id,
-            f"tar -czf {_SNAPSHOT_TMP} -C {WEBSANDBOX_WORKDIR} .",
-        )
-        data = await daytona.download_file(sandbox_id, _SNAPSHOT_TMP)
-    except Exception as exc:  # noqa: BLE001 — any VM-side failure is uniform
-        logger.warning(
-            "codeproject.snapshot: tar/download failed for project=%s", project_id, exc_info=True
-        )
-        raise with_cause(
-            CloudError(502, "codeproject.snapshot_failed", "Failed to snapshot the project"),
-            exc,
-        ) from exc
-
-    cap = _snapshot_max_bytes()
-    if len(data) > cap:
-        raise CloudError(
-            413,
-            "codeproject.snapshot_too_large",
-            f"Project snapshot is {len(data) / 1024 / 1024:.1f} MB, over the "
-            f"{cap / 1024 / 1024:.0f} MB limit",
-        )
-
-    up = uploads if uploads is not None else build_uploads()
-    file_id = await _upload_project_blob(
-        up,
-        data,
-        workspace_id=workspace_id,
-        user_id=user_id,
-        filename=f"code-project-snapshot-{project_id}.tgz",
-        folder=_PROJECT_SNAPSHOT_FOLDER,
-        content_type=_SNAPSHOT_MIME,
-    )
-    await codeproject_service.set_project_snapshot(workspace_id, user_id, project_id, file_id)
-    logger.info(
-        "codeproject.snapshot: project=%s daytona=%s -> file=%s (%d bytes)",
-        project_id,
-        sandbox_id,
-        file_id,
-        len(data),
-    )
-    return file_id
-
-
 async def restore_project(
     workspace_id: str,
     user_id: str,
@@ -705,34 +678,51 @@ async def restore_project(
     client: DaytonaClient | None = None,
     uploads: Any = None,
 ) -> None:
-    """Restore a project's durable state into a (fresh) VM: snapshot then overlay.
+    """Reconstruct a project's workspace in ``sandbox_id`` from the per-file store.
 
-    Mirrors ``restore_workspace`` but reads the pointer off the durable
-    ``CodeProject`` row (via the owner-scoped ``get_project`` view — so it also
-    enforces tenancy). Applies the two tiers in order into ``sandbox_id``:
-      1. ``snapshot_file_id`` — the full-workspace tarball (baseline): fetched
-         from S3, ``upload_bytes`` into the VM, ``tar -xzf`` over the dir.
-      2. ``overlay`` — the write-through per-file tier (edits since the last
-         snapshot): each ``relpath -> FileRecord id`` is fetched and written over
-         the tree. Cleared whenever a snapshot is taken, so replay is always the
-         freshest source state, never a stale resurrection.
+    Reads the pointers off the durable ``CodeProject`` row (via the owner-scoped
+    ``get_project`` view — so it also enforces tenancy) and applies, in order:
 
-    A project with NEITHER a snapshot nor an overlay is a clean 409 (nothing to
-    restore). No S3 guard here — restore is a READ path; the guard protects the
-    WRITE path so a project never silently persists to disk in the first place.
+      0. MIGRATION (once per project, only for state that predates S1) — a legacy
+         ``snapshot_file_id`` is expanded into per-file overlay entries and the
+         pointer is cleared. If it could not be carried across in full, the pointer
+         is kept and the tar is untarred as a baseline for THIS session so nothing
+         is missing, and the migration retries on the next open.
+      1. OVERLAY — the authoritative store. Every ``relpath -> FileRecord id`` is
+         fetched and written into the workspace.
+      2. PRUNE — workspace files the overlay does NOT list are deleted, iff the
+         overlay is known complete. This is what makes a delete stick: the VM this
+         restores into was just cloned or scaffolded, so it holds baseline files
+         the user may have removed, and replay-only would resurrect every one of
+         them. Gated on ``overlay_complete`` because "absent from the overlay"
+         means "deleted" only once the overlay has been verified against a real
+         workspace — for an in-tab project (partial overlay, scaffold baseline
+         re-materialized client-side) it does not, and pruning would be data loss.
+
+    A project with NEITHER a legacy snapshot nor an overlay is a clean 409 (nothing
+    to restore). The prune assumes a FRESHLY provisioned VM — the only caller is
+    ``codeproject.lifecycle.open_project``'s cold-provision branch, so there is
+    never unsaved in-VM work for it to remove.
     """
     daytona = _require_client(client)
 
     project = await codeproject_service.get_project(workspace_id, user_id, project_id)
-    overlay = project.overlay or {}
-    if not project.snapshot_file_id and not overlay:
+    if not project.snapshot_file_id and not project.overlay:
         raise ConflictError(
             "codeproject.no_snapshot", "This project has no durable state to restore"
         )
 
     up = uploads if uploads is not None else build_uploads()
 
-    # Tier 1 — the full-workspace snapshot (baseline).
+    # Tier 0 — one-time migration off the retired tarball tier.
+    if project.snapshot_file_id:
+        project = await _migrate_legacy_snapshot(workspace_id, user_id, project, up)
+    overlay = project.overlay or {}
+
+    # Legacy FALLBACK — only reachable when the migration above could not carry the
+    # tar across in full (it leaves the pointer set for a retry). Untarring the
+    # baseline keeps this session complete rather than opening a project with holes
+    # in it; the per-file store still wins, because the overlay replays on top.
     if project.snapshot_file_id:
         data = await _download_snapshot(
             up, project.snapshot_file_id, workspace_id=workspace_id, user_id=user_id
@@ -759,7 +749,7 @@ async def restore_project(
             len(data),
         )
 
-    # Tier 2 — replay the write-through overlay (freshest edits) over the tree.
+    # Tier 1 — write the authoritative per-file store into the workspace.
     replayed = 0
     for rel_path, file_id in overlay.items():
         abs_path = _overlay_abs_path(rel_path)
@@ -783,10 +773,16 @@ async def restore_project(
             )
     if replayed:
         logger.info(
-            "codeproject.restore: project=%s daytona=%s replayed %d overlay file(s)",
+            "codeproject.restore: project=%s daytona=%s replayed %d file(s)",
             project_id,
             sandbox_id,
             replayed,
+        )
+
+    # Tier 2 — reconcile the deletions. See the docstring for why this is gated.
+    if project.overlay_complete:
+        await _prune_stale_workspace_files(
+            daytona, sandbox_id, overlay, project_id=project_id, replayed=replayed
         )
 
 
@@ -883,21 +879,32 @@ async def move_project_overlay(
 # state this path persists.
 # ===========================================================================
 
-# Read-back caps for the browser restore payload. The whole overlay is
-# materialized in memory as one JSON response, so both a per-file byte ceiling
-# and a file-count ceiling are enforced — a source tree is small, and an
-# unbounded read is a memory + latency hazard for the tab as much as the box.
-# Env-tunable in the same shape as ``POCKETPAW_WEBSANDBOX_SNAPSHOT_MAX_MB``.
-_DEFAULT_OVERLAY_MAX_MB = 10.0
-_DEFAULT_OVERLAY_MAX_FILES = 2000
+# Caps on the per-file store. Re-tuned by S1: the overlay used to be a DELTA (the
+# handful of files edited since the last tarball), and 10 MB / 2000 files was
+# generous for that. It now holds the project's WHOLE source tree, and those
+# numbers would reject an ordinary repo — a mid-size monorepo clears 2000 source
+# files on its own — turning "your project is too big" into the normal case.
+# node_modules, .git and build output are excluded (``_SNAPSHOT_EXCLUDED_SEGMENTS``),
+# so these bound SOURCE only, which is what makes 100 MB roomy rather than reckless.
+# Both stay LOUD (413) rather than truncating: a silently partial project reads to
+# the user as deleted files. Env-tunable in the same shape as
+# ``POCKETPAW_WEBSANDBOX_SNAPSHOT_MAX_MB``.
+_DEFAULT_OVERLAY_MAX_MB = 100.0
+_DEFAULT_OVERLAY_MAX_FILES = 10000
+
+# The PER-FILE ceiling, deliberately split from the aggregate above. It used to be
+# the same knob, which was fine while both meant "10 MB"; raising the aggregate to
+# 100 MB would otherwise have quietly let a single 100 MB file through the browser
+# write route. One runaway file and a whole runaway project are different failures
+# and now have different limits.
+_DEFAULT_FILE_MAX_MB = 10.0
 
 
 def _overlay_max_bytes() -> int:
-    """Overlay byte cap (``POCKETPAW_CODEPROJECT_OVERLAY_MAX_MB``).
+    """Aggregate byte cap for a project's files (``POCKETPAW_CODEPROJECT_OVERLAY_MAX_MB``).
 
-    Applied twice: as the per-file ceiling on a write (so one runaway file can
-    never land) and as the cumulative ceiling on the read-back (so the restore
-    payload stays bounded no matter how the overlay grew).
+    Bounds every whole-project materialization: the browser read-back payload, the
+    in-memory expansion of a sync transport tarball, and the legacy-tar migration.
     """
     raw = os.environ.get("POCKETPAW_CODEPROJECT_OVERLAY_MAX_MB", "").strip()
     mb = _DEFAULT_OVERLAY_MAX_MB
@@ -907,6 +914,20 @@ def _overlay_max_bytes() -> int:
         except ValueError:
             logger.warning(
                 "ignoring non-numeric POCKETPAW_CODEPROJECT_OVERLAY_MAX_MB=%r; using %s", raw, mb
+            )
+    return int(mb * 1024 * 1024)
+
+
+def _file_max_bytes() -> int:
+    """Per-file byte cap (``POCKETPAW_CODEPROJECT_FILE_MAX_MB``)."""
+    raw = os.environ.get("POCKETPAW_CODEPROJECT_FILE_MAX_MB", "").strip()
+    mb = _DEFAULT_FILE_MAX_MB
+    if raw:
+        try:
+            mb = float(raw)
+        except ValueError:
+            logger.warning(
+                "ignoring non-numeric POCKETPAW_CODEPROJECT_FILE_MAX_MB=%r; using %s", raw, mb
             )
     return int(mb * 1024 * 1024)
 
@@ -961,15 +982,21 @@ def _require_safe_rel_path(rel_path: str) -> str:
     return safe
 
 
-# Path segments dropped when a snapshot tar is expanded for the BROWSER read-back.
-# ``snapshot_project`` tars the whole workspace with no excludes (right for a VM
-# restore, which wants a byte-identical tree), but every tree here is regenerable
-# or meaningless in a tab: ``npm install`` restores ``node_modules``, a build
-# restores ``dist``/``build``/``.next``/``.svelte-kit``, ``.turbo``/``.cache``/
-# ``coverage`` are derived artifacts, and ``.git`` is a binary object store the
-# in-tab runtime has no client for. They are also the bulk of the bytes — shipping
-# them through a JSON string map would be hundreds of MB the browser throws away.
-# Not applied to the VM restore path, which legitimately wants the whole tree.
+# Path segments that never enter the per-file store. ONE list, four readers (S1):
+# ``_sync_tar_command`` excludes them at the source, ``_expand_tar_to_blobs``
+# re-checks after expansion, ``_list_workspace_files`` prunes them from the
+# enumeration, and the restore prune therefore cannot touch them.
+#
+# Every tree here is regenerable or meaningless to persist: ``npm install`` restores
+# ``node_modules``, a build restores ``dist``/``build``/``.next``/``.svelte-kit``,
+# ``.turbo``/``.cache``/``coverage`` are derived artifacts, and ``.git`` is a binary
+# object store whose durability is the remote. They are also the bulk of the bytes —
+# storing them one blob per file, or shipping them to a tab through a JSON string
+# map, would be hundreds of MB nothing reads.
+#
+# The exclusion is why the prune is safe: a path the enumeration cannot see is never
+# a candidate for deletion, so restoring into a fresh clone leaves ``.git`` and an
+# installed ``node_modules`` exactly where they are.
 _SNAPSHOT_EXCLUDED_SEGMENTS = frozenset(
     {
         "node_modules",
@@ -1007,31 +1034,29 @@ def _tar_member_rel_path(name: str) -> str | None:
     return _normalize_rel_path(raw)
 
 
-def _expand_snapshot_tar(data: bytes, *, project_id: str, cap: int) -> tuple[dict[str, str], int]:
-    """Expand a snapshot tarball in memory into ``({relpath: text}, total bytes)``.
+def _expand_tar_to_blobs(data: bytes, *, project_id: str, cap: int) -> tuple[dict[str, bytes], int]:
+    """Expand a tarball in memory into ``({relpath: raw bytes}, total bytes)``.
 
-    The BASELINE tier of the browser read-back — the in-memory counterpart of
-    ``restore_project``'s ``tar -xzf`` into a VM. Written by ``tar -czf`` so the
-    blob is gzipped; ``r:*`` auto-detects anyway.
+    ONE expander behind every place a tar is read: the browser read-back's baseline
+    (via ``_expand_snapshot_tar``, which decodes on top), the sync transport tarball,
+    and the legacy-tar migration. Written by ``tar -czf`` so the blob is gzipped;
+    ``r:*`` auto-detects anyway.
 
-    Three classes of member never make it into the payload:
+    Two classes of member never make it out:
       * non-regular entries (directories, symlinks, hardlinks, devices) — a
         directory carries no content and a link is a tar-smuggling vector with no
-        meaning in a browser FS;
+        meaning in a browser FS or a re-materialized workspace;
       * unsafe names (absolute or ``..``-traversing) and regenerable trees
-        (``_SNAPSHOT_EXCLUDED_SEGMENTS``);
-      * non-UTF-8 blobs — the transport is a JSON string map, so a binary file
-        can't be carried. Skipped with a warning rather than failing the whole
-        restore, mirroring how the overlay read-back tolerates one bad entry.
+        (``_SNAPSHOT_EXCLUDED_SEGMENTS``).
 
     The byte cap is enforced from the member HEADER before anything is read, so a
-    huge (or zip-bomb) snapshot bounds memory instead of consuming it. Exceeding it
+    huge (or zip-bomb) archive bounds memory instead of consuming it. Exceeding it
     raises LOUD (413) — see ``read_project_overlay`` for why a truncated payload is
     the one outcome to avoid.
     """
-    files: dict[str, str] = {}
+    blobs: dict[str, bytes] = {}
     total = 0
-    skipped_unsafe = skipped_excluded = skipped_binary = 0
+    skipped_unsafe = skipped_excluded = 0
     # A corrupt or truncated archive raises on open OR mid-iteration; both are the
     # same failure — the baseline is unreadable — and both must be LOUD. Returning
     # the overlay alone would look like a project that lost most of its files.
@@ -1065,11 +1090,7 @@ def _expand_snapshot_tar(data: bytes, *, project_id: str, cap: int) -> tuple[dic
                     )
                 handle = archive.extractfile(member)
                 blob = handle.read() if handle is not None else b""
-                try:
-                    files[rel_path] = blob.decode("utf-8")
-                except UnicodeDecodeError:
-                    skipped_binary += 1
-                    continue
+                blobs[rel_path] = blob
                 total += len(blob)
     except (tarfile.TarError, EOFError, OSError) as exc:
         raise with_cause(
@@ -1081,15 +1102,44 @@ def _expand_snapshot_tar(data: bytes, *, project_id: str, cap: int) -> tuple[dic
             exc,
         ) from exc
     logger.debug(
-        "codeproject.read_overlay: snapshot expanded for project=%s -> %d file(s), %d bytes "
-        "(skipped %d excluded, %d binary, %d unsafe)",
+        "codeproject.expand_tar: project=%s -> %d file(s), %d bytes "
+        "(skipped %d excluded, %d unsafe)",
         project_id,
-        len(files),
+        len(blobs),
         total,
         skipped_excluded,
-        skipped_binary,
         skipped_unsafe,
     )
+    return blobs, total
+
+
+def _expand_snapshot_tar(data: bytes, *, project_id: str, cap: int) -> tuple[dict[str, str], int]:
+    """Expand a tarball into ``({relpath: text}, total bytes)`` for the browser.
+
+    ``_expand_tar_to_blobs`` plus the one concern only the JSON wire has: a binary
+    file cannot be carried in a string map, so a non-UTF-8 member is skipped with a
+    warning rather than failing the whole restore — the same "one bad entry must not
+    sink the rest" rule the overlay read-back replays under. Its bytes still counted
+    against the cap during expansion (they were buffered), but they are not counted
+    in the returned total, which is the budget the overlay tier then adds to.
+    """
+    blobs, _raw_total = _expand_tar_to_blobs(data, project_id=project_id, cap=cap)
+    files: dict[str, str] = {}
+    total = 0
+    skipped_binary = 0
+    for rel_path, blob in blobs.items():
+        try:
+            files[rel_path] = blob.decode("utf-8")
+        except UnicodeDecodeError:
+            skipped_binary += 1
+            continue
+        total += len(blob)
+    if skipped_binary:
+        logger.debug(
+            "codeproject.read_overlay: skipped %d non-UTF-8 entry(ies) for project=%s",
+            skipped_binary,
+            project_id,
+        )
     return files, total
 
 
@@ -1120,7 +1170,7 @@ async def put_project_file(
     safe_path = _require_safe_rel_path(rel_path)
     data = content.encode("utf-8")
 
-    cap = _overlay_max_bytes()
+    cap = _file_max_bytes()
     if len(data) > cap:
         raise CloudError(
             413,
@@ -1272,6 +1322,369 @@ async def read_project_overlay(
     return files
 
 
+# ===========================================================================
+# Workspace file sync — what makes the per-file store COMPLETE (S1).
+#
+# The write-through hooks only ever see files that pass through the editor: a
+# ``git clone``'s tree, a materialized scaffold, and anything a process writes
+# (build output, generated files) are invisible to them. The tarball tier used to
+# cover that gap, and covering it is the price of retiring the tarball — so the
+# workspace is enumerated explicitly and every file written through to its own
+# blob.
+#
+# The tar is a TRANSPORT here, not a tier: one round trip to read the whole tree
+# instead of one ``download_file`` per file, expanded in memory and immediately
+# fanned out into per-file objects. Nothing durable is a tarball afterwards.
+# ===========================================================================
+
+
+def _sync_tar_command() -> str:
+    """The in-VM command that packs the workspace for a sync read.
+
+    Excludes are built from ``_SNAPSHOT_EXCLUDED_SEGMENTS`` so there is exactly ONE
+    definition of "a regenerable tree" — the same frozenset the expander re-checks
+    and the prune skips. Excluding at the tar level is what keeps a 500 MB
+    ``node_modules`` off the wire in the first place; re-checking after expansion is
+    defence in depth for a tar built elsewhere (a legacy snapshot, say).
+    """
+    excludes = " ".join(
+        f"--exclude={shlex.quote(seg)}" for seg in sorted(_SNAPSHOT_EXCLUDED_SEGMENTS)
+    )
+    return (
+        f"tar -czf {_PROJECT_SYNC_TMP} {excludes} "
+        f"-C {shlex.quote(WEBSANDBOX_WORKDIR)} . 2>/dev/null || true"
+    )
+
+
+async def sync_project_files(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    sandbox_id: str,
+    *,
+    client: DaytonaClient | None = None,
+    uploads: Any = None,
+) -> dict[str, str]:
+    """Re-image a project's per-file store from its live VM workspace.
+
+    The replacement for the retired ``snapshot_project``, and the operation that
+    makes "the overlay is the whole truth" true. Enumerate the workspace, write
+    every file through to its own blob, and swap the whole map in with ONE service
+    write. Returns the new overlay.
+
+    DELETIONS ARE THE POINT. Syncing enumerates what EXISTS, so a file the user
+    deleted simply isn't uploaded — and because the map is REPLACED rather than
+    merged, its old entry goes with it. Nothing is left to resurrect it: there is
+    no baseline blob to replay, and the next restore reconstructs the workspace
+    from this map alone.
+
+    Two things are deliberately NOT dropped, because "the sync didn't see it" is
+    not the same claim as "the user deleted it":
+      * paths inside an excluded tree (``dist/``, ``.next/`` …). The enumeration
+        never looks there, so an entry a write hook once recorded for such a path
+        is kept rather than silently discarded.
+      * paths whose upload FAILED this round. A stale pointer beats no pointer.
+    And an enumeration that comes back EMPTY is treated as a failed read, not as an
+    emptied workspace: it returns the existing overlay untouched. A transient VM
+    error must never be the thing that wipes a project.
+
+    Fails CLOSED on a non-s3 upload adapter in cloud (silent non-persistence is
+    worse than a loud 503), and LOUD on the aggregate caps rather than persisting a
+    truncated project. Both callers (``ws.snapshot_on_disconnect`` and
+    ``lifecycle.open_project``) are best-effort and log at WARNING, so a raise here
+    costs the capture, never the session.
+    """
+    _require_s3_for_project_store()
+    daytona = _require_client(client)
+
+    # Owner-scoped tenancy gate: NotFound for a project the caller doesn't own.
+    project = await codeproject_service.get_project(workspace_id, user_id, project_id)
+    previous = dict(project.overlay or {})
+
+    try:
+        await daytona.execute_command(
+            sandbox_id, _sync_tar_command(), timeout=_SYNC_EXEC_TIMEOUT_SECONDS
+        )
+        data = await daytona.download_file(sandbox_id, _PROJECT_SYNC_TMP)
+    except Exception as exc:  # noqa: BLE001 — any VM-side failure is uniform
+        logger.warning(
+            "codeproject.sync: tar/download failed for project=%s", project_id, exc_info=True
+        )
+        raise with_cause(
+            CloudError(502, "codeproject.sync_failed", "Failed to read the project workspace"),
+            exc,
+        ) from exc
+
+    cap = _overlay_max_bytes()
+    blobs, total = _expand_tar_to_blobs(data, project_id=project_id, cap=cap)
+
+    max_files = _overlay_max_files()
+    if len(blobs) > max_files:
+        raise CloudError(
+            413,
+            "codeproject.overlay_too_many_files",
+            f"Project holds {len(blobs)} files, over the {max_files} file limit",
+        )
+    if not blobs:
+        # An empty read is ambiguous (a genuinely empty workspace, or a tar that
+        # never ran) and the destructive reading of it is unrecoverable. Keep what
+        # we have; a real empty project loses nothing by staying as it was.
+        logger.warning(
+            "codeproject.sync: workspace enumeration for project=%s daytona=%s came back "
+            "EMPTY — keeping the existing %d file(s) rather than dropping them",
+            project_id,
+            sandbox_id,
+            len(previous),
+        )
+        return previous
+
+    up = uploads if uploads is not None else build_uploads()
+    overlay: dict[str, str] = {}
+    failed = 0
+    for rel_path in sorted(blobs):
+        try:
+            overlay[rel_path] = await _upload_project_blob(
+                up,
+                blobs[rel_path],
+                workspace_id=workspace_id,
+                user_id=user_id,
+                filename=f"overlay-{project_id}-{rel_path.rsplit('/', 1)[-1] or 'file'}",
+                folder=_PROJECT_OVERLAY_FOLDER,
+                content_type="application/octet-stream",
+            )
+        except Exception:  # noqa: BLE001 — one bad blob must not sink the whole sync
+            failed += 1
+            if rel_path in previous:
+                overlay[rel_path] = previous[rel_path]
+            logger.warning(
+                "codeproject.sync: upload failed for project=%s path=%r", project_id, rel_path
+            )
+
+    # Carry across the entries the enumeration could not have seen (see docstring).
+    kept_excluded = 0
+    for rel_path, file_id in previous.items():
+        if rel_path not in overlay and _is_excluded_snapshot_path(rel_path):
+            overlay[rel_path] = file_id
+            kept_excluded += 1
+
+    dropped = sorted(set(previous) - set(overlay))
+    view = await codeproject_service.replace_project_overlay(
+        workspace_id,
+        user_id,
+        project_id,
+        overlay,
+        # Verified against a real workspace — this is what licenses restore's prune.
+        complete=True,
+    )
+    logger.info(
+        "codeproject.sync: project=%s daytona=%s -> %d file(s), %d bytes "
+        "(dropped %d deleted, kept %d excluded, %d upload failure(s))",
+        project_id,
+        sandbox_id,
+        len(view.overlay),
+        total,
+        len(dropped),
+        kept_excluded,
+        failed,
+    )
+    return dict(view.overlay)
+
+
+async def _migrate_legacy_snapshot(
+    workspace_id: str,
+    user_id: str,
+    project: CodeProjectView,
+    uploads: Any,
+) -> CodeProjectView:
+    """Expand a project's legacy tarball into per-file entries, ONCE. Returns the view.
+
+    The one-way migration for state written before the tarball tier was retired.
+    Such a project carries a ``snapshot_file_id`` plus a partial overlay of the
+    edits made after the tar was taken, and reading the overlay alone would lose
+    everything that only ever lived inside the tar. So the tar is expanded and each
+    member written through to its own blob.
+
+    Three properties, all of which make it safe to run on every restore:
+      * NON-DESTRUCTIVE — an existing overlay entry always WINS. It is newer than
+        the tar by construction (it was written after the snapshot), so the tar's
+        copy is never allowed to overwrite it.
+      * IDEMPOTENT — success clears ``snapshot_file_id``, so there is no tar left
+        to expand a second time. A partial run keeps the pointer AND keeps every
+        entry it did carry across, so the retry only does the remainder.
+      * FAIL-SAFE — if the blob is unreadable, the upload adapter is misconfigured,
+        or any member fails to land, the pointer is KEPT. The caller then falls back
+        to untarring the baseline into the VM, so the session is complete either
+        way and the data is still in blob storage for the next attempt.
+
+    Clearing the pointer is not bookkeeping — it is the whole point. While it is
+    set, a restore replays a baseline that cannot express a deletion, which is the
+    bug this migration exists to end.
+    """
+    project_id = project.id
+    try:
+        _require_s3_for_project_store()
+        data = await _download_snapshot(
+            uploads, project.snapshot_file_id or "", workspace_id=workspace_id, user_id=user_id
+        )
+        blobs, _total = _expand_tar_to_blobs(data, project_id=project_id, cap=_overlay_max_bytes())
+    except Exception:  # noqa: BLE001 — any read failure keeps the pointer for a retry
+        logger.warning(
+            "codeproject.migrate: could not read legacy snapshot=%s for project=%s; "
+            "keeping the pointer and falling back to the tar baseline",
+            project.snapshot_file_id,
+            project_id,
+            exc_info=True,
+        )
+        return project
+
+    overlay = dict(project.overlay or {})
+    migrated = failed = 0
+    for rel_path in sorted(blobs):
+        if rel_path in overlay:
+            # The overlay entry post-dates the tar — never overwrite it.
+            continue
+        try:
+            overlay[rel_path] = await _upload_project_blob(
+                uploads,
+                blobs[rel_path],
+                workspace_id=workspace_id,
+                user_id=user_id,
+                filename=f"overlay-{project_id}-{rel_path.rsplit('/', 1)[-1] or 'file'}",
+                folder=_PROJECT_OVERLAY_FOLDER,
+                content_type="application/octet-stream",
+            )
+            migrated += 1
+        except Exception:  # noqa: BLE001 — a partial migration retries, never loses
+            failed += 1
+            logger.warning(
+                "codeproject.migrate: upload failed for project=%s path=%r",
+                project_id,
+                rel_path,
+            )
+
+    view = await codeproject_service.replace_project_overlay(
+        workspace_id,
+        user_id,
+        project_id,
+        overlay,
+        # A legacy tar was a whole-workspace image, so the merged map is complete —
+        # unless something failed to land, in which case it demonstrably isn't.
+        complete=failed == 0,
+        clear_snapshot=failed == 0,
+    )
+    logger.info(
+        "codeproject.migrate: project=%s legacy snapshot=%s -> %d new per-file entry(ies), "
+        "%d total (%d failure(s); pointer %s)",
+        project_id,
+        project.snapshot_file_id,
+        migrated,
+        len(view.overlay),
+        failed,
+        "kept for retry" if failed else "cleared",
+    )
+    return view
+
+
+async def _list_workspace_files(daytona: Any, sandbox_id: str) -> list[str]:
+    """Enumerate the VM workspace as project-relative paths (excluded trees pruned).
+
+    ``find`` rather than the sync's tar because the caller only needs NAMES — the
+    prune decides what to delete, and shipping the bytes to decide that would be
+    absurd. The excluded segments are pruned in the command AND re-checked in
+    Python, so the two enumerations agree on what is even visible.
+
+    Every path is re-jailed through ``_normalize_rel_path`` after the workspace
+    prefix is stripped: this list feeds an ``rm``, so a line that doesn't sit under
+    the workspace dir is dropped rather than trusted.
+    """
+    root = shlex.quote(WEBSANDBOX_WORKDIR)
+    names = " -o ".join(f"-name {shlex.quote(seg)}" for seg in sorted(_SNAPSHOT_EXCLUDED_SEGMENTS))
+    command = f"find {root} -type d \\( {names} \\) -prune -o -type f -print"
+    resp = await daytona.execute_command(sandbox_id, command, timeout=_SYNC_EXEC_TIMEOUT_SECONDS)
+    stdout = getattr(resp, "result", "") or ""
+    prefix = WEBSANDBOX_WORKDIR.rstrip("/") + "/"
+    found: list[str] = []
+    for line in stdout.splitlines():
+        raw = line.strip()
+        if not raw.startswith(prefix):
+            continue
+        rel_path = _normalize_rel_path(raw[len(prefix) :])
+        if rel_path is None or _is_excluded_snapshot_path(rel_path):
+            continue
+        found.append(rel_path)
+    return found
+
+
+async def _prune_stale_workspace_files(
+    daytona: Any,
+    sandbox_id: str,
+    overlay: dict[str, str],
+    *,
+    project_id: str,
+    replayed: int,
+) -> int:
+    """Delete workspace files the (complete) per-file store does not list. Returns the count.
+
+    The deletion half of "restore reconstructs the workspace from the overlay". A
+    restore always runs into a VM that was just cloned or scaffolded, so it holds
+    baseline files — including the ones the user DELETED. Writing the overlay over
+    that tree leaves those files behind, which is precisely the resurrection the
+    tarball tier used to cause. Removing them is what makes a delete durable.
+
+    Only ever called when ``overlay_complete`` is set, i.e. after a sync verified
+    the map against a real workspace. Two more guards on top of that:
+      * an EMPTY enumeration is treated as a failed read, never as "delete
+        everything" — the same reading ``sync_project_files`` takes;
+      * nothing is pruned when the overlay replay wrote NOTHING, because a restore
+        that failed to materialize the store must not then delete the baseline it
+        was supposed to replace.
+    Excluded trees are invisible to the enumeration, so ``.git``, ``node_modules``
+    and build output are never touched. Best-effort: a prune failure leaves a
+    resurrected file, which is recoverable; raising would fail the whole open.
+    """
+    if not overlay or not replayed:
+        return 0
+    try:
+        present = await _list_workspace_files(daytona, sandbox_id)
+    except Exception:  # noqa: BLE001 — a failed enumeration prunes nothing
+        logger.warning(
+            "codeproject.restore: could not enumerate the workspace for project=%s; "
+            "skipping the stale-file prune",
+            project_id,
+            exc_info=True,
+        )
+        return 0
+    if not present:
+        return 0
+
+    stale = [p for p in sorted(set(present)) if p not in overlay]
+    targets = [abs_path for abs_path in map(_overlay_abs_path, stale) if abs_path is not None]
+    if not targets:
+        return 0
+
+    removed = 0
+    for start in range(0, len(targets), _PRUNE_CHUNK):
+        chunk = targets[start : start + _PRUNE_CHUNK]
+        command = "rm -f " + " ".join(shlex.quote(p) for p in chunk)
+        try:
+            await daytona.execute_command(sandbox_id, command, timeout=_SYNC_EXEC_TIMEOUT_SECONDS)
+            removed += len(chunk)
+        except Exception:  # noqa: BLE001 — one failed chunk must not sink the restore
+            logger.warning(
+                "codeproject.restore: stale-file prune failed for project=%s (%d path(s))",
+                project_id,
+                len(chunk),
+                exc_info=True,
+            )
+    logger.info(
+        "codeproject.restore: project=%s daytona=%s pruned %d file(s) absent from the store",
+        project_id,
+        sandbox_id,
+        removed,
+    )
+    return removed
+
+
 __all__ = [
     "build_uploads",
     "drop_overlay",
@@ -1285,6 +1698,6 @@ __all__ = [
     "read_project_overlay",
     "restore_project",
     "restore_workspace",
-    "snapshot_project",
     "snapshot_workspace",
+    "sync_project_files",
 ]

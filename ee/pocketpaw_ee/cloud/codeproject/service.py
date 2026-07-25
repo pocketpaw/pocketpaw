@@ -54,6 +54,23 @@
 #     clobber state the project has since accumulated. The WebSandbox fields are
 #     left readable — this PR moves WHO the Daytona path writes, not what exists.
 #
+# Modified 2026-07-25 (feat/code-s3-authoritative): the per-file ``overlay`` is now
+# the AUTHORITATIVE store, which REVERSES this module's 2026-07-24 decision that
+# "a full snapshot supersedes it". WHY the reversal: a tarball is an unmodifiable
+# blob, so a DELETE has no representation inside it — replaying the baseline
+# resurrected every removed file — and clearing the overlay on snapshot destroyed
+# the one tier that could record the absence. Making the per-file map complete and
+# authoritative turns a delete into the removal of an entry, with nothing left to
+# resurrect it. Two ops change here:
+#   * ``set_project_snapshot`` NO LONGER CLEARS THE OVERLAY. It only records the
+#     legacy tarball pointer. Clearing would now discard the authoritative state.
+#   * ``replace_project_overlay`` — new: swap the whole map in ONE write, mark it
+#     complete, and clear the legacy tarball pointer. It is what
+#     ``durability.sync_project_files`` (workspace enumeration) and the legacy-tar
+#     migration write through, so a full re-image costs one doc save rather than
+#     one per file, and the drop-plus-add is atomic (a half-applied overlay would
+#     read as data loss).
+#
 # Modified 2026-07-24 (feat/code-initial-prompt): ``create_project`` now persists
 # the optional ``initial_prompt`` (the WHAT-to-build description) on an actual
 # INSERT only — a github idempotent hit returns the existing row untouched, so a
@@ -134,6 +151,7 @@ def _doc_to_view(doc: _CodeProjectDoc) -> CodeProjectView:
         updated_at=doc.updated_at,
         snapshot_file_id=doc.snapshot_file_id,
         overlay=dict(doc.overlay or {}),
+        overlay_complete=bool(doc.overlay_complete),
         initial_prompt=doc.initial_prompt,
         initial_prompt_consumed=doc.initial_prompt_consumed,
         current_sandbox_id=doc.current_sandbox_id,
@@ -480,28 +498,76 @@ async def set_project_snapshot(
     project_id: str,
     file_id: str,
 ) -> CodeProjectView:
-    """Record the durable project-snapshot pointer; clear the overlay.
+    """Record the LEGACY tarball pointer. Does NOT touch the overlay.
 
     Tenant- and owner-scoped (Rule 7 via ``_read_owned``): only the owning caller
     can bind a snapshot to their own project. ``file_id`` is the blob-storage
-    ``FileRecord`` id produced by ``EEUploadService.upload`` in the durability
-    module — a durable pointer to the tarball of the project's files. A full
-    snapshot supersedes the incremental overlay, so the overlay is CLEARED here
-    (mirroring ``WebSandbox.set_snapshot``): everything the overlay held is now
-    inside the snapshot tar, and clearing it is what keeps restore from replaying
-    a stale write over a since-deleted file. Raises ``NotFound`` when no owned row
-    matches.
+    ``FileRecord`` id of a whole-workspace tarball.
+
+    This used to CLEAR the overlay, on the reasoning that a full snapshot
+    supersedes an incremental delta. That reasoning is now inverted: the overlay
+    is the authoritative store, so clearing it would discard the project's real
+    state and hand the resurrection problem back to a tarball that cannot express
+    a deletion. Nothing in production writes a new tarball any more; this op
+    survives for the legacy pointer (the rollout backfill, and tests that stage
+    pre-migration state) and the pointer is cleared for good by the migration in
+    ``durability.restore_project``. Raises ``NotFound`` when no owned row matches.
     """
     doc = await _read_owned(workspace_id, user_id, project_id)
     if doc is None:
         raise NotFound("code_project", project_id)
     doc.snapshot_file_id = file_id
-    doc.overlay = {}
     doc.updated_at = datetime.now(UTC)
     await doc.save()
     # no-event: the snapshot pointer is durability bookkeeping, not a lifecycle
     # transition — no downstream handler reacts to it, and emitting a project
     # event would falsely signal a state change to a projects-grid fan-out.
+    return _doc_to_view(doc)
+
+
+async def replace_project_overlay(
+    workspace_id: str,
+    user_id: str,
+    project_id: str,
+    overlay: dict[str, str],
+    *,
+    complete: bool = True,
+    clear_snapshot: bool = True,
+) -> CodeProjectView:
+    """Swap the project's whole per-file store in ONE write. The authoritative op.
+
+    Tenant- and owner-scoped (Rule 7 via ``_read_owned``). The entry-point op for
+    a full re-image of a project: ``durability.sync_project_files`` enumerates the
+    VM workspace and hands the resulting map here, and the legacy-tarball migration
+    hands over the tar's members merged under the (fresher) existing entries.
+
+    Three properties matter, and all three are why this is ONE op rather than a
+    loop over ``set_project_overlay_entry`` / ``drop_project_overlay_entry``:
+      * ATOMIC — the adds and the drops land in a single doc save. A half-applied
+        re-image reads to the user as deleted files.
+      * DROPS ARE THE POINT — a path absent from ``overlay`` is a path the user
+        deleted. Passing the map wholesale is what lets a deletion be expressed by
+        omission, which is the whole reason the tarball tier was retired.
+      * ``complete`` records that the map was verified against a real workspace,
+        which is what makes restore's destructive prune safe to run.
+
+    ``clear_snapshot`` (default True) drops the legacy tarball pointer, because
+    after a verified re-image the tar is superseded and re-expanding it would
+    resurrect exactly the files this write just dropped. The migration passes
+    False when it could not carry every member across, so the tar stays readable
+    and the migration retries on the next open rather than losing data.
+    """
+    doc = await _read_owned(workspace_id, user_id, project_id)
+    if doc is None:
+        raise NotFound("code_project", project_id)
+    # Reassign (not in-place mutate) so Beanie always sees the field as dirty.
+    doc.overlay = dict(overlay)
+    doc.overlay_complete = complete
+    if clear_snapshot:
+        doc.snapshot_file_id = None
+    doc.updated_at = datetime.now(UTC)
+    await doc.save()
+    # no-event: durability bookkeeping, same reasoning as set_project_snapshot.
     return _doc_to_view(doc)
 
 
@@ -687,6 +753,7 @@ __all__ = [
     "mark_initial_prompt_consumed",
     "move_project_overlay_entry",
     "rename_project",
+    "replace_project_overlay",
     "set_project_overlay_entry",
     "set_project_snapshot",
     "view_to_wire",

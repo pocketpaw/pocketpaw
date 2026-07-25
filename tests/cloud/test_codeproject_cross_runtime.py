@@ -27,6 +27,13 @@
 #     ordinary nested source (incl. non-ASCII text) survives byte-identical.
 #   * tar safety: absolute, ``..``-traversing, and symlink members are skipped.
 #   * caps: a filtered snapshot still over the cap fails LOUD, never partial.
+#
+# Updated 2026-07-25 (S1, feat/code-s3-authoritative): ``snapshot_project`` is gone —
+# the tarball tier was retired because a tar cannot express a DELETE — so the
+# "a Daytona session ended" setup now stages the LEGACY row shape directly (tar in
+# blob storage + ``snapshot_file_id`` pointing at it). That is deliberately still the
+# scenario under test: the browser read-back must keep serving such a project until a
+# VM open migrates it to per-file entries. The read path itself is unchanged.
 from __future__ import annotations
 
 import io
@@ -160,15 +167,24 @@ async def _project(workspace=_WS, user=_USER):  # noqa: ANN001
 
 
 async def _daytona_session(project_id: str, uploads: _FakeUploads, tar_bytes: bytes) -> None:
-    """Simulate a Daytona session ending: snapshot the VM, which clears the overlay."""
-    await durability.snapshot_project(
-        _WS,
-        _USER,
-        project_id,
-        _SANDBOX,
-        client=_FakeDaytonaClient(tar_bytes=tar_bytes),
-        uploads=uploads,
+    """Stage a LEGACY tarball snapshot on a project (pre-S1 durable state).
+
+    S1 retired the tarball tier and deleted ``snapshot_project``, so this stages the
+    state directly: land the tar in blob storage and point the project at it. That
+    is exactly the row shape a project written by the old Daytona path still has in
+    Mongo today, which is what these cross-runtime read-back tests are about — the
+    browser must keep serving a legacy project's files until a VM open migrates it.
+    """
+    file_id = await durability._upload_project_blob(
+        uploads,
+        tar_bytes,
+        workspace_id=_WS,
+        user_id=_USER,
+        filename="legacy-snapshot.tgz",
+        folder="/code-project-snapshots",
+        content_type="application/gzip",
     )
+    await codeproject_service.set_project_snapshot(_WS, _USER, project_id, file_id)
 
 
 def _ctx(workspace=_WS, user=_USER):  # noqa: ANN001
@@ -190,10 +206,9 @@ async def test_snapshot_only_project_reads_back_the_tars_files() -> None:
     project = await _project()
     uploads = _FakeUploads()
 
-    # Work done in the VM, then a disconnect snapshot — which CLEARS the overlay.
-    await durability.mirror_file_to_project(
-        _WS, _USER, project.id, "src/app.ts", b"pre-snapshot", uploads=uploads
-    )
+    # A pre-S1 Daytona session: everything the user did is inside the tarball and
+    # the overlay is empty (the old ``set_project_snapshot`` cleared it, which is
+    # exactly the state that made this read-back return ``{}``).
     await _daytona_session(
         project.id,
         uploads,

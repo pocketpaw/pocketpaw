@@ -17,6 +17,13 @@
 # is NOT surfaced on the wire ``CodeProjectResponse``; it is internal durability
 # bookkeeping, not a client-facing field.
 #
+# Modified 2026-07-25 (feat/code-s3-authoritative): added ``overlay_complete`` —
+# view-only like ``overlay`` (durability bookkeeping, never on the wire). It says
+# whether ``overlay`` is a COMPLETE image of the workspace or just the delta of
+# files that passed a write hook, which is the difference between "this path is
+# absent because the user deleted it" and "this path is absent because nothing ever
+# mirrored it". Restore reads it before doing anything destructive.
+#
 # Modified 2026-07-24 (feat/code-initial-prompt): added ``initial_prompt`` and
 # ``initial_prompt_consumed`` to CodeProjectView. Unlike ``overlay`` these DO flow
 # to the wire (``initialPrompt`` / ``initialPromptConsumed``) — the frontend reads
@@ -79,9 +86,11 @@ class CodeProjectView:
     updated_at: datetime
     # Durable blob-storage snapshot pointer — the project's files between VMs.
     snapshot_file_id: str | None = None
-    # The write-through per-file durability overlay (``relpath -> FileRecord id``),
-    # keyed on the project. View-only, mirroring WebSandboxView — not on the wire.
+    # The AUTHORITATIVE per-file store (``relpath -> FileRecord id``), keyed on the
+    # project. View-only, mirroring WebSandboxView — not on the wire.
     overlay: dict[str, str] = field(default_factory=dict)
+    # Whether ``overlay`` is a complete image of the workspace (see the model).
+    overlay_complete: bool = False
     # The natural-language build prompt captured at create-from-description time
     # (WHAT to build), and whether the auto-run build turn has been kicked off for
     # it. Both flow to the wire, unlike ``overlay``.
