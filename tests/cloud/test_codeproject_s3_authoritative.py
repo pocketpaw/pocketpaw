@@ -488,15 +488,20 @@ async def test_sync_keeps_entries_it_could_not_have_seen() -> None:
     """
     project = await _project()
     uploads = _FakeUploads()
-    await durability.mirror_file_to_project(
-        _WS, _USER, project.id, "dist/hand-edited.js", b"EDITED", uploads=uploads
+    # Planted through the overlay BOOKKEEPING call rather than through a write:
+    # since fix/codeproject-never-store-generated-trees the write path refuses an
+    # excluded path outright, so a write can no longer create one of these. An entry
+    # like this can still be PRESENT — a store written before that guard has them —
+    # and surviving the prune is exactly what this test is about.
+    await codeproject_service.set_project_overlay_entry(
+        _WS, _USER, project.id, "dist/hand-edited.js", "file-legacy"
     )
 
     overlay = await durability.sync_project_files(
         _WS, _USER, project.id, _VM, client=_FakeVm({"a.ts": b"A"}), uploads=uploads
     )
 
-    assert overlay == {"a.ts": "file-2", "dist/hand-edited.js": "file-1"}
+    assert overlay == {"a.ts": "file-1", "dist/hand-edited.js": "file-legacy"}
 
 
 async def test_an_in_tab_project_is_never_pruned() -> None:
