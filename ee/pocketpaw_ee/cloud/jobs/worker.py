@@ -45,6 +45,18 @@
 # key. The stamp happens before the ok:false → failed escalation, so a rejected
 # writeback still escalates correctly (the failed-state marker overwrites the
 # optimistic "done" the same way the rejection path always has).
+#
+# Updated: 2026-07-15 (fix/jobs-source-collection-tenancy, F2 security) — a job
+# FAILURE no longer surfaces raw ``str(exc)`` on the broadcast/audit paths. A
+# workspace-CUSTOM job (the #1536 entry-point feature) can raise with upstream
+# text carrying a secret (a token, a DB row, a URL carrying a token); that used
+# to land in the pocket's broadcast ``state`` (relayed over the WS to EVERY
+# viewer) AND the audit ``error`` field. Both failure boundaries now route the
+# message through ``_safe_failure_message``: a CONTROLLED error (``CloudError``
+# or the registry ``JobError``) surfaces its safe, fixed ``.code`` (e.g.
+# ``job.connector_error`` / ``job.result_forbidden``); any other raise surfaces
+# a generic ``"job failed"``. The FULL detail (message + traceback) stays ONLY
+# in ``logger.exception``.
 
 """ARQ entrypoint: execute one workspace job + write the result back."""
 
@@ -53,16 +65,41 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from pocketpaw_ee.cloud._core.errors import CloudError
+
 # Module-scope import so tests can ``monkeypatch.setattr(worker, "merge_spec", …)``.
 from pocketpaw_ee.cloud.jobs import service as jobs_service
 from pocketpaw_ee.cloud.jobs.domain import (
     WORKSPACE_JOB_IDENTITY,
     failed_state_writeback,
 )
-from pocketpaw_ee.cloud.jobs.registry import resolve_job, validate_job_result
+from pocketpaw_ee.cloud.jobs.registry import JobError, resolve_job, validate_job_result
 from pocketpaw_ee.cloud.pockets.service import get_pocket_workspace, merge_spec
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_failure_message(exc: BaseException) -> str:
+    """Map a job failure to a SAFE, fixed message for the broadcast + audit paths.
+
+    F2 (security). A workspace-CUSTOM job (the #1536 entry-point feature) can
+    raise with raw upstream text — a DB error, a row value, a URL carrying a
+    token. That text must NOT reach the pocket's broadcast ``state`` (relayed
+    over the WS to EVERY viewer) or the audit ``error`` field. So the failure
+    boundary NEVER surfaces ``str(exc)`` on those paths:
+
+      - a CONTROLLED error (:class:`CloudError` or the registry :class:`JobError`)
+        carries a safe, fixed ``.code`` — e.g. ``job.connector_error``,
+        ``job.result_forbidden`` — so surface the code (safe AND useful);
+      - any OTHER exception (an arbitrary custom-job raise) gets a generic fixed
+        string, never the interpolated text.
+
+    The FULL detail (``str(exc)`` + traceback) stays in ``logger.exception`` at
+    the call site — this helper only decides what the viewer / audit may see.
+    """
+    if isinstance(exc, (CloudError, JobError)):
+        return exc.code
+    return "job failed"
 
 
 async def execute_workspace_job(ctx: dict[str, Any], job_id: str) -> None:
@@ -129,14 +166,11 @@ async def execute_workspace_job(ctx: dict[str, Any], job_id: str) -> None:
         # State-only contract — raises JobResultError on a template-owned write.
         result = validate_job_result(raw)
     except Exception as exc:  # noqa: BLE001 — every failure path converges here
+        # F2: the FULL detail (message + traceback) goes ONLY to the log; the
+        # broadcast/audit paths below see a SAFE value, never raw ``str(exc)`` —
+        # a custom job could otherwise leak a token / DB row / PII to viewers.
         logger.exception("jobs: job %s (%s) failed", job_id, doc.job_name)
-        # NOTE for connector-job authors: ``str(exc)`` lands in broadcast state
-        # via ``failed_state_writeback`` and is visible to every viewer of the
-        # pocket. Do NOT let raw exception text carry PII or secrets — map your
-        # job's failure modes to FIXED, safe strings (e.g. "upstream timeout")
-        # rather than surfacing the raw message. (Tracked as a follow-up; the
-        # default below is intentionally left as-is for the built-in jobs.)
-        message = str(exc) or exc.__class__.__name__
+        message = _safe_failure_message(exc)
         # Writeback FIRST so the button un-hangs even if the status save races.
         await _writeback(
             workspace_id=workspace_id,
@@ -176,7 +210,9 @@ async def execute_workspace_job(ctx: dict[str, Any], job_id: str) -> None:
             )
     except Exception as exc:  # noqa: BLE001 — converge on the same failure path
         logger.exception("jobs: job %s (%s) writeback failed/rejected", job_id, doc.job_name)
-        message = str(exc) or exc.__class__.__name__
+        # F2: safe value on broadcast/audit (the merge_spec warnings that a
+        # rejection carries stay in the log above, not on the viewer path).
+        message = _safe_failure_message(exc)
         # Best-effort failed-state writeback so the button stops spinning. This
         # call is NOT ok-checked — a doubly-rejected merge must not loop.
         await _writeback(

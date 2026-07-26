@@ -8,6 +8,23 @@
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-07-17 (feat/sites-native-artifact-no-build): added ``artifact_home()``
+# (the ~/.pocketpaw/site-artifacts root for the native-artifact read-through cache,
+# mirroring build_home) and ``generator_version()`` (an artifact-format + dep epoch
+# the cache key rides so a generator/dep upgrade invalidates stored renders). These
+# back service.get_native_artifact becoming read-through: a preview VIEW no longer
+# triggers a build, so the prod box stops running a 1-2 min SvelteKit build on every
+# site view. Builds now happen only at publish and (cached/pre-warmed) at edit-arm.
+#
+# Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): build()/_build_one() gain an
+# OPTIONAL ``assets`` param — the base64 binary sideband ({path: base64}) an html
+# IMPORT carries alongside its text ``source`` map. It rides ``input.assets`` on the
+# html branch only, and ONLY when non-empty, so every existing ripple/svelte/html
+# payload stays byte-identical. CROSS-REPO SEAM: the paw-sites generator's ``assets``
+# key (decode + write each entry verbatim into the static tree) is being added in a
+# parallel paw-sites slice — this codes to that contract; a generator predating it
+# ignores the key and deploys the text tree only.
+#
 # Updated 2026-07-10 (HE-3 — html publish skips the Node build): build()/_build_one()
 # now branch the STAGE-2 payload AND the build chain on the engine's CAPABILITY, via
 # ``needs_node_build(engine)`` / ``is_source_engine(engine)`` from the canonical
@@ -771,6 +788,41 @@ def _gen_cmd_argv() -> list[str]:
     return shlex.split(os.environ.get("PAW_SITES_GEN_CMD", "paw-sites-gen"))
 
 
+def artifact_home() -> Path:
+    """Root dir for the persistent per-pocket native-artifact CACHE (the read-through
+    store behind ``get_native_artifact``). Each pocket's rendered ``{body_html, css}``
+    artifacts live under ``artifact_home()/<pocket_id>/<content_hash>.json`` so a
+    preview view can serve a prior render from disk WITHOUT a subprocess build.
+
+    ``~/.pocketpaw/site-artifacts`` by default so it rides the prod ``backend-data``
+    volume alongside ``build_home()`` (``~/.pocketpaw/site-builds``); override with
+    PAW_SITES_ARTIFACT_DIR (tests point it at a temp dir so they never write the real
+    home). Mirrors ``build_home()`` / ``local_server.sites_home()``'s convention."""
+    raw = os.environ.get("PAW_SITES_ARTIFACT_DIR")
+    base = Path(raw) if raw else Path.home() / ".pocketpaw" / "site-artifacts"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+# Cache-format epoch for the native-artifact store. Bump this string whenever the
+# artifact EXTRACTION shape changes (what ``_read_native_artifact`` pulls out of a
+# build) so a code change that alters the stored ``{body_html, css}`` invalidates
+# every previously-cached artifact instead of serving a stale render.
+_ARTIFACT_FORMAT_EPOCH = "v1"
+
+
+def generator_version() -> str:
+    """A stable identifier of the paw-sites GENERATOR + artifact-format the cache is
+    keyed on, so a generator/dep upgrade (which changes the built output) invalidates
+    the native-artifact store rather than serving a render from the old toolchain.
+
+    Combines the artifact-format epoch with the pinned ripple + motion dep specs —
+    the inputs that most directly move the built HTML/CSS. It rides the content hash
+    in ``service._artifact_content_hash``; a bump to any of these yields a fresh key,
+    so the next preview rebuilds once and re-caches."""
+    return f"{_ARTIFACT_FORMAT_EPOCH}|{_ripple_dep_source()}|{_ripple_motion_dep()}"
+
+
 def _ripple_dep_source() -> str:
     """The npm source spec the generated project's @ripple-ui/svelte dep is
     rewritten to before install. Default "0.2.0" (a registry version — valid
@@ -968,6 +1020,69 @@ class _SubprocessRunner:
         return await self.build_static(project_dir, gate=True)
 
 
+async def run_import(
+    files: dict[str, str],
+    *,
+    site_id: str,
+    capture_api_base: str,
+    capture_signed_key: str,
+    _exec: Any = None,
+) -> dict[str, Any]:
+    """Run imported files through the paw-sites ``import`` generator subcommand and
+    return ``{source, assets, report}`` — the rewired html source map, the base64
+    binary sideband, and the authoritative import report.
+
+    This is what makes an imported ``<form>`` actually post to the capture API: the
+    generator runs buildImportPlan + rewireForms over ``files`` (path -> base64
+    bytes) using ``siteConfig`` (the site id + capture base + the site's signed
+    key), rewrites each form's action to ``{captureApiBase}/capture/form`` with the
+    hidden paw_* fields, and returns the rewired source plus a report whose keys are
+    the exact snake_case shape the Site doc + /sites report panel read.
+
+    Shells out to the SAME tokenised generator command as apply_leaf_edits
+    (``_gen_cmd_argv()`` + ``import --input <tempfile>``) and emits exactly ONE JSON
+    line on stdout. A PURE transform — no bun install / build / workerd — so it is
+    fast and safe to call inline on the import path before publish. Failure surfaces
+    as a ``RuntimeError`` (non-zero exit carries the CLI stderr; a wedged run is a
+    failed run, mirroring generate()/apply_leaf_edits). ``_exec`` is the injectable
+    subprocess-exec seam tests stub so the bridge is unit-testable without Bun."""
+    input_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            input_path = fh.name
+            json.dump(
+                {
+                    "files": files,
+                    "siteConfig": {
+                        "siteId": site_id,
+                        "captureApiBase": capture_api_base,
+                        "captureSignedKey": capture_signed_key,
+                    },
+                },
+                fh,
+            )
+        timeout_s = _build_timeout_sec()
+        proc = await (_exec or asyncio.create_subprocess_exec)(
+            *_gen_cmd_argv(),
+            "import",
+            "--input",
+            input_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = await _communicate_bounded(proc, timeout_s, "import")
+        except _BuildTimeout as exc:
+            raise RuntimeError(f"import timed out after {exc.timeout_s}s") from exc
+        if proc.returncode != 0:
+            raise RuntimeError(f"import failed: {stderr.decode()}")
+        return json.loads(stdout.decode().strip().splitlines()[-1])
+    finally:
+        if input_path and os.path.exists(input_path):
+            os.unlink(input_path)
+
+
 async def apply_leaf_edits(
     source: dict[str, str],
     edits: list[dict[str, Any]],
@@ -1067,6 +1182,7 @@ class GeneratorClient:
         capture_signed_key: str,
         engine: str = "ripple",
         source: dict[str, Any] | None = None,
+        assets: dict[str, str] | None = None,
         builder_origin: str | None = None,
         d1_database_id: str = "",
         pocket_id: str | None = None,
@@ -1074,6 +1190,11 @@ class GeneratorClient:
         static_build: bool = True,
     ) -> BuildResult:
         """Generate + smoke-build a Paw Site, forking STAGE 2 on ``engine``.
+
+        ``assets`` (SI-4) is the html import's base64 BINARY sideband
+        ({path: base64}) — sent as ``input.assets`` on the html branch only, and only
+        when non-empty (see _build_one for the cross-repo seam note). ripple/svelte
+        payloads never carry it.
 
         ``engine="ripple"`` (default) compiles ``ripple_spec`` into the site;
         ``engine="svelte"`` materializes ``source`` (the pocket's hand-written
@@ -1145,6 +1266,7 @@ class GeneratorClient:
                 capture_signed_key=capture_signed_key,
                 engine=engine,
                 source=source,
+                assets=assets,
                 builder_origin=builder_origin,
                 d1_database_id=d1_database_id,
                 pocket_id=None,
@@ -1161,6 +1283,7 @@ class GeneratorClient:
                 capture_signed_key=capture_signed_key,
                 engine=engine,
                 source=source,
+                assets=assets,
                 builder_origin=builder_origin,
                 d1_database_id=d1_database_id,
                 pocket_id=pocket_id,
@@ -1184,6 +1307,7 @@ class GeneratorClient:
         pocket_id: str | None,
         smoke: bool,
         static_build: bool = True,
+        assets: dict[str, str] | None = None,
     ) -> BuildResult:
         # PERF-3: stable per-pocket working dir (overwrite the source each build)
         # so node_modules persists; fall back to a throwaway tempfile dir when no
@@ -1240,6 +1364,16 @@ class GeneratorClient:
             # source engine) is untouched by this branch and still sends rippleSpec
             # below, so its wire bytes — and svelte's — are unchanged.
             input_json["source"] = source or {}
+            # SI-4 CROSS-REPO SEAM: an html IMPORT also carries binary files, which
+            # cannot ride the text-only ``source`` map — they ride ``input.assets``
+            # ({path: base64}). The paw-sites generator's ``assets`` handling
+            # (decode + write each entry verbatim into the emitted static tree) is
+            # being added in a PARALLEL paw-sites slice; this codes to that
+            # contract. Sent ONLY when non-empty, so a plain html publish's payload
+            # stays byte-identical, and a generator predating the key ignores it
+            # (the import report warns that assets then don't deploy).
+            if assets:
+                input_json["assets"] = assets
         else:
             input_json["rippleSpec"] = ripple_spec
         gen = await self._runner.generate(input_json, out_dir)

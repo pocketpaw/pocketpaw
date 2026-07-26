@@ -100,6 +100,12 @@ read-only: the ``pocketpaw_fabric`` server grew three ontology modification
 tools (``fabric_link_create`` / ``fabric_link_delete`` at MEMBER tier,
 ``fabric_type_update`` RBAC-gated on ``fabric.admin``), mirroring the REST
 routes. ``tool_ids()`` picks them up automatically via ``FABRIC_TOOL_IDS``.
+
+Updated: 2026-07-24 (CX-3, feat/code-agent-exclusive-tools) —
+``CloudLifecycleHook.on_startup`` now also back-fills the dedicated ``code``
+agent (``ensure_code_agent_all_workspaces``) beside the default ``pocketpaw``
+one, so existing workspaces resolve ``/code`` turns to the exclusive-file-tool
+agent without waiting for the first-turn lazy seed.
 """
 
 from __future__ import annotations
@@ -309,6 +315,11 @@ class CloudLifecycleHook:
         await seed_workspace(admin)
         # Back-fill the pocketpaw agent for workspaces that predate agent seeding.
         await ensure_default_agent_all_workspaces()
+        # Back-fill the dedicated /code agent (exclusive file-tool set) beside it
+        # so an existing workspace resolves /code turns without a first-turn seed.
+        from pocketpaw_ee.cloud.agents.service import ensure_code_agent_all_workspaces
+
+        await ensure_code_agent_all_workspaces()
 
         # Persist Haiku-generated chat titles into MongoDB.
         try:
@@ -812,6 +823,129 @@ class CloudStockImagesMcpProvider:
         return list(STOCK_TOOL_IDS)
 
 
+class CloudIconsMcpProvider:
+    """`pocketpaw.mcp_servers` — the icon-search in-process server
+    (``pocketpaw_icons``). Hosts ``search_icons`` only.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so the bundled
+    ``pocketpaw-create-svelte-site`` skill can source real open-source icons for
+    a generated marketing site without an explicit opt-in — the same regime the
+    stock-images + sites manager + media servers use. The cloud chat agent runs
+    on the claude_agent_sdk backend, which only sees in-process MCP servers (a
+    plain BaseTool is invisible to it), so icon search MUST be surfaced here.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.icons import build_icons_server
+
+            return build_icons_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the icons server is unavailable,
+            # same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS
+
+        return list(ICON_TOOL_IDS)
+
+
+class CloudPaletteMcpProvider:
+    """`pocketpaw.mcp_servers` — the palette-extraction in-process server
+    (``pocketpaw_palette``). Hosts ``extract_palette`` only.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so the bundled
+    ``pocketpaw-create-svelte-site`` skill can derive a coherent color system
+    from a brand photo/logo for a generated marketing site without an explicit
+    opt-in — the same regime the icons + stock-images + sites manager + media
+    servers use. The cloud chat agent runs on the claude_agent_sdk backend,
+    which only sees in-process MCP servers (a plain BaseTool is invisible to
+    it), so palette extraction MUST be surfaced here.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.palette import build_palette_server
+
+            return build_palette_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the palette server is
+            # unavailable, same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.palette import PALETTE_TOOL_IDS
+
+        return list(PALETTE_TOOL_IDS)
+
+
+class CloudDesignSystemsMcpProvider:
+    """`pocketpaw.mcp_servers` — the design-system library retriever in-process
+    server (``pocketpaw_design_systems``). Hosts ``list_design_systems`` +
+    ``get_design_system``.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so the bundled
+    ``pocketpaw-create-svelte-site`` skill can pick and adapt a coherent,
+    professional visual identity from the bundled DESIGN.md library for a
+    generated marketing site without an explicit opt-in — the same regime the
+    palette + icons + stock-images + sites manager + media servers use. The
+    cloud chat agent runs on the claude_agent_sdk backend, which only sees
+    in-process MCP servers (a plain BaseTool is invisible to it), so the
+    design-system retriever MUST be surfaced here. It reads the bundled files
+    directly from OSS core (``pocketpaw.bundled_design_systems``) — no kb-go, no
+    network.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.design_systems import (
+                build_design_systems_server,
+            )
+
+            return build_design_systems_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the design-systems server is
+            # unavailable, same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.design_systems import DESIGN_SYSTEM_TOOL_IDS
+
+        return list(DESIGN_SYSTEM_TOOL_IDS)
+
+
+class CloudAskMcpProvider:
+    """`pocketpaw.mcp_servers` — the interactive ``ask_user`` in-process server
+    (``pocketpaw_ask``). Hosts ``ask_user`` only.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``), same regime as the icons + palette
+    + stock-images + design-systems site-authoring servers. The cloud chat agent
+    runs on the claude_agent_sdk backend, which only sees in-process MCP servers
+    (the harness ``AskUserQuestion`` tool is NOT exposed to it), so an
+    interactive question tool MUST be surfaced here. It matters most on surfaces
+    where inline Ripple is OFF (e.g. /sites svelte-create): without it the agent
+    can only ask clarifying questions as plain text. run_core turns a call to
+    this tool into an ``ask_user_question`` stream frame the client renders as
+    clickable option chips.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.ask import build_ask_server
+
+            return build_ask_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the ask server is unavailable,
+            # same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.ask import ASK_TOOL_IDS
+
+        return list(ASK_TOOL_IDS)
+
+
 class CloudDeliverMcpProvider:
     """`pocketpaw.mcp_servers` — the artifact-delivery in-process server
     (``pocketpaw_deliver``). Hosts ``deliver_artifact`` only (ART-4).
@@ -899,6 +1033,40 @@ class CloudBeltMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.belt import BELT_TOOL_IDS
 
         return list(BELT_TOOL_IDS)
+
+
+class CloudCodeMcpProvider:
+    """`pocketpaw.mcp_servers` — the Code Mode delegate in-process server
+    (``pocketpaw_code``). Hosts the four /code file tools: ``readFile`` /
+    ``search`` / ``listDir`` / ``writeFile``.
+
+    The main chat agent drives the /code surface and reaches the user's project
+    through these tools, one call at a time. No handler opens a file: each parks
+    on a future while the BROWSER runs the matching file-session verb and posts
+    the result back to ``POST /codeagent/resolve``, because a WebContainer
+    project lives in the tab and has no server-side row a backend could reach.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``), the same regime as the sibling belt
+    / loom / media servers: the /code surface scopes access via its profile,
+    which allows these tool ids and DENIES the file/shell built-ins outright.
+    ``build_code_server`` returns None — and the loop skips it — when the
+    claude_agent_sdk isn't installed, so chat never breaks.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.code import build_code_server
+
+            return build_code_server()
+        except ImportError:
+            # claude_agent_sdk not installed — same degrade path as the other
+            # in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.code import CODE_TOOL_IDS
+
+        return list(CODE_TOOL_IDS)
 
 
 class CloudExternalActionsMcpProvider:

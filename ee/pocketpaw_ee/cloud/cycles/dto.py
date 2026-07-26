@@ -65,10 +65,10 @@ class CreateCycleRequest(BaseModel):
 class UpdateCycleRequest(BaseModel):
     """Body for ``PATCH /cycles/{id}``.
 
-    Per spec only ``upcoming`` cycles can have their name / description /
-    dates edited — the router enforces the status check via the service.
-    Status transitions go through ``POST /cycles/{id}/close`` (or the
-    snapshot job's auto-promote) rather than this PATCH endpoint.
+    Editable at any status — the operator can rename, re-date, add a
+    description, adjust scope, or re-assign the project at any point in the
+    sprint lifecycle. Status transitions go through the dedicated
+    start/stop/close/reactivate endpoints.
 
     ``project_id`` is editable on any status — moving an in-flight cycle
     between projects is a low-risk operation (just a grouping change).
@@ -79,6 +79,7 @@ class UpdateCycleRequest(BaseModel):
     start: date | None = None
     end: date | None = None
     project_id: str | None = None
+    scope: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def _check_dates(self) -> UpdateCycleRequest:

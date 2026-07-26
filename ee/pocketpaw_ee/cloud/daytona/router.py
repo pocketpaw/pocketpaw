@@ -17,6 +17,9 @@ Mounted at ``/api/v1/``. Endpoints:
   PATCH  /cloud/projects/{name}/vm/files/rename            — Rename in project in VM
 
 Created: 2026-06-24.  Updated: 2026-07-10 — workspace VM replaces per-project sandbox.
+Updated: 2026-07-15 (fix/workspace-vm-map-to-db) — the store's workspace-VM
+    accessors are now async + Mongo-backed (``workspace_vms`` collection); every
+    call site here ``await``s them.
 """
 
 from __future__ import annotations
@@ -243,8 +246,8 @@ async def get_workspace_vm(
         set_workspace_vm,
     )
 
-    sandbox_id = get_workspace_vm_sandbox_id(workspace_id)
-    config = get_workspace_vm_config(workspace_id)
+    sandbox_id = await get_workspace_vm_sandbox_id(workspace_id)
+    config = await get_workspace_vm_config(workspace_id)
 
     if sandbox_id:
         # VM already exists — return status.
@@ -265,7 +268,7 @@ async def get_workspace_vm(
             # Sandbox might have been deleted externally — clean up and re-provision.
             from pocketpaw_ee.cloud.daytona.store import remove_workspace_vm as _rm_ws_vm
 
-            _rm_ws_vm(workspace_id)
+            await _rm_ws_vm(workspace_id)
             sandbox_id = None
 
     # No VM exists or it was deleted — auto-provision.
@@ -293,7 +296,7 @@ async def get_workspace_vm(
             disk=disk,
             auto_stop_interval=auto_stop,
         )
-        set_workspace_vm(workspace_id, info.id, sandbox_name, config)
+        await set_workspace_vm(workspace_id, info.id, sandbox_name, config)
 
         # Create the workspace root directory inside the VM.
         root_dir = config.get("root_dir", "/workspace")
@@ -355,13 +358,13 @@ async def provision_workspace_vm(
     client = await _require_daytona()
 
     # Destroy existing VM if any.
-    existing_id = get_workspace_vm_sandbox_id(workspace_id)
+    existing_id = await get_workspace_vm_sandbox_id(workspace_id)
     if existing_id:
         try:
             await client.delete_sandbox(existing_id)
         except Exception as exc:
             logger.warning("Failed to delete existing workspace VM %s: %s", existing_id, exc)
-        remove_workspace_vm(workspace_id)
+        await remove_workspace_vm(workspace_id)
 
     config = {
         "cpu": req.cpu,
@@ -377,7 +380,7 @@ async def provision_workspace_vm(
         memory=req.memory,
         disk=req.disk,
     )
-    set_workspace_vm(workspace_id, info.id, sandbox_name, config)
+    await set_workspace_vm(workspace_id, info.id, sandbox_name, config)
 
     asyncio.create_task(_ensure_workspace_root(client, info.id, req.root_dir))
 
@@ -402,7 +405,7 @@ async def get_workspace_vm_config(
     workspace_id = _resolve_workspace_id(http_request)
     from pocketpaw_ee.cloud.daytona.store import get_workspace_vm_config
 
-    config = get_workspace_vm_config(workspace_id)
+    config = await get_workspace_vm_config(workspace_id)
     return {"ok": True, "config": config}
 
 
@@ -434,9 +437,9 @@ async def update_workspace_vm_config(
 
     updates = req.model_dump(exclude_none=True)
     if updates:
-        update_workspace_vm_config(workspace_id, updates)
+        await update_workspace_vm_config(workspace_id, updates)
 
-    config = get_workspace_vm_config(workspace_id)
+    config = await get_workspace_vm_config(workspace_id)
     return {"ok": True, "config": config}
 
 
@@ -455,7 +458,7 @@ async def stop_workspace_vm(
 
     from pocketpaw_ee.cloud.daytona.store import get_workspace_vm_sandbox_id
 
-    sandbox_id = get_workspace_vm_sandbox_id(workspace_id)
+    sandbox_id = await get_workspace_vm_sandbox_id(workspace_id)
     if not sandbox_id:
         return {"ok": True, "message": "No workspace VM to stop"}
 
@@ -484,7 +487,7 @@ async def delete_workspace_vm(
         remove_workspace_vm,
     )
 
-    sandbox_id = get_workspace_vm_sandbox_id(workspace_id)
+    sandbox_id = await get_workspace_vm_sandbox_id(workspace_id)
     if not sandbox_id:
         return {"ok": True, "message": "No workspace VM to delete"}
 
@@ -494,7 +497,7 @@ async def delete_workspace_vm(
     except Exception as exc:
         logger.warning("Failed to delete workspace VM %s: %s", sandbox_id, exc)
 
-    remove_workspace_vm(workspace_id)
+    await remove_workspace_vm(workspace_id)
     return {"ok": True, "message": "Workspace VM deleted"}
 
 
@@ -507,7 +510,7 @@ async def get_workspace_vm_terminal(
 
     from pocketpaw_ee.cloud.daytona.store import get_workspace_vm_sandbox_id
 
-    sandbox_id = get_workspace_vm_sandbox_id(workspace_id)
+    sandbox_id = await get_workspace_vm_sandbox_id(workspace_id)
     if not sandbox_id:
         raise HTTPException(status_code=404, detail="No workspace VM provisioned")
 
@@ -559,7 +562,7 @@ async def _require_workspace_vm(
         get_workspace_vm_sandbox_id,
     )
 
-    sandbox_id = get_workspace_vm_sandbox_id(workspace_id)
+    sandbox_id = await get_workspace_vm_sandbox_id(workspace_id)
     if not sandbox_id:
         raise HTTPException(
             status_code=404,
@@ -574,7 +577,7 @@ async def _require_workspace_vm(
             detail=f"VM is in state '{info.state}' — must be 'started' for file operations",
         )
 
-    config = get_workspace_vm_config(workspace_id)
+    config = await get_workspace_vm_config(workspace_id)
     workspace_root = config.get("root_dir", "/workspace")
     project_abs_path = f"{workspace_root}/{project_name}".replace("//", "/")
 

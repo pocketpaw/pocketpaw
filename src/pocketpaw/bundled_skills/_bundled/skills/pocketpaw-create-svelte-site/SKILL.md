@@ -3,21 +3,25 @@ name: pocketpaw-create-svelte-site
 description: |
   Build a marketing landing page as a Paw Site on the SVELTE TRACK — a
   real, standalone website you author as premium hand-written SvelteKit
-  components, prerendered statically to the edge. Invoke when the user
-  asks for a BRAND-NEW marketing / landing site AND the create flow is on
-  the Svelte engine ("Use Svelte pages" toggle → engine="svelte"): "build
-  a dentist landing site", "make a marketing page for my bakery", "a
-  landing page for my SaaS". This is the component-authoring brain — YOU
-  write the Svelte sections (Hero, Pricing, Faq, ...) at the quality bar of
-  the proven spike, assemble them into a source map, and a deterministic
-  tool persists the pocket stamped type="site" + pattern="landing" +
-  engine="svelte" so the published page renders from your components. You
-  do NOT compose a rippleSpec, do NOT call get_widget_spec, do NOT use the
-  pocket specialist. For the ripple track (the default engine) use
-  pocketpaw-create-paw-site; for publishing an EXISTING pocket use
-  pocketpaw-create-site. Loading this skill keeps the chat agent's
+  components, prerendered statically to the edge. Decide by the REQUIREMENT:
+  reach for this when the site genuinely needs what a component framework
+  gives — real client-side interactivity, complex or multi-view stateful UI,
+  app-like behaviour — OR when the user EXPLICITLY asks for Svelte / SvelteKit
+  ("build it in Svelte", "use SvelteKit"). Do NOT default to it for a plain
+  static marketing/landing page ("build a dentist landing page", "a marketing
+  page for my bakery", "a landing page for my SaaS") that has no real
+  interactivity — that is the common case and belongs to
+  pocketpaw-create-paw-site (the default landing brain, which can also emit a
+  plain hand-written HTML page). Pick Svelte on need or explicit request, not
+  from the topic alone. When you DO use it: YOU write the Svelte sections
+  (Hero, Pricing, Faq, ...) at the quality bar of the proven spike, assemble
+  them into a source map, and a deterministic tool persists the pocket stamped
+  type="site" + pattern="landing" + engine="svelte" so the published page
+  renders from your components. You do NOT compose a rippleSpec, do NOT call
+  get_widget_spec, do NOT use the pocket specialist. For publishing an EXISTING
+  pocket use pocketpaw-create-site. Loading this skill keeps the chat agent's
   always-on system prompt small while still delivering the full Svelte
-  authoring brain when a svelte-track site is actually requested.
+  authoring brain when a site actually needs Svelte.
 ---
 
 # Build a Paw Site — the Svelte-track authoring brain
@@ -72,10 +76,23 @@ distinctive type, a bespoke animated hero graphic, real testimonials, a
 priced pricing table, a native FAQ, a lead form. **Match that bar.** Use
 the design skills to get there:
 
-- Invoke **`frontend-design`** (or **`taste-skill`**) for the look: a real
-  type system, a considered palette, generous spacing, a hero with a
-  bespoke visual — not a centered headline on a gradient. Avoid generic
-  "AI landing page" aesthetics.
+- **Run `pocketpaw-design-taste` FIRST — before you author a line.** It is the
+  engine-agnostic, static-safe taste brain (with the Svelte-track specifics
+  folded in), and its opening steps are what stop every site looking the same:
+  (1) declare the Vision Ledger and a one-line **Design Read** (business kind,
+  audience, vibe), (2) pick a Trend Engine identity and an aesthetic
+  **direction/family** (clean-tech / soft-premium / editorial-luxury /
+  warm-minimalist / brutalist / dark-tech) that sets the palette, type,
+  materiality, and motion, (3) set the three dials from the read. THEN author
+  the sections honouring that direction. Do not skip to a default clean house
+  style — the Design Read + family pick is the difference between "designed
+  for this business" and "generic AI landing page". The skill also carries the
+  layout-variance, materiality, CSS-first-motion, and anti-slop "AI tells"
+  rules, and it mirrors the prerender resting-state rule below so its taste
+  never fights the static render.
+- Invoke **`frontend-design`** (or **`taste-skill`**) alongside it for extra
+  look reference: a real type system, generous spacing, a hero with a bespoke
+  visual — not a centered headline on a gradient.
 - One **component per section**. The page is an ordered list of sections;
   each section owns its own copy, data, styles, and motion. This is the
   whole edit-model payoff: to refine the hero later you edit one file.
@@ -266,9 +283,24 @@ do **not** fall back to drafting a rippleSpec. The tool fails closed when
 the map is missing a required §4.3 file and names which one; add it and
 retry.
 
-## STEP 4 — Publish
+## STEP 4 — Stop at the draft (publish only when asked)
 
-Publish the new pocket as a site:
+**Default: create the draft, do NOT publish.** After `create_svelte_site`
+returns, the pocket exists as a reviewable **draft** — a real, editable svelte
+site the user can preview in-app right now (open **/sites** → the site's
+**Preview** tab). Publishing deploys it to the public edge (and, on a paid
+tier, can open a checkout), so taking it live is the user's call, not an
+automatic next step.
+
+So **do NOT call `publish` by default.** Instead, tell the user the draft is
+ready, point them at the Preview, and offer to take it live — e.g. *"Your
+Bright Smile site is ready as a draft. Preview it under /sites, and say
+**publish** (or 'make it live') when you're happy with it."* Then stop. Keep
+iterating on the draft if they want changes; an edit is a draft too.
+
+**Publish in this same turn ONLY if the user's request already asked to go
+live** — "publish it", "make it live", "ship it", "put it online". When they
+did, publish the pocket:
 
 ```
 mcp__pocketpaw_sites_manager__publish(pocket_id = <the id from STEP 3>)
@@ -453,8 +485,10 @@ D1 + wires the read/write layer. Done.
    `src/lib/components/*.svelte` sections — every import resolvable.
 4. **It converts + captures.** CTAs are anchors, there's a real priced
    pricing section, and a flat lead form POSTing to `/api/submit`.
-5. **You showed the live URL.** The user got the `url` from publish and a
-   pointer to /sites — not just "done". Errors were relayed, never masked.
+5. **You stopped at the draft (or published only if asked).** By default the
+   user got a pointer to the in-app Preview under /sites and an offer to
+   publish — not an auto-publish. If they explicitly asked to go live, they got
+   the `url` from publish. Errors were relayed, never masked.
 
 ## Related tools (via MCP)
 
@@ -465,6 +499,7 @@ D1 + wires the read/write layer. Done.
   `auth` bindings — see [Dynamic svelte sites](#dynamic-svelte-sites--live-data-on-the-svelte-track)).
   Returns `{ok, pocket_id, pocket}`.
 - `mcp__pocketpaw_sites_manager__publish` — publish the pocket as a live
-  site; show the user the `url`.
+  site; show the user the `url`. Call it only when the user asks to go live
+  (draft-first — STEP 4); a plain "create a site" stops at the draft.
 - `mcp__pocketpaw_pocket__list_pockets` — find an existing pocket if the
   user named one rather than describing a new site.

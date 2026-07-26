@@ -1,4 +1,15 @@
 # tests/ee/agent/test_sites_mcp_server/test_create_svelte_site.py
+# Updated: 2026-07-17 (fix/sites-draft-visible) — added
+# test_create_mints_draft_site_doc_that_lists: the create handler now mints a DRAFT
+# Site doc so the new site LISTS in the /sites gallery immediately (deployed=False),
+# with no publish and no billing. Before the fix a draft-first pocket had no Site doc,
+# and the gallery reads Site docs, so it appeared in neither the All nor the Draft
+# filter. Ground truth: the Site card read straight from sites.service.list_for_workspace.
+# Updated: 2026-07-17 (feat/sites-draft-first-create) — added
+# test_create_result_is_draft_shaped_no_live_url: the create tool persists a DRAFT and
+# never publishes, so its result payload carries no live-site fields (url/live/deployed)
+# — only {ok, pocket_id, pocket}. Pins the draft-path payload the FE renders as
+# unpublished (draft/preview affordances), so draft-first never shows a dead live button.
 # Updated: 2026-06-17 (fix/sites-plan-gate-asymmetry) — create_svelte_site now
 # calls the shared Sites plan gate (sites.service.require_sites_plan) before
 # agent_create, so an autouse fixture defaults get_workspace_plan to "go"
@@ -214,6 +225,92 @@ class TestCreateSvelteSiteEndToEnd:
         assert doc.source == source
         # The svelte path persists NO rippleSpec.
         assert doc.rippleSpec is None
+
+    @pytest.mark.asyncio
+    async def test_create_result_is_draft_shaped_no_live_url(
+        self, beanie_test_db, recording_bus
+    ) -> None:
+        """feat/sites-draft-first-create: the create tool persists a DRAFT and never
+        publishes, so its result payload carries NO live-site fields (no url / live /
+        deployed) — only {ok, pocket_id, pocket:{id,name,type,pattern,engine}}. This is
+        the payload the FE already renders for an unpublished pocket (draft/preview
+        affordances), so draft-first never surfaces a dead 'Open live site' button."""
+        from unittest.mock import patch
+
+        from bson import ObjectId
+        from pocketpaw_ee.agent.mcp_servers import sites_create as sites_create_mcp
+
+        with (
+            patch(
+                "pocketpaw_ee.cloud.chat.agent_service.current_workspace_id",
+                return_value=str(ObjectId()),
+            ),
+            patch(
+                "pocketpaw_ee.cloud.chat.agent_service.current_user_id",
+                return_value=str(ObjectId()),
+            ),
+        ):
+            out = await sites_create_mcp._create_svelte_site_handler(
+                {"source": _sample_source(), "name": "Draft Svelte"}
+            )
+
+        assert not out.get("is_error"), out
+        body = json.loads(out["content"][0]["text"])
+        # Draft-shaped: the create result identifies the pocket for the in-app
+        # preview but carries no live-site fields (publish is a separate, on-request
+        # step).
+        assert body["ok"] is True
+        assert body["pocket_id"]
+        assert set(body["pocket"]) == {"id", "name", "type", "pattern", "engine"}
+        assert body["pocket"]["engine"] == "svelte"
+        # No live-site fields leak into the create (draft) payload.
+        for leaked in ("url", "live", "deployed", "site_url"):
+            assert leaked not in body, f"create (draft) payload must not carry {leaked!r}"
+            assert leaked not in body["pocket"]
+
+    @pytest.mark.asyncio
+    async def test_create_mints_draft_site_doc_that_lists(
+        self, beanie_test_db, recording_bus
+    ) -> None:
+        """fix/sites-draft-visible: the create handler mints a DRAFT Site doc so the
+        new site LISTS in the /sites gallery right away (deployed=False, no live url),
+        with no publish and no billing. Ground truth: the Site card read straight from
+        the service's gallery read, keyed on the pocket the handler just created."""
+        from unittest.mock import patch
+
+        from bson import ObjectId
+        from pocketpaw_ee.agent.mcp_servers import sites_create as sites_create_mcp
+        from pocketpaw_ee.sites import service as sites_service
+
+        workspace_id = str(ObjectId())
+        user_id = str(ObjectId())
+        with (
+            patch(
+                "pocketpaw_ee.cloud.chat.agent_service.current_workspace_id",
+                return_value=workspace_id,
+            ),
+            patch(
+                "pocketpaw_ee.cloud.chat.agent_service.current_user_id",
+                return_value=user_id,
+            ),
+        ):
+            out = await sites_create_mcp._create_svelte_site_handler(
+                {"source": _sample_source(), "name": "Draft Lister"}
+            )
+
+        assert not out.get("is_error"), out
+        body = json.loads(out["content"][0]["text"])
+        pocket_id = body["pocket_id"]
+
+        # The draft lists in the gallery read — exactly one card for this pocket,
+        # reading as a DRAFT (deployed False, no live url, no checkout).
+        cards = await sites_service.list_for_workspace(workspace_id)
+        assert [c.pocket_id for c in cards] == [pocket_id]
+        assert cards[0].deployed is False
+        assert cards[0].url == ""
+        assert cards[0].checkout_url is None
+        # SR-9 resolves the engine from the source pocket for the card badge.
+        assert cards[0].engine == "svelte"
 
     @pytest.mark.asyncio
     async def test_missing_identity_is_error(self) -> None:

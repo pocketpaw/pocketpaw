@@ -1,0 +1,8 @@
+{
+  "slug": "bold-high-contrast",
+  "name": "Monolith",
+  "description": "Near-black on near-white, oversized display type, and one electric lime accent that does all the shouting. A confident, editorial-brutalist system for brands that want to feel loud and certain.",
+  "aesthetic": ["bold", "high-contrast", "brutalist", "editorial", "energetic", "monochrome"],
+  "industries": ["agency", "creative-studio", "fashion", "events", "portfolio", "media", "crypto-web3"],
+  "page_types": ["landing", "portfolio", "event", "product-launch", "manifesto", "coming-soon"]
+}

@@ -39,6 +39,14 @@
 # idempotent dedup (skip ids already in the pocket's `scored_rows`), the same
 # real heuristic + band, and the same PII allowlist (id/name/score/band/stage)
 # apply to all three source modes — only WHERE the batch comes from differs.
+#
+# Updated: 2026-07-14 (fix/jobs-source-collection-tenancy) — the Mongo
+# `source_collection` read now threads this job's `workspace_id` into
+# `jobs.service.read_source_records(..., workspace_id=workspace_id, ...)`, which
+# scopes the query to the job's own workspace and denylists credential/system
+# collections. Closes a P1 cross-tenant leak: an author-controlled
+# `source_collection` previously read EVERY tenant's rows from the shared DB.
+# Connector + inline-`rows` source modes are unchanged (already tenant-safe).
 
 """Built-in `score_applications` job: real data-backed scoring + PII allowlist."""
 
@@ -359,8 +367,13 @@ class ScoreApplicationsJob:
 
         # Read a bounded page from the source. Pull a few-hundred window so the
         # next unscored batch is in reach without an unbounded scan; the page is
-        # then filtered to NEW records and capped at `batch_size`.
-        page = await jobs_service.read_source_records(source_collection, limit=300)
+        # then filtered to NEW records and capped at `batch_size`. The read is
+        # SCOPED to this job's `workspace_id` (and denylists credential/system
+        # collections) inside `read_source_records`, so an author-controlled
+        # `source_collection` can only ever surface this workspace's own rows.
+        page = await jobs_service.read_source_records(
+            source_collection, workspace_id=workspace_id, limit=300
+        )
 
         return self._score_next_batch(existing_rows=existing_rows, page=page, batch_size=batch_size)
 

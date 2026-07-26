@@ -1,5 +1,14 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-07-24 (CX-1, feat/code-agent-cx1) — ``_build_options`` / ``run`` /
+  ``prewarm`` grow an ``exclusive_mcp_tools: bool = False`` keyword. When True, the
+  MCP scoping block CAPS the tool surface to ``allow_mcp_tool_ids`` alone — no
+  POCKET_CREATION_GRANT, no widget/atlas ids, and NOT the
+  ALWAYS_ALLOWED_MCP_SERVERS escape hatch — so a dedicated agent (e.g. /code) gets
+  EXACTLY the declared ids. ``exclusive_mcp_tools=True`` with
+  ``allow_mcp_tool_ids=None`` strips ALL ``mcp__`` ids (empty permitted set), so an
+  exclusive agent wins over even a broad surface. ``False`` (the default) keeps the
+  legacy grant-union scoping byte-for-byte. Built-in SDK tools are never touched.
 Updated: 2026-07-08 (CS-13, feat/per-send-model-override) — ``run`` /
   ``_build_options`` grow an optional ``model_override: str | None = None``
   keyword. When set, it is applied as the LAST word in the model-selection block,
@@ -173,6 +182,17 @@ Updated: 2026-06-07 (feat/entity-pocket-profile-field, entity-rooms A2) — ``ru
   connect), so the run goes through a fresh stateless query whose options carry
   the plugin; the temp dir is removed in the outer ``finally``. Empty
   ``skill_names`` is a no-op. Crosses the EE→OSS boundary as a plain frozenset.
+Updated: 2026-07-25 (feat/bundled-skills-per-surface) — a non-empty
+  ``skill_names`` now SUPPRESSES the wholesale bundled-skills plugin
+  (``_should_load_bundled_plugin``). Before this, the two plugin entries were
+  independent: the bundled plugin loaded from ``plugins=`` regardless of
+  ``skill_names``, so a surface could not withhold a bundled skill by naming a
+  narrower set — ``SurfaceProfile.skill_names`` was additive-only, and /code had
+  to deny the ``Skill`` BUILT-IN outright to keep ``pocketpaw-create-pocket``
+  from firing on "build an app with components and nice design". With the gate,
+  naming skills yields exactly those (``materialize_run_skills`` resolves
+  bundled names too, via its new packaged fallback) and naming none keeps the
+  full bundled set, so general chat is byte-for-byte unchanged.
 Updated: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①) —
   ``run`` also accepts ``allow_sdk_tools: frozenset[str]``, the per-entity
   ADDITIVE SDK-tool allowlist (resolved upstream from the entity pocket's
@@ -297,6 +317,87 @@ from pocketpaw.security.rails import is_substring_blocked
 from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy
 
 logger = logging.getLogger(__name__)
+
+
+def _scrub_nul_chars(options_kwargs: dict[str, Any]) -> list[str]:
+    """Strip NUL characters out of the assembled options, IN PLACE.
+
+    Returns the dotted/indexed paths that carried one, most useful field first as
+    encountered, so the caller can log WHERE it came from.
+
+    Why this exists: Windows ``CreateProcess`` refuses a command line, an
+    environment block, or a cwd containing a NUL, and the SDK passes all three
+    through untouched. One NUL anywhere in the option set therefore kills the spawn
+    before the agent exists, with an error that names nothing:
+
+        CLIConnectionError: Failed to start Claude Code: embedded null character
+
+    Every turn on that path then fails identically and there is no way to tell from
+    the message whether the offender was the system prompt, a tool id, an env value,
+    or the working directory. POSIX is not immune either — ``execve`` takes
+    NUL-terminated strings, so a NUL truncates the argument silently instead of
+    failing loudly, which is worse.
+
+    Stripping is always safe: a NUL is not valid in a prompt, a tool id, a model
+    name, a path, or an env value, so there is no case where preserving one is
+    correct. Reporting the path is the part that earns this function's keep — it
+    turns an un-debuggable spawn failure into a working run plus a breadcrumb
+    naming the source.
+    """
+    offenders: list[str] = []
+
+    def walk(value: Any, path: str) -> Any:
+        if isinstance(value, str):
+            if "\0" in value:
+                offenders.append(path)
+                # Log the TEXT AROUND the NUL, not just the field name. The field
+                # alone is not actionable: ``system_prompt`` is tens of thousands of
+                # characters assembled from a surface preamble, the soul, the
+                # about-member block, KB context and history, so "it was in
+                # system_prompt" narrows nothing. The surrounding text names the
+                # actual producer — that is how the first instance of this was
+                # traced to a `.tgz` workspace snapshot the KB had indexed as text
+                # and was injecting as raw gzip.
+                #
+                # ``env`` values are REDACTED to a length + offset: that is where
+                # API keys and tokens live, and a log line is the wrong place for
+                # them. The variable NAME is already in ``path``, which is the part
+                # that identifies the source.
+                i = value.index("\0")
+                if path.startswith("env["):
+                    logger.error(
+                        "SDK: NUL in %s — value length %d, first NUL at offset %d "
+                        "(value redacted: env carries credentials)",
+                        path,
+                        len(value),
+                        i,
+                    )
+                else:
+                    logger.error(
+                        "SDK: NUL in %s at offset %d of %d — context: %r",
+                        path,
+                        i,
+                        len(value),
+                        value[max(0, i - 120) : i + 120],
+                    )
+                return value.replace("\0", "")
+            return value
+        # dict / list are rebuilt in place so the caller's object is the cleaned one.
+        # Anything else (numbers, bools, None, hooks, session_store, transports) is
+        # returned untouched — the guard must never coerce an opaque collaborator.
+        if isinstance(value, dict):
+            for key, item in list(value.items()):
+                value[key] = walk(item, f"{path}[{key!r}]")
+            return value
+        if isinstance(value, list):
+            for i, item in enumerate(value):
+                value[i] = walk(item, f"{path}[{i}]")
+            return value
+        return value
+
+    for key, item in list(options_kwargs.items()):
+        options_kwargs[key] = walk(item, key)
+    return offenders
 
 
 class _BuiltOptions(NamedTuple):
@@ -1279,6 +1380,25 @@ class ClaudeSDKBackend(BaseAgentBackend):
         return system_prompt[:cut]
 
     @staticmethod
+    def _should_load_bundled_plugin(*, enabled: bool, skill_names: frozenset[str]) -> bool:
+        """Whether to load the WHOLE bundled-skills plugin this connect.
+
+        The bundled skills ship as a local plugin passed via SDK ``plugins=``,
+        which loads independently of ``skill_names``. That made a surface's
+        skill allowlist advisory rather than binding: naming a narrow set could
+        not withhold ``pocketpaw-create-pocket``, whose description matches
+        "build an app with components and nice design" almost word for word.
+        /code had to deny the ``Skill`` built-in outright to stop it.
+
+        Gating the wholesale load on an EMPTY ``skill_names`` makes the
+        allowlist binding — name skills and the run gets exactly those (each
+        materialized by ``materialize_run_skills``, bundled ones included);
+        name none and the full bundled set loads as before, so general chat is
+        unchanged. ``sdk_load_bundled_skills=False`` still disables it outright.
+        """
+        return enabled and not skill_names
+
+    @staticmethod
     def _plugin_digest(skill_names: frozenset[str], *, bundled: bool) -> str:
         """Stable digest of the agent's plugin IDENTITY for the cache key.
 
@@ -1535,6 +1655,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         stderr_sink: list[str],
         session_handle: SessionHandle | None = None,
         model_override: str | None = None,
+        exclusive_mcp_tools: bool = False,
     ) -> _BuiltOptions:
         """Assemble the ``ClaudeAgentOptions`` a turn (or a prewarm) will run on.
 
@@ -1766,7 +1887,29 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # Built-in SDK tools (Read/Write/Bash/...) are NEVER filtered here —
         # only ``mcp__*`` ids — so scoping a mode can't strip core tools.
         # Applied AFTER deny so a denied id can't sneak back via the grant.
-        if allow_mcp_tool_ids is not None:
+        #
+        # ``exclusive_mcp_tools`` (CX-1) is the exact-toolset signal: an
+        # EXCLUSIVE turn CAPS the MCP surface to ``allow_mcp_tool_ids`` alone —
+        # no POCKET_CREATION_GRANT, no widget/atlas ids, and NOT the
+        # ALWAYS_ALLOWED_MCP_SERVERS escape hatch — so a dedicated agent (e.g.
+        # /code) gets EXACTLY the ids it declared and nothing the universal
+        # grant would otherwise union back in. Precedence rule: an exclusive
+        # turn with ``allow_mcp_tool_ids=None`` strips ALL ``mcp__`` ids (an
+        # empty permitted set), which is how an exclusive agent wins even over a
+        # broad surface. The default (signal off) path below is byte-for-byte
+        # the legacy grant-union scoping.
+        if exclusive_mcp_tools:
+            permitted = allow_mcp_tool_ids or frozenset()
+            before_count = len(allowed_tools)
+            allowed_tools = [
+                t for t in allowed_tools if not t.startswith("mcp__") or t in permitted
+            ]
+            if len(allowed_tools) < before_count:
+                logger.info(
+                    "Exclusive MCP-allow: capped to exactly %s (no general grant)",
+                    sorted(permitted),
+                )
+        elif allow_mcp_tool_ids is not None:
             from pocketpaw.agents.sdk_mcp_atlas import ATLAS_TOOL_IDS
             from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
 
@@ -1852,14 +1995,31 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # ``skills=`` option is also gated by setting_sources, but
         # ``plugins=`` is not. Toggle via ``sdk_load_bundled_skills``.
         bundled_loaded = False
-        if self.settings.sdk_load_bundled_skills:
+        if self._should_load_bundled_plugin(
+            enabled=self.settings.sdk_load_bundled_skills, skill_names=skill_names
+        ):
             from pocketpaw.bundled_skills import bundled_skills_plugin_dir
 
             plugin_dir = bundled_skills_plugin_dir()
             if plugin_dir is not None:
                 options_kwargs["plugins"] = [{"type": "local", "path": str(plugin_dir)}]
                 bundled_loaded = True
-                logger.info("SDK: loading bundled-skills plugin from %s", plugin_dir)
+                # Enumerate the actual skill dirs so operators can confirm which
+                # bundled skills reached the agent this connect (e.g. that a newly
+                # added skill is picked up after a restart).
+                try:
+                    _skills_root = plugin_dir / "skills"
+                    _skill_names = sorted(
+                        p.name for p in _skills_root.iterdir() if (p / "SKILL.md").is_file()
+                    )
+                except Exception:  # noqa: BLE001 — logging must never break the run
+                    _skill_names = []
+                logger.info(
+                    "SDK: loading bundled-skills plugin from %s — %d skills: %s",
+                    plugin_dir,
+                    len(_skill_names),
+                    ", ".join(_skill_names) or "(none found)",
+                )
 
         # Plugin-identity digest (fix/claude-sdk-warm-client-skills): folds
         # the requested skill set + the bundled flag into the cache key so a
@@ -2044,6 +2204,22 @@ class ClaudeSDKBackend(BaseAgentBackend):
         if session_handle is not None and session_handle.session_store is not None:
             options_kwargs["session_store"] = session_handle.session_store
 
+        # LAST gate before the options become a subprocess. A NUL anywhere in here
+        # — an arg, an env value, the cwd — makes the CLI spawn fail with
+        # "embedded null character" and names nothing, so every turn on the path
+        # dies identically and undiagnosably. Strip it and say where it was; see
+        # ``_scrub_nul_chars``. Must stay after EVERY kwarg is set (env and the
+        # per-send model override are assigned above) and before
+        # ``_ClaudeAgentOptions`` is constructed.
+        nul_paths = _scrub_nul_chars(options_kwargs)
+        if nul_paths:
+            logger.error(
+                "SDK: stripped NUL character(s) from options before spawn — "
+                "fields: %s. The run proceeds with them removed; this is a BUG at "
+                "whatever produced these values, please report the field list.",
+                ", ".join(nul_paths),
+            )
+
         # Create options (after all kwargs are set, including model)
         options = self._ClaudeAgentOptions(**options_kwargs)
 
@@ -2066,6 +2242,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         allow_sdk_tools: frozenset[str] = frozenset(),
         allow_mcp_tool_ids: frozenset[str] | None = None,
         skill_names: frozenset[str] = frozenset(),
+        exclusive_mcp_tools: bool = False,
     ) -> None:
         """Eagerly ``connect()`` the warm CLI subprocess for a session before its
         first turn, so the first real ``run`` reuses it instead of paying the
@@ -2115,6 +2292,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 allow_sdk_tools=allow_sdk_tools,
                 allow_mcp_tool_ids=allow_mcp_tool_ids,
                 skill_names=skill_names,
+                exclusive_mcp_tools=exclusive_mcp_tools,
                 stderr_sink=[],
             )
             # Remember the digest we may have adopted a dir under, so a failed
@@ -2304,6 +2482,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         warm_client: LeasedClient | None = None,
         on_client_built: Callable[[Any, str, Callable], None] | None = None,
         model_override: str | None = None,
+        exclusive_mcp_tools: bool = False,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
@@ -2470,6 +2649,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 skill_names=skill_names,
                 session_handle=session_handle,
                 model_override=model_override,
+                exclusive_mcp_tools=exclusive_mcp_tools,
                 stderr_sink=_stderr_lines,
             )
             options = _built.options

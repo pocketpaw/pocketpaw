@@ -211,7 +211,15 @@ Changes:
   withhold-when-empty forward — including on the legacy ``resolved_profile is
   None`` path — so agent skills materialize even on non-entity / non-profile
   runs. The union still crosses into ``AgentPool.run`` as a plain
-  ``frozenset[str]`` (no EE symbol crosses into OSS). Per-agent MCP is DEFERRED.
+  ``frozenset[str]`` (no EE symbol crosses into OSS).
+- 2026-07-24 (CX-2, feat/code-agent-exclusive-tools) — per-agent MCP tool policy
+  (the M2 slice previously marked DEFERRED) is now LANDED. When the resolved
+  agent's config declares ``tool_mode="exclusive"``, ``_agent_tool_policy(instance)``
+  returns its declared ``tools`` and ``_drive_agent_loop`` sets
+  ``exclusive_mcp_tools=True`` + ``allow_mcp_tool_ids=<those tools>`` — driving the
+  CX-1 suppressible-grant cap so an exclusive agent (e.g. /code) gets EXACTLY its
+  declared MCP ids, OVERRIDING any surface allow-list. "additive" (the default)
+  is unchanged. The flag/allow-list cross into ``AgentPool.run`` as plain data.
 """
 
 from __future__ import annotations
@@ -334,6 +342,16 @@ def _stream_ttl() -> int:
 # agent RESUMES its native CLI session instead of replaying Mongo history into the
 # prompt. OFF (the default) leaves ``pool.run`` byte-for-byte the legacy path.
 _SUPERVISOR_TRUTHY = {"1", "true", "yes", "on"}
+
+# The interactive ask_user tool id (source of truth:
+# ``ee/pocketpaw_ee/agent/mcp_servers/ask.py`` ``ASK_USER_TOOL_ID``). Spelled as
+# a literal so this hot streaming path stays decoupled from the agent-tool
+# module — the same reason surface_registry spells its deny-list ids literally.
+# A ``tool_use`` for this id becomes an ``ask_user_question`` stream frame
+# (question + options) the client renders as clickable option chips, instead of
+# a generic ``tool_start``. It restores the interactive question UI on surfaces
+# where inline Ripple is off (notably /sites svelte-create).
+_ASK_USER_TOOL_ID = "mcp__pocketpaw_ask__ask_user"
 
 
 def _session_supervisor_enabled() -> bool:
@@ -823,6 +841,35 @@ def _agent_skill_set(instance: Any) -> frozenset[str]:
     return direct | plugin_skills
 
 
+def _agent_tool_policy(instance: Any) -> tuple[bool, frozenset[str]]:
+    """Resolve the agent's EXCLUSIVE tool policy from its raw config (CX-2).
+
+    Returns ``(exclusive, tools)``:
+    - ``exclusive`` is ``True`` ONLY when the agent config's
+      ``tool_mode == "exclusive"``. An explicit signal — a non-empty ``tools``
+      list does NOT by itself make an agent exclusive.
+    - ``tools`` is the frozenset of the agent's declared MCP tool ids, returned
+      only on the exclusive path (empty otherwise). The caller uses it as the
+      run's ``allow_mcp_tool_ids`` — which, paired with the CX-1
+      ``exclusive_mcp_tools`` cap, suppresses the universal pocket/widget/atlas
+      grant and OVERRIDES any surface allow-list. Additive agents (the default)
+      return ``(False, frozenset())`` so the legacy grant-union path is untouched.
+
+    ``instance.config`` is the raw config dict on the pooled instance; guarded
+    for dict-or-object exactly like ``backend`` is read at the run seam.
+    """
+    config = getattr(instance, "config", None) or {}
+    if isinstance(config, dict):
+        mode = config.get("tool_mode", "additive")
+        tools = config.get("tools", []) or []
+    else:
+        mode = getattr(config, "tool_mode", "additive")
+        tools = getattr(config, "tools", []) or []
+    if mode != "exclusive":
+        return (False, frozenset())
+    return (True, frozenset(tools))
+
+
 async def _prewarm_session(ctx: ScopeContext) -> None:
     """Eagerly warm the agent's CLI subprocess for this run's session BEFORE the
     first model turn (feat/claude-sdk-prewarm).
@@ -884,6 +931,15 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
             surface_sys_override = ctx.resolved_profile.system_message_override
             surface_skills = ctx.resolved_profile.skill_names or frozenset()
         surface_skills = surface_skills | _agent_skill_set(instance)
+        # CX-2 — mirror _drive_agent_loop's exclusive-tool resolution EXACTLY so
+        # the prewarmed client's options (and thus its cache key) MATCH turn 1's.
+        # An exclusive agent caps its MCP surface, which changes ``allowed_tools``
+        # (part of the client cache key); without mirroring it here the prewarm
+        # would warm an UNCAPPED client that turn 1 discards — a wasted warm.
+        # Additive agents (the default) leave both values unchanged.
+        prewarm_exclusive, prewarm_tools = _agent_tool_policy(instance)
+        if prewarm_exclusive:
+            surface_allow_mcp = prewarm_tools
 
         # Bind this run's tenancy for the warm-up so the prewarmed subprocess
         # connects with the SAME per-tenant cwd jail the first turn will resolve
@@ -911,6 +967,7 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
                 allow_mcp_tool_ids=surface_allow_mcp,
                 system_message_override=surface_sys_override,
                 skill_names=surface_skills,
+                exclusive_mcp_tools=prewarm_exclusive,
             )
         finally:
             detach_agent_identity(identity_tokens)
@@ -1090,6 +1147,21 @@ async def _drive_agent_loop(
         )
         if surface_allow_mcp is not None:
             run_kwargs["allow_mcp_tool_ids"] = surface_allow_mcp
+        # CX-2 — per-agent EXCLUSIVE tool policy. When the RESOLVED agent declares
+        # ``tool_mode="exclusive"``, its OWN ``tools`` become the MCP allow-list and
+        # the CX-1 ``exclusive_mcp_tools`` cap fires: the universal grant
+        # (pocket/widget/atlas + the ALWAYS_ALLOWED escape) is suppressed and the
+        # agent's declared ids OVERRIDE any surface ``allow_mcp_tool_ids`` set just
+        # above — agent-exclusive wins over the surface. ``exclusive_mcp_tools``
+        # rides the SAME withhold-when-empty contract as ``model_override`` /
+        # ``skill_names``: the key is added ONLY on the exclusive branch, so the 7
+        # non-Claude backends never receive a kwarg their narrower signature
+        # rejects. Additive agents (the default) touch nothing → the run is
+        # byte-identical to today, grant path intact.
+        agent_exclusive, agent_tools = _agent_tool_policy(instance)
+        if agent_exclusive:
+            run_kwargs["exclusive_mcp_tools"] = True
+            run_kwargs["allow_mcp_tool_ids"] = agent_tools
         # Forward the override only when the entity actually set one — withholding
         # keeps the prompt assembly untouched on every other run.
         if surface_sys_override is not None:
@@ -1255,7 +1327,22 @@ async def _drive_agent_loop(
                         tool_input = econtent
                     elif isinstance(econtent, str):
                         name = econtent
-                yield ("tool_start", {"tool": name, "input": tool_input})
+                if name == _ASK_USER_TOOL_ID:
+                    # Interactive question: emit an ``ask_user_question`` frame the
+                    # client renders as clickable option chips (service.ts ->
+                    # chatStore.setAskUser -> AssistantMessage chips), NOT a generic
+                    # tool_start. The agent ends its turn after asking; the user's
+                    # click returns as the next message.
+                    ask_input = tool_input if isinstance(tool_input, dict) else {}
+                    yield (
+                        "ask_user_question",
+                        {
+                            "question": ask_input.get("question", ""),
+                            "options": ask_input.get("options", []),
+                        },
+                    )
+                else:
+                    yield ("tool_start", {"tool": name, "input": tool_input})
             elif etype == "tool_result":
                 meta = getattr(event, "metadata", None) or {}
                 name = ""
@@ -1272,7 +1359,10 @@ async def _drive_agent_loop(
                     output=output,
                     handled_pocket_ids=handled_pocket_ids,
                 )
-                yield ("tool_result", {"tool": name, "output": output})
+                # The ask_user ack is internal (the question UI already rendered
+                # from the tool_use); don't surface a tool_result chip for it.
+                if name != _ASK_USER_TOOL_ID:
+                    yield ("tool_result", {"tool": name, "output": output})
             elif etype == "token_usage":
                 # Real per-run token metering (W3a). The backend (claude_sdk and
                 # every other backend) emits a ``token_usage`` AgentEvent whose
@@ -1540,6 +1630,9 @@ async def execute_run(spec: RunSpec) -> None:
         user_id=spec.user_id,
         agent_id_hint=spec.agent_id,
         expected_workspace_id=spec.workspace_id,
+        # CX-3: on /code the resolver routes an unhinted turn to the dedicated
+        # code agent (exclusive file-tool policy). No-op on every other surface.
+        surface=spec.surface,
     )
     # Even with the spec fallback, a doc + spec that BOTH lack a usable workspace
     # must fail cleanly here — never attach an empty identity downstream (the

@@ -55,6 +55,10 @@ class SurfaceMetaRequest(BaseModel):
     # "Use Svelte pages" toggle: "ripple" (default) | "svelte". Selects which
     # create-site authoring skill the preamble prefers. Optional.
     engine: str | None = None
+    # Sites refine hint — mirror SurfaceMeta. The Build/Chat toggle in the
+    # /sites/[siteId] refine chat: "chat" answers with no mutation, "build" (the
+    # default, preserving today's behavior) refines the site. Optional.
+    mode: str | None = "build"
     # Belt console hints — mirror SurfaceMeta. Set by the /belt page once the
     # user has bound a repo + branch for the run. ``repo`` is the absolute repo
     # path; ``base_branch`` is the branch to base the change off. Optional.

@@ -140,6 +140,11 @@ class SurfaceMeta:
     # "svelte"; absent / "ripple" keeps the default marketing brain. Does not
     # affect the refine branch (keyed on ``pocket_id``).
     engine: str | None = None
+    # Sites refine hint — the Build/Chat toggle in the /sites/[siteId] refine chat.
+    # ``"chat"`` answers questions about the existing site with NO mutation; ``"build"``
+    # / unset refines (edits) the site. Consulted only on the refine branch (pocket_id
+    # present); the sites handler reads ``meta.mode`` there. Absent on create/gallery.
+    mode: str | None = None
     # Belt console hints — set by the /belt page once the user has bound a repo
     # + branch for the run. ``repo`` is the absolute repo path; ``base_branch``
     # is the branch to base the change off. The belt handler injects both into
@@ -226,11 +231,26 @@ class SurfaceProfile:
         svelte-create row.
       * ``skill_names`` — skills this surface surfaces to the agent. Tested DATA;
         skill-surfacing consumption lands in a later pass.
-      * ``system_message_override`` — optional full system-message swap for a
-        surface. Declared for a future PR; not consumed yet.
+      * ``system_message_override`` — the surface's own system prompt, replacing
+        the pocket-shaped DELIVERABLE stack. CONSUMED since 2026-07-22
+        (fix/code-surface-denies-pocket-authoring); set on the CODE row, ``None``
+        everywhere else. When set, ``build_behavior_instructions`` appends it
+        INSTEAD of the ripple LAW, the pocket-delegation rule, the per-backend
+        pocket prompts, the home widget prompt, and the artifact-delivery rule.
+        It does NOT displace the runtime-identity rule or the Composio rules —
+        those describe the ENVIRONMENT (and the Composio ones are gated on
+        Composio being enabled, so prompt and tool list agree); this field
+        describes the WORK. Prompt text lives in ``surface/system_prompts.py``.
 
-    ``ripple_mode`` and ``deny_mcp_tool_ids`` are CONSUMED today; the remaining
-    fields are intentionally populated-but-inert so the descriptor's shape is
+        Pairs with, and does not replace, the deny set: the prompt says what the
+        surface DOES build, the deny set makes the alternatives unreachable.
+        /code needed both — ``ripple_mode="off"`` plus a preamble forbidding
+        pockets still lost to a request whose vocabulary matched the
+        create-pocket skill, because a prohibition does not create a default.
+
+    ``ripple_mode``, ``deny_mcp_tool_ids``, ``allow_mcp_tool_ids`` and
+    ``system_message_override`` are CONSUMED today; ``allowed_sdk_tools`` and
+    ``skill_names`` remain populated-but-inert so the descriptor's shape is
     locked now and later passes add enforcement without re-designing the
     primitive.
     """

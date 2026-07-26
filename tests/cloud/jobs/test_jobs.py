@@ -641,6 +641,139 @@ async def test_worker_failure_writes_failed_state(
     assert doc.error
 
 
+# ---------------------------------------------------------------------------
+# F2 (security) — a job failure must NOT surface raw exception text on the
+# broadcast/audit paths. A workspace-CUSTOM job (the #1536 entry-point feature)
+# can raise with upstream text carrying a secret (a token, a DB row, a URL);
+# that raw text used to land in the pocket's broadcast `state` (seen by EVERY
+# viewer over the WS) AND the audit `error`. The worker now surfaces a
+# controlled error's safe, fixed `.code` — or a generic "job failed" for any
+# other raise; the FULL detail stays only in the exception log.
+# ---------------------------------------------------------------------------
+
+
+class _SecretLeakJob:
+    """A CUSTOM job that raises with raw upstream text carrying a secret."""
+
+    name = "secret_leak_job"
+
+    async def __call__(
+        self, *, workspace_id: str, pocket_id: str, job_id: str, params: dict
+    ) -> dict:
+        raise Exception("secret token abc123def")
+
+
+class _CloudErrorJob:
+    """A job that raises a CONTROLLED CloudError (safe, fixed `.code`)."""
+
+    name = "cloud_error_job"
+
+    async def __call__(
+        self, *, workspace_id: str, pocket_id: str, job_id: str, params: dict
+    ) -> dict:
+        from pocketpaw_ee.cloud._core.errors import CloudError
+
+        # The message interpolates a "secret" to prove ONLY the code is surfaced.
+        raise CloudError(502, "job.connector_error", "connector 'sf' row secret-xyz failed")
+
+
+@pytest.mark.asyncio
+async def test_worker_failure_does_not_leak_raw_exception_text(
+    mongo_db: Any,
+    fake_pool: _FakePool,
+    seed_pocket,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # noqa: ARG001
+    """A custom job raising raw text with a secret must NOT put that text on the
+    broadcast `state` or the audit `error`. Both carry the generic "job failed";
+    the secret substring appears in NEITHER. FAILS on the unfixed worker, which
+    writes `str(exc)` straight into both paths."""
+    jobs_registry.register_job(_SecretLeakJob())
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_merge_spec(workspace_id, user_id, pocket_id, body):  # type: ignore[no-untyped-def]
+        captured["body"] = body
+        return {"ok": True}
+
+    monkeypatch.setattr(jobs_worker, "merge_spec", _fake_merge_spec)
+
+    recorder = _RecordingAuditLogger()
+    monkeypatch.setattr(jobs_service, "get_audit_logger", lambda: recorder)
+
+    pocket_id = await seed_pocket(workspace=WS)
+    result = await jobs_service.dispatch_job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        action="run_leak",
+        job_name="secret_leak_job",
+        params={},
+        triggered_by=VIEWER,
+    )
+    job_id = result["job_id"]
+
+    await jobs_worker.execute_workspace_job({}, job_id)
+
+    # (a) broadcast state — the secret is absent; the message is the generic string.
+    broadcast_error = captured["body"]["merge"]["state"]["run_leak_error"]
+    assert "abc123def" not in broadcast_error
+    assert broadcast_error == "job failed"
+
+    # (b) audit error — same: no secret, generic string.
+    failed_events = [e for e in recorder.events if e.context.get("outcome") == "failed"]
+    assert failed_events, "the failed job must be audited"
+    audit_error = failed_events[-1].context.get("error")
+    assert "abc123def" not in str(audit_error)
+    assert audit_error == "job failed"
+
+    # (c) the persisted doc's error is the safe string too.
+    doc = await jobs_service.get_job(WS, job_id)
+    assert doc is not None
+    assert doc.status == "failed"
+    assert doc.error == "job failed"
+
+
+@pytest.mark.asyncio
+async def test_worker_failure_surfaces_controlled_error_code(
+    mongo_db: Any,
+    fake_pool: _FakePool,
+    seed_pocket,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # noqa: ARG001
+    """A CONTROLLED CloudError surfaces its safe, fixed `.code` (a useful signal)
+    on both paths — never the interpolated message (which here hides a secret)."""
+    jobs_registry.register_job(_CloudErrorJob())
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_merge_spec(workspace_id, user_id, pocket_id, body):  # type: ignore[no-untyped-def]
+        captured["body"] = body
+        return {"ok": True}
+
+    monkeypatch.setattr(jobs_worker, "merge_spec", _fake_merge_spec)
+
+    pocket_id = await seed_pocket(workspace=WS)
+    result = await jobs_service.dispatch_job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        action="run_cloud_err",
+        job_name="cloud_error_job",
+        params={},
+        triggered_by=VIEWER,
+    )
+    job_id = result["job_id"]
+
+    await jobs_worker.execute_workspace_job({}, job_id)
+
+    broadcast_error = captured["body"]["merge"]["state"]["run_cloud_err_error"]
+    assert broadcast_error == "job.connector_error"
+    assert "secret-xyz" not in broadcast_error
+
+    doc = await jobs_service.get_job(WS, job_id)
+    assert doc is not None
+    assert doc.error == "job.connector_error"
+
+
 @pytest.mark.asyncio
 async def test_worker_rejects_template_owned_result(
     mongo_db: Any, fake_pool: _FakePool, seed_pocket, monkeypatch: pytest.MonkeyPatch
@@ -1080,10 +1213,20 @@ async def test_route_no_kind_does_not_enqueue_job(
 # ---------------------------------------------------------------------------
 
 
-async def _seed_source(mongo_db: Any, collection: str, records: list[dict]) -> None:
-    """Insert raw source records into a Mongo collection in the test DB."""
+async def _seed_source(
+    mongo_db: Any, collection: str, records: list[dict], *, workspace: str = WS
+) -> None:
+    """Insert raw source records into a Mongo collection in the test DB.
+
+    Each record is stamped with a ``workspace`` field (default :data:`WS`) so the
+    tenancy-scoped read matches it — ``read_source_records`` now filters on
+    ``{"workspace": workspace_id}``, so an untagged record would (correctly) read
+    as nothing. A record that already carries its own ``workspace`` keeps it,
+    which lets a test seed MULTIPLE tenants into one collection (the cross-tenant
+    isolation test seeds both :data:`WS` and :data:`OTHER_WS` rows).
+    """
     for rec in records:
-        await mongo_db[collection].insert_one(dict(rec))
+        await mongo_db[collection].insert_one({"workspace": workspace, **rec})
 
 
 async def _seed_pocket_with_scored_rows(*, workspace: str, scored_rows: list[dict]) -> str:
@@ -1269,6 +1412,103 @@ async def test_score_applications_missing_source_collection_returns_empty(
 
 
 # ---------------------------------------------------------------------------
+# SECURITY (fix/jobs-source-collection-tenancy) — the source-collection read is
+# TENANCY-SCOPED and DENYLISTED. Before the fix, `read_source_records` did an
+# unscoped `db[name].find({})` over an AUTHOR-controlled collection name in the
+# SHARED cloud DB, so a pocket author could set `source_collection: "users"` (or
+# any collection) and pull EVERY tenant's rows — a cross-tenant leak. The fix
+# scopes the read to the job's own workspace AND denylists credential/identity/
+# system collections outright. These two tests FAIL on the pre-fix code (the
+# unscoped read pulls the other tenant's rows / reads the denylisted collection)
+# and PASS after the fix.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_score_applications_source_backed_is_workspace_scoped(
+    mongo_db: Any,
+) -> None:
+    """A source-backed run reads ONLY records tagged with the job's own
+    workspace — never another tenant's rows.
+
+    Seeds ONE collection with records for TWO tenants (:data:`WS` and
+    :data:`OTHER_WS`) and runs `score_applications` for :data:`WS`. The scored
+    rows come only from the WS records; the OTHER_WS rows are never read. FAILS
+    on the pre-fix code, whose unscoped `find({})` pulled every tenant's rows.
+    """
+    from pocketpaw_ee.cloud.jobs.builtin.score_applications import ScoreApplicationsJob
+
+    await _seed_source(
+        mongo_db,
+        "applications",
+        [
+            {"id": "ws-a-1", "name": "Alice A", "email": "alice@acme.com"},
+            {"id": "ws-a-2", "name": "Aaron A", "email": "aaron@acme.com"},
+        ],
+        workspace=WS,
+    )
+    await _seed_source(
+        mongo_db,
+        "applications",
+        [
+            {"id": "ws-b-1", "name": "Bianca B", "email": "bianca@other.com"},
+            {"id": "ws-b-2", "name": "Ben B", "email": "ben@other.com"},
+        ],
+        workspace=OTHER_WS,
+    )
+    pocket_id = await _seed_pocket_with_scored_rows(workspace=WS, scored_rows=[])
+
+    job = ScoreApplicationsJob()
+    result = await job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        job_id="j-tenant-1",
+        params={"source_collection": "applications", "batch_size": 10},
+    )
+
+    ids = {r["id"] for r in result["state"]["scored_rows"]}
+    assert ids == {"ws-a-1", "ws-a-2"}
+    assert not any(str(i).startswith("ws-b") for i in ids)
+
+
+@pytest.mark.asyncio
+async def test_score_applications_denylisted_collection_reads_nothing(
+    mongo_db: Any,
+) -> None:
+    """A denylisted collection (credential/identity/system) is NEVER read, even
+    for the job's own workspace.
+
+    Seeds `workspace_connectors` rows tagged with the job's own :data:`WS` and
+    points the job at it — nothing is scored (the denylist returns `[]` before
+    any read). FAILS on the pre-fix code, which had no denylist and scored the
+    connector rows (whose `config` holds secrets).
+    """
+    from pocketpaw_ee.cloud.jobs.builtin.score_applications import ScoreApplicationsJob
+
+    await _seed_source(
+        mongo_db,
+        "workspace_connectors",
+        [
+            {"id": "conn-1", "name": "github", "config": {"token": "ghp_secret"}},
+            {"id": "conn-2", "name": "slack", "config": {"token": "xoxb-secret"}},
+        ],
+        workspace=WS,
+    )
+    pocket_id = await _seed_pocket_with_scored_rows(workspace=WS, scored_rows=[])
+
+    job = ScoreApplicationsJob()
+    result = await job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        job_id="j-deny-1",
+        params={"source_collection": "workspace_connectors", "batch_size": 10},
+    )
+
+    assert result["state"]["scored_rows"] == []
+    assert result["state"]["score_applications_scored_count"] == 0
+
+
+# ---------------------------------------------------------------------------
 # CHANGE 2 (this PR) — score_applications CONNECTOR source mode. When `params`
 # carries `connector` + `action`, the job reads its batch from the workspace's
 # BOUND connector via `jobs.service.execute_connector_action` (which calls
@@ -1288,11 +1528,42 @@ def _connector_response(records: Any) -> Any:
     return ExecuteActionResponse(success=True, data=records, execution_mode="cloud")
 
 
+def _read_action_info(action: str = "list_leads") -> Any:
+    """A read-first (``auto``-trust, ``is_read=True``) action classification —
+    the shape ``connectors_service.get_action_trust`` returns for a read action."""
+    from pocketpaw_ee.cloud.connectors.domain import ConnectorActionInfo
+
+    return ConnectorActionInfo(
+        name=action,
+        description="",
+        trust_level="auto",
+        execution_mode="cloud",
+        is_read=True,
+    )
+
+
+def _patch_action_trust(monkeypatch: pytest.MonkeyPatch, info: Any) -> None:
+    """Monkeypatch ``connectors_service.get_action_trust`` to return ``info``
+    (a :class:`ConnectorActionInfo` or ``None``). F3 makes
+    ``execute_connector_action`` consult this trust gate BEFORE ``execute``, so
+    the connector-backed tests must stub it as a read action to reach execute."""
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    async def _fake_trust(name, action):  # type: ignore[no-untyped-def]
+        return info
+
+    monkeypatch.setattr(connectors_service, "get_action_trust", _fake_trust)
+
+
 def _patch_connector_execute(monkeypatch: pytest.MonkeyPatch, records: Any):
     """Monkeypatch ``connectors_service.execute`` to return ``records`` and
     capture the call args. ``execute_connector_action`` lazy-imports the
     connectors service inside the function, so patching the real module object
     is what the lazy import resolves to.
+
+    Also stubs ``get_action_trust`` as a READ action so the F3 trust gate lets
+    the (fake) connector action through — the connector-backed built-in only
+    runs read actions, so this keeps the end-to-end path green.
 
     Returns the ``captured`` dict so a test can assert the call ran under the
     workspace job identity with ``pocket_id=None``.
@@ -1309,6 +1580,7 @@ def _patch_connector_execute(monkeypatch: pytest.MonkeyPatch, records: Any):
         return _connector_response(records)
 
     monkeypatch.setattr(connectors_service, "execute", _fake_execute)
+    _patch_action_trust(monkeypatch, _read_action_info())
     return captured
 
 
@@ -1499,6 +1771,9 @@ async def test_score_applications_connector_error_propagates(
         return ExecuteActionResponse(success=False, data=None, error="upstream 500")
 
     monkeypatch.setattr(connectors_service, "execute", _failing_execute)
+    # The action passes the F3 read gate (a real upstream error, not a blocked
+    # write) so the failure we assert is the connector's, not the trust gate's.
+    _patch_action_trust(monkeypatch, _read_action_info())
     pocket_id = await _seed_pocket_with_scored_rows(workspace=WS, scored_rows=[])
 
     job = ScoreApplicationsJob()
@@ -1510,3 +1785,103 @@ async def test_score_applications_connector_error_propagates(
             params={"connector": "snctm-api", "action": "list_leads", "batch_size": 20},
         )
     assert exc.value.code == "job.connector_error"
+
+
+# ---------------------------------------------------------------------------
+# F3 (security) — a job must not drive a WRITE connector action. `execute` does
+# NOT classify read/write trust; that gate lives only in the MCP
+# `connector_execute` tool via `get_action_trust`. `connector_action` is a free
+# author param, so without a gate here a job could run a write / confirm /
+# restricted action under the system identity, bypassing the interactive
+# approval + per-user permission checks. `execute_connector_action` now resolves
+# the action's trust FIRST and allows ONLY read-first (`auto`) actions.
+# ---------------------------------------------------------------------------
+
+
+def _write_action_info(action: str = "create_lead") -> Any:
+    """A write-shaped (``confirm``-trust, ``is_read=False``) action."""
+    from pocketpaw_ee.cloud.connectors.domain import ConnectorActionInfo
+
+    return ConnectorActionInfo(
+        name=action,
+        description="",
+        trust_level="confirm",
+        execution_mode="cloud",
+        is_read=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_connector_action_rejects_write_action(
+    mongo_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ARG001
+    """A WRITE (non-``auto``) action is refused BEFORE ``execute`` runs, so a job
+    can't drive a write connector action past the read gate under the system
+    identity. FAILS on the un-gated service, which calls ``execute`` regardless."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    execute_calls = {"n": 0}
+
+    async def _spy_execute(*args, **kwargs):  # type: ignore[no-untyped-def]
+        execute_calls["n"] += 1
+        return _connector_response([])
+
+    monkeypatch.setattr(connectors_service, "execute", _spy_execute)
+    _patch_action_trust(monkeypatch, _write_action_info("create_lead"))
+
+    with pytest.raises(CloudError) as exc:
+        await jobs_service.execute_connector_action(WS, "salesforce", "create_lead", {})
+
+    assert exc.value.code == "job.connector_action_not_allowed"
+    # The write action never reached execute — refused at the gate.
+    assert execute_calls["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_execute_connector_action_allows_read_action(
+    mongo_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ARG001
+    """A READ (``auto``-trust) action passes the gate: ``execute`` runs once and
+    its data payload is returned unchanged."""
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    records = [{"id": "r1"}, {"id": "r2"}]
+    execute_calls = {"n": 0}
+
+    async def _fake_execute(workspace_id, name, body, *, user_id=None):  # type: ignore[no-untyped-def]
+        execute_calls["n"] += 1
+        return _connector_response(records)
+
+    monkeypatch.setattr(connectors_service, "execute", _fake_execute)
+    _patch_action_trust(monkeypatch, _read_action_info("list_leads"))
+
+    out = await jobs_service.execute_connector_action(WS, "salesforce", "list_leads", {})
+
+    assert execute_calls["n"] == 1
+    assert out == records
+
+
+@pytest.mark.asyncio
+async def test_execute_connector_action_rejects_unknown_action(
+    mongo_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ARG001
+    """An unknown action (``get_action_trust`` → ``None``) is refused fail-closed,
+    and ``execute`` never runs."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    execute_calls = {"n": 0}
+
+    async def _spy_execute(*args, **kwargs):  # type: ignore[no-untyped-def]
+        execute_calls["n"] += 1
+        return _connector_response([])
+
+    monkeypatch.setattr(connectors_service, "execute", _spy_execute)
+    _patch_action_trust(monkeypatch, None)
+
+    with pytest.raises(CloudError) as exc:
+        await jobs_service.execute_connector_action(WS, "salesforce", "no_such_action", {})
+
+    assert exc.value.code == "job.connector_action_not_allowed"
+    assert execute_calls["n"] == 0

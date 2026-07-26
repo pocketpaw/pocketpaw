@@ -11,6 +11,9 @@ directory marker file.
 
 Created: 2026-06-22
 Updated: 2026-06-23 — added POST /cloud/projects/clone (git clone into project).
+Updated: 2026-07-15 (fix/workspace-vm-map-to-db) — the workspace-VM store
+    accessors are now async + Mongo-backed; ``await`` the VM lookups in
+    ``_ensure_vm_project_dir`` / ``_clone_into_vm``.
 """
 
 from __future__ import annotations
@@ -245,7 +248,7 @@ async def _ensure_vm_project_dir(workspace_id: str, project_name: str) -> str:
             get_workspace_vm_sandbox_id,
         )
 
-        sandbox_id = get_workspace_vm_sandbox_id(workspace_id)
+        sandbox_id = await get_workspace_vm_sandbox_id(workspace_id)
         if not sandbox_id:
             logger.debug("_ensure_vm_project_dir: no VM for workspace %s", workspace_id)
             return ""
@@ -270,7 +273,7 @@ async def _ensure_vm_project_dir(workspace_id: str, project_name: str) -> str:
             logger.warning("_ensure_vm_project_dir: could not ensure VM is started: %s", exc)
             return ""
 
-        config = get_workspace_vm_config(workspace_id)
+        config = await get_workspace_vm_config(workspace_id)
         root = config.get("root_dir", "/workspace")
         vm_path = f"{root}/{project_name}"
 
@@ -294,7 +297,7 @@ async def _clone_into_vm(
             get_workspace_vm_sandbox_id,
         )
 
-        sandbox_id = get_workspace_vm_sandbox_id(workspace_id)
+        sandbox_id = await get_workspace_vm_sandbox_id(workspace_id)
         if not sandbox_id:
             return
 
@@ -304,7 +307,7 @@ async def _clone_into_vm(
         if client is None:
             return
 
-        config = get_workspace_vm_config(workspace_id)
+        config = await get_workspace_vm_config(workspace_id)
         root = config.get("root_dir", "/workspace")
         vm_path = f"{root}/{project_name}"
 

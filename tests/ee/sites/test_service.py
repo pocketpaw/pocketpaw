@@ -1296,7 +1296,9 @@ async def test_workers_mode_routes_static_publish_to_workers_deployer(beanie_tes
 
     calls: list[tuple[str, str]] = []
 
-    async def fake_workers_deploy(site_id: str, project_dir: str) -> str:
+    async def fake_workers_deploy(
+        site_id: str, project_dir: str, *, engine: str = "ripple", **_: object
+    ) -> str:
         calls.append((site_id, project_dir))
         return f"https://paw-site-{site_id}.acct.workers.dev"
 
@@ -1334,7 +1336,9 @@ async def test_workers_mode_dynamic_site_enqueues_not_deploys(beanie_test_db, mo
     monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "workers")
     monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
 
-    async def must_not_run(site_id: str, project_dir: str) -> str:  # pragma: no cover
+    async def must_not_run(  # pragma: no cover
+        site_id: str, project_dir: str, *, engine: str = "ripple", **_: object
+    ) -> str:
         raise AssertionError("a dynamic site must not reach the workers deployer")
 
     gen = _FakeGenerator()
