@@ -417,9 +417,7 @@ def _concierge_profile(meta: SurfaceMeta) -> SurfaceProfile:
         from pocketpaw_ee.agent.mcp_servers.pawbar import pawbar_tool_id
 
         verb_ids = frozenset(
-            pawbar_tool_id(a["verb"])
-            for a in actions
-            if isinstance(a, dict) and a.get("verb")
+            pawbar_tool_id(a["verb"]) for a in actions if isinstance(a, dict) and a.get("verb")
         )
         allow = allow | verb_ids
     return SurfaceProfile(

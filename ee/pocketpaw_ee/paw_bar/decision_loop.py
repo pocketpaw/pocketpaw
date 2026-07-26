@@ -98,6 +98,7 @@ def _sanitize_for_human(text: Any, *, cap: int) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s[:cap]
 
+
 # Schema version stamped onto the ``_customer_reply`` blob. Bump when the blob
 # shape changes so a stale pending Action approved after a deploy is handled
 # loudly rather than misinterpreted. (Mirrors instinct_bridge._POCKET_WRITE_SCHEMA.)
@@ -127,9 +128,7 @@ def resolve_workspace_id(widget: Any) -> str:
     instinct.db) is done separately in ``propose_customer_decision`` from the
     real ``workspace_id`` only — an owner label is never a store-path token.
     """
-    return str(getattr(widget, "workspace_id", "") or "") or str(
-        getattr(widget, "owner", "") or ""
-    )
+    return str(getattr(widget, "workspace_id", "") or "") or str(getattr(widget, "owner", "") or "")
 
 
 def _summarize_payload(payload: dict[str, Any]) -> str:
@@ -385,8 +384,7 @@ async def propose_customer_action(
         safe_summary = _sanitize_for_human(summary, cap=_MAX_SUMMARY_CHARS)
         safe_widget_name = _sanitize_for_human(widget_name, cap=80) or widget_id
         default_reply = (
-            f"Thanks, we've passed your '{verb}' request to the team and will "
-            "follow up shortly."
+            f"Thanks, we've passed your '{verb}' request to the team and will follow up shortly."
         )
         title = f"Visitor action on {safe_widget_name}: {verb}".strip()
         recommendation = (

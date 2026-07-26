@@ -84,7 +84,7 @@ def derive_conversation_starters(widget: Any) -> list[str]:
     starters: list[str] = []
     if spec is not None and getattr(spec, "catalog", None):
         starters.append("What do you sell?")
-    for action in (getattr(spec, "actions", None) or []):
+    for action in getattr(spec, "actions", None) or []:
         if len(starters) >= _MAX_STARTERS:
             break
         label = (getattr(action, "label", "") or "").strip()

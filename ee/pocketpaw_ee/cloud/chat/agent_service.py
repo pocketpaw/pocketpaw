@@ -356,9 +356,7 @@ def current_pocket_id() -> str | None:
 # which widget to run ``execute_action`` against. ``None`` (every non-concierge or
 # no-actions run) means the server builds NO tools — deny-all, exactly as before.
 # Shape: ``{"widget_id": str, "actions": [{"verb","policy","args","label"}, ...]}``.
-_active_pawbar_run: ContextVar[dict[str, Any] | None] = ContextVar(
-    "agent_pawbar_run", default=None
-)
+_active_pawbar_run: ContextVar[dict[str, Any] | None] = ContextVar("agent_pawbar_run", default=None)
 
 
 def bind_pawbar_run(run: dict[str, Any] | None) -> Token:
@@ -1102,7 +1100,9 @@ async def _resolve_concierge(
     # Reconcile the pocket's workspace against the key's — a non-empty doc
     # workspace that disagrees raises Forbidden (cross-tenant guard); an empty
     # doc workspace falls back to the trusted key workspace.
-    workspace_id = _reconcile_workspace_id(str(getattr(pocket, "workspace", "")), expected_workspace_id)
+    workspace_id = _reconcile_workspace_id(
+        str(getattr(pocket, "workspace", "")), expected_workspace_id
+    )
     if not workspace_id:
         raise CloudError(400, "concierge.no_workspace", "Concierge run has no workspace")
 
