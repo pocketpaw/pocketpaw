@@ -19,6 +19,11 @@
 #     status, created_at}.
 #   * Handoffs empty-but-well-shaped in v1 (no producer), and isolated by widget.
 #   * Conversations list (LISTABLE — grouped by customer_ref, unsupported=False).
+# Updated 2026-07-26 (concierge transcripts): a tenth layer covers two-sided
+#   transcripts — a run carrying ``user_text`` renders the visitor turn before the
+#   agent's, a run with no reply still shows what was asked, the question is
+#   stamped earlier than the answer, and the conversations preview falls back to
+#   the visitor's question only when there is no reply to show.
 
 from __future__ import annotations
 
@@ -616,8 +621,9 @@ _CUST = "cust-0001"  # valid customer_ref (>= 8 chars, allowed charset)
 @pytest.mark.asyncio
 async def test_transcript_happy_path_ordered_and_shaped(client):
     """The transcript is this visitor's concierge turns, oldest-first, shaped
-    {customer_ref, messages:[{role,content,created_at}], count}. v1: assistant-only
-    (the concierge MVP doesn't persist the visitor's message)."""
+    {customer_ref, messages:[{role,content,created_at}], count}. These runs carry
+    no stored visitor text, so the result is assistant-only — which is exactly the
+    shape a site with transcript retention turned off keeps producing."""
     c, store, _fabric = client
     site = await _site()
     await store.create_widget(_widget())
@@ -787,3 +793,104 @@ async def test_preview_frame_served_when_concierge_disabled(client):
     res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
     assert res.status_code == 200
     assert "window.__PAWBAR__" in res.text
+
+
+# --------------------------------------------------------------------------- #
+# Layer 10 — two-sided transcripts (visitor lines stored on the run doc)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_transcript_interleaves_visitor_and_agent_turns(client):
+    """A run that stored the visitor's line renders BOTH turns, question first,
+    so the owner reads a conversation instead of a monologue."""
+    c, store, _fabric = client
+    site = await _site()
+    await store.create_widget(_widget())
+    now = datetime.now(UTC)
+    await _mk_run(
+        user_id=_CUST,
+        user_text="What time do you open?",
+        partial_text="We open at 8am.",
+        createdAt=now - timedelta(minutes=5),
+        ended_at=now - timedelta(minutes=4),
+    )
+    await _mk_run(
+        user_id=_CUST,
+        user_text="Do you do gluten free?",
+        partial_text="Yes, every day.",
+        createdAt=now,
+        ended_at=now,
+    )
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/conversations/{_CUST}")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["count"] == 4
+    assert [(m["role"], m["content"]) for m in body["messages"]] == [
+        ("user", "What time do you open?"),
+        ("assistant", "We open at 8am."),
+        ("user", "Do you do gluten free?"),
+        ("assistant", "Yes, every day."),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_transcript_keeps_visitor_turn_when_reply_missing(client):
+    """A run that failed before answering still shows what was asked — otherwise
+    the owner sees an empty conversation and has no idea what went wrong."""
+    c, store, _fabric = client
+    site = await _site()
+    await store.create_widget(_widget())
+    await _mk_run(user_id=_CUST, user_text="Are you open on Sunday?", partial_text="")
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/conversations/{_CUST}")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert [(m["role"], m["content"]) for m in body["messages"]] == [
+        ("user", "Are you open on Sunday?")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_transcript_user_turn_is_stamped_at_ask_time(client):
+    """The question carries the run's creation time and the answer its end time,
+    so a slow reply is visible in the transcript rather than collapsed."""
+    c, store, _fabric = client
+    site = await _site()
+    await store.create_widget(_widget())
+    asked = datetime.now(UTC) - timedelta(minutes=2)
+    answered = datetime.now(UTC)
+    await _mk_run(
+        user_id=_CUST, user_text="hello?", partial_text="hi!", createdAt=asked, ended_at=answered
+    )
+
+    body = (await c.get(f"/paw-bar/admin/site/{site.id}/conversations/{_CUST}")).json()
+    # Mongo stores millisecond precision, so compare the ORDER rather than exact
+    # microseconds: the question must be stamped strictly before the answer.
+    assert body["messages"][0]["created_at"] < body["messages"][1]["created_at"]
+
+
+@pytest.mark.asyncio
+async def test_conversations_preview_falls_back_to_visitor_question(client):
+    """A conversation whose run produced no reply used to render a blank row; it
+    now previews what the visitor asked."""
+    c, store, _fabric = client
+    site = await _site()
+    await store.create_widget(_widget())
+    await _mk_run(user_id=_CUST, user_text="Do you deliver?", partial_text="")
+
+    body = (await c.get(f"/paw-bar/admin/site/{site.id}/conversations")).json()
+    assert [i["preview"] for i in body["items"]] == ["Do you deliver?"]
+
+
+@pytest.mark.asyncio
+async def test_conversations_preview_still_prefers_the_reply(client):
+    """The existing preview behaviour is unchanged when there IS a reply."""
+    c, store, _fabric = client
+    site = await _site()
+    await store.create_widget(_widget())
+    await _mk_run(user_id=_CUST, user_text="Do you deliver?", partial_text="Yes, within 5km.")
+
+    body = (await c.get(f"/paw-bar/admin/site/{site.id}/conversations")).json()
+    assert [i["preview"] for i in body["items"]] == ["Yes, within 5km."]

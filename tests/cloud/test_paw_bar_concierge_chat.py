@@ -14,6 +14,11 @@
 #     SIBLING pocket/workspace than the key → 403, and a happy path that streams
 #     SSE frames while dispatching a correctly-shaped CONCIERGE RunSpec (executor
 #     stubbed — the live agent run is T5).
+# Updated 2026-07-26 (concierge transcripts): a fourth layer covers visitor-message
+#   retention — the dispatched spec carries the visitor's line by default, carries
+#   nothing when the site's concierge_store_transcripts is off (while the AGENT
+#   still receives the full message either way), the stored copy is length-capped,
+#   and create_run actually lands the field on the run document.
 
 from __future__ import annotations
 
@@ -483,3 +488,134 @@ async def test_chat_rate_limit_is_429(concierge_client):
         )
     res = await client.post("/paw-bar/chat", json=_payload(widget.id), headers={"Origin": _ORIGIN})
     assert res.status_code == 429
+
+
+# --------------------------------------------------------------------------- #
+# Layer 4 — visitor-message retention (concierge transcripts)
+#
+# The concierge visitor is anonymous and has no Message row, so the run doc is the
+# only place the visitor half of a transcript can live. These prove the toggle
+# actually governs storage, that the AGENT is unaffected by it, and that the
+# stored copy is bounded.
+# --------------------------------------------------------------------------- #
+
+
+async def _dispatch(client, store, monkeypatch, *, site_kw=None, **payload_ov):
+    """Run one chat request through the endpoint and return the dispatched RunSpec."""
+    from pocketpaw_ee.cloud.chat.runs.memory_stream import InMemoryStreamTransport
+
+    await _site(**(site_kw or {}))
+    widget = await store.create_widget(_widget(agent_id="agent-xyz"))
+
+    transport = InMemoryStreamTransport()
+    fake_exec = _FakeExecutor(transport)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.runs.transport.get_stream_transport", lambda: transport
+    )
+    monkeypatch.setattr("pocketpaw_ee.cloud.chat.runs.executor.get_executor", lambda: fake_exec)
+
+    async def _fake_create_run(spec):
+        return SimpleNamespace(run_id=spec.run_id)
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.chat.runs.service.create_run", _fake_create_run)
+
+    res = await client.post(
+        "/paw-bar/chat", json=_payload(widget.id, **payload_ov), headers={"Origin": _ORIGIN}
+    )
+    assert res.status_code == 200, res.text
+    assert len(fake_exec.submitted) == 1
+    return fake_exec.submitted[0]
+
+
+@pytest.mark.asyncio
+async def test_chat_persists_visitor_message_by_default(concierge_client, monkeypatch):
+    """A site with the default settings stores the visitor's line, so the owner's
+    transcript is a conversation and not the agent talking to itself."""
+    client, store = concierge_client
+    spec = await _dispatch(client, store, monkeypatch, message="Do you do gluten free?")
+    assert spec.persist_user_text == "Do you do gluten free?"
+    # The visitor is still anonymous: no Message row is claimed for that text.
+    assert spec.user_message_id == ""
+
+
+@pytest.mark.asyncio
+async def test_chat_does_not_persist_visitor_message_when_retention_off(
+    concierge_client, monkeypatch
+):
+    """concierge_store_transcripts=False keeps the concierge fully working while
+    the visitor's words are never written down."""
+    client, store = concierge_client
+    spec = await _dispatch(
+        client,
+        store,
+        monkeypatch,
+        site_kw={"concierge_store_transcripts": False},
+        message="My order number is 12345",
+    )
+    assert spec.persist_user_text == ""
+    # The AGENT still gets the whole message — the toggle governs storage only.
+    assert spec.content == "My order number is 12345"
+
+
+@pytest.mark.asyncio
+async def test_chat_stored_visitor_message_is_length_capped(concierge_client, monkeypatch):
+    """A pasted wall of text can't grow the run collection without bound, and the
+    agent still receives every character of it."""
+    from pocketpaw_ee.paw_bar.router import _STORED_USER_TEXT_CHARS
+
+    client, store = concierge_client
+    long_message = "a" * (_STORED_USER_TEXT_CHARS + 500)
+    spec = await _dispatch(client, store, monkeypatch, message=long_message)
+    assert len(spec.persist_user_text) == _STORED_USER_TEXT_CHARS
+    assert spec.content == long_message
+
+
+@pytest.mark.asyncio
+async def test_create_run_writes_visitor_text_onto_the_run_doc(mongo_db):
+    """The spec field actually lands on the document the transcript reads back."""
+    from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
+    from pocketpaw_ee.cloud.chat.runs.service import create_run
+
+    spec = RunSpec(
+        run_id="run-transcript-1",
+        workspace_id="ws-1",
+        context_type="concierge",
+        scope_id="pocket-1",
+        session_key="cloud:concierge:pocket-1:cust-1:agent-xyz",
+        group=None,
+        user_id="cust-1",
+        agent_id="agent-xyz",
+        client_message_id="cmid-transcript-1",
+        user_message_id="",
+        persist_user_text="What time do you open?",
+        content="What time do you open?",
+        history=[],
+        intent=None,
+    )
+    doc = await create_run(spec)
+    assert doc.user_text == "What time do you open?"
+
+
+@pytest.mark.asyncio
+async def test_create_run_defaults_visitor_text_to_empty(mongo_db):
+    """Every authed surface leaves the field unset and is unchanged by this."""
+    from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
+    from pocketpaw_ee.cloud.chat.runs.service import create_run
+
+    spec = RunSpec(
+        run_id="run-transcript-2",
+        workspace_id="ws-1",
+        context_type="pocket",
+        scope_id="pocket-1",
+        session_key="cloud:pocket:pocket-1",
+        group=None,
+        user_id="user:maya",
+        agent_id="agent-xyz",
+        client_message_id="cmid-transcript-2",
+        user_message_id="msg-1",
+        content="hello",
+        history=[],
+        intent=None,
+    )
+    doc = await create_run(spec)
+    assert doc.user_text == ""

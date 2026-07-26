@@ -16,6 +16,10 @@ Changes:
   boundary (EE Rule 2 — only this module touches ``ChatRunDoc``). ``bill_run`` now
   calls ``mark_billed`` instead. Reading ``run_doc.usage`` in metering stays fine;
   only the WRITE moves here, the owner of the document.
+- 2026-07-26 (concierge transcripts) — ``create_run`` copies
+  ``RunSpec.persist_user_text`` onto ``ChatRunDoc.user_text``. Only the concierge
+  surface ever sets it (its anonymous visitor has no Message row to point
+  ``user_message_id`` at), so every other caller writes "" and is unchanged.
 """
 
 from __future__ import annotations
@@ -55,6 +59,7 @@ async def create_run(spec: RunSpec) -> ChatRunDoc:
         agent_id=spec.agent_id,
         client_message_id=spec.client_message_id,
         user_message_id=spec.user_message_id,
+        user_text=spec.persist_user_text,
     )
     try:
         await doc.insert()

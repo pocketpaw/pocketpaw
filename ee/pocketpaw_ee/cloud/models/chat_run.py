@@ -16,6 +16,14 @@ Changes:
   until its cost is metered (the durable backlog the sweeper drains). The
   exactly-once guarantee is doubly held — the ledger's ``run:{run_id}``
   idempotency key is the real guard, this flag is the cheap "already done" filter.
+- 2026-07-26 (concierge transcripts) — added ``user_text``. Every authed surface
+  persists the user's turn as its own Message document and points
+  ``user_message_id`` at it; the CONCIERGE surface has an anonymous visitor with
+  no thread and no Message row, so the visitor half of the conversation was never
+  written down and the owner's "transcript" read as the agent talking to itself.
+  This field is that missing half, written only for concierge runs whose site has
+  ``concierge_store_transcripts`` on. It is PERSONAL DATA — a visitor types free
+  text — so it is opt-outable per site and length-capped by the writer.
 """
 
 from __future__ import annotations
@@ -62,6 +70,14 @@ class ChatRunDoc(Document):
     # exactly-once guard; this flag is the cheap "skip already-billed" filter that
     # keeps each sweep bounded.
     billed: bool = False
+    # The user's OWN message text, stored on the run itself. Empty on every surface
+    # that persists the user turn as a real Message document (``user_message_id``
+    # points at it there) — this exists for the CONCIERGE surface, whose visitor is
+    # anonymous and therefore has no thread and no Message row. Written only when
+    # the site's ``concierge_store_transcripts`` toggle is on, and length-capped by
+    # the writer. Treat it as PERSONAL DATA: a visitor types free text, so it can
+    # carry a name, an email, or an order number.
+    user_text: str = ""
     createdAt: datetime = Field(default_factory=_utcnow)
     started_at: datetime | None = None
     ended_at: datetime | None = None

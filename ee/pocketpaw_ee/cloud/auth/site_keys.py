@@ -59,6 +59,15 @@
 # ``concierge_enabled=False`` refuses the resolved concierge (403 ``concierge_disabled``).
 # The FRAME endpoint enforces the same switch inline (it calls ``lookup_site_by_key``
 # directly, not this resolver).
+#
+# Updated 2026-07-26 (concierge transcripts): the resolver body moved into
+# ``resolve_site_key_with_site``, which returns ``(RequestContext, Site)``;
+# ``resolve_site_key`` is now a thin wrapper that drops the Site. Same gates, same
+# order, same statuses — the Site is returned only AFTER every gate passes. The
+# concierge chat path needs an owner-set Site field the context does not carry
+# (``concierge_store_transcripts``, the visitor-message retention toggle), and the
+# gate had already loaded the doc, so this hands it over instead of paying for a
+# second ``find_one`` per message.
 
 from __future__ import annotations
 
@@ -234,6 +243,31 @@ async def resolve_site_key(
             key" beyond the status — both are 401 so an attacker can't enumerate
             which embed keys are live.
     """
+    ctx, _site = await resolve_site_key_with_site(
+        key, origin, customer_ref, frame_origin=frame_origin
+    )
+    return ctx
+
+
+async def resolve_site_key_with_site(
+    key: str,
+    origin: str | None,
+    customer_ref: str,
+    *,
+    frame_origin: str | None = None,
+) -> tuple[RequestContext, _SiteDoc]:
+    """``resolve_site_key`` plus the resolved Site doc — the SAME gate chain.
+
+    This holds the actual implementation; ``resolve_site_key`` is a thin wrapper
+    that drops the Site. Callers that need an owner-set Site field the context
+    does not carry (the transcript-retention toggle
+    ``concierge_store_transcripts`` is the first) use this instead of re-querying
+    the Site — the gate already loaded it, so the field is free.
+
+    The Site is returned ONLY after every gate has passed, so a caller can never
+    read a field off a Site whose key was rejected. See ``resolve_site_key`` for
+    the full gate order and the raised statuses; behavior here is identical.
+    """
     site = await lookup_site_by_key(key)
 
     # Kill switch (D1 / SS-6): the owner's on/off toggle for the concierge, checked
@@ -253,7 +287,7 @@ async def resolve_site_key(
     elif not origin_allowed(site.allowed_origins, origin):
         raise HTTPException(status_code=403, detail="origin_not_allowed")
 
-    return _context_from_site(site, customer_ref)
+    return _context_from_site(site, customer_ref), site
 
 
-__all__ = ["lookup_site_by_key", "resolve_site_key"]
+__all__ = ["lookup_site_by_key", "resolve_site_key", "resolve_site_key_with_site"]

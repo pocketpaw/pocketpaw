@@ -10,6 +10,9 @@
 #   * The admin settings surface: GET + PATCH /paw-bar/admin/site/{id}/settings
 #     round-trips the two fields, rejects a cross-tenant id (404), and a PATCH that
 #     flips the switch off silences the frame on the NEXT request (immediate effect).
+# Updated 2026-07-26 (concierge transcripts): a fifth layer covers the
+#   transcript-retention toggle — exposed on GET, writable via PATCH, defaults on,
+#   and fully independent of the kill switch in both directions.
 
 from __future__ import annotations
 
@@ -310,3 +313,56 @@ async def test_toggle_off_silences_frame_immediately(client):
     after = await c.get("/paw-bar/frame", params={"key": _VALID_KEY})
     assert after.status_code == 403
     assert "concierge_disabled" in after.text
+
+
+# --------------------------------------------------------------------------- #
+# Layer 5 — the transcript-retention toggle
+#
+# Retention is its own switch because it is the only concierge setting that
+# governs whether NEW personal data is collected. These prove it is exposed,
+# writable, independent of the kill switch, and defaults to on.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_settings_get_exposes_transcript_retention_default_on(client):
+    c, _store = client
+    site = await _site()
+    body = (await c.get(f"/paw-bar/admin/site/{site.id}/settings")).json()
+    assert body["concierge_store_transcripts"] is True
+
+
+@pytest.mark.asyncio
+async def test_settings_patch_can_turn_transcript_retention_off(client):
+    c, _store = client
+    site = await _site()
+    res = await c.patch(
+        f"/paw-bar/admin/site/{site.id}/settings",
+        json={"concierge_store_transcripts": False},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["concierge_store_transcripts"] is False
+    got = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert got.json()["concierge_store_transcripts"] is False
+
+
+@pytest.mark.asyncio
+async def test_transcript_retention_is_independent_of_the_kill_switch(client):
+    """Turning retention off must not silence the concierge, and turning the
+    concierge off must not silently flip retention."""
+    c, _store = client
+    site = await _site(concierge_greeting="Hi there")
+    res = await c.patch(
+        f"/paw-bar/admin/site/{site.id}/settings",
+        json={"concierge_store_transcripts": False},
+    )
+    body = res.json()
+    assert body["concierge_store_transcripts"] is False
+    assert body["concierge_enabled"] is True  # concierge still live
+    assert body["concierge_greeting"] == "Hi there"  # untouched
+
+    res2 = await c.patch(
+        f"/paw-bar/admin/site/{site.id}/settings",
+        json={"concierge_enabled": False},
+    )
+    assert res2.json()["concierge_store_transcripts"] is False  # still off, not reset

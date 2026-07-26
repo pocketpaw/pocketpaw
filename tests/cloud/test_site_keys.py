@@ -14,6 +14,11 @@
 # gate) and ``resolve_site_key``'s new ``frame_origin`` dual-mode gate (an Origin
 # equal to our frame origin is accepted without an allowlist check; a mismatched
 # Origin still falls back to the fail-closed ``allowed_origins`` gate).
+# Updated 2026-07-26 (concierge transcripts): + coverage for
+# ``resolve_site_key_with_site``, which now holds the implementation and returns
+# ``(ctx, Site)`` so the chat path can read an owner-set field without a second
+# query. The added cases prove the Site is handed over ONLY after every gate
+# passes — a bad key still 401s and a bad origin still 403s with nothing returned.
 
 from __future__ import annotations
 
@@ -341,4 +346,48 @@ async def test_frame_origin_none_is_pure_inline_behavior(mongo_db):
     assert ctx.scope is ScopeKind.CONCIERGE
     with pytest.raises(HTTPException) as exc:
         await resolve_site_key(_VALID_KEY, "https://evil.example", "cust-1")
+    assert exc.value.status_code == 403
+
+
+# --------------------------------------------------------------------------- #
+# resolve_site_key_with_site — the same gates, plus the resolved Site
+#
+# The chat path needs an owner-set Site field the context does not carry
+# (concierge_store_transcripts), and the gate already loaded the doc. These prove
+# handing it over does not weaken any gate: the Site comes back ONLY on success.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_resolve_with_site_returns_the_resolved_site(mongo_db):
+    from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key_with_site
+
+    site = await _site()
+    ctx, resolved = await resolve_site_key_with_site(_VALID_KEY, _ALLOWED_ORIGIN, "cust-0001")
+    assert resolved.id == site.id
+    assert resolved.concierge_store_transcripts is True
+    # The context is byte-identical in the fields callers depend on.
+    assert ctx.workspace_id == site.workspace
+    assert ctx.pocket_id == site.pocket_id
+
+
+@pytest.mark.asyncio
+async def test_resolve_with_site_withholds_the_site_on_a_bad_key(mongo_db):
+    from fastapi import HTTPException
+    from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key_with_site
+
+    await _site()
+    with pytest.raises(HTTPException) as exc:
+        await resolve_site_key_with_site("site_key_" + "z" * 24, _ALLOWED_ORIGIN, "cust-0001")
+    assert exc.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_resolve_with_site_withholds_the_site_on_a_bad_origin(mongo_db):
+    from fastapi import HTTPException
+    from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key_with_site
+
+    await _site()
+    with pytest.raises(HTTPException) as exc:
+        await resolve_site_key_with_site(_VALID_KEY, "https://evil.example", "cust-0001")
     assert exc.value.status_code == 403

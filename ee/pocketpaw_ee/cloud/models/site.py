@@ -136,6 +136,14 @@
 # ``window.__PAWBAR__`` config payload. Both default backward-compatibly
 # (``concierge_enabled=True`` + ``concierge_greeting=""``), so every existing Site
 # reads as enabled with no greeting — no migration.
+#
+# Updated 2026-07-26 (concierge transcripts): added ``concierge_store_transcripts``
+# — the owner's retention switch for the VISITOR half of a conversation. It is
+# deliberately its own toggle rather than a fold into ``concierge_enabled``,
+# because it is the one concierge setting that governs whether NEW personal data
+# is collected (visitor free text can carry a name, an email, an order number).
+# Defaults True so the owner-facing transcript is a real two-sided conversation;
+# an owner on a privacy-sensitive site turns it off and keeps the concierge.
 
 from __future__ import annotations
 
@@ -264,6 +272,20 @@ class Site(TimestampedDocument):
     # reads it in a parallel slice and falls back to its own default when "".
     # Defaults "" (no custom greeting), so no migration.
     concierge_greeting: str = ""
+    # Paw Bar concierge (transcripts): the OWNER's retention switch for the
+    # VISITOR half of a conversation. The agent's replies were always durable
+    # (``ChatRunDoc.partial_text``); when this is True the visitor's own message is
+    # persisted too (``ChatRunDoc.user_text``), which is what makes an owner-facing
+    # transcript a real two-sided conversation instead of a monologue. It is a
+    # separate switch because it is the only concierge setting that decides whether
+    # NEW personal data is stored: a visitor types free text, so the stored line can
+    # carry a name, an email, an order number. An owner running a
+    # privacy-sensitive site turns it off and keeps the concierge — replies still
+    # persist, only the visitor's words are dropped. Read per message (never
+    # cached), so flipping it off stops collection on the very next turn; it does
+    # NOT retroactively purge lines already stored. Defaults True (the transcript
+    # the dashboard promises), so no migration.
+    concierge_store_transcripts: bool = True
 
     def rotate_signed_key(self) -> str:
         """Regenerate the public embed key and return the new value (T1).

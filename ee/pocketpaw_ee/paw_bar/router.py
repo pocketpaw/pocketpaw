@@ -1,4 +1,19 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-26 (concierge transcripts) — the visitor half of a conversation
+#   is now written down, so an owner's transcript is a dialogue instead of the
+#   agent talking to itself. (1) concierge_chat resolves the embed key through
+#   ``resolve_site_key_with_site`` (same gates, hands back the Site the gate
+#   already loaded) and sets ``RunSpec.persist_user_text`` — the visitor's message,
+#   capped at ``_STORED_USER_TEXT_CHARS``, and ONLY when the site's
+#   ``concierge_store_transcripts`` is on. The agent always receives the full
+#   message; the toggle governs storage, not the answer. (2) ``_load_transcript``
+#   emits the user turn (``ChatRunDoc.user_text``, stamped at run creation) before
+#   the assistant turn (``partial_text``, stamped at completion); either may be
+#   absent and the other still renders, so a retention-off site reads exactly as it
+#   did before. (3) the conversations list falls back to the visitor's question
+#   when a run produced no reply, instead of rendering a blank row. (4) the
+#   settings GET/PATCH carry ``concierge_store_transcripts``. Turning the toggle
+#   off stops collection on the next message; it does NOT purge stored lines.
 # Updated: 2026-07-23 (feat/site-dedicated-agent) — auto-provision a DEDICATED
 #   concierge agent per site. (1) create_widget: when the request carries NO
 #   agent_id and the pocket resolves to a published Site, provision + bind one
@@ -40,9 +55,9 @@
 #   site→widget→pocket resolution as the other reads; the transcript is the
 #   concierge ``ChatRunDoc`` runs for (pocket, customer_ref), most-recent 200,
 #   oldest-first; 400 on a bad customer_ref, 404 when the ref has no conversation
-#   here. v1 caveat: the concierge MVP does not persist the visitor's message, so
-#   every turn is role "assistant" (the agent reply on ``partial_text``) until
-#   visitor-text capture is approved (a PII-posture decision).
+#   here. (The v1 caveat that every turn was role "assistant" no longer holds —
+#   see the 2026-07-26 entry above; visitor lines are stored when the site's
+#   retention toggle allows.)
 # Updated: 2026-07-16 (D2 security review — role gate + empty-pocket guard) —
 #   the four D2 reads now gate on ``require_action("paw_bar.read")`` (ADMIN — the
 #   caller's WORKSPACE ROLE), NOT the coarse ``require_scope("admin")`` that
@@ -323,6 +338,7 @@ def _asset_version() -> str:
             continue
     return str(newest)
 
+
 # A frame-ancestors host-source is host[:port] with NO scheme, path, or whitespace.
 # ``allowed_origins`` is owner-controlled data flowing into a response HEADER, so
 # each entry is reduced to this safe shape (or dropped) — a stray space / ``;`` /
@@ -440,7 +456,7 @@ def _pawbar_bootstrap_html(config: dict[str, Any], asset_mount: str, page_bg: st
     config_json = json.dumps(config).replace("<", "\\u003c")
     v = _asset_version()
     preview_style = (
-        f'<style>html,body{{background:{page_bg};color-scheme:dark}}</style>\n' if page_bg else ""
+        f"<style>html,body{{background:{page_bg};color-scheme:dark}}</style>\n" if page_bg else ""
     )
     return (
         "<!doctype html>\n"
@@ -952,8 +968,9 @@ async def list_events(
 # admin CRUD above: ``require_scope("admin")`` (a signed-in dashboard session) +
 # the caller's ACTIVE workspace via ``current_workspace_id``. The lookup is
 # workspace-scoped, so another tenant's site id resolves to 404 and never leaks or
-# mutates. Reads/writes touch ONLY the two concierge fields — the site's publish /
-# billing / capture config is out of scope here. Co-located with the paw-bar
+# mutates. Reads/writes touch ONLY the concierge fields (the kill switch, the
+# greeting, and the transcript-retention toggle) — the site's publish / billing /
+# capture config is out of scope here. Co-located with the paw-bar
 # enforcement (the frame/chat/action gates) rather than the heavier sites control
 # plane so the owner surface and the switch it drives sit in one place.
 # ---------------------------------------------------------------------------
@@ -969,6 +986,11 @@ class ConciergeSettingsUpdate(BaseModel):
 
     concierge_enabled: bool | None = None
     concierge_greeting: str | None = None
+    # Retention switch for the VISITOR half of a transcript. Off means the
+    # concierge keeps working and keeps storing its own replies, but the visitor's
+    # words are never written down. Turning it off does NOT purge what is already
+    # stored — that is a delete operation, not a settings change.
+    concierge_store_transcripts: bool | None = None
 
 
 class ConciergeSettingsResponse(BaseModel):
@@ -977,6 +999,7 @@ class ConciergeSettingsResponse(BaseModel):
     site_id: str
     concierge_enabled: bool
     concierge_greeting: str
+    concierge_store_transcripts: bool
 
 
 async def _load_site_scoped(site_id: str, workspace_id: str) -> Any:
@@ -1019,6 +1042,7 @@ async def get_site_concierge_settings(
         site_id=str(site.id),
         concierge_enabled=site.concierge_enabled,
         concierge_greeting=site.concierge_greeting,
+        concierge_store_transcripts=site.concierge_store_transcripts,
     )
 
 
@@ -1067,6 +1091,7 @@ async def update_site_concierge_settings(
         site_id=str(site.id),
         concierge_enabled=site.concierge_enabled,
         concierge_greeting=site.concierge_greeting,
+        concierge_store_transcripts=site.concierge_store_transcripts,
     )
 
 
@@ -1141,6 +1166,13 @@ _CONVERSATION_SCAN_CAP = 200
 # never ships the whole history in one response.
 _TRANSCRIPT_CAP = 200
 
+# Max characters of a visitor's own message persisted on the run doc for the
+# transcript. The agent still receives the FULL message — this caps only what we
+# write down, so a pasted wall of text (or a deliberate storage-stuffing attempt)
+# can't grow the run collection without bound. Generous enough that a real
+# question is never clipped.
+_STORED_USER_TEXT_CHARS = 4000
+
 
 class AdminWidgetView(BaseModel):
     """The site's paw-bar widget as the owner dashboard needs it (D2 overview)."""
@@ -1202,12 +1234,11 @@ class ConversationsResponse(BaseModel):
 class TranscriptMessage(BaseModel):
     """One message in a conversation transcript (D2 drill-in).
 
-    ``role`` is "user" or "assistant" per the frozen contract. NOTE (v1): the
-    concierge run path is a stateless MVP that does NOT persist the visitor's
-    (user) message — only the agent reply survives, on ``ChatRunDoc.partial_text``
-    — so today every message is role "assistant". Persisting visitor text is a
-    privacy posture decision (it stores visitor PII) tracked as a follow-up; when
-    it lands, user turns fill in here with no shape change.
+    ``role`` is "user" or "assistant" per the frozen contract. Both roles are now
+    real: the agent reply comes from ``ChatRunDoc.partial_text`` and the visitor's
+    own line from ``ChatRunDoc.user_text``. A site whose owner turned
+    ``concierge_store_transcripts`` off stores no visitor lines, so its transcripts
+    are assistant-only — the same shape this DTO always had, just missing one role.
     """
 
     role: str
@@ -1386,12 +1417,12 @@ async def get_site_conversation_transcript(
     customer_ref). Capped at the most recent ``_TRANSCRIPT_CAP`` (200) turns,
     presented oldest-first. 404 when the ref has no concierge conversation here.
 
-    ROLE COVERAGE (v1): the concierge run path is a stateless MVP that does not
-    persist the visitor's message (see ``concierge_chat`` — user_message_id="",
-    "no persisted user message"), so the only per-visitor content that survives is
-    the agent reply on ``ChatRunDoc.partial_text``. Every message is therefore role
-    "assistant" today. Persisting visitor text (to fill in the "user" turns) stores
-    visitor PII and is a privacy-posture decision for a follow-up, NOT done here.
+    ROLE COVERAGE: both halves of the conversation are here — the visitor's line
+    from ``ChatRunDoc.user_text`` and the agent's from ``partial_text``. The
+    visitor half is stored only while the site's ``concierge_store_transcripts``
+    toggle is on (it is personal data, so the owner controls it); an owner who
+    turns it off keeps getting assistant-only transcripts from that point on, and
+    lines already stored are NOT retroactively purged.
     """
     if not _CUSTOMER_REF_RE.match(customer_ref or ""):
         raise HTTPException(400, "invalid_customer_ref")
@@ -1596,11 +1627,16 @@ async def _list_conversations(
             continue
         seen.add(run.user_id)
         when = run.ended_at or run.createdAt
+        # Prefer the agent's reply as the row preview (unchanged). Fall back to the
+        # visitor's own question when there is no reply — a run that failed or was
+        # cut off used to render a blank row, which told the owner nothing; the
+        # question at least says what the visitor wanted.
+        preview = (run.partial_text or "") or (getattr(run, "user_text", "") or "")
         items.append(
             ConversationItem(
                 customer_ref=run.user_id,
                 last_message_at=when.isoformat() if when else "",
-                preview=(run.partial_text or "")[:_CONVERSATION_PREVIEW_CHARS],
+                preview=preview[:_CONVERSATION_PREVIEW_CHARS],
             )
         )
         if len(items) >= limit:
@@ -1609,9 +1645,7 @@ async def _list_conversations(
     # A cursor is offered only when the scan hit its cap (older runs may remain);
     # it is the oldest run we looked at, so the next page continues strictly older.
     next_cursor = (
-        runs[-1].createdAt.isoformat()
-        if len(runs) >= _CONVERSATION_SCAN_CAP and runs
-        else None
+        runs[-1].createdAt.isoformat() if len(runs) >= _CONVERSATION_SCAN_CAP and runs else None
     )
     return ConversationsResponse(items=items, cursor=next_cursor, unsupported=False)
 
@@ -1623,11 +1657,15 @@ async def _load_transcript(
 
     Fetches this (pocket, customer_ref)'s concierge ``ChatRunDoc`` runs (index-
     backed, most-recent ``_TRANSCRIPT_CAP``), then presents them oldest-first. Each
-    completed run contributes the agent reply (``partial_text``) as an "assistant"
-    message; the visitor's own message is not persisted by the stateless concierge
-    MVP, so it does not appear (see the endpoint docstring). Returns ``None`` when
-    the ref has NO concierge run here (the caller 404s) — distinct from an empty
-    list, which means runs exist but none carried reply text yet.
+    run contributes up to TWO messages, in conversation order: the visitor's own
+    line (``user_text``) as "user", then the agent reply (``partial_text``) as
+    "assistant". Either can be missing and the other still renders — a site with
+    ``concierge_store_transcripts`` off has no user lines (assistant-only, exactly
+    the old shape), and a run that failed before producing text has no assistant
+    line. Both empty and the run contributes nothing.
+
+    Returns ``None`` when the ref has NO concierge run here (the caller 404s) —
+    distinct from an empty list, which means runs exist but none carried any text.
     """
     from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 
@@ -1647,17 +1685,29 @@ async def _load_transcript(
 
     messages: list[TranscriptMessage] = []
     for run in reversed(runs):  # oldest-first
-        text = run.partial_text or ""
-        if not text:
-            continue
-        when = run.ended_at or run.createdAt
-        messages.append(
-            TranscriptMessage(
-                role="assistant",
-                content=text,
-                created_at=when.isoformat() if when else "",
+        # The visitor's line is stamped at the moment the run was created; the
+        # reply is stamped when it finished. Using each one's own timestamp keeps
+        # the pair honest about how long the answer took.
+        asked = run.createdAt
+        answered = run.ended_at or run.createdAt
+        user_text = getattr(run, "user_text", "") or ""
+        if user_text:
+            messages.append(
+                TranscriptMessage(
+                    role="user",
+                    content=user_text,
+                    created_at=asked.isoformat() if asked else "",
+                )
             )
-        )
+        reply = run.partial_text or ""
+        if reply:
+            messages.append(
+                TranscriptMessage(
+                    role="assistant",
+                    content=reply,
+                    created_at=answered.isoformat() if answered else "",
+                )
+            )
     return messages
 
 
@@ -2003,9 +2053,11 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     # credential; there is no user. ``frame_origin`` makes the origin gate accept an
     # iframe-mode request (Origin == our frame, already gated by the frame CSP) while
     # still requiring an inline-mode request's Origin to be on ``Site.allowed_origins``.
-    from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key
+    # ``_with_site`` hands back the Site the gate already loaded, so step (8) can
+    # read the owner's transcript-retention toggle without a second query.
+    from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key_with_site
 
-    ctx = await resolve_site_key(
+    ctx, site = await resolve_site_key_with_site(
         body.signed_key, origin, body.customer_ref, frame_origin=frame_origin
     )
 
@@ -2099,8 +2151,19 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     # anonymous customer handle (session / rate-limit key, never a principal).
     # ``surface="concierge"`` makes execute_run resolve the CONCIERGE
     # SurfaceProfile (tool lockdown); ``context_type="concierge"`` makes it
-    # resolve the CONCIERGE scope (KB locked to pocket:<id>). Stateless MVP:
-    # ``history=[]`` (no cross-visitor bleed) and no persisted user message.
+    # resolve the CONCIERGE scope (KB locked to pocket:<id>). ``history=[]`` stays
+    # (each turn is answered fresh — no cross-visitor bleed).
+    #
+    # ``persist_user_text`` is the visitor's own line, written onto the run doc so
+    # the owner's transcript is a conversation rather than a monologue. The visitor
+    # is anonymous and has no Message row, so ``user_message_id`` stays "" and this
+    # is the only place that text can live. Gated on the site owner's
+    # ``concierge_store_transcripts`` (re-read every turn, so turning it off stops
+    # collection on the next message) and length-capped — the agent still gets the
+    # full message either way, this governs only what is stored.
+    stored_user_text = (
+        body.message[:_STORED_USER_TEXT_CHARS] if site.concierge_store_transcripts else ""
+    )
     spec = RunSpec(
         run_id=run_id,
         workspace_id=ctx.workspace_id,
@@ -2112,6 +2175,7 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
         agent_id=widget.agent_id,
         client_message_id=client_message_id,
         user_message_id="",
+        persist_user_text=stored_user_text,
         content=body.message,
         history=[],
         intent=None,
