@@ -123,7 +123,9 @@ async def validate_meeting_invite(token: str) -> dict[str, Any]:
             "This invite link has reached its maximum number of uses.",
         )
 
-    # Fetch the room info to confirm the call is still active.
+    # Fetch the room info to check if the call is currently active.
+    # For scheduled meetings the room may not exist yet — that's fine,
+    # the invite is still valid and the room will be created on join.
     from pocketpaw_ee.cloud.livekit.service import get_room_info
 
     room_info = await get_room_info(doc.group_id)
@@ -179,11 +181,17 @@ async def accept_meeting_invite(
             "This invite link has reached its maximum number of uses.",
         )
 
-    # Verify the call is still active.
-    from pocketpaw_ee.cloud.livekit.service import LIVEKIT_URL, get_room_info
+    # Ensure the LiveKit room exists — create it if this is a scheduled
+    # meeting where the room hasn't been started yet. If the room already
+    # exists and is inactive (call ended), reject.
+    from pocketpaw_ee.cloud.livekit.service import LIVEKIT_URL, create_room, get_room_info
 
     room_info = await get_room_info(doc.group_id)
-    if room_info is None or not room_info.get("active", False):
+    if room_info is None:
+        # Room doesn't exist yet — create it (scheduled meeting, guest is first to join)
+        logger.info("Creating LiveKit room for group %s (guest join via invite)", doc.group_id)
+        await create_room(doc.group_id)
+    elif not room_info.get("active", False):
         raise Forbidden(
             "meeting_invite.call_ended",
             "The call has ended. This invite is no longer valid.",
