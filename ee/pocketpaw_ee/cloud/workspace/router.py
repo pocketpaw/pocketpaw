@@ -286,7 +286,7 @@ async def get_route_permissions(
         (m.role for m in members if m.user_id == viewer_id),
         "member",
     )
-    if viewer_role not in ("owner", "admin"):
+    if viewer_role not in ("owner", "admin", "editor"):
         # Filter to only the viewer's own permissions
         filtered = {k: v for k, v in result.items() if k == viewer_id}
         return RoutePermissionsOut(permissions=filtered)
@@ -299,12 +299,13 @@ async def set_member_route_permissions(
     user_id: str,
     body: SetMemberRoutePermissionsRequest,
     ctx: RequestContext = Depends(request_context),
-    user: User = Depends(require_action("workspace.member.role_change")),
+    user: User = Depends(require_action("workspace.member.permissions")),
 ) -> dict:
     """Set which routes a specific member can access.
 
     An empty ``routes`` list grants full access (clears all restrictions).
-    Gated by the same ``workspace.member.role_change`` action as role changes.
+    Gated by ``workspace.member.permissions`` (editor+). Editors can manage
+    route access for members but cannot change workspace-level roles.
     """
     await workspace_service.set_member_route_permissions(
         ctx,
@@ -320,7 +321,7 @@ async def clear_member_route_permissions(
     workspace_id: str,
     user_id: str,
     ctx: RequestContext = Depends(request_context),
-    user: User = Depends(require_action("workspace.member.role_change")),
+    user: User = Depends(require_action("workspace.member.permissions")),
 ) -> Response:
     """Remove all route restrictions for a member (grants full access)."""
     await workspace_service.clear_member_route_permissions(ctx, workspace_id, user_id)
@@ -351,7 +352,7 @@ async def get_connector_permissions(
         (m.role for m in members if m.user_id == viewer_id),
         "member",
     )
-    if viewer_role not in ("owner", "admin"):
+    if viewer_role not in ("owner", "admin", "editor"):
         filtered = {k: v for k, v in result.items() if k == viewer_id}
         return ConnectorPermissionsOut(permissions=filtered)
     return ConnectorPermissionsOut(permissions=result)
@@ -363,12 +364,13 @@ async def set_member_connector_permissions(
     user_id: str,
     body: SetMemberConnectorPermissionsRequest,
     ctx: RequestContext = Depends(request_context),
-    user: User = Depends(require_action("workspace.member.role_change")),
+    user: User = Depends(require_action("workspace.member.permissions")),
 ) -> dict:
     """Set which connectors a specific member can access.
 
     An empty ``connectors`` list grants full access (clears all restrictions).
-    Gated by the same ``workspace.member.role_change`` action as role changes.
+    Gated by ``workspace.member.permissions`` (editor+). Editors can manage
+    connector access for members but cannot change workspace-level roles.
     """
     await workspace_service.set_member_connector_permissions(
         ctx,
@@ -384,7 +386,7 @@ async def clear_member_connector_permissions(
     workspace_id: str,
     user_id: str,
     ctx: RequestContext = Depends(request_context),
-    user: User = Depends(require_action("workspace.member.role_change")),
+    user: User = Depends(require_action("workspace.member.permissions")),
 ) -> Response:
     """Remove all connector restrictions for a member (grants full access)."""
     await workspace_service.clear_member_connector_permissions(ctx, workspace_id, user_id)

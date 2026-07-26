@@ -113,13 +113,13 @@ class InviteContextDTO(BaseModel):
 
 class CreateInviteRequest(BaseModel):
     email: str
-    role: str = Field(default="member", pattern="^(admin|member)$")
+    role: str = Field(default="member", pattern="^(admin|editor|member)$")
     group_id: str | None = None
     context: InviteContextDTO | None = None
 
 
 class UpdateMemberRoleRequest(BaseModel):
-    role: str = Field(pattern="^(owner|admin|member)$")
+    role: str = Field(pattern="^(owner|admin|editor|member)$")
 
 
 class SetApprovalLevelRequest(BaseModel):
@@ -172,7 +172,7 @@ class BulkInviteRequest(BaseModel):
     """
 
     emails: list[EmailStr] = Field(min_length=1, max_length=100)
-    role: str = Field(default="member", pattern="^(admin|member)$")
+    role: str = Field(default="member", pattern="^(admin|editor|member)$")
     group_id: str | None = None
 
 
