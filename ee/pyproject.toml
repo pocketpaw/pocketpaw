@@ -6,6 +6,12 @@
 # depends on the OSS core package `pocketpaw`.
 #
 # Changes:
+#   - 2026-07-27 (fix/dev-ci): the "CodeAgent — runtime-agnostic" contract now
+#     sources the codeagent PACKAGE instead of a hand-kept list of its modules.
+#     The list had gone stale twice over — `delegates.py` was never added, and
+#     `transport.py` / `domain.py` were deleted with the turn-agent — and a
+#     contract that names a module which no longer exists fails the whole
+#     `lint-imports` run, not just that contract. See the contract below.
 #   - 2026-07-01 (ee-cython gate): the cython build hook is now GATED OFF by
 #     default (`enable-by-default = false`) so dev / CI / editable installs stay
 #     fast and readable — the ~25-min compile only fires when
@@ -666,13 +672,14 @@ allow_indirect_imports = "true"
 #
 # A human reviewer will not catch that on a diff that otherwise looks like a
 # helpful refactor. The linter will.
-source_modules = [
-    "pocketpaw_ee.cloud.codeagent.router",
-    "pocketpaw_ee.cloud.codeagent.service",
-    "pocketpaw_ee.cloud.codeagent.transport",
-    "pocketpaw_ee.cloud.codeagent.dto",
-    "pocketpaw_ee.cloud.codeagent.domain",
-]
+#
+# Sourced from the PACKAGE, not a file list. The original list named the five
+# modules codeagent had on 2026-07-21; `delegates.py` (added 2026-07-22) never
+# got added to it, and `transport.py` / `domain.py` were deleted 2026-07-23 with
+# the turn-agent, which broke the run outright. `as_packages` defaults to true,
+# so naming the package covers every submodule — including the ones added after
+# this contract was written.
+source_modules = ["pocketpaw_ee.cloud.codeagent"]
 forbidden_modules = [
     "pocketpaw_ee.cloud.daytona",
     "pocketpaw_ee.cloud.websandbox",

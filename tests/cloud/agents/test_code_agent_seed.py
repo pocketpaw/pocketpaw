@@ -47,9 +47,7 @@ async def test_seed_code_agent_inserts_exclusive_file_tool_agent(recording_bus) 
     assert doc.config.system_prompt == CODE_SYSTEM_PROMPT
     # NO create-pocket / pocket / widget skill — the CODE surface ships none.
     assert doc.config.skill_refs == []
-    assert not any(
-        "pocket" in s.lower() or "widget" in s.lower() for s in doc.config.skill_refs
-    )
+    assert not any("pocket" in s.lower() or "widget" in s.lower() for s in doc.config.skill_refs)
 
     created_events = [e for e in recording_bus.events if isinstance(e, AgentCreated)]
     assert len(created_events) == 1
