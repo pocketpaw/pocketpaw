@@ -21,12 +21,20 @@
 # The status route now refuses the gate-owned targets (``approved`` / ``sent``)
 # with 403 ``draft.gate_required`` — approval happens ONLY in the Instinct
 # Tray, and only the approved dispatch path may send.
+# Updated 2026-07-27 (feat/growth-g4, security review F3): per-route RBAC.
+# ``require_license`` alone left every route open to any authenticated member
+# of any workspace. Reads take ``growth.read`` (MEMBER), authoring writes
+# ``growth.write`` (MEMBER), and the OUTBOUND verb — POST
+# /drafts/{id}/propose — takes ``growth.manage`` (ADMIN): the propose route
+# has to sit at the same tier ``growth.executor`` re-checks at dispatch, or a
+# member-filed proposal would always fail closed at approve time.
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
+from pocketpaw_ee.cloud._core.deps import require_action_any_workspace
 from pocketpaw_ee.cloud.growth import service as growth_service
 from pocketpaw_ee.cloud.growth.domain import (
     DraftChannel,
@@ -51,7 +59,11 @@ from pocketpaw_ee.cloud.license import require_license
 router = APIRouter(prefix="/growth", tags=["Growth"], dependencies=[Depends(require_license)])
 
 
-@router.post("/prospects", response_model=ProspectResponse)
+@router.post(
+    "/prospects",
+    response_model=ProspectResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
 async def create_prospect(
     body: CreateProspectRequest,
     ctx: RequestContext = Depends(request_context),
@@ -59,7 +71,11 @@ async def create_prospect(
     return await growth_service.create(ctx, body)
 
 
-@router.post("/prospects/bulk", response_model=BulkIngestResponse)
+@router.post(
+    "/prospects/bulk",
+    response_model=BulkIngestResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
 async def bulk_ingest_prospects(
     body: BulkIngestRequest,
     ctx: RequestContext = Depends(request_context),
@@ -70,7 +86,11 @@ async def bulk_ingest_prospects(
     return await growth_service.bulk_ingest(ctx, body)
 
 
-@router.get("/prospects", response_model=list[ProspectResponse])
+@router.get(
+    "/prospects",
+    response_model=list[ProspectResponse],
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
 async def list_prospects(
     tier: ProspectTier | None = Query(default=None),
     status: ProspectStatus | None = Query(default=None),
@@ -83,7 +103,11 @@ async def list_prospects(
     )
 
 
-@router.get("/prospects/{prospect_id}", response_model=ProspectResponse)
+@router.get(
+    "/prospects/{prospect_id}",
+    response_model=ProspectResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
 async def get_prospect(
     prospect_id: str,
     ctx: RequestContext = Depends(request_context),
@@ -91,7 +115,11 @@ async def get_prospect(
     return await growth_service.get(ctx, prospect_id)
 
 
-@router.patch("/prospects/{prospect_id}", response_model=ProspectResponse)
+@router.patch(
+    "/prospects/{prospect_id}",
+    response_model=ProspectResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
 async def update_prospect(
     prospect_id: str,
     body: UpdateProspectRequest,
@@ -105,7 +133,11 @@ async def update_prospect(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/prospects/{prospect_id}/drafts", response_model=DraftResponse)
+@router.post(
+    "/prospects/{prospect_id}/drafts",
+    response_model=DraftResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
 async def create_draft(
     prospect_id: str,
     body: CreateDraftRequest,
@@ -117,7 +149,11 @@ async def create_draft(
     return await growth_service.create_draft(ctx, prospect_id, body)
 
 
-@router.get("/drafts", response_model=list[DraftResponse])
+@router.get(
+    "/drafts",
+    response_model=list[DraftResponse],
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
 async def list_drafts(
     prospect_id: str | None = Query(default=None),
     channel: DraftChannel | None = Query(default=None),
@@ -130,7 +166,11 @@ async def list_drafts(
     )
 
 
-@router.post("/drafts/{draft_id}/status", response_model=DraftResponse)
+@router.post(
+    "/drafts/{draft_id}/status",
+    response_model=DraftResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
 async def transition_draft(
     draft_id: str,
     body: TransitionDraftRequest,
@@ -144,7 +184,11 @@ async def transition_draft(
     return await growth_service.transition(ctx, draft_id, body)
 
 
-@router.post("/drafts/{draft_id}/propose", response_model=ProposeSendResponse)
+@router.post(
+    "/drafts/{draft_id}/propose",
+    response_model=ProposeSendResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
 async def propose_draft_send(
     draft_id: str,
     ctx: RequestContext = Depends(request_context),

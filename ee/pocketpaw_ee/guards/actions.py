@@ -239,14 +239,20 @@ ACTIONS: dict[str, ActionRule] = {
     "ship.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "ship.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # /growth — outbound engine (prospects, drafts, gated sends).
-    # Reading prospects / drafts is MEMBER. ``growth.manage`` (ADMIN) gates the
-    # OUTBOUND verb — an approved send goes out under the company's name to a
-    # real prospect and cannot be unsent. Like ship.manage it never executes
-    # from a request: the send routes through a ``_growth_send`` Instinct
-    # proposal, and ``growth.executor`` RE-CHECKS this action against the
-    # proposer's CURRENT role at dispatch time, so a since-demoted proposer's
-    # approved send fails closed. (feat/growth-g4, mirroring /ship.)
+    # Reading prospects / drafts is MEMBER; authoring them (create / update /
+    # draft / non-gated lifecycle moves) is MEMBER too — the fabric.read /
+    # fabric.write split, because staging outreach copy is ordinary team work.
+    # ``growth.manage`` (ADMIN) gates the OUTBOUND verb — proposing a send.
+    # An approved send goes out under the company's name to a real prospect and
+    # cannot be unsent. Like ship.manage it never executes from a request: the
+    # send routes through a ``_growth_send`` Instinct proposal, and
+    # ``growth.executor`` RE-CHECKS this action against the proposer's CURRENT
+    # role at dispatch time, so a since-demoted proposer's approved send fails
+    # closed. The propose ROUTE therefore has to sit at the same ADMIN tier the
+    # executor re-checks, or every member-filed proposal would fail closed at
+    # approve time. (feat/growth-g4, mirroring /ship.)
     "growth.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "growth.write": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "growth.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Instinct — human-in-the-loop decision pipeline.
     # Propose and read are MEMBER (agents and analysts can propose + view actions).
