@@ -14,6 +14,11 @@
 # (``DRAFT_TRANSITIONS``): draft→proposed→approved→sent, sent→replied, any
 # non-terminal→rejected. The transition table lives here (pure data) so the
 # service stays a dumb enforcer and G-4 can wire Instinct proposals on top.
+# Updated 2026-07-27 (feat/growth-g4): the Instinct send gate —
+# ``GATE_OWNED_TARGETS`` marks the statuses only the gate machinery may set
+# (``approved`` via an approved ``_growth_send`` proposal, ``sent`` via the
+# dispatch worker), and ``GROWTH_DISPATCH_JOB_NAME`` names the arq job the
+# approve path enqueues on the ``growth`` queue.
 
 from __future__ import annotations
 
@@ -84,6 +89,21 @@ DRAFT_TRANSITIONS: dict[str, frozenset[str]] = {
     "sent": frozenset({"replied", "rejected"}),
 }
 
+# G-4 — the Instinct send gate owns these edges. ``approved`` is only reachable
+# through an approved ``_growth_send`` proposal (the instinct router's approve
+# paths → ``growth.executor``), and ``sent`` only through the dispatch worker
+# (G-5/G-6). The PUBLIC status route refuses these targets with a 403
+# ``draft.gate_required`` even when the move is legal per ``DRAFT_TRANSITIONS``
+# — structural, like /ship's destroy gate: NOTHING can send without an approved
+# proposal. The gate machinery uses ``service.gate_transition`` (same legality
+# table, no public-route restriction).
+GATE_OWNED_TARGETS: frozenset[str] = frozenset({"approved", "sent"})
+
+# The arq job the approve path enqueues on ``GROWTH_QUEUE_NAME``. Registered in
+# ``growth/worker.py`` under this explicit name (``arq.worker.func``) so the
+# dotted name survives refactors of the Python function.
+GROWTH_DISPATCH_JOB_NAME = "growth.dispatch"
+
 
 @dataclass(frozen=True)
 class Draft:
@@ -108,6 +128,8 @@ class Draft:
 
 __all__ = [
     "DRAFT_TRANSITIONS",
+    "GATE_OWNED_TARGETS",
+    "GROWTH_DISPATCH_JOB_NAME",
     "GROWTH_QUEUE_NAME",
     "Draft",
     "DraftChannel",

@@ -1,14 +1,24 @@
-# ee/pocketpaw_ee/cloud/growth/worker.py — arq worker seam for the dedicated
-# ``growth`` queue (G-1, feat/growth-g1). Registration only: no real jobs yet.
-# Later slices (ingestion, drafts, gated-send dispatch) register their
-# entrypoints into ``WorkerSettings.functions`` here and enqueue with
-# ``_queue_name=GROWTH_QUEUE_NAME`` (arq's selector is the underscore-prefixed
-# kwarg; a bare ``queue=`` is forwarded to the job function and crashes it —
-# see the jobs/domain.py history).
+# ee/pocketpaw_ee/cloud/growth/worker.py — arq worker for the dedicated
+# ``growth`` queue.
+#
+# Created 2026-07-27 (feat/growth-g1): registration seam only (a no-op
+# heartbeat so arq would boot).
+# Updated 2026-07-27 (feat/growth-g4): the heartbeat is replaced by the real
+# ``growth.dispatch`` job entrypoint — registered under its explicit dotted
+# name via ``arq.worker.func`` so the enqueue side
+# (``growth.executor.execute_approved_growth_send``) and the worker agree on
+# the name. The job body is a deliberate STUB in this slice: it logs and marks
+# NOTHING sent — G-5 (email via provider) and G-6 (follow-ups) fill in the
+# actual delivery and the draft's ``sent`` flip (via the service's
+# ``gate_transition`` seam). The job only ever EXISTS for a draft whose
+# ``_growth_send`` proposal a human approved — that is the whole gate.
 #
 # Unlike workspace jobs (which ride arq's DEFAULT queue on the shared chat-runs
 # worker — see ``jobs/domain.py``), growth gets its OWN queue + worker process
-# so a burst of outbound work can never starve interactive chat runs.
+# so a burst of outbound work can never starve interactive chat runs. Enqueue
+# with ``_queue_name=GROWTH_QUEUE_NAME`` (arq's selector is the
+# underscore-prefixed kwarg; a bare ``queue=`` is forwarded to the job function
+# and crashes it — see the jobs/domain.py history).
 #
 # Deploy as a separate process alongside the web service::
 #
@@ -21,7 +31,7 @@
 # same shape + rationale as the chat-runs worker; tests set a stub
 # ``POCKETPAW_REDIS_URL`` in ``tests/cloud/conftest.py`` before import.
 
-"""arq worker entry point for the dedicated ``growth`` queue (seam only)."""
+"""arq worker entry point for the dedicated ``growth`` queue."""
 
 from __future__ import annotations
 
@@ -30,23 +40,33 @@ import os
 from typing import Any
 
 from arq.connections import RedisSettings
+from arq.worker import func
 
 from pocketpaw_ee.cloud import init_realtime
 from pocketpaw_ee.cloud._core.realtime import xproc
-from pocketpaw_ee.cloud.growth.domain import GROWTH_QUEUE_NAME
+from pocketpaw_ee.cloud.growth.domain import GROWTH_DISPATCH_JOB_NAME, GROWTH_QUEUE_NAME
 from pocketpaw_ee.cloud.shared.db import close_cloud_db, init_cloud_db
 
 logger = logging.getLogger(__name__)
 
 
-async def growth_heartbeat(ctx: dict[str, Any]) -> None:
-    """Placeholder entrypoint — the queue-registration seam.
+async def dispatch(ctx: dict[str, Any], draft_id: str, channel: str) -> None:
+    """Dispatch an APPROVED outbound draft — STUB (G-4).
 
-    arq refuses to boot a worker with zero functions ("at least one function
-    or cron_job must be registered"), so the seam ships this no-op. Later
-    slices replace/extend it with the real ingestion / draft / send jobs.
+    This job is enqueued ONLY by ``executor.execute_approved_growth_send``
+    after a human approved the draft's ``_growth_send`` Instinct proposal —
+    there is no other producer, so a job here IS the approval record's
+    downstream. In this slice it logs and returns: no provider call, no
+    draft mutation, nothing is marked sent. G-5/G-6 replace the body with the
+    real per-channel delivery + the draft's ``sent`` flip (via
+    ``service.gate_transition``) + follow-up scheduling.
     """
-    logger.info("growth worker: heartbeat (no growth jobs registered yet)")
+    logger.info(
+        "growth worker: dispatch STUB — draft=%s channel=%s (approved send queued; "
+        "no delivery in G-4, nothing marked sent)",
+        draft_id,
+        channel,
+    )
 
 
 async def _startup(ctx: dict[str, Any]) -> None:
@@ -87,7 +107,10 @@ class WorkerSettings:
     """
 
     queue_name = GROWTH_QUEUE_NAME
-    functions = [growth_heartbeat]
+    # ``func(..., name=...)`` pins the job's wire name to the explicit dotted
+    # constant so the executor's ``enqueue_job(GROWTH_DISPATCH_JOB_NAME, ...)``
+    # always matches, independent of the Python function's name.
+    functions = [func(dispatch, name=GROWTH_DISPATCH_JOB_NAME)]
     on_startup = _startup
     on_shutdown = _shutdown
     # Crash policy mirrors the chat-runs worker: no auto-retry. Outbound work
@@ -97,4 +120,4 @@ class WorkerSettings:
     redis_settings = _redis_settings()
 
 
-__all__ = ["GROWTH_QUEUE_NAME", "WorkerSettings", "growth_heartbeat"]
+__all__ = ["GROWTH_DISPATCH_JOB_NAME", "GROWTH_QUEUE_NAME", "WorkerSettings", "dispatch"]
