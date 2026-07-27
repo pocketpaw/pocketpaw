@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from pocketpaw.agents.errors import HerdrUnavailable
-from pocketpaw.agents.herdr_runtime import HerdrRuntime
+from pocketpaw.agents.herdr_runtime import HerdrRuntime, map_agent_status
 from pocketpaw.mission_control.models import AgentStatus
 from pocketpaw_ee.cloud.herdr_cockpit.dto import (
     CockpitPaneOut,
@@ -64,20 +64,32 @@ async def build_snapshot(runtime: HerdrRuntime) -> CockpitSnapshot:
         return CockpitSnapshot(ts=ts, herdr_available=False, panes=[])
 
     try:
-        panes = await runtime.list_panes()
+        # ``list_agents`` (not ``list_panes``): this is an AGENT board, so a
+        # plain shell pane is not a subject — listing every pane rendered each
+        # bare shell as an "offline" agent, which reads as a fleet of dead
+        # agents at rest. It also halves the work: the list records already
+        # carry ``agent_status`` (verified against herdr v0.7.4), so a snapshot
+        # costs ONE subprocess instead of 1 + one ``agent get`` per pane. At 20
+        # panes on a 1.5s tick that was ~14 spawns/second, per connected admin.
+        panes = await runtime.list_agents()
     except HerdrUnavailable:
         # Flag on but herdr unreachable this tick (server down, socket error).
         return CockpitSnapshot(ts=ts, herdr_available=False, panes=[])
 
     out: list[CockpitPaneOut] = []
     for pane in panes:
-        try:
-            status = await runtime.status(pane)
-            status_value = status.value
-        except HerdrUnavailable:
-            # Pane vanished (or is not an agent pane) between list and status —
-            # fail that dot to offline, keep the rest of the frame intact.
-            status_value = AgentStatus.OFFLINE.value
+        raw_status = pane.raw.get("agent_status")
+        if raw_status is not None:
+            status_value = map_agent_status(raw_status).value
+        else:
+            # Older/leaner herdr payload without the inline status — fall back
+            # to the per-pane call rather than mislabelling the dot.
+            try:
+                status_value = (await runtime.status(pane)).value
+            except HerdrUnavailable:
+                # Pane vanished between the list and the status call — fail
+                # that one dot to offline, keep the rest of the frame intact.
+                status_value = AgentStatus.OFFLINE.value
         out.append(
             CockpitPaneOut(
                 pane_id=pane.pane_id,
@@ -107,5 +119,13 @@ async def read_preview(
     try:
         text = await runtime.read(pane_id, lines=clamped)
     except HerdrUnavailable:
+        text = ""
+    except ValueError:
+        # ``pane_id`` is a raw URL segment, and the adapter refuses a flag-like
+        # id (argument-injection guard) by raising ValueError — which is NOT a
+        # HerdrUnavailable and would otherwise escape as a 500, breaking the
+        # never-a-500 contract this module promises. Note it fires even with the
+        # flag OFF, because the adapter validates the target while building argv
+        # before it checks availability. A malformed id simply has no scrollback.
         text = ""
     return PanePreviewOut(pane_id=pane_id, text=text)

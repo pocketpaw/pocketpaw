@@ -67,6 +67,15 @@ class FakeHerdrRuntime:
             raise HerdrUnavailable("test: herdr unreachable")
         return list(self._panes)
 
+    async def list_agents(self) -> list[PaneRef]:
+        # build_snapshot uses list_agents (agent panes only). Honour the
+        # "list_panes" key too so the existing fail-open test keeps expressing
+        # "the listing call is down" without caring which listing it is.
+        if "list_agents" in self._raise_on or "list_panes" in self._raise_on:
+            raise HerdrUnavailable("test: herdr unreachable")
+        self.status_calls = getattr(self, "status_calls", [])
+        return list(self._panes)
+
     async def status(self, ref: PaneRef | str) -> AgentStatus:
         pane_id = ref.pane_id if isinstance(ref, PaneRef) else str(ref)
         if "status" in self._raise_on or pane_id in self._raise_on:
@@ -78,6 +87,10 @@ class FakeHerdrRuntime:
     ) -> str:
         pane_id = ref.pane_id if isinstance(ref, PaneRef) else str(ref)
         self.read_calls.append((pane_id, lines))
+        if pane_id.startswith("-"):
+            # Mirrors the real adapter's argument-injection guard, which raises
+            # ValueError (NOT HerdrUnavailable) for a flag-like id.
+            raise ValueError(f"invalid pane id: {pane_id!r} — must not start with '-'")
         if "read" in self._raise_on:
             raise HerdrUnavailable("test: read failed")
         return self._text
@@ -90,6 +103,9 @@ def _pane(pane_id: str, **kw) -> PaneRef:
         agent=kw.get("agent", "claude"),
         tab_id=kw.get("tab_id", "tab-1"),
         terminal_id=kw.get("terminal_id", "term-1"),
+        # ``raw`` carries herdr's full record; the snapshot reads agent_status
+        # from it, so tests can pin the status without a per-pane status() call.
+        raw=kw.get("raw", {}),
     )
 
 
@@ -311,6 +327,48 @@ async def test_preview_endpoint_fails_open_to_empty_text():
 
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"pane_id": "p1", "text": ""}
+
+
+async def test_preview_endpoint_does_not_500_on_a_flaglike_pane_id():
+    """A flag-like pane id must fail open, not 500.
+
+    ``pane_id`` is a raw URL segment. The adapter's argument-injection guard
+    refuses a leading ``-`` by raising ValueError — which is not a
+    HerdrUnavailable, so it escaped the fail-open handler and surfaced as a 500.
+    The security control was fine (herdr never saw the value); the contract that
+    this route never 500s was not.
+    """
+    app = _build_app(role="admin", runtime=FakeHerdrRuntime())
+    async with _client(app) as client:
+        resp = await client.get("/api/v1/cockpit/pane/--help/preview")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"pane_id": "--help", "text": ""}
+
+
+async def test_snapshot_uses_inline_agent_status_without_per_pane_calls():
+    """One subprocess per tick, not 1 + N.
+
+    herdr's agent-list records already carry ``agent_status`` (verified against
+    v0.7.4), so the snapshot reads it inline. A per-pane ``status()`` call here
+    would be a regression: at 20 panes on a 1.5s tick it was ~14 process spawns
+    a second, per connected admin.
+    """
+    panes = [
+        _pane("p1", raw={"agent_status": "working"}),
+        _pane("p2", raw={"agent_status": "blocked"}),
+    ]
+
+    class NoStatusCalls(FakeHerdrRuntime):
+        async def status(self, ref):  # noqa: ANN001 — test double
+            raise AssertionError("status() must not be called when the list carries it")
+
+    snap = await service.build_snapshot(NoStatusCalls(panes=panes))
+    assert snap.herdr_available is True
+    assert [p.status for p in snap.panes] == [
+        AgentStatus.ACTIVE.value,
+        AgentStatus.BLOCKED.value,
+    ]
 
 
 async def test_endpoints_require_admin():
