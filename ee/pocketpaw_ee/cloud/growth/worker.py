@@ -12,6 +12,12 @@
 # actual delivery and the draft's ``sent`` flip (via the service's
 # ``gate_transition`` seam). The job only ever EXISTS for a draft whose
 # ``_growth_send`` proposal a human approved — that is the whole gate.
+# Updated 2026-07-27 (feat/growth-g6): the ``channel="whatsapp"`` branch is
+# live — it delegates to ``growth.whatsapp.dispatch_whatsapp``, which enforces
+# the hard ``prospect.opted_in`` guard (no opt-in ⇒ NO provider call at all),
+# the hourly ``GROWTH_WHATSAPP_MAX_PER_HOUR`` cap, the MSG91 send, and the
+# approved→sent flip through ``service.gate_transition``. Other channels keep
+# the stub.
 #
 # Unlike workspace jobs (which ride arq's DEFAULT queue on the shared chat-runs
 # worker — see ``jobs/domain.py``), growth gets its OWN queue + worker process
@@ -51,19 +57,33 @@ logger = logging.getLogger(__name__)
 
 
 async def dispatch(ctx: dict[str, Any], draft_id: str, channel: str) -> None:
-    """Dispatch an APPROVED outbound draft — STUB (G-4).
+    """Dispatch an APPROVED outbound draft.
 
     This job is enqueued ONLY by ``executor.execute_approved_growth_send``
     after a human approved the draft's ``_growth_send`` Instinct proposal —
     there is no other producer, so a job here IS the approval record's
-    downstream. In this slice it logs and returns: no provider call, no
-    draft mutation, nothing is marked sent. G-5/G-6 replace the body with the
-    real per-channel delivery + the draft's ``sent`` flip (via
-    ``service.gate_transition``) + follow-up scheduling.
+    downstream.
+
+    ``whatsapp`` is live (G-6): it enforces the hard opt-in guard, the hourly
+    rate cap, sends via MSG91, and flips the draft approved→sent through the
+    gate seam. Every refusal RAISES (``max_tries = 1``, so the job lands as a
+    failed job an operator can see) and writes its own compliance row — a
+    refused send is never a silent success.
+
+    The other channels remain the G-4 logging stub until their slices land
+    (G-5 email); they mark nothing sent.
     """
+    if channel == "whatsapp":
+        # Imported lazily so the worker module stays importable (and arq's
+        # settings class evaluable) without the provider stack.
+        from pocketpaw_ee.cloud.growth.whatsapp import dispatch_whatsapp
+
+        await dispatch_whatsapp(draft_id)
+        return
+
     logger.info(
         "growth worker: dispatch STUB — draft=%s channel=%s (approved send queued; "
-        "no delivery in G-4, nothing marked sent)",
+        "no delivery for this channel yet, nothing marked sent)",
         draft_id,
         channel,
     )
