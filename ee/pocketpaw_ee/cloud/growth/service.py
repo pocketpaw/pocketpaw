@@ -38,11 +38,19 @@
 # ``global-read`` justifications on those reads) and ``record_message_log``,
 # the sole writer of the ``MessageLog`` audit doc — one row per delivery
 # ATTEMPT, so a failure and its later retry both survive.
+# Updated 2026-07-27 (feat/growth-g7): the follow-up sweep's data seams — the
+# only Beanie access the cron sweep (``growth/followups.py``) gets, since the
+# import-linter "Growth" contract keeps the doc classes inside this module.
+# ``list_sent_drafts_for_followup`` (cross-tenant scan, the one deliberate
+# global read), ``list_channel_drafts`` / ``get_prospect_system`` /
+# ``mark_prospect_dead`` / ``create_followup_draft`` — all keyed on an explicit
+# ``workspace_id`` because the sweep runs under the worker's system identity,
+# mirroring ``upsert_by_domain`` and ``gate_transition``.
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from beanie import PydanticObjectId
@@ -382,8 +390,21 @@ async def create_draft(
     flips to ``drafted`` on its first draft; later statuses (``in_sequence``,
     ``replied``, ``dead``) are never regressed.
     """
-    body = CreateDraftRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
+    return await _insert_draft(workspace_id, prospect_id, body)
+
+
+async def _insert_draft(
+    workspace_id: str, prospect_id: str, body: CreateDraftRequest
+) -> DraftResponse:
+    """Insert one draft against a prospect in ``workspace_id``.
+
+    The shared core of the HTTP ``create_draft`` and the system-identity
+    ``create_followup_draft`` (G-7) — same validation, same prospect check,
+    same first-draft status nudge, so a follow-up born in the cron sweep is
+    indistinguishable from one an operator typed.
+    """
+    body = CreateDraftRequest.model_validate(body)
     prospect = await _fetch_in_workspace(workspace_id, prospect_id)
 
     doc = _DraftDoc(
@@ -777,19 +798,161 @@ async def record_message_log(
     )
 
 
+# ---------------------------------------------------------------------------
+# Follow-up sweep seams (G-7)
+#
+# The daily cron sweep (``growth/followups.py``) runs under the worker's system
+# identity across every tenant, so these take an explicit ``workspace_id``
+# instead of a RequestContext — same discipline as ``upsert_by_domain`` and
+# ``gate_transition``. They live here (not in ``followups.py``) because the
+# import-linter "Growth" contract keeps ``models.draft`` / ``models.prospect``
+# behind this module.
+# ---------------------------------------------------------------------------
+
+
+def _resolved_sent_at(doc: _DraftDoc) -> datetime | None:
+    """When this draft actually went out.
+
+    Prefers an explicit ``sent_at`` written by the dispatch worker's send
+    record (G-5/G-6) when the field exists, and otherwise falls back to
+    ``updatedAt`` — which, for a draft sitting in ``sent``, IS the moment of
+    the ``sent`` transition (the status flip is the last write). The fallback
+    goes stale only if something else edits a sent draft, which no current
+    code path does. Mongo returns naive datetimes, so anchor them to UTC.
+    """
+    raw = getattr(doc, "sent_at", None) or getattr(doc, "updatedAt", None)
+    if raw is None:
+        return None
+    return raw.replace(tzinfo=UTC) if raw.tzinfo is None else raw
+
+
+async def list_sent_drafts_for_followup(*, limit: int = 500) -> list[dict[str, Any]]:
+    """Every draft currently sitting in ``sent``, oldest-touched first.
+
+    global-read: the follow-up cron sweeps ALL tenants under the worker's
+    system identity — there is no request workspace to filter on. Each row
+    carries its own ``workspace_id`` and the caller re-enters per-workspace
+    reads through the scoped helpers below, so nothing crosses tenants
+    downstream.
+
+    Returns lightweight wire dicts (not domain objects) so the sweep never
+    needs the doc class. ``sent_at`` is resolved per ``_resolved_sent_at``;
+    the caller applies the age threshold, keeping the delay policy in one
+    place. The oldest-first sort means the ``limit`` cap sheds the NEWEST
+    sends — the ones furthest from being due — when a backlog exceeds it.
+    """
+    cursor = (
+        _DraftDoc.find({"status": "sent"})
+        .sort(+_DraftDoc.updatedAt)  # type: ignore[operator]
+        .limit(limit)
+    )
+    return [
+        {
+            "id": str(doc.id),
+            "workspace_id": doc.workspace,
+            "prospect_id": doc.prospect_id,
+            "channel": doc.channel,
+            "variant": doc.variant,
+            "subject": doc.subject,
+            "body": doc.body,
+            "demo_url": doc.demo_url,
+            "sent_at": _resolved_sent_at(doc),
+        }
+        async for doc in cursor
+    ]
+
+
+async def list_channel_drafts(
+    workspace_id: str, prospect_id: str, channel: str
+) -> list[dict[str, Any]]:
+    """Every draft for one (prospect, channel) pair, oldest first.
+
+    The sweep reads this to decide three things at once: is a follow-up
+    already open (dedupe), how many follow-ups has this pair already had
+    (the cap), and which draft was the first touch (the template source).
+    """
+    cursor = (
+        _DraftDoc.find(
+            {"workspace": workspace_id, "prospect_id": prospect_id, "channel": channel}
+        ).sort(+_DraftDoc.createdAt)  # type: ignore[operator]
+    )
+    return [
+        {
+            "id": str(doc.id),
+            "workspace_id": doc.workspace,
+            "prospect_id": doc.prospect_id,
+            "channel": doc.channel,
+            "variant": doc.variant,
+            "status": doc.status,
+            "subject": doc.subject,
+            "body": doc.body,
+            "demo_url": doc.demo_url,
+        }
+        async for doc in cursor
+    ]
+
+
+async def get_prospect_system(workspace_id: str, prospect_id: str) -> ProspectResponse:
+    """Read a prospect under the worker's system identity (still tenant-scoped:
+    a cross-workspace id raises NotFound exactly as the HTTP ``get`` does)."""
+    doc = await _fetch_in_workspace(workspace_id, prospect_id)
+    return _to_response(_to_domain(doc))
+
+
+async def mark_prospect_dead(workspace_id: str, prospect_id: str) -> ProspectResponse:
+    """Retire a prospect the sequence is done with (G-7 cap reached).
+
+    ``dead`` is the terminal outbound status — the sweep skips those rows on
+    every later pass, so nothing touches this prospect again. Idempotent: a
+    prospect already ``dead`` is returned unchanged without a write.
+    """
+    doc = await _fetch_in_workspace(workspace_id, prospect_id)
+    if doc.status == "dead":
+        return _to_response(_to_domain(doc))
+    doc.status = "dead"
+    await doc.save()  # bumps updatedAt
+    # no-event: growth has no realtime subscriber in v1; the prospects view polls.
+    return _to_response(_to_domain(doc))
+
+
+async def create_followup_draft(
+    workspace_id: str, prospect_id: str, body: CreateDraftRequest
+) -> DraftResponse:
+    """Create a follow-up draft under the worker's system identity (G-7).
+
+    Same insert as the HTTP ``create_draft`` (shared ``_insert_draft`` core),
+    keyed on an explicit workspace instead of a RequestContext. The draft is
+    born in ``draft`` status like any other — the sweep then walks it onto the
+    EXISTING gate propose path, so it reaches a human in The Tray and NOTHING
+    is approved or sent without them.
+    """
+    body = CreateDraftRequest.model_validate(body)
+    if body.variant != "follow_up":
+        raise ValidationError(
+            "draft.not_a_followup",
+            "create_followup_draft only creates variant='follow_up' drafts",
+        )
+    return await _insert_draft(workspace_id, prospect_id, body)
+
+
 __all__ = [
     "bulk_ingest",
     "create",
     "create_draft",
+    "create_followup_draft",
     "gate_transition",
     "get",
     "get_draft_for_dispatch",
     "get_prospect_for_dispatch",
+    "get_prospect_system",
     "linkedin_queue",
     "linkedin_queue_markdown",
+    "list_channel_drafts",
     "list_drafts",
     "list_prospects",
+    "list_sent_drafts_for_followup",
     "mark_linkedin_sent",
+    "mark_prospect_dead",
     "propose_send",
     "record_message_log",
     "transition",

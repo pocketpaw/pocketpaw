@@ -848,6 +848,10 @@ name = "Growth — Beanie writes only from service.py"
 # from ``growth.service.record_message_log``), and the dispatch modules join
 # the source list: ``email_dispatch`` records + flips through the service, and
 # ``connector`` only ever touches the provider's HTTP API.
+# feat/growth-g7 — ``followups`` (the daily cron sweep) joins too: it reads and
+# writes drafts/prospects ONLY through the service's system-identity seams
+# (``list_sent_drafts_for_followup`` / ``list_channel_drafts`` /
+# ``create_followup_draft`` / ``mark_prospect_dead``).
 type = "forbidden"
 allow_indirect_imports = "true"
 source_modules = [
@@ -859,6 +863,7 @@ source_modules = [
     "pocketpaw_ee.cloud.growth.executor",
     "pocketpaw_ee.cloud.growth.connector",
     "pocketpaw_ee.cloud.growth.email_dispatch",
+    "pocketpaw_ee.cloud.growth.followups",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.prospect",
