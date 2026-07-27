@@ -8,6 +8,9 @@
 # Created 2026-07-27 (feat/growth-g1): first slice of /growth — create / get /
 # list (tier/status/source filters) / update. Later slices add ingestion,
 # drafts, and Instinct-gated sends.
+# Updated 2026-07-27 (feat/growth-g2): POST /bulk — batch ingestion (Clay /
+# directory imports) via the service's ``bulk_ingest``; 500-row cap on the DTO,
+# per-row errors in the response.
 
 from __future__ import annotations
 
@@ -17,6 +20,8 @@ from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud.growth import service as growth_service
 from pocketpaw_ee.cloud.growth.domain import ProspectSource, ProspectStatus, ProspectTier
 from pocketpaw_ee.cloud.growth.dto import (
+    BulkIngestRequest,
+    BulkIngestResponse,
     CreateProspectRequest,
     ProspectResponse,
     UpdateProspectRequest,
@@ -34,6 +39,17 @@ async def create_prospect(
     ctx: RequestContext = Depends(request_context),
 ) -> ProspectResponse:
     return await growth_service.create(ctx, body)
+
+
+@router.post("/bulk", response_model=BulkIngestResponse)
+async def bulk_ingest_prospects(
+    body: BulkIngestRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> BulkIngestResponse:
+    """Batch create-or-update (max 500 rows). Bad rows come back as indexed
+    error entries; the rest land. Idempotent — re-posting the same payload
+    updates the existing rows instead of duplicating them."""
+    return await growth_service.bulk_ingest(ctx, body)
 
 
 @router.get("", response_model=list[ProspectResponse])
