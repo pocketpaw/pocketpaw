@@ -71,6 +71,10 @@ section: workspace-scoped prospect store under /growth/prospects (create /
 get / list with tier|status|source filters / update), domain-deduped per
 workspace, cross-tenant ids 404. First slice of the /growth outbound engine.
 
+Updated: 2026-07-27 (feat/growth-g2) — added POST /growth/prospects/bulk to
+the Growth — Prospects section: batch ingestion (max 500 rows) via the
+upsert-by-domain seam, per-row errors, idempotent re-runs.
+
 Updated: 2026-07-11 (feat/real-pipeline-s1) — documented the Fabric — Transform
 Mappings section: GET/POST/DELETE /fabric/ingest/mappings (author the
 workspace's source→Fabric mappings, now with a "connector" source_kind that
@@ -1302,8 +1306,9 @@ prospect store. All routes are license-gated and carry the canonical
 prospect id from another workspace returns an identical 404 (existence never
 leaks). The company website `domain` is the dedupe key — normalised to a bare
 lowercase hostname (scheme, `www.`, path, and port stripped) — unique per
-workspace. Later slices add ingestion, drafts, and Instinct-gated sends on the
-dedicated `growth` arq queue (`pocketpaw_ee.cloud.growth.worker.WorkerSettings`).
+workspace. G-2 adds the bulk-ingestion route below; later slices add drafts
+and Instinct-gated sends on the dedicated `growth` arq queue
+(`pocketpaw_ee.cloud.growth.worker.WorkerSettings`).
 
 ### `POST /api/v1/growth/prospects`
 
@@ -1334,6 +1339,54 @@ create-or-update callers use the service's `upsert_by_domain` seam instead.
 
 Returns the prospect envelope: all fields above plus `id`, `workspace_id`,
 and ISO `created_at` / `updated_at`.
+
+### `POST /api/v1/growth/prospects/bulk`
+
+Batch create-or-update — the ingestion endpoint for Clay exports and
+partner-directory scrapes (G-2). Body:
+
+```json
+{
+  "rows": [
+    {
+      "name": "Sam Founder",
+      "company": "Acme Dental",
+      "domain": "acme-dental.com",
+      "source": "clay",
+      "emails": ["sam@acme-dental.com"]
+    }
+  ]
+}
+```
+
+Each row is `CreateProspectRequest`-shaped (same fields, defaults, and enums
+as the single-create route above). Max **500 rows** — an oversized payload is
+a 422 before any row is processed. Rows are processed individually through
+the upsert-by-domain seam:
+
+- a **new** `(workspace, domain)` inserts → counted in `created`;
+- an **existing** one updates in place (all fields overwritten except
+  `source`, which keeps first-capture provenance) → counted in `updated`;
+- an **invalid** row (bad enum, missing field, empty domain) is skipped and
+  recorded — the rest of the batch proceeds. No all-or-nothing abort;
+  upserts are idempotent, so re-posting the same payload is safe and reports
+  every row as updated.
+
+Response:
+
+```json
+{
+  "created": 18,
+  "updated": 1,
+  "errors": [
+    {"index": 4, "code": "prospect.invalid_row", "message": "source: Input should be 'clay', 'directory' or 'manual'"}
+  ]
+}
+```
+
+`index` is the row's position in the submitted `rows` array. Rows land only
+in the caller's workspace — the same domains ingested by another workspace
+create independent rows.
 
 ### `GET /api/v1/growth/prospects`
 
