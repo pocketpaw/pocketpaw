@@ -93,6 +93,14 @@ Security review follow-up: documented per-route growth RBAC
 and the fact that a _growth_send blob can only be minted by this route —
 the generic POST /instinct/actions refuses reserved gated parameter keys.
 
+Updated: 2026-07-27 (feat/growth-g7) — added the Growth — Follow-ups section:
+the daily `growth.followup_sweep` arq cron on the `growth` queue turns a send
+that went quiet into a `variant: "follow_up"` draft filed back through the
+same `_growth_send` gate (proposed, never approved or sent), capped at
+GROWTH_FOLLOWUP_MAX per prospect+channel after which the prospect is retired
+to `dead`. Documented both env knobs (GROWTH_FOLLOWUP_DELAY_DAYS,
+GROWTH_FOLLOWUP_MAX).
+
 Updated: 2026-07-11 (feat/real-pipeline-s1) — documented the Fabric — Transform
 Mappings section: GET/POST/DELETE /fabric/ingest/mappings (author the
 workspace's source→Fabric mappings, now with a "connector" source_kind that
@@ -1722,3 +1730,70 @@ closed), and `mark_failed` on the Action if the enqueue fails. On
 **reject** the draft flips to `rejected` and nothing is enqueued. The
 dispatch job body is a logging stub in this slice — G-5/G-6 implement the
 actual per-channel delivery and the `sent` flip.
+
+## Growth — Follow-ups
+
+Final slice of the `/growth` v1 outbound engine (G-7): the loop that closes
+the cycle. A draft that went out and got no reply produces a **second draft**
+— a short nudge — which is filed straight back into the Instinct Tray through
+the same `_growth_send` gate. There is **no new API surface** here and no new
+authority: the sweep's terminal state is a `proposed` draft plus a pending
+Action a human decides on, exactly like a first touch typed by hand. Nothing
+auto-approves and nothing auto-sends.
+
+**Where it runs.** `growth.followup_sweep`, a daily arq **cron** at 13:00 UTC
+on the dedicated `growth` queue
+(`pocketpaw_ee.cloud.growth.worker.WorkerSettings.cron_jobs`, `unique=True`
+so a horizontally-scaled worker fleet runs one tick, not N). Deploy it with
+the same process that already serves `growth.dispatch`:
+
+```bash
+arq pocketpaw_ee.cloud.growth.worker.WorkerSettings
+```
+
+**What it does**, per (workspace, prospect, channel) thread:
+
+1. Finds the thread's most recent `sent` draft and checks it is older than
+   `GROWTH_FOLLOWUP_DELAY_DAYS`. The clock starts at the LAST touch, not the
+   first — a thread that already had a nudge waits the full delay again.
+2. Skips the thread when the prospect is `replied` (they answered) or `dead`
+   (already retired), or when any draft in the thread is `replied`.
+3. Skips the thread when a follow-up is already **open** in it (`draft`,
+   `proposed` or `approved`) — that one is the human's move. This is also
+   what makes the sweep idempotent: the follow-up it filed on the last pass
+   blocks the next one, so re-running a pass creates nothing.
+4. Counts the thread's non-rejected follow-ups. At `GROWTH_FOLLOWUP_MAX` the
+   prospect is retired to `status: "dead"` and nothing further is created —
+   the sweep never touches them again. (A follow-up a human **rejected**
+   doesn't burn a cap slot.)
+5. Otherwise: creates a `variant: "follow_up"` draft (copy templated in code
+   from the thread's first touch — a placeholder the `/growth` crew skill
+   replaces; on email the subject is the original's, `Re:`-prefixed, so the
+   nudge threads under it) and immediately runs it through the existing
+   propose path — filing the `_growth_send` Action and flipping the draft to
+   `proposed`.
+
+**Who proposes.** A cron has no user, but the gate re-checks the proposer's
+*current* `growth.manage` role at execute time, so a "system"-proposed
+follow-up would be approvable and then fail closed at dispatch. The sweep
+therefore **inherits the human** who proposed the thread's last send, read off
+that draft's own `_growth_send` Action — they become the follow-up's trigger
+source, its Tray assignee, and the identity the execute-time re-check runs
+against. When no proposer can be resolved (a draft that reached `sent` with no
+Tray record) the thread is skipped: a proposal nobody can execute is worse
+than none.
+
+**Config.** Both read from the environment at sweep time, so a change takes
+effect on the next tick without a redeploy. An unparseable or out-of-range
+value logs a warning and falls back to the default — a typo must not take the
+outbound loop down.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `GROWTH_FOLLOWUP_DELAY_DAYS` | `4` | Days of silence after a send before its follow-up comes due. Minimum `1`. |
+| `GROWTH_FOLLOWUP_MAX` | `2` | Follow-ups allowed per (prospect, channel). On the pass where a capped thread comes due again, the prospect is set to `dead` instead. |
+
+**Send timestamp.** The age check reads the draft's `sent_at` when the
+dispatch worker's send record supplies one, and otherwise falls back to
+`updated_at` — which, for a draft sitting in `sent`, is the moment of the
+`sent` transition, since the status flip is the last write to that row.
