@@ -1,4 +1,14 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-26 (site knowledge sync) — two owner endpoints over the site's
+#   own knowledge: GET /paw-bar/admin/site/{id}/knowledge reports how many articles
+#   the concierge can quote and how the last sync went, and POST
+#   .../knowledge/sync re-reads the site's pages into pocket:<pocket_id> (the ONE
+#   scope a concierge reads) without needing a re-publish. The sync also runs
+#   automatically on publish and on agent provisioning; this is the manual handle.
+#   The read gates on paw_bar.read, the sync on the new paw_bar.manage — both ADMIN,
+#   but a mutation that spends compute does not ride a read gate. The sync is
+#   awaited here (the owner clicked a button and wants the result) while the
+#   automatic triggers are backgrounded.
 # Updated: 2026-07-26 (concierge transcripts) — the visitor half of a conversation
 #   is now written down, so an owner's transcript is a dialogue instead of the
 #   agent talking to itself. (1) concierge_chat resolves the embed key through
@@ -1093,6 +1103,95 @@ async def update_site_concierge_settings(
         concierge_greeting=site.concierge_greeting,
         concierge_store_transcripts=site.concierge_store_transcripts,
     )
+
+
+# ---------------------------------------------------------------------------
+# Admin: per-Site concierge KNOWLEDGE (site content → the pocket KB it reads)
+#
+# A concierge answers from ONE scope, ``pocket:<pocket_id>``, so if nothing put the
+# site's own pages there the agent is live but knows nothing about the business it
+# fronts. The sync runs automatically on publish and on agent provisioning; these
+# two endpoints are the owner's window into it — what the concierge currently
+# knows, and a way to re-run the sync without re-publishing.
+#
+# Gates: the read uses ``paw_bar.read`` and the sync ``paw_bar.manage`` (both
+# ADMIN). The sync is a mutation that spends compute, so it does not ride the read.
+# ---------------------------------------------------------------------------
+
+_require_paw_bar_manage = require_action("paw_bar.manage", workspace_dep=current_workspace_id)
+
+
+class ConciergeKnowledgeResponse(BaseModel):
+    """What a site's concierge currently knows, and how the last sync went.
+
+    ``status`` is "" for a clean sync; otherwise a stable machine code the dashboard
+    can turn into a sentence: ``never_synced`` (nothing has run yet), ``no_content``
+    (the pocket holds no ingestable pages — the case for a foreign site we do not
+    host), ``pocket_unavailable`` or ``sync_failed``.
+    """
+
+    site_id: str
+    article_count: int
+    synced_at: str
+    status: str
+    ingested: int = 0
+    removed: int = 0
+    skipped: int = 0
+
+
+def _knowledge_response(site: Any, report: Any = None) -> ConciergeKnowledgeResponse:
+    synced_at = getattr(site, "kb_synced_at", None)
+    status = getattr(site, "kb_sync_error", "") or ""
+    if not synced_at and not status:
+        status = "never_synced"
+    return ConciergeKnowledgeResponse(
+        site_id=str(site.id),
+        article_count=len(getattr(site, "kb_article_ids", None) or []),
+        synced_at=synced_at.isoformat() if synced_at else "",
+        status=status,
+        ingested=getattr(report, "ingested", 0) or 0,
+        removed=getattr(report, "removed", 0) or 0,
+        skipped=getattr(report, "skipped", 0) or 0,
+    )
+
+
+@router.get(
+    "/paw-bar/admin/site/{site_id}/knowledge",
+    response_model=ConciergeKnowledgeResponse,
+    dependencies=[Depends(_require_paw_bar_read)],
+)
+async def get_site_knowledge(
+    site_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+) -> ConciergeKnowledgeResponse:
+    """How much of this site the concierge can actually quote. Workspace-scoped."""
+    site = await _load_site_scoped(site_id, workspace_id)
+    return _knowledge_response(site)
+
+
+@router.post(
+    "/paw-bar/admin/site/{site_id}/knowledge/sync",
+    response_model=ConciergeKnowledgeResponse,
+    dependencies=[Depends(_require_paw_bar_manage)],
+)
+async def sync_site_knowledge_now(
+    site_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+) -> ConciergeKnowledgeResponse:
+    """Re-read the site's pages into the KB its concierge answers from.
+
+    Awaited rather than backgrounded, unlike the publish and provisioning triggers:
+    the owner clicked a button and needs the result, not a promise. It is idempotent
+    (re-ingesting a page versions its article rather than duplicating it) and prunes
+    the articles pages that no longer exist left behind, so pressing it twice is
+    harmless. Never raises on a sync failure — the failure is reported in ``status``
+    so the dashboard can show it instead of a stack trace.
+    """
+    from pocketpaw_ee.sites.kb_ingest import safe_sync_site_knowledge
+
+    site = await _load_site_scoped(site_id, workspace_id)
+    report = await safe_sync_site_knowledge(site)
+    return _knowledge_response(site, report)
 
 
 # ---------------------------------------------------------------------------

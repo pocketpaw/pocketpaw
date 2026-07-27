@@ -144,6 +144,14 @@
 # is collected (visitor free text can carry a name, an email, an order number).
 # Defaults True so the owner-facing transcript is a real two-sided conversation;
 # an owner on a privacy-sensitive site turns it off and keeps the concierge.
+#
+# Updated 2026-07-26 (site knowledge sync): added ``kb_article_ids`` /
+# ``kb_synced_at`` / ``kb_sync_error`` — the bookkeeping behind "this site's own
+# pages are in the pocket KB its concierge reads". Without it a dedicated concierge
+# was provisioned knowledge-empty and could not answer a question about the business
+# it fronts. The ids exist so a re-sync can prune what a renamed page left behind
+# without clearing a scope that also holds owner-uploaded files. All default
+# empty/None, so no migration.
 
 from __future__ import annotations
 
@@ -286,6 +294,17 @@ class Site(TimestampedDocument):
     # NOT retroactively purge lines already stored. Defaults True (the transcript
     # the dashboard promises), so no migration.
     concierge_store_transcripts: bool = True
+    # Site knowledge sync (``sites.kb_ingest``): the kb-go article ids this site's
+    # own content currently occupies in ``pocket:<pocket_id>`` — the scope its
+    # concierge reads. Kept so a later sync can delete the articles a renamed or
+    # deleted page left behind WITHOUT touching the rest of the scope, which also
+    # holds owner-uploaded files. Empty until the first sync, so no migration.
+    kb_article_ids: list[str] = Field(default_factory=list)
+    # When the last sync ran (success or not) and why it produced nothing, so the
+    # dashboard can tell "this concierge has no knowledge yet" apart from "syncing
+    # is broken". "" means the last sync was clean.
+    kb_synced_at: datetime | None = None
+    kb_sync_error: str = ""
 
     def rotate_signed_key(self) -> str:
         """Regenerate the public embed key and return the new value (T1).

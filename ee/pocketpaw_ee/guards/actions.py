@@ -3,6 +3,11 @@
 # machine-readable `code` emitted on denial. Tests iterate ACTIONS to
 # guarantee every guarded operation is covered.
 #
+# Updated: 2026-07-26 (site knowledge sync) — added ``paw_bar.manage`` (ADMIN) for
+# the owner-triggered site→pocket-KB sync. Same role as ``paw_bar.read`` but its
+# own action: the sync is a mutation that spends compute (ingest compiles
+# articles), and a write should not ride a read gate that could later be widened.
+#
 # Updated: 2026-07-16 (D2 concierge dashboard reads) — added ``paw_bar.read``
 # (ADMIN) so the per-site Concierge dashboard reads (ee.pocketpaw_ee.paw_bar
 # .router: overview / conversations / decisions / handoffs) gate on the caller's
@@ -270,6 +275,11 @@ ACTIONS: dict[str, ActionRule] = {
     # carry visitor PII and owner decision context, so the surface is owner/admin
     # only and must not be visible to every workspace member.
     "paw_bar.read": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Paw Bar concierge dashboard — the owner WRITE surface (today: the
+    # site→pocket-KB knowledge sync). ADMIN like the read, but its own action
+    # because it is a mutation that also spends compute (ingest compiles articles),
+    # so it must not inherit a read gate. Mirrors belt.read / belt.manage.
+    "paw_bar.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Belt console — the develop-station read + repo-admin surface
     # (ee.cloud.belt.router, feat/belt-console-backend SC-1). read is MEMBER so
     # any team member can list discoverable repos + their own station runs.

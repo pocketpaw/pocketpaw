@@ -2137,7 +2137,36 @@ async def _deploy_site_doc(
         if is_dynamic:
             doc.d1_database_id = d1_database_id
         await doc.save()
+
+    # The site's content just changed, so the knowledge its concierge answers from
+    # is now stale. Re-sync in the background: ingest compiles articles and can be
+    # slow, and a publish must not wait on it — the site goes live immediately and
+    # the concierge catches up a moment later. A preview publish never reaches here
+    # (it returns earlier), so a draft never rewrites the live KB.
+    _schedule_site_knowledge_sync(doc)
     return doc
+
+
+def _schedule_site_knowledge_sync(site: _SiteDoc) -> None:
+    """Fire the background site→pocket-KB sync. Non-async, never blocks, never
+    raises. Looked up through the module so tests can patch it, mirroring
+    ``_schedule_native_prewarm``.
+
+    The try/except is the point: this is called from the tail of a LIVE deploy, so
+    anything that escapes here would fail a publish of a site that is already
+    deployed and serving. A concierge with stale knowledge is a much smaller problem
+    than a publish that reports failure after succeeding.
+    """
+    try:
+        from pocketpaw_ee.sites.kb_ingest import schedule_site_knowledge_sync
+
+        schedule_site_knowledge_sync(site)
+    except Exception:  # noqa: BLE001 — never fail a live publish over a KB sync
+        logger.warning(
+            "sites.kb: could not schedule knowledge sync for site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
 
 
 async def _provision_dynamic_site(
@@ -2445,6 +2474,10 @@ async def finalize_provisioned_site(site: _SiteDoc, *, url: str) -> None:
     site.deployed_at = datetime.now(UTC)
     site.url = url
     await site.save()
+    # A dynamic site stands up through this job rather than through
+    # ``_deploy_site_doc``, so it needs its own knowledge sync or its concierge
+    # would be the only one left knowing nothing about the business.
+    _schedule_site_knowledge_sync(site)
 
 
 async def mark_provision_failed(site: _SiteDoc) -> None:

@@ -24,6 +24,10 @@
 #   agent's, a run with no reply still shows what was asked, the question is
 #   stamped earlier than the answer, and the conversations preview falls back to
 #   the visitor's question only when there is no reply to show.
+# Updated 2026-07-26 (site knowledge sync): an eleventh layer covers the two
+#   knowledge endpoints — the read distinguishes "never synced" from a failure, the
+#   sync is awaited and returns its own counts, a failed sync surfaces as a status
+#   rather than a 500, and both are cross-tenant-404 and member-403.
 
 from __future__ import annotations
 
@@ -894,3 +898,100 @@ async def test_conversations_preview_still_prefers_the_reply(client):
 
     body = (await c.get(f"/paw-bar/admin/site/{site.id}/conversations")).json()
     assert [i["preview"] for i in body["items"]] == ["Yes, within 5km."]
+
+
+# --------------------------------------------------------------------------- #
+# Layer 11 — concierge knowledge (site content in the pocket KB it reads)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_knowledge_reports_never_synced_before_the_first_sync(client):
+    """A site that has never synced is distinguishable from one whose sync failed,
+    so the dashboard can say "no knowledge yet" instead of "something is broken"."""
+    c, store, _fabric = client
+    site = await _site()
+    await store.create_widget(_widget())
+
+    body = (await c.get(f"/paw-bar/admin/site/{site.id}/knowledge")).json()
+    assert body["article_count"] == 0
+    assert body["status"] == "never_synced"
+    assert body["synced_at"] == ""
+
+
+@pytest.mark.asyncio
+async def test_knowledge_reports_what_the_concierge_can_quote(client):
+    c, store, _fabric = client
+    site = await _site()
+    site.kb_article_ids = ["site-home", "site-about"]
+    site.kb_synced_at = datetime.now(UTC)
+    await site.save()
+
+    body = (await c.get(f"/paw-bar/admin/site/{site.id}/knowledge")).json()
+    assert body["article_count"] == 2
+    assert body["status"] == ""
+    assert body["synced_at"]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_sync_runs_and_reports(client, monkeypatch):
+    """The owner clicked a button, so the sync is awaited and its result returned
+    rather than promised."""
+    c, store, _fabric = client
+    site = await _site()
+
+    async def _fake_sync(target):
+        from pocketpaw_ee.sites.kb_ingest import SiteKnowledgeReport
+
+        target.kb_article_ids = ["site-home"]
+        target.kb_synced_at = datetime.now(UTC)
+        target.kb_sync_error = ""
+        return SiteKnowledgeReport(ingested=1, removed=2, article_ids=["site-home"])
+
+    monkeypatch.setattr("pocketpaw_ee.sites.kb_ingest.safe_sync_site_knowledge", _fake_sync)
+
+    res = await c.post(f"/paw-bar/admin/site/{site.id}/knowledge/sync")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ingested"] == 1
+    assert body["removed"] == 2
+    assert body["article_count"] == 1
+    assert body["status"] == ""
+
+
+@pytest.mark.asyncio
+async def test_knowledge_sync_surfaces_a_failure_instead_of_500ing(client, monkeypatch):
+    c, store, _fabric = client
+    site = await _site()
+
+    async def _failing_sync(target):
+        from pocketpaw_ee.sites.kb_ingest import SiteKnowledgeReport
+
+        target.kb_sync_error = "sync_failed"
+        return SiteKnowledgeReport(error="sync_failed")
+
+    monkeypatch.setattr("pocketpaw_ee.sites.kb_ingest.safe_sync_site_knowledge", _failing_sync)
+
+    res = await c.post(f"/paw-bar/admin/site/{site.id}/knowledge/sync")
+    assert res.status_code == 200
+    assert res.json()["status"] == "sync_failed"
+
+
+@pytest.mark.asyncio
+async def test_knowledge_cross_tenant_is_404(client):
+    c, _store, _fabric = client
+    site = await _site(workspace="ws-other")
+    assert (await c.get(f"/paw-bar/admin/site/{site.id}/knowledge")).status_code == 404
+    assert (await c.post(f"/paw-bar/admin/site/{site.id}/knowledge/sync")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_knowledge_member_role_is_forbidden(mongo_db, store, fabric, monkeypatch):
+    """A site's knowledge state and its sync are owner/admin surfaces: the read
+    exposes how the concierge is configured, and the sync spends compute."""
+    app = _build_app(store, fabric, monkeypatch, role="member")
+    site = await _site()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as c:
+        assert (await c.get(f"/paw-bar/admin/site/{site.id}/knowledge")).status_code == 403
+        assert (await c.post(f"/paw-bar/admin/site/{site.id}/knowledge/sync")).status_code == 403

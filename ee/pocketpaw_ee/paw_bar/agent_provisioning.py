@@ -226,7 +226,30 @@ async def ensure_site_agent(site: Any, widget: Any) -> str | None:
             widget.id,
         )
         return None
+
+    # (4) Give the new agent something to know. A concierge reads ONE KB scope —
+    # its site's pocket — and until the site's own pages are in that scope the agent
+    # is provisioned knowledge-empty and answers "I don't know" about the business
+    # it fronts. Sites published before this existed have never synced, so a bind is
+    # the natural catch-up point. Background + failure-soft: never a gate on a bind.
+    _schedule_knowledge_sync(site)
     return agent.id
+
+
+def _schedule_knowledge_sync(site: Any) -> None:
+    """Fire the background site→pocket-KB sync, swallowing everything. Imported
+    lazily so provisioning keeps working even if the sites KB module cannot be
+    loaded in a given deployment."""
+    try:
+        from pocketpaw_ee.sites.kb_ingest import schedule_site_knowledge_sync
+
+        schedule_site_knowledge_sync(site)
+    except Exception:  # noqa: BLE001 — knowledge sync is never a gate on a bind
+        logger.warning(
+            "paw-bar concierge: could not schedule knowledge sync for site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
 
 
 async def _canonical_site_for_pocket(workspace_id: str, pocket_id: str) -> Any | None:
