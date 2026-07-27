@@ -88,6 +88,18 @@ workspace's source→Fabric mappings, now with a "connector" source_kind that
 dispatches through the OSS FABRIC_INGESTORS registry — gcalendar first) and
 POST /fabric/ingest/run (run one mapping immediately; misconfiguration reports
 status="error" in the body, never a 5xx).
+
+Updated: 2026-07-22 (SHIP-4, feat/ship-4-agent-surface) — the two DELETE routes
+now file REAL Instinct proposals (kind `_ship_action`), executed on approval by
+``ship.executor`` with an execute-time `ship.manage` re-check; documented the
+`pocketpaw_ship` MCP agent surface and how it is narrower than the HTTP one (a
+prod deploy proposes rather than deploys).
+
+Updated: 2026-07-22 (SHIP-3, feat/ship-3-cloud-entity) — documented the
+Ship — Managed Deploys section: the workspace-scoped /ship surface for
+provisioning a box, registering and deploying an app, routing a domain,
+creating a linked database, and reading logs + box health. The two DELETE
+routes PARK a teardown for human approval and never destroy anything.
 -->
 
 # Cloud REST API Reference
@@ -1233,6 +1245,175 @@ Errors:
 | 404 | `pocket.not_found` | Unknown pocket id. |
 | 403 | `pocket.access_denied` | The caller lacks access to the pocket. |
 | 500 | `sites.generator_failed` | The arm build failed (missing toolchain, non-zero build, or smoke-gate failure). |
+
+## Ship — Managed Deploys
+
+SHIP-3. The `/api/v1/ship` surface behind the /ship console: a workspace
+provisions a **box** (a VPS running Dokku), registers **apps** on it, and
+deploys them. Every route is license-gated and scoped to the caller's active
+workspace — the workspace never travels in a body or query param, and an id
+belonging to another tenant reads as `404`, never `403` (existence does not
+leak).
+
+Long work never blocks the request. `POST /ship/boxes` and
+`POST /ship/apps/{id}/deploy` enqueue an ARQ job and return immediately with a
+pollable record; the engine-backed routes (domains, database, logs, metrics)
+run inline over SSH and answer `409` with `code: ship.*_failed` when the deploy
+engine refuses.
+
+**Secrets never cross this surface.** A box's SSH key is decrypted only inside
+the engine session and shredded with it. App env **names** are accepted and
+stored (`env_refs`); env **values** are not. A database's connection string
+stays on the box — `POST /ship/apps/{id}/db` returns the NAME of the variable
+holding it.
+
+### `POST /ship/boxes`
+
+Provision a box. Body: `{"provider": "hcloud"}`. `server_type` and `region` are
+optional; they default to `cx22` / `fsn1` (Hetzner: 2 vCPU / 4 GB / 40 GB in
+Falkenstein — the cheapest shape that comfortably runs Dokku plus a couple of
+app containers), overridable per deployment via `POCKETPAW_SHIP_SERVER_TYPE` /
+`POCKETPAW_SHIP_REGION`.
+
+Returns the box in `provisioning`; poll `GET /ship/boxes` until it is `ready`:
+
+```json
+{"id": "…", "provider": "hcloud", "ip": "", "status": "provisioning", "price_monthly": null}
+```
+
+`status` is one of `provisioning` | `ready` | `degraded` | `destroyed`.
+
+### `GET /ship/boxes`
+
+The workspace's boxes, newest first — a list of the object above.
+
+### `GET /ship/boxes/{box_id}/metrics`
+
+Live box health, read over SSH. Three percentages, `0.0`–`100.0`:
+
+```json
+{"cpu": 21.0, "mem": 37.5, "disk": 23.0}
+```
+
+`cpu` is derived from the 1-minute load average over the core count and capped
+at 100. A box that is not `ready` answers `409 ship.box_not_ready`.
+
+### `DELETE /ship/boxes/{box_id}`
+
+**Parks** a teardown for human approval. Nothing is destroyed, no engine command
+runs, and the box keeps its current `status`:
+
+```json
+{"status": "pending_approval", "proposal_id": "<instinct-action-id>"}
+```
+
+The `proposal_id` is a real Instinct Action id: the teardown lands in The Tray
+for a human to approve or reject. Only on approval does
+`ship.executor.execute_approved_ship_action` touch the box — the request path
+never calls the engine's destroy verb. Repeating the call returns the same
+`proposal_id` rather than filing a duplicate.
+
+The executor re-checks `ship.manage` against the proposer's **current** role
+before it runs, so an approval for a since-demoted proposer fails closed, and
+re-approving an already-executed action never fires twice.
+
+### `POST /ship/apps`
+
+Register an app on a box. Body: `{"name": "demo", "box_id": "…"}`. Optional:
+`image` (the container image reference the deploy ships), `git_ref`,
+`build_path` (`dockerfile` | `nixpacks`), `prod`, and `env_refs` (variable
+NAMES only). Returns:
+
+```json
+{"id": "…", "name": "demo", "box_id": "…", "status": "created", "urls": []}
+```
+
+`status` walks `created` → `deploying` → `live` | `failed`. A duplicate name on
+the same box is `409 ship.app_exists`; a `box_id` from another workspace is
+`404`.
+
+### `GET /ship/apps?box_id=<id>`
+
+The workspace's apps, newest first, optionally narrowed to one box.
+
+### `POST /ship/apps/{app_id}/deploy`
+
+Enqueue a deploy. Takes **no body** — the app already carries its image, and the
+attempt pins that image so a later app edit cannot rewrite what is in flight. An
+app with no image is `422 ship.app_no_image`; a box that is not `ready` is
+`409 ship.box_not_ready`. Returns the attempt immediately:
+
+```json
+{"id": "…", "app_id": "…", "status": "queued", "started_at": "2026-07-22T…Z", "finished_at": null}
+```
+
+### `GET /ship/apps/{app_id}/deploys`
+
+The app's deploy attempts, newest first. `status` walks
+`queued` → `building` → `releasing` → `live`, or lands on `failed`;
+`finished_at` is set on a terminal state. Poll this to follow a deploy.
+
+### `POST /ship/apps/{app_id}/domains`
+
+Route a domain to the app and (by default) issue a certificate for it. Body:
+`{"domain": "demo.example.com", "enable_tls": true}`. Returns
+`{"domain": "…", "tls_enabled": true}` and adds the resulting URL to the app's
+`urls`.
+
+### `GET /ship/apps/{app_id}/domains`
+
+`{"domains": [{"domain": "…", "tls_enabled": true}]}` — the domains recorded at
+add time.
+
+### `POST /ship/apps/{app_id}/db`
+
+Create a database service and link it to the app. Body is optional; `service`
+defaults to `<app-name>-db`. Returns:
+
+```json
+{"service": "demo-db", "linked_app": "demo", "env_var": "MONGO_URL"}
+```
+
+`env_var` is the NAME of the variable the link injected. The connection string
+is a secret and never crosses the wire.
+
+### `GET /ship/apps/{app_id}/logs?num=<n>`
+
+Recent app log lines, newest last (`num` defaults to 100, max 1000). The engine
+redacts them before they leave the box:
+
+```json
+{"lines": ["2026-07-22T…Z app[web.1]: GET /health 200"]}
+```
+
+### `DELETE /ship/apps/{app_id}`
+
+**Parks** an app teardown for human approval, exactly like the box DELETE above.
+Nothing is destroyed.
+
+### The agent surface (`pocketpaw_ship` MCP)
+
+A chat agent in a room whose pocket has the **Ship connector** bound reaches the
+same service layer through ten in-process MCP tools — `ship_list_boxes`,
+`ship_provision_box`, `ship_list_apps`, `ship_create_app`, `ship_deploy_app`,
+`ship_add_domain`, `ship_create_db`, `ship_logs`, `ship_metrics`, and
+`ship_request_destroy`. Binding the connector also auto-surfaces the bundled
+`ship` skill into that room.
+
+The agent's surface is deliberately **narrower than the HTTP one**:
+
+| Verb | Operator over HTTP | Agent over MCP |
+|------|--------------------|----------------|
+| reads, provision, create app, domain, db | runs | runs |
+| deploy to a non-prod app | runs | runs |
+| deploy to a **prod-flagged** app | runs | **proposes** |
+| destroy a box or an app | proposes | proposes |
+
+An operator calling the API with their own credentials is a different actor from
+an agent acting on their behalf, which is why the prod deploy splits. Both paths
+converge on the same Instinct gate for teardowns: the tool returns
+`{"status": "proposed", "proposal_id": "…"}` and the agent is instructed never to
+report a destroy as done.
 
 ## Fabric — Transform Mappings (source→Fabric ingest)
 

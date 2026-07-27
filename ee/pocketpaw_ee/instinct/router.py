@@ -902,6 +902,52 @@ def _assert_fabric_objects_workspace(action: Any, current_workspace: str) -> Non
         )
 
 
+def _ship_action_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_ship_action`` blob on an Action, or ``None``.
+
+    The blob is the gated /ship infrastructure payload
+    ``ee.cloud.ship.propose`` stores under ``Action.parameters._ship_action``
+    (verb / box_id / app_id / params / params_hash / idempotency_key + the
+    originating ``workspace_id``). This is a peer gated proposal kind — the
+    approve path dispatches the apply-on-approve executor on its presence,
+    exactly as it dispatches the external-action executor on ``_external_action``.
+    A /ship action is the only path that may destroy a box or an app. Anything
+    that is not a dict is treated as "no ship action".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_ship_action")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_ship_action_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting a /ship action from another workspace.
+
+    Mirror of ``_assert_external_action_workspace`` for the ``_ship_action``
+    blob. ``require_action_any_workspace("instinct.approve")`` only proves the
+    caller holds the role SOMEWHERE; this binds the /ship Action to the caller's
+    active workspace. A /ship action carries no pocket, so its tenancy lives
+    entirely on the blob's ``workspace_id``. A mismatch → 403 on BOTH the approve
+    and the reject side (asymmetric tenant scope is no tenant scope). An empty
+    workspace claim fails closed.
+    """
+    blob = _ship_action_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This /ship action has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This /ship action belongs to a different workspace",
+        )
+
+
 def _pocket_create_blob(action: Any) -> dict[str, Any] | None:
     """Return the ``_pocket_create`` blob on an Action, or ``None``.
 
@@ -1413,6 +1459,7 @@ async def bulk_approve_actions(
             _assert_code_change_workspace(action, workspace_id)
             _assert_external_action_workspace(action, workspace_id)
             _assert_fabric_objects_workspace(action, workspace_id)
+            _assert_ship_action_workspace(action, workspace_id)
             _assert_pocket_create_workspace(action, workspace_id)
             _assert_instinct_rule_workspace(action, workspace_id)
             _assert_fabric_conflict_workspace(action, workspace_id)
@@ -1536,6 +1583,37 @@ async def bulk_approve_actions(
             except Exception:
                 logger.exception(
                     "bulk-approve fabric-objects execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # A bulk-approved gated ``_ship_action`` Action runs its approved
+        # infrastructure verb (destroy / rollback / prod deploy) against the live
+        # box. Mirrors the Fabric-objects branch above: per-item
+        # ``human.corrected(accepted)``, the ``agent.proposed`` event id off the
+        # blob as causation, then the executor (which owns the chain close). This
+        # is the ONLY path that may destroy a box or an app — the tool call and
+        # the HTTP DELETE only ever propose.
+        ship_action_blob = _ship_action_blob(action)
+        if ship_action_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=ship_action_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(ship_action_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.ship import executor as ship_executor
+
+                await ship_executor.execute_approved_ship_action(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve ship-action execution failed for %s (non-fatal)",
                     action.id,
                 )
             continue
@@ -1803,6 +1881,7 @@ async def bulk_reject_actions(
             _assert_code_change_workspace(action, workspace_id)
             _assert_external_action_workspace(action, workspace_id)
             _assert_fabric_objects_workspace(action, workspace_id)
+            _assert_ship_action_workspace(action, workspace_id)
             _assert_pocket_create_workspace(action, workspace_id)
             _assert_instinct_rule_workspace(action, workspace_id)
             _assert_fabric_conflict_workspace(action, workspace_id)
@@ -2352,6 +2431,33 @@ async def approve_action(
             )
         except Exception:
             logger.exception("fabric-objects execution after approval failed (non-fatal)")
+
+    # When the approved Action carries a gated ``_ship_action`` blob, run the
+    # approved infrastructure verb against the live box. Same best-effort,
+    # lazy-import, never-break-the-approve-response shape as the hooks above; the
+    # executor owns the chain CLOSE and records success / failure on the Action.
+    # This is the ONLY path that may destroy a box or an app.
+    ship_action_blob = _ship_action_blob(approved)
+    if ship_action_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=ship_action_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(ship_action_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.ship import executor as ship_executor
+
+            await ship_executor.execute_approved_ship_action(
+                approved, human_event_id=human_event_id
+            )
+        except Exception:
+            logger.exception("ship-action execution after approval failed (non-fatal)")
 
     # When the approved Action carries a gated ``_pocket_create`` blob, create the
     # proposed starter Pocket via ``pockets.service.create`` (workspace-scoped,

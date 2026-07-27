@@ -1,5 +1,8 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-07-27 (feat/growth-g4 merge) — merged integration/ship-v1 into the
+growth stack so the ``_growth_send`` gate slice can wire the sixth gated kind on
+top of ship's instinct-router changes; both changelog blocks below retained.
 Updated: 2026-07-27 (feat/growth-g3) — added ``Draft`` (the /growth per-channel
 outreach draft: workspace-scoped, attached to a prospect, status lifecycle
 enforced in the service) to the imports and ``get_all_documents()`` so the
@@ -13,6 +16,12 @@ dedupe key) to the imports and ``get_all_documents()`` so the
 ``__all__`` so it can't be star-imported into routers/DTOs/domains — only
 ``ee.cloud.growth.service`` imports the doc class directly (import-linter
 "Growth" contract).
+Updated: 2026-07-22 (SHIP-3, feat/ship-3-cloud-entity) — added ``ShipApp`` and
+``ShipDeploy`` (the /ship app + deploy-attempt docs) to the imports, ``__all__``
+and ``get_all_documents()`` so the ``ship_apps`` / ``ship_deploys`` collections
+are wired into ``init_beanie``. Only ``ee.cloud.ship.store`` imports the doc
+classes directly (import-linter "Ship" contract).
+
 Updated: 2026-07-15 (fix/workspace-vm-map-to-db) — added ``WorkspaceVm`` (the
 workspace→Daytona-VM mapping, moved out of the local
 ``~/.pocketpaw/daytona_workspace_vm_map.json`` file into the ``workspace_vms``
@@ -198,6 +207,7 @@ from pocketpaw_ee.cloud.models.request_log import RequestLog
 from pocketpaw_ee.cloud.models.sense_preference import WorkspaceSensePreference
 from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.session_transcript import SessionTranscriptDoc
+from pocketpaw_ee.cloud.models.ship import ShipApp, ShipBox, ShipDeploy
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
@@ -336,6 +346,9 @@ __all__ = [
     "Lead",
     "LeadSource",
     "LiteLLMTenantKey",
+    "ShipApp",
+    "ShipBox",
+    "ShipDeploy",
     "Meeting",
     "MeetingProviderCredentials",
     "MeetingsSettings",
@@ -437,6 +450,11 @@ def get_all_documents():
         # LiteLLM per-tenant virtual-key mapping (MCG-8). Only
         # ``ee.cloud.llm_provisioning.service`` writes this.
         LiteLLMTenantKey,
+        # Managed-deploy boxes + their apps and deploy attempts (SHIP-2/SHIP-3).
+        # Only ``ee.cloud.ship.store`` reads/writes these.
+        ShipBox,
+        ShipApp,
+        ShipDeploy,
         Invite,
         Group,
         InstinctApproval,

@@ -6,6 +6,9 @@
 # depends on the OSS core package `pocketpaw`.
 #
 # Changes:
+#   - 2026-07-21 (ship-1): added `asyncssh` — SSH exec transport for the /ship
+#     deploy engine's Dokku driver (ee/pocketpaw_ee/ship_engine/). Lazy-imported
+#     by AsyncSSHTransport only; the port + transcript-replay tests never load it.
 #   - 2026-07-01 (ee-cython gate): the cython build hook is now GATED OFF by
 #     default (`enable-by-default = false`) so dev / CI / editable installs stay
 #     fast and readable — the ~25-min compile only fires when
@@ -75,6 +78,12 @@ dependencies = [
     "redis[hiredis]>=5.0.0",
     # --- DNS (verified-domain TXT lookup, Wave 3 Task 12) ---
     "dnspython>=2.6.0",
+    # --- /ship deploy engine (SHIP-1) — SSH exec for the Dokku driver ---
+    # asyncssh is imported lazily inside AsyncSSHTransport._connect
+    # (ee/pocketpaw_ee/ship_engine/dokku.py), so the ShipEngine contract and
+    # the transcript-replay test path never load it. Floor 2.14.2 (2023-12,
+    # far past the workspace 7-day supply-chain minimum-age rule).
+    "asyncssh>=2.14.2",
     # --- Background worker (Tier 2 resumable chat runs) ---
     # arq is only imported by `pocketpaw_ee.cloud.chat.runs.arq_executor`
     # and `worker.py`; both are gated behind POCKETPAW_CLOUD_RUN_EXECUTOR=arq.
@@ -151,6 +160,7 @@ dependencies = [
     # uses it for the per-workspace keypair + subscribe/unsubscribe endpoints.
     "py-vapid>=1.9.0",
     "pywebpush>=2.3.0",
+    "hcloud>=2.23.0",
 ]
 
 [project.optional-dependencies]
@@ -253,6 +263,7 @@ loom = "pocketpaw_ee.extensions:CloudLoomMcpProvider"
 belt = "pocketpaw_ee.extensions:CloudBeltMcpProvider"
 code = "pocketpaw_ee.extensions:CloudCodeMcpProvider"
 external_actions = "pocketpaw_ee.extensions:CloudExternalActionsMcpProvider"
+ship = "pocketpaw_ee.extensions:CloudShipMcpProvider"
 fabric = "pocketpaw_ee.extensions:CloudFabricMcpProvider"
 instinct = "pocketpaw_ee.extensions:CloudInstinctMcpProvider"
 daytona = "pocketpaw_ee.extensions:CloudDaytonaMcpProvider"
@@ -891,6 +902,26 @@ source_modules = [
     "pocketpaw_ee.cloud.projects.domain",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.project"]
+
+# Ship — the /ship managed-deploy entity (SHIP-2/SHIP-3). This entity's
+# doc-owning module is ``ship/store.py`` rather than ``service.py``: the SSH
+# private key on a ShipBox is Fernet-encrypted at rest, and the store is what
+# hides that envelope so no caller ever handles ciphertext. The contract pins
+# the same boundary every other entity has — the router, DTOs and domain value
+# objects must never reach a Beanie document. ``service.py`` / ``engine.py`` /
+# the two arq job modules stay off the docs too, but by review rather than by
+# contract: they annotate with the doc types under ``TYPE_CHECKING``, which
+# import-linter counts as a real import.
+[[tool.importlinter.contracts]]
+name = "Ship — Beanie writes only from store.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.ship.router",
+    "pocketpaw_ee.cloud.ship.dto",
+    "pocketpaw_ee.cloud.ship.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.ship"]
 
 [[tool.importlinter.contracts]]
 name = "Planner — Beanie writes only from service.py"

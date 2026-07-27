@@ -1,0 +1,6 @@
+# transcript: `df -Pk /` — POSIX-format root filesystem usage on the box.
+EXIT: 0
+--- stdout ---
+Filesystem     1024-blocks      Used Available Capacity Mounted on
+/dev/vda1         81120644  30126432  50994212      38% /
+--- stderr ---

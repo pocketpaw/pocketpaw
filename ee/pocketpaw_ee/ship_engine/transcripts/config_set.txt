@@ -1,0 +1,9 @@
+# transcript: `dokku config:set --no-restart demo ...` — NOTE: real dokku
+# echoes the values back, so this transcript deliberately carries the test
+# secrets; the driver must redact them before logging.
+EXIT: 0
+--- stdout ---
+-----> Setting config vars
+       API_KEY:  hunter2-super-secret-value
+       MONGO_PASSWORD:  passw0rd-abc
+--- stderr ---

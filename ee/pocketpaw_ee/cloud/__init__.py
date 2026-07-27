@@ -529,6 +529,14 @@ def mount_cloud(app: FastAPI) -> None:
 
     app.include_router(belt_mandates_router, prefix="/api/v1")
 
+    # /ship managed deploys (SHIP-3, feat/ship-3-cloud-entity). The
+    # workspace-scoped /api/v1/ship surface: provision a box, register + deploy
+    # an app, route a domain, create a database, read logs + box health. The two
+    # DELETEs PARK a teardown for approval and never execute one.
+    from pocketpaw_ee.cloud.ship.router import router as ship_router
+
+    app.include_router(ship_router, prefix="/api/v1")
+
     # Files Tab v2 — /api/v1/files/tree + /api/v1/files/browse. Mounted
     # inline (instead of via build_router's ctx_factory) so the routes can
     # use the canonical `Depends(current_active_user)` auth chain without

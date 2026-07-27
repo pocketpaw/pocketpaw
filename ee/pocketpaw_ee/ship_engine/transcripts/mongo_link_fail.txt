@@ -1,0 +1,7 @@
+# transcript: `dokku mongo:link demo-db demo` failing AFTER dokku echoed the
+# DSN to stderr — the worst case for redaction of CommandFailed.stderr_tail.
+EXIT: 1
+--- stdout ---
+--- stderr ---
+ !     mongodb://demo-db:s3cr3tpass8f2a@dokku-mongo-demo-db:27017/demo-db refused the connection
+ !     Unable to link demo-db to demo
