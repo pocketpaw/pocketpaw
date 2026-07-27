@@ -822,10 +822,12 @@ name = "Growth — Beanie writes only from service.py"
 # writes drafts/prospects ONLY through the service's system-identity seams
 # (``list_sent_drafts_for_followup`` / ``list_channel_drafts`` /
 # ``create_followup_draft`` / ``mark_prospect_dead``).
-# feat/growth-g6 — the WhatsApp dispatch modules join the boundary, and the
-# ``WhatsAppSendLog`` compliance doc joins the forbidden list: ``whatsapp``
+# feat/growth-g6 — the WhatsApp dispatch modules join the boundary: ``whatsapp``
 # (the dispatch branch), ``msg91`` (the provider seam) and ``webhooks`` (the
 # inbound MSG91 endpoint) all read and write through ``growth.service``.
+# integration/growth-v1 — G-6's ``WhatsAppSendLog`` was folded into G-5's
+# ``MessageLog`` (one send record, not two), so only ``models.message_log``
+# stays on the forbidden list.
 type = "forbidden"
 allow_indirect_imports = "true"
 source_modules = [
@@ -846,7 +848,6 @@ forbidden_modules = [
     "pocketpaw_ee.cloud.models.prospect",
     "pocketpaw_ee.cloud.models.draft",
     "pocketpaw_ee.cloud.models.message_log",
-    "pocketpaw_ee.cloud.models.whatsapp_send_log",
 ]
 
 [[tool.importlinter.contracts]]

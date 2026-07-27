@@ -1,6 +1,12 @@
 """Cloud document models — re-exports for Beanie init.
 
-Updated: 2026-07-27 (feat/growth-g6) — added ``WhatsAppSendLog`` (the /growth
+Updated: 2026-07-27 (integration/growth-v1) — G-6's ``WhatsAppSendLog`` is
+gone: it and G-5's ``MessageLog`` were the same send record built in parallel
+under two names, unified onto ``MessageLog`` (which gained the ``sending`` /
+``blocked`` outcomes, ``blocked_reason``, ``error_code`` and
+``opted_in_at_attempt``). The stale G-6 note below is kept for history.
+
+Superseded: 2026-07-27 (feat/growth-g6) — added ``WhatsAppSendLog`` (the /growth
 per-attempt outbound WhatsApp compliance record: one row per attempt, including
 the attempts the opt-in guard REFUSED) to the imports and
 ``get_all_documents()`` so the ``growth_whatsapp_send_logs`` collection is wired
@@ -233,7 +239,6 @@ from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 from pocketpaw_ee.cloud.models.vapid_keypair import VapidKeypair
 from pocketpaw_ee.cloud.models.web_sandbox import WebSandbox
-from pocketpaw_ee.cloud.models.whatsapp_send_log import WhatsAppSendLog
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 from pocketpaw_ee.cloud.models.workspace_automation_config import WorkspaceAutomationConfig
 from pocketpaw_ee.cloud.models.workspace_job import WorkspaceJobDoc
@@ -528,10 +533,6 @@ def get_all_documents():
         # ATTEMPT (sent | failed) written by the dispatch worker through
         # ``growth.service.record_message_log``. Same import boundary.
         MessageLog,
-        # Growth WhatsApp send log (G-6) — one row per outbound attempt,
-        # including the attempts the opt-in guard refused (``blocked``). Same
-        # import boundary as Prospect / Draft.
-        WhatsAppSendLog,
         PushSubscription,
         VapidKeypair,
         WorkspaceSensePreference,

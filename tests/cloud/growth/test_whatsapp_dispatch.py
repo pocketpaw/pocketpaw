@@ -156,9 +156,20 @@ async def approved_draft(mongo_db: Any) -> Any:  # noqa: ARG001 — forces Beani
 
 
 async def _logs(workspace_id: str = "w1") -> list[Any]:
-    from pocketpaw_ee.cloud.models.whatsapp_send_log import WhatsAppSendLog
+    """This workspace's WhatsApp send records, oldest first.
 
-    return await WhatsAppSendLog.find({"workspace": workspace_id}).to_list()
+    Integration (growth-v1): G-6's ``WhatsAppSendLog`` was unified into G-5's
+    ``MessageLog`` — one send record for every channel. The compliance fields
+    this suite asserts on (``blocked_reason``, ``opted_in_at_attempt``) moved
+    across unchanged; ``status`` is now ``outcome`` and ``to_number`` is now
+    ``to_address``. Filtered to the whatsapp channel so an email row could
+    never be mistaken for a WhatsApp attempt.
+    """
+    from pocketpaw_ee.cloud.models.message_log import MessageLog
+
+    return await MessageLog.find(
+        {"workspace": workspace_id, "channel": "whatsapp"}
+    ).to_list()
 
 
 async def _draft_status(workspace_id: str, draft_id: str) -> str:
@@ -184,7 +195,7 @@ class TestOptedInSend:
 
         logs = await _logs()
         assert len(logs) == 1
-        assert logs[0].status == "sent"
+        assert logs[0].outcome == "sent"
         assert logs[0].blocked_reason == ""
         assert logs[0].provider_message_id == "msg91-1"
         assert logs[0].opted_in_at_attempt is True
@@ -263,10 +274,12 @@ class TestOptInGuard:
 
         logs = await _logs()
         assert len(logs) == 1
-        assert logs[0].status == "blocked"
+        assert logs[0].outcome == "blocked"
         assert logs[0].blocked_reason == "not_opted_in"
         assert logs[0].opted_in_at_attempt is False
-        assert logs[0].provider_message_id == ""
+        # Unified MessageLog spells "no provider id" as None, where G-6's own
+        # doc used "". Same claim: the provider was never called.
+        assert logs[0].provider_message_id is None
 
     async def test_error_carries_a_machine_readable_code(
         self, not_opted_in: Any, fake_client: FakeMsg91Client
@@ -451,7 +464,7 @@ class TestFailurePaths:
         assert await _draft_status("w1", draft.id) == "approved"
         logs = await _logs()
         assert len(logs) == 1
-        assert logs[0].status == "failed"
+        assert logs[0].outcome == "failed"
         assert logs[0].error_code == "msg91.http_error"
 
     async def test_unconfigured_workspace_blocks_without_a_client(
