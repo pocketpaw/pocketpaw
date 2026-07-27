@@ -47,6 +47,7 @@ from soul_protocol.engine.journal import open_journal  # noqa: E402
 
 import pocketpaw.journal_dep as journal_dep  # noqa: E402
 from pocketpaw.instinct.store import InstinctStore  # noqa: E402
+from tests.conftest import seed_gated_action  # noqa: E402
 
 
 @pytest.fixture
@@ -144,7 +145,7 @@ def _propose(
         "trigger": {"type": "agent", "source": "claude", "reason": "test"},
         "parameters": parameters,
     }
-    resp = client.post("/instinct/actions", json=body)
+    resp = seed_gated_action(client, body)
     assert resp.status_code == 201, resp.text
     return resp.json()["id"]
 

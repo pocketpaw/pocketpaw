@@ -32,6 +32,7 @@ from pocketpaw_ee.cloud.license import require_license  # noqa: E402
 from pocketpaw_ee.instinct.router import router  # noqa: E402
 
 from pocketpaw.instinct.store import InstinctStore  # noqa: E402
+from tests.conftest import seed_gated_action  # noqa: E402
 
 TRIGGER = {"type": "agent", "source": "claude", "reason": "low-1 fail-closed test"}
 
@@ -137,7 +138,7 @@ def _propose(client: TestClient, *, pocket_id: str, parameters: dict) -> str:
         "trigger": TRIGGER,
         "parameters": parameters,
     }
-    resp = client.post("/instinct/actions", json=payload)
+    resp = seed_gated_action(client, payload)
     assert resp.status_code == 201, resp.text
     return resp.json()["id"]
 
