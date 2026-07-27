@@ -3,6 +3,32 @@
 Created: 2026-07-18 (feat/herdr-runtime-adapter, HR-1).
 Updated: 2026-07-24 (HR-1b) — added ``close()`` pane teardown (the ``spawn``
 counterpart every consumer that opens a pane needs to end it and its process).
+Updated: 2026-07-27 (HR-1c) — hard deployment boundary: herdr is refused in
+shared multi-tenant cloud mode. See "Deployment boundary" below.
+
+Deployment boundary — dedicated box ONLY, never shared multi-tenant cloud
+------------------------------------------------------------------------
+herdr panes are OS processes with PTYs, and **herdr has no tenant model**: it
+mints its own flat workspace namespace (``w1``, ``w2``, …) with no notion of
+which paw workspace owns a pane. On a shared box that means one tenant's admin
+could observe another tenant's panes — a boundary we cannot configure our way
+out of, because it does not exist upstream. The per-process cost compounds it
+(one pane ≈ one agent process, so N concurrent users ≈ N processes).
+
+So this adapter is for **single-operator deployments only**: a per-tenant
+dedicated box (Track A), a developer machine, or a private/self-hosted stack,
+where the workspace admin *is* the box operator.
+
+Two gates enforce that, and both must pass:
+
+1. ``herdr_runtime_enabled`` (default **False**) — the operator opt-in.
+2. ``POCKETPAW_REQUIRE_WORKSPACE_SCOPE`` must **not** be set. That env marks a
+   shared multi-tenant cloud deployment; when it is set this adapter reports
+   itself permanently unavailable regardless of the flag, and logs an error.
+
+Gate 2 degrades through the ordinary "herdr is absent" path (every method
+raises :class:`HerdrUnavailable`, callers fall back), so a shared-cloud
+deployment that sets the flag by mistake loses the feature — it does not break.
 
 What this is
 ------------
@@ -99,6 +125,23 @@ _MC_VALUE_TO_HERDR: dict[str, str] = {
 
 _DEFAULT_TIMEOUT_MS = 15000
 
+# Shared multi-tenant cloud marker. The cloud deployment sets this to mandate
+# fail-closed workspace scoping (see ``pocketpaw.stores``); we reuse it as the
+# authoritative "this box serves more than one tenant" signal. Same env name and
+# same truthy set as stores.py so the two can never disagree about the mode.
+_REQUIRE_WORKSPACE_SCOPE_ENV = "POCKETPAW_REQUIRE_WORKSPACE_SCOPE"
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _shared_cloud_mode() -> bool:
+    """True when this process serves a shared multi-tenant cloud deployment.
+
+    Read at construction time (not import time) so tests and a re-created
+    runtime observe the current environment.
+    """
+    return os.environ.get(_REQUIRE_WORKSPACE_SCOPE_ENV, "").strip().lower() in _TRUTHY
+
+
 # Sentinel so _run_json can distinguish "use the configured default timeout"
 # from an explicit ``None`` (block indefinitely — used by blocking waits).
 _USE_DEFAULT_TIMEOUT = object()
@@ -194,6 +237,21 @@ class HerdrRuntime:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._enabled = bool(getattr(settings, "herdr_runtime_enabled", False))
+        # Deployment boundary (see module docstring): herdr has no tenant model,
+        # so it is refused outright on a shared multi-tenant box even when the
+        # operator opted in. Disabling here routes every caller through the
+        # already-tested "herdr absent" path rather than inventing a new failure.
+        self._shared_cloud = _shared_cloud_mode()
+        if self._enabled and self._shared_cloud:
+            logger.error(
+                "herdr_runtime_enabled is set but %s marks this a shared "
+                "multi-tenant deployment — REFUSING to enable herdr. herdr panes "
+                "are not workspace-scoped, so one tenant could observe another's "
+                "panes. herdr is supported only on a dedicated/single-operator "
+                "box. Treating herdr as unavailable.",
+                _REQUIRE_WORKSPACE_SCOPE_ENV,
+            )
+            self._enabled = False
         self._binary = _resolve_binary(settings)
         timeout_ms = int(
             getattr(settings, "herdr_cli_timeout_ms", _DEFAULT_TIMEOUT_MS) or _DEFAULT_TIMEOUT_MS
@@ -226,6 +284,14 @@ class HerdrRuntime:
 
     def _require_available(self) -> None:
         if not self._enabled:
+            if self._shared_cloud:
+                # Distinguish "operator left it off" from "we refused it" — the
+                # latter is a deployment boundary, not a missing toggle.
+                raise HerdrUnavailable(
+                    "herdr is not supported on a shared multi-tenant deployment "
+                    f"({_REQUIRE_WORKSPACE_SCOPE_ENV} is set); it requires a "
+                    "dedicated/single-operator box"
+                )
             raise HerdrUnavailable("herdr_runtime_enabled flag is off")
         if self._binary is None:
             raise HerdrUnavailable("herdr binary not found (install herdr or set herdr_cli_path)")
