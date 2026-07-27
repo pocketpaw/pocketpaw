@@ -7,6 +7,10 @@
 # cross-tenant isolation (foreign ids 404, foreign rows never listed).
 #
 # Created 2026-07-27 (feat/growth-g1): first slice of /growth.
+# Updated 2026-07-27 (feat/growth-g2): bulk-ingestion coverage — POST /bulk
+# idempotency (20 rows twice → second run all-updated), mixed-validity payloads
+# (bad rows become indexed error entries, good rows land), the 501-row 422 cap,
+# and cross-tenant scoping (bulk rows land only in the caller's workspace).
 
 from __future__ import annotations
 
@@ -198,6 +202,111 @@ async def test_list_filters_by_tier_status_source(w1_client):
 async def test_list_rejects_unknown_filter_value(w1_client):
     resp = await w1_client.get("/api/v1/growth/prospects", params={"tier": "platinum"})
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Bulk ingestion — POST /bulk
+# ---------------------------------------------------------------------------
+
+
+def _bulk_rows(n: int, source: str = "clay") -> list[dict[str, Any]]:
+    return [
+        {
+            "name": f"Contact {i}",
+            "company": f"Company {i}",
+            "domain": f"company-{i}.com",
+            "source": source,
+        }
+        for i in range(n)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bulk_ingest_is_idempotent(w1_client):
+    """POSTing the same 20 rows twice: first run creates all, second run
+    updates all — never duplicates (upsert keyed on workspace+domain)."""
+    rows = _bulk_rows(20)
+
+    first = await w1_client.post("/api/v1/growth/prospects/bulk", json={"rows": rows})
+    assert first.status_code == 200, first.text
+    assert first.json() == {"created": 20, "updated": 0, "errors": []}
+
+    second = await w1_client.post("/api/v1/growth/prospects/bulk", json={"rows": rows})
+    assert second.status_code == 200, second.text
+    assert second.json() == {"created": 0, "updated": 20, "errors": []}
+
+    listed = await w1_client.get("/api/v1/growth/prospects", params={"limit": 500})
+    assert len(listed.json()) == 20
+
+
+@pytest.mark.asyncio
+async def test_bulk_ingest_mixed_validity_records_errors_and_lands_good_rows(w1_client):
+    """A bad row becomes an indexed error entry; the rows around it land."""
+    rows = [
+        _payload(domain="alpha.io", company="Alpha"),
+        _payload(domain="bad.io", source="scraped"),  # invalid enum → error at index 1
+        {"name": "No Domain", "company": "Ghost", "source": "manual"},  # missing domain → index 2
+        _payload(domain="omega.io", company="Omega"),
+    ]
+
+    resp = await w1_client.post("/api/v1/growth/prospects/bulk", json={"rows": rows})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["created"] == 2
+    assert body["updated"] == 0
+    assert [e["index"] for e in body["errors"]] == [1, 2]
+    for err in body["errors"]:
+        assert err["code"] == "prospect.invalid_row"
+        assert err["message"]
+
+    listed = await w1_client.get("/api/v1/growth/prospects")
+    assert {p["domain"] for p in listed.json()} == {"alpha.io", "omega.io"}
+
+
+@pytest.mark.asyncio
+async def test_bulk_ingest_updates_existing_and_creates_new_in_one_call(w1_client):
+    """A payload mixing known and new domains splits into updated + created."""
+    await w1_client.post("/api/v1/growth/prospects", json=_payload(domain="alpha.io"))
+
+    rows = [
+        _payload(domain="alpha.io", name="Refreshed Contact", tier="a"),
+        _payload(domain="brand-new.io", company="Brand New"),
+    ]
+    resp = await w1_client.post("/api/v1/growth/prospects/bulk", json={"rows": rows})
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"created": 1, "updated": 1, "errors": []}
+
+    listed = (await w1_client.get("/api/v1/growth/prospects")).json()
+    by_domain = {p["domain"]: p for p in listed}
+    assert by_domain["alpha.io"]["name"] == "Refreshed Contact"
+    assert by_domain["alpha.io"]["tier"] == "a"
+
+
+@pytest.mark.asyncio
+async def test_bulk_ingest_rejects_more_than_500_rows(w1_client):
+    resp = await w1_client.post("/api/v1/growth/prospects/bulk", json={"rows": _bulk_rows(501)})
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_bulk_ingest_is_workspace_scoped(w1_client, w2_client):
+    """Bulk rows land only in the caller's workspace: w2 sees none of w1's
+    ingested rows, and the same domains ingested by w2 create fresh rows."""
+    rows = _bulk_rows(3)
+    resp = await w1_client.post("/api/v1/growth/prospects/bulk", json={"rows": rows})
+    assert resp.json() == {"created": 3, "updated": 0, "errors": []}
+
+    # w2 sees nothing from w1's ingest.
+    assert (await w2_client.get("/api/v1/growth/prospects")).json() == []
+
+    # The same domains in w2 are creates (fresh rows), not cross-tenant updates.
+    resp = await w2_client.post("/api/v1/growth/prospects/bulk", json={"rows": rows})
+    assert resp.json() == {"created": 3, "updated": 0, "errors": []}
+
+    w1_listed = (await w1_client.get("/api/v1/growth/prospects")).json()
+    w2_listed = (await w2_client.get("/api/v1/growth/prospects")).json()
+    assert len(w1_listed) == 3 and len(w2_listed) == 3
+    assert {p["id"] for p in w1_listed}.isdisjoint({p["id"] for p in w2_listed})
 
 
 # ---------------------------------------------------------------------------
