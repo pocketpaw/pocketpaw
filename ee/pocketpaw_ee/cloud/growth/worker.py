@@ -16,6 +16,10 @@
 # off to ``growth/email_dispatch.dispatch_email`` (per-channel module, so each
 # channel's delivery stays in its own file and the job body keeps one branch
 # per channel). Other channels still log the stub.
+# Updated 2026-07-27 (feat/growth-g7): the daily follow-up sweep joins the
+# queue as arq's first CRON job (``cron_jobs``, ``unique=True`` so only one
+# worker in a horizontally-scaled deploy runs a given tick). It PROPOSES
+# follow-ups into the Instinct tray and never sends — same gate, same human.
 #
 # Unlike workspace jobs (which ride arq's DEFAULT queue on the shared chat-runs
 # worker — see ``jobs/domain.py``), growth gets its OWN queue + worker process
@@ -43,12 +47,17 @@ import logging
 import os
 from typing import Any
 
+from arq import cron
 from arq.connections import RedisSettings
 from arq.worker import func
 
 from pocketpaw_ee.cloud import init_realtime
 from pocketpaw_ee.cloud._core.realtime import xproc
 from pocketpaw_ee.cloud.growth.domain import GROWTH_DISPATCH_JOB_NAME, GROWTH_QUEUE_NAME
+from pocketpaw_ee.cloud.growth.followups import (
+    GROWTH_FOLLOWUP_SWEEP_JOB_NAME,
+    followup_sweep,
+)
 from pocketpaw_ee.cloud.shared.db import close_cloud_db, init_cloud_db
 
 logger = logging.getLogger(__name__)
@@ -123,6 +132,23 @@ class WorkerSettings:
     # constant so the executor's ``enqueue_job(GROWTH_DISPATCH_JOB_NAME, ...)``
     # always matches, independent of the Python function's name.
     functions = [func(dispatch, name=GROWTH_DISPATCH_JOB_NAME)]
+    # G-7 — one daily tick at 13:00 UTC (business hours across US/EU, and well
+    # clear of the midnight batch traffic every other scheduler piles onto).
+    # ``unique=True`` (arq's default, explicit here because it is the property
+    # that matters) means a horizontally-scaled growth worker fleet still runs
+    # the sweep exactly once per tick. The sweep only ever PROPOSES — it
+    # cannot send, so a duplicate tick would at worst be a no-op anyway (the
+    # open-follow-up guard makes it idempotent).
+    cron_jobs = [
+        cron(
+            followup_sweep,
+            name=GROWTH_FOLLOWUP_SWEEP_JOB_NAME,
+            hour=13,
+            minute=0,
+            unique=True,
+            run_at_startup=False,
+        )
+    ]
     on_startup = _startup
     on_shutdown = _shutdown
     # Crash policy mirrors the chat-runs worker: no auto-retry. Outbound work
@@ -132,4 +158,11 @@ class WorkerSettings:
     redis_settings = _redis_settings()
 
 
-__all__ = ["GROWTH_DISPATCH_JOB_NAME", "GROWTH_QUEUE_NAME", "WorkerSettings", "dispatch"]
+__all__ = [
+    "GROWTH_DISPATCH_JOB_NAME",
+    "GROWTH_FOLLOWUP_SWEEP_JOB_NAME",
+    "GROWTH_QUEUE_NAME",
+    "WorkerSettings",
+    "dispatch",
+    "followup_sweep",
+]
