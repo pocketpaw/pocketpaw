@@ -1,5 +1,12 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-07-27 (feat/growth-g6) — added ``WhatsAppSendLog`` (the /growth
+per-attempt outbound WhatsApp compliance record: one row per attempt, including
+the attempts the opt-in guard REFUSED) to the imports and
+``get_all_documents()`` so the ``growth_whatsapp_send_logs`` collection is wired
+into ``init_beanie``. Kept out of ``__all__`` like ``Prospect`` / ``Draft`` —
+only ``ee.cloud.growth.service`` imports the doc class directly (import-linter
+"Growth" contract).
 Updated: 2026-07-27 (feat/growth-g4 merge) — merged integration/ship-v1 into the
 growth stack so the ``_growth_send`` gate slice can wire the sixth gated kind on
 top of ship's instinct-router changes; both changelog blocks below retained.
@@ -219,6 +226,7 @@ from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 from pocketpaw_ee.cloud.models.vapid_keypair import VapidKeypair
 from pocketpaw_ee.cloud.models.web_sandbox import WebSandbox
+from pocketpaw_ee.cloud.models.whatsapp_send_log import WhatsAppSendLog
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 from pocketpaw_ee.cloud.models.workspace_automation_config import WorkspaceAutomationConfig
 from pocketpaw_ee.cloud.models.workspace_job import WorkspaceJobDoc
@@ -509,6 +517,10 @@ def get_all_documents():
         # prospect, status lifecycle enforced in the service. Same import
         # boundary as Prospect.
         Draft,
+        # Growth WhatsApp send log (G-6) — one row per outbound attempt,
+        # including the attempts the opt-in guard refused (``blocked``). Same
+        # import boundary as Prospect / Draft.
+        WhatsAppSendLog,
         PushSubscription,
         VapidKeypair,
         WorkspaceSensePreference,
