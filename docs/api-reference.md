@@ -75,6 +75,13 @@ Updated: 2026-07-27 (feat/growth-g2) — added POST /growth/prospects/bulk to
 the Growth — Prospects section: batch ingestion (max 500 rows) via the
 upsert-by-domain seam, per-row errors, idempotent re-runs.
 
+Updated: 2026-07-27 (feat/growth-g3) — added the Growth — Drafts section:
+per-channel outreach drafts on a prospect (POST /growth/prospects/{id}/drafts,
+GET /growth/drafts with prospect|channel|status filters, POST
+/growth/drafts/{id}/status) with the enforced lifecycle
+draft→proposed→approved→sent, sent→replied, non-terminal→rejected; illegal
+moves 422 draft.illegal_transition.
+
 Updated: 2026-07-11 (feat/real-pipeline-s1) — documented the Fabric — Transform
 Mappings section: GET/POST/DELETE /fabric/ingest/mappings (author the
 workspace's source→Fabric mappings, now with a "connector" source_kind that
@@ -1848,3 +1855,61 @@ identity) and `source` (capture-time provenance) are immutable; the other
 fields (`name`, `company`, `tier`, `research_brief`, `emails`,
 `linkedin_url`, `whatsapp_number`, `opted_in`, `status`) patch in place.
 Returns the updated envelope.
+
+## Growth — Drafts
+
+Third slice of the `/growth` outbound engine (G-3): per-channel outreach
+drafts attached to a prospect, with an enforced status lifecycle. Same gates
+as prospects — license + `request_context`, every read workspace-scoped
+(cross-tenant ids 404). The lifecycle is the object the send-gate slice
+(G-4) proposes and dispatches on top of:
+
+```
+draft → proposed → approved → sent → replied
+  └────────┴──────────┴─────────┴──→ rejected   (any non-terminal)
+```
+
+`replied` and `rejected` are terminal. Any other move — skipping ahead,
+going backwards, leaving a terminal state — is a
+`422 draft.illegal_transition`. Transitions are mechanism-only: no side
+effects, no sending.
+
+### `POST /api/v1/growth/prospects/{prospect_id}/drafts`
+
+Attach one channel's copy to a prospect. Body:
+
+```json
+{
+  "channel": "email",
+  "subject": "Quick idea for Acme Dental's booking flow",
+  "body": "Saw your online booking stops at a contact form — here's a live demo.",
+  "variant": "first_touch",
+  "demo_url": null
+}
+```
+
+`channel` (`email | linkedin | whatsapp`) and `body` (non-empty, max 10 000
+chars) are required. `subject` is **email-only** — sending it on another
+channel is a 422. `variant` is `first_touch | follow_up` (default
+`first_touch`). Drafts are always born in `status: "draft"` — there is no
+status field here; lifecycle moves go through the transition route.
+
+The prospect must exist in the caller's workspace (`404 prospect.not_found`
+otherwise). A prospect still in `new` / `qualified` flips to `drafted` on
+its first draft; later prospect statuses are never regressed.
+
+Returns the draft envelope: the fields above plus `id`, `workspace_id`,
+`prospect_id`, `status`, and ISO `created_at` / `updated_at`.
+
+### `GET /api/v1/growth/drafts`
+
+List the workspace's drafts, newest first. Optional query filters:
+`prospect_id`, `channel`, `status` (enum-validated — an unknown value is a
+422) and `limit` (default 100, max 500).
+
+### `POST /api/v1/growth/drafts/{draft_id}/status`
+
+Move a draft along the lifecycle. Body: `{"status": "proposed"}` (any
+`DraftStatus`). Legal moves per the machine above; anything else is a
+`422 draft.illegal_transition` and the draft is unchanged. Cross-tenant or
+unknown ids: `404 draft.not_found`. Returns the updated envelope.
