@@ -513,3 +513,95 @@ def test_cron_is_registered_on_the_growth_queue():
     assert sweep.hour == 13
     assert sweep.minute == 0
     assert sweep.unique is True
+
+
+# ---------------------------------------------------------------------------
+# Send timestamp — the integration reconcile
+#
+# G-7 was built before any send record existed, so ``_resolved_sent_at`` could
+# only fall back to the draft's ``updatedAt``. The unified ``MessageLog`` now
+# supplies a real send timestamp, and the sweep reads it. These pin both sides
+# of that: the log wins when present, the fallback still covers the drafts that
+# have no log row (LinkedIn, and anything predating the record).
+# ---------------------------------------------------------------------------
+
+
+def _about(actual: datetime | None, expected: datetime) -> bool:
+    """Mongo stores millisecond precision, so compare within a second."""
+    assert actual is not None
+    return abs((actual - expected).total_seconds()) < 1
+
+
+async def _log_a_send(prospect_id: str, draft_id: str, when: datetime, *, workspace_id: str = "w1"):
+    log = await growth_service.record_message_log(
+        workspace_id=workspace_id,
+        draft_id=draft_id,
+        prospect_id=prospect_id,
+        channel="email",
+        provider="mailtrap",
+        to_address="sam@acme-dental.com",
+        outcome="sent",
+        sent_at=when,
+    )
+    return log
+
+
+async def test_sent_at_comes_from_the_send_record_not_the_status_flip(db):
+    """The age check reads MessageLog.sent_at when the dispatch worker wrote one.
+
+    The draft's ``updatedAt`` is "now" (the status flip just happened), so a
+    sweep that still trusted it would see a fresh send. The logged timestamp
+    says the message actually went out days ago.
+    """
+    prospect, draft = await _sent_thread()
+    long_ago = _in_days(-30)
+    await _log_a_send(prospect.id, draft.id, long_ago)
+
+    rows = await growth_service.list_sent_drafts_for_followup()
+    row = next(r for r in rows if r["id"] == draft.id)
+
+    assert _about(row["sent_at"], long_ago)
+    # And it is genuinely not the status-flip time the old code used.
+    assert (datetime.now(UTC) - row["sent_at"]).days >= 29
+
+
+async def test_newest_successful_attempt_wins_over_an_earlier_one(db):
+    """A retried send measures silence from the LAST time they heard from us."""
+    prospect, draft = await _sent_thread()
+    await _log_a_send(prospect.id, draft.id, _in_days(-30))
+    recent = _in_days(-2)
+    await _log_a_send(prospect.id, draft.id, recent)
+
+    rows = await growth_service.list_sent_drafts_for_followup()
+    assert _about(next(r for r in rows if r["id"] == draft.id)["sent_at"], recent)
+
+
+async def test_a_blocked_row_never_counts_as_a_send(db):
+    """Only ``sent`` rows supply a timestamp — a refused attempt is not a send."""
+    prospect, draft = await _sent_thread()
+    await growth_service.record_whatsapp_attempt(
+        "w1",
+        draft_id=draft.id,
+        prospect_id=prospect.id,
+        to_number="919876543210",
+        status="blocked",
+        blocked_reason="not_opted_in",
+    )
+
+    rows = await growth_service.list_sent_drafts_for_followup()
+    row = next(r for r in rows if r["id"] == draft.id)
+    # Falls back to the status flip, which is ~now — not due for a follow-up.
+    assert (datetime.now(UTC) - row["sent_at"]).days == 0
+
+
+async def test_a_draft_with_no_send_record_still_falls_back_to_the_flip(db):
+    """LinkedIn is sent by hand and writes no log row; the sweep must still see it."""
+    prospect = await _prospect("w1")
+    draft = await _draft("w1", prospect.id, channel="linkedin", subject=None)
+    await _send("w1", draft.id)
+
+    rows = await growth_service.list_sent_drafts_for_followup()
+    row = next(r for r in rows if r["id"] == draft.id)
+
+    assert row["sent_at"] is not None
+    assert (datetime.now(UTC) - row["sent_at"]).days == 0

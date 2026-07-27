@@ -830,20 +830,56 @@ async def record_message_log(
 # ---------------------------------------------------------------------------
 
 
-def _resolved_sent_at(doc: _DraftDoc) -> datetime | None:
-    """When this draft actually went out.
-
-    Prefers an explicit ``sent_at`` written by the dispatch worker's send
-    record (G-5/G-6) when the field exists, and otherwise falls back to
-    ``updatedAt`` — which, for a draft sitting in ``sent``, IS the moment of
-    the ``sent`` transition (the status flip is the last write). The fallback
-    goes stale only if something else edits a sent draft, which no current
-    code path does. Mongo returns naive datetimes, so anchor them to UTC.
-    """
-    raw = getattr(doc, "sent_at", None) or getattr(doc, "updatedAt", None)
+def _as_utc(raw: datetime | None) -> datetime | None:
+    """Mongo returns naive datetimes; anchor them to UTC."""
     if raw is None:
         return None
     return raw.replace(tzinfo=UTC) if raw.tzinfo is None else raw
+
+
+async def _sent_at_by_draft(draft_ids: list[str]) -> dict[str, datetime]:
+    """Newest successful send timestamp per draft, read off the send record.
+
+    One batched query for the whole sweep page rather than a lookup per draft.
+    A draft can have several attempts (a failure and its retry each write a
+    row), so the NEWEST ``sent`` row wins — that is the last time the prospect
+    actually heard from us, which is what the silence window measures from.
+
+    # global-read: paired with the cross-tenant scan in
+    # ``list_sent_drafts_for_followup`` — the ids come from that scan's own
+    # rows, and every value is handed straight back to it, so nothing crosses
+    # a tenant boundary that the draft scan had not already crossed.
+    """
+    if not draft_ids:
+        return {}
+    newest: dict[str, datetime] = {}
+    async for row in _MessageLogDoc.find(
+        {"draft_id": {"$in": draft_ids}, "outcome": "sent", "sent_at": {"$ne": None}}
+    ):
+        stamp = _as_utc(row.sent_at)
+        if stamp is None:
+            continue
+        current = newest.get(row.draft_id)
+        if current is None or stamp > current:
+            newest[row.draft_id] = stamp
+    return newest
+
+
+def _resolved_sent_at(doc: _DraftDoc, logged: datetime | None = None) -> datetime | None:
+    """When this draft actually went out.
+
+    Prefers ``MessageLog.sent_at`` — the timestamp the dispatch worker wrote
+    when the provider accepted the message (``logged``, batched in by
+    ``_sent_at_by_draft``). Falls back to the draft's ``updatedAt``, which for
+    a draft sitting in ``sent`` IS the moment of the ``sent`` transition, since
+    the status flip is the last write to that row.
+
+    The fallback is not dead code. It covers drafts that predate the send
+    record, and the ``linkedin`` channel, which never produces one at all: a
+    LinkedIn draft is sent by hand and recorded through the mark-sent route, so
+    the status flip is the only timestamp that exists for it.
+    """
+    return _as_utc(logged) or _as_utc(getattr(doc, "updatedAt", None))
 
 
 async def list_sent_drafts_for_followup(*, limit: int = 500) -> list[dict[str, Any]]:
@@ -856,16 +892,19 @@ async def list_sent_drafts_for_followup(*, limit: int = 500) -> list[dict[str, A
     downstream.
 
     Returns lightweight wire dicts (not domain objects) so the sweep never
-    needs the doc class. ``sent_at`` is resolved per ``_resolved_sent_at``;
-    the caller applies the age threshold, keeping the delay policy in one
-    place. The oldest-first sort means the ``limit`` cap sheds the NEWEST
-    sends — the ones furthest from being due — when a backlog exceeds it.
+    needs the doc class. ``sent_at`` is resolved per ``_resolved_sent_at``,
+    with the send-record timestamps batched in by one extra query; the caller
+    applies the age threshold, keeping the delay policy in one place. The
+    oldest-first sort means the ``limit`` cap sheds the NEWEST sends — the ones
+    furthest from being due — when a backlog exceeds it.
     """
     cursor = (
         _DraftDoc.find({"status": "sent"})
         .sort(+_DraftDoc.updatedAt)  # type: ignore[operator]
         .limit(limit)
     )
+    docs = [doc async for doc in cursor]
+    logged = await _sent_at_by_draft([str(doc.id) for doc in docs])
     return [
         {
             "id": str(doc.id),
@@ -876,9 +915,9 @@ async def list_sent_drafts_for_followup(*, limit: int = 500) -> list[dict[str, A
             "subject": doc.subject,
             "body": doc.body,
             "demo_url": doc.demo_url,
-            "sent_at": _resolved_sent_at(doc),
+            "sent_at": _resolved_sent_at(doc, logged.get(str(doc.id))),
         }
-        async for doc in cursor
+        for doc in docs
     ]
 
 
