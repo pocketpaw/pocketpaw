@@ -245,6 +245,38 @@ async def test_dedicated_box_still_allows_herdr(fake_herdr_on_path, monkeypatch)
     assert _make_runtime(herdr_runtime_enabled=True).available is True
 
 
+@pytest.mark.parametrize("hostile", ["--force", "-f", "--help", "--workspace"])
+@pytest.mark.asyncio
+async def test_flaglike_pane_id_is_refused(runtime, hostile):
+    """Argument injection: a flag-like id must never reach herdr's parser.
+
+    There is no shell (``create_subprocess_exec`` + argv), so the residual risk
+    is a positional value being read as a FLAG. ``/cockpit/pane/{pane_id}/preview``
+    passes a URL segment straight through, so this is reachable input.
+    """
+    for call in (
+        runtime.status(hostile),
+        runtime.read(hostile),
+        runtime.close(hostile),
+        runtime.attach_info(hostile),
+    ):
+        with pytest.raises(ValueError, match="must not start with"):
+            await call
+
+
+@pytest.mark.asyncio
+async def test_flaglike_agent_label_is_refused(runtime):
+    with pytest.raises(ValueError, match="must not start with"):
+        await runtime.spawn("--help")
+
+
+@pytest.mark.asyncio
+async def test_legitimate_ids_still_pass(runtime):
+    """The guard is narrow — real herdr ids are unaffected."""
+    assert await runtime.status("w2:p1") is not None
+    assert isinstance(await runtime.read("w2:p1"), str)
+
+
 @pytest.mark.asyncio
 async def test_binary_missing_reports_unavailable(monkeypatch, tmp_path):
     # Flag on, but no herdr anywhere on PATH.
