@@ -538,7 +538,16 @@ class Settings(BaseSettings):
             "binary + run a headless herdr server, see the HR-2 runbook) to let "
             "consumers spawn and drive coding-agent panes through herdr. herdr "
             "is used ONLY as a separate process over its CLI — never imported "
-            "or linked (it is AGPL-3.0; process-boundary use only)."
+            "or linked (it is AGPL-3.0; process-boundary use only). "
+            "DEDICATED-BOX ONLY: herdr has no tenant model (it mints a flat "
+            "workspace namespace with no link to a paw workspace), so on a "
+            "shared box one tenant's admin could observe another's panes. This "
+            "flag is therefore honoured only on a single-operator deployment — "
+            "a per-tenant dedicated box, a dev machine, or a self-hosted stack. "
+            "If ``POCKETPAW_REQUIRE_WORKSPACE_SCOPE`` is set (the shared "
+            "multi-tenant cloud marker) the adapter REFUSES to enable "
+            "regardless of this flag, logs an error, and degrades through the "
+            "ordinary herdr-unavailable path."
         ),
     )
     herdr_cli_path: str | None = Field(

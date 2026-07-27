@@ -215,6 +215,36 @@ async def test_flag_off_reports_unavailable(fake_herdr_on_path):
         await rt.status("w2:p1")
 
 
+@pytest.mark.parametrize("truthy", ["1", "true", "YES", "on"])
+@pytest.mark.asyncio
+async def test_shared_cloud_mode_refuses_herdr(fake_herdr_on_path, monkeypatch, truthy):
+    """The deployment boundary: a shared multi-tenant box refuses herdr outright.
+
+    Flag ON and the binary present — the ONLY reason it stays unavailable is
+    ``POCKETPAW_REQUIRE_WORKSPACE_SCOPE``. herdr panes are not workspace-scoped,
+    so one tenant could observe another's panes.
+    """
+    monkeypatch.setenv("POCKETPAW_REQUIRE_WORKSPACE_SCOPE", truthy)
+    rt = _make_runtime(herdr_runtime_enabled=True)
+    assert rt.available is False
+    assert await rt.probe() is False
+    with pytest.raises(HerdrUnavailable, match="shared multi-tenant"):
+        await rt.status("w2:p1")
+    with pytest.raises(HerdrUnavailable, match="shared multi-tenant"):
+        await rt.spawn("claude")
+
+
+@pytest.mark.asyncio
+async def test_dedicated_box_still_allows_herdr(fake_herdr_on_path, monkeypatch):
+    """The boundary is precise: an unset/falsey scope env leaves herdr usable."""
+    for value in ("", "0", "false", "off"):
+        monkeypatch.setenv("POCKETPAW_REQUIRE_WORKSPACE_SCOPE", value)
+        rt = _make_runtime(herdr_runtime_enabled=True)
+        assert rt.available is True, f"{value!r} should not trip the boundary"
+    monkeypatch.delenv("POCKETPAW_REQUIRE_WORKSPACE_SCOPE", raising=False)
+    assert _make_runtime(herdr_runtime_enabled=True).available is True
+
+
 @pytest.mark.asyncio
 async def test_binary_missing_reports_unavailable(monkeypatch, tmp_path):
     # Flag on, but no herdr anywhere on PATH.
