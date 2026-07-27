@@ -824,6 +824,21 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.cycle"]
 
 [[tool.importlinter.contracts]]
+name = "Growth — Beanie writes only from service.py"
+# feat/growth-g1 — only ``growth.service`` owns the Prospect Beanie writes;
+# dto/domain/router/worker go through it. The worker is the dedicated
+# ``growth`` arq queue seam and must never touch the doc class directly.
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.growth.router",
+    "pocketpaw_ee.cloud.growth.dto",
+    "pocketpaw_ee.cloud.growth.domain",
+    "pocketpaw_ee.cloud.growth.worker",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.prospect"]
+
+[[tool.importlinter.contracts]]
 name = "LLM provisioning — Beanie writes only from service.py"
 # MCG-8: the per-tenant LiteLLM virtual-key mapping (LiteLLMTenantKey) is written
 # only by llm_provisioning.service. The domain layer carries framework-free value
