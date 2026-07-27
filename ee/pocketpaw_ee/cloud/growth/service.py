@@ -8,6 +8,9 @@
 # Created 2026-07-27 (feat/growth-g1): first slice of /growth — the prospect
 # store. No events yet: growth has no realtime subscriber in v1, so writes
 # carry ``# no-event:`` markers per the ee/cloud emit rule.
+# Updated 2026-07-27 (feat/growth-g2): ``bulk_ingest`` — per-row validation +
+# ``upsert_by_domain`` over a capped batch; a bad row records an indexed error
+# entry and the rest proceed (idempotent upserts, so no rollback is needed).
 
 from __future__ import annotations
 
@@ -15,12 +18,16 @@ import logging
 from typing import Any
 
 from beanie import PydanticObjectId
+from pydantic import ValidationError as PydanticValidationError
 
 from pocketpaw_ee.cloud._core.context import RequestContext
 from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, NotFound
 from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.growth.domain import Prospect
 from pocketpaw_ee.cloud.growth.dto import (
+    BulkIngestRequest,
+    BulkIngestResponse,
+    BulkRowError,
     CreateProspectRequest,
     ProspectResponse,
     UpdateProspectRequest,
@@ -225,7 +232,56 @@ async def upsert_by_domain(
     return _to_response(_to_domain(doc))
 
 
+async def bulk_ingest(ctx: RequestContext, body: BulkIngestRequest) -> BulkIngestResponse:
+    """Ingest a batch of prospect rows via ``upsert_by_domain``.
+
+    Each row is validated individually: an invalid row records a
+    ``BulkRowError`` (with its payload index) and the remaining rows proceed —
+    no all-or-nothing abort. Upserts are idempotent, so a partial failure
+    needs no rollback and a re-run of the same payload is safe (second run
+    reports every row as updated). The 500-row cap lives on the DTO, so an
+    oversized payload 422s at the boundary before this function runs.
+    """
+    body = BulkIngestRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+
+    created = 0
+    updated = 0
+    errors: list[BulkRowError] = []
+    for index, raw in enumerate(body.rows):
+        try:
+            row = CreateProspectRequest.model_validate(raw)
+        except PydanticValidationError as exc:
+            first = exc.errors()[0]
+            loc = ".".join(str(part) for part in first["loc"]) or "row"
+            errors.append(
+                BulkRowError(
+                    index=index,
+                    code="prospect.invalid_row",
+                    message=f"{loc}: {first['msg']}",
+                )
+            )
+            continue
+        existing = await _ProspectDoc.find_one({"workspace": workspace_id, "domain": row.domain})
+        await upsert_by_domain(workspace_id, row)
+        if existing is None:
+            created += 1
+        else:
+            updated += 1
+
+    logger.info(
+        "growth.bulk_ingest workspace=%s rows=%d created=%d updated=%d errors=%d",
+        workspace_id,
+        len(body.rows),
+        created,
+        updated,
+        len(errors),
+    )
+    return BulkIngestResponse(created=created, updated=updated, errors=errors)
+
+
 __all__ = [
+    "bulk_ingest",
     "create",
     "get",
     "list_prospects",

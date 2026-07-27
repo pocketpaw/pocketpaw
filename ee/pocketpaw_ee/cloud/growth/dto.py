@@ -6,8 +6,15 @@
 #
 # Created 2026-07-27 (feat/growth-g1): first slice of /growth — the prospect
 # store. Domain → DTO mapping lives in ``service.py`` as private helpers.
+# Updated 2026-07-27 (feat/growth-g2): bulk-ingestion DTOs — BulkIngestRequest
+# (raw rows, 500-row cap enforced at the DTO boundary so an oversized payload
+# 422s before any row is touched), BulkRowError, BulkIngestResponse. Rows are
+# deliberately ``dict`` (not CreateProspectRequest) so one invalid row becomes
+# a per-row error entry in the response instead of failing the whole payload.
 
 from __future__ import annotations
+
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -73,6 +80,32 @@ class UpdateProspectRequest(BaseModel):
     status: ProspectStatus | None = None
 
 
+class BulkIngestRequest(BaseModel):
+    """Bulk-ingestion payload: up to 500 CreateProspectRequest-shaped rows.
+
+    Rows stay ``dict`` on purpose — the service validates each row
+    individually so a bad row records an error entry while the rest proceed
+    (no all-or-nothing abort). The 500-row cap IS enforced here: an oversized
+    payload is a 422 before any row is processed.
+    """
+
+    rows: list[dict[str, Any]] = Field(max_length=500)
+
+
+class BulkRowError(BaseModel):
+    """One failed row in a bulk ingest: its position and why it was skipped."""
+
+    index: int
+    code: str
+    message: str
+
+
+class BulkIngestResponse(BaseModel):
+    created: int
+    updated: int
+    errors: list[BulkRowError]
+
+
 class ProspectResponse(BaseModel):
     id: str
     workspace_id: str
@@ -92,6 +125,9 @@ class ProspectResponse(BaseModel):
 
 
 __all__ = [
+    "BulkIngestRequest",
+    "BulkIngestResponse",
+    "BulkRowError",
     "CreateProspectRequest",
     "ProspectResponse",
     "UpdateProspectRequest",
