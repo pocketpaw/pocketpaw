@@ -46,6 +46,16 @@
 # ``mark_prospect_dead`` / ``create_followup_draft`` — all keyed on an explicit
 # ``workspace_id`` because the sweep runs under the worker's system identity,
 # mirroring ``upsert_by_domain`` and ``gate_transition``.
+# Updated 2026-07-27 (feat/growth-g6): the WhatsApp dispatch + inbound seams.
+# This module stays the sole owner of the Beanie writes the G-6 slice needs, so
+# ``growth/whatsapp.py`` (the dispatch branch) and ``growth/webhooks.py`` (the
+# MSG91 inbound webhook) never touch a doc class. It reuses G-5's
+# ``get_draft_for_dispatch`` / ``get_prospect_for_dispatch`` readers (G-6 had
+# built an identical pair under different names, collapsed at integration),
+# ``record_whatsapp_attempt`` / ``finish_whatsapp_attempt`` /
+# ``count_whatsapp_attempts_since`` own the ``WhatsAppSendLog`` compliance
+# record and its rate-cap window, and ``record_whatsapp_inbound_reply`` applies
+# the opt-in + status flips an inbound reply implies.
 
 from __future__ import annotations
 
@@ -83,6 +93,7 @@ from pocketpaw_ee.cloud.growth.dto import (
 from pocketpaw_ee.cloud.models.draft import Draft as _DraftDoc
 from pocketpaw_ee.cloud.models.message_log import MessageLog as _MessageLogDoc
 from pocketpaw_ee.cloud.models.prospect import Prospect as _ProspectDoc
+from pocketpaw_ee.cloud.models.whatsapp_send_log import WhatsAppSendLog as _WhatsAppSendLogDoc
 
 logger = logging.getLogger(__name__)
 
@@ -727,8 +738,11 @@ async def get_prospect_for_dispatch(workspace_id: str, prospect_id: str) -> Pros
     Takes the explicit ``workspace_id`` the draft supplied, so the read is
     tenant-filtered like every other prospect read. ``None`` (not NotFound) —
     a missing prospect is a recorded delivery failure, not an exception in a
-    background job.
+    background job. An empty ``workspace_id`` returns ``None`` outright rather
+    than issuing an unscoped query (guard carried over from G-6's reader).
     """
+    if not workspace_id:
+        return None
     try:
         oid = PydanticObjectId(prospect_id)
     except Exception:  # noqa: BLE001 — malformed id == no prospect
@@ -935,11 +949,199 @@ async def create_followup_draft(
     return await _insert_draft(workspace_id, prospect_id, body)
 
 
+# ---------------------------------------------------------------------------
+# WhatsApp dispatch + inbound (G-6)
+# ---------------------------------------------------------------------------
+
+
+async def record_whatsapp_attempt(
+    workspace_id: str,
+    *,
+    draft_id: str,
+    prospect_id: str,
+    to_number: str,
+    status: str,
+    blocked_reason: str = "",
+    opted_in_at_attempt: bool = False,
+) -> str:
+    """Write the compliance row for one WhatsApp send attempt; return its id.
+
+    Written BEFORE the provider is called (``status="sending"``) so an attempt
+    that crashes mid-flight still leaves a trace, and so the rate-cap window
+    counts in-flight attempts rather than only completed ones. Guard refusals
+    write ``status="blocked"`` with the machine-readable ``blocked_reason`` and
+    are never followed by a provider call.
+    """
+    doc = _WhatsAppSendLogDoc(
+        workspace=workspace_id,
+        draft_id=draft_id,
+        prospect_id=prospect_id,
+        to_number=to_number,
+        status=status,
+        blocked_reason=blocked_reason,
+        opted_in_at_attempt=opted_in_at_attempt,
+    )
+    await doc.insert()
+    # no-event: growth has no realtime subscriber in v1; the sends view polls.
+    return str(doc.id)
+
+
+async def finish_whatsapp_attempt(
+    log_id: str,
+    *,
+    status: str,
+    provider_message_id: str = "",
+    error_code: str = "",
+    error: str = "",
+) -> None:
+    """Finalise a ``sending`` row to ``sent`` / ``failed``.
+
+    ``error`` is truncated here rather than at the call site so no caller can
+    accidentally persist a full provider response (which may echo request
+    headers) into the log.
+    """
+    try:
+        oid = PydanticObjectId(log_id)
+    except Exception:  # noqa: BLE001 — nothing to finalise
+        return
+    doc = await _WhatsAppSendLogDoc.find_one({"_id": oid})
+    if doc is None:
+        return
+    doc.status = status
+    doc.provider_message_id = provider_message_id
+    doc.error_code = error_code
+    doc.error = error[:500]
+    await doc.save()  # bumps updatedAt
+    # no-event: growth has no realtime subscriber in v1; the sends view polls.
+
+
+async def count_whatsapp_attempts_since(workspace_id: str, since: datetime) -> int:
+    """Count attempts that REACHED the provider in the window.
+
+    ``blocked`` rows are excluded on purpose: a refused attempt never touched
+    Meta, so it must not consume the quality-rating budget the cap protects.
+    ``sending`` rows ARE counted — an in-flight send is already committed.
+    """
+    return await _WhatsAppSendLogDoc.find(
+        {
+            "workspace": workspace_id,
+            "status": {"$in": ["sending", "sent", "failed"]},
+            "createdAt": {"$gte": since},
+        }
+    ).count()
+
+
+def _number_variants(number: str) -> list[str]:
+    """The exact stored spellings an inbound number most often matches.
+
+    MSG91 reports the sender in E.164 digits with no ``+``; a prospect row may
+    have been imported with a ``+``. Those three spellings cover the common
+    case with a plain indexed equality match — anything more decorated falls
+    through to ``_loose_number_regex``.
+    """
+    digits = "".join(ch for ch in number if ch.isdigit())
+    if not digits:
+        return []
+    variants = {number.strip(), digits, f"+{digits}"}
+    return [v for v in variants if v]
+
+
+def _loose_number_regex(number: str) -> str:
+    """A separator-tolerant pattern for the same digits.
+
+    Prospects imported from a CSV or a directory carry human formatting —
+    ``+91 98765 43210``, ``+91-98765-43210``, ``(91) 98765 43210``. Normalising
+    the column would mean a migration plus a write-path change shared with
+    every other /growth slice, so the read path absorbs the variance instead:
+    the digits in order, with any non-digits allowed between them. Only used
+    when the exact-match query misses, so the common inbound event still costs
+    one indexed lookup.
+    """
+    digits = "".join(ch for ch in number if ch.isdigit())
+    if not digits:
+        return ""
+    return r"^\D*" + r"\D*".join(digits) + r"\D*$"
+
+
+async def _has_sent_whatsapp_draft(workspace_id: str, prospect_id: str) -> bool:
+    count = await _DraftDoc.find(
+        {
+            "workspace": workspace_id,
+            "prospect_id": prospect_id,
+            "channel": "whatsapp",
+            "status": "sent",
+        }
+    ).count()
+    return count > 0
+
+
+async def record_whatsapp_inbound_reply(number: str) -> int:
+    """Apply an inbound WhatsApp reply: opt the prospect in, mark them replied.
+
+    Returns how many prospect rows were updated — 0 for a number we don't hold,
+    which the webhook turns into a plain 200 so the endpoint never reveals
+    whether a number exists in the system.
+
+    # global-read: the MSG91 inbound webhook is unauthenticated by nature (the
+    # provider is the caller) and its payload carries no workspace, so the
+    # lookup starts from the number alone. Tenancy is re-narrowed immediately:
+    # when any workspace has actually WhatsApp'd this number, only those
+    # workspaces' rows are touched — a tenant that merely holds the same
+    # prospect never learns that someone else's outreach got a reply. Scoping
+    # the resolve by the receiving ``integrated_number`` instead (exact, per
+    # WABA) is the follow-up once the connector row is queryable by config.
+    """
+    variants = _number_variants(number)
+    if not variants:
+        return 0
+
+    docs = await _ProspectDoc.find({"whatsapp_number": {"$in": variants}}).to_list()
+    if not docs:
+        # Second pass for human-formatted stored numbers. See _loose_number_regex.
+        pattern = _loose_number_regex(number)
+        if pattern:
+            docs = await _ProspectDoc.find({"whatsapp_number": {"$regex": pattern}}).to_list()
+    if not docs:
+        return 0
+
+    messaged = [d for d in docs if await _has_sent_whatsapp_draft(d.workspace, str(d.id))]
+    targets = messaged or docs
+
+    for doc in targets:
+        doc.opted_in = True
+        doc.status = "replied"
+        await doc.save()  # bumps updatedAt
+        # no-event: growth has no realtime subscriber in v1.
+
+        sent_drafts = await _DraftDoc.find(
+            {
+                "workspace": doc.workspace,
+                "prospect_id": str(doc.id),
+                "channel": "whatsapp",
+                "status": "sent",
+            }
+        ).to_list()
+        for draft in sent_drafts:
+            # sent→replied is legal per DRAFT_TRANSITIONS and is not a
+            # gate-owned target; the gate seam is used because this caller runs
+            # under a system identity with no RequestContext.
+            await gate_transition(doc.workspace, str(draft.id), "replied")
+
+    logger.info(
+        "growth.whatsapp_inbound: reply matched %d prospect row(s) across %d candidate(s)",
+        len(targets),
+        len(docs),
+    )
+    return len(targets)
+
+
 __all__ = [
     "bulk_ingest",
+    "count_whatsapp_attempts_since",
     "create",
     "create_draft",
     "create_followup_draft",
+    "finish_whatsapp_attempt",
     "gate_transition",
     "get",
     "get_draft_for_dispatch",
@@ -955,6 +1157,8 @@ __all__ = [
     "mark_prospect_dead",
     "propose_send",
     "record_message_log",
+    "record_whatsapp_attempt",
+    "record_whatsapp_inbound_reply",
     "transition",
     "update",
     "upsert_by_domain",
