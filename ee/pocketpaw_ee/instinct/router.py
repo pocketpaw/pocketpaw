@@ -1,5 +1,24 @@
 # ee/instinct/router.py — FastAPI router for the Instinct decision pipeline API.
 # Created: 2026-03-28 — Propose, approve/reject, list pending, query audit.
+# Updated: 2026-07-27 (feat/growth-g4 — _growth_send proposal type) — wired the
+#   /growth outbound-send gate kind into the dispatch, mirroring ``_ship_action``
+#   exactly. ``_growth_send_blob`` + ``_assert_growth_workspace`` are the peers
+#   of the ship blob accessor + tenancy guard (the guard runs at all four
+#   assertion sites — approve / bulk-approve / reject / bulk-reject — and fails
+#   closed on an empty workspace claim). The blob
+#   (``Action.parameters._growth_send``, filed by ``ee.cloud.growth.propose``)
+#   carries {draft_id, prospect_id, channel, prospect name/company, rendered
+#   preview, workspace_id, chain ids}. On APPROVE (single AND bulk) the router
+#   emits ``human.corrected`` then fires
+#   ``growth.executor.execute_approved_growth_send`` — which flips the draft
+#   proposed→approved through the service's gate seam and enqueues the
+#   ``growth.dispatch`` arq job (a logging STUB until G-5/G-6), and OWNS the
+#   chain close. On REJECT the router emits ``human.corrected`` +
+#   ``decision.completed(rejected)`` itself, then best-effort flips the draft
+#   proposed→rejected via ``_mark_growth_send_rejected_safe`` (the executor
+#   never runs on reject — nothing is enqueued, nothing sends). This gate is
+#   the ONLY path to a draft's ``approved``/``sent`` statuses — the public
+#   /growth status route refuses those targets (``draft.gate_required``).
 # Updated: 2026-07-10 (FST-6 — _fabric_conflict proposal type) — wired the
 #   conflict-stewardship gate kind into the FOUR-path dispatch.
 #   ``_fabric_conflict_blob`` + ``_assert_fabric_conflict_workspace`` are the
@@ -948,6 +967,70 @@ def _assert_ship_action_workspace(action: Any, current_workspace: str) -> None:
         )
 
 
+def _growth_send_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_growth_send`` blob on an Action, or ``None``.
+
+    The blob is the gated /growth outbound-send payload
+    ``ee.cloud.growth.propose`` stores under ``Action.parameters._growth_send``
+    (draft_id / prospect_id / channel / prospect name+company / rendered
+    preview / idempotency_key + the originating ``workspace_id``). This is a
+    peer gated proposal kind — the approve path dispatches the apply-on-approve
+    executor on its presence, exactly as it dispatches the ship executor on
+    ``_ship_action``. A growth send is the ONLY path that may flip a draft to
+    ``approved`` (and, downstream, ``sent``). Anything that is not a dict is
+    treated as "no growth send".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_growth_send")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_growth_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting a growth send from another workspace.
+
+    Mirror of ``_assert_ship_action_workspace`` for the ``_growth_send`` blob.
+    ``require_action_any_workspace("instinct.approve")`` only proves the caller
+    holds the role SOMEWHERE; this binds the growth-send Action to the caller's
+    active workspace. A growth send carries no pocket, so its tenancy lives
+    entirely on the blob's ``workspace_id``. A mismatch → 403 on BOTH the
+    approve and the reject side (asymmetric tenant scope is no tenant scope —
+    pocketpaw#1183 / #1250). An empty workspace claim fails closed — approving
+    it would dispatch an outbound message whose tenancy cannot be verified.
+    """
+    blob = _growth_send_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This growth send has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This growth send belongs to a different workspace",
+        )
+
+
+async def _mark_growth_send_rejected_safe(action: Any, reason: str) -> None:
+    """Best-effort draft flip (proposed→rejected) for a rejected growth send.
+
+    The router owns the CHAIN close on reject (the executor never runs, so no
+    dispatch job is enqueued and nothing sends); this lazy-imported hook only
+    reflects the rejection onto the draft's status so the /growth views read
+    it — the ``_mark_plan_rejected_safe`` shape. Never breaks the reject
+    response."""
+    try:
+        from pocketpaw_ee.cloud.growth import executor as growth_executor
+
+        await growth_executor.mark_growth_send_rejected(action, reason)
+    except Exception:  # noqa: BLE001 — read-model nudge must never break reject
+        logger.debug("growth: mark_growth_send_rejected hook failed (non-fatal)", exc_info=True)
+
+
 def _pocket_create_blob(action: Any) -> dict[str, Any] | None:
     """Return the ``_pocket_create`` blob on an Action, or ``None``.
 
@@ -1460,6 +1543,7 @@ async def bulk_approve_actions(
             _assert_external_action_workspace(action, workspace_id)
             _assert_fabric_objects_workspace(action, workspace_id)
             _assert_ship_action_workspace(action, workspace_id)
+            _assert_growth_workspace(action, workspace_id)
             _assert_pocket_create_workspace(action, workspace_id)
             _assert_instinct_rule_workspace(action, workspace_id)
             _assert_fabric_conflict_workspace(action, workspace_id)
@@ -1614,6 +1698,37 @@ async def bulk_approve_actions(
             except Exception:
                 logger.exception(
                     "bulk-approve ship-action execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # G-4 — a bulk-approved gated ``_growth_send`` Action flips its draft to
+        # ``approved`` and enqueues the outbound dispatch job on the ``growth``
+        # queue. Mirrors the ship branch above: per-item
+        # ``human.corrected(accepted)``, the ``agent.proposed`` event id off the
+        # blob as causation, then the executor (which owns the chain close).
+        # This is the ONLY path that may approve a draft for sending — the
+        # public /growth status route refuses the edge.
+        growth_send_blob = _growth_send_blob(action)
+        if growth_send_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=growth_send_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(growth_send_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.growth import executor as growth_executor
+
+                await growth_executor.execute_approved_growth_send(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve growth-send execution failed for %s (non-fatal)",
                     action.id,
                 )
             continue
@@ -1882,6 +1997,7 @@ async def bulk_reject_actions(
             _assert_external_action_workspace(action, workspace_id)
             _assert_fabric_objects_workspace(action, workspace_id)
             _assert_ship_action_workspace(action, workspace_id)
+            _assert_growth_workspace(action, workspace_id)
             _assert_pocket_create_workspace(action, workspace_id)
             _assert_instinct_rule_workspace(action, workspace_id)
             _assert_fabric_conflict_workspace(action, workspace_id)
@@ -2160,6 +2276,32 @@ async def bulk_reject_actions(
             )
             continue
 
+        # G-4 — a bulk-rejected gated ``_growth_send`` Action closes its chain
+        # HERE (the dispatch executor never runs on reject — nothing is
+        # enqueued, nothing sends). Mirrors the admin-action reject branch
+        # above, plus the best-effort draft flip proposed→rejected.
+        growth_send_blob = _growth_send_blob(action)
+        if growth_send_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=growth_send_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(growth_send_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=growth_send_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            await _mark_growth_send_rejected_safe(action, req.reason)
+            continue
+
     return BulkActionResponse(bulk_id=bulk_id, affected=rejected, missing=missing)
 
 
@@ -2234,6 +2376,11 @@ async def approve_action(
     # fires a workspace-admin write (e.g. a member role change) after an
     # execute-time RBAC re-check, so the cross-workspace gate is mandatory here.
     _assert_admin_action_workspace(before, workspace_id)
+    # G-4 — same tenancy gate for a gated growth-send Action — its
+    # ``_growth_send`` blob carries the workspace, not a pocket. Approving it
+    # flips the draft to ``approved`` and enqueues the outbound dispatch job, so
+    # the cross-workspace gate is mandatory here.
+    _assert_growth_workspace(before, workspace_id)
 
     req = req or ApproveRequest()
     # SHOULD-FIX 1 — the audit actor is the authenticated identity, not
@@ -2458,6 +2605,35 @@ async def approve_action(
             )
         except Exception:
             logger.exception("ship-action execution after approval failed (non-fatal)")
+
+    # G-4 — when the approved Action carries a gated ``_growth_send`` blob, flip
+    # the draft to ``approved`` and enqueue its outbound dispatch job. Same
+    # best-effort, lazy-import, never-break-the-approve-response shape as the
+    # ship hook above; the executor owns the chain CLOSE and records success /
+    # failure on the Action. This is the ONLY path that may approve a draft for
+    # sending — the public /growth status route refuses the edge
+    # (``draft.gate_required``).
+    growth_send_blob = _growth_send_blob(approved)
+    if growth_send_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=growth_send_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(growth_send_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.growth import executor as growth_executor
+
+            await growth_executor.execute_approved_growth_send(
+                approved, human_event_id=human_event_id
+            )
+        except Exception:
+            logger.exception("growth-send execution after approval failed (non-fatal)")
 
     # When the approved Action carries a gated ``_pocket_create`` blob, create the
     # proposed starter Pocket via ``pockets.service.create`` (workspace-scoped,
@@ -2773,6 +2949,10 @@ async def reject_action(
     # side. Asymmetric tenant scope is no tenant scope: a cross-workspace reject
     # must 403 before any mutation, exactly like the approve side.
     _assert_admin_action_workspace(before, workspace_id)
+    # G-4 — same tenancy gate for a gated growth-send Action on the REJECT
+    # side. Asymmetric tenant scope is no tenant scope: a cross-workspace reject
+    # must 403 before any mutation, exactly like the approve side.
+    _assert_growth_workspace(before, workspace_id)
 
     reason = req.reason if req else ""
     rejector_id = str(user.id)
@@ -3052,6 +3232,33 @@ async def reject_action(
             reason=reason,
             causation_override=human_event_id,
         )
+
+    # G-4 — a rejected gated ``_growth_send`` Action closes its chain HERE (the
+    # dispatch executor never runs on reject — nothing is enqueued, nothing
+    # sends). ``human.corrected(rejected)`` cites the ``agent.proposed`` event
+    # (off the blob's ``proposed_event_id``); ``decision.completed(rejected)``
+    # cites the human event. The draft itself flips proposed→rejected via the
+    # best-effort hook so the /growth views reflect the decision.
+    growth_send_blob = _growth_send_blob(action)
+    if growth_send_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=growth_send_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(growth_send_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=growth_send_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
+        await _mark_growth_send_rejected_safe(action, reason)
 
     # gap2 — a rejected ``_customer_reply`` Action delivers a DECLINED decision
     # (carrying the rejection reason) back to the customer surface. Same
