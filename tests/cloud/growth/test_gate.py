@@ -929,6 +929,11 @@ class TestGrowthRouteRbac:
             ("POST", "/growth/drafts/{draft_id}/status"): "growth.write",
             # The outbound verb sits at the ADMIN tier the executor re-checks.
             ("POST", "/growth/drafts/{draft_id}/propose"): "growth.manage",
+            # G-8's manual LinkedIn surface. mark-sent is an OUTBOUND verb —
+            # same ADMIN tier as propose — and it walks the gate seam, since
+            # ``sent`` is gate-owned.
+            ("GET", "/growth/linkedin/queue"): "growth.read",
+            ("POST", "/growth/linkedin/{draft_id}/mark-sent"): "growth.manage",
         }
 
         seen: dict[tuple[str, str], str] = {}

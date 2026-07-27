@@ -24,6 +24,14 @@
 # draft→proposed via ``transition``), and ``gate_transition`` is the internal
 # seam the growth executor / dispatch worker use to walk gate-owned edges
 # (same legality table, explicit workspace_id, no RequestContext).
+# Updated 2026-07-27 (feat/growth-g8): LinkedIn manual queue —
+# ``linkedin_queue`` (proposed/approved linkedin drafts joined with their
+# prospect via two queries, newest first), ``linkedin_queue_markdown``
+# (copy-paste export grouped per prospect: connect note + after-accept
+# message), and ``mark_linkedin_sent`` (channel guard + the EXISTING
+# ``transition`` function, so approved→sent stays the only legal move and
+# proposed→sent 422s as ``draft.illegal_transition``). Deliberately manual —
+# no LinkedIn API, no automation (account-ban avoidance is the feature).
 
 from __future__ import annotations
 
@@ -49,6 +57,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     CreateDraftRequest,
     CreateProspectRequest,
     DraftResponse,
+    LinkedInQueueItemResponse,
     ProposeSendResponse,
     ProspectResponse,
     TransitionDraftRequest,
@@ -512,14 +521,158 @@ async def propose_send(ctx: RequestContext, draft_id: str) -> ProposeSendRespons
     return ProposeSendResponse(proposal_id=proposal_id, draft=draft)
 
 
+# ---------------------------------------------------------------------------
+# LinkedIn manual queue (G-8)
+# ---------------------------------------------------------------------------
+
+
+async def linkedin_queue(
+    ctx: RequestContext, *, limit: int = 100
+) -> list[LinkedInQueueItemResponse]:
+    """The manual LinkedIn send queue: the workspace's linkedin-channel drafts
+    in ``proposed`` / ``approved``, newest first, each joined with its
+    prospect's targeting context (name, company, profile URL, brief, tier).
+
+    The join is two queries (drafts, then their prospects by id), not an
+    aggregation — the queue is small (manual sending is the bottleneck by
+    design). A draft whose prospect vanished is skipped rather than crashing
+    the queue.
+    """
+    workspace_id = _require_workspace(ctx)
+    cursor = (
+        _DraftDoc.find(
+            {
+                "workspace": workspace_id,
+                "channel": "linkedin",
+                "status": {"$in": ["proposed", "approved"]},
+            }
+        )
+        .sort(-_DraftDoc.createdAt)  # type: ignore[operator]
+        .limit(limit)
+    )
+    drafts = [_draft_to_domain(doc) async for doc in cursor]
+
+    prospect_oids = []
+    for draft in drafts:
+        try:
+            prospect_oids.append(PydanticObjectId(draft.prospect_id))
+        except Exception:  # noqa: BLE001 — malformed ref == orphan, skipped below
+            continue
+    prospects: dict[str, Prospect] = {}
+    if prospect_oids:
+        async for pdoc in _ProspectDoc.find(
+            {"workspace": workspace_id, "_id": {"$in": prospect_oids}}
+        ):
+            prospects[str(pdoc.id)] = _to_domain(pdoc)
+
+    items: list[LinkedInQueueItemResponse] = []
+    for draft in drafts:
+        prospect = prospects.get(draft.prospect_id)
+        if prospect is None:
+            continue
+        items.append(
+            LinkedInQueueItemResponse(
+                draft=_draft_to_response(draft),
+                prospect_name=prospect.name,
+                prospect_company=prospect.company,
+                linkedin_url=prospect.linkedin_url,
+                research_brief=prospect.research_brief,
+                tier=prospect.tier,
+            )
+        )
+    return items
+
+
+def _one_line(text: str, max_len: int = 160) -> str:
+    """First non-empty line of a blob, hard-capped for the one-line brief."""
+    stripped = text.strip()
+    line = stripped.splitlines()[0].strip() if stripped else ""
+    return line if len(line) <= max_len else line[: max_len - 1] + "…"
+
+
+def _render_queue_markdown(items: list[LinkedInQueueItemResponse]) -> str:
+    """Render the queue as paste-ready markdown — one section per prospect.
+
+    No tables, no HTML: heading = name + company, profile URL as a link, tier
+    + one-line brief, then the connect note (first_touch body, with a char
+    count against LinkedIn's 300-char connect limit) and the after-accept
+    message (follow_up body, when one is queued), each with its draft id so
+    mark-sent can be called after the manual send.
+    """
+    lines = ["# LinkedIn outreach queue", ""]
+    if not items:
+        lines.append("_Queue is empty — no proposed or approved LinkedIn drafts._")
+        return "\n".join(lines) + "\n"
+
+    grouped: dict[str, list[LinkedInQueueItemResponse]] = {}
+    for item in items:  # preserves newest-first order of first appearance
+        grouped.setdefault(item.draft.prospect_id, []).append(item)
+
+    for group in grouped.values():
+        head = group[0]
+        lines.append(f"## {head.prospect_name} — {head.prospect_company}")
+        lines.append("")
+        if head.linkedin_url:
+            lines.append(f"[LinkedIn profile]({head.linkedin_url})")
+            lines.append("")
+        brief = _one_line(head.research_brief)
+        lines.append(f"Tier {head.tier.upper()}" + (f" — {brief}" if brief else ""))
+        lines.append("")
+        first = next((i for i in group if i.draft.variant == "first_touch"), None)
+        follow = next((i for i in group if i.draft.variant == "follow_up"), None)
+        for label, entry in (("Connect note", first), ("After accept", follow)):
+            if entry is None:
+                continue
+            counter = f"{len(entry.draft.body)}/300 chars, " if label == "Connect note" else ""
+            lines.append(f"{label} ({counter}{entry.draft.status}):")
+            lines.append("")
+            lines.append(entry.draft.body)
+            lines.append("")
+            lines.append(f"Draft id: `{entry.draft.id}`")
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+async def linkedin_queue_markdown(ctx: RequestContext, *, limit: int = 100) -> str:
+    """The queue as copy-paste markdown (``?format=md`` on the queue route)."""
+    return _render_queue_markdown(await linkedin_queue(ctx, limit=limit))
+
+
+async def mark_linkedin_sent(ctx: RequestContext, draft_id: str) -> DraftResponse:
+    """Record that the captain manually sent a queued LinkedIn draft.
+
+    Guard: the draft must be linkedin-channel (422 ``draft.wrong_channel``
+    otherwise). The status move rides ``gate_transition``, not the public
+    ``transition``: G-4 made ``sent`` a GATE_OWNED_TARGET that the public
+    status route refuses with 403 ``draft.gate_required``, and this route IS
+    the LinkedIn dispatch path — the "worker" is the human, because LinkedIn
+    is manual by design. G-4's structural guarantee still holds: only
+    ``approved`` can move to ``sent``, and ``approved`` is reachable only
+    through an approved ``_growth_send`` proposal. The legality table is
+    identical, so proposed→sent stays a 422 ``draft.illegal_transition``.
+    The route sits at ``growth.manage`` — the same outbound tier as propose.
+    """
+    workspace_id = _require_workspace(ctx)
+    doc = await _fetch_draft_in_workspace(workspace_id, draft_id)
+    if doc.channel != "linkedin":
+        raise ValidationError(
+            "draft.wrong_channel",
+            f"mark-sent is for linkedin drafts; this draft targets '{doc.channel}'",
+        )
+    return await gate_transition(workspace_id, draft_id, "sent")
+
+
 __all__ = [
     "bulk_ingest",
     "create",
     "create_draft",
     "gate_transition",
     "get",
+    "linkedin_queue",
+    "linkedin_queue_markdown",
     "list_drafts",
     "list_prospects",
+    "mark_linkedin_sent",
     "propose_send",
     "transition",
     "update",

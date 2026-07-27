@@ -28,10 +28,22 @@
 # /drafts/{id}/propose — takes ``growth.manage`` (ADMIN): the propose route
 # has to sit at the same tier ``growth.executor`` re-checks at dispatch, or a
 # member-filed proposal would always fail closed at approve time.
+# Updated 2026-07-27 (feat/growth-g8): LinkedIn manual queue — GET
+# /linkedin/queue (proposed/approved linkedin drafts joined with prospect
+# context; ``?format=md`` returns a paste-ready text/markdown export) and
+# POST /linkedin/{draft_id}/mark-sent (records a manual send via the G-3
+# transition machine). Deliberately manual — no LinkedIn API.
+# Updated 2026-07-27 (integration/growth-v1): the G-8 LinkedIn routes carry the
+# G-4 per-route RBAC guards their branch predated — ``growth.read`` on the
+# queue, ``growth.manage`` on mark-sent (it is an OUTBOUND verb, same tier as
+# propose).
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import PlainTextResponse, Response
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace
@@ -49,6 +61,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     CreateDraftRequest,
     CreateProspectRequest,
     DraftResponse,
+    LinkedInQueueItemResponse,
     ProposeSendResponse,
     ProspectResponse,
     TransitionDraftRequest,
@@ -201,3 +214,45 @@ async def propose_draft_send(
     ``rejected``. A draft that cannot legally move to ``proposed`` is a 422
     ``draft.illegal_transition`` (so re-proposing is refused)."""
     return await growth_service.propose_send(ctx, draft_id)
+
+
+# ---------------------------------------------------------------------------
+# LinkedIn manual queue (G-8)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/linkedin/queue",
+    response_model=None,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def linkedin_queue(
+    format: Literal["json", "md"] = Query(default="json"),
+    limit: int = Query(default=100, ge=1, le=500),
+    ctx: RequestContext = Depends(request_context),
+) -> list[LinkedInQueueItemResponse] | Response:
+    """The manual send queue: the workspace's linkedin drafts in
+    proposed/approved, newest first, joined with prospect context.
+    ``?format=md`` returns a paste-ready ``text/markdown`` export instead —
+    one section per prospect with the connect note and after-accept message.
+    Manual send is the feature: there is no LinkedIn API integration."""
+    if format == "md":
+        markdown = await growth_service.linkedin_queue_markdown(ctx, limit=limit)
+        return PlainTextResponse(markdown, media_type="text/markdown; charset=utf-8")
+    return await growth_service.linkedin_queue(ctx, limit=limit)
+
+
+@router.post(
+    "/linkedin/{draft_id}/mark-sent",
+    response_model=DraftResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
+async def mark_linkedin_sent(
+    draft_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> DraftResponse:
+    """Record a manual LinkedIn send. The draft must be linkedin-channel
+    (422 ``draft.wrong_channel``) and ``approved`` — the move rides the G-3
+    machine, so anything but approved→sent is a 422
+    ``draft.illegal_transition``."""
+    return await growth_service.mark_linkedin_sent(ctx, draft_id)
