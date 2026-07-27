@@ -89,6 +89,16 @@ provider call, writes a MessageLog audit row per attempt, and flips the draft
 to sent through the existing gate seam. Also documented the retryable failure
 path (failed row, draft stays approved, nothing raises) and the required
 GROWTH_SENDING_DOMAIN config plus why outreach never rides the apex.
+
+Updated: 2026-07-27 (feat/growth-g6) — documented the Growth — WhatsApp
+dispatch section: the growth.dispatch job's channel="whatsapp" branch sends via
+MSG91 behind a HARD prospect.opted_in guard (not opted in ⇒ no provider call at
+all, typed error, blocked send-log row, draft left approved), the guard order,
+the per-attempt WhatsAppSendLog compliance record, connector-state credential
+resolution (no env fallback for the authkey), the fail-closed inbound webhook
+POST /growth/webhooks/msg91, and the GROWTH_WHATSAPP_MAX_PER_HOUR /
+GROWTH_MSG91_WEBHOOK_SECRET environment variables.
+
 Updated: 2026-07-27 (feat/growth-g4) — documented the Instinct send gate:
 POST /growth/drafts/{id}/propose files a gated _growth_send proposal and
 flips the draft to proposed; the status route now refuses the gate-owned
@@ -2184,7 +2194,10 @@ enqueues the `growth.dispatch` job `{draft_id, channel}` on the dedicated
 `growth` arq queue — with an execute-time re-check that the proposer STILL
 holds `growth.manage` (a since-demoted proposer's approved send fails
 closed), and `mark_failed` on the Action if the enqueue fails. On
-**reject** the draft flips to `rejected` and nothing is enqueued.
+**reject** the draft flips to `rejected` and nothing is enqueued. The
+`email` branch is live (below) and the `whatsapp` branch is live (*Growth —
+WhatsApp dispatch*); `linkedin` keeps the logging stub on purpose — it is
+sent by hand from the LinkedIn queue.
 
 ### Dispatch — how an approved email actually sends (G-5)
 
@@ -2351,3 +2364,114 @@ outbound loop down.
 dispatch worker's send record supplies one, and otherwise falls back to
 `updated_at` — which, for a draft sitting in `sent`, is the moment of the
 `sent` transition, since the status flip is the last write to that row.
+
+---
+
+## Growth — WhatsApp dispatch (MSG91)
+
+Sixth slice of the `/growth` outbound engine (G-6): the `channel="whatsapp"`
+branch of the `growth.dispatch` arq job actually sends, through MSG91 (an
+official Meta WhatsApp Business Solution Provider).
+
+**The opt-in guard is a service-level invariant, not a UI convention.** Meta
+bans WhatsApp Business Accounts that send business-initiated template messages
+to numbers that never consented — the quality rating collapses, then the number
+gets restricted, then banned, for the whole tenant. So dispatch refuses any
+draft whose prospect has `opted_in = false`: it makes **no provider call at
+all**, raises `growth.whatsapp_opt_in_required`, records a `blocked` row, and
+leaves the draft in `approved` so the refusal is visible instead of silent.
+
+Because business-initiated messages must be pre-approved templates, the draft
+`body` is sent as the template's first body variable, never as free-form text.
+
+**Guard order** (each refusal writes its own send-log row and raises):
+
+| # | Guard | Error code | Blocked reason |
+|---|---|---|---|
+| 1 | Draft still `approved` (the G-4 gate owns that status) | `growth.draft_not_approved` | `draft_not_approved` |
+| 2 | Prospect still exists in the draft's workspace | `growth.prospect_unavailable` | `prospect_missing` |
+| 3 | **`prospect.opted_in`** | `growth.whatsapp_opt_in_required` | `not_opted_in` |
+| 4 | Prospect has a WhatsApp number | `growth.prospect_unavailable` | `no_number` |
+| 5 | Hourly rate cap | `growth.whatsapp_rate_capped` | `rate_capped` |
+| 6 | Resolvable MSG91 credentials | `growth.whatsapp_not_configured` | `not_configured` |
+
+On success the job writes a `sending` row, calls MSG91, finalises the row to
+`sent` (or `failed`), and flips the draft `approved → sent` through the gate's
+own `service.gate_transition` seam. The growth worker runs with `max_tries = 1`,
+so a refusal lands as a failed arq job for operator review — an outbound message
+is never retried automatically.
+
+Every attempt — including refused ones — writes a row to
+`growth_whatsapp_send_logs` (`WhatsAppSendLog`): workspace, draft, prospect,
+recipient number, status, blocked reason, provider message id, and
+`opted_in_at_attempt` (the consent fact *as of* the send, which a later prospect
+edit cannot rewrite).
+
+### Credentials
+
+The MSG91 authkey is resolved per workspace through the **connector state
+pattern** — the workspace's `msg91` `WorkspaceConnector` row, read via
+`CloudConnectorStateStore` with the `ws:<workspace_id>` scope key. There is
+deliberately **no env-var fallback for the authkey**: a deployment-global
+provider key would let one tenant's outbound traffic burn another tenant's WABA
+quality rating. No row, no send.
+
+Config keys on that row:
+
+| Key | Required | Notes |
+|---|---|---|
+| `authkey_enc` | yes* | The authkey as a `_core.crypto` Fernet ciphertext (needs `CLOUD_ENCRYPTION_KEY`). Preferred — keeps the plaintext out of Mongo and out of the connectors entity's own `config` echo. |
+| `authkey` | yes* | Plaintext fallback for installs with no encryption key. Warns on every resolve. |
+| `integrated_number` | yes | The WABA business number messages are sent from. |
+| `template_name` | yes | The pre-approved Meta template. |
+| `language_code` | no | Defaults to `en`. |
+| `namespace` | no | WABA template namespace, when the account requires one. |
+| `base_url` | no | Defaults to `https://api.msg91.com`. Per-workspace override for regional mirrors. |
+
+\* one of `authkey_enc` / `authkey`.
+
+The authkey is never logged, never returned by any DTO, and never persisted into
+the send log. `Msg91Credentials.__repr__` redacts it, so a traceback or a `%r`
+format cannot spill it either.
+
+### `POST /api/v1/growth/webhooks/msg91`
+
+Inbound MSG91 WhatsApp events. **Unauthenticated by nature** (MSG91 is the
+caller) — mounted separately from the licensed `/growth` router, with no license
+gate, no RBAC and no `RequestContext`.
+
+**Fails closed.** Trust rests entirely on the signature: HMAC-SHA256 over the
+raw request body, keyed by `GROWTH_MSG91_WEBHOOK_SECRET`, hex-encoded, in
+`X-Msg91-Signature` (an optional `sha256=` prefix is tolerated). A bad
+signature, a missing header, **and an unset secret** all return
+`403 growth.webhook_signature_invalid` / `growth.webhook_unsigned` /
+`growth.webhook_unverifiable`. Unlike the Recall webhook there is no
+accept-while-you-wire-it-up mode — a forged inbound reply would flip
+`opted_in` and thereby unlock business-initiated sends to a number that never
+consented.
+
+On a verified inbound reply the handler sets `prospect.opted_in = true`, moves
+the prospect to `replied`, and walks any `sent` WhatsApp draft for that prospect
+to `replied` (through the gate seam). Under Meta's rules a user-initiated
+message both opens the 24-hour service window and *is* the opt-in signal for
+that number.
+
+Delivery-status callbacks (`status` / `delivered` / `read` / …) are accepted and
+ignored — a receipt is not consent. A number no workspace holds is a 200 no-op.
+
+The response body is a constant `{"ok": true}` for every accepted request —
+processed, ignored, or unknown number — so the endpoint cannot be used as a
+membership oracle over phone numbers.
+
+Tenancy: the payload carries no workspace, so the lookup starts from the number
+and is immediately re-narrowed — when any workspace has actually WhatsApp'd that
+number, only those workspaces' rows are touched, so a tenant that merely holds
+the same prospect never learns someone else's outreach got a reply.
+
+### Environment
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GROWTH_WHATSAPP_MAX_PER_HOUR` | `20` | Per-workspace outbound WhatsApp ceiling per rolling hour. WhatsApp quality rating is computed over a rolling window of recent business-initiated messages, and a burst (bulk approval, retry storm, mis-scoped follow-up cron) is exactly the shape that trips it — with the damage landing on the WABA, not the individual send. The cap bounds the blast radius of a bug. Attempts that reached the provider (`sending` / `sent` / `failed`) consume the window; refused attempts do not. There is no "disabled" value — `0` refuses every send rather than meaning unlimited, and a non-numeric or negative value falls back to the default, so a fat-fingered setting fails closed. |
+| `GROWTH_MSG91_WEBHOOK_SECRET` | *(unset)* | Shared secret for the inbound webhook HMAC. **Required** — while unset, `POST /growth/webhooks/msg91` rejects every request with 403. |
+| `CLOUD_ENCRYPTION_KEY` | *(unset)* | Existing deployment-wide Fernet key. Needed to store the MSG91 authkey as `authkey_enc` rather than plaintext. |
