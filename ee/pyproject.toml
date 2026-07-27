@@ -814,6 +814,10 @@ name = "Growth — Beanie writes only from service.py"
 # feat/growth-g4 — the gate modules join the boundary: ``propose`` files the
 # Instinct Action and ``executor`` flips drafts ONLY through the service's
 # ``gate_transition`` seam, never the doc class directly.
+# feat/growth-g5 — the MessageLog audit doc joins the boundary (writes only
+# from ``growth.service.record_message_log``), and the dispatch modules join
+# the source list: ``email_dispatch`` records + flips through the service, and
+# ``connector`` only ever touches the provider's HTTP API.
 type = "forbidden"
 allow_indirect_imports = "true"
 source_modules = [
@@ -823,10 +827,13 @@ source_modules = [
     "pocketpaw_ee.cloud.growth.worker",
     "pocketpaw_ee.cloud.growth.propose",
     "pocketpaw_ee.cloud.growth.executor",
+    "pocketpaw_ee.cloud.growth.connector",
+    "pocketpaw_ee.cloud.growth.email_dispatch",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.prospect",
     "pocketpaw_ee.cloud.models.draft",
+    "pocketpaw_ee.cloud.models.message_log",
 ]
 
 [[tool.importlinter.contracts]]
