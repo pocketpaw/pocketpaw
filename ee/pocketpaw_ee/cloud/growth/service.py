@@ -53,9 +53,15 @@
 # ``get_draft_for_dispatch`` / ``get_prospect_for_dispatch`` readers (G-6 had
 # built an identical pair under different names, collapsed at integration),
 # ``record_whatsapp_attempt`` / ``finish_whatsapp_attempt`` /
-# ``count_whatsapp_attempts_since`` own the ``WhatsAppSendLog`` compliance
-# record and its rate-cap window, and ``record_whatsapp_inbound_reply`` applies
-# the opt-in + status flips an inbound reply implies.
+# ``count_whatsapp_attempts_since`` own the WhatsApp compliance record and its
+# rate-cap window, and ``record_whatsapp_inbound_reply`` applies the opt-in +
+# status flips an inbound reply implies.
+# Updated 2026-07-27 (integration/growth-v1): G-5's ``MessageLog`` and G-6's
+# ``WhatsAppSendLog`` were the same record under two names (parallel branches,
+# neither could see the other). Unified onto ``MessageLog``: the WhatsApp
+# writers above now insert and finalise ``MessageLog`` rows carrying
+# ``channel="whatsapp"``, and the rate-cap count filters on that channel so an
+# email send can never consume the WhatsApp budget.
 
 from __future__ import annotations
 
@@ -73,6 +79,7 @@ from pocketpaw_ee.cloud.growth.domain import (
     DRAFT_TRANSITIONS,
     GATE_OWNED_TARGETS,
     MESSAGE_LOG_OUTCOMES,
+    PROVIDER_REACHED_OUTCOMES,
     Draft,
     MessageLog,
     Prospect,
@@ -93,7 +100,6 @@ from pocketpaw_ee.cloud.growth.dto import (
 from pocketpaw_ee.cloud.models.draft import Draft as _DraftDoc
 from pocketpaw_ee.cloud.models.message_log import MessageLog as _MessageLogDoc
 from pocketpaw_ee.cloud.models.prospect import Prospect as _ProspectDoc
-from pocketpaw_ee.cloud.models.whatsapp_send_log import WhatsAppSendLog as _WhatsAppSendLogDoc
 
 logger = logging.getLogger(__name__)
 
@@ -972,12 +978,14 @@ async def record_whatsapp_attempt(
     write ``status="blocked"`` with the machine-readable ``blocked_reason`` and
     are never followed by a provider call.
     """
-    doc = _WhatsAppSendLogDoc(
+    doc = _MessageLogDoc(
         workspace=workspace_id,
         draft_id=draft_id,
         prospect_id=prospect_id,
-        to_number=to_number,
-        status=status,
+        channel="whatsapp",
+        provider="msg91",
+        to_address=to_number,
+        outcome=status,
         blocked_reason=blocked_reason,
         opted_in_at_attempt=opted_in_at_attempt,
     )
@@ -1004,13 +1012,18 @@ async def finish_whatsapp_attempt(
         oid = PydanticObjectId(log_id)
     except Exception:  # noqa: BLE001 — nothing to finalise
         return
-    doc = await _WhatsAppSendLogDoc.find_one({"_id": oid})
+    doc = await _MessageLogDoc.find_one({"_id": oid})
     if doc is None:
         return
-    doc.status = status
+    doc.outcome = status
     doc.provider_message_id = provider_message_id
     doc.error_code = error_code
     doc.error = error[:500]
+    if status == "sent" and doc.sent_at is None:
+        # The send timestamp the follow-up sweep reads off this row. Set here
+        # (not at insert) because the row starts life as ``sending``, before
+        # the provider has accepted anything.
+        doc.sent_at = datetime.now(UTC)
     await doc.save()  # bumps updatedAt
     # no-event: growth has no realtime subscriber in v1; the sends view polls.
 
@@ -1022,10 +1035,13 @@ async def count_whatsapp_attempts_since(workspace_id: str, since: datetime) -> i
     Meta, so it must not consume the quality-rating budget the cap protects.
     ``sending`` rows ARE counted — an in-flight send is already committed.
     """
-    return await _WhatsAppSendLogDoc.find(
+    return await _MessageLogDoc.find(
         {
             "workspace": workspace_id,
-            "status": {"$in": ["sending", "sent", "failed"]},
+            # Scoped to the channel now that email and WhatsApp share one send
+            # record — an email send must never consume the WhatsApp cap.
+            "channel": "whatsapp",
+            "outcome": {"$in": sorted(PROVIDER_REACHED_OUTCOMES)},
             "createdAt": {"$gte": since},
         }
     ).count()

@@ -17,6 +17,11 @@
 # Updated 2026-07-27 (feat/growth-g5): ``MessageLog`` — the audit value object
 # for ONE outbound delivery attempt (``MESSAGE_LOG_OUTCOMES``: sent | failed).
 # One row per attempt, not per draft, so a retried send keeps both records.
+# Updated 2026-07-27 (integration/growth-v1): the outcome vocabulary absorbs
+# G-6's WhatsApp send record — ``sending`` (written before the provider call)
+# and ``blocked`` (a guard refused; no provider call happened) join
+# ``MESSAGE_LOG_OUTCOMES``, and ``PROVIDER_REACHED_OUTCOMES`` names the subset
+# the WhatsApp rate cap counts.
 # Updated 2026-07-27 (feat/growth-g4): the Instinct send gate —
 # ``GATE_OWNED_TARGETS`` marks the statuses only the gate machinery may set
 # (``approved`` via an approved ``_growth_send`` proposal, ``sent`` via the
@@ -132,9 +137,22 @@ class Draft:
 # G-5 — outcome of one outbound delivery ATTEMPT. ``sent`` means the provider
 # accepted the message; ``failed`` means it did not, and the draft deliberately
 # stays ``approved`` so the attempt is retryable without a second approval.
-MessageOutcome = Literal["sent", "failed"]
+#
+# Integration (growth-v1) — ``sending`` and ``blocked`` come from G-6's
+# unified-in WhatsApp path. ``sending`` is the row written BEFORE the provider
+# call, so an attempt that crashes mid-flight still leaves a trace and the
+# rate-cap window counts committed attempts rather than only completed ones.
+# ``blocked`` is a guard refusal: NO provider call was made, and the row exists
+# precisely to prove that (see ``blocked_reason``).
+MessageOutcome = Literal["sending", "sent", "failed", "blocked"]
 
-MESSAGE_LOG_OUTCOMES: frozenset[str] = frozenset({"sent", "failed"})
+MESSAGE_LOG_OUTCOMES: frozenset[str] = frozenset({"sending", "sent", "failed", "blocked"})
+
+# Outcomes that mean the attempt REACHED the provider. The WhatsApp rate cap
+# counts these and excludes ``blocked`` on purpose: a refused attempt never
+# touched Meta, so it must not consume the quality-rating budget the cap
+# protects.
+PROVIDER_REACHED_OUTCOMES: frozenset[str] = frozenset({"sending", "sent", "failed"})
 
 
 @dataclass(frozen=True)
@@ -152,13 +170,18 @@ class MessageLog:
     draft_id: str
     prospect_id: str
     channel: str  # DraftChannel
-    provider: str  # e.g. "mailtrap"
+    provider: str  # e.g. "mailtrap" (email) or "msg91" (whatsapp)
     to_address: str
     outcome: str  # MessageOutcome
     provider_message_id: str | None = None
     sent_at: datetime | None = None
     error: str | None = None
     created_at: datetime | None = None
+    # Why a ``blocked`` attempt was refused; empty on every other outcome.
+    blocked_reason: str = ""
+    error_code: str = ""
+    # The opt-in fact as of the attempt — the WhatsApp compliance claim.
+    opted_in_at_attempt: bool = False
 
 
 __all__ = [
@@ -167,6 +190,7 @@ __all__ = [
     "GROWTH_DISPATCH_JOB_NAME",
     "GROWTH_QUEUE_NAME",
     "MESSAGE_LOG_OUTCOMES",
+    "PROVIDER_REACHED_OUTCOMES",
     "Draft",
     "DraftChannel",
     "DraftStatus",
