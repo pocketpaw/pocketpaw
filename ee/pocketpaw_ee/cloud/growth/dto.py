@@ -15,6 +15,8 @@
 # is email-only, enforced here at the boundary; body non-empty),
 # TransitionDraftRequest (the target status; legality is the SERVICE's job —
 # the DTO only checks it's a known status), DraftResponse.
+# Updated 2026-07-27 (feat/growth-g4): ProposeSendResponse — the Instinct
+# proposal id + the flipped draft returned by POST /growth/drafts/{id}/propose.
 
 from __future__ import annotations
 
@@ -184,6 +186,14 @@ class DraftResponse(BaseModel):
     updated_at: str | None
 
 
+class ProposeSendResponse(BaseModel):
+    """Result of proposing a draft for sending (G-4): the Instinct proposal id
+    a human approves/rejects in the Tray, plus the draft (now ``proposed``)."""
+
+    proposal_id: str
+    draft: DraftResponse
+
+
 __all__ = [
     "BulkIngestRequest",
     "BulkIngestResponse",
@@ -191,6 +201,7 @@ __all__ = [
     "CreateDraftRequest",
     "CreateProspectRequest",
     "DraftResponse",
+    "ProposeSendResponse",
     "ProspectResponse",
     "TransitionDraftRequest",
     "UpdateProspectRequest",

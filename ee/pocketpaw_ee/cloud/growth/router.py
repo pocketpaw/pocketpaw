@@ -16,6 +16,11 @@
 # (illegal moves 422 ``draft.illegal_transition``). Router prefix widened from
 # ``/growth/prospects`` to ``/growth`` (routes now carry ``/prospects``
 # themselves) so drafts mount beside prospects — final URLs unchanged.
+# Updated 2026-07-27 (feat/growth-g4): POST /drafts/{id}/propose — files a
+# gated ``_growth_send`` Instinct proposal and flips the draft to ``proposed``.
+# The status route now refuses the gate-owned targets (``approved`` / ``sent``)
+# with 403 ``draft.gate_required`` — approval happens ONLY in the Instinct
+# Tray, and only the approved dispatch path may send.
 
 from __future__ import annotations
 
@@ -36,6 +41,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     CreateDraftRequest,
     CreateProspectRequest,
     DraftResponse,
+    ProposeSendResponse,
     ProspectResponse,
     TransitionDraftRequest,
     UpdateProspectRequest,
@@ -132,5 +138,22 @@ async def transition_draft(
 ) -> DraftResponse:
     """Move a draft along the lifecycle. Legal: draft→proposed→approved→sent,
     sent→replied, any non-terminal→rejected. Anything else is a 422
-    ``draft.illegal_transition``."""
+    ``draft.illegal_transition``. The gate-owned targets ``approved`` and
+    ``sent`` are refused here with 403 ``draft.gate_required`` — they are set
+    only by the Instinct send gate (G-4)."""
     return await growth_service.transition(ctx, draft_id, body)
+
+
+@router.post("/drafts/{draft_id}/propose", response_model=ProposeSendResponse)
+async def propose_draft_send(
+    draft_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> ProposeSendResponse:
+    """File a gated ``_growth_send`` Instinct proposal for this draft (G-4).
+
+    Flips the draft to ``proposed`` and returns the ``proposal_id`` a human
+    approves or rejects in the Tray. NOTHING is sent by this route — approval
+    enqueues the ``growth.dispatch`` job; rejection flips the draft to
+    ``rejected``. A draft that cannot legally move to ``proposed`` is a 422
+    ``draft.illegal_transition`` (so re-proposing is refused)."""
+    return await growth_service.propose_send(ctx, draft_id)

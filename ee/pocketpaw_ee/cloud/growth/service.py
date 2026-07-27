@@ -17,6 +17,13 @@
 # ``transition`` — a dumb enforcer of ``DRAFT_TRANSITIONS`` (illegal moves →
 # 422 ``draft.illegal_transition``), no side effects; G-4 wires proposals on
 # top. This module also owns the Draft doc writes (same "Growth" contract).
+# Updated 2026-07-27 (feat/growth-g4): the Instinct send gate. The PUBLIC
+# ``transition`` now refuses gate-owned targets (``approved`` / ``sent``) with
+# 403 ``draft.gate_required`` — those edges belong to the gate machinery:
+# ``propose_send`` files a ``_growth_send`` Instinct proposal (and flips
+# draft→proposed via ``transition``), and ``gate_transition`` is the internal
+# seam the growth executor / dispatch worker use to walk gate-owned edges
+# (same legality table, explicit workspace_id, no RequestContext).
 
 from __future__ import annotations
 
@@ -29,7 +36,12 @@ from pydantic import ValidationError as PydanticValidationError
 from pocketpaw_ee.cloud._core.context import RequestContext
 from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, NotFound, ValidationError
 from pocketpaw_ee.cloud._core.time import iso_utc
-from pocketpaw_ee.cloud.growth.domain import DRAFT_TRANSITIONS, Draft, Prospect
+from pocketpaw_ee.cloud.growth.domain import (
+    DRAFT_TRANSITIONS,
+    GATE_OWNED_TARGETS,
+    Draft,
+    Prospect,
+)
 from pocketpaw_ee.cloud.growth.dto import (
     BulkIngestRequest,
     BulkIngestResponse,
@@ -37,6 +49,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     CreateDraftRequest,
     CreateProspectRequest,
     DraftResponse,
+    ProposeSendResponse,
     ProspectResponse,
     TransitionDraftRequest,
     UpdateProspectRequest,
@@ -398,11 +411,19 @@ async def list_drafts(
 async def transition(
     ctx: RequestContext, draft_id: str, body: TransitionDraftRequest
 ) -> DraftResponse:
-    """Move a draft along the status machine — a dumb enforcer, no side
-    effects. Legal moves per ``DRAFT_TRANSITIONS``: draft→proposed→approved→
-    sent, sent→replied, any non-terminal→rejected. Anything else is a 422
-    ``draft.illegal_transition``. G-4 wires Instinct proposals ON TOP of this
-    seam; it stays mechanism-only."""
+    """Move a draft along the status machine — the PUBLIC route's enforcer.
+
+    Legal moves per ``DRAFT_TRANSITIONS``: draft→proposed→approved→sent,
+    sent→replied, any non-terminal→rejected. Anything else is a 422
+    ``draft.illegal_transition``.
+
+    G-4 — GATE-OWNED edges (``approved`` / ``sent``) are additionally refused
+    here with 403 ``draft.gate_required`` even when legal per the table:
+    ``approved`` is only reachable through an approved ``_growth_send``
+    Instinct proposal (the growth executor's ``gate_transition`` call) and
+    ``sent`` only through the dispatch worker. Structural, like /ship's
+    destroy gate — no HTTP caller can approve or mark-sent a draft directly.
+    """
     body = TransitionDraftRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
     doc = await _fetch_draft_in_workspace(workspace_id, draft_id)
@@ -412,6 +433,12 @@ async def transition(
             "draft.illegal_transition",
             f"Cannot move a draft from '{doc.status}' to '{body.status}'",
         )
+    if body.status in GATE_OWNED_TARGETS:
+        raise Forbidden(
+            "draft.gate_required",
+            f"'{body.status}' is set by the Instinct send gate — propose the draft "
+            "and approve it in the Tray; it cannot be set directly",
+        )
 
     doc.status = body.status
     await doc.save()  # bumps updatedAt
@@ -419,13 +446,81 @@ async def transition(
     return _draft_to_response(_draft_to_domain(doc))
 
 
+async def gate_transition(workspace_id: str, draft_id: str, status: str) -> DraftResponse:
+    """The Instinct-gate seam onto the draft status machine (G-4).
+
+    Same legality table as ``transition`` (illegal moves still 422
+    ``draft.illegal_transition``) but WITHOUT the public-route gate-owned
+    restriction, and keyed on an explicit ``workspace_id`` instead of a
+    RequestContext — the callers run under a system identity (the growth
+    executor after an Instinct approval, the reject flip, and the G-5/G-6
+    dispatch worker), mirroring how ``upsert_by_domain`` trusts the worker's
+    workspace. NOT reachable from any HTTP route.
+    """
+    doc = await _fetch_draft_in_workspace(workspace_id, draft_id)
+    if status not in DRAFT_TRANSITIONS.get(doc.status, frozenset()):
+        raise ValidationError(
+            "draft.illegal_transition",
+            f"Cannot move a draft from '{doc.status}' to '{status}'",
+        )
+    doc.status = status
+    await doc.save()  # bumps updatedAt
+    # no-event: growth has no realtime subscriber in v1; the drafts view polls.
+    return _draft_to_response(_draft_to_domain(doc))
+
+
+async def propose_send(ctx: RequestContext, draft_id: str) -> ProposeSendResponse:
+    """File a gated ``_growth_send`` Instinct proposal for a draft (G-4).
+
+    Validates the draft can legally move to ``proposed`` (422 otherwise — so a
+    second propose of the same draft is refused and no duplicate proposal is
+    filed), loads the prospect for the Tray card, files the Instinct Action
+    (the blob carries draft/prospect/channel + the rendered preview), then
+    flips draft→proposed via the existing ``transition``. NOTHING sends here:
+    the send is dispatched only by ``executor.execute_approved_growth_send``
+    after a human approves the proposal.
+    """
+    workspace_id = _require_workspace(ctx)
+    doc = await _fetch_draft_in_workspace(workspace_id, draft_id)
+    if "proposed" not in DRAFT_TRANSITIONS.get(doc.status, frozenset()):
+        raise ValidationError(
+            "draft.illegal_transition",
+            f"Cannot move a draft from '{doc.status}' to 'proposed'",
+        )
+    prospect = await _fetch_in_workspace(workspace_id, doc.prospect_id)
+
+    # Lazy import — keeps the service importable without the instinct stack
+    # and mirrors the router's lazy-dispatch discipline.
+    from pocketpaw_ee.cloud.growth.propose import propose_growth_send
+
+    proposal_id = await propose_growth_send(
+        workspace_id=workspace_id,
+        draft_id=str(doc.id),
+        prospect_id=doc.prospect_id,
+        channel=doc.channel,
+        prospect_name=prospect.name,
+        prospect_company=prospect.company,
+        preview_subject=doc.subject,
+        preview_body=doc.body,
+        requested_by=str(ctx.user_id or ""),
+    )
+
+    # The existing transition seam does the flip (draft→proposed is legal and
+    # not gate-owned). Validated above, so this only races a concurrent move —
+    # in which case the pending proposal stays for the human to reject.
+    draft = await transition(ctx, draft_id, TransitionDraftRequest(status="proposed"))
+    return ProposeSendResponse(proposal_id=proposal_id, draft=draft)
+
+
 __all__ = [
     "bulk_ingest",
     "create",
     "create_draft",
+    "gate_transition",
     "get",
     "list_drafts",
     "list_prospects",
+    "propose_send",
     "transition",
     "update",
     "upsert_by_domain",

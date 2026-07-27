@@ -811,6 +811,9 @@ name = "Growth — Beanie writes only from service.py"
 # ``growth`` arq queue seam and must never touch the doc class directly.
 # feat/growth-g3 — the Draft doc joins the same boundary: writes only from
 # ``growth.service``.
+# feat/growth-g4 — the gate modules join the boundary: ``propose`` files the
+# Instinct Action and ``executor`` flips drafts ONLY through the service's
+# ``gate_transition`` seam, never the doc class directly.
 type = "forbidden"
 allow_indirect_imports = "true"
 source_modules = [
@@ -818,6 +821,8 @@ source_modules = [
     "pocketpaw_ee.cloud.growth.dto",
     "pocketpaw_ee.cloud.growth.domain",
     "pocketpaw_ee.cloud.growth.worker",
+    "pocketpaw_ee.cloud.growth.propose",
+    "pocketpaw_ee.cloud.growth.executor",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.prospect",
