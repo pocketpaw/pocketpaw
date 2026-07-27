@@ -225,6 +225,19 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   env-configurable), marking queued/running `ChatRunDoc`s older than 10 minutes as
   `interrupted` so runs abandoned by a backend restart surface a retry affordance
   instead of leaving clients subscribed forever.
+- **Growth outbound config (`GROWTH_SENDING_DOMAIN`)**: the secondary domain the
+  `/growth` engine sends cold outreach from — **required**, with no default. The
+  dispatch worker fails closed when it is unset (nothing goes out), validates the
+  from-address against it at send time, and refuses a value equal to the
+  deployment's own host (`POCKETPAW_PUBLIC_BASE_URL`). Never point it at the apex:
+  cold outreach draws spam complaints at rates transactional mail never sees, and
+  the complaints land on the *sending* domain's reputation — a burnt secondary
+  domain costs a DNS record and a warm-up, a burnt apex takes password resets,
+  invoices and receipts with it. The provider credential itself is **not** an env
+  var: it is per-workspace connector state on the workspace's `mailtrap` connector
+  row (`MAILTRAP_API_TOKEN`, plus optional `MAILTRAP_FROM_EMAIL` /
+  `MAILTRAP_FROM_NAME`), so disabling the connector revokes sending immediately.
+  See `ee/pocketpaw_ee/cloud/growth/connector.py` and `docs/api-reference.md`.
 - **Session supervisor config**: `POCKETPAW_SESSION_SUPERVISOR` (default OFF). When
   truthy (`1`/`true`/`yes`/`on`), the cloud chat executor drives every agent turn
   through the `SessionSupervisor` + the durable `(workspace, session, agent) ->

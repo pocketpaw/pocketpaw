@@ -82,6 +82,13 @@ GET /growth/drafts with prospect|channel|status filters, POST
 draft→proposed→approved→sent, sent→replied, non-terminal→rejected; illegal
 moves 422 draft.illegal_transition.
 
+Updated: 2026-07-27 (feat/growth-g5) — documented email dispatch: the
+growth.dispatch job's email branch now sends through the per-workspace
+Mailtrap connector, re-checks that the draft is still approved before any
+provider call, writes a MessageLog audit row per attempt, and flips the draft
+to sent through the existing gate seam. Also documented the retryable failure
+path (failed row, draft stays approved, nothing raises) and the required
+GROWTH_SENDING_DOMAIN config plus why outreach never rides the apex.
 Updated: 2026-07-27 (feat/growth-g4) — documented the Instinct send gate:
 POST /growth/drafts/{id}/propose files a gated _growth_send proposal and
 flips the draft to proposed; the status route now refuses the gate-owned
@@ -2169,9 +2176,55 @@ enqueues the `growth.dispatch` job `{draft_id, channel}` on the dedicated
 `growth` arq queue — with an execute-time re-check that the proposer STILL
 holds `growth.manage` (a since-demoted proposer's approved send fails
 closed), and `mark_failed` on the Action if the enqueue fails. On
-**reject** the draft flips to `rejected` and nothing is enqueued. The
-dispatch job body is a logging stub in this slice — G-5/G-6 implement the
-actual per-channel delivery and the `sent` flip.
+**reject** the draft flips to `rejected` and nothing is enqueued.
+
+### Dispatch — how an approved email actually sends (G-5)
+
+The `growth.dispatch` job's `email` branch is live. It is not an HTTP route —
+there is no "send this now" endpoint, by design — but its behaviour is part of
+the contract the propose/approve routes above promise.
+
+1. **Load and re-check.** The job re-reads the draft and refuses anything that
+   is not `approved`. A job whose draft was rejected while queued, or a
+   redelivered job for a draft already `sent`, logs a warning and makes **no**
+   provider call. This is the dispatcher's half of the send gate.
+2. **Send.** Delivery goes through the workspace's **Mailtrap** connector
+   (`connectors/mailtrap.yaml`) over the Email Sending API. The token is a
+   per-workspace credential held in that workspace's connector row and read
+   through the connector state store — never an inlined process credential,
+   and never logged, returned, or put on a DTO. Disabling the connector
+   revokes sending immediately (the state store only resolves enabled rows).
+   The connector declares **no actions**, so no agent or connector-execute
+   call can reach a send: the approved-draft path is the only one.
+3. **Record, then flip.** A `MessageLog` row is written first (the audit row
+   proves a message physically left even if the following write fails), then
+   the draft moves `approved → sent` through the same gate seam the executor
+   uses. No second status path is introduced.
+
+**Failure is retryable, not fatal.** A provider rejection, a transport error,
+an unconfigured connector, a prospect with no email address, or a
+subject-less draft all produce `MessageLog(outcome="failed", error=...)` and
+leave the draft `approved` — the human approval still stands, only delivery
+failed, so a re-run needs no second approval. Nothing raises out of the job:
+the growth worker runs `max_tries=1` precisely so outbound work is never
+auto-retried into a double-send, and the `MessageLog` row is the durable
+failure record.
+
+**`MessageLog`** (collection `growth_message_logs`, one row per delivery
+**attempt**): `workspace`, `draft_id`, `prospect_id`, `channel`, `provider`
+(`"mailtrap"`), `provider_message_id`, `to_address`, `sent_at`, `outcome`
+(`sent | failed`), `error`. Written only by the growth service.
+
+**Config — `GROWTH_SENDING_DOMAIN` (required to send).** The secondary
+sending domain outreach rides. Unset means nothing goes out; the dispatcher
+fails closed rather than guessing. The from-address (default
+`outreach@<GROWTH_SENDING_DOMAIN>`, overridable per workspace via the
+connector's `MAILTRAP_FROM_EMAIL`) is validated against it at send time, and
+the value may not equal the deployment's own host (`POCKETPAW_PUBLIC_BASE_URL`).
+Cold outreach draws spam complaints at rates transactional mail never sees,
+and every complaint lands on the sending domain's reputation — a burnt
+secondary domain costs a DNS record and a warm-up, while a burnt apex takes
+password resets, invoices, and receipts down with it.
 
 ## Growth — LinkedIn Queue
 
@@ -2223,3 +2276,4 @@ gate seam rather than the public status route; the structural guarantee is
 unchanged (only an `approved` draft can move, and `approved` is reachable
 only through an approved `_growth_send` proposal). The queue read requires
 `growth.read` (MEMBER).
+
