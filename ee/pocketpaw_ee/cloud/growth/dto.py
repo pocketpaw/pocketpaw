@@ -15,6 +15,10 @@
 # is email-only, enforced here at the boundary; body non-empty),
 # TransitionDraftRequest (the target status; legality is the SERVICE's job —
 # the DTO only checks it's a known status), DraftResponse.
+# Updated 2026-07-27 (feat/growth-g8): LinkedInQueueItemResponse — one row of
+# the manual LinkedIn send queue: the draft envelope joined with the prospect
+# context the captain needs to send by hand (name, company, profile URL,
+# research brief, tier). Response-only; the queue has no request DTO.
 
 from __future__ import annotations
 
@@ -184,6 +188,22 @@ class DraftResponse(BaseModel):
     updated_at: str | None
 
 
+class LinkedInQueueItemResponse(BaseModel):
+    """One row of the manual LinkedIn send queue.
+
+    The draft envelope plus the prospect context needed to send it by hand —
+    the queue exists so the captain can copy-paste; there is no LinkedIn API
+    integration by design (account-ban avoidance).
+    """
+
+    draft: DraftResponse
+    prospect_name: str
+    prospect_company: str
+    linkedin_url: str | None
+    research_brief: str
+    tier: str
+
+
 __all__ = [
     "BulkIngestRequest",
     "BulkIngestResponse",
@@ -191,6 +211,7 @@ __all__ = [
     "CreateDraftRequest",
     "CreateProspectRequest",
     "DraftResponse",
+    "LinkedInQueueItemResponse",
     "ProspectResponse",
     "TransitionDraftRequest",
     "UpdateProspectRequest",

@@ -16,10 +16,18 @@
 # (illegal moves 422 ``draft.illegal_transition``). Router prefix widened from
 # ``/growth/prospects`` to ``/growth`` (routes now carry ``/prospects``
 # themselves) so drafts mount beside prospects — final URLs unchanged.
+# Updated 2026-07-27 (feat/growth-g8): LinkedIn manual queue — GET
+# /linkedin/queue (proposed/approved linkedin drafts joined with prospect
+# context; ``?format=md`` returns a paste-ready text/markdown export) and
+# POST /linkedin/{draft_id}/mark-sent (records a manual send via the G-3
+# transition machine). Deliberately manual — no LinkedIn API.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import PlainTextResponse, Response
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud.growth import service as growth_service
@@ -36,6 +44,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     CreateDraftRequest,
     CreateProspectRequest,
     DraftResponse,
+    LinkedInQueueItemResponse,
     ProspectResponse,
     TransitionDraftRequest,
     UpdateProspectRequest,
@@ -134,3 +143,37 @@ async def transition_draft(
     sent→replied, any non-terminal→rejected. Anything else is a 422
     ``draft.illegal_transition``."""
     return await growth_service.transition(ctx, draft_id, body)
+
+
+# ---------------------------------------------------------------------------
+# LinkedIn manual queue (G-8)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/linkedin/queue", response_model=None)
+async def linkedin_queue(
+    format: Literal["json", "md"] = Query(default="json"),
+    limit: int = Query(default=100, ge=1, le=500),
+    ctx: RequestContext = Depends(request_context),
+) -> list[LinkedInQueueItemResponse] | Response:
+    """The manual send queue: the workspace's linkedin drafts in
+    proposed/approved, newest first, joined with prospect context.
+    ``?format=md`` returns a paste-ready ``text/markdown`` export instead —
+    one section per prospect with the connect note and after-accept message.
+    Manual send is the feature: there is no LinkedIn API integration."""
+    if format == "md":
+        markdown = await growth_service.linkedin_queue_markdown(ctx, limit=limit)
+        return PlainTextResponse(markdown, media_type="text/markdown; charset=utf-8")
+    return await growth_service.linkedin_queue(ctx, limit=limit)
+
+
+@router.post("/linkedin/{draft_id}/mark-sent", response_model=DraftResponse)
+async def mark_linkedin_sent(
+    draft_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> DraftResponse:
+    """Record a manual LinkedIn send. The draft must be linkedin-channel
+    (422 ``draft.wrong_channel``) and ``approved`` — the move rides the G-3
+    machine, so anything but approved→sent is a 422
+    ``draft.illegal_transition``."""
+    return await growth_service.mark_linkedin_sent(ctx, draft_id)
