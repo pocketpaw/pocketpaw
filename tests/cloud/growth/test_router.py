@@ -22,9 +22,29 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
+from pocketpaw_ee.cloud._core.deps import current_workspace_id
 from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.auth import current_active_user
 from pocketpaw_ee.cloud.growth.router import router as growth_router
 from pocketpaw_ee.cloud.license import require_license
+
+
+# G-4 — the growth routes now carry real RBAC guards
+# (``growth.read`` / ``growth.write`` / ``growth.manage``), so the test app has
+# to supply an authenticated user + active workspace the guard can resolve.
+# ``role`` drives the guard's verdict, so a test can drive an under-privileged
+# caller by building the app at a lower tier.
+class _FakeMembership:
+    def __init__(self, workspace: str, role: str = "admin") -> None:
+        self.workspace = workspace
+        self.role = role
+
+
+class _FakeUser:
+    def __init__(self, user_id: str, workspace_id: str, role: str = "admin") -> None:
+        self.id = user_id
+        self.active_workspace = workspace_id
+        self.workspaces = [_FakeMembership(workspace=workspace_id, role=role)]
 
 
 def _make_ctx(workspace_id: str | None, user_id: str = "u1") -> RequestContext:
@@ -37,7 +57,9 @@ def _make_ctx(workspace_id: str | None, user_id: str = "u1") -> RequestContext:
     )
 
 
-def _build_app(workspace_id: str | None = "w1", user_id: str = "u1") -> FastAPI:
+def _build_app(
+    workspace_id: str | None = "w1", user_id: str = "u1", role: str = "admin"
+) -> FastAPI:
     app = FastAPI()
     add_error_handler(app)
     app.include_router(growth_router, prefix="/api/v1")
@@ -45,8 +67,11 @@ def _build_app(workspace_id: str | None = "w1", user_id: str = "u1") -> FastAPI:
     async def _ctx() -> RequestContext:
         return _make_ctx(workspace_id, user_id)
 
+    user = _FakeUser(user_id, workspace_id or "w1", role=role)
     app.dependency_overrides[request_context] = _ctx
     app.dependency_overrides[require_license] = lambda: None
+    app.dependency_overrides[current_active_user] = lambda: user
+    app.dependency_overrides[current_workspace_id] = lambda: user.active_workspace
     return app
 
 
