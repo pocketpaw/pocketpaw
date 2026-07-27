@@ -82,6 +82,13 @@ GET /growth/drafts with prospect|channel|status filters, POST
 draft→proposed→approved→sent, sent→replied, non-terminal→rejected; illegal
 moves 422 draft.illegal_transition.
 
+Updated: 2026-07-27 (feat/growth-g4) — documented the Instinct send gate:
+POST /growth/drafts/{id}/propose files a gated _growth_send proposal and
+flips the draft to proposed; the status route now refuses the gate-owned
+approved/sent targets with 403 draft.gate_required. Approve (single or bulk)
+flips the draft to approved and enqueues growth.dispatch on the growth arq
+queue; reject flips it to rejected. Nothing sends without an approval.
+
 Updated: 2026-07-11 (feat/real-pipeline-s1) — documented the Fabric — Transform
 Mappings section: GET/POST/DELETE /fabric/ingest/mappings (author the
 workspace's source→Fabric mappings, now with a "connector" source_kind that
@@ -2055,6 +2062,14 @@ going backwards, leaving a terminal state — is a
 `422 draft.illegal_transition`. Transitions are mechanism-only: no side
 effects, no sending.
 
+**G-4 — the Instinct send gate owns the `approved` and `sent` edges.** The
+public status route refuses those targets with `403 draft.gate_required`
+even though they are legal per the table: `approved` is only ever set after
+a human approves the draft's `_growth_send` Instinct proposal (which also
+enqueues the `growth.dispatch` arq job on the dedicated `growth` queue),
+and `sent` only by the dispatch worker (G-5/G-6 — a logging stub in G-4).
+Structural, like /ship's destroy gate: nothing sends without an approval.
+
 ### `POST /api/v1/growth/prospects/{prospect_id}/drafts`
 
 Attach one channel's copy to a prospect. Body:
@@ -2094,3 +2109,34 @@ Move a draft along the lifecycle. Body: `{"status": "proposed"}` (any
 `DraftStatus`). Legal moves per the machine above; anything else is a
 `422 draft.illegal_transition` and the draft is unchanged. Cross-tenant or
 unknown ids: `404 draft.not_found`. Returns the updated envelope.
+
+The gate-owned targets `approved` and `sent` are refused here with
+`403 draft.gate_required` (see the G-4 note above) — approval happens only
+in the Instinct Tray, and only the approved dispatch path may send.
+
+### `POST /api/v1/growth/drafts/{draft_id}/propose`
+
+File a gated `_growth_send` Instinct proposal for a draft (G-4). No body.
+The draft must be able to legally move to `proposed`
+(`422 draft.illegal_transition` otherwise — so re-proposing an already
+proposed draft is refused and no duplicate proposal is filed); cross-tenant
+or unknown ids `404 draft.not_found`.
+
+Flips the draft to `proposed` and files an Instinct `Action` whose
+`_growth_send` blob carries the draft/prospect ids, the channel, the
+prospect's name + company, and the **rendered preview** (subject + body) —
+the human approves the exact copy that was staged. Returns:
+
+```json
+{ "proposal_id": "<instinct action id>", "draft": { ...draft envelope, "status": "proposed" } }
+```
+
+NOTHING is sent by this route. On **approve** (single or bulk, in the
+Instinct Tray) the growth executor flips the draft to `approved` and
+enqueues the `growth.dispatch` job `{draft_id, channel}` on the dedicated
+`growth` arq queue — with an execute-time re-check that the proposer STILL
+holds `growth.manage` (a since-demoted proposer's approved send fails
+closed), and `mark_failed` on the Action if the enqueue fails. On
+**reject** the draft flips to `rejected` and nothing is enqueued. The
+dispatch job body is a logging stub in this slice — G-5/G-6 implement the
+actual per-channel delivery and the `sent` flip.
