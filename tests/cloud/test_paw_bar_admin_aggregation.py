@@ -995,3 +995,15 @@ async def test_knowledge_member_role_is_forbidden(mongo_db, store, fabric, monke
     async with AsyncClient(transport=transport, base_url="http://t") as c:
         assert (await c.get(f"/paw-bar/admin/site/{site.id}/knowledge")).status_code == 403
         assert (await c.post(f"/paw-bar/admin/site/{site.id}/knowledge/sync")).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_overview_carries_the_transcript_retention_setting(client):
+    """The dashboard renders all three owner settings from the one call it already
+    makes, rather than a second round trip for a single boolean."""
+    c, store, _fabric = client
+    site = await _site(concierge_store_transcripts=False)
+    await store.create_widget(_widget())
+
+    body = (await c.get(f"/paw-bar/admin/site/{site.id}/overview")).json()
+    assert body["store_transcripts"] is False

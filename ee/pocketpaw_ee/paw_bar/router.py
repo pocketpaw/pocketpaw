@@ -1306,6 +1306,11 @@ class SiteOverviewResponse(BaseModel):
     widget: AdminWidgetView | None = None
     enabled: bool
     greeting: str
+    # The third owner setting, alongside ``enabled`` and ``greeting``: whether the
+    # visitor's own messages are stored. Carried here so the dashboard renders all
+    # three from the one call it already makes rather than a second round trip for
+    # a single boolean.
+    store_transcripts: bool = True
     counts: OverviewCounts
 
 
@@ -1468,6 +1473,7 @@ async def get_site_overview(
         widget=widget_view,
         enabled=site.concierge_enabled,
         greeting=site.concierge_greeting,
+        store_transcripts=site.concierge_store_transcripts,
         counts=counts,
     )
 
