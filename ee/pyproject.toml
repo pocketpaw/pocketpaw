@@ -666,12 +666,17 @@ allow_indirect_imports = "true"
 #
 # A human reviewer will not catch that on a diff that otherwise looks like a
 # helpful refactor. The linter will.
+# 2026-07-27 (feat/growth-g1 touch-time fix): dropped the ``transport`` and
+# ``domain`` entries — both modules were removed by the 2026-07-23 turn-agent
+# refactor ("remove the separate turn-agent, keep the delegate channel"), and
+# import-linter hard-fails on a nonexistent module, breaking the whole ee
+# config. ``delegates.py`` (the surviving delegate channel) is added in their
+# place so the sandbox guard still covers every codeagent module.
 source_modules = [
     "pocketpaw_ee.cloud.codeagent.router",
     "pocketpaw_ee.cloud.codeagent.service",
-    "pocketpaw_ee.cloud.codeagent.transport",
+    "pocketpaw_ee.cloud.codeagent.delegates",
     "pocketpaw_ee.cloud.codeagent.dto",
-    "pocketpaw_ee.cloud.codeagent.domain",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.daytona",
@@ -787,6 +792,21 @@ source_modules = [
     "pocketpaw_ee.cloud.cycles.scheduler",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.cycle"]
+
+[[tool.importlinter.contracts]]
+name = "Growth — Beanie writes only from service.py"
+# feat/growth-g1 — only ``growth.service`` owns the Prospect Beanie writes;
+# dto/domain/router/worker go through it. The worker is the dedicated
+# ``growth`` arq queue seam and must never touch the doc class directly.
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.growth.router",
+    "pocketpaw_ee.cloud.growth.dto",
+    "pocketpaw_ee.cloud.growth.domain",
+    "pocketpaw_ee.cloud.growth.worker",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.prospect"]
 
 [[tool.importlinter.contracts]]
 name = "LLM provisioning — Beanie writes only from service.py"
