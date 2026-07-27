@@ -88,6 +88,10 @@ flips the draft to proposed; the status route now refuses the gate-owned
 approved/sent targets with 403 draft.gate_required. Approve (single or bulk)
 flips the draft to approved and enqueues growth.dispatch on the growth arq
 queue; reject flips it to rejected. Nothing sends without an approval.
+Security review follow-up: documented per-route growth RBAC
+(growth.read / growth.write MEMBER, growth.manage ADMIN on the propose verb)
+and the fact that a _growth_send blob can only be minted by this route —
+the generic POST /instinct/actions refuses reserved gated parameter keys.
 
 Updated: 2026-07-11 (feat/real-pipeline-s1) — documented the Fabric — Transform
 Mappings section: GET/POST/DELETE /fabric/ingest/mappings (author the
@@ -1505,6 +1509,17 @@ workspace. G-2 adds the bulk-ingestion route below; later slices add drafts
 and Instinct-gated sends on the dedicated `growth` arq queue
 (`pocketpaw_ee.cloud.growth.worker.WorkerSettings`).
 
+**RBAC (G-4).** Every `/growth` route carries a workspace-role guard on top of
+the license gate. Reads (`GET /growth/prospects`, `GET /growth/drafts`, …)
+require `growth.read` (MEMBER); authoring writes — create/update a prospect,
+bulk ingest, create a draft, non-gated lifecycle moves — require `growth.write`
+(MEMBER); and the outbound verb `POST /growth/drafts/{id}/propose` requires
+`growth.manage` (ADMIN). The propose route sits at the ADMIN tier deliberately:
+`growth.executor` re-checks that same action against the proposer's *current*
+role at dispatch time, so a member-filed proposal would always fail closed at
+approve. A caller below the required tier gets
+`403 workspace.insufficient_role`.
+
 ### `POST /api/v1/growth/prospects`
 
 Create a prospect. Body:
@@ -1673,7 +1688,17 @@ in the Instinct Tray, and only the approved dispatch path may send.
 
 ### `POST /api/v1/growth/drafts/{draft_id}/propose`
 
-File a gated `_growth_send` Instinct proposal for a draft (G-4). No body.
+File a gated `_growth_send` Instinct proposal for a draft (G-4). Requires
+`growth.manage` (ADMIN). No body.
+
+This route is the **only** way a `_growth_send` proposal comes into existence:
+the generic `POST /instinct/actions` (open to any member holding
+`instinct.propose`) refuses reserved gated parameter keys with
+`422 instinct.reserved_parameter_key`, so nobody can hand-craft a Tray card
+that dispatches a send on approval. Approving with edits cannot re-point one
+either — the blob's tenancy, proposer, target draft and channel are pinned back
+from the stored proposal.
+
 The draft must be able to legally move to `proposed`
 (`422 draft.illegal_transition` otherwise — so re-proposing an already
 proposed draft is refused and no duplicate proposal is filed); cross-tenant
