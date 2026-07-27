@@ -9,6 +9,11 @@
 #
 # Created 2026-07-27 (feat/growth-g1): first slice of /growth — the prospect
 # store. Later slices add ingestion, drafts, and Instinct-gated sends.
+# Updated 2026-07-27 (feat/growth-g3): ``Draft`` — per-channel outreach copy
+# attached to a prospect, with the enforced status machine
+# (``DRAFT_TRANSITIONS``): draft→proposed→approved→sent, sent→replied, any
+# non-terminal→rejected. The transition table lives here (pure data) so the
+# service stays a dumb enforcer and G-4 can wire Instinct proposals on top.
 
 from __future__ import annotations
 
@@ -59,8 +64,55 @@ class Prospect:
     updated_at: datetime | None = None
 
 
+# Outreach channel a draft targets. ``subject`` only applies to email.
+DraftChannel = Literal["email", "linkedin", "whatsapp"]
+
+# Which touch in the sequence the copy is written for.
+DraftVariant = Literal["first_touch", "follow_up"]
+
+# Draft lifecycle. ``replied`` and ``rejected`` are terminal.
+DraftStatus = Literal["draft", "proposed", "approved", "sent", "replied", "rejected"]
+
+# The enforced status machine: draft→proposed→approved→sent (the happy chain),
+# sent→replied (the prospect answered), and any NON-terminal status→rejected.
+# ``replied`` / ``rejected`` are terminal — absent keys, so nothing leaves them.
+# The service raises ``draft.illegal_transition`` (422) for any pair not here.
+DRAFT_TRANSITIONS: dict[str, frozenset[str]] = {
+    "draft": frozenset({"proposed", "rejected"}),
+    "proposed": frozenset({"approved", "rejected"}),
+    "approved": frozenset({"sent", "rejected"}),
+    "sent": frozenset({"replied", "rejected"}),
+}
+
+
+@dataclass(frozen=True)
+class Draft:
+    """Draft value object — one channel's outreach copy for a prospect.
+
+    ``subject`` is email-only (``None`` on linkedin / whatsapp — the DTO
+    boundary enforces it). ``body`` is the message copy and is never empty.
+    """
+
+    id: str
+    workspace_id: str
+    prospect_id: str
+    channel: str  # DraftChannel — validated at the DTO boundary
+    body: str
+    subject: str | None = None  # email only
+    variant: str = "first_touch"  # DraftVariant
+    status: str = "draft"  # DraftStatus
+    demo_url: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 __all__ = [
+    "DRAFT_TRANSITIONS",
     "GROWTH_QUEUE_NAME",
+    "Draft",
+    "DraftChannel",
+    "DraftStatus",
+    "DraftVariant",
     "Prospect",
     "ProspectSource",
     "ProspectStatus",

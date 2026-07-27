@@ -798,6 +798,8 @@ name = "Growth — Beanie writes only from service.py"
 # feat/growth-g1 — only ``growth.service`` owns the Prospect Beanie writes;
 # dto/domain/router/worker go through it. The worker is the dedicated
 # ``growth`` arq queue seam and must never touch the doc class directly.
+# feat/growth-g3 — the Draft doc joins the same boundary: writes only from
+# ``growth.service``.
 type = "forbidden"
 allow_indirect_imports = "true"
 source_modules = [
@@ -806,7 +808,10 @@ source_modules = [
     "pocketpaw_ee.cloud.growth.domain",
     "pocketpaw_ee.cloud.growth.worker",
 ]
-forbidden_modules = ["pocketpaw_ee.cloud.models.prospect"]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.prospect",
+    "pocketpaw_ee.cloud.models.draft",
+]
 
 [[tool.importlinter.contracts]]
 name = "LLM provisioning — Beanie writes only from service.py"

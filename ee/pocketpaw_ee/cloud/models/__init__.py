@@ -1,5 +1,11 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-07-27 (feat/growth-g3) — added ``Draft`` (the /growth per-channel
+outreach draft: workspace-scoped, attached to a prospect, status lifecycle
+enforced in the service) to the imports and ``get_all_documents()`` so the
+``growth_drafts`` collection is wired into ``init_beanie``. Kept out of
+``__all__`` like ``Prospect`` — only ``ee.cloud.growth.service`` imports the
+doc class directly (import-linter "Growth" contract).
 Updated: 2026-07-27 (feat/growth-g1) — added ``Prospect`` (the /growth
 outbound-engine prospect store: workspace-scoped, unique (workspace, domain)
 dedupe key) to the imports and ``get_all_documents()`` so the
@@ -142,6 +148,7 @@ from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
 from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from pocketpaw_ee.cloud.models.deep_work_log import DeepWorkLog
+from pocketpaw_ee.cloud.models.draft import Draft
 from pocketpaw_ee.cloud.models.fabric_ingest_state import (
     FabricIngestConfig,
     FabricIngestState,
@@ -480,6 +487,10 @@ def get_all_documents():
         # ``ee.cloud.growth.service`` imports this doc directly (import-linter
         # "Growth" contract).
         Prospect,
+        # Growth drafts (G-3) — per-channel outreach copy attached to a
+        # prospect, status lifecycle enforced in the service. Same import
+        # boundary as Prospect.
+        Draft,
         PushSubscription,
         VapidKeypair,
         WorkspaceSensePreference,
