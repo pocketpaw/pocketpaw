@@ -15,9 +15,15 @@ could observe another tenant's panes — a boundary we cannot configure our way
 out of, because it does not exist upstream. The per-process cost compounds it
 (one pane ≈ one agent process, so N concurrent users ≈ N processes).
 
-So this adapter is for **single-operator deployments only**: a per-tenant
-dedicated box (Track A), a developer machine, or a private/self-hosted stack,
-where the workspace admin *is* the box operator.
+So this adapter is for **single-operator deployments only** — the ones where the
+workspace admin *is* the machine's operator:
+
+* the **desktop app** (Tauri), running on the individual user's own machine —
+  one account, one machine, so the tenancy problem simply does not arise;
+* a **per-tenant dedicated box** (Track A);
+* a developer machine or a private/self-hosted stack.
+
+It is **not** for the shared multi-tenant SaaS.
 
 Two gates enforce that, and both must pass:
 
@@ -131,6 +137,30 @@ _DEFAULT_TIMEOUT_MS = 15000
 # same truthy set as stores.py so the two can never disagree about the mode.
 _REQUIRE_WORKSPACE_SCOPE_ENV = "POCKETPAW_REQUIRE_WORKSPACE_SCOPE"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _reject_flaglike(value: str, what: str) -> str:
+    """Reject a structured value that would be parsed as a herdr CLI flag.
+
+    We invoke herdr with ``create_subprocess_exec`` and an argv list, so there
+    is no shell and no shell-metacharacter injection. The residual risk is
+    **argument** injection: a positional value beginning with ``-`` is read by
+    herdr's parser as a flag, not as data. Ids (``w3:p1``), workspace ids,
+    branches and enum-ish values never legitimately start with ``-``, so we
+    refuse them at this single seam — which protects every current and future
+    consumer of the adapter, including ones that pass HTTP-supplied values
+    straight through (the cockpit's ``/pane/{pane_id}/preview`` does exactly
+    that).
+
+    Free-form text (``send``'s payload) is deliberately NOT run through this —
+    a message may legitimately start with ``-``. It is passed as a positional
+    after the target, so a leading ``--`` there could still be misread by
+    herdr; no HTTP surface reaches ``send`` today (the cockpit is read-only),
+    and a consumer that wires one up must revisit this.
+    """
+    if value.startswith("-"):
+        raise ValueError(f"invalid {what}: {value!r} — must not start with '-' (flag-like)")
+    return value
 
 
 def _shared_cloud_mode() -> bool:
@@ -386,9 +416,12 @@ class HerdrRuntime:
     def _target(ref: PaneRef | str) -> str:
         """The herdr command target for a ref — its opaque ``pane_id``.
 
-        Accepts a :class:`PaneRef` or a raw pane-id string.
+        Accepts a :class:`PaneRef` or a raw pane-id string. The id is refused if
+        it looks like a CLI flag — see :func:`_reject_flaglike`. This is the
+        chokepoint every pane-addressing command goes through, so validating
+        here covers status/read/send/wait/attach_info/close in one place.
         """
-        return ref.pane_id if isinstance(ref, PaneRef) else str(ref)
+        return _reject_flaglike(ref.pane_id if isinstance(ref, PaneRef) else str(ref), "pane id")
 
     # -- spawn / enumerate --------------------------------------------------
 
@@ -414,7 +447,8 @@ class HerdrRuntime:
         agent's env (``--env K=V``), not herdr's. Returns an opaque
         :class:`PaneRef`.
         """
-        args: list[str] = ["agent", "start", agent]
+        # Positional — refuse a flag-like label (see _reject_flaglike).
+        args: list[str] = ["agent", "start", _reject_flaglike(agent, "agent label")]
 
         ws = workspace
         wt_cwd: str | None = None
