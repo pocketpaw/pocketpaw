@@ -19,7 +19,10 @@
 #      STILL hold ``growth.manage`` in the blob's workspace. A since-demoted
 #      or since-removed proposer's approved send FAILS CLOSED (learned from
 #      admin_proposals via ship: revocation happens between propose and
-#      approve).
+#      approve). The proposer id is resolved from the ACTION's trigger, NOT
+#      the blob's ``requested_by`` — see ``_resolve_proposer`` (security
+#      review F2): a blob-supplied id would let whoever wrote the blob choose
+#      whose role gets checked.
 #   4. Flip the draft proposed→approved through the service's gate seam
 #      (``gate_transition`` — the only caller allowed onto a gate-owned edge).
 #      A draft that moved meanwhile (rejected / already approved) fails the
@@ -65,6 +68,42 @@ def _lock_for(action_id: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _LOCKS[action_id] = lock
     return lock
+
+
+def _resolve_proposer(action: Any, blob: dict[str, Any]) -> str | None:
+    """Resolve the proposer id to RE-CHECK, from the ACTION — not the blob.
+
+    SECURITY (security review F2) — the blob's ``requested_by`` is data inside
+    ``Action.parameters``. Trusting it for the authorization re-check made the
+    guard self-referential: whoever could write the blob could also name whose
+    role gets checked, so a forged blob naming a known admin would pass the
+    re-check and dispatch. The trustworthy record is the Action's own trigger,
+    written by ``store.propose`` into the audit row as
+    ``f"{trigger.type}:{trigger.source}"`` — the in-process propose helper sets
+    ``trigger.source`` from the authenticated caller, and the generic HTTP
+    propose route can no longer mint a gated blob at all
+    (``instinct.reserved_parameter_key``).
+
+    Returns the proposer id, or ``None`` when it cannot be trusted:
+      * no resolvable trigger source, or
+      * the blob's ``requested_by`` DISAGREES with it — a tamper signal (the
+        two are written from the same value by the propose helper), so we fail
+        closed rather than pick a winner.
+    """
+    trigger = getattr(action, "trigger", None)
+    trigger_source = str(getattr(trigger, "source", "") or "")
+    if not trigger_source:
+        return None
+    claimed = str(blob.get("requested_by") or "")
+    if claimed and claimed != trigger_source:
+        logger.warning(
+            "growth: blob requested_by=%r disagrees with the action's trigger "
+            "source=%r — refusing to dispatch (tamper signal)",
+            claimed,
+            trigger_source,
+        )
+        return None
+    return trigger_source
 
 
 def _already_executed(action: Any, blob: dict[str, Any]) -> bool:
@@ -229,7 +268,12 @@ async def execute_approved_growth_send(
 
     action_id = str(getattr(action, "id", "") or "")
     workspace_id = str(blob.get("workspace_id") or "")
-    requested_by = str(blob.get("requested_by") or "")
+    # F2 — the proposer comes off the ACTION's trigger, never the blob's
+    # ``requested_by`` (see ``_resolve_proposer``). ``None`` means untrustworthy
+    # → the guard sequence fails closed below. The chain actor uses the same
+    # resolved value so a tampered blob can't relabel the audit trail either.
+    proposer_id = _resolve_proposer(action, blob)
+    requested_by = proposer_id or ""
     draft_id = str(blob.get("draft_id") or "")
     channel = str(blob.get("channel") or "")
     corr_raw = blob.get("correlation_id")
@@ -279,8 +323,13 @@ async def execute_approved_growth_send(
             await _fail("growth send blob is missing draft_id/channel — undispatchable")
             return
 
-        # (4) Authorization re-check at EXECUTE time; fails closed.
-        if not await _proposer_still_authorized(workspace_id, requested_by):
+        # (4) Authorization re-check at EXECUTE time; fails closed. The
+        # proposer id is the ACTION's, not the blob's — an unresolvable or
+        # contradicted claim never reaches the role check at all (F2).
+        if proposer_id is None:
+            await _fail("growth send has no trustworthy proposer — refusing to dispatch")
+            return
+        if not await _proposer_still_authorized(workspace_id, proposer_id):
             await _fail("proposer is no longer authorized in this workspace")
             return
 
