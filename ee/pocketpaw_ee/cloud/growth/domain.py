@@ -14,6 +14,9 @@
 # (``DRAFT_TRANSITIONS``): draft→proposed→approved→sent, sent→replied, any
 # non-terminal→rejected. The transition table lives here (pure data) so the
 # service stays a dumb enforcer and G-4 can wire Instinct proposals on top.
+# Updated 2026-07-27 (feat/growth-g5): ``MessageLog`` — the audit value object
+# for ONE outbound delivery attempt (``MESSAGE_LOG_OUTCOMES``: sent | failed).
+# One row per attempt, not per draft, so a retried send keeps both records.
 # Updated 2026-07-27 (feat/growth-g4): the Instinct send gate —
 # ``GATE_OWNED_TARGETS`` marks the statuses only the gate machinery may set
 # (``approved`` via an approved ``_growth_send`` proposal, ``sent`` via the
@@ -126,15 +129,50 @@ class Draft:
     updated_at: datetime | None = None
 
 
+# G-5 — outcome of one outbound delivery ATTEMPT. ``sent`` means the provider
+# accepted the message; ``failed`` means it did not, and the draft deliberately
+# stays ``approved`` so the attempt is retryable without a second approval.
+MessageOutcome = Literal["sent", "failed"]
+
+MESSAGE_LOG_OUTCOMES: frozenset[str] = frozenset({"sent", "failed"})
+
+
+@dataclass(frozen=True)
+class MessageLog:
+    """One outbound delivery attempt for a draft — the audit record.
+
+    Tenancy is required at construction (``workspace_id``, no default), like
+    every other growth value object. Carries the PROVIDER's identity and
+    message id, never its credential; ``error`` is a sanitised, human-readable
+    reason produced by the channel connector.
+    """
+
+    id: str
+    workspace_id: str
+    draft_id: str
+    prospect_id: str
+    channel: str  # DraftChannel
+    provider: str  # e.g. "mailtrap"
+    to_address: str
+    outcome: str  # MessageOutcome
+    provider_message_id: str | None = None
+    sent_at: datetime | None = None
+    error: str | None = None
+    created_at: datetime | None = None
+
+
 __all__ = [
     "DRAFT_TRANSITIONS",
     "GATE_OWNED_TARGETS",
     "GROWTH_DISPATCH_JOB_NAME",
     "GROWTH_QUEUE_NAME",
+    "MESSAGE_LOG_OUTCOMES",
     "Draft",
     "DraftChannel",
     "DraftStatus",
     "DraftVariant",
+    "MessageLog",
+    "MessageOutcome",
     "Prospect",
     "ProspectSource",
     "ProspectStatus",

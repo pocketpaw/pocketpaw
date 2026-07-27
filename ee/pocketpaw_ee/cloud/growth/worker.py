@@ -12,6 +12,10 @@
 # actual delivery and the draft's ``sent`` flip (via the service's
 # ``gate_transition`` seam). The job only ever EXISTS for a draft whose
 # ``_growth_send`` proposal a human approved — that is the whole gate.
+# Updated 2026-07-27 (feat/growth-g5): the ``email`` branch is live — it hands
+# off to ``growth/email_dispatch.dispatch_email`` (per-channel module, so each
+# channel's delivery stays in its own file and the job body keeps one branch
+# per channel). Other channels still log the stub.
 #
 # Unlike workspace jobs (which ride arq's DEFAULT queue on the shared chat-runs
 # worker — see ``jobs/domain.py``), growth gets its OWN queue + worker process
@@ -51,19 +55,27 @@ logger = logging.getLogger(__name__)
 
 
 async def dispatch(ctx: dict[str, Any], draft_id: str, channel: str) -> None:
-    """Dispatch an APPROVED outbound draft — STUB (G-4).
+    """Dispatch an APPROVED outbound draft.
 
     This job is enqueued ONLY by ``executor.execute_approved_growth_send``
     after a human approved the draft's ``_growth_send`` Instinct proposal —
     there is no other producer, so a job here IS the approval record's
-    downstream. In this slice it logs and returns: no provider call, no
-    draft mutation, nothing is marked sent. G-5/G-6 replace the body with the
-    real per-channel delivery + the draft's ``sent`` flip (via
-    ``service.gate_transition``) + follow-up scheduling.
+    downstream. Each channel owns its own delivery module and re-checks that
+    the draft is still ``approved`` before anything reaches a provider.
+
+    ``email`` is live (G-5). The remaining channels still log and return.
     """
+    if channel == "email":
+        # Lazy import — keeps the arq worker's boot free of the HTTP client
+        # stack until an email job actually lands.
+        from pocketpaw_ee.cloud.growth.email_dispatch import dispatch_email
+
+        await dispatch_email(draft_id)
+        return
+
     logger.info(
         "growth worker: dispatch STUB — draft=%s channel=%s (approved send queued; "
-        "no delivery in G-4, nothing marked sent)",
+        "no delivery for this channel yet, nothing marked sent)",
         draft_id,
         channel,
     )

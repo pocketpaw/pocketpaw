@@ -1,0 +1,43 @@
+# Mailtrap connector — the outbound email provider for the /growth engine.
+# Created: 2026-07-27 (feat/growth-g5, G-5).
+#
+# Like ship.yaml, this connector declares NO actions: the send is not an
+# agent-callable REST verb. Outbound email leaves the building through exactly
+# one path — an Instinct-approved draft picked up by the ``growth.dispatch``
+# worker (``ee/pocketpaw_ee/cloud/growth/email_dispatch.py``), which calls the
+# typed client in ``ee/pocketpaw_ee/cloud/growth/connector.py``. Exposing a
+# generic "send an email" action here would route around the approval gate.
+#
+# This connector exists for the CREDENTIAL: per-workspace, BYO, stored in the
+# WorkspaceConnector row's config blob (the same connector-state pattern
+# stripe/gmail use) and read back through the cloud connector state store. The
+# central project never holds a shared sending key, and no send credential is
+# ever inlined from the process environment.
+
+name: mailtrap
+display_name: Mailtrap
+type: email
+icon: mail
+
+auth:
+  method: api_key
+  credentials:
+    - name: MAILTRAP_API_TOKEN
+      description: >-
+        Mailtrap Email Sending API token for this workspace's sending domain.
+        Per-workspace by design — the central project never holds a shared
+        sending credential.
+      required: true
+    - name: MAILTRAP_FROM_EMAIL
+      description: >-
+        From-address for cold outreach. MUST sit on the workspace's secondary
+        sending domain (GROWTH_SENDING_DOMAIN), never the apex — the dispatcher
+        refuses to send otherwise. Defaults to outreach@<GROWTH_SENDING_DOMAIN>.
+      required: false
+    - name: MAILTRAP_FROM_NAME
+      description: Display name on the From header (optional).
+      required: false
+
+# No actions: sending is gated behind the Instinct approval + the growth
+# dispatch worker, never a generic connector verb.
+actions: []
