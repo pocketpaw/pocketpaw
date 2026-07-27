@@ -32,10 +32,17 @@
 # ``transition`` function, so approved→sent stays the only legal move and
 # proposed→sent 422s as ``draft.illegal_transition``). Deliberately manual —
 # no LinkedIn API, no automation (account-ban avoidance is the feature).
+# Updated 2026-07-27 (feat/growth-g5): the dispatch-worker seams —
+# ``get_draft_for_dispatch`` / ``get_prospect_for_dispatch`` (the worker is
+# handed only a draft id by the queue and derives tenancy FROM the row; see the
+# ``global-read`` justifications on those reads) and ``record_message_log``,
+# the sole writer of the ``MessageLog`` audit doc — one row per delivery
+# ATTEMPT, so a failure and its later retry both survive.
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from beanie import PydanticObjectId
@@ -47,7 +54,9 @@ from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.growth.domain import (
     DRAFT_TRANSITIONS,
     GATE_OWNED_TARGETS,
+    MESSAGE_LOG_OUTCOMES,
     Draft,
+    MessageLog,
     Prospect,
 )
 from pocketpaw_ee.cloud.growth.dto import (
@@ -64,6 +73,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     UpdateProspectRequest,
 )
 from pocketpaw_ee.cloud.models.draft import Draft as _DraftDoc
+from pocketpaw_ee.cloud.models.message_log import MessageLog as _MessageLogDoc
 from pocketpaw_ee.cloud.models.prospect import Prospect as _ProspectDoc
 
 logger = logging.getLogger(__name__)
@@ -662,18 +672,126 @@ async def mark_linkedin_sent(ctx: RequestContext, draft_id: str) -> DraftRespons
     return await gate_transition(workspace_id, draft_id, "sent")
 
 
+# ---------------------------------------------------------------------------
+# Dispatch-worker seams (G-5)
+# ---------------------------------------------------------------------------
+
+
+async def get_draft_for_dispatch(draft_id: str) -> Draft | None:
+    """Load a draft by id ALONE — the dispatch worker's entry read.
+
+    The arq job carries only ``(draft_id, channel)``: the worker process has no
+    RequestContext and no workspace to filter on, so tenancy is DERIVED from
+    the row and every subsequent call (prospect read, status flip, audit write)
+    is scoped to ``draft.workspace_id``. Safe because the id itself is not
+    attacker-supplied — the only producer of this job is
+    ``executor.execute_approved_growth_send``, which already validated the
+    draft against the approved proposal's workspace. Returns ``None`` for a
+    malformed or vanished id so the job can no-op instead of raising.
+
+    # global-read: worker path — no request workspace exists to filter on; the
+    # draft id comes from the gate's own enqueue and the row supplies tenancy.
+    """
+    try:
+        oid = PydanticObjectId(draft_id)
+    except Exception:  # noqa: BLE001 — malformed id == nothing to dispatch
+        return None
+    doc = await _DraftDoc.find_one({"_id": oid})
+    return _draft_to_domain(doc) if doc is not None else None
+
+
+async def get_prospect_for_dispatch(workspace_id: str, prospect_id: str) -> Prospect | None:
+    """Load the draft's prospect for the dispatch worker, workspace-scoped.
+
+    Takes the explicit ``workspace_id`` the draft supplied, so the read is
+    tenant-filtered like every other prospect read. ``None`` (not NotFound) —
+    a missing prospect is a recorded delivery failure, not an exception in a
+    background job.
+    """
+    try:
+        oid = PydanticObjectId(prospect_id)
+    except Exception:  # noqa: BLE001 — malformed id == no prospect
+        return None
+    doc = await _ProspectDoc.find_one({"_id": oid, "workspace": workspace_id})
+    return _to_domain(doc) if doc is not None else None
+
+
+async def record_message_log(
+    *,
+    workspace_id: str,
+    draft_id: str,
+    prospect_id: str,
+    channel: str,
+    provider: str,
+    to_address: str,
+    outcome: str,
+    provider_message_id: str | None = None,
+    sent_at: datetime | None = None,
+    error: str | None = None,
+) -> MessageLog:
+    """Write the audit row for ONE outbound delivery attempt (G-5).
+
+    Sole writer of the ``MessageLog`` doc (the "Growth" import-linter contract
+    keeps the doc class out of the worker/connector modules). One row per
+    ATTEMPT: a ``failed`` row leaves the draft ``approved`` so the retry writes
+    a second row and the delivery history stays complete.
+
+    ``error`` is truncated — connectors already sanitise their messages, but a
+    provider error body should never be able to bloat the audit collection.
+    """
+    if outcome not in MESSAGE_LOG_OUTCOMES:
+        raise ValidationError(
+            "message_log.invalid_outcome",
+            f"'{outcome}' is not a delivery outcome ({sorted(MESSAGE_LOG_OUTCOMES)})",
+        )
+    if not workspace_id:
+        raise ValidationError("message_log.no_workspace", "A message log needs a workspace")
+
+    doc = _MessageLogDoc(
+        workspace=workspace_id,
+        draft_id=draft_id,
+        prospect_id=prospect_id,
+        channel=channel,
+        provider=provider,
+        provider_message_id=provider_message_id,
+        to_address=to_address,
+        sent_at=sent_at,
+        outcome=outcome,
+        error=error[:500] if error else None,
+    )
+    await doc.insert()
+    # no-event: growth has no realtime subscriber in v1; the sends view polls.
+    return MessageLog(
+        id=str(doc.id),
+        workspace_id=doc.workspace,
+        draft_id=doc.draft_id,
+        prospect_id=doc.prospect_id,
+        channel=doc.channel,
+        provider=doc.provider,
+        to_address=doc.to_address,
+        outcome=doc.outcome,
+        provider_message_id=doc.provider_message_id,
+        sent_at=doc.sent_at,
+        error=doc.error,
+        created_at=getattr(doc, "createdAt", None),
+    )
+
+
 __all__ = [
     "bulk_ingest",
     "create",
     "create_draft",
     "gate_transition",
     "get",
+    "get_draft_for_dispatch",
+    "get_prospect_for_dispatch",
     "linkedin_queue",
     "linkedin_queue_markdown",
     "list_drafts",
     "list_prospects",
     "mark_linkedin_sent",
     "propose_send",
+    "record_message_log",
     "transition",
     "update",
     "upsert_by_domain",

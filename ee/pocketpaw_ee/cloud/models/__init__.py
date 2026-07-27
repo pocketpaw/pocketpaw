@@ -3,6 +3,12 @@
 Updated: 2026-07-27 (feat/growth-g4 merge) — merged integration/ship-v1 into the
 growth stack so the ``_growth_send`` gate slice can wire the sixth gated kind on
 top of ship's instinct-router changes; both changelog blocks below retained.
+Updated: 2026-07-27 (feat/growth-g5) — added ``MessageLog`` (the /growth
+outbound audit row: one record per delivery ATTEMPT, ``sent`` | ``failed``) to
+the imports and ``get_all_documents()`` so the ``growth_message_logs``
+collection is wired into ``init_beanie``. Kept out of ``__all__`` like
+``Prospect`` / ``Draft`` — only ``ee.cloud.growth.service`` imports the doc
+class directly (import-linter "Growth" contract).
 Updated: 2026-07-27 (feat/growth-g3) — added ``Draft`` (the /growth per-channel
 outreach draft: workspace-scoped, attached to a prospect, status lifecycle
 enforced in the service) to the imports and ``get_all_documents()`` so the
@@ -192,6 +198,7 @@ from pocketpaw_ee.cloud.models.meeting import (
 )
 from pocketpaw_ee.cloud.models.member_ingest_state import MemberIngestState
 from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reaction
+from pocketpaw_ee.cloud.models.message_log import MessageLog
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
 from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
 from pocketpaw_ee.cloud.models.payment import Payment
@@ -510,6 +517,10 @@ def get_all_documents():
         # prospect, status lifecycle enforced in the service. Same import
         # boundary as Prospect.
         Draft,
+        # Growth message log (G-5) — one audit row per outbound delivery
+        # ATTEMPT (sent | failed) written by the dispatch worker through
+        # ``growth.service.record_message_log``. Same import boundary.
+        MessageLog,
         PushSubscription,
         VapidKeypair,
         WorkspaceSensePreference,
