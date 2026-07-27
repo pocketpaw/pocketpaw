@@ -462,9 +462,9 @@ class HerdrRuntime:
         if eff_cwd is not None:
             args += ["--cwd", str(eff_cwd)]
         if ws:
-            args += ["--workspace", str(ws)]
+            args += ["--workspace", _reject_flaglike(str(ws), "workspace id")]
         if split:
-            args += ["--split", split]
+            args += ["--split", _reject_flaglike(split, "split direction")]
         if env:
             for key, value in env.items():
                 args += ["--env", f"{key}={value}"]
@@ -508,7 +508,7 @@ class HerdrRuntime:
 
         ``source`` is ``visible`` | ``recent`` | ``recent-unwrapped``.
         """
-        args = ["agent", "read", self._target(ref), "--source", source]
+        args = ["agent", "read", self._target(ref), "--source", _reject_flaglike(source, "source")]
         if lines is not None:
             args += ["--lines", str(int(lines))]
         result = await self._run_json(args)
@@ -616,13 +616,13 @@ class HerdrRuntime:
         """
         args = ["worktree", "create", "--json"]
         if workspace:
-            args += ["--workspace", str(workspace)]
+            args += ["--workspace", _reject_flaglike(str(workspace), "workspace id")]
         elif cwd is not None:
             args += ["--cwd", str(cwd)]
         if branch:
-            args += ["--branch", branch]
+            args += ["--branch", _reject_flaglike(branch, "branch")]
         if base:
-            args += ["--base", base]
+            args += ["--base", _reject_flaglike(base, "base ref")]
         if path is not None:
             args += ["--path", str(path)]
         args.append("--focus" if focus else "--no-focus")
@@ -641,6 +641,7 @@ class HerdrRuntime:
         ws_id = workspace.workspace_id if isinstance(workspace, WorktreeRef) else str(workspace)
         if not ws_id:
             raise ValueError("worktree_remove requires a workspace id")
+        ws_id = _reject_flaglike(ws_id, "workspace id")
         args = ["worktree", "remove", "--workspace", ws_id, "--json"]
         if force:
             args.append("--force")

@@ -107,6 +107,20 @@ def _path_with(*dirs: str) -> str:
     return os.pathsep.join([*dirs, *_SAFE_PATH_DIRS])
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_shared_cloud(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every test in this file hermetic against a cloud-configured shell.
+
+    ``POCKETPAW_REQUIRE_WORKSPACE_SCOPE`` marks a shared multi-tenant
+    deployment, which makes ``HerdrRuntime`` refuse to enable at all. If a
+    developer's (or CI lane's) environment exports it, most of this file would
+    fail for a reason unrelated to what each test asserts. Autouse so tests that
+    build their own PATH are covered too; the two tests that exercise the
+    boundary set the env themselves via monkeypatch, which still wins.
+    """
+    monkeypatch.delenv("POCKETPAW_REQUIRE_WORKSPACE_SCOPE", raising=False)
+
+
 @pytest.fixture
 def fake_herdr_bin(tmp_path: Path) -> Path:
     """Write the fake `herdr` executable and return its path."""
@@ -124,6 +138,11 @@ def fake_herdr_on_path(fake_herdr_bin: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("PATH", _path_with(str(fake_herdr_bin.parent)))
     monkeypatch.delenv("HERDR_FAKE_MODE", raising=False)
     monkeypatch.delenv("HERDR_CAPTURE_FILE", raising=False)
+    # Hermetic against a cloud-configured shell: this env marks a shared
+    # multi-tenant deployment and makes HerdrRuntime refuse to enable at all,
+    # which would fail most of this file for reasons unrelated to the test. The
+    # two tests that care set it themselves via monkeypatch.
+    monkeypatch.delenv("POCKETPAW_REQUIRE_WORKSPACE_SCOPE", raising=False)
     return fake_herdr_bin
 
 
