@@ -66,6 +66,11 @@ rebuild — dynamic-source split + input-keyspace confinement) and GET
 /sites/by-pocket/{id}/native-artifact (serve the armed build's body_html + css
 for shadow render — per-GET arm-build cost, path-traversal-guarded CSS reader).
 
+Updated: 2026-07-27 (feat/growth-g1) — documented the Growth — Prospects
+section: workspace-scoped prospect store under /growth/prospects (create /
+get / list with tier|status|source filters / update), domain-deduped per
+workspace, cross-tenant ids 404. First slice of the /growth outbound engine.
+
 Updated: 2026-07-11 (feat/real-pipeline-s1) — documented the Fabric — Transform
 Mappings section: GET/POST/DELETE /fabric/ingest/mappings (author the
 workspace's source→Fabric mappings, now with a "connector" source_kind that
@@ -1729,3 +1734,64 @@ the split is the security model:
 Owner replies are stored in their own table rather than as chat runs, because
 the metering sweeper bills every terminal run and would otherwise charge the
 owner credits for typing their own sentence.
+
+---
+
+## Growth — Prospects
+
+First slice of the `/growth` outbound engine (G-1): a workspace-scoped
+prospect store. All routes are license-gated and carry the canonical
+`request_context`; every read is workspace-scoped inside the service, so a
+prospect id from another workspace returns an identical 404 (existence never
+leaks). The company website `domain` is the dedupe key — normalised to a bare
+lowercase hostname (scheme, `www.`, path, and port stripped) — unique per
+workspace. Later slices add ingestion, drafts, and Instinct-gated sends on the
+dedicated `growth` arq queue (`pocketpaw_ee.cloud.growth.worker.WorkerSettings`).
+
+### `POST /api/v1/growth/prospects`
+
+Create a prospect. Body:
+
+```json
+{
+  "name": "Sam Founder",
+  "company": "Acme Dental",
+  "domain": "acme-dental.com",
+  "source": "manual",
+  "tier": "unqualified",
+  "research_brief": "",
+  "emails": [],
+  "linkedin_url": null,
+  "whatsapp_number": null,
+  "opted_in": false,
+  "status": "new"
+}
+```
+
+`name`, `company`, `domain`, and `source` are required. Enums: `source` is
+`clay | directory | manual`; `tier` is `a | b | c | unqualified` (default
+`unqualified`); `status` is
+`new | qualified | drafted | in_sequence | replied | dead` (default `new`).
+A duplicate `(workspace, domain)` returns `409 prospect.domain_taken` —
+create-or-update callers use the service's `upsert_by_domain` seam instead.
+
+Returns the prospect envelope: all fields above plus `id`, `workspace_id`,
+and ISO `created_at` / `updated_at`.
+
+### `GET /api/v1/growth/prospects`
+
+List the workspace's prospects, newest first. Optional query filters:
+`tier`, `status`, `source` (validated against the enums above — an unknown
+value is a 422, not an empty list) and `limit` (default 100, max 500).
+
+### `GET /api/v1/growth/prospects/{prospect_id}`
+
+Fetch one prospect. Cross-tenant or unknown ids: `404 prospect.not_found`.
+
+### `PATCH /api/v1/growth/prospects/{prospect_id}`
+
+Partial update — send only the fields to change. `domain` (the dedupe
+identity) and `source` (capture-time provenance) are immutable; the other
+fields (`name`, `company`, `tier`, `research_brief`, `emails`,
+`linkedin_url`, `whatsapp_number`, `opted_in`, `status`) patch in place.
+Returns the updated envelope.
