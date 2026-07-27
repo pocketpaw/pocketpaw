@@ -93,6 +93,13 @@ Security review follow-up: documented per-route growth RBAC
 and the fact that a _growth_send blob can only be minted by this route —
 the generic POST /instinct/actions refuses reserved gated parameter keys.
 
+Updated: 2026-07-27 (feat/growth-g8) — added the Growth — LinkedIn Queue
+section: GET /growth/linkedin/queue (proposed/approved linkedin drafts joined
+with prospect context, ?format=md for a paste-ready markdown export) and
+POST /growth/linkedin/{draft_id}/mark-sent (record a manual send via the G-3
+machine). Deliberately manual — no LinkedIn API. Integration note: mark-sent
+rides the gate seam (sent is gate-owned since G-4) and takes growth.manage.
+
 Updated: 2026-07-11 (feat/real-pipeline-s1) — documented the Fabric — Transform
 Mappings section: GET/POST/DELETE /fabric/ingest/mappings (author the
 workspace's source→Fabric mappings, now with a "connector" source_kind that
@@ -2165,3 +2172,54 @@ closed), and `mark_failed` on the Action if the enqueue fails. On
 **reject** the draft flips to `rejected` and nothing is enqueued. The
 dispatch job body is a logging stub in this slice — G-5/G-6 implement the
 actual per-channel delivery and the `sent` flip.
+
+## Growth — LinkedIn Queue
+
+The manual send surface for LinkedIn outreach (G-8). **Deliberately manual**:
+there is no LinkedIn API integration and no automation — the captain
+copy-pastes each note by hand (account-ban avoidance is the feature). Same
+gates as the rest of `/growth` — license + `request_context`, every read
+workspace-scoped.
+
+### `GET /api/v1/growth/linkedin/queue`
+
+The workspace's linkedin-channel drafts in `proposed` / `approved`, newest
+first, each joined with its prospect's targeting context. Query:
+`limit` (default 100, max 500) and `format` (`json` default, `md`).
+
+JSON items:
+
+```json
+{
+  "draft": { "id": "…", "body": "…", "variant": "first_touch", "status": "approved", "…": "…" },
+  "prospect_name": "Sam Founder",
+  "prospect_company": "Acme Dental",
+  "linkedin_url": "https://linkedin.com/in/sam-founder",
+  "research_brief": "Books via a contact form; no online scheduling.",
+  "tier": "a"
+}
+```
+
+`?format=md` returns `text/markdown` instead — a paste-ready export, one
+section per prospect (no tables, no HTML): name + company heading, the
+profile URL as a link, tier + the brief's first line, the connect note
+(`first_touch` body, with a char count against LinkedIn's 300-char connect
+limit), the after-accept message (`follow_up` body, when queued), and each
+draft's id for the mark-sent call.
+
+### `POST /api/v1/growth/linkedin/{draft_id}/mark-sent`
+
+Record that a queued LinkedIn draft was manually sent. The draft must be
+linkedin-channel (`422 draft.wrong_channel` otherwise) and `approved` — the
+move rides the G-3 machine, so anything but approved→sent is a
+`422 draft.illegal_transition`. Cross-tenant or unknown ids:
+`404 draft.not_found`. Returns the updated draft envelope (`status: "sent"`);
+the draft leaves the queue and continues the normal lifecycle
+(sent→replied / rejected).
+
+Requires `growth.manage` (ADMIN) — it is an OUTBOUND verb, the same tier as
+propose. Because G-4 made `sent` a gate-owned target, this route walks the
+gate seam rather than the public status route; the structural guarantee is
+unchanged (only an `approved` draft can move, and `approved` is reachable
+only through an approved `_growth_send` proposal). The queue read requires
+`growth.read` (MEMBER).
