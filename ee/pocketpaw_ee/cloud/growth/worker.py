@@ -20,6 +20,12 @@
 # queue as arq's first CRON job (``cron_jobs``, ``unique=True`` so only one
 # worker in a horizontally-scaled deploy runs a given tick). It PROPOSES
 # follow-ups into the Instinct tray and never sends — same gate, same human.
+# Updated 2026-07-27 (feat/growth-g6): the ``channel="whatsapp"`` branch is
+# live — it delegates to ``growth.whatsapp.dispatch_whatsapp``, which enforces
+# the hard ``prospect.opted_in`` guard (no opt-in ⇒ NO provider call at all),
+# the hourly ``GROWTH_WHATSAPP_MAX_PER_HOUR`` cap, the MSG91 send, and the
+# approved→sent flip through ``service.gate_transition``. Only ``linkedin``
+# keeps the stub — it is manual by design (G-8's queue + mark-sent route).
 #
 # Unlike workspace jobs (which ride arq's DEFAULT queue on the shared chat-runs
 # worker — see ``jobs/domain.py``), growth gets its OWN queue + worker process
@@ -72,7 +78,14 @@ async def dispatch(ctx: dict[str, Any], draft_id: str, channel: str) -> None:
     downstream. Each channel owns its own delivery module and re-checks that
     the draft is still ``approved`` before anything reaches a provider.
 
-    ``email`` is live (G-5). The remaining channels still log and return.
+    ``email`` is live (G-5) and ``whatsapp`` is live (G-6). WhatsApp
+    additionally enforces the hard opt-in guard, the hourly rate cap, and
+    RAISES on every refusal (``max_tries = 1``, so the job lands as a failed
+    job an operator can see) while writing its own compliance row — a refused
+    send is never a silent success.
+
+    ``linkedin`` keeps the stub on purpose: it is manual by design, sent by
+    hand from G-8's queue and recorded through the mark-sent route.
     """
     if channel == "email":
         # Lazy import — keeps the arq worker's boot free of the HTTP client
@@ -80,6 +93,14 @@ async def dispatch(ctx: dict[str, Any], draft_id: str, channel: str) -> None:
         from pocketpaw_ee.cloud.growth.email_dispatch import dispatch_email
 
         await dispatch_email(draft_id)
+        return
+
+    if channel == "whatsapp":
+        # Imported lazily so the worker module stays importable (and arq's
+        # settings class evaluable) without the provider stack.
+        from pocketpaw_ee.cloud.growth.whatsapp import dispatch_whatsapp
+
+        await dispatch_whatsapp(draft_id)
         return
 
     logger.info(
