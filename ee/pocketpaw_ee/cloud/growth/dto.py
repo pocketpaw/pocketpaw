@@ -11,14 +11,25 @@
 # 422s before any row is touched), BulkRowError, BulkIngestResponse. Rows are
 # deliberately ``dict`` (not CreateProspectRequest) so one invalid row becomes
 # a per-row error entry in the response instead of failing the whole payload.
+# Updated 2026-07-27 (feat/growth-g3): draft DTOs — CreateDraftRequest (subject
+# is email-only, enforced here at the boundary; body non-empty),
+# TransitionDraftRequest (the target status; legality is the SERVICE's job —
+# the DTO only checks it's a known status), DraftResponse.
 
 from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from pocketpaw_ee.cloud.growth.domain import ProspectSource, ProspectStatus, ProspectTier
+from pocketpaw_ee.cloud.growth.domain import (
+    DraftChannel,
+    DraftStatus,
+    DraftVariant,
+    ProspectSource,
+    ProspectStatus,
+    ProspectTier,
+)
 
 
 def _normalise_domain(v: str) -> str:
@@ -124,11 +135,63 @@ class ProspectResponse(BaseModel):
     updated_at: str | None
 
 
+class CreateDraftRequest(BaseModel):
+    """One channel's outreach copy for a prospect.
+
+    A draft is always born in ``status="draft"`` — there is no status field
+    here; lifecycle moves happen only through the transition route.
+    """
+
+    channel: DraftChannel
+    subject: str | None = Field(default=None, max_length=200)
+    body: str = Field(min_length=1, max_length=10_000)
+    variant: DraftVariant = "first_touch"
+    demo_url: str | None = Field(default=None, max_length=2048)
+
+    @field_validator("body")
+    @classmethod
+    def _non_blank_body(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("body must not be blank")
+        return v
+
+    @model_validator(mode="after")
+    def _subject_is_email_only(self) -> CreateDraftRequest:
+        if self.channel != "email" and self.subject is not None:
+            raise ValueError("subject is only valid on the email channel")
+        return self
+
+
+class TransitionDraftRequest(BaseModel):
+    """Target status for a lifecycle move. Whether the move is LEGAL from the
+    draft's current status is the service's call (``draft.illegal_transition``,
+    422) — this DTO only rejects unknown status names."""
+
+    status: DraftStatus
+
+
+class DraftResponse(BaseModel):
+    id: str
+    workspace_id: str
+    prospect_id: str
+    channel: str
+    subject: str | None
+    body: str
+    variant: str
+    status: str
+    demo_url: str | None
+    created_at: str | None
+    updated_at: str | None
+
+
 __all__ = [
     "BulkIngestRequest",
     "BulkIngestResponse",
     "BulkRowError",
+    "CreateDraftRequest",
     "CreateProspectRequest",
+    "DraftResponse",
     "ProspectResponse",
+    "TransitionDraftRequest",
     "UpdateProspectRequest",
 ]

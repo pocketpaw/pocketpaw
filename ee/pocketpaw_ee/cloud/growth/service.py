@@ -11,6 +11,12 @@
 # Updated 2026-07-27 (feat/growth-g2): ``bulk_ingest`` — per-row validation +
 # ``upsert_by_domain`` over a capped batch; a bad row records an indexed error
 # entry and the rest proceed (idempotent upserts, so no rollback is needed).
+# Updated 2026-07-27 (feat/growth-g3): drafts — ``create_draft`` (prospect must
+# exist in the workspace; first draft flips a new/qualified prospect to
+# ``drafted``), ``list_drafts`` (prospect/channel/status filters), and
+# ``transition`` — a dumb enforcer of ``DRAFT_TRANSITIONS`` (illegal moves →
+# 422 ``draft.illegal_transition``), no side effects; G-4 wires proposals on
+# top. This module also owns the Draft doc writes (same "Growth" contract).
 
 from __future__ import annotations
 
@@ -21,17 +27,21 @@ from beanie import PydanticObjectId
 from pydantic import ValidationError as PydanticValidationError
 
 from pocketpaw_ee.cloud._core.context import RequestContext
-from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, NotFound
+from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, NotFound, ValidationError
 from pocketpaw_ee.cloud._core.time import iso_utc
-from pocketpaw_ee.cloud.growth.domain import Prospect
+from pocketpaw_ee.cloud.growth.domain import DRAFT_TRANSITIONS, Draft, Prospect
 from pocketpaw_ee.cloud.growth.dto import (
     BulkIngestRequest,
     BulkIngestResponse,
     BulkRowError,
+    CreateDraftRequest,
     CreateProspectRequest,
+    DraftResponse,
     ProspectResponse,
+    TransitionDraftRequest,
     UpdateProspectRequest,
 )
+from pocketpaw_ee.cloud.models.draft import Draft as _DraftDoc
 from pocketpaw_ee.cloud.models.prospect import Prospect as _ProspectDoc
 
 logger = logging.getLogger(__name__)
@@ -59,6 +69,38 @@ def _to_domain(doc: _ProspectDoc) -> Prospect:
         status=doc.status,
         created_at=getattr(doc, "createdAt", None),
         updated_at=getattr(doc, "updatedAt", None),
+    )
+
+
+def _draft_to_domain(doc: _DraftDoc) -> Draft:
+    return Draft(
+        id=str(doc.id),
+        workspace_id=doc.workspace,
+        prospect_id=doc.prospect_id,
+        channel=doc.channel,
+        subject=doc.subject,
+        body=doc.body,
+        variant=doc.variant,
+        status=doc.status,
+        demo_url=doc.demo_url,
+        created_at=getattr(doc, "createdAt", None),
+        updated_at=getattr(doc, "updatedAt", None),
+    )
+
+
+def _draft_to_response(d: Draft) -> DraftResponse:
+    return DraftResponse(
+        id=d.id,
+        workspace_id=d.workspace_id,
+        prospect_id=d.prospect_id,
+        channel=d.channel,
+        subject=d.subject,
+        body=d.body,
+        variant=d.variant,
+        status=d.status,
+        demo_url=d.demo_url,
+        created_at=iso_utc(d.created_at),
+        updated_at=iso_utc(d.updated_at),
     )
 
 
@@ -280,11 +322,111 @@ async def bulk_ingest(ctx: RequestContext, body: BulkIngestRequest) -> BulkInges
     return BulkIngestResponse(created=created, updated=updated, errors=errors)
 
 
+# ---------------------------------------------------------------------------
+# Drafts (G-3)
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_draft_in_workspace(workspace_id: str, draft_id: str) -> _DraftDoc:
+    """Fetch a draft scoped to the caller's workspace — identical 404s for a
+    malformed id, a missing row, or another tenant's row."""
+    try:
+        oid = PydanticObjectId(draft_id)
+    except Exception as exc:  # noqa: BLE001 — malformed id == not found
+        raise NotFound("draft", draft_id) from exc
+    doc = await _DraftDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        raise NotFound("draft", draft_id)
+    return doc
+
+
+async def create_draft(
+    ctx: RequestContext, prospect_id: str, body: CreateDraftRequest
+) -> DraftResponse:
+    """Attach one channel's outreach copy to a prospect.
+
+    The prospect must exist in the caller's workspace (cross-tenant ids 404,
+    existence never leaks). A prospect still sitting in ``new`` / ``qualified``
+    flips to ``drafted`` on its first draft; later statuses (``in_sequence``,
+    ``replied``, ``dead``) are never regressed.
+    """
+    body = CreateDraftRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    prospect = await _fetch_in_workspace(workspace_id, prospect_id)
+
+    doc = _DraftDoc(
+        workspace=workspace_id,
+        prospect_id=str(prospect.id),
+        **body.model_dump(),
+    )
+    await doc.insert()
+    # no-event: growth has no realtime subscriber in v1; the drafts view polls.
+
+    if prospect.status in ("new", "qualified"):
+        prospect.status = "drafted"
+        await prospect.save()  # bumps updatedAt
+        # no-event: growth has no realtime subscriber in v1.
+
+    return _draft_to_response(_draft_to_domain(doc))
+
+
+async def list_drafts(
+    ctx: RequestContext,
+    *,
+    prospect_id: str | None = None,
+    channel: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[DraftResponse]:
+    """List the workspace's drafts, newest first, optionally filtered."""
+    workspace_id = _require_workspace(ctx)
+    filters: dict[str, Any] = {"workspace": workspace_id}
+    if prospect_id is not None:
+        filters["prospect_id"] = prospect_id
+    if channel is not None:
+        filters["channel"] = channel
+    if status is not None:
+        filters["status"] = status
+    cursor = (
+        _DraftDoc.find(filters)
+        .sort(-_DraftDoc.createdAt)  # type: ignore[operator]
+        .limit(limit)
+    )
+    return [_draft_to_response(_draft_to_domain(doc)) async for doc in cursor]
+
+
+async def transition(
+    ctx: RequestContext, draft_id: str, body: TransitionDraftRequest
+) -> DraftResponse:
+    """Move a draft along the status machine — a dumb enforcer, no side
+    effects. Legal moves per ``DRAFT_TRANSITIONS``: draft→proposed→approved→
+    sent, sent→replied, any non-terminal→rejected. Anything else is a 422
+    ``draft.illegal_transition``. G-4 wires Instinct proposals ON TOP of this
+    seam; it stays mechanism-only."""
+    body = TransitionDraftRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    doc = await _fetch_draft_in_workspace(workspace_id, draft_id)
+
+    if body.status not in DRAFT_TRANSITIONS.get(doc.status, frozenset()):
+        raise ValidationError(
+            "draft.illegal_transition",
+            f"Cannot move a draft from '{doc.status}' to '{body.status}'",
+        )
+
+    doc.status = body.status
+    await doc.save()  # bumps updatedAt
+    # no-event: growth has no realtime subscriber in v1; the drafts view polls.
+    return _draft_to_response(_draft_to_domain(doc))
+
+
 __all__ = [
     "bulk_ingest",
     "create",
+    "create_draft",
     "get",
+    "list_drafts",
     "list_prospects",
+    "transition",
     "update",
     "upsert_by_domain",
 ]

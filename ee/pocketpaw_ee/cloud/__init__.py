@@ -1,5 +1,9 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-07-27 (feat/growth-g3) — The growth router now also carries
+    drafts (``/growth/prospects/{id}/drafts``, ``/growth/drafts``,
+    ``/growth/drafts/{id}/status``); its prefix widened to ``/growth`` with
+    final prospect URLs unchanged.
 Modified: 2026-07-27 (feat/growth-g1) — Mounts the growth prospect-store
     router (``/growth/prospects`` create / get / list / update) under
     ``/api/v1``. License gate + ``request_context`` on every route;
