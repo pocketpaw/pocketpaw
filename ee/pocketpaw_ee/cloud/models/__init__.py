@@ -1,5 +1,12 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-07-27 (feat/growth-g1) — added ``Prospect`` (the /growth
+outbound-engine prospect store: workspace-scoped, unique (workspace, domain)
+dedupe key) to the imports and ``get_all_documents()`` so the
+``growth_prospects`` collection is wired into ``init_beanie``. Kept out of
+``__all__`` so it can't be star-imported into routers/DTOs/domains — only
+``ee.cloud.growth.service`` imports the doc class directly (import-linter
+"Growth" contract).
 Updated: 2026-07-15 (fix/workspace-vm-map-to-db) — added ``WorkspaceVm`` (the
 workspace→Daytona-VM mapping, moved out of the local
 ``~/.pocketpaw/daytona_workspace_vm_map.json`` file into the ``workspace_vms``
@@ -177,6 +184,7 @@ from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.models.pocket_backend import PocketBackendCredential
 from pocketpaw_ee.cloud.models.project import Project
+from pocketpaw_ee.cloud.models.prospect import Prospect
 from pocketpaw_ee.cloud.models.push_subscription import PushSubscription
 from pocketpaw_ee.cloud.models.read_state import ReadState
 from pocketpaw_ee.cloud.models.request_log import RequestLog
@@ -469,6 +477,11 @@ def get_all_documents():
         Lead,
         Site,
         SiteRateCounter,
+        # Growth prospect store (G-1) — the /growth outbound engine's
+        # workspace-scoped, domain-deduped prospect record. Only
+        # ``ee.cloud.growth.service`` imports this doc directly (import-linter
+        # "Growth" contract).
+        Prospect,
         PushSubscription,
         VapidKeypair,
         WorkspaceSensePreference,

@@ -1,5 +1,9 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-07-27 (feat/growth-g1) — Mounts the growth prospect-store
+    router (``/growth/prospects`` create / get / list / update) under
+    ``/api/v1``. License gate + ``request_context`` on every route;
+    workspace-scoped reads inside the service (cross-tenant ids 404).
 Modified: 2026-07-11 (feat/real-pipeline-s1) — Mounts the fabric_ingest
     transform-surface router (``/fabric/ingest/mappings`` CRUD +
     ``/fabric/ingest/run`` run-now) next to the fabric router under
@@ -409,6 +413,7 @@ def mount_cloud(app: FastAPI) -> None:
 
     from pocketpaw_ee.cloud.decisions.router import router as decisions_router
     from pocketpaw_ee.cloud.fabric_ingest.router import router as fabric_ingest_router
+    from pocketpaw_ee.cloud.growth.router import router as growth_router
     from pocketpaw_ee.cloud.instinct_approvals.router import router as instinct_approvals_router
     from pocketpaw_ee.cloud.kb.router import router as kb_router
     from pocketpaw_ee.cloud.leads.router import router as leads_router
@@ -474,6 +479,12 @@ def mount_cloud(app: FastAPI) -> None:
     # drains here) and authed GET /sites/{id}/leads (plan-gated + RBAC +
     # workspace-scoped) for the Leads view.
     app.include_router(leads_router, prefix="/api/v1")
+    # Growth — G-1 prospect store (/growth outbound engine, first slice).
+    # License-gated, workspace-scoped CRUD under /growth/prospects; cross-tenant
+    # ids 404 inside the service. Later slices add ingestion, drafts, and
+    # Instinct-gated sends (the dedicated ``growth`` arq queue seam lives in
+    # ``growth/worker.py``).
+    app.include_router(growth_router, prefix="/api/v1")
     # Sites control plane — RFC 12 Task 3.5. POST /sites/publish (compile +
     # smoke-gate + WfP deploy), GET /sites, and the custom-domain pair
     # (Cloudflare for SaaS) the Domains panel drives.
