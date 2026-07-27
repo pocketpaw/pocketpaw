@@ -10,6 +10,14 @@
 # prospect → 404 on create, foreign draft ids 404, lists never leak).
 #
 # Created 2026-07-27 (feat/growth-g3): third slice of /growth — drafts.
+# Updated 2026-07-27 (feat/growth-g4): the Instinct send gate owns the
+# ``approved`` / ``sent`` edges now — the public status route refuses them
+# with 403 ``draft.gate_required`` (new tests below). Lifecycle walks that
+# previously drove those edges over HTTP route the gate-owned hops through
+# ``service.gate_transition`` — the exact seam the gate machinery uses (the
+# full propose→approve HTTP path is covered in test_gate.py). The 422
+# illegal-transition coverage is unchanged: every parametrized attempt stays
+# illegal per the table and still asserts the 422 via the public route.
 
 from __future__ import annotations
 
@@ -100,15 +108,33 @@ async def _create_draft(client: AsyncClient, prospect_id: str, **overrides: Any)
     return resp.json()
 
 
-async def _walk(client: AsyncClient, draft_id: str, *statuses: str) -> dict[str, Any]:
-    """Walk a draft through a sequence of transitions, asserting each is legal."""
+# G-4 — the gate-owned edges. The public status route 403s these targets;
+# lifecycle walks route them through the service's gate seam instead.
+_GATE_OWNED = {"approved", "sent"}
+
+
+async def _walk(
+    client: AsyncClient, draft_id: str, *statuses: str, workspace_id: str = "w1"
+) -> dict[str, Any]:
+    """Walk a draft through a sequence of legal transitions.
+
+    Public edges go through the HTTP status route; gate-owned edges
+    (``approved`` / ``sent``) go through ``service.gate_transition`` — the
+    same seam the Instinct gate machinery uses (G-4; the full
+    propose→approve HTTP path is exercised in test_gate.py)."""
+    from pocketpaw_ee.cloud.growth import service as growth_service
+
     body: dict[str, Any] = {}
     for status in statuses:
-        resp = await client.post(
-            f"/api/v1/growth/drafts/{draft_id}/status", json={"status": status}
-        )
-        assert resp.status_code == 200, f"{status}: {resp.text}"
-        body = resp.json()
+        if status in _GATE_OWNED:
+            result = await growth_service.gate_transition(workspace_id, draft_id, status)
+            body = result.model_dump()
+        else:
+            resp = await client.post(
+                f"/api/v1/growth/drafts/{draft_id}/status", json={"status": status}
+            )
+            assert resp.status_code == 200, f"{status}: {resp.text}"
+            body = resp.json()
         assert body["status"] == status
     return body
 
@@ -233,11 +259,42 @@ async def test_create_draft_rejects_unknown_channel(w1_client):
 
 @pytest.mark.asyncio
 async def test_legal_chain_walks_green(w1_client):
-    """draft→proposed→approved→sent→replied, every hop a 200."""
+    """draft→proposed→approved→sent→replied — the full legal chain. The
+    public hops are 200s; the gate-owned hops (approved/sent) walk through
+    the gate seam (G-4)."""
     prospect = await _create_prospect(w1_client)
     draft = await _create_draft(w1_client, prospect["id"])
     final = await _walk(w1_client, draft["id"], "proposed", "approved", "sent", "replied")
     assert final["status"] == "replied"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chain", "attempt"),
+    [
+        (("proposed",), "approved"),  # the gate owns proposed→approved
+        (("proposed", "approved"), "sent"),  # the dispatch worker owns approved→sent
+    ],
+)
+async def test_gate_owned_edges_forbidden_on_public_route(w1_client, chain, attempt):
+    """G-4 gate integrity: ``approved`` / ``sent`` are LEGAL per the table but
+    REFUSED on the public status route (403 ``draft.gate_required``) — only an
+    approved ``_growth_send`` Instinct proposal (and, downstream, the dispatch
+    worker) may set them. The draft does not move."""
+    prospect = await _create_prospect(w1_client)
+    draft = await _create_draft(w1_client, prospect["id"])
+    await _walk(w1_client, draft["id"], *chain)
+
+    resp = await w1_client.post(
+        f"/api/v1/growth/drafts/{draft['id']}/status", json={"status": attempt}
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == "draft.gate_required"
+
+    listed = (
+        await w1_client.get("/api/v1/growth/drafts", params={"prospect_id": prospect["id"]})
+    ).json()
+    assert listed[0]["status"] == chain[-1]
 
 
 @pytest.mark.asyncio
