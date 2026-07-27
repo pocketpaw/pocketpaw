@@ -193,11 +193,12 @@ async def _build_with(backend, *, allow, exclusive):
 def backend_with_grant_pool(monkeypatch):
     """A backend whose ``_collect_mcp_tool_ids`` yields a deterministic pool:
     the four code file ids + a widget id + an atlas id + a planner grant id."""
+    from pocketpaw_ee.cloud.surface.surface_registry import _CODE_FILE_TOOL_IDS
+
     from pocketpaw.agents.claude_sdk import POCKET_CREATION_GRANT, ClaudeSDKBackend
     from pocketpaw.agents.sdk_mcp_atlas import ATLAS_TOOL_IDS
     from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
     from pocketpaw.config import get_settings
-    from pocketpaw_ee.cloud.surface.surface_registry import _CODE_FILE_TOOL_IDS
 
     widget_id = next(iter(WIDGET_TOOL_IDS))
     atlas_id = next(iter(ATLAS_TOOL_IDS))
@@ -322,9 +323,7 @@ async def test_write_file_relays_the_staged_sentence_as_success(in_workspace, mo
             },
         )
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser", _staged
-    )
+    monkeypatch.setattr("pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser", _staged)
 
     response = await _write_file_handler({"path": "src/button.tsx", "content": "x"})
     assert not response.get("is_error")
@@ -406,9 +405,7 @@ async def test_a_failed_delegate_relays_the_channels_own_message(in_workspace, m
             message="The browser did not finish the delegated task in 180s.",
         )
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser", _timeout
-    )
+    monkeypatch.setattr("pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser", _timeout)
 
     response = await _read_file_handler({"path": "a.ts"})
 
@@ -425,13 +422,9 @@ async def test_a_browser_side_error_result_becomes_an_error_response(in_workspac
     string."""
 
     async def _iserror(workspace_id, tool, tool_input):
-        return DelegateOutcome(
-            ok=True, result={"output": "no such file: a.ts", "isError": True}
-        )
+        return DelegateOutcome(ok=True, result={"output": "no such file: a.ts", "isError": True})
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser", _iserror
-    )
+    monkeypatch.setattr("pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser", _iserror)
 
     response = await _read_file_handler({"path": "a.ts"})
     assert response["is_error"] is True
@@ -446,9 +439,7 @@ async def test_an_empty_success_output_is_still_a_success(in_workspace, monkeypa
     async def _empty(workspace_id, tool, tool_input):
         return DelegateOutcome(ok=True, result={"output": "", "isError": False})
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser", _empty
-    )
+    monkeypatch.setattr("pocketpaw_ee.cloud.codeagent.delegates.delegate_call_to_browser", _empty)
 
     response = await _read_file_handler({"path": "empty.ts"})
     assert not response.get("is_error")
