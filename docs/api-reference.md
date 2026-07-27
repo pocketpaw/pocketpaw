@@ -82,6 +82,12 @@ GET /growth/drafts with prospect|channel|status filters, POST
 draft→proposed→approved→sent, sent→replied, non-terminal→rejected; illegal
 moves 422 draft.illegal_transition.
 
+Updated: 2026-07-27 (feat/growth-g8) — added the Growth — LinkedIn Queue
+section: GET /growth/linkedin/queue (proposed/approved linkedin drafts joined
+with prospect context, ?format=md for a paste-ready markdown export) and
+POST /growth/linkedin/{draft_id}/mark-sent (record a manual send via the G-3
+machine). Deliberately manual — no LinkedIn API.
+
 Updated: 2026-07-11 (feat/real-pipeline-s1) — documented the Fabric — Transform
 Mappings section: GET/POST/DELETE /fabric/ingest/mappings (author the
 workspace's source→Fabric mappings, now with a "connector" source_kind that
@@ -1470,3 +1476,47 @@ Move a draft along the lifecycle. Body: `{"status": "proposed"}` (any
 `DraftStatus`). Legal moves per the machine above; anything else is a
 `422 draft.illegal_transition` and the draft is unchanged. Cross-tenant or
 unknown ids: `404 draft.not_found`. Returns the updated envelope.
+
+## Growth — LinkedIn Queue
+
+The manual send surface for LinkedIn outreach (G-8). **Deliberately manual**:
+there is no LinkedIn API integration and no automation — the captain
+copy-pastes each note by hand (account-ban avoidance is the feature). Same
+gates as the rest of `/growth` — license + `request_context`, every read
+workspace-scoped.
+
+### `GET /api/v1/growth/linkedin/queue`
+
+The workspace's linkedin-channel drafts in `proposed` / `approved`, newest
+first, each joined with its prospect's targeting context. Query:
+`limit` (default 100, max 500) and `format` (`json` default, `md`).
+
+JSON items:
+
+```json
+{
+  "draft": { "id": "…", "body": "…", "variant": "first_touch", "status": "approved", "…": "…" },
+  "prospect_name": "Sam Founder",
+  "prospect_company": "Acme Dental",
+  "linkedin_url": "https://linkedin.com/in/sam-founder",
+  "research_brief": "Books via a contact form; no online scheduling.",
+  "tier": "a"
+}
+```
+
+`?format=md` returns `text/markdown` instead — a paste-ready export, one
+section per prospect (no tables, no HTML): name + company heading, the
+profile URL as a link, tier + the brief's first line, the connect note
+(`first_touch` body, with a char count against LinkedIn's 300-char connect
+limit), the after-accept message (`follow_up` body, when queued), and each
+draft's id for the mark-sent call.
+
+### `POST /api/v1/growth/linkedin/{draft_id}/mark-sent`
+
+Record that a queued LinkedIn draft was manually sent. The draft must be
+linkedin-channel (`422 draft.wrong_channel` otherwise) and `approved` — the
+move rides the G-3 machine, so anything but approved→sent is a
+`422 draft.illegal_transition`. Cross-tenant or unknown ids:
+`404 draft.not_found`. Returns the updated draft envelope (`status: "sent"`);
+the draft leaves the queue and continues the normal lifecycle
+(sent→replied / rejected).
