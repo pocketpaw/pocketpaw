@@ -29,6 +29,12 @@
 # orders derived from the Literals. The rank is data here rather than a
 # lexicographic accident in the query layer, so renaming a tier can't silently
 # reorder the list.
+# Updated 2026-07-28 (feat/growth-projects): ``Prospect.project_id`` — the
+# client a prospect belongs to, following the ``tasks`` / ``cycles`` consumer
+# pattern exactly (nullable, validated against the workspace at entry, an
+# optional filter on the reads). An agency runs one outbound pipeline per
+# client; the project primitive already models that container, so growth
+# consumes it rather than inventing a second scoping concept.
 # Updated 2026-07-27 (feat/growth-g4): the Instinct send gate —
 # ``GATE_OWNED_TARGETS`` marks the statuses only the gate machinery may set
 # (``approved`` via an approved ``_growth_send`` proposal, ``sent`` via the
@@ -91,6 +97,11 @@ class Prospect:
     company: str
     domain: str
     source: str  # ProspectSource — validated at the DTO boundary
+    # The client this prospect belongs to, when the workspace uses projects.
+    # Nullable throughout: a solo operator never sees a project and nothing
+    # about their pipeline changes. Validated against the workspace at entry —
+    # a project from another tenant is a hard error, not a silent null.
+    project_id: str | None = None
     tier: str = "unqualified"  # ProspectTier
     research_brief: str = ""
     emails: tuple[str, ...] = ()

@@ -42,6 +42,11 @@
 # dedupe identity, and a row without one is not a prospect. The LinkedIn queue
 # row gained ``prospect_domain`` so an export can still title a section for a
 # prospect whose name nobody has filled in yet.
+# Updated 2026-07-28 (feat/growth-projects): ``project_id`` on the create,
+# update and response shapes — the client a prospect belongs to. On the UPDATE
+# it is three-valued the way ``tasks`` does it (None = leave alone, an id =
+# reassign, "" = clear); on the CREATE it is a plain optional. Neither can
+# validate the id itself: only the service knows the caller's workspace.
 
 from __future__ import annotations
 
@@ -97,6 +102,10 @@ class CreateProspectRequest(BaseModel):
     company: str = Field(default="", max_length=200)
     domain: str = Field(min_length=1, max_length=253)
     source: ProspectSource
+    # The client this prospect belongs to. The SERVICE validates it against
+    # the caller's workspace (a project from another tenant is a 404) — the
+    # DTO can only check the shape, since it has no tenancy context.
+    project_id: str | None = None
     tier: ProspectTier = "unqualified"
     research_brief: str = ""
     emails: list[str] = Field(default_factory=list)
@@ -124,6 +133,11 @@ class UpdateProspectRequest(BaseModel):
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
     company: str | None = Field(default=None, min_length=1, max_length=200)
+    # Three-valued, mirroring ``tasks``: ``None`` leaves the assignment alone,
+    # an id reassigns (validated against the workspace), and ``""`` clears it.
+    # Without the empty-string case there would be no way to un-assign a
+    # prospect from a client once assigned.
+    project_id: str | None = None
     tier: ProspectTier | None = None
     research_brief: str | None = None
     emails: list[str] | None = None
@@ -166,6 +180,7 @@ class ProspectResponse(BaseModel):
     company: str
     domain: str
     source: str
+    project_id: str | None = None
     tier: str
     research_brief: str
     emails: list[str]
