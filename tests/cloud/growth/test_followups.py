@@ -621,3 +621,91 @@ async def test_a_draft_with_no_send_record_still_falls_back_to_the_flip(db):
 
     assert row["sent_at"] is not None
     assert (datetime.now(UTC) - row["sent_at"]).days == 0
+
+
+# ---------------------------------------------------------------------------
+# Grouping by client (feat/growth-projects)
+#
+# The sweep works one client's threads together so their follow-ups go out
+# under that client's sender identity. The thing that must NOT change: it is
+# still ONE pass over each thread, and the open-follow-up guard still holds.
+# ---------------------------------------------------------------------------
+
+
+async def _project(workspace_id: str, name: str) -> str:
+    from pocketpaw_ee.cloud.models.project import Project as _ProjectDoc
+
+    doc = _ProjectDoc(
+        workspace=workspace_id,
+        name=name,
+        description="",
+        color="",
+        lead_id=None,
+        status="active",
+        created_by="u1",
+    )
+    await doc.insert()
+    return str(doc.id)
+
+
+@pytest.mark.asyncio
+async def test_sweep_covers_every_project_exactly_once(db, tray):
+    """Three clients plus an unassigned prospect: each gets one follow-up, and
+    nobody gets two. Grouping must not turn one sweep into N sweeps."""
+    a = await _project("w1", "Client A")
+    b = await _project("w1", "Client B")
+    for index, project_id in enumerate((a, a, b, None)):
+        await _sent_thread("w1", domain=f"client-{index}.com", project_id=project_id)
+
+    counters = await followup_sweep({}, now=_in_days(5))
+
+    assert counters["created"] == 4
+    followups = await _followups("w1")
+    assert len(followups) == 4
+    # One per thread — no thread was worked twice.
+    assert len({f.prospect_id for f in followups}) == 4
+    assert all(f.status == "proposed" for f in followups)
+
+
+@pytest.mark.asyncio
+async def test_grouping_does_not_break_the_open_followup_guard(db, tray):
+    """The idempotency guard is per-thread and survives the partition: a second
+    pass over the same grouped data proposes nothing new."""
+    a = await _project("w1", "Client A")
+    b = await _project("w1", "Client B")
+    for index, project_id in enumerate((a, b)):
+        await _sent_thread("w1", domain=f"client-{index}.com", project_id=project_id)
+
+    first = await followup_sweep({}, now=_in_days(5))
+    assert first["created"] == 2
+
+    second = await followup_sweep({}, now=_in_days(6))
+    assert second["created"] == 0
+    assert second["skipped"] == 2
+    assert len(await _followups("w1")) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_client_whose_prospect_is_unreadable_does_not_stop_the_others(
+    db, tray, monkeypatch
+):
+    """One client's bad row must not cost another client their whole pass."""
+    a = await _project("w1", "Client A")
+    bad, _ = await _sent_thread("w1", domain="bad.com", project_id=a)
+    await _sent_thread("w1", domain="good.com")
+
+    real = growth_service.get_prospect_system
+
+    async def _flaky(workspace_id: str, prospect_id: str):
+        if prospect_id == bad.id:
+            raise RuntimeError("prospect row is unreadable")
+        return await real(workspace_id, prospect_id)
+
+    monkeypatch.setattr(growth_service, "get_prospect_system", _flaky)
+
+    counters = await followup_sweep({}, now=_in_days(5))
+
+    assert counters["created"] == 1
+    assert counters["skipped"] == 1
+    assert counters["threads"] == 2
+    assert [f.prospect_id for f in await _followups("w1")] != [bad.id]
