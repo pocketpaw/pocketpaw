@@ -108,11 +108,14 @@ async def list_prospects(
     tier: ProspectTier | None = Query(default=None),
     status: ProspectStatus | None = Query(default=None),
     source: ProspectSource | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
     limit: int = Query(default=100, ge=1, le=500),
     ctx: RequestContext = Depends(request_context),
 ) -> list[ProspectResponse]:
+    """``q`` is a case-insensitive substring search across name / company /
+    domain / research_brief — the "find that one company" box."""
     return await growth_service.list_prospects(
-        ctx, tier=tier, status=status, source=source, limit=limit
+        ctx, tier=tier, status=status, source=source, q=q, limit=limit
     )
 
 
