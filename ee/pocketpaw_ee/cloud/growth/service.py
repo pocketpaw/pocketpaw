@@ -24,6 +24,12 @@
 # draft→proposed via ``transition``), and ``gate_transition`` is the internal
 # seam the growth executor / dispatch worker use to walk gate-owned edges
 # (same legality table, explicit workspace_id, no RequestContext).
+# Updated 2026-07-28 (feat/growth-mcp): ``update_draft`` — a partial edit of a
+# draft's COPY, refused with 403 ``draft.not_editable`` for anything past
+# ``draft``. The guard is structural: from ``proposed`` on, the stored body IS
+# what the human reviews in the Tray and what the dispatch worker puts on the
+# wire, so an edit there would send copy nobody approved. The agent surface
+# (``agent/mcp_servers/growth.py``) is the caller that needed it.
 # Updated 2026-07-28 (feat/growth-api-scale): the list query grew a scale
 # surface — ``q`` (escaped case-insensitive regex across four fields, ceiling
 # documented on ``_prospect_filters``), four ``sort`` modes with the tier rank
@@ -122,6 +128,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     ProspectPageResponse,
     ProspectResponse,
     TransitionDraftRequest,
+    UpdateDraftRequest,
     UpdateProspectRequest,
 )
 from pocketpaw_ee.cloud.models.draft import Draft as _DraftDoc
@@ -792,6 +799,48 @@ async def list_drafts(
         .limit(limit)
     )
     return [_draft_to_response(_draft_to_domain(doc)) async for doc in cursor]
+
+
+async def update_draft(
+    ctx: RequestContext, draft_id: str, body: UpdateDraftRequest
+) -> DraftResponse:
+    """Edit a draft's copy (subject / body / demo_url) — ONLY while it is
+    still ``draft``.
+
+    The status guard is load-bearing, not tidiness. Once a draft is
+    ``proposed``, a human is reading THAT copy in the Tray, and the dispatch
+    worker sends the stored body — so an edit after proposal would put text on
+    the wire that nobody approved. Same reasoning at ``approved`` / ``sent``.
+    Anything past ``draft`` is refused with 403 ``draft.not_editable``; revise
+    by rejecting the draft and writing a new one.
+
+    The lifecycle is untouched here: this function never reads or writes
+    ``status``.
+    """
+    body = UpdateDraftRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    doc = await _fetch_draft_in_workspace(workspace_id, draft_id)
+
+    if doc.status != "draft":
+        raise Forbidden(
+            "draft.not_editable",
+            f"A draft in '{doc.status}' can no longer be edited — its copy is "
+            "what the gate reviews and what the worker sends. Reject it and "
+            "write a new draft instead",
+        )
+    if body.subject is not None and doc.channel != "email":
+        raise ValidationError(
+            "draft.subject_not_allowed",
+            f"subject is only valid on the email channel (this draft is '{doc.channel}')",
+        )
+
+    for field in ("subject", "body", "demo_url"):
+        value = getattr(body, field)
+        if value is not None:
+            setattr(doc, field, value)
+    await doc.save()  # bumps updatedAt
+    # no-event: growth has no realtime subscriber in v1; the drafts view polls.
+    return _draft_to_response(_draft_to_domain(doc))
 
 
 async def transition(

@@ -10,6 +10,13 @@
 # prospect → 404 on create, foreign draft ids 404, lists never leak).
 #
 # Created 2026-07-27 (feat/growth-g3): third slice of /growth — drafts.
+# Updated 2026-07-28 (feat/growth-mcp): PATCH /growth/drafts/{id} — editing a
+# draft's copy. The load-bearing case is the REFUSAL: parametrized over
+# proposed / approved / sent / rejected, each 403 ``draft.not_editable`` with
+# the stored body unchanged, because from ``proposed`` on the stored copy is
+# what the Tray shows and what the worker sends. Plus the email-only subject
+# check (needs the STORED channel, hence service-side), empty/blank payloads,
+# a ``status`` key that the edit DTO has no field for, and tenancy.
 # Updated 2026-07-27 (feat/growth-g4): the Instinct send gate owns the
 # ``approved`` / ``sent`` edges now — the public status route refuses them
 # with 403 ``draft.gate_required`` (new tests below). Lifecycle walks that
@@ -463,3 +470,111 @@ async def test_drafts_are_tenant_scoped(w1_client, w2_client):
     # The cross-tenant attempt must not have moved the draft.
     listed = (await w1_client.get("/api/v1/growth/drafts")).json()
     assert listed[0]["status"] == "draft"
+
+
+# ---------------------------------------------------------------------------
+# Edit the copy (feat/growth-mcp) — PATCH /drafts/{id}
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_draft_edits_the_copy_while_still_draft(w1_client):
+    """Subject / body / demo_url are editable, any subset, while the draft
+    has not left ``draft``. The status is untouched by an edit."""
+    prospect = await _create_prospect(w1_client)
+    draft = await _create_draft(w1_client, prospect["id"])
+
+    resp = await w1_client.patch(
+        f"/api/v1/growth/drafts/{draft['id']}",
+        json={"body": "Rewrote the opener so it leads with the booking drop-off."},
+    )
+    assert resp.status_code == 200, resp.text
+    edited = resp.json()
+    assert edited["body"].startswith("Rewrote the opener")
+    assert edited["subject"] == draft["subject"]  # untouched
+    assert edited["status"] == "draft"
+
+    resp = await w1_client.patch(
+        f"/api/v1/growth/drafts/{draft['id']}",
+        json={"subject": "A faster path from search to booked", "demo_url": "https://d.example"},
+    )
+    assert resp.status_code == 200, resp.text
+    edited = resp.json()
+    assert edited["subject"] == "A faster path from search to booked"
+    assert edited["demo_url"] == "https://d.example"
+    assert edited["body"].startswith("Rewrote the opener")
+
+
+@pytest.mark.parametrize("status", ["proposed", "approved", "sent", "rejected"])
+@pytest.mark.asyncio
+async def test_update_draft_refused_once_the_draft_has_moved(w1_client, status):
+    """The load-bearing guard: from ``proposed`` on, the stored body IS what
+    the human reviews in the Tray and what the dispatch worker sends, so an
+    edit would put unapproved copy on the wire. 403 ``draft.not_editable``,
+    and the stored copy is unchanged."""
+    prospect = await _create_prospect(w1_client)
+    draft = await _create_draft(w1_client, prospect["id"])
+    walk = {
+        "proposed": ("proposed",),
+        "approved": ("proposed", "approved"),
+        "sent": ("proposed", "approved", "sent"),
+        "rejected": ("rejected",),
+    }[status]
+    await _walk(w1_client, draft["id"], *walk)
+
+    resp = await w1_client.patch(
+        f"/api/v1/growth/drafts/{draft['id']}", json={"body": "swapped copy"}
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == "draft.not_editable"
+
+    listed = (await w1_client.get("/api/v1/growth/drafts")).json()
+    assert listed[0]["body"] == draft["body"]
+
+
+@pytest.mark.asyncio
+async def test_update_draft_rejects_a_subject_on_a_non_email_channel(w1_client):
+    """``subject`` stays email-only — the check needs the STORED channel, so
+    it lives in the service rather than the DTO."""
+    prospect = await _create_prospect(w1_client)
+    draft = await _create_draft(
+        w1_client, prospect["id"], channel="linkedin", subject=None, body="Connect note."
+    )
+    resp = await w1_client.patch(f"/api/v1/growth/drafts/{draft['id']}", json={"subject": "nope"})
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "draft.subject_not_allowed"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},  # nothing to change
+        {"body": "   "},  # blank body
+        {"status": "approved"},  # no status field exists on the edit DTO
+    ],
+)
+@pytest.mark.asyncio
+async def test_update_draft_rejects_bad_payloads(w1_client, payload):
+    """An empty patch and a blank body 422 at the boundary. So does a
+    ``status`` key: the edit DTO has no status field, and a lifecycle move
+    dressed as an edit would be a second road to ``approved``."""
+    prospect = await _create_prospect(w1_client)
+    draft = await _create_draft(w1_client, prospect["id"])
+    resp = await w1_client.patch(f"/api/v1/growth/drafts/{draft['id']}", json=payload)
+    assert resp.status_code == 422, resp.text
+    listed = (await w1_client.get("/api/v1/growth/drafts")).json()
+    assert listed[0]["status"] == "draft"
+
+
+@pytest.mark.asyncio
+async def test_update_draft_is_tenant_scoped(w1_client, w2_client):
+    """w2 cannot edit w1's draft — identical 404, and nothing is written."""
+    prospect = await _create_prospect(w1_client)
+    draft = await _create_draft(w1_client, prospect["id"])
+    resp = await w2_client.patch(
+        f"/api/v1/growth/drafts/{draft['id']}", json={"body": "tenant leak"}
+    )
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "draft.not_found"
+    listed = (await w1_client.get("/api/v1/growth/drafts")).json()
+    assert listed[0]["body"] == draft["body"]

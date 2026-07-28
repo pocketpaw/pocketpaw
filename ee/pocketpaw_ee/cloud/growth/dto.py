@@ -26,6 +26,10 @@
 # ProposeBatchRequest / ProposeBatchError / ProposeBatchResponse — proposing a
 # selection of drafts in one call, with per-draft error entries in the
 # bulk-ingest style (100-id cap enforced at the boundary).
+# Updated 2026-07-28 (feat/growth-mcp): UpdateDraftRequest — a partial edit of a
+# draft's COPY (subject / body / demo_url), the shape the agent surface needs to
+# revise a draft it wrote. No ``status`` field, deliberately: the lifecycle moves
+# through the transition route and the Instinct gate, never through an edit.
 # Updated 2026-07-27 (feat/growth-g8): LinkedInQueueItemResponse — one row of
 # the manual LinkedIn send queue: the draft envelope joined with the prospect
 # context the captain needs to send by hand (name, company, profile URL,
@@ -207,6 +211,39 @@ class CreateDraftRequest(BaseModel):
         return self
 
 
+class UpdateDraftRequest(BaseModel):
+    """Partial edit of a draft's COPY — every field optional, ``None`` means
+    "leave as-is".
+
+    There is no ``status`` field and there never will be: a status move is a
+    lifecycle event that goes through the transition route (and, for the
+    gate-owned targets, through an approved Instinct proposal). Letting an edit
+    carry a status would be a second, unreviewed road to ``approved``.
+
+    ``channel`` and ``prospect_id`` are likewise not editable — a draft for a
+    different channel or a different prospect is a different draft.
+    ``subject`` stays email-only, but that check needs the stored draft's
+    channel, so it lives in the service rather than here.
+    """
+
+    subject: str | None = Field(default=None, max_length=200)
+    body: str | None = Field(default=None, min_length=1, max_length=10_000)
+    demo_url: str | None = Field(default=None, max_length=2048)
+
+    @field_validator("body")
+    @classmethod
+    def _non_blank_body(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError("body must not be blank")
+        return v
+
+    @model_validator(mode="after")
+    def _at_least_one_field(self) -> UpdateDraftRequest:
+        if self.subject is None and self.body is None and self.demo_url is None:
+            raise ValueError("provide at least one of subject / body / demo_url")
+        return self
+
+
 class TransitionDraftRequest(BaseModel):
     """Target status for a lifecycle move. Whether the move is LEGAL from the
     draft's current status is the service's call (``draft.illegal_transition``,
@@ -302,5 +339,6 @@ __all__ = [
     "ProspectPageResponse",
     "ProspectResponse",
     "TransitionDraftRequest",
+    "UpdateDraftRequest",
     "UpdateProspectRequest",
 ]
