@@ -290,8 +290,14 @@ def test_studio_profile_ripple_off_media_tools_and_skill() -> None:
 
 def test_code_profile_ripple_off_and_scoped_to_the_file_tools() -> None:
     """The /code profile turns ripple OFF (so the agent edits code, not a
-    dashboard) and scopes the MCP surface to exactly the four file tools the main
-    agent drives."""
+    dashboard) and scopes the MCP surface to exactly the file tools the main
+    agent drives.
+
+    ``editFile`` joined the set 2026-07-28. It is load-bearing rather than a
+    convenience: ``readFile`` windows at 30_000 characters, so without a verb
+    that changes PART of a file the only way to touch a larger one is a
+    whole-file ``writeFile`` carrying invented text for the part never read.
+    """
     profile = resolve_profile(SurfaceKind.CODE, SurfaceMeta())
 
     assert profile.ripple_mode == "off"
@@ -300,6 +306,7 @@ def test_code_profile_ripple_off_and_scoped_to_the_file_tools() -> None:
             "mcp__pocketpaw_code__readFile",
             "mcp__pocketpaw_code__search",
             "mcp__pocketpaw_code__listDir",
+            "mcp__pocketpaw_code__editFile",
             "mcp__pocketpaw_code__writeFile",
         }
     )

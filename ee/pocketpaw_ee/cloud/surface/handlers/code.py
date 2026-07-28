@@ -54,6 +54,30 @@
 # widget tools; this prose exists so the agent knows why they are absent rather
 # than discovering it as a tool error mid-turn.
 #
+# Changed: 2026-07-28 (fix/code-truncated-read-destroys-file) — two paragraphs,
+# both against the same reported symptom: the agent "fabricating things from
+# another session instead of reading the files".
+#
+# The first is the EDIT paragraph. This preamble used to say "to change the code,
+# call `writeFile` with the file's COMPLETE new contents… so `readFile` before
+# changing something you have not read this turn." On any file past the browser's
+# 30_000-char read window that instruction cannot be followed — and the model
+# followed it anyway, sending back the head with the tail reconstructed. The
+# surface now leads with ``editFile`` and states plainly that a partial read
+# forbids a whole-file write. The ENFORCEMENT is in the browser
+# (``delegate.ts``/``lossyWriteRefusal``), as it must be: this text explains a
+# refusal that already happens rather than requesting good behaviour, which is
+# the same division of labour the profile note below describes.
+#
+# The second is the ORIENTATION paragraph. Nothing told the agent to read a
+# project's own conventions, so it filled the gap from priors — which is the
+# other half of what "fabricating" described. It now reads ``CLAUDE.md`` /
+# ``AGENTS.md`` / ``.cursorrules`` / ``CONTRIBUTING.md`` / ``README.md`` before
+# working in a project it does not know. Deliberately an instruction rather than
+# an injection: a repo's ``CLAUDE.md`` can be tens of KB, and spending that on
+# every turn to serve the first one is the wrong trade. Auto-stamping the file
+# into ``SurfaceMeta`` at project open is the stronger version and is a follow-up.
+#
 # Mirrors the layout of handlers/sites.py and handlers/belt.py: an async
 # ``build_preamble`` returning an XML-ish ``<surface>`` + ``<orientation>`` +
 # ``<procedure>`` block.
@@ -103,10 +127,10 @@ def _orientation(project_name: str | None) -> str:
         "'pocket' or 'dashboard'.",
         "The user's project does NOT live on your machine. It lives in the "
         "user's own project workspace, and you reach it ONLY through your file "
-        "tools — `readFile`, `search`, `listDir`, and `writeFile`. You have no "
-        "filesystem of your own on this surface: there is no working directory "
-        "to sit in, nothing to `cd` into, no shell, and no path on disk you can "
-        "usefully name.",
+        "tools — `readFile`, `search`, `listDir`, `editFile`, and `writeFile`. "
+        "You have no filesystem of your own on this surface: there is no working "
+        "directory to sit in, nothing to `cd` into, no shell, and no path on "
+        "disk you can usefully name.",
     ]
 
     if project_name:
@@ -122,13 +146,32 @@ def _procedure() -> str:
     """Render the ``<code-procedure>`` block — how to do the work."""
     lines = [
         "<code-procedure>",
+        "Before you change anything in a project you have not worked in yet, "
+        "find out how it wants to be worked in. `listDir` the project root and "
+        "`readFile` whichever of these it has: `CLAUDE.md`, `AGENTS.md`, "
+        "`.cursorrules`, `.github/copilot-instructions.md`, `CONTRIBUTING.md`, "
+        "`README.md`. They are where a project states its conventions, its build "
+        "and test commands, and the things it does not want done — none of which "
+        "you can infer from a source file, and all of which you would otherwise "
+        "be guessing at. Check `docs/` too when the task is architectural. Read "
+        "them once at the start of your work on a project, not on every turn.",
         "Work the way a coding agent works. To understand the project, `search` "
         "for the relevant code and `readFile` the files that matter; `listDir` to "
-        "see how a folder is laid out. To change the code, call `writeFile` with "
-        "the file's COMPLETE new contents. It saves the file, and creates it if "
-        "it does not exist yet. What you send REPLACES the file — anything you "
-        "leave out is gone — so `readFile` before changing something you have "
-        "not read this turn.",
+        "see how a folder is laid out. Match what you write to what is already "
+        "there — its naming, its idioms, its comment density — rather than to "
+        "your own defaults.",
+        "To change an existing file, use `editFile` — give it the exact text to "
+        "replace and what to put there instead. It changes only the span you "
+        "name and leaves the rest of the file alone, which is what makes it safe "
+        "on a file you have not read end to end. Use `writeFile` to CREATE a "
+        "file, or to replace a small one you have read in full; what you send "
+        "REPLACES the whole file, so anything you leave out is deleted.",
+        "`readFile` returns large files one window at a time. If the result ends "
+        "with a note saying how many characters were not shown, you are holding "
+        "PART of that file — read on with the `offset` the note gives you, and do "
+        "not `writeFile` it, because the contents you would send back for the "
+        "part you never read would be something you made up. That write is "
+        "refused, and correctly so. Reach for `editFile` instead.",
         "If the user's request is scoped to a selection they have ALREADY made, "
         "act on it IMMEDIATELY, without re-reading the whole project first. The "
         "selected code and the file it came from are already in your context — "

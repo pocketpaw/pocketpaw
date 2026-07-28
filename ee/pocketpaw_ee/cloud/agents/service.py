@@ -678,6 +678,17 @@ async def seed_code_agent(
     Idempotent (find-by-slug short-circuit). Returns ``(agent, created)`` —
     ``created`` is ``True`` only when this call inserted a new row. Returns
     ``(None, False)`` if the insert raises (callers wrap in try/except).
+
+    The short-circuit RECONCILES the tool list rather than returning blind
+    (2026-07-28, fix/code-truncated-read-destroys-file). It used to return the
+    existing row untouched, which made ``_CODE_FILE_TOOL_IDS`` authoritative only
+    for workspaces created after a change to it. Adding a file verb was therefore
+    a no-op everywhere the agent already existed: the tool is defined by the MCP
+    server, allowed by the CODE ``SurfaceProfile``, and then stripped at run time
+    by this row's stale ``tools`` — because ``tool_mode="exclusive"`` makes THIS
+    list the cap. No error, no log, the agent simply never sees the tool. The
+    reconciliation is a UNION, so an id an operator added by hand survives; only
+    absence is corrected.
     """
     # Local imports keep the surface package off this module's import graph and
     # avoid any cycle; the constants are cheap module-level frozensets/strings.
@@ -688,6 +699,15 @@ async def seed_code_agent(
         _AgentDoc.workspace == workspace_id, _AgentDoc.slug == "code"
     )
     if existing is not None:
+        missing = _CODE_FILE_TOOL_IDS - set(existing.config.tools or [])
+        if missing:
+            existing.config.tools = sorted(set(existing.config.tools or []) | _CODE_FILE_TOOL_IDS)
+            await existing.save()
+            logger.info(
+                "Reconciled 'code' agent tools in workspace %s; added %s",
+                workspace_id,
+                sorted(missing),
+            )
         return existing, False
 
     agent = _AgentDoc(
