@@ -928,6 +928,10 @@ class TestGrowthRouteRbac:
             ("POST", "/growth/prospects/{prospect_id}/drafts"): "growth.write",
             ("PATCH", "/growth/prospects/{prospect_id}"): "growth.write",
             ("POST", "/growth/drafts/{draft_id}/status"): "growth.write",
+            # Editing a draft's COPY is authoring, not outbound — and the
+            # service refuses it past ``draft`` anyway, so it can never touch
+            # copy the gate has already been shown.
+            ("PATCH", "/growth/drafts/{draft_id}"): "growth.write",
             # The outbound verb sits at the ADMIN tier the executor re-checks.
             ("POST", "/growth/drafts/{draft_id}/propose"): "growth.manage",
             # G-10a's batch propose is the same outbound verb over N ids, so
