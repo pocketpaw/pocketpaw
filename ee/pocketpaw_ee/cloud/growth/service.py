@@ -24,6 +24,13 @@
 # draft→proposed via ``transition``), and ``gate_transition`` is the internal
 # seam the growth executor / dispatch worker use to walk gate-owned edges
 # (same legality table, explicit workspace_id, no RequestContext).
+# Updated 2026-07-28 (feat/growth-api-scale): the list query grew a scale
+# surface — ``q`` (escaped case-insensitive regex across four fields, ceiling
+# documented on ``_prospect_filters``), four ``sort`` modes with the tier rank
+# WALKED rather than compared, and keyset cursor pagination returning
+# ``ProspectPageResponse`` ({items, next_cursor, total}) in place of a bare
+# list. Cursors carry their sort mode so a mid-scroll sort change 422s instead
+# of resuming against a key that means something else.
 # Updated 2026-07-27 (feat/growth-g8): LinkedIn manual queue —
 # ``linkedin_queue`` (proposed/approved linkedin drafts joined with their
 # prospect via two queries, newest first), ``linkedin_queue_markdown``
@@ -95,6 +102,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     DraftResponse,
     LinkedInQueueItemResponse,
     ProposeSendResponse,
+    ProspectPageResponse,
     ProspectResponse,
     TransitionDraftRequest,
     UpdateProspectRequest,
@@ -378,6 +386,80 @@ async def _tier_ordered_page(
     return collected
 
 
+# ---------------------------------------------------------------------------
+# Keyset cursor (G-10a)
+#
+# Convention follows ``audit/service.py`` and ``sessions/service.py``: an
+# opaque composite ``{sort_value}|{oid}``, keyset (not offset) so a page never
+# skips or repeats a row when the collection is written to mid-scroll.
+#
+# ONE extension over those two: the sort mode is prefixed
+# (``{sort}:{value}|{oid}``). Audit and sessions have a single fixed ordering,
+# so their cursor can only ever be read back the way it was written. This list
+# has four, and a UI that changes the sort while holding a cursor would
+# otherwise resume against a key that means something different — silently
+# wrong rows rather than an error. The prefix turns that into a 422.
+#
+# The oid is split off with ``rsplit`` because the company sort's value is
+# user-supplied and may itself contain ``|``; an ObjectId hex never can.
+# ---------------------------------------------------------------------------
+
+
+def _encode_prospect_cursor(sort: str, value: str, oid: PydanticObjectId) -> str:
+    return f"{sort}:{value}|{oid!s}"
+
+
+def _decode_prospect_cursor(cursor: str, sort: str) -> tuple[str, PydanticObjectId]:
+    """Split an opaque cursor into ``(sort_value, oid)``, verifying the mode.
+
+    Any malformed cursor — bad shape, unparseable id, or a cursor minted under
+    a different sort — is a 422 ``prospect.bad_cursor`` rather than a wrong
+    page.
+    """
+    try:
+        head, oid_str = cursor.rsplit("|", 1)
+        mode, value = head.split(":", 1)
+        # Broad catch: a bad id raises bson's InvalidId, not ValueError — same
+        # reasoning as ``_fetch_in_workspace``, a malformed id is caller error.
+        oid = PydanticObjectId(oid_str)
+    except Exception as exc:  # noqa: BLE001 — any malformed cursor is a 422
+        raise ValidationError("prospect.bad_cursor", "Invalid pagination cursor") from exc
+    if mode != sort:
+        raise ValidationError(
+            "prospect.bad_cursor",
+            f"Cursor was issued for sort '{mode}' but the request asks for '{sort}'",
+        )
+    return value, oid
+
+
+def _keyset_clause(sort: str, value: str, oid: PydanticObjectId) -> dict[str, Any]:
+    """The "strictly after the cursor row" clause for a non-tier sort."""
+    if sort == "newest":
+        at = _parse_cursor_datetime(value)
+        return {"$or": [{"createdAt": {"$lt": at}}, {"createdAt": at, "_id": {"$lt": oid}}]}
+    if sort == "oldest":
+        at = _parse_cursor_datetime(value)
+        return {"$or": [{"createdAt": {"$gt": at}}, {"createdAt": at, "_id": {"$gt": oid}}]}
+    # company — ascending, ties broken by ascending _id
+    return {"$or": [{"company": {"$gt": value}}, {"company": value, "_id": {"$gt": oid}}]}
+
+
+def _parse_cursor_datetime(value: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValidationError("prospect.bad_cursor", "Invalid pagination cursor") from exc
+
+
+def _cursor_value_for(doc: _ProspectDoc, sort: str) -> str:
+    if sort == "company":
+        return doc.company
+    if sort == "tier":
+        return doc.tier
+    created = getattr(doc, "createdAt", None)
+    return created.isoformat() if created is not None else ""
+
+
 async def list_prospects(
     ctx: RequestContext,
     *,
@@ -386,25 +468,64 @@ async def list_prospects(
     source: str | None = None,
     q: str | None = None,
     sort: str = "newest",
+    cursor: str | None = None,
     limit: int = 100,
-) -> list[ProspectResponse]:
-    """List the workspace's prospects, optionally filtered and ordered.
+) -> ProspectPageResponse:
+    """One page of the workspace's prospects, filtered and ordered.
 
     ``q`` is a case-insensitive substring match across name / company /
     domain / research_brief (see ``_prospect_filters`` for the scale ceiling).
-    ``sort`` is one of ``newest`` (default, the pre-G-10a behaviour) /
-    ``oldest`` / ``company`` / ``tier``.
+    ``sort`` is ``newest`` (default, the pre-G-10a ordering) / ``oldest`` /
+    ``company`` / ``tier``. ``cursor`` resumes after the last row of the
+    previous page — pass back the ``next_cursor`` the page returned, unchanged.
+
+    ``total`` counts every row matching the filters, NOT the page, and is
+    computed without the cursor clause so it stays put while the caller pages
+    through ("showing 40 of 3,182").
     """
     workspace_id = _require_workspace(ctx)
+    if sort != "tier" and sort not in _PROSPECT_SORT_SPECS:
+        raise ValidationError("prospect.bad_sort", f"Unknown sort mode '{sort}'")
     filters = _prospect_filters(workspace_id, tier=tier, status=status, source=source, q=q)
+
+    # Over-fetch by one: the extra row is the "is there a next page" probe and
+    # is never returned.
+    probe = limit + 1
     if sort == "tier":
-        docs = await _tier_ordered_page(filters, limit=limit)
+        start_tier: str | None = None
+        after_oid: PydanticObjectId | None = None
+        if cursor:
+            start_tier, after_oid = _decode_prospect_cursor(cursor, sort)
+            if start_tier not in TIER_SORT_ORDER:
+                raise ValidationError("prospect.bad_cursor", "Invalid pagination cursor")
+        docs = await _tier_ordered_page(
+            filters, limit=probe, start_tier=start_tier, after_oid=after_oid
+        )
     else:
-        spec = _PROSPECT_SORT_SPECS.get(sort)
-        if spec is None:
-            raise ValidationError("prospect.bad_sort", f"Unknown sort mode '{sort}'")
-        docs = await _ProspectDoc.find(filters).sort(spec).limit(limit).to_list()
-    return [_to_response(_to_domain(doc)) for doc in docs]
+        find_filter: dict[str, Any] = filters
+        if cursor:
+            value, oid = _decode_prospect_cursor(cursor, sort)
+            find_filter = {"$and": [filters, _keyset_clause(sort, value, oid)]}
+        docs = (
+            await _ProspectDoc.find(find_filter)
+            .sort(_PROSPECT_SORT_SPECS[sort])
+            .limit(probe)
+            .to_list()
+        )
+
+    has_more = len(docs) > limit
+    page = docs[:limit]
+    next_cursor = (
+        _encode_prospect_cursor(sort, _cursor_value_for(page[-1], sort), page[-1].id)
+        if has_more and page
+        else None
+    )
+    total = await _ProspectDoc.find(filters).count()
+    return ProspectPageResponse(
+        items=[_to_response(_to_domain(doc)) for doc in page],
+        next_cursor=next_cursor,
+        total=total,
+    )
 
 
 async def update(

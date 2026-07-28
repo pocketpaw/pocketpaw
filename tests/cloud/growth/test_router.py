@@ -7,6 +7,10 @@
 # cross-tenant isolation (foreign ids 404, foreign rows never listed).
 #
 # Created 2026-07-27 (feat/growth-g1): first slice of /growth.
+# Updated 2026-07-28 (feat/growth-api-scale): the list route returns the
+# {items, next_cursor, total} page envelope, so every list assertion here reads
+# ``.json()["items"]``. The scale surface itself (q / sort / cursor / facets)
+# is covered in test_list_query.py.
 # Updated 2026-07-27 (feat/growth-g2): bulk-ingestion coverage — POST /bulk
 # idempotency (20 rows twice → second run all-updated), mixed-validity payloads
 # (bad rows become indexed error entries, good rows land), the 501-row 422 cap,
@@ -206,21 +210,21 @@ async def test_list_filters_by_tier_status_source(w1_client):
 
     resp = await w1_client.get("/api/v1/growth/prospects")
     assert resp.status_code == 200
-    assert len(resp.json()) == 3
+    assert len(resp.json()["items"]) == 3
 
     resp = await w1_client.get("/api/v1/growth/prospects", params={"tier": "a"})
-    assert {p["domain"] for p in resp.json()} == {"beta.io", "gamma.io"}
+    assert {p["domain"] for p in resp.json()["items"]} == {"beta.io", "gamma.io"}
 
     resp = await w1_client.get("/api/v1/growth/prospects", params={"source": "clay"})
-    assert [p["domain"] for p in resp.json()] == ["beta.io"]
+    assert [p["domain"] for p in resp.json()["items"]] == ["beta.io"]
 
     resp = await w1_client.get("/api/v1/growth/prospects", params={"status": "new"})
-    assert len(resp.json()) == 3
+    assert len(resp.json()["items"]) == 3
 
     resp = await w1_client.get(
         "/api/v1/growth/prospects", params={"tier": "a", "source": "directory"}
     )
-    assert [p["domain"] for p in resp.json()] == ["gamma.io"]
+    assert [p["domain"] for p in resp.json()["items"]] == ["gamma.io"]
 
 
 @pytest.mark.asyncio
@@ -261,7 +265,8 @@ async def test_bulk_ingest_is_idempotent(w1_client):
     assert second.json() == {"created": 0, "updated": 20, "errors": []}
 
     listed = await w1_client.get("/api/v1/growth/prospects", params={"limit": 500})
-    assert len(listed.json()) == 20
+    assert len(listed.json()["items"]) == 20
+    assert listed.json()["total"] == 20
 
 
 @pytest.mark.asyncio
@@ -285,7 +290,7 @@ async def test_bulk_ingest_mixed_validity_records_errors_and_lands_good_rows(w1_
         assert err["message"]
 
     listed = await w1_client.get("/api/v1/growth/prospects")
-    assert {p["domain"] for p in listed.json()} == {"alpha.io", "omega.io"}
+    assert {p["domain"] for p in listed.json()["items"]} == {"alpha.io", "omega.io"}
 
 
 @pytest.mark.asyncio
@@ -301,7 +306,7 @@ async def test_bulk_ingest_updates_existing_and_creates_new_in_one_call(w1_clien
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"created": 1, "updated": 1, "errors": []}
 
-    listed = (await w1_client.get("/api/v1/growth/prospects")).json()
+    listed = (await w1_client.get("/api/v1/growth/prospects")).json()["items"]
     by_domain = {p["domain"]: p for p in listed}
     assert by_domain["alpha.io"]["name"] == "Refreshed Contact"
     assert by_domain["alpha.io"]["tier"] == "a"
@@ -322,14 +327,14 @@ async def test_bulk_ingest_is_workspace_scoped(w1_client, w2_client):
     assert resp.json() == {"created": 3, "updated": 0, "errors": []}
 
     # w2 sees nothing from w1's ingest.
-    assert (await w2_client.get("/api/v1/growth/prospects")).json() == []
+    assert (await w2_client.get("/api/v1/growth/prospects")).json()["items"] == []
 
     # The same domains in w2 are creates (fresh rows), not cross-tenant updates.
     resp = await w2_client.post("/api/v1/growth/prospects/bulk", json={"rows": rows})
     assert resp.json() == {"created": 3, "updated": 0, "errors": []}
 
-    w1_listed = (await w1_client.get("/api/v1/growth/prospects")).json()
-    w2_listed = (await w2_client.get("/api/v1/growth/prospects")).json()
+    w1_listed = (await w1_client.get("/api/v1/growth/prospects")).json()["items"]
+    w2_listed = (await w2_client.get("/api/v1/growth/prospects")).json()["items"]
     assert len(w1_listed) == 3 and len(w2_listed) == 3
     assert {p["id"] for p in w1_listed}.isdisjoint({p["id"] for p in w2_listed})
 
@@ -361,4 +366,5 @@ async def test_cross_tenant_access_is_isolated(w1_client, w2_client, op):
     else:  # list
         resp = await w2_client.get("/api/v1/growth/prospects")
         assert resp.status_code == 200
-        assert resp.json() == []
+        assert resp.json()["items"] == []
+        assert resp.json()["total"] == 0

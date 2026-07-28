@@ -17,6 +17,11 @@
 # the DTO only checks it's a known status), DraftResponse.
 # Updated 2026-07-27 (feat/growth-g4): ProposeSendResponse — the Instinct
 # proposal id + the flipped draft returned by POST /growth/drafts/{id}/propose.
+# Updated 2026-07-28 (feat/growth-api-scale): ProspectPageResponse — the
+# cursor-paginated envelope GET /growth/prospects now returns
+# ({items, next_cursor, total}) in place of the bare array. Breaking on
+# purpose: "n of m" needs a filter-scoped total and reaching row 3,000 needs a
+# resume key, and neither fits in a naked list.
 # Updated 2026-07-27 (feat/growth-g8): LinkedInQueueItemResponse — one row of
 # the manual LinkedIn send queue: the draft envelope joined with the prospect
 # context the captain needs to send by hand (name, company, profile URL,
@@ -141,6 +146,21 @@ class ProspectResponse(BaseModel):
     updated_at: str | None
 
 
+class ProspectPageResponse(BaseModel):
+    """One cursor-paginated page of prospects (G-10a).
+
+    Replaces the bare array the list route used to return — a BREAKING change,
+    made deliberately: without ``total`` the UI cannot say "n of m", and
+    without ``next_cursor`` it cannot reach row 3,000. ``total`` counts every
+    row matching the CURRENT filters (not the page), so it is stable while
+    paging and is what the count reads from.
+    """
+
+    items: list[ProspectResponse]
+    next_cursor: str | None = None
+    total: int
+
+
 class CreateDraftRequest(BaseModel):
     """One channel's outreach copy for a prospect.
 
@@ -223,6 +243,7 @@ __all__ = [
     "DraftResponse",
     "LinkedInQueueItemResponse",
     "ProposeSendResponse",
+    "ProspectPageResponse",
     "ProspectResponse",
     "TransitionDraftRequest",
     "UpdateProspectRequest",
