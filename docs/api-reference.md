@@ -110,6 +110,15 @@ Security review follow-up: documented per-route growth RBAC
 and the fact that a _growth_send blob can only be minted by this route —
 the generic POST /instinct/actions refuses reserved gated parameter keys.
 
+Updated: 2026-07-28 (feat/growth-mcp) — added the Growth — the agent surface
+section: the nine pocketpaw_growth in-process MCP tools the chat agent on the
+/growth rail drives, the table of how that surface is narrower than the HTTP
+one, and why the agent's reach ends at proposed (no send tool, no status
+argument, no route to gate_transition). Also added PATCH /growth/drafts/{id}
+— edit a draft's copy while it is still `draft`; anything past that is
+403 draft.not_editable, because from proposed on the stored body is what the
+Tray shows and what the worker sends.
+
 Updated: 2026-07-28 (feat/growth-api-scale) — the prospect list grew a scale
 surface. BREAKING: GET /growth/prospects now returns
 {items, next_cursor, total} instead of a bare array. Added q search across
@@ -1782,6 +1791,21 @@ List the workspace's drafts, newest first. Optional query filters:
 `prospect_id`, `channel`, `status` (enum-validated — an unknown value is a
 422) and `limit` (default 100, max 500).
 
+### `PATCH /api/v1/growth/drafts/{draft_id}`
+
+Edit a draft's copy. Body: any subset of `subject`, `body`, `demo_url`
+(an empty body object is a 422 — there is nothing to change). No `status`
+field exists on this request: a lifecycle move dressed as an edit would be a
+second, unreviewed road to `approved`.
+
+**Only while the draft is still `draft`.** From `proposed` on, the stored body
+is what a human is reading in the Tray and what the dispatch worker puts on
+the wire, so an edit there would send copy nobody approved — refused with
+`403 draft.not_editable`. Revise by rejecting the draft and writing a new one.
+`subject` stays email-only (`422 draft.subject_not_allowed` on a linkedin /
+whatsapp draft). Cross-tenant or unknown ids: `404 draft.not_found`. Requires
+`growth.write` (MEMBER) — editing copy is authoring, not an outbound verb.
+
 ### `POST /api/v1/growth/drafts/{draft_id}/status`
 
 Move a draft along the lifecycle. Body: `{"status": "proposed"}` (any
@@ -2145,3 +2169,51 @@ the same prospect never learns someone else's outreach got a reply.
 | `GROWTH_WHATSAPP_MAX_PER_HOUR` | `20` | Per-workspace outbound WhatsApp ceiling per rolling hour. WhatsApp quality rating is computed over a rolling window of recent business-initiated messages, and a burst (bulk approval, retry storm, mis-scoped follow-up cron) is exactly the shape that trips it — with the damage landing on the WABA, not the individual send. The cap bounds the blast radius of a bug. Attempts that reached the provider (`sending` / `sent` / `failed`) consume the window; refused attempts do not. There is no "disabled" value — `0` refuses every send rather than meaning unlimited, and a non-numeric or negative value falls back to the default, so a fat-fingered setting fails closed. |
 | `GROWTH_MSG91_WEBHOOK_SECRET` | *(unset)* | Shared secret for the inbound webhook HMAC. **Required** — while unset, `POST /growth/webhooks/msg91` rejects every request with 403. |
 | `CLOUD_ENCRYPTION_KEY` | *(unset)* | Existing deployment-wide Fernet key. Needed to store the MSG91 authkey as `authkey_enc` rather than plaintext. |
+
+## Growth — the agent surface (`pocketpaw_growth` MCP)
+
+The chat agent on the `/growth` rail reaches the same service layer through
+nine in-process MCP tools. It is the operator's assistant on that page: it can
+research and file a prospect, write and revise the copy, and put a send in
+front of a human. It cannot send.
+
+| Tool | RBAC | What it does |
+|---|---|---|
+| `growth_list_prospects` | `growth.read` | Compact rows + the filter-scoped `total`; `tier` / `status` / `source` / `q` / `sort` / `cursor` / `limit` |
+| `growth_get_prospect` | `growth.read` | One prospect in full, with every draft written for it |
+| `growth_list_drafts` | `growth.read` | Drafts with truncated body previews; filters by prospect / channel / status |
+| `growth_linkedin_queue` | `growth.read` | The manual LinkedIn queue with its prospect context |
+| `growth_upsert_prospect` | `growth.write` | Create-or-enrich keyed on `domain`; omitted fields keep their stored values |
+| `growth_create_draft` | `growth.write` | Write one channel's copy — born `draft` |
+| `growth_update_draft` | `growth.write` | Revise copy, only while the draft is still `draft` |
+| `growth_propose_send` | `growth.manage` | Files one `_growth_send` Instinct proposal; returns `{status: "proposed", proposal_id}` |
+| `growth_propose_send_batch` | `growth.manage` | The same, over up to 100 draft ids — one proposal each |
+
+The agent's surface is deliberately **narrower than the HTTP one**:
+
+| Verb | Operator over HTTP | Agent over MCP |
+|------|--------------------|----------------|
+| reads, upsert a prospect, write a draft | runs | runs |
+| edit a draft's copy (while `draft`) | runs | runs |
+| propose a send | runs | runs |
+| move a draft to `approved` or `sent` | **refused** (gate-owned) | **no tool exists** |
+| mark a LinkedIn draft sent | runs | **no tool exists** |
+
+**The agent's reach ends at `proposed`.** No tool sends; no tool takes a
+`status` argument (the legal move is exposed as the named verb
+`growth_propose_send`, so there is no shape of argument that could ask for
+`approved`); and `service.gate_transition` — the seam the executor and the
+dispatch worker walk — is not reachable from the MCP module at all. The two
+`status` fields that do appear are read filters on the list tools.
+`growth_update_draft` stops at `draft` for the same reason: from `proposed`
+on, the stored body is what the Tray shows and what goes on the wire, so an
+edit past that point would be a send bypass wearing an edit's clothes. Tests
+assert all of this against the tool list and schemas, so a tool added later
+trips them before it ships.
+
+Tenancy comes from the chat stream's identity — no tool accepts a
+`workspace_id`, and every schema sets `additionalProperties: false`. The RBAC
+tiers mirror the HTTP routes, and the ADMIN tier on the propose verbs is
+load-bearing: `growth.executor` re-checks `growth.manage` against the
+proposer's **current** role at approve time, so a proposal filed below that
+tier could only ever clog the Tray.
