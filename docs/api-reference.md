@@ -110,6 +110,16 @@ Security review follow-up: documented per-route growth RBAC
 and the fact that a _growth_send blob can only be minted by this route —
 the generic POST /instinct/actions refuses reserved gated parameter keys.
 
+Updated: 2026-07-28 (feat/growth-api-scale) — the prospect list grew a scale
+surface. BREAKING: GET /growth/prospects now returns
+{items, next_cursor, total} instead of a bare array. Added q search across
+name/company/domain/research_brief, four sort modes (tier ordering is the
+declared rank a-b-c-unqualified, not lexicographic), keyset cursor
+pagination, GET /growth/prospects/facets (per-tier/status/source counts,
+each block excluding its own filter), and POST /growth/drafts/propose-batch
+(<=100 ids, each proposed through the existing Instinct gate, per-draft
+error entries, growth.manage).
+
 Updated: 2026-07-27 (feat/growth-g8) — added the Growth — LinkedIn Queue
 section: GET /growth/linkedin/queue (proposed/approved linkedin drafts joined
 with prospect context, ?format=md for a paste-ready markdown export) and
@@ -1988,8 +1998,8 @@ and Instinct-gated sends on the dedicated `growth` arq queue
 the license gate. Reads (`GET /growth/prospects`, `GET /growth/drafts`, …)
 require `growth.read` (MEMBER); authoring writes — create/update a prospect,
 bulk ingest, create a draft, non-gated lifecycle moves — require `growth.write`
-(MEMBER); and the outbound verb `POST /growth/drafts/{id}/propose` requires
-`growth.manage` (ADMIN). The propose route sits at the ADMIN tier deliberately:
+(MEMBER); and the outbound verbs — `POST /growth/drafts/{id}/propose` and
+`POST /growth/drafts/propose-batch` — require `growth.manage` (ADMIN). The propose route sits at the ADMIN tier deliberately:
 `growth.executor` re-checks that same action against the proposer's *current*
 role at dispatch time, so a member-filed proposal would always fail closed at
 approve. A caller below the required tier gets
@@ -2075,9 +2085,74 @@ create independent rows.
 
 ### `GET /api/v1/growth/prospects`
 
-List the workspace's prospects, newest first. Optional query filters:
-`tier`, `status`, `source` (validated against the enums above — an unknown
-value is a 422, not an empty list) and `limit` (default 100, max 500).
+One page of the workspace's prospects. **The response is an envelope, not a
+bare array** — it changed shape in G-10a:
+
+```json
+{
+  "items": [ { ...prospect envelope }, ... ],
+  "next_cursor": "newest:2026-07-28T09:14:02+00:00|66a1...f3",
+  "total": 3182
+}
+```
+
+`total` counts every row matching the current filters (not the page), so the
+UI can say "showing 40 of 3,182". `next_cursor` is `null` on the last page.
+
+Query parameters:
+
+| Param | Default | Notes |
+|---|---|---|
+| `tier`, `status`, `source` | — | Validated against the enums above; an unknown value is a 422, not an empty list. |
+| `q` | — | Case-insensitive substring search across `name`, `company`, `domain` and `research_brief`. Regex metacharacters are escaped, so `.*` matches nothing rather than everything. Max 200 chars. |
+| `sort` | `newest` | `newest` \| `oldest` \| `company` \| `tier`. |
+| `cursor` | — | The previous page's `next_cursor`, passed back unchanged. |
+| `limit` | 100 | Max 500. |
+
+**Tier sort order is the declared rank `a → b → c → unqualified`**, not a
+lexicographic comparison. Today's tier names happen to sort the same way
+lexicographically; that is an accident, and renaming a tier would break it
+silently. The rank lives in `growth/domain.py` as `TIER_SORT_ORDER` and the
+query walks those buckets in order.
+
+**Pagination is keyset**, so a page never skips or repeats a row when the
+collection is written to mid-scroll. The cursor is opaque — do not parse or
+construct it — and carries the sort mode it was issued under: reusing a
+cursor after changing `sort` is a `422 prospect.bad_cursor` rather than a
+silently wrong page. Any malformed cursor is the same 422.
+
+**Search scale ceiling.** `q` is an unanchored regex `$or` across four
+fields, which Mongo cannot serve from an index — it is a collection scan
+bounded by the workspace filter. Fine at the scale this surface targets (tens
+of thousands of rows per workspace); past ~100k it needs a real text index or
+an external search index. No text index was added here: `models/prospect.py`
+carries a unique `(workspace, domain)` index plus a `(workspace, createdAt)`
+list cursor, and a Mongo text index is a per-collection singleton that has to
+be designed against those rather than bolted on.
+
+### `GET /api/v1/growth/prospects/facets`
+
+Counts behind the filter chips. Takes the same `tier` / `status` / `source` /
+`q` filters as the list route and returns:
+
+```json
+{
+  "tier":   { "a": 12, "b": 40, "c": 8, "unqualified": 300 },
+  "status": { "new": 210, "qualified": 90, "drafted": 40, "in_sequence": 12, "replied": 6, "dead": 2 },
+  "source": { "clay": 180, "directory": 140, "manual": 40 }
+}
+```
+
+Each block respects every active filter **except its own**. With
+`status=new` on, the tier counts describe the new rows rather than
+collapsing to whichever tier is selected — otherwise the selected chip reads
+`n` and every sibling reads `0`, which tells the user nothing about where to
+go next. `q` constrains all three blocks (it is not a facet of its own).
+
+Every legal value appears, zeros included, so the chip row keeps a stable
+shape as the user filters. Served by one workspace-scoped `$facet`
+aggregation — three separate queries would be three chances for the counts to
+disagree with each other.
 
 ### `GET /api/v1/growth/prospects/{prospect_id}`
 
@@ -2198,6 +2273,44 @@ closed), and `mark_failed` on the Action if the enqueue fails. On
 `email` branch is live (below) and the `whatsapp` branch is live (*Growth —
 WhatsApp dispatch*); `linkedin` keeps the logging stub on purpose — it is
 sent by hand from the LinkedIn queue.
+
+### `POST /api/v1/growth/drafts/propose-batch`
+
+Propose a selection of drafts in one call. Requires `growth.manage` (ADMIN)
+— the same tier as the single propose, so batching is not a cheaper route to
+the outbound verb.
+
+```json
+{ "draft_ids": ["66a1...f3", "66a1...f4", "66a1...f5"] }
+```
+
+Max 100 ids; an oversized payload is a `422` at the boundary, before a single
+proposal is filed. The cap is 100 rather than bulk ingest's 500 because each
+id costs a proposal a human then has to triage in the Tray.
+
+Each id goes through the **same** `propose_send` path as the single-draft
+route: one gated `_growth_send` Instinct proposal per draft, each approved or
+rejected individually. There is no batch proposal object, no batch approval,
+and no shortcut into the gate — a "batch" here is a UI convenience over N
+gated proposals. Nothing is sent by this route.
+
+Partial success, like bulk ingest — a draft that cannot be proposed (missing,
+cross-tenant, already proposed, terminal) records an indexed error entry and
+the remaining ids still go:
+
+```json
+{
+  "proposed": 2,
+  "failed": [
+    { "index": 1, "draft_id": "not-an-object-id", "code": "draft.not_found", "message": "..." },
+    { "index": 2, "draft_id": "66a1...f5", "code": "draft.illegal_transition", "message": "..." }
+  ]
+}
+```
+
+`index` is the id's position in the submitted `draft_ids` array. Nothing is
+rolled back on partial failure — the proposals already filed are legitimate
+and a human can reject them in the Tray.
 
 ### Dispatch — how an approved email actually sends (G-5)
 
