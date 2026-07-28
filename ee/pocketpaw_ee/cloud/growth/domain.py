@@ -22,6 +22,11 @@
 # and ``blocked`` (a guard refused; no provider call happened) join
 # ``MESSAGE_LOG_OUTCOMES``, and ``PROVIDER_REACHED_OUTCOMES`` names the subset
 # the WhatsApp rate cap counts.
+# Updated 2026-07-28 (feat/growth-api-scale): the prospect list's scale
+# vocabulary — ``ProspectSort`` (the four ordering modes the UI offers) and
+# ``TIER_SORT_ORDER``, the DECLARED qualification rank a→b→c→unqualified. The
+# rank is data here rather than a lexicographic accident in the query layer, so
+# renaming a tier can't silently reorder the list.
 # Updated 2026-07-27 (feat/growth-g4): the Instinct send gate —
 # ``GATE_OWNED_TARGETS`` marks the statuses only the gate machinery may set
 # (``approved`` via an approved ``_growth_send`` proposal, ``sent`` via the
@@ -50,6 +55,17 @@ ProspectTier = Literal["a", "b", "c", "unqualified"]
 
 # Outbound lifecycle. Later slices move prospects along this chain.
 ProspectStatus = Literal["new", "qualified", "drafted", "in_sequence", "replied", "dead"]
+
+# G-10a — the prospect list's ordering modes. ``newest`` is the default and is
+# byte-for-byte the pre-G-10a behaviour.
+ProspectSort = Literal["newest", "oldest", "company", "tier"]
+
+# Qualification rank, best first. This is DECLARED, not derived: a lexicographic
+# sort over the current tier names happens to produce the same order, which is
+# luck — rename ``unqualified`` to ``untriaged`` or add a ``d`` tier and the
+# accident breaks silently. The list query walks these buckets in this order, so
+# the ordering survives any rename of the values above.
+TIER_SORT_ORDER: tuple[str, ...] = ("a", "b", "c", "unqualified")
 
 
 @dataclass(frozen=True)
@@ -191,6 +207,7 @@ __all__ = [
     "GROWTH_QUEUE_NAME",
     "MESSAGE_LOG_OUTCOMES",
     "PROVIDER_REACHED_OUTCOMES",
+    "TIER_SORT_ORDER",
     "Draft",
     "DraftChannel",
     "DraftStatus",
@@ -198,6 +215,7 @@ __all__ = [
     "MessageLog",
     "MessageOutcome",
     "Prospect",
+    "ProspectSort",
     "ProspectSource",
     "ProspectStatus",
     "ProspectTier",
