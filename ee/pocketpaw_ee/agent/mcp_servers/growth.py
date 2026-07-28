@@ -47,6 +47,14 @@
 # and the LinkedIn queue.
 #
 # Created 2026-07-28 (feat/growth-mcp): new module.
+# Updated 2026-07-28 (feat/growth-projects): a prospect may now be JUST A DOMAIN
+# — ``CreateProspectRequest`` accepts an empty name / company. The CREATE
+# refusal in ``_upsert_prospect_handler`` is UNCHANGED and is now the only thing
+# holding that line for the agent: a human pasting a domain list is entitled to
+# a nameless row, an agent that researched a company and still can't name it is
+# not. What did change is the placeholder: the ``or "unknown"`` fallbacks are
+# gone, because with an empty name legal in the store they would have stamped
+# the literal word "unknown" over a real (blank) value on any enrichment call.
 
 from __future__ import annotations
 
@@ -467,8 +475,6 @@ async def _upsert_prospect_handler(args: dict) -> dict:
         # Build once to canonicalise the domain (the DTO validator strips the
         # scheme / www / path), then look the row up on that canonical form.
         probe = CreateProspectRequest(
-            name=name or "unknown",
-            company=company or "unknown",
             domain=domain,
             source=_opt_str(args, "source") or "manual",
         )
@@ -497,8 +503,12 @@ async def _upsert_prospect_handler(args: dict) -> dict:
 
     try:
         body = CreateProspectRequest(
-            name=_pick(name, "name", None) or "unknown",
-            company=_pick(company, "company", None) or "unknown",
+            # No "unknown" placeholder: on a CREATE the refusal above already
+            # demanded both, and on an ENRICH the stored value carries forward
+            # — including a stored "" from a bare-domain import, which must
+            # survive an unrelated enrichment rather than be stamped over.
+            name=_pick(name, "name", "") or "",
+            company=_pick(company, "company", "") or "",
             domain=probe.domain,
             source=_pick(_opt_str(args, "source"), "source", "manual"),
             tier=_pick(_opt_str(args, "tier"), "tier", "unqualified"),

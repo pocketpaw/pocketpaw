@@ -70,6 +70,11 @@
 # MSG91 inbound webhook) never touch a doc class. It reuses G-5's
 # ``get_draft_for_dispatch`` / ``get_prospect_for_dispatch`` readers (G-6 had
 # built an identical pair under different names, collapsed at integration),
+# Updated 2026-07-28 (feat/growth-projects): a prospect may be JUST A DOMAIN.
+# ``name`` / ``company`` can now be empty (see ``dto.py``), so the LinkedIn
+# export titles its sections through ``_queue_heading`` — whichever of
+# name/company is known, else the domain, never a placeholder word — and the
+# queue row carries ``prospect_domain`` to make that fallback possible.
 # ``record_whatsapp_attempt`` / ``finish_whatsapp_attempt`` /
 # ``count_whatsapp_attempts_since`` own the WhatsApp compliance record and its
 # rate-cap window, and ``record_whatsapp_inbound_reply`` applies the opt-in +
@@ -1052,6 +1057,7 @@ async def linkedin_queue(
                 draft=_draft_to_response(draft),
                 prospect_name=prospect.name,
                 prospect_company=prospect.company,
+                prospect_domain=prospect.domain,
                 linkedin_url=prospect.linkedin_url,
                 research_brief=prospect.research_brief,
                 tier=prospect.tier,
@@ -1065,6 +1071,20 @@ def _one_line(text: str, max_len: int = 160) -> str:
     stripped = text.strip()
     line = stripped.splitlines()[0].strip() if stripped else ""
     return line if len(line) <= max_len else line[: max_len - 1] + "…"
+
+
+def _queue_heading(item: LinkedInQueueItemResponse) -> str:
+    """Title one queue section, honestly, whatever is known about the prospect.
+
+    A prospect can be just a domain: an import of bare domains files rows with
+    an empty name and company, and research fills them in later. So the heading
+    joins whichever of (name, company) exist and falls back to the DOMAIN,
+    which is always known — never to a placeholder word. ``Unknown — Unknown``
+    reads like a corrupted row; ``northwinddental.com`` reads like a company
+    nobody has researched yet, which is the truth.
+    """
+    known = [part for part in (item.prospect_name, item.prospect_company) if part.strip()]
+    return " — ".join(known) or item.prospect_domain or "(no domain)"
 
 
 def _render_queue_markdown(items: list[LinkedInQueueItemResponse]) -> str:
@@ -1087,7 +1107,7 @@ def _render_queue_markdown(items: list[LinkedInQueueItemResponse]) -> str:
 
     for group in grouped.values():
         head = group[0]
-        lines.append(f"## {head.prospect_name} — {head.prospect_company}")
+        lines.append(f"## {_queue_heading(head)}")
         lines.append("")
         if head.linkedin_url:
             lines.append(f"[LinkedIn profile]({head.linkedin_url})")

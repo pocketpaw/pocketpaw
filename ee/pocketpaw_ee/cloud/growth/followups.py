@@ -34,6 +34,10 @@
 # so the tests freeze it instead of sleeping.
 #
 # Created 2026-07-27 (feat/growth-g7): new module.
+# Updated 2026-07-28 (feat/growth-projects): a prospect may be just a domain, so
+# ``render_followup`` no longer assumes a company. The body already degraded
+# (``there`` / ``your team``); the generated subject now drops the dash instead
+# of sending "Following up —", which reads as a template that failed to render.
 
 """Daily follow-up sweep for the /growth outbound engine."""
 
@@ -168,7 +172,11 @@ def render_followup(
                 else f"Re: {original_subject}"
             )
         else:
-            subject = f"Following up — {prospect_company}".strip()
+            # A prospect can be just a domain, so the company may be empty.
+            # Drop the dash rather than sending "Following up —", which reads
+            # like a template that failed to render.
+            company = prospect_company.strip()
+            subject = f"Following up — {company}" if company else "Following up"
         subject = subject[:200]
     return subject, body
 
