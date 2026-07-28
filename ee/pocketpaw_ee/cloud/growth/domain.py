@@ -23,10 +23,12 @@
 # ``MESSAGE_LOG_OUTCOMES``, and ``PROVIDER_REACHED_OUTCOMES`` names the subset
 # the WhatsApp rate cap counts.
 # Updated 2026-07-28 (feat/growth-api-scale): the prospect list's scale
-# vocabulary — ``ProspectSort`` (the four ordering modes the UI offers) and
-# ``TIER_SORT_ORDER``, the DECLARED qualification rank a→b→c→unqualified. The
-# rank is data here rather than a lexicographic accident in the query layer, so
-# renaming a tier can't silently reorder the list.
+# vocabulary — ``ProspectSort`` (the four ordering modes the UI offers),
+# ``TIER_SORT_ORDER``, the DECLARED qualification rank a→b→c→unqualified, and
+# ``PROSPECT_STATUS_ORDER`` / ``PROSPECT_SOURCE_ORDER``, the facet display
+# orders derived from the Literals. The rank is data here rather than a
+# lexicographic accident in the query layer, so renaming a tier can't silently
+# reorder the list.
 # Updated 2026-07-27 (feat/growth-g4): the Instinct send gate —
 # ``GATE_OWNED_TARGETS`` marks the statuses only the gate machinery may set
 # (``approved`` via an approved ``_growth_send`` proposal, ``sent`` via the
@@ -37,7 +39,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Literal, get_args
 
 # Dedicated arq queue for growth jobs. Unlike workspace jobs (which ride arq's
 # default queue on the shared chat-runs worker — see ``jobs/domain.py``), growth
@@ -66,6 +68,13 @@ ProspectSort = Literal["newest", "oldest", "company", "tier"]
 # accident breaks silently. The list query walks these buckets in this order, so
 # the ordering survives any rename of the values above.
 TIER_SORT_ORDER: tuple[str, ...] = ("a", "b", "c", "unqualified")
+
+# Display order for the facet counts. Derived from the Literals above rather
+# than re-typed, so a new status or source can never go missing from the chip
+# row. ``TIER_SORT_ORDER`` stays hand-written because it is a RANK, which is a
+# different claim than "the set of legal values".
+PROSPECT_STATUS_ORDER: tuple[str, ...] = get_args(ProspectStatus)
+PROSPECT_SOURCE_ORDER: tuple[str, ...] = get_args(ProspectSource)
 
 
 @dataclass(frozen=True)
@@ -206,6 +215,8 @@ __all__ = [
     "GROWTH_DISPATCH_JOB_NAME",
     "GROWTH_QUEUE_NAME",
     "MESSAGE_LOG_OUTCOMES",
+    "PROSPECT_SOURCE_ORDER",
+    "PROSPECT_STATUS_ORDER",
     "PROVIDER_REACHED_OUTCOMES",
     "TIER_SORT_ORDER",
     "Draft",

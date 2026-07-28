@@ -30,7 +30,9 @@
 # WALKED rather than compared, and keyset cursor pagination returning
 # ``ProspectPageResponse`` ({items, next_cursor, total}) in place of a bare
 # list. Cursors carry their sort mode so a mid-scroll sort change 422s instead
-# of resuming against a key that means something else.
+# of resuming against a key that means something else. ``prospect_facets``
+# counts tier/status/source in ONE workspace-scoped ``$facet`` aggregation,
+# each block excluding its own filter.
 # Updated 2026-07-27 (feat/growth-g8): LinkedIn manual queue —
 # ``linkedin_queue`` (proposed/approved linkedin drafts joined with their
 # prospect via two queries, newest first), ``linkedin_queue_markdown``
@@ -87,6 +89,8 @@ from pocketpaw_ee.cloud.growth.domain import (
     DRAFT_TRANSITIONS,
     GATE_OWNED_TARGETS,
     MESSAGE_LOG_OUTCOMES,
+    PROSPECT_SOURCE_ORDER,
+    PROSPECT_STATUS_ORDER,
     PROVIDER_REACHED_OUTCOMES,
     TIER_SORT_ORDER,
     Draft,
@@ -102,6 +106,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     DraftResponse,
     LinkedInQueueItemResponse,
     ProposeSendResponse,
+    ProspectFacetsResponse,
     ProspectPageResponse,
     ProspectResponse,
     TransitionDraftRequest,
@@ -526,6 +531,66 @@ async def list_prospects(
         next_cursor=next_cursor,
         total=total,
     )
+
+
+# The facet blocks: response field → (document field, display order).
+_PROSPECT_FACETS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "tier": ("tier", TIER_SORT_ORDER),
+    "status": ("status", PROSPECT_STATUS_ORDER),
+    "source": ("source", PROSPECT_SOURCE_ORDER),
+}
+
+
+async def prospect_facets(
+    ctx: RequestContext,
+    *,
+    tier: str | None = None,
+    status: str | None = None,
+    source: str | None = None,
+    q: str | None = None,
+) -> ProspectFacetsResponse:
+    """Counts per tier / status / source for the filter chips.
+
+    Each block respects every active filter EXCEPT its own: with a status
+    filter on, the tier counts still describe that status's rows rather than
+    collapsing to the one selected tier. That self-exclusion is what makes a
+    facet a facet — otherwise the selected chip reads ``n`` and every sibling
+    reads ``0``, which tells the user nothing about where to go next.
+
+    ONE aggregation, workspace-scoped: the ``$or`` search and the tenancy
+    filter (which every block shares) go in the outer ``$match``, and each
+    ``$facet`` branch adds only the sibling filters it needs. Three round
+    trips would be three chances for the counts to disagree with each other.
+    """
+    workspace_id = _require_workspace(ctx)
+    active = {"tier": tier, "status": status, "source": source}
+
+    # Shared prefix — tenancy + the search term, which constrains every block.
+    outer = _prospect_filters(workspace_id, q=q)
+
+    branches: dict[str, list[dict[str, Any]]] = {}
+    for block, (field, _order) in _PROSPECT_FACETS.items():
+        siblings = {f: v for f, v in active.items() if f != block and v is not None}
+        stages: list[dict[str, Any]] = []
+        if siblings:
+            stages.append({"$match": siblings})
+        stages.append({"$group": {"_id": f"${field}", "n": {"$sum": 1}}})
+        branches[block] = stages
+
+    pipeline: list[dict[str, Any]] = [{"$match": outer}, {"$facet": branches}]
+    rows = await _ProspectDoc.get_motor_collection().aggregate(pipeline).to_list(None)
+    raw: dict[str, Any] = rows[0] if rows else {}
+
+    counted: dict[str, dict[str, int]] = {}
+    for block, (_field, order) in _PROSPECT_FACETS.items():
+        seen = {b["_id"]: int(b["n"]) for b in raw.get(block, []) if b.get("_id") is not None}
+        # Every legal value is present, zeros included, so the chip row keeps a
+        # stable shape while the user filters. An unknown value (legacy row,
+        # hand-edited document) is appended rather than silently dropped.
+        counted[block] = {value: seen.pop(value, 0) for value in order} | {
+            value: count for value, count in seen.items()
+        }
+    return ProspectFacetsResponse(**counted)
 
 
 async def update(

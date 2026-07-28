@@ -21,7 +21,8 @@
 # cursor-paginated envelope GET /growth/prospects now returns
 # ({items, next_cursor, total}) in place of the bare array. Breaking on
 # purpose: "n of m" needs a filter-scoped total and reaching row 3,000 needs a
-# resume key, and neither fits in a naked list.
+# resume key, and neither fits in a naked list. ProspectFacetsResponse — the
+# per-tier / per-status / per-source counts behind the filter chips.
 # Updated 2026-07-27 (feat/growth-g8): LinkedInQueueItemResponse — one row of
 # the manual LinkedIn send queue: the draft envelope joined with the prospect
 # context the captain needs to send by hand (name, company, profile URL,
@@ -161,6 +162,21 @@ class ProspectPageResponse(BaseModel):
     total: int
 
 
+class ProspectFacetsResponse(BaseModel):
+    """Counts per tier / status / source for the filter chips (G-10a).
+
+    Each block is ``{value: count}`` covering EVERY legal value, zeros
+    included — the chip row keeps a stable shape as the user filters instead
+    of chips appearing and vanishing. Each block respects the OTHER active
+    filters but not its own, so the tier counts stay meaningful while a status
+    filter is on (that is the whole point of a facet).
+    """
+
+    tier: dict[str, int]
+    status: dict[str, int]
+    source: dict[str, int]
+
+
 class CreateDraftRequest(BaseModel):
     """One channel's outreach copy for a prospect.
 
@@ -243,6 +259,7 @@ __all__ = [
     "DraftResponse",
     "LinkedInQueueItemResponse",
     "ProposeSendResponse",
+    "ProspectFacetsResponse",
     "ProspectPageResponse",
     "ProspectResponse",
     "TransitionDraftRequest",
