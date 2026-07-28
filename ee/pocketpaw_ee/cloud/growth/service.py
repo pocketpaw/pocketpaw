@@ -578,7 +578,12 @@ async def prospect_facets(
         branches[block] = stages
 
     pipeline: list[dict[str, Any]] = [{"$match": outer}, {"$facet": branches}]
-    rows = await _ProspectDoc.get_motor_collection().aggregate(pipeline).to_list(None)
+    # Straight to the driver collection rather than Beanie's
+    # ``Document.aggregate``: that wrapper returns a latent command cursor that
+    # cannot be awaited under mongomock-motor (the reference_mongomock_quirks
+    # caveat — aggregation CURSORS, not aggregation itself). The driver's own
+    # cursor round-trips $facet with nested $match/$group there and in Mongo.
+    rows = await _ProspectDoc.get_pymongo_collection().aggregate(pipeline).to_list(None)
     raw: dict[str, Any] = rows[0] if rows else {}
 
     counted: dict[str, dict[str, int]] = {}
