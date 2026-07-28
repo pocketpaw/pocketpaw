@@ -523,7 +523,7 @@ class TestCredentialsNeverLeak:
         assert SECRET_AUTHKEY not in str([entry.model_dump() for entry in logs])
 
         drafts = await growth_service.list_drafts(_ctx("w1"))
-        prospects = await growth_service.list_prospects(_ctx("w1"))
+        prospects = (await growth_service.list_prospects(_ctx("w1"))).items
         serialised = str([d.model_dump() for d in drafts] + [p.model_dump() for p in prospects])
         assert SECRET_AUTHKEY not in serialised
 

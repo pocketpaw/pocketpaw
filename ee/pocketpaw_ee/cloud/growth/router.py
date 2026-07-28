@@ -28,6 +28,11 @@
 # /drafts/{id}/propose — takes ``growth.manage`` (ADMIN): the propose route
 # has to sit at the same tier ``growth.executor`` re-checks at dispatch, or a
 # member-filed proposal would always fail closed at approve time.
+# Updated 2026-07-28 (feat/growth-api-scale): GET /prospects grew the scale
+# query — ``q`` (search), ``sort`` (newest|oldest|company|tier), ``cursor`` —
+# and now returns ``ProspectPageResponse`` ({items, next_cursor, total})
+# instead of a bare array. BREAKING for any existing consumer of the list
+# route; the frontend list view is the only one and lands with it.
 # Updated 2026-07-27 (feat/growth-g8): LinkedIn manual queue — GET
 # /linkedin/queue (proposed/approved linkedin drafts joined with prospect
 # context; ``?format=md`` returns a paste-ready text/markdown export) and
@@ -64,6 +69,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     DraftResponse,
     LinkedInQueueItemResponse,
     ProposeSendResponse,
+    ProspectPageResponse,
     ProspectResponse,
     TransitionDraftRequest,
     UpdateProspectRequest,
@@ -102,7 +108,7 @@ async def bulk_ingest_prospects(
 
 @router.get(
     "/prospects",
-    response_model=list[ProspectResponse],
+    response_model=ProspectPageResponse,
     dependencies=[Depends(require_action_any_workspace("growth.read"))],
 )
 async def list_prospects(
@@ -111,15 +117,28 @@ async def list_prospects(
     source: ProspectSource | None = Query(default=None),
     q: str | None = Query(default=None, max_length=200),
     sort: ProspectSort = Query(default="newest"),
+    cursor: str | None = Query(default=None, max_length=200),
     limit: int = Query(default=100, ge=1, le=500),
     ctx: RequestContext = Depends(request_context),
-) -> list[ProspectResponse]:
-    """``q`` is a case-insensitive substring search across name / company /
+) -> ProspectPageResponse:
+    """One page of prospects: ``{items, next_cursor, total}``.
+
+    ``q`` is a case-insensitive substring search across name / company /
     domain / research_brief — the "find that one company" box. ``sort`` is
     ``newest`` (default) / ``oldest`` / ``company`` / ``tier``; the tier order
-    is the declared rank a→b→c→unqualified, not a lexicographic accident."""
+    is the declared rank a→b→c→unqualified, not a lexicographic accident.
+    ``cursor`` is the previous page's ``next_cursor``, passed back unchanged;
+    ``null`` there means the last page. ``total`` counts every row matching the
+    filters, so the UI can say "n of m"."""
     return await growth_service.list_prospects(
-        ctx, tier=tier, status=status, source=source, q=q, sort=sort, limit=limit
+        ctx,
+        tier=tier,
+        status=status,
+        source=source,
+        q=q,
+        sort=sort,
+        cursor=cursor,
+        limit=limit,
     )
 
 
