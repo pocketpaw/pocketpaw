@@ -16,6 +16,12 @@ Changes:
   boundary (EE Rule 2 — only this module touches ``ChatRunDoc``). ``bill_run`` now
   calls ``mark_billed`` instead. Reading ``run_doc.usage`` in metering stays fine;
   only the WRITE moves here, the owner of the document.
+- 2026-07-28 (HR-12a, feat/cockpit-agent-activity) — the ``queued``/``running``
+  pair that three functions each spelled inline is now the named
+  ``ACTIVE_RUN_STATUSES`` constant, and two workspace-scoped reads were added
+  (``find_active_runs_for_workspace`` / ``find_recent_runs_for_workspace``) for
+  the agent-activity board. They return ``RunActivityRow`` value objects, not
+  ``ChatRunDoc``, so the caller never sees a Beanie document.
 """
 
 from __future__ import annotations
@@ -27,12 +33,30 @@ from typing import Any
 from pymongo.errors import DuplicateKeyError
 
 from pocketpaw_ee.cloud._core.errors import NotFound
-from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
+from pocketpaw_ee.cloud.chat.runs.domain import RunActivityRow, RunSpec
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+# A run is ACTIVE while it has been accepted but has not reached a terminal
+# state. One definition, one place: the scope lookup, the jail guard, and the
+# agent-activity board all read the same pair, so "is this agent working right
+# now" can never disagree with "is this scope busy".
+ACTIVE_RUN_STATUSES = ("queued", "running")
 
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _to_activity_row(doc: ChatRunDoc) -> RunActivityRow:
+    """Project a run document onto the Beanie-free activity value object."""
+    return RunActivityRow(
+        run_id=doc.run_id,
+        agent_id=doc.agent_id,
+        status=doc.status,
+        created_at=doc.createdAt,
+        started_at=doc.started_at,
+        ended_at=doc.ended_at,
+    )
 
 
 async def create_run(spec: RunSpec) -> ChatRunDoc:
@@ -154,7 +178,7 @@ async def find_active_run_for_scope(
             ChatRunDoc.workspace == workspace_id,
             ChatRunDoc.scope_id == scope_id,
             ctype_filter,
-            {"status": {"$in": ["queued", "running"]}},
+            {"status": {"$in": list(ACTIVE_RUN_STATUSES)}},
         )
         .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
         .first_or_none()
@@ -164,7 +188,7 @@ async def find_active_run_for_scope(
 async def find_stale_running(older_than: datetime) -> list[ChatRunDoc]:
     """Runs left queued/running before a cutoff."""
     return await ChatRunDoc.find(
-        {"status": {"$in": ["queued", "running"]}},
+        {"status": {"$in": list(ACTIVE_RUN_STATUSES)}},
         ChatRunDoc.createdAt < older_than,
     ).to_list()
 
@@ -183,6 +207,68 @@ async def find_active_run_scopes() -> set[tuple[str, str, str]]:
     GC pass into deleting a jail it's about to reuse.
     """
     docs = await ChatRunDoc.find(
-        {"status": {"$in": ["queued", "running"]}},
+        {"status": {"$in": list(ACTIVE_RUN_STATUSES)}},
     ).to_list()
     return {(d.workspace, d.context_type, d.scope_id) for d in docs}
+
+
+# ---------------------------------------------------------------------------
+# Workspace-scoped activity reads (HR-12a)
+#
+# Both are TENANT-SCOPED by construction: ``workspace_id`` is a required
+# keyword and lands in the filter, so there is no call shape that returns
+# another workspace's runs. Both are also WINDOWED and CAPPED — an activity
+# board must never be able to ask Mongo for a workspace's whole run history.
+# The ``(workspace, context_type, scope_id, createdAt)`` index on ChatRunDoc
+# leads on ``workspace``, so the workspace + createdAt filter is served by its
+# prefix.
+# ---------------------------------------------------------------------------
+
+
+async def find_active_runs_for_workspace(
+    *,
+    workspace_id: str,
+    since: datetime,
+    limit: int,
+) -> list[RunActivityRow]:
+    """A workspace's currently-active (``queued``/``running``) runs, newest first.
+
+    Windowed like its sibling below on purpose: a run still marked ``running``
+    from days ago is a leaked run (that is what ``find_stale_running`` reaps),
+    not an agent at work, and showing it would pin an agent to ACTIVE forever.
+    """
+    docs = (
+        await ChatRunDoc.find(
+            ChatRunDoc.workspace == workspace_id,
+            ChatRunDoc.createdAt >= since,
+            {"status": {"$in": list(ACTIVE_RUN_STATUSES)}},
+        )
+        .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
+        .limit(limit)
+        .to_list()
+    )
+    return [_to_activity_row(d) for d in docs]
+
+
+async def find_recent_runs_for_workspace(
+    *,
+    workspace_id: str,
+    since: datetime,
+    limit: int,
+) -> list[RunActivityRow]:
+    """A workspace's runs of any status since ``since``, newest first.
+
+    Truncation is by newest-first, so a busy workspace loses its least-recently
+    active agents from the tail — never its live ones, which the active read
+    above surfaces independently of this cap.
+    """
+    docs = (
+        await ChatRunDoc.find(
+            ChatRunDoc.workspace == workspace_id,
+            ChatRunDoc.createdAt >= since,
+        )
+        .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
+        .limit(limit)
+        .to_list()
+    )
+    return [_to_activity_row(d) for d in docs]

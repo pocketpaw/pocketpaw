@@ -219,6 +219,17 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Run agent activity tests
+        # Same addopts escape as the cockpit step above. This one guards a
+        # CROSS-TENANT property — the board is filtered to the caller's
+        # workspace at the query — so it must not sit in the tests/cloud blind
+        # spot: a dropped filter would be a silent leak between tenants that no
+        # other lane runs a test for.
+        run: uv run pytest tests/cloud/test_agent_activity.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
   import-linter:
     name: OSS-EE boundary
     runs-on: ubuntu-latest
