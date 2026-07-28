@@ -32,7 +32,10 @@
 # list. Cursors carry their sort mode so a mid-scroll sort change 422s instead
 # of resuming against a key that means something else. ``prospect_facets``
 # counts tier/status/source in ONE workspace-scoped ``$facet`` aggregation,
-# each block excluding its own filter.
+# each block excluding its own filter. ``propose_send_batch`` proposes a
+# selection of drafts by calling the EXISTING ``propose_send`` per id — one
+# gated Instinct proposal each, no batch proposal object and no second route
+# to ``approved``; partial success in the ``bulk_ingest`` style.
 # Updated 2026-07-27 (feat/growth-g8): LinkedIn manual queue —
 # ``linkedin_queue`` (proposed/approved linkedin drafts joined with their
 # prospect via two queries, newest first), ``linkedin_queue_markdown``
@@ -83,7 +86,13 @@ from beanie import PydanticObjectId
 from pydantic import ValidationError as PydanticValidationError
 
 from pocketpaw_ee.cloud._core.context import RequestContext
-from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import (
+    CloudError,
+    ConflictError,
+    Forbidden,
+    NotFound,
+    ValidationError,
+)
 from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.growth.domain import (
     DRAFT_TRANSITIONS,
@@ -105,6 +114,9 @@ from pocketpaw_ee.cloud.growth.dto import (
     CreateProspectRequest,
     DraftResponse,
     LinkedInQueueItemResponse,
+    ProposeBatchError,
+    ProposeBatchRequest,
+    ProposeBatchResponse,
     ProposeSendResponse,
     ProspectFacetsResponse,
     ProspectPageResponse,
@@ -884,6 +896,57 @@ async def propose_send(ctx: RequestContext, draft_id: str) -> ProposeSendRespons
     # in which case the pending proposal stays for the human to reject.
     draft = await transition(ctx, draft_id, TransitionDraftRequest(status="proposed"))
     return ProposeSendResponse(proposal_id=proposal_id, draft=draft)
+
+
+async def propose_send_batch(
+    ctx: RequestContext, body: ProposeBatchRequest
+) -> ProposeBatchResponse:
+    """Propose a selection of drafts in one call (G-10a).
+
+    Each id goes through the EXISTING ``propose_send`` — one Instinct
+    proposal per draft, filed by the same code path the single-draft route
+    uses. There is deliberately no batch proposal object and no shortcut into
+    ``gate_transition``: a "batch" here is a UI convenience over N gated
+    proposals, and a human still approves each one in the Tray. A parallel
+    mechanism would be a second way to reach ``approved``, which is exactly
+    what ``GATE_OWNED_TARGETS`` exists to prevent.
+
+    Partial success, like ``bulk_ingest``: a draft that can't be proposed
+    (missing, cross-tenant, already proposed, terminal) records an indexed
+    error entry and the rest still go. Nothing is rolled back — the proposals
+    already filed are legitimate and a human can reject them.
+    """
+    body = ProposeBatchRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+
+    proposed = 0
+    failed: list[ProposeBatchError] = []
+    for index, draft_id in enumerate(body.draft_ids):
+        try:
+            await propose_send(ctx, draft_id)
+        except CloudError as exc:
+            # Only the domain's own failures become per-draft entries; an
+            # unexpected exception still aborts the batch loudly rather than
+            # being flattened into a row the caller might ignore.
+            failed.append(
+                ProposeBatchError(
+                    index=index,
+                    draft_id=draft_id,
+                    code=exc.code,
+                    message=exc.message,
+                )
+            )
+            continue
+        proposed += 1
+
+    logger.info(
+        "growth.propose_batch workspace=%s requested=%d proposed=%d failed=%d",
+        workspace_id,
+        len(body.draft_ids),
+        proposed,
+        len(failed),
+    )
+    return ProposeBatchResponse(proposed=proposed, failed=failed)
 
 
 # ---------------------------------------------------------------------------

@@ -930,6 +930,17 @@ class TestGrowthRouteRbac:
             ("POST", "/growth/drafts/{draft_id}/status"): "growth.write",
             # The outbound verb sits at the ADMIN tier the executor re-checks.
             ("POST", "/growth/drafts/{draft_id}/propose"): "growth.manage",
+
+
+            # G-10a's batch propose is the same outbound verb over N ids, so
+            # it sits at the same ADMIN tier — a lower tier here would be a
+            # way to file proposals the executor then refuses at approve time.
+            ("POST", "/growth/drafts/propose-batch"): "growth.manage",
+            # G-8's manual LinkedIn surface. mark-sent is an OUTBOUND verb —
+            # same ADMIN tier as propose — and it walks the gate seam, since
+            # ``sent`` is gate-owned.
+            ("GET", "/growth/linkedin/queue"): "growth.read",
+            ("POST", "/growth/linkedin/{draft_id}/mark-sent"): "growth.manage",
         }
 
         seen: dict[tuple[str, str], str] = {}
@@ -944,3 +955,142 @@ class TestGrowthRouteRbac:
                 seen[(method, route.path)] = guards[0].replace("require_action_growth_", "growth.")
 
         assert seen == expected
+
+
+# ---------------------------------------------------------------------------
+# Batch propose (G-10a) — N ids, N gated proposals, no shortcut
+# ---------------------------------------------------------------------------
+
+
+BATCH_URL = "/api/v1/growth/drafts/propose-batch"
+
+
+async def _n_drafts(client: AsyncClient, n: int, *, prefix: str = "batch") -> list[dict]:
+    """n prospects, one email draft each. Each gets its own domain — the
+    (workspace, domain) index is unique, so two calls in one test need
+    distinct prefixes or the second 409s."""
+    drafts = []
+    for i in range(n):
+        _, draft = await _drafted_prospect(
+            client, domain=f"{prefix}-{i:02d}.io", company=f"Co {prefix} {i:02d}"
+        )
+        drafts.append(draft)
+    return drafts
+
+
+class TestProposeBatch:
+    """A batch is a UI convenience over N gated proposals, never a way around
+    the gate: every id rides the same ``propose_send`` path, so each draft
+    still needs its own human approval in the Tray."""
+
+    @pytest.mark.asyncio
+    async def test_twelve_valid_ids_file_twelve_gated_proposals(self, w1, gate_store):
+        drafts = await _n_drafts(w1, 12)
+
+        resp = await w1.post(BATCH_URL, json={"draft_ids": [d["id"] for d in drafts]})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"proposed": 12, "failed": []}
+
+        # One gated proposal per draft — filed through the gate, not around it.
+        actions = await gate_store.list_actions(limit=100)
+        assert len(actions) == 12
+        blobs = [a.parameters["_growth_send"] for a in actions]
+        assert all(b["kind"] == "growth_send" for b in blobs)
+        assert all(b["workspace_id"] == "w1" for b in blobs)
+        assert {b["draft_id"] for b in blobs} == {d["id"] for d in drafts}
+        # Every one is PENDING: nothing was approved, nothing was sent.
+        assert all(str(getattr(a.status, "value", a.status)) == "pending" for a in actions)
+        for draft in drafts:
+            assert await _draft_status(w1, draft["id"]) == "proposed"
+
+    @pytest.mark.asyncio
+    async def test_mixed_validity_proposes_the_good_and_reports_the_bad(self, w1, gate_store):
+        """A bad id becomes an indexed error entry; the ids around it still
+        get proposed — same partial-success contract as bulk ingest."""
+        good = await _n_drafts(w1, 2, prefix="good")
+        already = (await _n_drafts(w1, 1, prefix="already"))[0]
+        await _propose(w1, already["id"])  # now 'proposed' — can't move again
+
+        ids = [good[0]["id"], "not-an-object-id", already["id"], good[1]["id"]]
+        resp = await w1.post(BATCH_URL, json={"draft_ids": ids})
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["proposed"] == 2
+        assert [e["index"] for e in body["failed"]] == [1, 2]
+        assert body["failed"][0] == {
+            "index": 1,
+            "draft_id": "not-an-object-id",
+            "code": "draft.not_found",
+            "message": body["failed"][0]["message"],
+        }
+        assert body["failed"][1]["draft_id"] == already["id"]
+        assert body["failed"][1]["code"] == "draft.illegal_transition"
+
+        # The valid ones really landed.
+        assert await _draft_status(w1, good[0]["id"]) == "proposed"
+        assert await _draft_status(w1, good[1]["id"]) == "proposed"
+        # 1 from the setup propose + 2 from the batch. The already-proposed
+        # draft did NOT get a second proposal.
+        assert len(await gate_store.list_actions(limit=100)) == 3
+
+    @pytest.mark.asyncio
+    async def test_over_one_hundred_ids_is_422_before_anything_is_filed(self, w1, gate_store):
+        drafts = await _n_drafts(w1, 2)
+        oversized = [drafts[0]["id"]] * 101
+
+        resp = await w1.post(BATCH_URL, json={"draft_ids": oversized})
+
+        assert resp.status_code == 422, resp.text
+        # The cap is enforced at the DTO boundary — no proposal was filed.
+        assert await gate_store.list_actions(limit=100) == []
+        assert await _draft_status(w1, drafts[0]["id"]) == "draft"
+
+    @pytest.mark.asyncio
+    async def test_exactly_one_hundred_ids_is_accepted(self, w1):
+        """The cap is 100, not 99 — pins the boundary."""
+        draft = (await _n_drafts(w1, 1))[0]
+        # 1 real id + 99 unknown ones: proves the payload passed validation
+        # (a 422 would mean the cap fired) without creating 100 drafts.
+        ids = [draft["id"]] + [f"missing-{i}" for i in range(99)]
+        resp = await w1.post(BATCH_URL, json={"draft_ids": ids})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["proposed"] == 1
+        assert len(resp.json()["failed"]) == 99
+
+    @pytest.mark.asyncio
+    async def test_a_member_cannot_batch_propose(self, w1, gate_store):
+        """Same ADMIN tier as the single propose — batching must not be a
+        cheaper route to the outbound verb."""
+        drafts = await _n_drafts(w1, 2)
+        transport = ASGITransport(app=_build_growth_app("w1", role="member"))
+        async with AsyncClient(transport=transport, base_url="http://t") as member:
+            resp = await member.post(BATCH_URL, json={"draft_ids": [d["id"] for d in drafts]})
+
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["error"]["code"] == "workspace.insufficient_role"
+        assert await gate_store.list_actions(limit=100) == []
+        assert await _draft_status(w1, drafts[0]["id"]) == "draft"
+
+    @pytest.mark.asyncio
+    async def test_another_tenants_draft_ids_propose_nothing(self, w1, w2, gate_store):
+        """Cross-tenant ids 404 into the failed list — existence never leaks
+        and no proposal is filed against the other workspace's draft."""
+        foreign = await _n_drafts(w2, 2)
+
+        resp = await w1.post(BATCH_URL, json={"draft_ids": [d["id"] for d in foreign]})
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["proposed"] == 0
+        assert [e["code"] for e in body["failed"]] == ["draft.not_found", "draft.not_found"]
+        assert await gate_store.list_actions(limit=100) == []
+        assert await _draft_status(w2, foreign[0]["id"]) == "draft"
+
+    @pytest.mark.asyncio
+    async def test_an_empty_batch_is_a_no_op(self, w1, gate_store):
+        resp = await w1.post(BATCH_URL, json={"draft_ids": []})
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"proposed": 0, "failed": []}
+        assert await gate_store.list_actions(limit=100) == []
