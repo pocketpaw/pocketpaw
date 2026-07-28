@@ -1,5 +1,10 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-07-28 (feat/growth-api-scale) — The growth router's list route
+    changed shape: ``GET /growth/prospects`` returns
+    ``{items, next_cursor, total}`` instead of a bare array (BREAKING), and
+    gained ``q`` / ``sort`` / ``cursor``. Two new routes on the same mount:
+    ``GET /growth/prospects/facets`` and ``POST /growth/drafts/propose-batch``.
 Modified: 2026-07-27 (feat/growth-g3) — The growth router now also carries
     drafts (``/growth/prospects/{id}/drafts``, ``/growth/drafts``,
     ``/growth/drafts/{id}/status``); its prefix widened to ``/growth`` with
