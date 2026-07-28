@@ -11,7 +11,10 @@
 # Updated 2026-07-28 (feat/growth-projects): ``name`` and ``company`` default to
 # ``""`` — a prospect may be JUST A DOMAIN until research fills the rest in, so
 # the stored fields have to be able to say "not yet known". Existing rows all
-# carry values, so this is a widening with no migration.
+# carry values, so this is a widening with no migration. Also ``project_id`` —
+# the client container (``cloud/projects``) a prospect belongs to — plus a
+# (workspace, project_id, createdAt) index, because an agency's default view is
+# one client's pipeline rather than the whole workspace's.
 
 from __future__ import annotations
 
@@ -34,6 +37,10 @@ class Prospect(TimestampedDocument):
     # Company website domain, lowercased at the service boundary — the dedupe key.
     domain: str
     source: str  # clay | directory | manual (validated at the DTO boundary)
+    # The client this prospect belongs to (``cloud/projects``), or None on a
+    # workspace that doesn't use projects. Validated against the workspace by
+    # the service before it is written.
+    project_id: str | None = None
     tier: str = "unqualified"  # a | b | c | unqualified
     research_brief: str = ""
     emails: list[str] = Field(default_factory=list)
@@ -55,4 +62,8 @@ class Prospect(TimestampedDocument):
             ),
             # List cursor: the prospects view pages newest-first per workspace.
             [("workspace", 1), ("createdAt", -1)],
+            # Project-scoped list cursor: an agency's default view is ONE
+            # client's pipeline, so the project filter belongs in the index
+            # rather than as a post-filter over the whole workspace.
+            [("workspace", 1), ("project_id", 1), ("createdAt", -1)],
         ]

@@ -75,6 +75,13 @@
 # export titles its sections through ``_queue_heading`` — whichever of
 # name/company is known, else the domain, never a placeholder word — and the
 # queue row carries ``prospect_domain`` to make that fallback possible.
+# Also ``project_id`` on the prospect — the client container, consumed exactly
+# the way ``tasks`` consumes it: validated at entry by ``_ensure_project_in_
+# workspace`` (growth's own copy of the check, calling the same public
+# ``projects.service.exists_in_workspace`` seam — see that helper on why it is
+# not imported from ``tasks``), an optional three-valued filter on list /
+# facets / search, and nullable everywhere so a workspace without projects is
+# untouched. ``upsert_by_domain`` only ever SETS the project, never clears it.
 # ``record_whatsapp_attempt`` / ``finish_whatsapp_attempt`` /
 # ``count_whatsapp_attempts_since`` own the WhatsApp compliance record and its
 # rate-cap window, and ``record_whatsapp_inbound_reply`` applies the opt-in +
@@ -156,6 +163,7 @@ def _to_domain(doc: _ProspectDoc) -> Prospect:
         company=doc.company,
         domain=doc.domain,
         source=doc.source,
+        project_id=getattr(doc, "project_id", None),
         tier=doc.tier,
         research_brief=doc.research_brief,
         emails=tuple(doc.emails),
@@ -208,6 +216,7 @@ def _to_response(p: Prospect) -> ProspectResponse:
         company=p.company,
         domain=p.domain,
         source=p.source,
+        project_id=p.project_id,
         tier=p.tier,
         research_brief=p.research_brief,
         emails=list(p.emails),
@@ -231,6 +240,31 @@ def _require_workspace(ctx: RequestContext) -> str:
     if not ctx.workspace_id:
         raise Forbidden("prospect.no_workspace", "Active workspace required for growth operations")
     return ctx.workspace_id
+
+
+async def _ensure_project_in_workspace(workspace_id: str, project_id: str) -> None:
+    """Validate that ``project_id`` names a real project in this workspace.
+
+    Growth's OWN copy of the check ``tasks`` and ``cycles`` each carry, rather
+    than an import of ``tasks.service._ensure_project_in_workspace``: that one
+    is private, and reaching across an entity boundary for a sibling's private
+    helper is the drift the 4-file rule exists to prevent. Both copies call the
+    same PUBLIC seam — ``projects.service.exists_in_workspace`` — so there is
+    one source of truth for the answer, three callers for the question.
+
+    The import is lazy for the same two reasons ``tasks`` gives: it avoids a
+    module-load cycle, and it degrades silently on a build that predates the
+    Projects entity (there, a supplied project id simply cannot be validated,
+    and growth is not the module that should fail the deploy over it).
+    """
+    try:
+        from pocketpaw_ee.cloud.projects import service as projects_service
+    except Exception:  # noqa: BLE001 — no Projects entity on this build
+        return
+    if not await projects_service.exists_in_workspace(workspace_id, project_id):
+        # Same 404 a foreign prospect id gets: another tenant's project must
+        # not be distinguishable from one that never existed.
+        raise NotFound("project", project_id)
 
 
 async def _fetch_in_workspace(workspace_id: str, prospect_id: str) -> _ProspectDoc:
@@ -275,6 +309,8 @@ async def create(ctx: RequestContext, body: CreateProspectRequest) -> ProspectRe
     that want create-or-update semantics use ``upsert_by_domain`` instead."""
     body = CreateProspectRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
+    if body.project_id:
+        await _ensure_project_in_workspace(workspace_id, body.project_id)
 
     existing = await _ProspectDoc.find_one({"workspace": workspace_id, "domain": body.domain})
     if existing is not None:
@@ -322,9 +358,16 @@ def _prospect_filters(
     tier: str | None = None,
     status: str | None = None,
     source: str | None = None,
+    project_id: str | None = None,
     q: str | None = None,
 ) -> dict[str, Any]:
     """Build the tenant-scoped Mongo filter shared by list / facets / count.
+
+    ``project_id`` scopes to one client's pipeline. It is three-valued like
+    ``tasks``: ``None`` is "every project" (the default — a workspace not using
+    projects is unaffected), an id scopes to that client, and an empty string
+    scopes to the UNASSIGNED rows, which is how the UI offers a "no client"
+    bucket without a magic id.
 
     SCALE CEILING — ``q`` is an unanchored, case-insensitive regex ``$or``
     across four fields. Mongo cannot use an index for that, so it is a
@@ -344,6 +387,8 @@ def _prospect_filters(
         filters["status"] = status
     if source is not None:
         filters["source"] = source
+    if project_id is not None:
+        filters["project_id"] = project_id or None
     if q is not None and q.strip():
         pattern = _escape_regex(q)
         filters["$or"] = [
@@ -495,6 +540,7 @@ async def list_prospects(
     tier: str | None = None,
     status: str | None = None,
     source: str | None = None,
+    project_id: str | None = None,
     q: str | None = None,
     sort: str = "newest",
     cursor: str | None = None,
@@ -515,7 +561,9 @@ async def list_prospects(
     workspace_id = _require_workspace(ctx)
     if sort != "tier" and sort not in _PROSPECT_SORT_SPECS:
         raise ValidationError("prospect.bad_sort", f"Unknown sort mode '{sort}'")
-    filters = _prospect_filters(workspace_id, tier=tier, status=status, source=source, q=q)
+    filters = _prospect_filters(
+        workspace_id, tier=tier, status=status, source=source, project_id=project_id, q=q
+    )
 
     # Over-fetch by one: the extra row is the "is there a next page" probe and
     # is never returned.
@@ -571,6 +619,7 @@ async def prospect_facets(
     tier: str | None = None,
     status: str | None = None,
     source: str | None = None,
+    project_id: str | None = None,
     q: str | None = None,
 ) -> ProspectFacetsResponse:
     """Counts per tier / status / source for the filter chips.
@@ -589,8 +638,12 @@ async def prospect_facets(
     workspace_id = _require_workspace(ctx)
     active = {"tier": tier, "status": status, "source": source}
 
-    # Shared prefix — tenancy + the search term, which constrains every block.
-    outer = _prospect_filters(workspace_id, q=q)
+    # Shared prefix — tenancy, the search term, and the project scope. The
+    # project goes in the OUTER match rather than getting a facet block of its
+    # own: it is not a chip the user toggles inside the list, it is which
+    # client's list they are looking at. Counts for the other three must be
+    # scoped to that client or the chips describe a pipeline nobody is viewing.
+    outer = _prospect_filters(workspace_id, project_id=project_id, q=q)
 
     branches: dict[str, list[dict[str, Any]]] = {}
     for block, (field, _order) in _PROSPECT_FACETS.items():
@@ -628,6 +681,14 @@ async def update(
     body = UpdateProspectRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
     doc = await _fetch_in_workspace(workspace_id, prospect_id)
+    if body.project_id is not None:
+        # Three-valued, like ``tasks``: an id reassigns (validated first), an
+        # empty string clears. ``None`` never reaches here.
+        if body.project_id:
+            await _ensure_project_in_workspace(workspace_id, body.project_id)
+            doc.project_id = body.project_id
+        else:
+            doc.project_id = None
     _apply_update(doc, body)
     await doc.save()  # bumps updatedAt
     # no-event: growth has no realtime subscriber in v1; the prospects view polls.
@@ -645,8 +706,14 @@ async def upsert_by_domain(
     worker/system identity, mirroring how the arq worker trusts the doc's
     workspace. Every mutable field EXCEPT ``source`` is overwritten on update —
     source records provenance at first capture and is kept.
+
+    ``project_id`` is one of the overwritten fields, and it is validated
+    against ``workspace_id`` BEFORE anything is written: an ingestion path is
+    exactly where a bad id would otherwise get in unchecked.
     """
     body = CreateProspectRequest.model_validate(prospect_data)
+    if body.project_id:
+        await _ensure_project_in_workspace(workspace_id, body.project_id)
 
     doc = await _ProspectDoc.find_one({"workspace": workspace_id, "domain": body.domain})
     if doc is None:
@@ -667,6 +734,14 @@ async def upsert_by_domain(
         "status",
     ):
         setattr(doc, field, getattr(body, field))
+    # ``project_id`` is the ONE field an upsert only ever SETS, never clears. A
+    # re-import that names a project reassigns the row; one that says nothing
+    # leaves the assignment alone. The alternative — treating the DTO's default
+    # ``None`` as "unassign" — would make every agent enrichment call
+    # (``growth_upsert_prospect``, which carries no project) silently orphan a
+    # client's prospect. Un-assigning is an explicit act: PATCH with ``""``.
+    if body.project_id:
+        doc.project_id = body.project_id
     await doc.save()  # bumps updatedAt
     # no-event: growth has no realtime subscriber in v1.
     return _to_response(_to_domain(doc))
@@ -703,7 +778,15 @@ async def bulk_ingest(ctx: RequestContext, body: BulkIngestRequest) -> BulkInges
             )
             continue
         existing = await _ProspectDoc.find_one({"workspace": workspace_id, "domain": row.domain})
-        await upsert_by_domain(workspace_id, row)
+        try:
+            await upsert_by_domain(workspace_id, row)
+        except CloudError as exc:
+            # A row can be well-FORMED and still be refused — naming a project
+            # that isn't in this workspace is the case that brought this here.
+            # It is one bad row, not a bad payload, so it joins the error list
+            # like a malformed one instead of aborting the other 499.
+            errors.append(BulkRowError(index=index, code=exc.code, message=exc.message))
+            continue
         if existing is None:
             created += 1
         else:

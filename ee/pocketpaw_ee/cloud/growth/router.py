@@ -48,6 +48,11 @@
 # context; ``?format=md`` returns a paste-ready text/markdown export) and
 # POST /linkedin/{draft_id}/mark-sent (records a manual send via the G-3
 # transition machine). Deliberately manual — no LinkedIn API.
+# Updated 2026-07-28 (feat/growth-projects): GET /prospects and GET
+# /prospects/facets take an optional ``project_id`` — one client's pipeline.
+# Query params only; NO new route, so the guard-coverage test in
+# ``tests/cloud/growth/test_gate.py`` keeps its existing surface. Omitting it
+# means every project, so a workspace not using them sees no change.
 # Updated 2026-07-27 (integration/growth-v1): the G-8 LinkedIn routes carry the
 # G-4 per-route RBAC guards their branch predated — ``growth.read`` on the
 # queue, ``growth.manage`` on mark-sent (it is an OUTBOUND verb, same tier as
@@ -129,6 +134,7 @@ async def list_prospects(
     tier: ProspectTier | None = Query(default=None),
     status: ProspectStatus | None = Query(default=None),
     source: ProspectSource | None = Query(default=None),
+    project_id: str | None = Query(default=None, max_length=64),
     q: str | None = Query(default=None, max_length=200),
     sort: ProspectSort = Query(default="newest"),
     cursor: str | None = Query(default=None, max_length=200),
@@ -143,12 +149,17 @@ async def list_prospects(
     is the declared rank a→b→c→unqualified, not a lexicographic accident.
     ``cursor`` is the previous page's ``next_cursor``, passed back unchanged;
     ``null`` there means the last page. ``total`` counts every row matching the
-    filters, so the UI can say "n of m"."""
+    filters, so the UI can say "n of m".
+
+    ``project_id`` scopes to one client's pipeline. Omitted means every
+    project, which is the whole view for a workspace not using them; an empty
+    string means the rows with no client assigned."""
     return await growth_service.list_prospects(
         ctx,
         tier=tier,
         status=status,
         source=source,
+        project_id=project_id,
         q=q,
         sort=sort,
         cursor=cursor,
@@ -168,6 +179,7 @@ async def prospect_facets(
     tier: ProspectTier | None = Query(default=None),
     status: ProspectStatus | None = Query(default=None),
     source: ProspectSource | None = Query(default=None),
+    project_id: str | None = Query(default=None, max_length=64),
     q: str | None = Query(default=None, max_length=200),
     ctx: RequestContext = Depends(request_context),
 ) -> ProspectFacetsResponse:
@@ -177,7 +189,9 @@ async def prospect_facets(
     filter and respects the others — so with ``status=replied`` on, the tier
     counts describe the replied rows rather than collapsing to the selected
     tier. Every legal value is present, zeros included."""
-    return await growth_service.prospect_facets(ctx, tier=tier, status=status, source=source, q=q)
+    return await growth_service.prospect_facets(
+        ctx, tier=tier, status=status, source=source, project_id=project_id, q=q
+    )
 
 
 @router.get(

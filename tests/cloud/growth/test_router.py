@@ -438,3 +438,218 @@ async def test_research_fills_in_a_bare_domain_later(w1_client):
     assert patched.json()["company"] == "Northwind Dental"
     assert patched.json()["domain"] == "northwinddental.com"
     assert patched.json()["id"] == created["id"]
+
+
+# ---------------------------------------------------------------------------
+# Project scoping (feat/growth-projects)
+#
+# An agency runs one outbound pipeline per client, and ``cloud/projects`` is
+# already that container. Growth consumes it the way tasks and cycles do:
+# nullable, validated at entry, an optional filter on the reads.
+# ---------------------------------------------------------------------------
+
+
+async def _make_project(workspace_id: str, name: str = "Client A") -> str:
+    from pocketpaw_ee.cloud.models.project import Project as _ProjectDoc
+
+    doc = _ProjectDoc(
+        workspace=workspace_id,
+        name=name,
+        description="",
+        color="",
+        lead_id=None,
+        status="active",
+        created_by="u1",
+    )
+    await doc.insert()
+    return str(doc.id)
+
+
+@pytest.mark.asyncio
+async def test_create_assigns_a_project(w1_client, mongo_db):
+    project_id = await _make_project("w1")
+    resp = await w1_client.post("/api/v1/growth/prospects", json=_payload(project_id=project_id))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["project_id"] == project_id
+
+
+@pytest.mark.asyncio
+async def test_create_without_a_project_is_unchanged(w1_client):
+    """A workspace that doesn't use projects sees exactly what it saw before."""
+    resp = await w1_client.post("/api/v1/growth/prospects", json=_payload())
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["project_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_a_foreign_or_missing_project(w1_client, mongo_db):
+    """Another tenant's project is a hard error, and indistinguishable from a
+    project that never existed — existence must not leak either way."""
+    foreign = await _make_project("w2")
+    resp = await w1_client.post("/api/v1/growth/prospects", json=_payload(project_id=foreign))
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "project.not_found"
+
+    ghost = await w1_client.post(
+        "/api/v1/growth/prospects",
+        json=_payload(domain="other.com", project_id="507f1f77bcf86cd799439011"),
+    )
+    assert ghost.status_code == 404
+    assert ghost.json()["error"]["code"] == "project.not_found"
+
+    # Nothing was written on either refusal.
+    assert (await w1_client.get("/api/v1/growth/prospects")).json()["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_and_facets_scope_to_one_project(w1_client, mongo_db):
+    a = await _make_project("w1", "Client A")
+    b = await _make_project("w1", "Client B")
+    await w1_client.post(
+        "/api/v1/growth/prospects", json=_payload(domain="a1.com", project_id=a, tier="a")
+    )
+    await w1_client.post(
+        "/api/v1/growth/prospects", json=_payload(domain="a2.com", project_id=a, tier="b")
+    )
+    await w1_client.post(
+        "/api/v1/growth/prospects", json=_payload(domain="b1.com", project_id=b, tier="a")
+    )
+    await w1_client.post("/api/v1/growth/prospects", json=_payload(domain="loose.com"))
+
+    everything = (await w1_client.get("/api/v1/growth/prospects")).json()
+    assert everything["total"] == 4
+
+    scoped = (await w1_client.get("/api/v1/growth/prospects", params={"project_id": a})).json()
+    assert scoped["total"] == 2
+    assert {i["domain"] for i in scoped["items"]} == {"a1.com", "a2.com"}
+
+    # Empty string is the "no client assigned" bucket, not "every project".
+    unassigned = (await w1_client.get("/api/v1/growth/prospects", params={"project_id": ""})).json()
+    assert unassigned["total"] == 1
+    assert unassigned["items"][0]["domain"] == "loose.com"
+
+    # The chips describe the client being viewed, not the whole workspace.
+    facets = (
+        await w1_client.get("/api/v1/growth/prospects/facets", params={"project_id": a})
+    ).json()
+    assert facets["tier"]["a"] == 1
+    assert facets["tier"]["b"] == 1
+    assert facets["status"]["new"] == 2
+
+
+@pytest.mark.asyncio
+async def test_search_respects_the_project_scope(w1_client, mongo_db):
+    a = await _make_project("w1", "Client A")
+    await w1_client.post(
+        "/api/v1/growth/prospects",
+        json=_payload(domain="a1.com", company="Northwind Dental", project_id=a),
+    )
+    await w1_client.post(
+        "/api/v1/growth/prospects",
+        json=_payload(domain="b1.com", company="Northwind Dental"),
+    )
+
+    both = (await w1_client.get("/api/v1/growth/prospects", params={"q": "northwind"})).json()
+    assert both["total"] == 2
+    scoped = (
+        await w1_client.get("/api/v1/growth/prospects", params={"q": "northwind", "project_id": a})
+    ).json()
+    assert scoped["total"] == 1
+    assert scoped["items"][0]["domain"] == "a1.com"
+
+
+@pytest.mark.asyncio
+async def test_patch_reassigns_and_clears_the_project(w1_client, mongo_db):
+    a = await _make_project("w1", "Client A")
+    b = await _make_project("w1", "Client B")
+    created = (await w1_client.post("/api/v1/growth/prospects", json=_payload(project_id=a))).json()
+
+    moved = await w1_client.patch(
+        f"/api/v1/growth/prospects/{created['id']}", json={"project_id": b}
+    )
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["project_id"] == b
+
+    # Omitting the field leaves the assignment alone.
+    untouched = await w1_client.patch(
+        f"/api/v1/growth/prospects/{created['id']}", json={"tier": "a"}
+    )
+    assert untouched.json()["project_id"] == b
+
+    # An empty string is the explicit un-assign.
+    cleared = await w1_client.patch(
+        f"/api/v1/growth/prospects/{created['id']}", json={"project_id": ""}
+    )
+    assert cleared.json()["project_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_patch_rejects_a_foreign_project(w1_client, mongo_db):
+    foreign = await _make_project("w2")
+    created = (await w1_client.post("/api/v1/growth/prospects", json=_payload())).json()
+    resp = await w1_client.patch(
+        f"/api/v1/growth/prospects/{created['id']}", json={"project_id": foreign}
+    )
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "project.not_found"
+    same = (await w1_client.get(f"/api/v1/growth/prospects/{created['id']}")).json()
+    assert same["project_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_bulk_import_assigns_a_project_and_a_re_import_never_orphans(w1_client, mongo_db):
+    """An import lands in the selected client's pipeline. A later re-import
+    that says nothing about projects — an enrichment pass, say — must not
+    silently un-assign the rows."""
+    a = await _make_project("w1", "Client A")
+    rows = [{"domain": d, "source": "directory", "project_id": a} for d in ("x.com", "y.com")]
+    first = await w1_client.post("/api/v1/growth/prospects/bulk", json={"rows": rows})
+    assert first.status_code == 200, first.text
+    assert first.json()["created"] == 2
+
+    again = await w1_client.post(
+        "/api/v1/growth/prospects/bulk",
+        json={"rows": [{"domain": "x.com", "source": "directory", "name": "Ada"}]},
+    )
+    assert again.json()["updated"] == 1
+    scoped = (await w1_client.get("/api/v1/growth/prospects", params={"project_id": a})).json()
+    assert scoped["total"] == 2
+    enriched = next(i for i in scoped["items"] if i["domain"] == "x.com")
+    assert enriched["name"] == "Ada"
+    assert enriched["project_id"] == a
+
+
+@pytest.mark.asyncio
+async def test_bulk_import_rejects_a_foreign_project_row(w1_client, mongo_db):
+    foreign = await _make_project("w2")
+    resp = await w1_client.post(
+        "/api/v1/growth/prospects/bulk",
+        json={"rows": [{"domain": "x.com", "source": "directory", "project_id": foreign}]},
+    )
+    # One bad row, not a bad payload: it becomes an indexed error entry and
+    # the good rows in the same batch still land.
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["created"] == 0
+    assert [e["code"] for e in body["errors"]] == ["project.not_found"]
+    assert body["errors"][0]["index"] == 0
+    assert (await w1_client.get("/api/v1/growth/prospects")).json()["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_bulk_import_bad_project_row_does_not_abort_the_batch(w1_client, mongo_db):
+    foreign = await _make_project("w2")
+    resp = await w1_client.post(
+        "/api/v1/growth/prospects/bulk",
+        json={
+            "rows": [
+                {"domain": "bad.com", "source": "directory", "project_id": foreign},
+                {"domain": "good.com", "source": "directory"},
+            ]
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["created"] == 1
+    assert len(resp.json()["errors"]) == 1
+    listed = (await w1_client.get("/api/v1/growth/prospects")).json()
+    assert [i["domain"] for i in listed["items"]] == ["good.com"]
