@@ -133,3 +133,90 @@ async def test_blank_q_is_ignored(w1_client):
     await _seed(w1_client, [{"domain": "alpha.io"}, {"domain": "beta.io"}])
     resp = await w1_client.get(LIST_URL, params={"q": "   "})
     assert len(resp.json()) == 2
+
+
+# ---------------------------------------------------------------------------
+# 2. ``sort``
+# ---------------------------------------------------------------------------
+
+
+SORT_ROWS = [
+    {"domain": "zulu.io", "company": "Zulu Clinics", "tier": "unqualified"},
+    {"domain": "alpha.io", "company": "Alpha Dental", "tier": "c"},
+    {"domain": "mike.io", "company": "Mike Ortho", "tier": "a"},
+    {"domain": "bravo.io", "company": "Bravo Health", "tier": "b"},
+]
+
+
+@pytest.mark.asyncio
+async def test_sort_newest_is_the_default_and_is_creation_order_reversed(w1_client):
+    await _seed(w1_client, SORT_ROWS)
+    default = (await w1_client.get(LIST_URL)).json()
+    explicit = (await w1_client.get(LIST_URL, params={"sort": "newest"})).json()
+    assert [p["domain"] for p in default] == ["bravo.io", "mike.io", "alpha.io", "zulu.io"]
+    assert default == explicit
+
+
+@pytest.mark.asyncio
+async def test_sort_oldest_is_creation_order(w1_client):
+    await _seed(w1_client, SORT_ROWS)
+    rows = (await w1_client.get(LIST_URL, params={"sort": "oldest"})).json()
+    assert [p["domain"] for p in rows] == ["zulu.io", "alpha.io", "mike.io", "bravo.io"]
+
+
+@pytest.mark.asyncio
+async def test_sort_company_is_alphabetical(w1_client):
+    await _seed(w1_client, SORT_ROWS)
+    rows = (await w1_client.get(LIST_URL, params={"sort": "company"})).json()
+    assert [p["company"] for p in rows] == [
+        "Alpha Dental",
+        "Bravo Health",
+        "Mike Ortho",
+        "Zulu Clinics",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sort_tier_walks_the_declared_rank(w1_client):
+    """a → b → c → unqualified. Asserted on the tier sequence itself, not on
+    the row order, so the test states the rank rather than restating the
+    fixture."""
+    await _seed(w1_client, SORT_ROWS)
+    rows = (await w1_client.get(LIST_URL, params={"sort": "tier"})).json()
+    assert [p["tier"] for p in rows] == ["a", "b", "c", "unqualified"]
+    assert [p["domain"] for p in rows] == ["mike.io", "bravo.io", "alpha.io", "zulu.io"]
+
+
+@pytest.mark.asyncio
+async def test_sort_tier_orders_within_a_bucket_newest_first(w1_client):
+    await _seed(
+        w1_client,
+        [
+            {"domain": "a-old.io", "tier": "a"},
+            {"domain": "b-only.io", "tier": "b"},
+            {"domain": "a-new.io", "tier": "a"},
+        ],
+    )
+    rows = (await w1_client.get(LIST_URL, params={"sort": "tier"})).json()
+    assert [p["domain"] for p in rows] == ["a-new.io", "a-old.io", "b-only.io"]
+
+
+@pytest.mark.asyncio
+async def test_sort_tier_composes_with_a_tier_filter(w1_client):
+    await _seed(w1_client, SORT_ROWS)
+    rows = (await w1_client.get(LIST_URL, params={"sort": "tier", "tier": "b"})).json()
+    assert [p["domain"] for p in rows] == ["bravo.io"]
+
+
+@pytest.mark.asyncio
+async def test_sort_tier_is_workspace_scoped(w1_client, w2_client):
+    await _seed(w1_client, [{"domain": "alpha.io", "tier": "a"}])
+    await _seed(w2_client, [{"domain": "beta.io", "tier": "a"}])
+    rows = (await w1_client.get(LIST_URL, params={"sort": "tier"})).json()
+    assert [p["domain"] for p in rows] == ["alpha.io"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_sort_mode_is_422(w1_client):
+    resp = await w1_client.get(LIST_URL, params={"sort": "cheapest"})
+    assert resp.status_code == 422

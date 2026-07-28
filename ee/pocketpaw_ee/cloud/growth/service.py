@@ -81,6 +81,7 @@ from pocketpaw_ee.cloud.growth.domain import (
     GATE_OWNED_TARGETS,
     MESSAGE_LOG_OUTCOMES,
     PROVIDER_REACHED_OUTCOMES,
+    TIER_SORT_ORDER,
     Draft,
     MessageLog,
     Prospect,
@@ -314,6 +315,69 @@ def _prospect_filters(
     return filters
 
 
+# Mongo sort keys per sort mode. Every spec ends in ``_id`` so ties break
+# deterministically — without it two rows sharing a createdAt / company can
+# swap places between two identical queries, which silently duplicates or drops
+# a row across a paginated boundary. ``tier`` is absent on purpose: its order is
+# a declared rank, not a field comparison — see ``_tier_ordered_page``.
+_PROSPECT_SORT_SPECS: dict[str, list[tuple[str, int]]] = {
+    "newest": [("createdAt", -1), ("_id", -1)],
+    "oldest": [("createdAt", 1), ("_id", 1)],
+    "company": [("company", 1), ("_id", 1)],
+}
+
+
+def _tier_buckets(filters: dict[str, Any]) -> tuple[str, ...]:
+    """The tier buckets to walk, best-qualified first.
+
+    An active ``tier`` filter collapses the walk to that one bucket — the
+    filter is enum-validated at the router, so it is always a known tier.
+    """
+    active = filters.get("tier")
+    if active is None:
+        return TIER_SORT_ORDER
+    return (active,) if active in TIER_SORT_ORDER else ()
+
+
+async def _tier_ordered_page(
+    filters: dict[str, Any],
+    *,
+    limit: int,
+    start_tier: str | None = None,
+    after_oid: PydanticObjectId | None = None,
+) -> list[_ProspectDoc]:
+    """Fetch up to ``limit`` docs ordered by the DECLARED tier rank.
+
+    Mongo cannot sort by a rank that isn't in the document, and adding a
+    computed rank via ``$addFields`` would drag the whole list query into an
+    aggregation. Instead the rank is walked: one bounded query per tier bucket,
+    in ``TIER_SORT_ORDER``, stopping as soon as the page is full — at most four
+    queries, each bounded by the remaining page size.
+
+    Within a bucket rows come back newest-first by ``_id`` (an ObjectId is
+    monotonic in creation time, so it doubles as the recency key AND the
+    tie-breaker, which keeps the resume key a single value).
+    """
+    collected: list[_ProspectDoc] = []
+    buckets = _tier_buckets(filters)
+    started = start_tier is None
+    for bucket_tier in buckets:
+        if not started:
+            if bucket_tier != start_tier:
+                continue
+            started = True
+        remaining = limit - len(collected)
+        if remaining <= 0:
+            break
+        bucket_filter: dict[str, Any] = {**filters, "tier": bucket_tier}
+        if bucket_tier == start_tier and after_oid is not None:
+            bucket_filter["_id"] = {"$lt": after_oid}
+        collected.extend(
+            await _ProspectDoc.find(bucket_filter).sort([("_id", -1)]).limit(remaining).to_list()
+        )
+    return collected
+
+
 async def list_prospects(
     ctx: RequestContext,
     *,
@@ -321,21 +385,26 @@ async def list_prospects(
     status: str | None = None,
     source: str | None = None,
     q: str | None = None,
+    sort: str = "newest",
     limit: int = 100,
 ) -> list[ProspectResponse]:
-    """List the workspace's prospects, newest first, optionally filtered.
+    """List the workspace's prospects, optionally filtered and ordered.
 
     ``q`` is a case-insensitive substring match across name / company /
     domain / research_brief (see ``_prospect_filters`` for the scale ceiling).
+    ``sort`` is one of ``newest`` (default, the pre-G-10a behaviour) /
+    ``oldest`` / ``company`` / ``tier``.
     """
     workspace_id = _require_workspace(ctx)
     filters = _prospect_filters(workspace_id, tier=tier, status=status, source=source, q=q)
-    cursor = (
-        _ProspectDoc.find(filters)
-        .sort(-_ProspectDoc.createdAt)  # type: ignore[operator]
-        .limit(limit)
-    )
-    return [_to_response(_to_domain(doc)) async for doc in cursor]
+    if sort == "tier":
+        docs = await _tier_ordered_page(filters, limit=limit)
+    else:
+        spec = _PROSPECT_SORT_SPECS.get(sort)
+        if spec is None:
+            raise ValidationError("prospect.bad_sort", f"Unknown sort mode '{sort}'")
+        docs = await _ProspectDoc.find(filters).sort(spec).limit(limit).to_list()
+    return [_to_response(_to_domain(doc)) for doc in docs]
 
 
 async def update(

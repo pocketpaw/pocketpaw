@@ -51,6 +51,7 @@ from pocketpaw_ee.cloud.growth import service as growth_service
 from pocketpaw_ee.cloud.growth.domain import (
     DraftChannel,
     DraftStatus,
+    ProspectSort,
     ProspectSource,
     ProspectStatus,
     ProspectTier,
@@ -109,13 +110,16 @@ async def list_prospects(
     status: ProspectStatus | None = Query(default=None),
     source: ProspectSource | None = Query(default=None),
     q: str | None = Query(default=None, max_length=200),
+    sort: ProspectSort = Query(default="newest"),
     limit: int = Query(default=100, ge=1, le=500),
     ctx: RequestContext = Depends(request_context),
 ) -> list[ProspectResponse]:
     """``q`` is a case-insensitive substring search across name / company /
-    domain / research_brief — the "find that one company" box."""
+    domain / research_brief — the "find that one company" box. ``sort`` is
+    ``newest`` (default) / ``oldest`` / ``company`` / ``tier``; the tier order
+    is the declared rank a→b→c→unqualified, not a lexicographic accident."""
     return await growth_service.list_prospects(
-        ctx, tier=tier, status=status, source=source, q=q, limit=limit
+        ctx, tier=tier, status=status, source=source, q=q, sort=sort, limit=limit
     )
 
 
