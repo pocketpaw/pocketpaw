@@ -28,6 +28,11 @@
 # /drafts/{id}/propose — takes ``growth.manage`` (ADMIN): the propose route
 # has to sit at the same tier ``growth.executor`` re-checks at dispatch, or a
 # member-filed proposal would always fail closed at approve time.
+# Updated 2026-07-28 (feat/growth-mcp): PATCH /drafts/{id} — edit a draft's copy
+# (subject / body / demo_url) while it is still ``draft``. Anything past that is
+# 403 ``draft.not_editable``: from ``proposed`` on, the stored body is what the
+# Tray shows and what the worker sends. Declared ABOVE the /drafts/{id}/status
+# POST for readability only — different methods, no path-match ambiguity.
 # Updated 2026-07-28 (feat/growth-api-scale): GET /prospects grew the scale
 # query — ``q`` (search), ``sort`` (newest|oldest|company|tier), ``cursor`` —
 # and now returns ``ProspectPageResponse`` ({items, next_cursor, total})
@@ -80,6 +85,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     ProspectPageResponse,
     ProspectResponse,
     TransitionDraftRequest,
+    UpdateDraftRequest,
     UpdateProspectRequest,
 )
 from pocketpaw_ee.cloud.license import require_license
@@ -235,6 +241,26 @@ async def list_drafts(
     return await growth_service.list_drafts(
         ctx, prospect_id=prospect_id, channel=channel, status=status, limit=limit
     )
+
+
+@router.patch(
+    "/drafts/{draft_id}",
+    response_model=DraftResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def update_draft(
+    draft_id: str,
+    body: UpdateDraftRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> DraftResponse:
+    """Edit a draft's copy — subject / body / demo_url, any subset.
+
+    Only while the draft is still ``draft``: from ``proposed`` on, the stored
+    body is what the human reviews in the Tray and what the worker sends, so an
+    edit is refused with 403 ``draft.not_editable``. There is no ``status``
+    field on the body — lifecycle moves go through the status route and the
+    gate."""
+    return await growth_service.update_draft(ctx, draft_id, body)
 
 
 @router.post(
