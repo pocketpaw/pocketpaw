@@ -129,6 +129,19 @@ each block excluding its own filter), and POST /growth/drafts/propose-batch
 (<=100 ids, each proposed through the existing Instinct gate, per-draft
 error entries, growth.manage).
 
+Updated: 2026-07-28 (feat/growth-projects) — a prospect can now be just a
+domain: name and company are optional on create and on a bulk row, defaulting
+to "" (not yet known), and nothing renders an empty value as "unknown".
+domain stays required and still normalises. Added project_id — the client
+container from cloud/projects — on create, on PATCH (three-valued: omit to
+leave alone, an id to reassign, "" to clear) and as an optional filter on the
+list, the facets and the search; a foreign project is 404 project.not_found.
+The email dispatcher resolves a per-project sender identity (from-name /
+from-address / reply-to, per-field fallback to the workspace default) via the
+MAILTRAP_PROJECT_SENDERS and MAILTRAP_REPLY_TO connector keys, and the daily
+follow-up sweep works one client's threads at a time so their nudges go out
+under that identity.
+
 Updated: 2026-07-27 (feat/growth-g8) — added the Growth — LinkedIn Queue
 section: GET /growth/linkedin/queue (proposed/approved linkedin drafts joined
 with prospect context, ?format=md for a paste-ready markdown export) and
@@ -2034,7 +2047,19 @@ Create a prospect. Body:
 }
 ```
 
-`name`, `company`, `domain`, and `source` are required. Enums: `source` is
+Only `domain` and `source` are required. `name` and `company` default to
+`""` — **not yet known**, which is the honest shape an import arrives in: a
+pasted list of bare domains, enriched by research later on the same
+`(workspace, domain)` identity. Nothing renders an empty value as the word
+"unknown". The agent surface is stricter: `growth_upsert_prospect` refuses to
+CREATE a row without a name and a company.
+
+`project_id` (optional) assigns the prospect to a client project
+(`cloud/projects`). It is validated against the caller's workspace — another
+tenant's project is `404 project.not_found`. Nullable throughout: a workspace
+not using projects is unaffected.
+
+Enums: `source` is
 `clay | directory | manual`; `tier` is `a | b | c | unqualified` (default
 `unqualified`); `status` is
 `new | qualified | drafted | in_sequence | replied | dead` (default `new`).
@@ -2113,6 +2138,7 @@ Query parameters:
 | Param | Default | Notes |
 |---|---|---|
 | `tier`, `status`, `source` | — | Validated against the enums above; an unknown value is a 422, not an empty list. |
+| `project_id` | — | Scope to one client's pipeline. Omitted means every project (the whole view for a workspace not using them); an empty string means the rows with no client assigned. |
 | `q` | — | Case-insensitive substring search across `name`, `company`, `domain` and `research_brief`. Regex metacharacters are escaped, so `.*` matches nothing rather than everything. Max 200 chars. |
 | `sort` | `newest` | `newest` \| `oldest` \| `company` \| `tier`. |
 | `cursor` | — | The previous page's `next_cursor`, passed back unchanged. |
@@ -2142,7 +2168,7 @@ be designed against those rather than bolted on.
 ### `GET /api/v1/growth/prospects/facets`
 
 Counts behind the filter chips. Takes the same `tier` / `status` / `source` /
-`q` filters as the list route and returns:
+`project_id` / `q` filters as the list route and returns:
 
 ```json
 {
@@ -2156,7 +2182,10 @@ Each block respects every active filter **except its own**. With
 `status=new` on, the tier counts describe the new rows rather than
 collapsing to whichever tier is selected — otherwise the selected chip reads
 `n` and every sibling reads `0`, which tells the user nothing about where to
-go next. `q` constrains all three blocks (it is not a facet of its own).
+go next. `q` constrains all three blocks (it is not a facet of its own), and so does
+`project_id` — it is not a chip the user toggles inside the list, it is
+*which client's list* they are looking at, so the other three counts have to
+be scoped to it.
 
 Every legal value appears, zeros included, so the chip row keeps a stable
 shape as the user filters. Served by one workspace-scoped `$facet`
@@ -2174,6 +2203,13 @@ identity) and `source` (capture-time provenance) are immutable; the other
 fields (`name`, `company`, `tier`, `research_brief`, `emails`,
 `linkedin_url`, `whatsapp_number`, `opted_in`, `status`) patch in place.
 Returns the updated envelope.
+
+`project_id` is three-valued here: omitting it leaves the assignment alone,
+an id reassigns the prospect to that client (validated against the workspace
+— a foreign project is `404 project.not_found`), and `""` clears it.
+Un-assigning is deliberately explicit: a bulk upsert only ever *sets* the
+project, so an enrichment pass that carries no project can never orphan a
+client's prospect.
 
 ## Growth — Drafts
 
