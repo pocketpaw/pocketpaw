@@ -368,3 +368,73 @@ async def test_cross_tenant_access_is_isolated(w1_client, w2_client, op):
         assert resp.status_code == 200
         assert resp.json()["items"] == []
         assert resp.json()["total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# A prospect can be just a domain (feat/growth-projects)
+#
+# A pasted import arrives as bare domains. ``name`` / ``company`` mean "not yet
+# known" when empty; ``domain`` stays required because it IS the identity.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_accepts_a_bare_domain(w1_client):
+    resp = await w1_client.post(
+        "/api/v1/growth/prospects",
+        json={"domain": "northwinddental.com", "source": "directory"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["domain"] == "northwinddental.com"
+    # Empty means "not yet known" — never a placeholder word.
+    assert body["name"] == ""
+    assert body["company"] == ""
+    assert "unknown" not in resp.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_create_still_requires_a_domain(w1_client):
+    resp = await w1_client.post("/api/v1/growth/prospects", json={"source": "manual"})
+    assert resp.status_code == 422
+    blank = await w1_client.post(
+        "/api/v1/growth/prospects", json={"domain": "  ", "source": "manual"}
+    )
+    assert blank.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_bulk_ingest_accepts_bare_domain_rows(w1_client):
+    """The honest shape of an import: a list of domains, one per line."""
+    rows = [{"domain": d, "source": "directory"} for d in ("a-co.com", "b-co.com", "c-co.com")]
+    resp = await w1_client.post("/api/v1/growth/prospects/bulk", json={"rows": rows})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["created"] == 3
+    assert body["errors"] == []
+
+    listed = (await w1_client.get("/api/v1/growth/prospects")).json()
+    assert listed["total"] == 3
+    assert {item["domain"] for item in listed["items"]} == {"a-co.com", "b-co.com", "c-co.com"}
+    assert all(item["name"] == "" and item["company"] == "" for item in listed["items"])
+
+
+@pytest.mark.asyncio
+async def test_research_fills_in_a_bare_domain_later(w1_client):
+    """The whole point of allowing the empty row: it gets enriched in place,
+    on the same (workspace, domain) identity — no duplicate."""
+    created = (
+        await w1_client.post(
+            "/api/v1/growth/prospects",
+            json={"domain": "northwinddental.com", "source": "directory"},
+        )
+    ).json()
+    patched = await w1_client.patch(
+        f"/api/v1/growth/prospects/{created['id']}",
+        json={"name": "Dr Nguyen", "company": "Northwind Dental", "tier": "b"},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["name"] == "Dr Nguyen"
+    assert patched.json()["company"] == "Northwind Dental"
+    assert patched.json()["domain"] == "northwinddental.com"
+    assert patched.json()["id"] == created["id"]

@@ -34,6 +34,14 @@
 # the manual LinkedIn send queue: the draft envelope joined with the prospect
 # context the captain needs to send by hand (name, company, profile URL,
 # research brief, tier). Response-only; the queue has no request DTO.
+# Updated 2026-07-28 (feat/growth-projects): a prospect may be JUST A DOMAIN.
+# ``name`` and ``company`` on CreateProspectRequest lost their ``min_length=1``
+# and now default to ``""`` — "not yet known", the shape a pasted domain list
+# actually arrives in (bulk rows validate through this same model, so they
+# relax with it). ``domain`` stays required and still normalises: it is the
+# dedupe identity, and a row without one is not a prospect. The LinkedIn queue
+# row gained ``prospect_domain`` so an export can still title a section for a
+# prospect whose name nobody has filled in yet.
 
 from __future__ import annotations
 
@@ -70,8 +78,23 @@ def _normalise_domain(v: str) -> str:
 
 
 class CreateProspectRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-    company: str = Field(min_length=1, max_length=200)
+    """A prospect at capture time. Only ``domain`` is required.
+
+    ``name`` and ``company`` default to ``""`` meaning NOT YET KNOWN, because
+    that is the honest shape an import arrives in: a list of bare domains
+    pasted out of a directory, with the rest filled in later by research. An
+    empty string here is a fact ("we haven't looked yet"), never a placeholder
+    — nothing downstream may render it as the literal word "unknown".
+
+    The AGENT surface is stricter on purpose: ``growth_upsert_prospect``
+    refuses to CREATE a row without a name and a company, because an agent
+    that researched a company and still can't name it has failed at the job.
+    A human pasting a domain list is a different caller with a different
+    truth, and that guard lives in the MCP handler rather than here.
+    """
+
+    name: str = Field(default="", max_length=200)
+    company: str = Field(default="", max_length=200)
     domain: str = Field(min_length=1, max_length=253)
     source: ProspectSource
     tier: ProspectTier = "unqualified"
@@ -318,6 +341,9 @@ class LinkedInQueueItemResponse(BaseModel):
     draft: DraftResponse
     prospect_name: str
     prospect_company: str
+    # Always present, unlike name / company — the export titles a section with
+    # it when nobody has filled the rest in yet.
+    prospect_domain: str = ""
     linkedin_url: str | None
     research_brief: str
     tier: str

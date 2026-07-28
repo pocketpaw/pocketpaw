@@ -342,3 +342,29 @@ async def test_md_export_empty_queue(w1_client):
 async def test_queue_rejects_unknown_format(w1_client):
     resp = await w1_client.get("/api/v1/growth/linkedin/queue", params={"format": "html"})
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_md_export_titles_a_nameless_prospect_with_its_domain(w1_client):
+    """A prospect can be just a domain. The export must degrade to something
+    TRUE — the domain — never to a placeholder like "Unknown — Unknown"."""
+    prospect = await _create_prospect(w1_client, name="", company="")
+    draft = await _create_draft(w1_client, prospect["id"])
+    await _walk(w1_client, draft["id"], "proposed")
+
+    md = (await w1_client.get("/api/v1/growth/linkedin/queue", params={"format": "md"})).text
+    assert "## acme-dental.com" in md
+    assert "unknown" not in md.lower()
+    assert "—" not in md.splitlines()[2]  # no orphaned dash on the heading line
+
+
+@pytest.mark.asyncio
+async def test_md_export_titles_a_half_known_prospect_with_what_it_has(w1_client):
+    """Company known, contact not: the heading is the company alone."""
+    prospect = await _create_prospect(w1_client, name="")
+    draft = await _create_draft(w1_client, prospect["id"])
+    await _walk(w1_client, draft["id"], "proposed")
+
+    md = (await w1_client.get("/api/v1/growth/linkedin/queue", params={"format": "md"})).text
+    assert "## Acme Dental" in md
+    assert "## Acme Dental —" not in md

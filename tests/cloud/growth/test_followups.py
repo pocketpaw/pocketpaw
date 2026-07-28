@@ -245,6 +245,22 @@ def test_render_followup_does_not_double_prefix_a_reply_subject():
     assert subject == "Re: already a reply"
 
 
+def test_render_followup_degrades_for_a_prospect_that_is_just_a_domain():
+    """Name and company can both be empty — the copy must still read like a
+    person wrote it, and must never surface a placeholder word."""
+    subject, body = render_followup(
+        channel="email",
+        prospect_name="",
+        prospect_company="",
+        first_touch={"subject": "", "body": "hi"},
+    )
+    assert subject == "Following up"  # no orphaned dash
+    assert "Hi there," in body
+    assert "your team" in body
+    assert "unknown" not in body.lower()
+    assert "unknown" not in (subject or "").lower()
+
+
 def test_render_followup_omits_subject_off_email():
     """The draft DTO refuses a subject on non-email channels — the renderer
     must not hand one over."""

@@ -8,6 +8,10 @@
 #
 # Created 2026-07-27 (feat/growth-g1): first slice of /growth — the prospect
 # store. Later slices (ingestion, drafts, gated sends) build on this doc.
+# Updated 2026-07-28 (feat/growth-projects): ``name`` and ``company`` default to
+# ``""`` — a prospect may be JUST A DOMAIN until research fills the rest in, so
+# the stored fields have to be able to say "not yet known". Existing rows all
+# carry values, so this is a widening with no migration.
 
 from __future__ import annotations
 
@@ -23,8 +27,10 @@ class Prospect(TimestampedDocument):
 
     # Tenancy boundary — every read filters on this.
     workspace: Indexed(str)  # type: ignore[valid-type]
-    name: str
-    company: str
+    # Both default to "" — NOT YET KNOWN. A pasted list of bare domains is a
+    # legitimate import; research fills these in later.
+    name: str = ""
+    company: str = ""
     # Company website domain, lowercased at the service boundary — the dedupe key.
     domain: str
     source: str  # clay | directory | manual (validated at the DTO boundary)
