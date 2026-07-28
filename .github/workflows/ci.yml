@@ -206,6 +206,19 @@ jobs:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
 
+      - name: Run herdr cockpit tests
+        # tests/cloud is excluded by the addopts in pyproject.toml, so the step
+        # above never reaches this file — which would leave the cockpit's ADMIN
+        # gate (test_endpoints_require_admin) and its fail-open contract with NO
+        # automated coverage on any PR. `-o addopts=""` clears that ignore for
+        # this one file. The wider "no lane runs tests/cloud" gap is pre-existing
+        # and tracked separately; this keeps the new RBAC surface out of the
+        # blind spot rather than quietly widening it.
+        run: uv run pytest tests/cloud/test_herdr_cockpit.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
   import-linter:
     name: OSS-EE boundary
     runs-on: ubuntu-latest

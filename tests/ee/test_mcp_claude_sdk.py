@@ -1,13 +1,18 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
-Updated: 2026-07-25 (feat/code-writes-apply-directly) — ``_strip_builtin_servers``
-  now also drops ``pocketpaw_code`` (readFile / search / listDir / writeFile,
-  the /code file tools, registered always-on via ``CloudCodeMcpProvider``), so
-  the external-config assertions stay focused. This one arrived without the
-  strip and took six tests down with it on every branch off dev; the pattern
-  below is now a dozen entries long, which is a hint that "an always-on server
-  landed" should fail somewhere more specific than six assertions about
-  external config. Same regime as pocketpaw_daytona.
+Updated: 2026-07-27 (fix/dev-ci) — ``_strip_builtin_servers`` now also drops
+  ``pocketpaw_code`` (the Code Mode delegate server: readFile / search /
+  listDir / writeFile), registered always-on via the ``code`` mcp_servers entry
+  point (``CloudCodeMcpProvider``) since #1763. That PR shipped the server and
+  its own test file but never taught this helper, so six assertions here counted
+  it as an external config and dev went red. Same regime as
+  ``pocketpaw_daytona``: ambient registration, scoped by the /code
+  SurfaceProfile allowlist rather than by being withheld.
+
+  Two branches hit this and fixed it independently, which is the actual signal:
+  the list below is a dozen entries long, and every one of them was written
+  after an always-on server took six external-config assertions down with it.
+  "A builtin server landed" should fail somewhere more specific than here.
 Updated: 2026-07-06 (feat/paw-sites-stock-imagery) — ``_strip_builtin_servers``
   now also drops ``pocketpaw_stock`` (search_stock_images: free Pexels +
   Unsplash photo search for site imagery, registered always-on via the
@@ -184,12 +189,14 @@ def _strip_builtin_servers(result: dict) -> dict:
     # ``pocketpaw_daytona`` is always-on too — the /code surface scopes access
     # via its profile allowlist, same regime as fabric / instinct / media.
     out.pop(_DAYTONA_MCP_SERVER_NAME, None)
-    # ``pocketpaw_code`` is always-on too — the four /code file tools (readFile
-    # / search / listDir / writeFile) register unconditionally via
-    # ``CloudCodeMcpProvider``. Registration is not the boundary here: each tool
-    # parks on a delegate frame that only a tab with a code project open can
-    # answer, and the /code SurfaceProfile scopes who may call them at all. Same
-    # regime as daytona.
+    # ``pocketpaw_code`` is always-on too — the /code file tools (readFile /
+    # search / listDir / editFile / writeFile) are ambient, NOT in
+    # ``OPT_IN_MCP_SERVERS``. The /code SurfaceProfile scopes them via
+    # ``tool_mode="exclusive"`` + ``_CODE_FILE_TOOL_IDS``, so the allowlist is
+    # the boundary, not registration — the same regime as its sibling
+    # ``pocketpaw_daytona`` directly above. Registration could not be the
+    # boundary anyway: each tool parks on a delegate frame that only a tab with
+    # a code project open can answer.
     out.pop(_CODE_MCP_SERVER_NAME, None)
     # ``pocketpaw_atlas`` is always-on too — the capability atlas
     # (atlas_search / atlas_describe) is registered unconditionally in core

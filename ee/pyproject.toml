@@ -6,6 +6,12 @@
 # depends on the OSS core package `pocketpaw`.
 #
 # Changes:
+#   - 2026-07-27 (fix/dev-ci): the "CodeAgent — runtime-agnostic" contract now
+#     sources the codeagent PACKAGE instead of a hand-kept list of its modules.
+#     The list had gone stale twice over — `delegates.py` was never added, and
+#     `transport.py` / `domain.py` were deleted with the turn-agent — and a
+#     contract that names a module which no longer exists fails the whole
+#     `lint-imports` run, not just that contract. See the contract below.
 #   - 2026-07-01 (ee-cython gate): the cython build hook is now GATED OFF by
 #     default (`enable-by-default = false`) so dev / CI / editable installs stay
 #     fast and readable — the ~25-min compile only fires when
@@ -667,24 +673,22 @@ allow_indirect_imports = "true"
 # A human reviewer will not catch that on a diff that otherwise looks like a
 # helpful refactor. The linter will.
 #
-# The list was stale until 2026-07-25 and took CI down with it. It named
-# ``transport`` and ``domain``, both deleted with the client-side sub-agent, and
-# import-linter treats an unresolvable source module as a hard error rather than
-# skipping it — so every run on a clean checkout died with "Module
-# 'pocketpaw_ee.cloud.codeagent.domain' does not exist" before a single contract
-# was evaluated. It passes on a developer machine, because a leftover
-# ``__pycache__/domain.cpython-312.pyc`` is enough for the graph builder to
-# resolve the name. Delete the pycache before trusting a local green here.
+# Sourced from the PACKAGE, not a file list. The original list named the five
+# modules codeagent had on 2026-07-21; `delegates.py` (added 2026-07-22) never
+# got added to it, and `transport.py` / `domain.py` were deleted 2026-07-23 with
+# the turn-agent, which broke the run outright. `as_packages` defaults to true,
+# so naming the package covers every submodule — including the ones added after
+# this contract was written.
 #
-# ``delegates`` replaces them, and it is the module that most needs this guard:
-# it IS the client-reads-and-sends inversion described above, so a server-side
-# fetch smuggled in there would defeat the contract at its source.
-source_modules = [
-    "pocketpaw_ee.cloud.codeagent.router",
-    "pocketpaw_ee.cloud.codeagent.service",
-    "pocketpaw_ee.cloud.codeagent.delegates",
-    "pocketpaw_ee.cloud.codeagent.dto",
-]
+# Two branches fixed this independently (2026-07-28). The other one re-listed the
+# four surviving modules by name and explained the failure in more detail: an
+# unresolvable source module is a HARD error for import-linter, not a skip, so a
+# clean checkout died before evaluating a single contract — while a developer
+# machine stayed green because a stale ``__pycache__/domain.cpython-312.pyc`` was
+# enough for the graph builder to resolve the name. Worth keeping that detail;
+# the package form is kept as the fix, because a name list is what went stale in
+# the first place and would go stale again on the next module added.
+source_modules = ["pocketpaw_ee.cloud.codeagent"]
 forbidden_modules = [
     "pocketpaw_ee.cloud.daytona",
     "pocketpaw_ee.cloud.websandbox",
