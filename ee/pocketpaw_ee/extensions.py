@@ -1135,6 +1135,44 @@ class CloudShipMcpProvider:
         return list(EXTERNAL_ACTIONS_TOOL_IDS)
 
 
+class CloudGrowthMcpProvider:
+    """`pocketpaw.mcp_servers` — the /growth outbound in-process server
+    (``pocketpaw_growth``). Hosts the prospect + draft verbs the chat agent on
+    the /growth rail may drive.
+
+    Reads (prospect list / one prospect with its drafts / draft list / LinkedIn
+    queue) and AUTHORING writes (upsert a researched prospect, write a draft,
+    revise a draft still in ``draft``) execute through
+    ``ee.cloud.growth.service``. The OUTBOUND verbs do not, and there is no tool
+    that sends: ``growth_propose_send`` / ``growth_propose_send_batch`` file
+    Instinct proposals and return ``status="proposed"``. Nothing reaches
+    ``approved`` or ``sent`` from here — those are ``GATE_OWNED_TARGETS``,
+    walked only by ``ee.cloud.growth.executor`` after a human approval and by
+    the dispatch worker. The tools carry the same per-action RBAC tiers as the
+    HTTP routes (read / write / manage), so a proposal the executor could never
+    approve is never filed.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) — surfaces scope access via their
+    profile allowlist, the same regime the sibling belt / ship / external-action
+    servers use. ``build_growth_server`` returns None — and the loop skips it —
+    when the claude_agent_sdk isn't installed, so chat never breaks.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.growth import build_growth_server
+
+            return build_growth_server()
+        except ImportError:
+            # claude_agent_sdk not installed — same posture as the siblings.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.growth import GROWTH_TOOL_IDS
+
+        return list(GROWTH_TOOL_IDS)
+
+
 class CloudWorkspaceAdminMcpProvider:
     """`pocketpaw.mcp_servers` — the workspace-administration in-process server
     (``pocketpaw_workspace_admin``, feat/workspace-admin-tools WA-1).

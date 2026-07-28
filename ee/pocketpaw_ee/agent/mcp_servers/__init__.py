@@ -1,5 +1,8 @@
 """In-process MCP servers exposed to agent backends for cloud features.
 
+Updated: 2026-07-28 (feat/growth-mcp) — added ``growth.py`` (``pocketpaw_growth``)
+to the listing below: the agent-facing /growth surface, read-and-propose only.
+
 Updated: 2026-06-11 (feat/fabric-instinct-mcp-providers) — added the server
 surface listing below, plus the two new read-only servers (``fabric.py`` /
 ``instinct.py``). On the claude_agent_sdk backend, registry tools (BaseTool)
@@ -29,6 +32,14 @@ Server surfaces (module → server name → tools):
 * ``fabric.py`` → ``pocketpaw_fabric`` → ``fabric_query`` / ``fabric_stats``
   (READ-ONLY ontology access, workspace-scoped)
 * ``foresight.py`` → ``pocketpaw_foresight`` → scenario save/run
+* ``growth.py`` → ``pocketpaw_growth`` → the /growth outbound surface:
+  ``growth_list_prospects`` / ``growth_get_prospect`` / ``growth_list_drafts``
+  / ``growth_linkedin_queue`` (reads), ``growth_upsert_prospect`` /
+  ``growth_create_draft`` / ``growth_update_draft`` (authoring writes), and
+  ``growth_propose_send`` / ``growth_propose_send_batch`` (gated). NOTHING here
+  sends and nothing reaches the gate-owned draft statuses ``approved`` /
+  ``sent`` — the agent's reach ends at ``proposed``, a human approves in the
+  Tray, and the dispatch worker sends
 * ``icons.py`` → ``pocketpaw_icons`` → ``search_icons`` (free open-source
   icon/SVG search via Iconify for site iconography; pure read, no identity)
 * ``instinct.py`` → ``pocketpaw_instinct`` → ``instinct_pending`` /

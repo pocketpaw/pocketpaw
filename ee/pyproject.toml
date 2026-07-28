@@ -264,6 +264,7 @@ belt = "pocketpaw_ee.extensions:CloudBeltMcpProvider"
 code = "pocketpaw_ee.extensions:CloudCodeMcpProvider"
 external_actions = "pocketpaw_ee.extensions:CloudExternalActionsMcpProvider"
 ship = "pocketpaw_ee.extensions:CloudShipMcpProvider"
+growth = "pocketpaw_ee.extensions:CloudGrowthMcpProvider"
 fabric = "pocketpaw_ee.extensions:CloudFabricMcpProvider"
 instinct = "pocketpaw_ee.extensions:CloudInstinctMcpProvider"
 daytona = "pocketpaw_ee.extensions:CloudDaytonaMcpProvider"
@@ -830,7 +831,12 @@ name = "Growth — Beanie writes only from service.py"
 # stays on the forbidden list.
 type = "forbidden"
 allow_indirect_imports = "true"
+# feat/growth-mcp — the agent surface joins the boundary:
+# ``agent.mcp_servers.growth`` reaches prospects and drafts ONLY through
+# ``growth.service``, never a doc class. It is also the module where a stray
+# Beanie import would be least visible, so the contract is the check.
 source_modules = [
+    "pocketpaw_ee.agent.mcp_servers.growth",
     "pocketpaw_ee.cloud.growth.router",
     "pocketpaw_ee.cloud.growth.dto",
     "pocketpaw_ee.cloud.growth.domain",
