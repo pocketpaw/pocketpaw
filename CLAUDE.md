@@ -236,7 +236,11 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   invoices and receipts with it. The provider credential itself is **not** an env
   var: it is per-workspace connector state on the workspace's `mailtrap` connector
   row (`MAILTRAP_API_TOKEN`, plus optional `MAILTRAP_FROM_EMAIL` /
-  `MAILTRAP_FROM_NAME`), so disabling the connector revokes sending immediately.
+  `MAILTRAP_FROM_NAME`, `MAILTRAP_REPLY_TO`, and `MAILTRAP_PROJECT_SENDERS` — a
+  `{project_id: {from_email, from_name, reply_to}}` map so an agency sends as the
+  client whose project owns the prospect, resolved per field with the workspace
+  values as the fallback), so disabling the connector revokes sending immediately
+  for every project at once.
   See `ee/pocketpaw_ee/cloud/growth/connector.py` and `docs/api-reference.md`.
 - **Session supervisor config**: `POCKETPAW_SESSION_SUPERVISOR` (default OFF). When
   truthy (`1`/`true`/`yes`/`on`), the cloud chat executor drives every agent turn
