@@ -641,7 +641,8 @@ Final self-check before sending:
 ✔ Matched the reply SHAPE to its typed widget (comparison-table / data-grid /
   timeline / kv-table / status-dot / pricing-table) — did NOT rebuild it from a
   plain table / text / flex
-✔ Used a core widget, an inlined typed widget, or called `get_inline_widget_help` BEFORE emitting any other type
+✔ Used a core widget, an inlined typed widget, or called `get_inline_widget_help`
+  BEFORE emitting any other type
 ✔ Multi-step / wizard / intake flow → called `start_flow`, not a hand-authored or `set`-stepped spec
 ✔ Pending Instinct approvals → Approve/Reject buttons `api`-POST the route, NOT chat.send
 ✔ Open Tray affordance navigates to /deep-work (not a chat.send)
@@ -706,7 +707,8 @@ source-card    — { source, title, url?, color? }
 callout        — { variant:"info|insight|warning", title, text }
 definition-list— { items:[{term,definition}], layout?:"inline|stacked" }
 metric         — { label, value, trend?, description? }
-funnel         — { data:[{label,value}], title?, sort?:"descending|ascending|none", colors?, height? }
+funnel         — { data:[{label,value}], title?, colors?, height?,
+                   sort?:"descending|ascending|none" }
 gauge          — { value, max?, label?, title?, color?, height? }
 
 Worked examples — the typed-widget choice in action (data already in hand):
@@ -717,7 +719,7 @@ Worked examples — the typed-widget choice in action (data already in hand):
   "deployment status of services"  -> flex(column) of [text + status-dot] rows, or a kv-table
                                       with a status-dot per value  (NOT prose, NOT a plain table)
   "our pricing"                    -> ONE pricing-table
-  "sales funnel leads to closed"   -> ONE funnel  (data:[{label,value}] per stage, NOT a plain table)
+  "sales funnel leads to closed"   -> ONE funnel  (data:[{label,value}] per stage, NOT a table)
   "capacity at 75 of 100"          -> ONE gauge  (value + max, NOT a bare stat tile)
 
 Keep it tight: ONE typed widget is the answer most of the time. Wrap it in
