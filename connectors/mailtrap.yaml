@@ -37,6 +37,21 @@ auth:
     - name: MAILTRAP_FROM_NAME
       description: Display name on the From header (optional).
       required: false
+    - name: MAILTRAP_REPLY_TO
+      description: >-
+        Reply-To header for cold outreach (optional). Unlike the from-address
+        this is NOT constrained to the sending domain — it only tells the
+        recipient where to write back, so it can point at a real inbox.
+      required: false
+    - name: MAILTRAP_PROJECT_SENDERS
+      description: >-
+        Per-project sender overrides, as {project_id: {from_email, from_name,
+        reply_to}}. An agency sending for a client sends as that client.
+        Resolved per field, so a project that sets only from_name keeps the
+        workspace's reply_to. from_email is still pinned to
+        GROWTH_SENDING_DOMAIN — a client's own domain needs their DNS, which is
+        an onboarding flow, not a config key.
+      required: false
 
 # No actions: sending is gated behind the Instinct approval + the growth
 # dispatch worker, never a generic connector verb.

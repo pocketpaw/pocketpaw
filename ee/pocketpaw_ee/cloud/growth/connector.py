@@ -2,6 +2,17 @@
 # client for the /growth outbound engine (G-5).
 #
 # Created 2026-07-27 (feat/growth-g5): new module.
+# Updated 2026-07-28 (feat/growth-projects): PER-PROJECT SENDER IDENTITY. An
+# agency sending for a client has to send AS the client, so the sender is
+# resolved per project (``resolve_sender_identity``) with a per-FIELD fallback
+# to the workspace default, and a workspace-level ``MAILTRAP_REPLY_TO`` joins
+# the blob. This sits in FRONT of credential resolution, not instead of it: the
+# token is still the workspace's, read from the same connector row, so
+# disabling the connector still revokes every project's sending at once.
+# ``from_email`` stays pinned to GROWTH_SENDING_DOMAIN even when a project
+# overrides it — the client's identity rides ``from_name`` and ``reply_to``,
+# which is how agencies send without holding the client's DNS. See
+# ``resolve_sender_identity`` for the full argument.
 #
 # WHY A MODULE AND NOT A YAML ACTION. ``connectors/mailtrap.yaml`` declares the
 # credential but ZERO actions, exactly like ``ship.yaml``. A generic
@@ -55,6 +66,17 @@ MAILTRAP_SEND_URL = "https://send.api.mailtrap.io/api/send"
 TOKEN_KEY = "MAILTRAP_API_TOKEN"
 FROM_EMAIL_KEY = "MAILTRAP_FROM_EMAIL"
 FROM_NAME_KEY = "MAILTRAP_FROM_NAME"
+REPLY_TO_KEY = "MAILTRAP_REPLY_TO"
+
+# Per-project sender overrides: ``{project_id: {from_email, from_name,
+# reply_to}}``. Lives in the SAME connector blob as the workspace defaults
+# above, because that blob is already the answer to "how does this workspace
+# send email" and disabling the connector must revoke every identity in it at
+# once, not all-but-one.
+PROJECT_SENDERS_KEY = "MAILTRAP_PROJECT_SENDERS"
+_PROJECT_FROM_EMAIL = "from_email"
+_PROJECT_FROM_NAME = "from_name"
+_PROJECT_REPLY_TO = "reply_to"
 
 # Deployment-level config: the secondary sending domain (see the module header).
 SENDING_DOMAIN_ENV = "GROWTH_SENDING_DOMAIN"
@@ -74,6 +96,20 @@ class EmailSendError(Exception):
     Every message is scrubbed of the workspace's token before it is raised, so
     the string is safe to persist on a ``MessageLog.error`` and to log.
     """
+
+
+@dataclass(frozen=True)
+class SenderIdentity:
+    """Who an outreach message goes out as: the resolved sender for one send.
+
+    Resolved per PROJECT with a per-field fallback to the workspace default —
+    see ``resolve_sender_identity`` for what a project may override and why
+    ``from_address`` is not free.
+    """
+
+    from_address: str
+    from_name: str = ""
+    reply_to: str = ""
 
 
 @dataclass(frozen=True)
@@ -171,17 +207,87 @@ def _resolve_from_address(config: dict[str, Any], sending_domain: str) -> str:
     return from_address
 
 
+def _project_overrides(config: dict[str, Any], project_id: str | None) -> dict[str, str]:
+    """The sender overrides stored for one project. Empty when there are none.
+
+    Fail-soft on shape: a hand-edited blob that isn't the expected nested map
+    yields no overrides, which sends as the workspace default. Refusing the
+    send instead would take a client's whole pipeline down over a typo in an
+    unrelated project's entry.
+    """
+    if not project_id:
+        return {}
+    raw = config.get(PROJECT_SENDERS_KEY)
+    if not isinstance(raw, dict):
+        return {}
+    entry = raw.get(project_id)
+    if not isinstance(entry, dict):
+        return {}
+    return {k: str(v).strip() for k, v in entry.items() if isinstance(v, str) and v.strip()}
+
+
+def resolve_sender_identity(
+    config: dict[str, Any], sending_domain: str, project_id: str | None = None
+) -> SenderIdentity:
+    """Who this message is FROM — the project's identity, else the workspace's.
+
+    An agency running outbound for a client has to send AS the client, so the
+    project is the unit of identity, not the workspace. Resolution is per
+    FIELD, not per record: a project that overrides only the display name keeps
+    the workspace's reply-to rather than losing it, which is the common case
+    (one agency inbox, many client names).
+
+    WHAT A PROJECT MAY AND MAY NOT OVERRIDE, and why it matters:
+
+    * ``from_name`` — free. It is a display string.
+    * ``reply_to`` — free, and NOT constrained to the sending domain. It is
+      just a header telling the recipient where to write back, and pointing it
+      at the client's own inbox is the entire point: the reply lands with the
+      client, not the agency.
+    * ``from_email`` — still validated against ``GROWTH_SENDING_DOMAIN``, same
+      as the workspace default. This is the constraint people try to argue
+      with, so: you cannot send as ``hello@theirdomain.com`` without their DNS.
+      Mail claiming a domain you don't hold fails DMARC, lands in spam, and
+      burns the reputation of the domain you DO hold. The honest shape is
+      ``clientname@<sending-domain>`` in the from-address, the client's name in
+      ``from_name``, and the client's inbox in ``reply_to`` — which is how
+      agencies actually send, and which reads correctly to the recipient.
+      Sending from a client's own domain needs their DNS delegated, and that is
+      an onboarding flow, not a config key.
+    """
+    overrides = _project_overrides(config, project_id)
+
+    from_address = overrides.get(_PROJECT_FROM_EMAIL) or ""
+    if from_address:
+        # Validated through the SAME check the workspace default gets — the
+        # override is a different value, not a different rule.
+        from_address = _resolve_from_address({FROM_EMAIL_KEY: from_address}, sending_domain)
+    else:
+        from_address = _resolve_from_address(config, sending_domain)
+
+    from_name = overrides.get(_PROJECT_FROM_NAME) or str(config.get(FROM_NAME_KEY) or "").strip()
+    reply_to = overrides.get(_PROJECT_REPLY_TO) or str(config.get(REPLY_TO_KEY) or "").strip()
+    return SenderIdentity(from_address=from_address, from_name=from_name, reply_to=reply_to)
+
+
 async def send_email(
     *,
     workspace_id: str,
     to_address: str,
     subject: str,
     body: str,
+    project_id: str | None = None,
 ) -> SentEmail:
     """Send one outreach email through Mailtrap. Raises ``EmailSendError``.
 
     The caller (``email_dispatch``) turns any raise into a ``failed``
     MessageLog row and leaves the draft ``approved`` so the send is retryable.
+
+    ``project_id`` selects the SENDER identity — an agency sending for a client
+    sends as that client. It does not select the credential: the token is still
+    the workspace's, read from the same connector row, and identity resolution
+    happens in FRONT of that rather than instead of it. A project with no
+    override, or no project at all, sends as the workspace default.
     """
     to_address = (to_address or "").strip()
     if "@" not in to_address:
@@ -199,18 +305,23 @@ async def send_email(
             "the mailtrap connector is not configured for this workspace — "
             "enable it and supply the sending token"
         )
-    from_address = _resolve_from_address(config, sending_domain)
-    from_name = str(config.get(FROM_NAME_KEY) or "").strip()
+    identity = resolve_sender_identity(config, sending_domain, project_id)
 
-    sender: dict[str, str] = {"email": from_address}
-    if from_name:
-        sender["name"] = from_name
-    payload = {
+    sender: dict[str, str] = {"email": identity.from_address}
+    if identity.from_name:
+        sender["name"] = identity.from_name
+    payload: dict[str, Any] = {
         "from": sender,
         "to": [{"email": to_address}],
         "subject": subject,
         "text": body,
     }
+    if identity.reply_to:
+        # Carried as the RFC 5322 header rather than a provider-specific field:
+        # ``headers`` is the documented passthrough, and a header is what the
+        # recipient's client actually reads. This is the field that makes a
+        # client's replies land with the client instead of the agency.
+        payload["headers"] = {"Reply-To": identity.reply_to}
 
     client = _http_client()
     try:
@@ -246,7 +357,7 @@ async def send_email(
         provider=MAILTRAP_CONNECTOR_NAME,
         provider_message_id=provider_message_id,
         to_address=to_address,
-        from_address=from_address,
+        from_address=identity.from_address,
     )
 
 
@@ -255,12 +366,16 @@ __all__ = [
     "FROM_NAME_KEY",
     "MAILTRAP_CONNECTOR_NAME",
     "MAILTRAP_SEND_URL",
+    "PROJECT_SENDERS_KEY",
     "PUBLIC_BASE_URL_ENV",
+    "REPLY_TO_KEY",
     "SENDING_DOMAIN_ENV",
     "TOKEN_KEY",
     "EmailSendError",
+    "SenderIdentity",
     "SentEmail",
     "load_workspace_config",
+    "resolve_sender_identity",
     "resolve_sending_domain",
     "send_email",
 ]

@@ -499,3 +499,192 @@ def test_sending_domain_is_normalised(monkeypatch):
     monkeypatch.setenv(growth_connector.SENDING_DOMAIN_ENV, "  WWW.Outbound-Paw.dev. ")
 
     assert growth_connector.resolve_sending_domain() == "outbound-paw.dev"
+
+
+# ---------------------------------------------------------------------------
+# Per-project sender identity (feat/growth-projects)
+#
+# An agency sending for a client sends AS the client. Identity resolves per
+# project with a per-FIELD fallback to the workspace default; the credential
+# is untouched by any of it.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_draft_for_project(project_id: str | None, domain: str) -> str:
+    prospect = _ProspectDoc(
+        workspace=WORKSPACE,
+        name="Sam Founder",
+        company="Acme Dental",
+        domain=domain,
+        source="manual",
+        project_id=project_id,
+        emails=[f"sam@{domain}"],
+    )
+    await prospect.insert()
+    draft = _DraftDoc(
+        workspace=WORKSPACE,
+        prospect_id=str(prospect.id),
+        channel="email",
+        subject="Quick question",
+        body="Hi Sam — worth a look?",
+        status="approved",
+    )
+    await draft.insert()
+    return str(draft.id)
+
+
+def _sent_payload(recorder: _Recorder, index: int = 0) -> dict[str, Any]:
+    import json
+
+    return json.loads(recorder.requests[index].content)
+
+
+@pytest.mark.asyncio
+async def test_project_sender_identity_overrides_the_workspace_default(
+    mongo_db, sending_env, monkeypatch
+):
+    recorder = _Recorder(_ok_response)
+    _install_transport(monkeypatch, recorder)
+    await _seed_connector(
+        {
+            growth_connector.TOKEN_KEY: TOKEN,
+            growth_connector.FROM_EMAIL_KEY: f"agency@{SENDING_DOMAIN}",
+            growth_connector.FROM_NAME_KEY: "The Agency",
+            growth_connector.REPLY_TO_KEY: "hello@agency.test",
+            growth_connector.PROJECT_SENDERS_KEY: {
+                "p-northwind": {
+                    "from_email": f"northwind@{SENDING_DOMAIN}",
+                    "from_name": "Northwind Dental",
+                    "reply_to": "front-desk@northwinddental.test",
+                }
+            },
+        }
+    )
+
+    await email_dispatch.dispatch_email(await _seed_draft_for_project("p-northwind", "nw.test"))
+
+    payload = _sent_payload(recorder)
+    assert payload["from"] == {
+        "email": f"northwind@{SENDING_DOMAIN}",
+        "name": "Northwind Dental",
+    }
+    # The reply lands with the CLIENT, not the agency. That is the feature.
+    assert payload["headers"]["Reply-To"] == "front-desk@northwinddental.test"
+
+
+@pytest.mark.asyncio
+async def test_sender_falls_back_per_field_not_per_record(mongo_db, sending_env, monkeypatch):
+    """A project that only renames itself keeps the workspace's reply-to —
+    one agency inbox, many client names, which is the common shape."""
+    recorder = _Recorder(_ok_response)
+    _install_transport(monkeypatch, recorder)
+    await _seed_connector(
+        {
+            growth_connector.TOKEN_KEY: TOKEN,
+            growth_connector.FROM_EMAIL_KEY: f"agency@{SENDING_DOMAIN}",
+            growth_connector.FROM_NAME_KEY: "The Agency",
+            growth_connector.REPLY_TO_KEY: "hello@agency.test",
+            growth_connector.PROJECT_SENDERS_KEY: {
+                "p-northwind": {"from_name": "Northwind Dental"}
+            },
+        }
+    )
+
+    await email_dispatch.dispatch_email(await _seed_draft_for_project("p-northwind", "nw.test"))
+
+    payload = _sent_payload(recorder)
+    assert payload["from"] == {"email": f"agency@{SENDING_DOMAIN}", "name": "Northwind Dental"}
+    assert payload["headers"]["Reply-To"] == "hello@agency.test"
+
+
+@pytest.mark.asyncio
+async def test_prospect_without_a_project_sends_as_the_workspace(
+    mongo_db, sending_env, monkeypatch
+):
+    """The no-projects workspace must be byte-for-byte what it was before."""
+    recorder = _Recorder(_ok_response)
+    _install_transport(monkeypatch, recorder)
+    await _seed_connector(
+        {
+            growth_connector.TOKEN_KEY: TOKEN,
+            growth_connector.FROM_EMAIL_KEY: f"agency@{SENDING_DOMAIN}",
+            growth_connector.FROM_NAME_KEY: "The Agency",
+            growth_connector.PROJECT_SENDERS_KEY: {
+                "p-northwind": {"from_name": "Northwind Dental"}
+            },
+        }
+    )
+
+    await email_dispatch.dispatch_email(await _seed_draft_for_project(None, "loose.test"))
+
+    payload = _sent_payload(recorder)
+    assert payload["from"] == {"email": f"agency@{SENDING_DOMAIN}", "name": "The Agency"}
+    assert "headers" not in payload
+
+
+@pytest.mark.asyncio
+async def test_project_from_address_still_has_to_be_on_the_sending_domain(
+    mongo_db, sending_env, monkeypatch
+):
+    """A project cannot send as a domain the deployment doesn't hold — that
+    mail fails DMARC and burns the domain it CAN send from. The override is a
+    different value, not a different rule."""
+    recorder = _Recorder(_ok_response)
+    _install_transport(monkeypatch, recorder)
+    await _seed_connector(
+        {
+            growth_connector.TOKEN_KEY: TOKEN,
+            growth_connector.PROJECT_SENDERS_KEY: {
+                "p-northwind": {"from_email": "hello@northwinddental.test"}
+            },
+        }
+    )
+
+    await email_dispatch.dispatch_email(await _seed_draft_for_project("p-northwind", "nw.test"))
+
+    assert recorder.requests == []
+    logs = await _logs()
+    assert [log.outcome for log in logs] == ["failed"]
+    assert "sending domain" in (logs[0].error or "")
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_project_senders_blob_falls_back_instead_of_failing(
+    mongo_db, sending_env, monkeypatch
+):
+    """A typo in one project's entry must not take an unrelated client's
+    pipeline down — it sends as the workspace default."""
+    recorder = _Recorder(_ok_response)
+    _install_transport(monkeypatch, recorder)
+    await _seed_connector(
+        {
+            growth_connector.TOKEN_KEY: TOKEN,
+            growth_connector.FROM_EMAIL_KEY: f"agency@{SENDING_DOMAIN}",
+            growth_connector.PROJECT_SENDERS_KEY: "not-a-map",
+        }
+    )
+
+    await email_dispatch.dispatch_email(await _seed_draft_for_project("p-northwind", "nw.test"))
+
+    assert _sent_payload(recorder)["from"] == {"email": f"agency@{SENDING_DOMAIN}"}
+
+
+@pytest.mark.asyncio
+async def test_project_identity_never_changes_the_credential(mongo_db, sending_env, monkeypatch):
+    """Identity resolution sits in FRONT of credential resolution, not
+    instead of it: the token is still the workspace's, so disabling the
+    connector still revokes every project at once."""
+    recorder = _Recorder(_ok_response)
+    _install_transport(monkeypatch, recorder)
+    await _seed_connector(
+        {
+            growth_connector.TOKEN_KEY: TOKEN,
+            growth_connector.PROJECT_SENDERS_KEY: {
+                "p-northwind": {"from_name": "Northwind Dental"}
+            },
+        }
+    )
+
+    await email_dispatch.dispatch_email(await _seed_draft_for_project("p-northwind", "nw.test"))
+
+    assert recorder.requests[0].headers["Api-Token"] == TOKEN

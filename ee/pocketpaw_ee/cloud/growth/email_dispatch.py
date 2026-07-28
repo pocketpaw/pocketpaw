@@ -5,6 +5,12 @@
 # Created 2026-07-27 (feat/growth-g5): new module. Lives beside ``worker.py``
 # rather than inside it so each channel's delivery owns its own file — the
 # worker keeps a one-line branch per channel.
+# Updated 2026-07-28 (feat/growth-projects): the send carries the prospect's
+# ``project_id``, so the connector resolves that client's sender identity
+# (from-name / from-address / reply-to) instead of the workspace's. The
+# prospect is already loaded here for its email address, so this costs nothing
+# — and it deliberately reads the identity off the PROSPECT rather than the
+# draft, because the client owns the relationship, not the copy.
 #
 # ORDER OF OPERATIONS, and why:
 #
@@ -85,6 +91,10 @@ async def dispatch_email(draft_id: str) -> None:
             to_address=to_address,
             subject=draft.subject or "",
             body=draft.body,
+            # The sender identity follows the PROSPECT's client, so an agency's
+            # message goes out as that client. A prospect with no project (or a
+            # project with no override) sends as the workspace default.
+            project_id=prospect.project_id if prospect else None,
         )
     except Exception as exc:  # noqa: BLE001 — a failed send is recorded, never raised
         reason = (
