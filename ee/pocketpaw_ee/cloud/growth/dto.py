@@ -23,6 +23,9 @@
 # purpose: "n of m" needs a filter-scoped total and reaching row 3,000 needs a
 # resume key, and neither fits in a naked list. ProspectFacetsResponse — the
 # per-tier / per-status / per-source counts behind the filter chips.
+# ProposeBatchRequest / ProposeBatchError / ProposeBatchResponse — proposing a
+# selection of drafts in one call, with per-draft error entries in the
+# bulk-ingest style (100-id cap enforced at the boundary).
 # Updated 2026-07-27 (feat/growth-g8): LinkedInQueueItemResponse — one row of
 # the manual LinkedIn send queue: the draft envelope joined with the prospect
 # context the captain needs to send by hand (name, company, profile URL,
@@ -234,6 +237,39 @@ class ProposeSendResponse(BaseModel):
     draft: DraftResponse
 
 
+class ProposeBatchRequest(BaseModel):
+    """Draft ids to propose in one call — up to 100 (G-10a).
+
+    The cap IS enforced here, so an oversized payload 422s before a single
+    proposal is filed. 100 rather than bulk-ingest's 500 because each id costs
+    an Instinct proposal a human then has to triage in the Tray: a batch that
+    outruns the reviewer defeats the gate.
+    """
+
+    draft_ids: list[str] = Field(max_length=100)
+
+
+class ProposeBatchError(BaseModel):
+    """One draft that could not be proposed: where it was and why.
+
+    Same shape as ``BulkRowError`` plus the id, because the caller holds ids
+    here rather than opaque rows and needs to know WHICH draft failed without
+    counting back into its own array.
+    """
+
+    index: int
+    draft_id: str
+    code: str
+    message: str
+
+
+class ProposeBatchResponse(BaseModel):
+    """How many drafts were proposed, and the per-draft failures."""
+
+    proposed: int
+    failed: list[ProposeBatchError]
+
+
 class LinkedInQueueItemResponse(BaseModel):
     """One row of the manual LinkedIn send queue.
 
@@ -258,6 +294,9 @@ __all__ = [
     "CreateProspectRequest",
     "DraftResponse",
     "LinkedInQueueItemResponse",
+    "ProposeBatchError",
+    "ProposeBatchRequest",
+    "ProposeBatchResponse",
     "ProposeSendResponse",
     "ProspectFacetsResponse",
     "ProspectPageResponse",

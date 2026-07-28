@@ -34,7 +34,10 @@
 # instead of a bare array. BREAKING for any existing consumer of the list
 # route; the frontend list view is the only one and lands with it. Plus GET
 # /prospects/facets — tier/status/source counts for the filter chips, declared
-# ABOVE /prospects/{prospect_id} so the literal path wins the match.
+# ABOVE /prospects/{prospect_id} so the literal path wins the match. Plus POST
+# /drafts/propose-batch — up to 100 draft ids, each proposed through the SAME
+# gated path as the single-draft route (growth.manage, one Instinct proposal
+# per draft, per-draft error entries).
 # Updated 2026-07-27 (feat/growth-g8): LinkedIn manual queue — GET
 # /linkedin/queue (proposed/approved linkedin drafts joined with prospect
 # context; ``?format=md`` returns a paste-ready text/markdown export) and
@@ -70,6 +73,8 @@ from pocketpaw_ee.cloud.growth.dto import (
     CreateProspectRequest,
     DraftResponse,
     LinkedInQueueItemResponse,
+    ProposeBatchRequest,
+    ProposeBatchResponse,
     ProposeSendResponse,
     ProspectFacetsResponse,
     ProspectPageResponse,
@@ -267,6 +272,27 @@ async def propose_draft_send(
     ``rejected``. A draft that cannot legally move to ``proposed`` is a 422
     ``draft.illegal_transition`` (so re-proposing is refused)."""
     return await growth_service.propose_send(ctx, draft_id)
+
+
+@router.post(
+    "/drafts/propose-batch",
+    response_model=ProposeBatchResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.manage"))],
+)
+async def propose_draft_send_batch(
+    body: ProposeBatchRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> ProposeBatchResponse:
+    """Propose a selection of drafts — up to 100 ids, an oversized payload
+    422s at the boundary.
+
+    Each id rides the SAME gated path as the single-draft route: one
+    ``_growth_send`` Instinct proposal per draft, each approved or rejected by
+    a human in the Tray. Nothing is sent here and there is no batch approval.
+    Partial success — a draft that can't be proposed becomes an indexed
+    ``{index, draft_id, code, message}`` entry in ``failed`` and the rest
+    still go. Same ADMIN tier (``growth.manage``) as the single propose."""
+    return await growth_service.propose_send_batch(ctx, body)
 
 
 # ---------------------------------------------------------------------------
