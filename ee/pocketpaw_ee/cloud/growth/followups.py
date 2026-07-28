@@ -38,6 +38,14 @@
 # ``render_followup`` no longer assumes a company. The body already degraded
 # (``there`` / ``your team``); the generated subject now drops the dash instead
 # of sending "Following up —", which reads as a template that failed to render.
+# Also: the sweep now GROUPS BY CLIENT. Threads are partitioned by (workspace,
+# project) before they are worked, so one client's follow-ups run together and
+# go out under that client's sender identity, and the pass logs a per-client
+# created count instead of one undifferentiated number. The partition is over
+# the same collapsed thread map the flat loop walked — one thread, one
+# prospect, one project — so every thread is still visited exactly once and the
+# open-follow-up idempotency guard is untouched. Grouping changes the order the
+# work happens in, not how much of it happens.
 
 """Daily follow-up sweep for the /growth outbound engine."""
 
@@ -45,6 +53,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -275,6 +284,67 @@ def _latest_sent_per_thread(rows: list[dict[str, Any]]) -> dict[tuple[str, str, 
     return threads
 
 
+# One thread, resolved far enough to know which client it belongs to:
+# ``((prospect_id, channel), latest_sent_row, prospect)``.
+_DueThread = tuple[tuple[str, str], dict[str, Any], Any]
+
+
+async def _group_due_threads(
+    growth_service: Any,
+    threads: dict[tuple[str, str, str], dict[str, Any]],
+    *,
+    cutoff: datetime,
+    counters: dict[str, int],
+) -> dict[tuple[str, str | None], list[_DueThread]]:
+    """Partition the due threads by ``(workspace, project)``.
+
+    WHY GROUP AT ALL. A follow-up goes out under the sender identity of the
+    client whose project owns the prospect (``growth/connector.py``). Working a
+    client's threads together is what makes that legible in the logs and gives
+    the pass a per-client "n proposed" line an operator can read — the sweep
+    stops being one undifferentiated queue for an agency running eight clients.
+
+    WHY THIS IS NOT N SWEEPS. The partition is over the SAME collapsed thread
+    map the single loop used to walk. A thread has one prospect, a prospect has
+    at most one project, so every thread lands in exactly one group and is
+    visited exactly once. The open-follow-up idempotency guard is untouched and
+    stays where it was, inside the per-thread body: grouping changes the ORDER
+    the threads are worked, never how many times.
+
+    The cheap checks stay in front of the expensive one, exactly as before: a
+    thread that isn't due yet is skipped WITHOUT a prospect read, so a backlog
+    of not-yet-due threads costs no more than it did.
+    """
+    groups: dict[tuple[str, str | None], list[_DueThread]] = {}
+    for (workspace_id, prospect_id, channel), latest in threads.items():
+        counters["threads"] += 1
+        try:
+            sent_at = _as_utc(latest.get("sent_at"))
+            if sent_at is None or sent_at > cutoff:
+                counters["skipped"] += 1
+                continue
+
+            prospect = await growth_service.get_prospect_system(workspace_id, prospect_id)
+            if prospect.status in _TERMINAL_PROSPECT_STATUSES:
+                counters["skipped"] += 1
+                continue
+        except Exception:  # noqa: BLE001 — one unreadable thread, not a dead pass
+            counters["skipped"] += 1
+            logger.exception(
+                "growth: follow-up sweep could not resolve prospect %s on '%s' (workspace=%s)",
+                prospect_id,
+                channel,
+                workspace_id,
+            )
+            continue
+
+        project_id = getattr(prospect, "project_id", None)
+        groups.setdefault((workspace_id, project_id), []).append(
+            ((prospect_id, channel), latest, prospect)
+        )
+    return groups
+
+
 async def _retract(growth_service: Any, workspace_id: str, draft_id: str) -> None:
     """Reject a follow-up draft whose proposal never made it to the tray.
 
@@ -305,6 +375,12 @@ async def followup_sweep(ctx: dict[str, Any], *, now: datetime | None = None) ->
     and how many threads were skipped (not due, replied, already open, or no
     resolvable proposer). NEVER raises — one bad thread must not take the
     whole daily pass down.
+
+    Work is GROUPED BY CLIENT (``_group_due_threads``) — one project's threads
+    together, so a follow-up goes out under that client's sender identity and
+    the pass logs a per-client line. The grouping is a partition of the same
+    thread map the flat loop walked, so every thread is still visited exactly
+    once and the open-follow-up idempotency guard is unaffected.
     """
     from pocketpaw_ee.cloud.growth import service as growth_service
     from pocketpaw_ee.cloud.growth.dto import CreateDraftRequest
@@ -316,6 +392,10 @@ async def followup_sweep(ctx: dict[str, Any], *, now: datetime | None = None) ->
 
     counters = {"threads": 0, "created": 0, "retired": 0, "skipped": 0}
     proposer_cache: dict[str, dict[str, str]] = {}
+    # How many follow-ups each client got this pass — the log line an agency
+    # operator actually reads. Not part of the returned counters, which the
+    # worker's contract fixes at four keys.
+    per_project: defaultdict[tuple[str, str | None], int] = defaultdict(int)
 
     try:
         sent_rows = await growth_service.list_sent_drafts_for_followup(limit=SENT_SCAN_LIMIT)
@@ -323,121 +403,139 @@ async def followup_sweep(ctx: dict[str, Any], *, now: datetime | None = None) ->
         logger.exception("growth: follow-up sweep could not read sent drafts")
         return counters
 
-    for (workspace_id, prospect_id, channel), latest in _latest_sent_per_thread(sent_rows).items():
-        counters["threads"] += 1
-        try:
-            sent_at = _as_utc(latest.get("sent_at"))
-            if sent_at is None or sent_at > cutoff:
-                counters["skipped"] += 1
-                continue
+    groups = await _group_due_threads(
+        growth_service, _latest_sent_per_thread(sent_rows), cutoff=cutoff, counters=counters
+    )
 
-            prospect = await growth_service.get_prospect_system(workspace_id, prospect_id)
-            if prospect.status in _TERMINAL_PROSPECT_STATUSES:
-                counters["skipped"] += 1
-                continue
+    for (workspace_id, project_id), members in groups.items():
+        for (prospect_id, channel), latest, prospect in members:
+            try:
+                thread = await growth_service.list_channel_drafts(
+                    workspace_id, prospect_id, channel
+                )
+                if any(d["status"] == "replied" for d in thread):
+                    # The draft-level reply signal, for a prospect row that
+                    # hasn't caught up yet. Same verdict: they answered, stop
+                    # nudging.
+                    counters["skipped"] += 1
+                    continue
 
-            thread = await growth_service.list_channel_drafts(workspace_id, prospect_id, channel)
-            if any(d["status"] == "replied" for d in thread):
-                # The draft-level reply signal, for a prospect row that hasn't
-                # caught up yet. Same verdict: they answered, stop nudging.
-                counters["skipped"] += 1
-                continue
+                followups = [d for d in thread if d["variant"] == "follow_up"]
+                if any(d["status"] in _OPEN_STATUSES for d in followups):
+                    # One is already waiting on a human — including the one this
+                    # sweep filed on its last pass. THIS IS THE IDEMPOTENCY
+                    # GUARD, and grouping does not touch it: a thread has one
+                    # prospect, so it lands in exactly one group and is visited
+                    # exactly once per pass. Grouping changes the ORDER threads
+                    # are worked, never how many times.
+                    counters["skipped"] += 1
+                    continue
 
-            followups = [d for d in thread if d["variant"] == "follow_up"]
-            if any(d["status"] in _OPEN_STATUSES for d in followups):
-                # One is already waiting on a human — including the one this
-                # sweep filed on its last pass. This is the idempotency guard.
-                counters["skipped"] += 1
-                continue
+                counted = [d for d in followups if d["status"] not in _UNCOUNTED_STATUSES]
+                if len(counted) >= max_followups:
+                    await growth_service.mark_prospect_dead(workspace_id, prospect_id)
+                    counters["retired"] += 1
+                    logger.info(
+                        "growth: prospect %s retired to dead after %d follow-ups on '%s' "
+                        "with no reply (workspace=%s project=%s)",
+                        prospect_id,
+                        len(counted),
+                        channel,
+                        workspace_id,
+                        project_id or "-",
+                    )
+                    continue
 
-            counted = [d for d in followups if d["status"] not in _UNCOUNTED_STATUSES]
-            if len(counted) >= max_followups:
-                await growth_service.mark_prospect_dead(workspace_id, prospect_id)
-                counters["retired"] += 1
-                logger.info(
-                    "growth: prospect %s retired to dead after %d follow-ups on '%s' "
-                    "with no reply (workspace=%s)",
+                if workspace_id not in proposer_cache:
+                    proposer_cache[workspace_id] = await _proposer_index(workspace_id)
+                fallback = thread[0] if thread else latest
+                first_touch = next((d for d in thread if d["variant"] == "first_touch"), fallback)
+                index = proposer_cache[workspace_id]
+                proposer = index.get(str(latest["id"])) or index.get(str(first_touch["id"]))
+                if not proposer:
+                    logger.warning(
+                        "growth: no proposer resolvable for draft %s — skipping its follow-up "
+                        "(an unapprovable proposal is worse than none)",
+                        latest["id"],
+                    )
+                    counters["skipped"] += 1
+                    continue
+
+                subject, body = render_followup(
+                    channel=channel,
+                    prospect_name=prospect.name,
+                    prospect_company=prospect.company,
+                    first_touch=first_touch,
+                )
+                draft = await growth_service.create_followup_draft(
+                    workspace_id,
                     prospect_id,
-                    len(counted),
+                    CreateDraftRequest(
+                        channel=channel,  # type: ignore[arg-type]
+                        subject=subject,
+                        body=body,
+                        variant="follow_up",
+                        demo_url=first_touch.get("demo_url"),
+                    ),
+                )
+                # The EXISTING gate path: files the ``_growth_send`` Action and
+                # flips the draft draft→proposed. It stops there — approval and
+                # dispatch stay the human's, exactly as for a first touch.
+                try:
+                    await growth_service.propose_send(
+                        _system_context(workspace_id, proposer, now), draft.id
+                    )
+                except Exception:
+                    # Retract the draft we just created. Left in ``draft`` status
+                    # it would count as an OPEN follow-up and block this thread on
+                    # every future pass — a silent, permanent stall. ``rejected``
+                    # is terminal, doesn't burn a cap slot, and lets the next pass
+                    # try again cleanly.
+                    await _retract(growth_service, workspace_id, draft.id)
+                    raise
+                counters["created"] += 1
+                per_project[(workspace_id, project_id)] += 1
+                logger.info(
+                    "growth: follow-up %d/%d proposed for prospect %s on '%s' "
+                    "(workspace=%s project=%s)",
+                    len(counted) + 1,
+                    max_followups,
+                    prospect_id,
                     channel,
                     workspace_id,
+                    project_id or "-",
                 )
-                continue
-
-            if workspace_id not in proposer_cache:
-                proposer_cache[workspace_id] = await _proposer_index(workspace_id)
-            fallback = thread[0] if thread else latest
-            first_touch = next((d for d in thread if d["variant"] == "first_touch"), fallback)
-            index = proposer_cache[workspace_id]
-            proposer = index.get(str(latest["id"])) or index.get(str(first_touch["id"]))
-            if not proposer:
-                logger.warning(
-                    "growth: no proposer resolvable for draft %s — skipping its follow-up "
-                    "(an unapprovable proposal is worse than none)",
-                    latest["id"],
-                )
+            except Exception:  # noqa: BLE001 — one bad thread must not stop the pass
                 counters["skipped"] += 1
-                continue
-
-            subject, body = render_followup(
-                channel=channel,
-                prospect_name=prospect.name,
-                prospect_company=prospect.company,
-                first_touch=first_touch,
-            )
-            draft = await growth_service.create_followup_draft(
-                workspace_id,
-                prospect_id,
-                CreateDraftRequest(
-                    channel=channel,  # type: ignore[arg-type]
-                    subject=subject,
-                    body=body,
-                    variant="follow_up",
-                    demo_url=first_touch.get("demo_url"),
-                ),
-            )
-            # The EXISTING gate path: files the ``_growth_send`` Action and
-            # flips the draft draft→proposed. It stops there — approval and
-            # dispatch stay the human's, exactly as for a first touch.
-            try:
-                await growth_service.propose_send(
-                    _system_context(workspace_id, proposer, now), draft.id
+                logger.exception(
+                    "growth: follow-up sweep failed for prospect %s on '%s' "
+                    "(workspace=%s project=%s)",
+                    prospect_id,
+                    channel,
+                    workspace_id,
+                    project_id or "-",
                 )
-            except Exception:
-                # Retract the draft we just created. Left in ``draft`` status
-                # it would count as an OPEN follow-up and block this thread on
-                # every future pass — a silent, permanent stall. ``rejected``
-                # is terminal, doesn't burn a cap slot, and lets the next pass
-                # try again cleanly.
-                await _retract(growth_service, workspace_id, draft.id)
-                raise
-            counters["created"] += 1
-            logger.info(
-                "growth: follow-up %d/%d proposed for prospect %s on '%s' (workspace=%s)",
-                len(counted) + 1,
-                max_followups,
-                prospect_id,
-                channel,
-                workspace_id,
-            )
-        except Exception:  # noqa: BLE001 — one bad thread must not stop the pass
-            counters["skipped"] += 1
-            logger.exception(
-                "growth: follow-up sweep failed for prospect %s on '%s' (workspace=%s)",
-                prospect_id,
-                channel,
-                workspace_id,
-            )
 
     logger.info(
-        "growth.followup_sweep threads=%d created=%d retired=%d skipped=%d (delay=%dd max=%d)",
+        "growth.followup_sweep threads=%d created=%d retired=%d skipped=%d "
+        "projects=%d (delay=%dd max=%d)",
         counters["threads"],
         counters["created"],
         counters["retired"],
         counters["skipped"],
+        len(groups),
         delay_days,
         max_followups,
     )
+    for (workspace_id, project_id), created in sorted(
+        per_project.items(), key=lambda item: (item[0][0], item[0][1] or "")
+    ):
+        logger.info(
+            "growth.followup_sweep workspace=%s project=%s created=%d",
+            workspace_id,
+            project_id or "-",
+            created,
+        )
     return counters
 
 
