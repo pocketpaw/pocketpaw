@@ -32,7 +32,9 @@
 # query — ``q`` (search), ``sort`` (newest|oldest|company|tier), ``cursor`` —
 # and now returns ``ProspectPageResponse`` ({items, next_cursor, total})
 # instead of a bare array. BREAKING for any existing consumer of the list
-# route; the frontend list view is the only one and lands with it.
+# route; the frontend list view is the only one and lands with it. Plus GET
+# /prospects/facets — tier/status/source counts for the filter chips, declared
+# ABOVE /prospects/{prospect_id} so the literal path wins the match.
 # Updated 2026-07-27 (feat/growth-g8): LinkedIn manual queue — GET
 # /linkedin/queue (proposed/approved linkedin drafts joined with prospect
 # context; ``?format=md`` returns a paste-ready text/markdown export) and
@@ -69,6 +71,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     DraftResponse,
     LinkedInQueueItemResponse,
     ProposeSendResponse,
+    ProspectFacetsResponse,
     ProspectPageResponse,
     ProspectResponse,
     TransitionDraftRequest,
@@ -140,6 +143,30 @@ async def list_prospects(
         cursor=cursor,
         limit=limit,
     )
+
+
+# Registered BEFORE /prospects/{prospect_id}: FastAPI matches in declaration
+# order, so a literal path that could also read as an id has to come first or
+# "facets" arrives as a prospect_id and 404s.
+@router.get(
+    "/prospects/facets",
+    response_model=ProspectFacetsResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def prospect_facets(
+    tier: ProspectTier | None = Query(default=None),
+    status: ProspectStatus | None = Query(default=None),
+    source: ProspectSource | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    ctx: RequestContext = Depends(request_context),
+) -> ProspectFacetsResponse:
+    """Counts per tier / status / source for the filter chips.
+
+    Takes the same filters as the list route. Each block excludes its OWN
+    filter and respects the others — so with ``status=replied`` on, the tier
+    counts describe the replied rows rather than collapsing to the selected
+    tier. Every legal value is present, zeros included."""
+    return await growth_service.prospect_facets(ctx, tier=tier, status=status, source=source, q=q)
 
 
 @router.get(
