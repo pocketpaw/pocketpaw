@@ -344,3 +344,100 @@ async def test_a_cursor_from_another_workspace_leaks_nothing(w1_client, w2_clien
     resp = await w2_client.get(LIST_URL, params={"limit": 2, "cursor": page["next_cursor"]})
     assert resp.status_code == 200
     assert resp.json() == {"items": [], "next_cursor": None, "total": 0}
+
+
+# ---------------------------------------------------------------------------
+# 4. Facets
+# ---------------------------------------------------------------------------
+
+
+FACET_ROWS = [
+    {"domain": "a1.io", "tier": "a", "status": "new", "source": "clay"},
+    {"domain": "a2.io", "tier": "a", "status": "replied", "source": "clay"},
+    {"domain": "b1.io", "tier": "b", "status": "new", "source": "directory"},
+    {"domain": "b2.io", "tier": "b", "status": "replied", "source": "manual"},
+    {"domain": "c1.io", "tier": "c", "status": "new", "source": "manual"},
+]
+
+
+@pytest.mark.asyncio
+async def test_facets_count_every_tier_status_and_source(w1_client):
+    await _seed(w1_client, FACET_ROWS)
+    resp = await w1_client.get(FACETS_URL)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["tier"] == {"a": 2, "b": 2, "c": 1, "unqualified": 0}
+    assert body["status"] == {
+        "new": 3,
+        "qualified": 0,
+        "drafted": 0,
+        "in_sequence": 0,
+        "replied": 2,
+        "dead": 0,
+    }
+    assert body["source"] == {"clay": 2, "directory": 1, "manual": 2}
+
+
+@pytest.mark.asyncio
+async def test_facets_include_zero_counts_for_a_stable_chip_row(w1_client):
+    """An empty workspace still reports every legal value, so the chip row
+    doesn't reshuffle as rows arrive."""
+    body = (await w1_client.get(FACETS_URL)).json()
+    assert set(body["tier"]) == {"a", "b", "c", "unqualified"}
+    assert set(body["source"]) == {"clay", "directory", "manual"}
+    assert sum(body["status"].values()) == 0
+
+
+@pytest.mark.asyncio
+async def test_tier_counts_respect_an_active_status_filter(w1_client):
+    """The acceptance case: with status=new on, the tier counts describe the
+    NEW rows only — a1/b1/c1 — not the whole workspace."""
+    await _seed(w1_client, FACET_ROWS)
+    body = (await w1_client.get(FACETS_URL, params={"status": "new"})).json()
+    assert body["tier"] == {"a": 1, "b": 1, "c": 1, "unqualified": 0}
+    assert body["source"] == {"clay": 1, "directory": 1, "manual": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_block_does_not_apply_its_own_filter(w1_client):
+    """status=new must NOT collapse the status block to {new: 3, rest: 0} —
+    that would tell the user nothing about where to go next."""
+    await _seed(w1_client, FACET_ROWS)
+    unfiltered = (await w1_client.get(FACETS_URL)).json()
+    filtered = (await w1_client.get(FACETS_URL, params={"status": "new"})).json()
+    assert filtered["status"] == unfiltered["status"]
+    assert filtered["status"]["replied"] == 2
+
+
+@pytest.mark.asyncio
+async def test_facets_compose_two_sibling_filters(w1_client):
+    await _seed(w1_client, FACET_ROWS)
+    body = (await w1_client.get(FACETS_URL, params={"status": "new", "source": "manual"})).json()
+    # Only c1.io is both new and manual.
+    assert body["tier"] == {"a": 0, "b": 0, "c": 1, "unqualified": 0}
+
+
+@pytest.mark.asyncio
+async def test_facets_respect_the_q_filter_in_every_block(w1_client):
+    """``q`` constrains all three blocks — it isn't a facet of its own, so
+    there is nothing for a block to exclude."""
+    await _seed(w1_client, FACET_ROWS)
+    body = (await w1_client.get(FACETS_URL, params={"q": "a1.io"})).json()
+    assert body["tier"] == {"a": 1, "b": 0, "c": 0, "unqualified": 0}
+    assert body["source"]["clay"] == 1
+
+
+@pytest.mark.asyncio
+async def test_facets_are_workspace_scoped(w1_client, w2_client):
+    await _seed(w1_client, FACET_ROWS)
+    await _seed(w2_client, [{"domain": "a1.io", "tier": "a"}])
+    assert (await w1_client.get(FACETS_URL)).json()["tier"]["a"] == 2
+    assert (await w2_client.get(FACETS_URL)).json()["tier"]["a"] == 1
+
+
+@pytest.mark.asyncio
+async def test_facets_path_is_not_swallowed_by_the_prospect_id_route(w1_client):
+    """``/prospects/facets`` must not be matched as ``/prospects/{id}``."""
+    resp = await w1_client.get(FACETS_URL)
+    assert resp.status_code == 200
+    assert set(resp.json()) == {"tier", "status", "source"}

@@ -920,6 +920,7 @@ class TestGrowthRouteRbac:
 
         expected = {
             ("GET", "/growth/prospects"): "growth.read",
+            ("GET", "/growth/prospects/facets"): "growth.read",
             ("GET", "/growth/prospects/{prospect_id}"): "growth.read",
             ("GET", "/growth/drafts"): "growth.read",
             ("POST", "/growth/prospects"): "growth.write",
