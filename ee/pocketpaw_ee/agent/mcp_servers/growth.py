@@ -480,6 +480,15 @@ async def _upsert_prospect_handler(args: dict) -> dict:
     except Exception as exc:  # noqa: BLE001
         return _service_error(exc, "look up the prospect")
 
+    if existing is None and (not name or not company):
+        # Only an ENRICHMENT call may omit these — there is nothing stored to
+        # carry forward, and a row named "unknown / unknown" is worse than a
+        # refusal the agent can act on.
+        return _error_response(
+            f"'{probe.domain}' is not in this workspace yet, so "
+            "growth_upsert_prospect needs `name` and `company` to add it."
+        )
+
     def _pick(supplied: Any, field: str, fallback: Any) -> Any:
         """Supplied wins; otherwise carry the stored value forward."""
         if supplied is not None:
