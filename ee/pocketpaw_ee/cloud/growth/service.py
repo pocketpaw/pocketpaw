@@ -66,6 +66,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -256,16 +257,48 @@ async def get(ctx: RequestContext, prospect_id: str) -> ProspectResponse:
     return _to_response(_to_domain(doc))
 
 
-async def list_prospects(
-    ctx: RequestContext,
+# ---------------------------------------------------------------------------
+# Prospect list query (G-10a)
+# ---------------------------------------------------------------------------
+
+# Fields the ``q`` search scans. Deliberately the four a human types into a
+# "find that company" box — identity (name/company), the dedupe key (domain),
+# and the qualification notes (research_brief).
+PROSPECT_SEARCH_FIELDS: tuple[str, ...] = ("name", "company", "domain", "research_brief")
+
+
+def _escape_regex(term: str) -> str:
+    """Neutralise regex metacharacters so a search term is matched literally.
+
+    Without this a caller could submit ``.*`` (harmless but wrong results) or a
+    catastrophic-backtracking pattern (a real DoS vector, since the regex runs
+    server-side in Mongo). ``re.escape`` is the whole defence — the term is
+    never compiled in Python, only handed to Mongo as a literal-ised pattern.
+    """
+    return re.escape(term.strip())
+
+
+def _prospect_filters(
+    workspace_id: str,
     *,
     tier: str | None = None,
     status: str | None = None,
     source: str | None = None,
-    limit: int = 100,
-) -> list[ProspectResponse]:
-    """List the workspace's prospects, newest first, optionally filtered."""
-    workspace_id = _require_workspace(ctx)
+    q: str | None = None,
+) -> dict[str, Any]:
+    """Build the tenant-scoped Mongo filter shared by list / facets / count.
+
+    SCALE CEILING — ``q`` is an unanchored, case-insensitive regex ``$or``
+    across four fields. Mongo cannot use an index for that, so it is a
+    collection scan bounded by the ``workspace`` filter. That is fine at the
+    single-workspace scale this surface targets (tens of thousands of rows,
+    single-digit-millisecond scans); past ~100k prospects per workspace this
+    needs a real text index or an external search index. A text index is NOT
+    added here on purpose: ``models/prospect.py`` carries a unique
+    (workspace, domain) index plus a (workspace, createdAt) list cursor, and a
+    Mongo text index is a per-collection singleton that would have to be
+    designed against those rather than bolted on.
+    """
     filters: dict[str, Any] = {"workspace": workspace_id}
     if tier is not None:
         filters["tier"] = tier
@@ -273,6 +306,30 @@ async def list_prospects(
         filters["status"] = status
     if source is not None:
         filters["source"] = source
+    if q is not None and q.strip():
+        pattern = _escape_regex(q)
+        filters["$or"] = [
+            {field: {"$regex": pattern, "$options": "i"}} for field in PROSPECT_SEARCH_FIELDS
+        ]
+    return filters
+
+
+async def list_prospects(
+    ctx: RequestContext,
+    *,
+    tier: str | None = None,
+    status: str | None = None,
+    source: str | None = None,
+    q: str | None = None,
+    limit: int = 100,
+) -> list[ProspectResponse]:
+    """List the workspace's prospects, newest first, optionally filtered.
+
+    ``q`` is a case-insensitive substring match across name / company /
+    domain / research_brief (see ``_prospect_filters`` for the scale ceiling).
+    """
+    workspace_id = _require_workspace(ctx)
+    filters = _prospect_filters(workspace_id, tier=tier, status=status, source=source, q=q)
     cursor = (
         _ProspectDoc.find(filters)
         .sort(-_ProspectDoc.createdAt)  # type: ignore[operator]
