@@ -628,6 +628,28 @@ class TestRbac:
 
 class TestValidation:
     @pytest.mark.asyncio
+    async def test_a_new_prospect_needs_a_name_and_a_company(self, mongo_db, admin_w1):
+        """Only an ENRICHMENT call may omit them — there is nothing stored to
+        carry forward on a create, and an "unknown / unknown" row is worse than
+        a refusal the agent can act on."""
+        with _identity("w1", admin_w1):
+            refused = await growth_mcp._upsert_prospect_handler({"domain": "nobody.com"})
+            assert "needs `name` and `company`" in _error_text(refused)
+            listed = _payload(await growth_mcp._list_prospects_handler({}))
+        assert listed["total"] == 0
+
+        # Once the row exists, a domain-only enrichment is fine.
+        prospect = await _seed_prospect(admin_w1)
+        with _identity("w1", admin_w1):
+            enriched = _payload(
+                await growth_mcp._upsert_prospect_handler(
+                    {"domain": prospect["domain"], "tier": "c"}
+                )
+            )["prospect"]
+        assert enriched["tier"] == "c"
+        assert enriched["name"] == "Sam Founder"
+
+    @pytest.mark.asyncio
     async def test_missing_required_ids_explain_themselves(self, mongo_db, admin_w1):
         with _identity("w1", admin_w1):
             assert "prospect_id" in _error_text(await growth_mcp._get_prospect_handler({}))
