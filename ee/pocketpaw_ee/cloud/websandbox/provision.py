@@ -35,12 +35,28 @@
 # Every provisioning fn takes ``client: DaytonaClient | None = None`` (default
 # ``get_daytona_client()``) — the mandatory DI seam so tests inject a FAKE client
 # and no test ever hits real Daytona.
+#
+# 2026-07-25 (B3, feat/code-scaffold-on-vm): the open flow split in two. The
+# shared half — quota, the idempotent registry row, cold-provision, boot wait,
+# the ready/rebind write, old-VM teardown — moved into ``_provision_into_row``;
+# what differs is only what gets put INTO the booted VM. ``open_sandbox`` keeps
+# the git clone (and keeps ``_validate_repo_url`` on it, unconditionally);
+# ``open_bare_sandbox`` adds an EMPTY VM with no clone, no git remote, and no
+# edit branch, for a scaffold project whose "repo" is a starter TEMPLATE id.
+#
+# The split exists so ``_validate_repo_url`` never has to be loosened. A template
+# id ("react") is not a URL and never will be; the fix is to keep it off the
+# clone path entirely rather than to teach the validator a second, weaker shape.
+# That validator is a security control — it is what stops a local-path remote or
+# a client-supplied credential reaching the VM's git config (and its snapshots) —
+# so anything that would relax it for a non-git caller is the wrong direction.
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
 import os
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -76,6 +92,33 @@ _AUTO_DELETE_MINUTES = 0
 
 # Daytona boot timeout (seconds) — block until the VM is ``started`` before clone.
 _BOOT_TIMEOUT_SECONDS = 120.0
+
+
+# ---------------------------------------------------------------------------
+# VM size.
+# ---------------------------------------------------------------------------
+# Stated HERE and passed EXPLICITLY, added 2026-07-22. Until now this module
+# called ``create_sandbox`` with no resource arguments and silently inherited
+# that function's signature defaults — cpu=2, memory=4. Nothing in the Code Mode
+# tree said what size a workspace VM was, so the answer lived in a default
+# argument three modules away and changed if anyone ever touched that signature.
+#
+# 1 vCPU / 1 GB is the deliberate floor: enough for `npm install` and a Vite dev
+# server, and the size a per-user workspace should cost. Raise MEMORY first if
+# installs start getting OOM-killed — node's resolver is the memory-hungry part,
+# not the CPU count.
+# ``_env_int`` (below, with the reaper config) already does exactly this — read,
+# tolerate garbage, floor at 1 — so this reuses it rather than shipping a second
+# copy that could drift.
+def _vm_resources() -> tuple[int, int, int]:
+    """(cpu, memory GB, disk GB) for a workspace VM. Read per call, not at import,
+    so a deployment can change the size without a code change."""
+    return (
+        _env_int("POCKETPAW_WEBSANDBOX_CPU", 1),
+        _env_int("POCKETPAW_WEBSANDBOX_MEMORY_GB", 1),
+        _env_int("POCKETPAW_WEBSANDBOX_DISK_GB", 10),
+    )
+
 
 # Auto-feature-branch (WC-5a): the repo is checked out onto a fresh
 # ``paw/edit-<8 hex>`` branch in the VM so AI edits never touch the default
@@ -169,6 +212,33 @@ def _validate_repo_url(repo: str) -> str:
     return candidate
 
 
+# The registry key's own bound. It is stored in ``WebSandbox.repo``, whose write
+# command (``CreateSandboxRequest.repo``) caps at 1024 — checking it here turns a
+# too-long key into a clean 400 instead of a pydantic error from two layers down.
+_MAX_REGISTRY_KEY = 1024
+
+
+def _validate_registry_key(key: str) -> str:
+    """Validate a NON-git registry key (the row's ``repo`` slot), returning it.
+
+    Deliberately NOT ``_validate_repo_url``. A bare VM clones nothing, so this
+    string is only ever a registry key — the (workspace, user, key) tuple that
+    makes ``create_sandbox`` idempotent. There is no URL to parse, no remote to
+    write, and no credential that could ride along, so the URL rules would be
+    both wrong and unenforceable here.
+
+    That is also why this is not a public write surface: no router binds it. The
+    only caller is the scaffold open path, which builds the key server-side from a
+    project it has already tenant-checked.
+    """
+    candidate = (key or "").strip()
+    if not candidate:
+        raise BadRequest("websandbox.invalid_key", "A workspace key is required")
+    if len(candidate) > _MAX_REGISTRY_KEY:
+        raise BadRequest("websandbox.invalid_key", "Workspace key is too long")
+    return candidate
+
+
 def _require_client(client: DaytonaClient | None) -> DaytonaClient:
     """Resolve the Daytona client, raising a clean CloudError when unconfigured.
 
@@ -190,6 +260,11 @@ def _require_client(client: DaytonaClient | None) -> DaytonaClient:
 # open flow.
 # ---------------------------------------------------------------------------
 
+#: What puts CONTENT into a freshly-booted, empty VM, called once with
+#: ``(daytona, daytona_id, project_dir)`` after the boot wait and the workdir
+#: mkdir. ``open_sandbox`` passes the git clone; a bare open passes nothing.
+_FillStage = Callable[[DaytonaClient, str, str], Awaitable[None]]
+
 
 async def open_sandbox(
     workspace_id: str,
@@ -209,64 +284,25 @@ async def open_sandbox(
     On any failure after the row exists, the row is advanced to ``stopped`` and a
     ``CloudError`` is raised (never left stuck in ``opening``); a VM created before
     the failure is best-effort stopped+deleted so a crash can't leak a live VM.
+
+    ``_validate_repo_url`` runs here, on EVERY clone, before anything is
+    provisioned. The bare path (``open_bare_sandbox``) exists precisely so that
+    stays true — a caller with no repo takes a different door instead of asking
+    this one to accept a weaker string.
     """
     body = OpenSandboxRequest.model_validate(body)
     repo_url = _validate_repo_url(body.repo)
-    daytona = _require_client(client)
-
-    # Quota + re-open bookkeeping — read the caller's OWN rows once (tenant- and
-    # owner-scoped via list_sandboxes). Re-opening a repo already open reuses its
-    # row (not a new slot); opening a NEW repo past the per-user live cap is
-    # rejected cleanly rather than cold-booting an unbounded number of VMs.
-    owned = await websandbox_service.list_sandboxes(workspace_id, user_id)
-    existing = next((r for r in owned if r.repo == repo_url), None)
-    old_sandbox_id = existing.sandbox_id if existing is not None else None
-    cap = _max_per_user()
-    if cap and existing is None:
-        live = sum(1 for r in owned if r.status in _LIVE_STATUSES)
-        if live >= cap:
-            raise ConflictError(
-                "websandbox.too_many",
-                f"You have too many open workspaces ({live}); close one and try again",
-            )
-
-    # 1. Upsert the registry row (idempotent on workspace+user+repo) and move it
-    #    to ``opening`` so a concurrent reader sees the in-flight state.
-    row = await websandbox_service.create_sandbox(
-        workspace_id, user_id, {"repo": repo_url, "status": "pending"}
-    )
-    await websandbox_service.update_status(workspace_id, user_id, row.id, {"status": "opening"})
-
-    daytona_id: str | None = None
+    # WC-5a: the repo is checked out onto a fresh branch in the VM so AI edits
+    # never touch the default branch. Minted before the fill stage so the same
+    # name reaches both the checkout and the row's ``branch`` binding.
     branch = _new_edit_branch()
-    try:
-        # 2. Cold-provision with the aggressive Daytona lifecycle (all MINUTES):
-        #    stop after 5 idle, archive 5 after stop, delete immediately on stop.
-        info = await daytona.create_sandbox(
-            name=f"websandbox-{row.id}",
-            auto_stop_interval=_AUTO_STOP_MINUTES,
-            auto_archive_interval=_AUTO_ARCHIVE_MINUTES,
-            auto_delete_interval=_AUTO_DELETE_MINUTES,
-        )
-        daytona_id = info.id
 
-        # 3. Block until the VM is booted before cloning.
-        await daytona.wait_for_sandbox(
-            daytona_id, target_state="started", timeout=_BOOT_TIMEOUT_SECONDS
-        )
-
-        # 4. Clone the repo into the sandbox's project dir.
-        # Clone INTO the pinned workspace dir (WEBSANDBOX_WORKDIR = /home/daytona)
-        # so the file tree, the terminal cwd, and the clone all agree on one
-        # directory. get_project_dir() returns /root on this image, which the
-        # terminal never opens in — that mismatch is why the tree looked empty.
-        #
+    async def _clone_into(daytona: DaytonaClient, daytona_id: str, project_dir: str) -> None:
+        """Clone the repo, branch it, and (when brokered) wire the push remote."""
         # CM-3c: if the caller has a GitHub connection whose installation can reach
         # this repo, clone it via the BROKER — the token is minted + used entirely
         # server-side and NEVER enters the VM (the VM receives files + a token-free
         # git remote). Otherwise, clone the PUBLIC repo in-VM with NO credentials.
-        project_dir = WEBSANDBOX_WORKDIR
-        await daytona.execute_command(daytona_id, f"mkdir -p {project_dir}")
         scoped = await websandbox_broker.resolve_repo_token(workspace_id, user_id, repo_url)
         if scoped is not None:
             await websandbox_broker.clone_into_vm(
@@ -280,9 +316,9 @@ async def open_sandbox(
         else:
             await daytona.git_clone(daytona_id, repo_url, project_dir, branch=body.branch)
 
-        # 4b. Check out a fresh ``paw/edit-<hex>`` branch IN the VM (WC-5a) so
-        #     every AI edit lands on an isolated branch, never the checked-out
-        #     default. cwd is the pinned workspace dir where the repo was cloned.
+        # Check out a fresh ``paw/edit-<hex>`` branch IN the VM (WC-5a) so every AI
+        # edit lands on an isolated branch, never the checked-out default. cwd is
+        # the pinned workspace dir where the repo was cloned.
         await daytona.execute_command(
             daytona_id,
             f"git checkout -b {branch}",
@@ -290,12 +326,12 @@ async def open_sandbox(
             timeout=_BRANCH_CHECKOUT_TIMEOUT_SECONDS,
         )
 
-        # 4c. CM-3d: for a broker-cloned (connected) repo, repoint ``origin`` at
-        #     the git proxy so an in-VM ``git push``/``fetch`` works with the token
-        #     still minted server-side (never in the VM). Best-effort — a wiring
-        #     miss leaves the clone fully usable, it just can't push yet; it must
-        #     never fail the open. Skipped for public clones (no connection to push
-        #     through) and when no public backend URL is reachable from the VM.
+        # CM-3d: for a broker-cloned (connected) repo, repoint ``origin`` at the
+        # git proxy so an in-VM ``git push``/``fetch`` works with the token still
+        # minted server-side (never in the VM). Best-effort — a wiring miss leaves
+        # the clone fully usable, it just can't push yet; it must never fail the
+        # open. Skipped for public clones (no connection to push through) and when
+        # no public backend URL is reachable from the VM.
         if scoped is not None:
             with contextlib.suppress(Exception):
                 await codegit_wire.wire_push_remote(
@@ -306,6 +342,135 @@ async def open_sandbox(
                     websandbox_broker.repo_full_name(repo_url) or repo_url,
                     project_dir,
                 )
+
+    return await _provision_into_row(
+        workspace_id,
+        user_id,
+        repo_url,
+        branch=branch,
+        fill=_clone_into,
+        client=client,
+    )
+
+
+async def open_bare_sandbox(
+    workspace_id: str,
+    user_id: str,
+    key: str,
+    client: DaytonaClient | None = None,
+) -> WebSandboxView:
+    """Cold-provision an EMPTY Daytona VM — no clone, no git remote, no branch.
+
+    The scaffold half of the open flow (B3). A scaffold project's ``repo`` field
+    holds a starter TEMPLATE id, not a URL, so there is nothing to clone and no
+    remote to authenticate: the VM boots empty and the caller materializes the
+    starter into it (``websandbox.scaffold_service.scaffold_into_sandbox``).
+
+    Everything else is identical to ``open_sandbox`` — the same per-user quota,
+    the same idempotent (workspace, user, key) row, the same failure handling, the
+    same old-VM teardown on a re-open. ``key`` is the row's registry key only; it
+    is server-built by the caller and never reaches git, a URL builder, or a
+    shell (see ``_validate_registry_key``).
+
+    Returns the ready view with a bound Daytona id and NO ``branch`` — a VM with
+    no repository has no branch to report, and inventing one would make the git
+    surface look available on a project that has no git.
+    """
+    return await _provision_into_row(
+        workspace_id,
+        user_id,
+        _validate_registry_key(key),
+        branch=None,
+        fill=None,
+        client=client,
+    )
+
+
+async def _provision_into_row(
+    workspace_id: str,
+    user_id: str,
+    registry_key: str,
+    *,
+    branch: str | None,
+    fill: _FillStage | None,
+    client: DaytonaClient | None,
+) -> WebSandboxView:
+    """Cold-provision a VM into the (workspace, user, ``registry_key``) row.
+
+    The half both open paths share: quota + re-open bookkeeping, the idempotent
+    registry row, the cold-provision with the aggressive Daytona lifecycle, the
+    boot wait, the ``ready`` rebind, and the old-VM teardown. ``fill`` is the only
+    difference between them — what (if anything) gets put into the booted VM.
+
+    ``registry_key`` is ALREADY validated by the caller: ``open_sandbox`` runs the
+    fail-closed ``_validate_repo_url`` on it, the bare path runs
+    ``_validate_registry_key``. This function never relaxes either — it does not
+    inspect the key at all, it only stores it.
+    """
+    daytona = _require_client(client)
+
+    # Quota + re-open bookkeeping — read the caller's OWN rows once (tenant- and
+    # owner-scoped via list_sandboxes). Re-opening a repo already open reuses its
+    # row (not a new slot); opening a NEW repo past the per-user live cap is
+    # rejected cleanly rather than cold-booting an unbounded number of VMs.
+    owned = await websandbox_service.list_sandboxes(workspace_id, user_id)
+    existing = next((r for r in owned if r.repo == registry_key), None)
+    old_sandbox_id = existing.sandbox_id if existing is not None else None
+    cap = _max_per_user()
+    if cap and existing is None:
+        live = sum(1 for r in owned if r.status in _LIVE_STATUSES)
+        if live >= cap:
+            raise ConflictError(
+                "websandbox.too_many",
+                f"You have too many open workspaces ({live}); close one and try again",
+            )
+
+    # 1. Upsert the registry row (idempotent on workspace+user+repo) and move it
+    #    to ``opening`` so a concurrent reader sees the in-flight state.
+    row = await websandbox_service.create_sandbox(
+        workspace_id, user_id, {"repo": registry_key, "status": "pending"}
+    )
+    await websandbox_service.update_status(workspace_id, user_id, row.id, {"status": "opening"})
+
+    daytona_id: str | None = None
+    try:
+        # 2. Cold-provision with the aggressive Daytona lifecycle (all MINUTES):
+        #    stop after 5 idle, archive 5 after stop, delete immediately on stop.
+        cpu, memory_gb, disk_gb = _vm_resources()
+        logger.info(
+            "websandbox: provisioning row=%s at %d vCPU / %d GB RAM / %d GB disk",
+            row.id,
+            cpu,
+            memory_gb,
+            disk_gb,
+        )
+        info = await daytona.create_sandbox(
+            name=f"websandbox-{row.id}",
+            cpu=cpu,
+            memory=memory_gb,
+            disk=disk_gb,
+            auto_stop_interval=_AUTO_STOP_MINUTES,
+            auto_archive_interval=_AUTO_ARCHIVE_MINUTES,
+            auto_delete_interval=_AUTO_DELETE_MINUTES,
+        )
+        daytona_id = info.id
+
+        # 3. Block until the VM is booted before filling it.
+        await daytona.wait_for_sandbox(
+            daytona_id, target_state="started", timeout=_BOOT_TIMEOUT_SECONDS
+        )
+
+        # 4. Fill the sandbox's project dir (a clone, or nothing for a bare VM).
+        # The dir is the pinned workspace dir (WEBSANDBOX_WORKDIR = /home/daytona)
+        # so the file tree, the terminal cwd, and whatever lands here all agree on
+        # one directory. get_project_dir() returns /root on this image, which the
+        # terminal never opens in — that mismatch is why the tree looked empty.
+        # It is created even on the bare path: the scaffold materializes into it,
+        # and the file tree lists it.
+        project_dir = WEBSANDBOX_WORKDIR
+        await daytona.execute_command(daytona_id, f"mkdir -p {project_dir}")
+        if fill is not None:
+            await fill(daytona, daytona_id, project_dir)
     except Exception as exc:  # noqa: BLE001 — any provisioning failure is handled uniformly
         # Best-effort teardown of a half-created VM so a failure can't leak it.
         if daytona_id is not None:
@@ -316,13 +481,17 @@ async def open_sandbox(
             await websandbox_service.update_status(
                 workspace_id, user_id, row.id, {"status": "stopped"}
             )
-        logger.warning("websandbox.open failed for repo=%s row=%s", repo_url, row.id, exc_info=True)
+        logger.warning(
+            "websandbox.open failed for key=%s row=%s", registry_key, row.id, exc_info=True
+        )
         raise with_cause(
             CloudError(502, "websandbox.provision_failed", "Failed to provision the sandbox"),
             exc,
         ) from exc
 
     # 5. Bind the Daytona id + the auto-created feature branch, and mark ready.
+    #    ``branch`` is None on the bare path and ``update_status`` skips a None,
+    #    so a bare VM's row simply carries no branch.
     ready = await websandbox_service.update_status(
         workspace_id,
         user_id,
@@ -339,11 +508,12 @@ async def open_sandbox(
         with contextlib.suppress(Exception):
             await daytona.delete_sandbox(old_sandbox_id)
     logger.info(
-        "websandbox.open ready: row=%s daytona=%s branch=%s repo=%s",
+        "websandbox.open ready: row=%s daytona=%s branch=%s key=%s filled=%s",
         row.id,
         daytona_id,
         branch,
-        repo_url,
+        registry_key,
+        fill is not None,
     )
     return ready
 
@@ -495,6 +665,7 @@ async def stop_websandbox_reaper(app: FastAPI) -> None:
 
 __all__ = [
     "get_tree",
+    "open_bare_sandbox",
     "open_sandbox",
     "reap_idle_sandboxes",
     "start_websandbox_reaper",

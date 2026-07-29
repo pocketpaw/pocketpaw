@@ -11,6 +11,19 @@
 # ``skills/<slug>/SKILL.md``) is the ONLY channel that survives that isolation,
 # exactly as the bundled-skills plugin does. We build a FRESH plugin per run so
 # only the entity's named skills are surfaced — never the full installed set.
+#
+# Modified: 2026-07-25 (feat/bundled-skills-per-surface) — named-skill
+# resolution gained a BUNDLED fallback. ``SkillLoader.SKILL_PATHS`` scans
+# ``~/.agents``, ``~/.claude`` and ``~/.pocketpaw`` but NOT the packaged
+# ``_bundled/skills/``, so a surface could only name a bundled skill when the
+# boot-time ~/.claude/skills mirror happened to be on
+# (``POCKETPAW_AUTO_INSTALL_BUNDLED_SKILLS`` turns it off). ``_bundled_skill_dirs``
+# reads the package directly as a source of LAST resort — an installed skill of
+# the same name still shadows it, so a user override keeps winning. This is
+# what lets the SDK backend stop loading the bundled plugin wholesale whenever
+# a surface names skills (see ``ClaudeSDKBackend._should_load_bundled_plugin``),
+# which is what finally makes ``SurfaceProfile.skill_names`` a real allowlist
+# instead of an advisory one.
 
 from __future__ import annotations
 
@@ -58,6 +71,40 @@ def _safe_slug(name: str) -> str | None:
     return name
 
 
+def _bundled_plugin_root() -> Path | None:
+    """Return the PACKAGED bundled-skills plugin root, or ``None``.
+
+    A seam, not just a wrapper: tests swap this for a throwaway bundle, and the
+    import is local so ``pocketpaw.skills`` never hard-depends on the shipping
+    side. Any failure degrades to "no bundle" — resolution then behaves exactly
+    as it did before the bundled fallback existed.
+    """
+    try:
+        from pocketpaw.bundled_skills import bundled_skills_plugin_dir
+
+        return bundled_skills_plugin_dir()
+    except Exception:  # noqa: BLE001 — a missing bundle must never fail a run
+        return None
+
+
+def _bundled_skill_dirs() -> dict[str, Path]:
+    """Map bundled skill name → its directory, for name-based resolution.
+
+    ``SkillLoader.SKILL_PATHS`` covers ``~/.agents``, ``~/.claude`` and
+    ``~/.pocketpaw`` — NOT the packaged ``_bundled/skills/``. Bundled skills
+    reached the loader only through the boot-time ~/.claude/skills mirror, which
+    ``POCKETPAW_AUTO_INSTALL_BUNDLED_SKILLS=false`` disables. This reads the
+    package directly so a surface can name a bundled skill unconditionally.
+    """
+    root = _bundled_plugin_root()
+    if root is None:
+        return {}
+    try:
+        return {p.name: p for p in (root / "skills").iterdir() if (p / "SKILL.md").is_file()}
+    except OSError:  # bundle absent or unreadable — degrade to no bundle
+        return {}
+
+
 def materialize_run_skills(
     skill_names: Iterable[str],
     run_id: str | None = None,
@@ -89,19 +136,25 @@ def materialize_run_skills(
         return None
 
     available = get_skill_loader().get_all()
+    bundled = _bundled_skill_dirs()
     matched: list[tuple[str, Path]] = []
     unknown: list[str] = []
     for name in sorted(requested):
-        skill = available.get(name)
-        if skill is None:
-            unknown.append(name)
-            continue
         slug = _safe_slug(name)
         if slug is None:
             logger.warning("materialize_run_skills: skipping unsafe skill slug %r", name)
             continue
+        # Resolution order: an INSTALLED skill (SKILL_PATHS) shadows a packaged
+        # bundled one of the same name, so a user override still wins. The
+        # bundled fallback exists because SKILL_PATHS does not cover the
+        # packaged ``_bundled/skills/`` dir — without it, naming a bundled
+        # skill only worked when the boot-time ~/.claude/skills mirror was on.
         # ``Skill.path`` points at SKILL.md; its parent is the skill directory.
-        skill_dir = skill.path.parent
+        skill = available.get(name)
+        skill_dir = skill.path.parent if skill is not None else bundled.get(name)
+        if skill_dir is None:
+            unknown.append(name)
+            continue
         if not (skill_dir / "SKILL.md").is_file():
             logger.warning(
                 "materialize_run_skills: skill %r has no SKILL.md at %s — skipping",

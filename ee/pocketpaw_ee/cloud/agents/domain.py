@@ -17,6 +17,11 @@ additive presentation fields that mirror the new Beanie fields:
 ``tools`` / ``soul_values``); ``voice`` / ``appearance`` are free-form blobs
 kept as dicts (nothing hashes these value objects — only ``!=`` equality is
 used, in ``service.update``).
+Updated: 2026-07-24 (CX-2, feat/code-agent-exclusive-tools) — added
+``AgentConfigSpec.tool_mode`` (``"additive"`` | ``"exclusive"``) mirroring the
+Beanie ``AgentConfig.tool_mode``. An ``"exclusive"`` agent's ``tools`` become the
+run's MCP allow-list and suppress the universal pocket/widget/atlas grant
+(CX-1); ``"additive"`` (the default) is the unchanged legacy grant-union.
 """
 
 from __future__ import annotations
@@ -33,6 +38,11 @@ class AgentConfigSpec:
     model: str = ""
     system_prompt: str = ""
     tools: tuple[str, ...] = ()
+    # Tool-surface policy. "additive" (default) UNIONs the agent's tools with the
+    # universal MCP grant (legacy). "exclusive" caps the run's MCP surface to
+    # exactly ``tools`` (CX-1/CX-2) — a non-empty ``tools`` list alone does NOT
+    # imply exclusive; only this flag does.
+    tool_mode: str = "additive"
     trust_level: int = 3
     temperature: float = 0.7
     max_tokens: int = 4096

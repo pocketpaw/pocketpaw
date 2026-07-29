@@ -227,6 +227,7 @@ def mount_cloud(app: FastAPI) -> None:
     import pocketpaw_ee.cloud.ripple_sources  # noqa: F401
 
     # Import and mount domain routers
+    from pocketpaw_ee.cloud.agent_activity.router import router as agent_activity_router
     from pocketpaw_ee.cloud.agents.router import router as agents_router
     from pocketpaw_ee.cloud.audit.router import router as audit_router
     from pocketpaw_ee.cloud.audit.router import workspace_router as audit_workspace_router
@@ -238,9 +239,11 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.billing.webhooks import router as billing_webhooks_router
     from pocketpaw_ee.cloud.chat.router import router as chat_router
     from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
+    from pocketpaw_ee.cloud.codeagent.router import router as codeagent_router
     from pocketpaw_ee.cloud.codeconnect.router import router as codeconnect_router
     from pocketpaw_ee.cloud.codegit.router import router as codegit_router
     from pocketpaw_ee.cloud.codeproject.router import router as codeproject_router
+    from pocketpaw_ee.cloud.codescaffold.router import router as codescaffold_router
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
     from pocketpaw_ee.cloud.credits.router import router as credits_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
@@ -249,6 +252,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.discovery.router import router as discovery_router
     from pocketpaw_ee.cloud.entitlements.router import router as entitlements_router
     from pocketpaw_ee.cloud.foresight.router import router as foresight_router
+    from pocketpaw_ee.cloud.herdr_cockpit.router import router as herdr_cockpit_router
     from pocketpaw_ee.cloud.jobs.router import router as jobs_router
     from pocketpaw_ee.cloud.license import get_license_info
     from pocketpaw_ee.cloud.meetings.providers.recall.webhooks import (
@@ -279,9 +283,17 @@ def mount_cloud(app: FastAPI) -> None:
     # Code Mode durable-project registry (CM-2a) — the reap-surviving project the
     # redesigned /code surface deep-links to; opening one resolves a ready sandbox.
     app.include_router(codeproject_router, prefix="/api/v1")
+    # Code Mode agent turn (CA-1) — stateless Ask over caller-supplied context.
+    # Reaches no sandbox on purpose, which is how one endpoint serves BOTH the
+    # Daytona and the in-tab WebContainer runtime.
+    app.include_router(codeagent_router, prefix="/api/v1")
     # Code Mode GitHub connect (CM-3) — install-URL / callback / repo picker so a
     # user can open PRIVATE repos; the token is minted server-side, never in the VM.
     app.include_router(codeconnect_router, prefix="/api/v1")
+    # Code Mode scaffolding (CS-1) — a prompt becomes a plan, and a plan becomes
+    # a SOURCE MAP. Writes no directory and reaches no sandbox: the runtime
+    # materializes the map, so one endpoint serves both runtimes.
+    app.include_router(codescaffold_router, prefix="/api/v1")
     # Code Mode git proxy (CM-3d) — the VM's git remote points here (basic-auth
     # ticket, NOT the GitHub token); the broker mints a repo-scoped token
     # server-side and proxies push/fetch upstream. Ticket-authed, not license/RC
@@ -291,6 +303,17 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(deep_work_log_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(runs_router, prefix="/api/v1")
+    # Herdr cockpit telemetry (HR-10a) — ADMIN-gated, flag-gated read-only SSE
+    # stream of herdr pane "dots" (GET /cockpit/stream) + on-demand pane preview
+    # (GET /cockpit/pane/{id}/preview). Fails open when herdr is disabled/absent;
+    # panes are NOT paw-workspace-scoped yet, hence ADMIN-only (see router).
+    app.include_router(herdr_cockpit_router, prefix="/api/v1")
+    # Agent activity (HR-12a) — the product-facing counterpart to the cockpit
+    # above: GET /agent-activity, MEMBER-gated, one entry per agent in the
+    # CALLER'S workspace with a run in the last 24h. Reads the durable
+    # ChatRunDoc turn record through chat.runs.service, so it sees /chat agents
+    # (which never appear as herdr panes) and stays correct across arq workers.
+    app.include_router(agent_activity_router, prefix="/api/v1")
     app.include_router(connectors_router, prefix="/api/v1")
     # Discovery — zero-setup workspace-discovery TRIGGER
     # (POST /cloud/discovery/run). Workspace-scoped (no path param); fires the
