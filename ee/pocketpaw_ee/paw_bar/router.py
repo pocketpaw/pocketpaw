@@ -1,4 +1,25 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-29 (concierge conversation memory) — a concierge turn is no
+#   longer answered cold. ``concierge_chat`` built its ``RunSpec`` with
+#   ``history=[]``, so the agent forgot the visitor's name between one message and
+#   the next: the visitor is anonymous and has no ``Message`` rows, so the authed
+#   surfaces' ``load_history_for_scope`` had nothing to read. The stored run docs
+#   (``user_text`` + ``partial_text``, from the transcript work below) are now ALSO
+#   the memory. (1) ``_concierge_runs_for_visitor`` extracts the (workspace,
+#   context_type, scope_id, user_id) query that ``_load_transcript`` already used,
+#   so the owner's transcript read and the agent's rehydration share ONE definition
+#   of "this visitor's turns" — per-visitor, per-site, per-tenant isolation lives in
+#   exactly one place. (2) ``_load_concierge_history`` shapes those rows into
+#   ``[{"role","content"}]`` oldest-first (the shape ``load_history_for_scope``
+#   returns), bounded by ``_HISTORY_TURN_CAP`` exchanges / ``_HISTORY_MESSAGE_CHARS``
+#   per line / ``_HISTORY_TOTAL_CHARS`` overall — fitted newest-first so the budget
+#   drops the OLDEST turns and the replay stays contiguous. Failure-soft: a read
+#   error answers without memory instead of 500-ing the visitor. (3) The read
+#   happens BEFORE ``create_run`` writes this turn's doc, so the current message
+#   rides in ``content`` exactly once. (4) Gated on the SAME
+#   ``concierge_store_transcripts`` toggle as the write — retention off means no
+#   memory, which is the owner's privacy choice working rather than a gap to route
+#   around.
 # Updated: 2026-07-26 (site knowledge sync) — two owner endpoints over the site's
 #   own knowledge: GET /paw-bar/admin/site/{id}/knowledge reports how many articles
 #   the concierge can quote and how the last sync went, and POST
@@ -1272,6 +1293,35 @@ _TRANSCRIPT_CAP = 200
 # question is never clipped.
 _STORED_USER_TEXT_CHARS = 4000
 
+# ---------------------------------------------------------------------------
+# Concierge conversation memory — the bounds on rehydrated history
+#
+# Every concierge turn replays the visitor's PRIOR turns into the run so the
+# agent remembers what was already said. Unbounded that would be both a cost
+# problem (the whole conversation is re-sent, and re-billed, on every turn) and
+# an abuse vector (a visitor could grow the prompt indefinitely by pasting).
+# Three bounds, each closing a different hole:
+# ---------------------------------------------------------------------------
+
+# How many prior EXCHANGES (a run = the visitor's line + the agent's reply) are
+# replayed. The most recent N, presented oldest-first. A site conversation is
+# short by nature — a dozen exchanges covers a full support or sales back-and-
+# forth, and it keeps the per-turn prompt cost flat instead of growing linearly.
+_HISTORY_TURN_CAP = 12
+
+# Max characters of any SINGLE replayed line. A long agent reply would otherwise
+# eat the whole budget below and evict every other turn; clipping it means the
+# newest exchange ALWAYS fits (2 x this < the total below), so memory can never
+# degrade to nothing because of one verbose turn. The clip affects the replayed
+# copy only — the stored transcript the owner reads is untouched.
+_HISTORY_MESSAGE_CHARS = 2000
+
+# Total characters across all replayed lines (~3k tokens). This is the real
+# ceiling on what a visitor can force us to re-send every turn. Turns are fitted
+# newest-first and the budget cuts off the OLDEST ones, so what survives is
+# always a contiguous run of the most recent conversation, never a gappy one.
+_HISTORY_TOTAL_CHARS = 12000
+
 
 class AdminWidgetView(BaseModel):
     """The site's paw-bar widget as the owner dashboard needs it (D2 overview)."""
@@ -1755,6 +1805,112 @@ async def _list_conversations(
     return ConversationsResponse(items=items, cursor=next_cursor, unsupported=False)
 
 
+async def _concierge_runs_for_visitor(
+    pocket_id: str, customer_ref: str, workspace_id: str, *, limit: int
+) -> list[Any]:
+    """One visitor's concierge runs on one site, most-recent first.
+
+    THE per-visitor isolation seam, deliberately in ONE place: both the owner's
+    transcript read and the agent's conversation-memory rehydration go through
+    this query, so there is no second, drifting definition of "this visitor's
+    turns". All four predicates are load-bearing:
+
+      * ``workspace``     — tenant isolation; another tenant's runs never match.
+      * ``context_type``  — concierge runs only; an authed pocket/session run on
+                            the same pocket is a different conversation.
+      * ``scope_id``      — the site's OWN pocket; a sibling site never matches.
+      * ``user_id``       — the anonymous customer handle; a sibling VISITOR of
+                            the same widget never matches.
+
+    Callers pass ``workspace_id`` / ``pocket_id`` from the authenticated
+    authority (the resolved site key or the session's workspace), never from the
+    request body. Index-backed and always bounded by ``limit``.
+    """
+    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+    return (
+        await ChatRunDoc.find(
+            ChatRunDoc.workspace == workspace_id,
+            ChatRunDoc.context_type == _CONCIERGE_CONTEXT_TYPE,
+            ChatRunDoc.scope_id == pocket_id,
+            ChatRunDoc.user_id == customer_ref,
+        )
+        .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
+        .limit(limit)
+        .to_list()
+    )
+
+
+async def _load_concierge_history(
+    pocket_id: str, customer_ref: str, workspace_id: str
+) -> list[dict[str, str]]:
+    """Rehydrate one visitor's prior turns as ``RunSpec.history``.
+
+    The concierge visitor is anonymous and has no ``Message`` rows, so the authed
+    surfaces' ``load_history_for_scope`` has nothing to read and every turn was
+    answered cold: the agent could not recall a name, an order number, or its own
+    previous answer. The stored run docs ARE the transcript, so they are also the
+    memory — same rows, same query (``_concierge_runs_for_visitor``), just shaped
+    for the model instead of for the dashboard.
+
+    Shape matches ``load_history_for_scope``: ``[{"role", "content"}]``, roles
+    "user" / "assistant", oldest-first.
+
+    Bounded by ``_HISTORY_TURN_CAP`` exchanges, ``_HISTORY_MESSAGE_CHARS`` per
+    line, and ``_HISTORY_TOTAL_CHARS`` overall. Turns are fitted newest-first and
+    the budget cuts the oldest off, so the replay is always the most recent
+    CONTIGUOUS stretch of the conversation — an older turn never jumps a newer
+    one just because it happens to be shorter.
+
+    The CURRENT turn is not in here: the caller reads before ``create_run``
+    writes this turn's doc, so the visitor's message rides in ``RunSpec.content``
+    exactly once.
+
+    Failure-soft: any read error degrades to no memory and logs. A visitor's chat
+    must not 500 because the run collection hiccuped.
+    """
+    # An empty handle is not a visitor — every anonymous caller that omitted the
+    # ref would otherwise share one bucket and read each other's conversation.
+    if not customer_ref:
+        return []
+
+    try:
+        runs = await _concierge_runs_for_visitor(
+            pocket_id, customer_ref, workspace_id, limit=_HISTORY_TURN_CAP
+        )
+
+        history: list[dict[str, str]] = []
+        budget = _HISTORY_TOTAL_CHARS
+        for run in runs:  # newest-first — the newest turns win the char budget
+            turn: list[dict[str, str]] = []
+            for role, raw in (
+                ("user", getattr(run, "user_text", "") or ""),
+                ("assistant", getattr(run, "partial_text", "") or ""),
+            ):
+                line = raw[:_HISTORY_MESSAGE_CHARS]
+                if line:
+                    turn.append({"role": role, "content": line})
+            if not turn:
+                # A run that stored neither side (retention off and no reply yet)
+                # contributes nothing, and costs nothing.
+                continue
+            cost = sum(len(m["content"]) for m in turn)
+            if cost > budget:
+                # Out of budget. Everything left in ``runs`` is OLDER, so stop
+                # rather than skip — that is what keeps the replay contiguous.
+                break
+            budget -= cost
+            history = turn + history  # prepend: the result reads oldest-first
+        return history
+    except Exception:  # noqa: BLE001 — memory is best-effort, the reply is not
+        logger.warning(
+            "concierge history load failed for pocket %s; answering without memory",
+            pocket_id,
+            exc_info=True,
+        )
+        return []
+
+
 async def _load_transcript(
     pocket_id: str, customer_ref: str, workspace_id: str
 ) -> list[TranscriptMessage] | None:
@@ -1772,18 +1928,8 @@ async def _load_transcript(
     Returns ``None`` when the ref has NO concierge run here (the caller 404s) —
     distinct from an empty list, which means runs exist but none carried any text.
     """
-    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
-
-    runs = (
-        await ChatRunDoc.find(
-            ChatRunDoc.workspace == workspace_id,
-            ChatRunDoc.context_type == _CONCIERGE_CONTEXT_TYPE,
-            ChatRunDoc.scope_id == pocket_id,
-            ChatRunDoc.user_id == customer_ref,
-        )
-        .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
-        .limit(_TRANSCRIPT_CAP)
-        .to_list()
+    runs = await _concierge_runs_for_visitor(
+        pocket_id, customer_ref, workspace_id, limit=_TRANSCRIPT_CAP
     )
     if not runs:
         return None
@@ -2256,8 +2402,7 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     # anonymous customer handle (session / rate-limit key, never a principal).
     # ``surface="concierge"`` makes execute_run resolve the CONCIERGE
     # SurfaceProfile (tool lockdown); ``context_type="concierge"`` makes it
-    # resolve the CONCIERGE scope (KB locked to pocket:<id>). ``history=[]`` stays
-    # (each turn is answered fresh — no cross-visitor bleed).
+    # resolve the CONCIERGE scope (KB locked to pocket:<id>).
     #
     # ``persist_user_text`` is the visitor's own line, written onto the run doc so
     # the owner's transcript is a conversation rather than a monologue. The visitor
@@ -2268,6 +2413,22 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     # full message either way, this governs only what is stored.
     stored_user_text = (
         body.message[:_STORED_USER_TEXT_CHARS] if site.concierge_store_transcripts else ""
+    )
+    # ``history`` is THIS visitor's prior turns on THIS site (see
+    # ``_load_concierge_history``). Read BEFORE ``create_run`` below writes this
+    # turn's doc, so the current message rides in ``content`` and appears exactly
+    # once. Scoped to (workspace, concierge, pocket, customer_ref) — a sibling
+    # visitor's, a sibling site's, and another tenant's turns can never appear.
+    #
+    # Gated on the SAME retention toggle as the write: an owner who turned
+    # transcript storage off gets no memory, because there is nothing stored to
+    # remember from and because replaying the agent's half alone would feed it a
+    # conversation with the questions missing. That degradation is the owner's
+    # privacy choice working, not a bug to route around.
+    prior_history = (
+        await _load_concierge_history(ctx.pocket_id or "", body.customer_ref, ctx.workspace_id)
+        if site.concierge_store_transcripts
+        else []
     )
     spec = RunSpec(
         run_id=run_id,
@@ -2282,7 +2443,7 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
         user_message_id="",
         persist_user_text=stored_user_text,
         content=body.message,
-        history=[],
+        history=prior_history,
         intent=None,
         attachments=[],
         mentions=[],
