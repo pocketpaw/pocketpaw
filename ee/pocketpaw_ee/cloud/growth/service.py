@@ -155,6 +155,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     UpdateDraftRequest,
     UpdateIcpRequest,
     UpdateProspectRequest,
+    _normalise_domain,
 )
 from pocketpaw_ee.cloud.models.draft import Draft as _DraftDoc
 from pocketpaw_ee.cloud.models.icp import Icp as _IcpDoc
@@ -1668,6 +1669,49 @@ async def get_prospect_system(workspace_id: str, prospect_id: str) -> ProspectRe
     a cross-workspace id raises NotFound exactly as the HTTP ``get`` does)."""
     doc = await _fetch_in_workspace(workspace_id, prospect_id)
     return _to_response(_to_domain(doc))
+
+
+# ---------------------------------------------------------------------------
+# Discovery seams (feat/growth-discovery)
+#
+# The discovery run and its cron live in ``growth/discovery.py`` and cannot
+# touch a doc class (import-linter "Growth" contract), so every read and write
+# they need is a named function here — the same arrangement ``followups`` has.
+# All of them take an explicit ``workspace_id`` because discovery runs under a
+# worker/system identity, mirroring ``upsert_by_domain`` and ``gate_transition``.
+# ---------------------------------------------------------------------------
+
+
+async def get_icp_system(workspace_id: str, icp_id: str) -> IcpResponse:
+    """Read an ICP under the worker's system identity (still tenant-scoped: a
+    cross-workspace id raises NotFound exactly as the HTTP ``get_icp`` does)."""
+    doc = await _fetch_icp_in_workspace(workspace_id, icp_id)
+    return _icp_to_response(_icp_to_domain(doc))
+
+
+async def prospect_exists_by_domain(workspace_id: str, domain: str) -> bool:
+    """Is this company already in the workspace's pipeline?
+
+    Discovery asks BEFORE filing, and skips the ones that are. Two reasons,
+    and the second is the load-bearing one:
+
+    1. Finding a company you already have is not a discovery. Filing it again
+       would spend the run's ``max_per_run`` budget on nothing.
+    2. ``upsert_by_domain`` overwrites ``status`` on an existing row — correct
+       for a human re-importing a list, wrong for a DAILY CRON. A prospect
+       sitting at ``in_sequence`` with two sent drafts would be reset to
+       ``new`` by a re-find, and the follow-up sweep would lose the thread.
+       Skipping known domains means discovery only ever INSERTS, so no
+       automated pass can walk a live prospect backwards.
+
+    Normalises the domain the same way the DTO does, so a research result
+    naming ``https://www.Acme.com/about`` matches the stored ``acme.com``.
+    """
+    normalised = _normalise_domain(domain)
+    if not normalised:
+        return False
+    doc = await _ProspectDoc.find_one({"workspace": workspace_id, "domain": normalised})
+    return doc is not None
 
 
 async def mark_prospect_dead(workspace_id: str, prospect_id: str) -> ProspectResponse:

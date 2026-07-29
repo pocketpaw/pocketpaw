@@ -850,6 +850,7 @@ source_modules = [
     "pocketpaw_ee.cloud.growth.propose",
     "pocketpaw_ee.cloud.growth.executor",
     "pocketpaw_ee.cloud.growth.connector",
+    "pocketpaw_ee.cloud.growth.discovery",
     "pocketpaw_ee.cloud.growth.email_dispatch",
     "pocketpaw_ee.cloud.growth.followups",
     "pocketpaw_ee.cloud.growth.whatsapp",

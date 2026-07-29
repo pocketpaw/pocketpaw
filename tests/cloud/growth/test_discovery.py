@@ -17,6 +17,15 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from pocketpaw_ee.cloud._core.errors import NotFound
+from pocketpaw_ee.cloud.growth.discovery import (
+    DiscoveredCompany,
+    ResearchRequest,
+    ResearchResult,
+    resolve_research_fn,
+    run_discovery,
+    set_production_research_fn,
+)
 from pocketpaw_ee.cloud.growth.domain import (
     RECORDABLE_EMAIL_CONFIDENCE,
     EmailEvidence,
@@ -239,3 +248,290 @@ class TestIcpCrud:
     @pytest.mark.asyncio
     async def test_a_malformed_id_is_a_404_not_a_500(self, w1):
         assert (await w1.get(f"{ICPS_URL}/not-an-object-id")).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# The discovery run — against a FAKE ResearchFn
+# ---------------------------------------------------------------------------
+
+
+class FakeResearch:
+    """A deterministic stand-in for the agent research loop.
+
+    The whole point of the ``ResearchFn`` seam (copied from belt/headless):
+    code under test never calls a real LLM, and a test can hand the run
+    EXACTLY the shape a misbehaving model would produce — a company with a
+    guessed address, a result with no domain, two hundred rows against a limit
+    of ten — and assert what the engine does with it.
+    """
+
+    def __init__(self, *companies: DiscoveredCompany, notes: str = "") -> None:
+        self.result = ResearchResult(companies=tuple(companies), notes=notes)
+        self.calls: list[ResearchRequest] = []
+
+    async def __call__(self, request: ResearchRequest) -> ResearchResult:
+        self.calls.append(request)
+        return self.result
+
+
+class ExplodingResearch:
+    """A research loop that fails, which is what a real one does sometimes."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self, request: ResearchRequest) -> ResearchResult:
+        self.calls += 1
+        raise RuntimeError("the search provider returned 503")
+
+
+def _company(domain: str, **overrides: Any) -> DiscoveredCompany:
+    base: dict[str, Any] = {
+        "name": "",
+        "company": f"Co {domain}",
+        "research_brief": "Three chairs, books by phone.",
+        "source_urls": (f"https://{domain}/about",),
+    }
+    base.update(overrides)
+    return DiscoveredCompany(domain=domain, **base)
+
+
+async def _prospects(client: AsyncClient) -> list[dict[str, Any]]:
+    resp = await client.get("/api/v1/growth/prospects")
+    assert resp.status_code == 200, resp.text
+    return resp.json()["items"]
+
+
+class TestDiscoveryRun:
+    """Files what it found, and nothing else. The assertions worth reading are
+    the negative ones: no drafts, no invented emails, no reset statuses."""
+
+    @pytest.mark.asyncio
+    async def test_a_found_company_lands_as_a_new_prospect(self, w1):
+        icp = await _create_icp(w1)
+        research = FakeResearch(_company("acme-dental.com"))
+
+        outcome = await run_discovery("w1", icp["id"], research)
+
+        assert outcome.filed == 1
+        (row,) = await _prospects(w1)
+        assert row["domain"] == "acme-dental.com"
+        assert row["source"] == "discovery"
+        assert row["status"] == "new"
+        assert row["tier"] == "unqualified"
+        assert row["icp_id"] == icp["id"]
+        assert row["source_urls"] == ["https://acme-dental.com/about"]
+
+    @pytest.mark.asyncio
+    async def test_the_icp_criteria_reach_the_research_loop(self, w1):
+        icp = await _create_icp(w1, geography="Bengaluru", exclusions="No chains.")
+        research = FakeResearch()
+
+        await run_discovery("w1", icp["id"], research)
+
+        (request,) = research.calls
+        assert request.criteria == icp["criteria"]
+        assert request.geography == "Bengaluru"
+        assert request.exclusions == "No chains."
+        assert request.max_results == icp["max_per_run"]
+        assert request.workspace_id == "w1"
+
+    @pytest.mark.asyncio
+    async def test_an_unobserved_email_never_reaches_the_prospect(self, w1):
+        """THE constraint, end to end. The research claims an address it built
+        from a pattern; the filed row carries no email at all. A prospect with
+        an empty ``emails`` is a good prospect — a human or a real verification
+        provider picks it up from there. A guessed one bounces and burns the
+        sending domain."""
+        icp = await _create_icp(w1)
+        research = FakeResearch(
+            _company(
+                "acme-dental.com",
+                emails=(
+                    EmailEvidence("sam@acme-dental.com", "guessed"),
+                    EmailEvidence(
+                        "info@acme-dental.com",
+                        "claimed",
+                        "https://some-directory.example/acme",
+                    ),
+                    # An ``observed`` claim with nowhere to check it.
+                    EmailEvidence("hello@acme-dental.com", "observed"),
+                ),
+            )
+        )
+
+        outcome = await run_discovery("w1", icp["id"], research)
+
+        assert outcome.filed == 1
+        (row,) = await _prospects(w1)
+        assert row["emails"] == []
+
+    @pytest.mark.asyncio
+    async def test_an_observed_email_does_reach_the_prospect(self, w1):
+        """The other half — the rule refuses guesses, it does not refuse
+        emails. An address read off the company's own contact page is exactly
+        what the engine is for."""
+        icp = await _create_icp(w1)
+        research = FakeResearch(
+            _company(
+                "acme-dental.com",
+                emails=(
+                    EmailEvidence("guess@acme-dental.com", "guessed"),
+                    EmailEvidence(
+                        "hello@acme-dental.com",
+                        "observed",
+                        "https://acme-dental.com/contact",
+                    ),
+                ),
+            )
+        )
+
+        await run_discovery("w1", icp["id"], research)
+
+        (row,) = await _prospects(w1)
+        assert row["emails"] == ["hello@acme-dental.com"]
+
+    @pytest.mark.asyncio
+    async def test_it_drafts_nothing_and_sends_nothing(self, w1):
+        """Discovery adds rows to a list; it does not start conversations.
+        Everything downstream still needs the human gate it always needed."""
+        icp = await _create_icp(w1)
+
+        await run_discovery("w1", icp["id"], FakeResearch(_company("acme-dental.com")))
+
+        assert (await w1.get("/api/v1/growth/drafts")).json() == []
+
+    @pytest.mark.asyncio
+    async def test_a_domain_the_workspace_already_has_is_skipped(self, w1):
+        """A daily cron that re-upserted a live prospect would reset its status
+        and lose the follow-up thread. Discovery only ever inserts."""
+        await w1.post(
+            "/api/v1/growth/prospects",
+            json={
+                "name": "Sam",
+                "company": "Acme Dental",
+                "domain": "acme-dental.com",
+                "source": "manual",
+                "status": "in_sequence",
+            },
+        )
+        icp = await _create_icp(w1)
+
+        outcome = await run_discovery("w1", icp["id"], FakeResearch(_company("acme-dental.com")))
+
+        assert (outcome.filed, outcome.skipped_existing) == (0, 1)
+        (row,) = await _prospects(w1)
+        assert row["status"] == "in_sequence"
+        assert row["source"] == "manual"
+        assert row["icp_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_known_domain_is_recognised_through_its_url_form(self, w1):
+        """The research reports what it read off the page; the existence check
+        normalises the same way the dedupe key does."""
+        await w1.post(
+            "/api/v1/growth/prospects",
+            json={"domain": "acme-dental.com", "source": "manual"},
+        )
+        icp = await _create_icp(w1)
+
+        outcome = await run_discovery(
+            "w1", icp["id"], FakeResearch(_company("https://www.Acme-Dental.com/pricing"))
+        )
+
+        assert outcome.skipped_existing == 1
+        assert len(await _prospects(w1)) == 1
+
+    @pytest.mark.asyncio
+    async def test_max_per_run_truncates_the_result(self, w1):
+        """A research loop that ignores the limit does not get to file 200
+        rows: the number a human agreed to review is the number that appears."""
+        icp = await _create_icp(w1, max_per_run=3)
+        research = FakeResearch(*[_company(f"co-{i:02d}.com") for i in range(20)])
+
+        outcome = await run_discovery("w1", icp["id"], research)
+
+        assert (outcome.filed, outcome.considered) == (3, 3)
+        assert len(await _prospects(w1)) == 3
+
+    @pytest.mark.asyncio
+    async def test_skipped_rows_do_not_free_budget_for_extra_ones(self, w1):
+        """The cap is on what the run CONSIDERS, so a result full of known
+        companies produces a short run rather than digging deeper."""
+        await w1.post(
+            "/api/v1/growth/prospects",
+            json={"domain": "co-00.com", "source": "manual"},
+        )
+        icp = await _create_icp(w1, max_per_run=2)
+        research = FakeResearch(*[_company(f"co-{i:02d}.com") for i in range(5)])
+
+        outcome = await run_discovery("w1", icp["id"], research)
+
+        assert (outcome.considered, outcome.filed, outcome.skipped_existing) == (2, 1, 1)
+
+    @pytest.mark.asyncio
+    async def test_a_result_without_a_domain_is_dropped(self, w1):
+        """A company nobody can look up is not a lead — there is nothing to
+        dedupe on and nothing for a human to open."""
+        icp = await _create_icp(w1)
+        research = FakeResearch(_company("   "), _company("acme-dental.com"))
+
+        outcome = await run_discovery("w1", icp["id"], research)
+
+        assert (outcome.filed, outcome.skipped_invalid) == (1, 1)
+
+    @pytest.mark.asyncio
+    async def test_a_research_crash_files_nothing_and_does_not_raise(self, w1):
+        """One bad ICP must not take down a cron pass that has other
+        workspaces left to serve."""
+        icp = await _create_icp(w1)
+        research = ExplodingResearch()
+
+        outcome = await run_discovery("w1", icp["id"], research)
+
+        assert outcome.filed == 0
+        assert "research failed" in outcome.error
+        assert await _prospects(w1) == []
+
+    @pytest.mark.asyncio
+    async def test_a_paused_icp_does_not_run(self, w1):
+        icp = await _create_icp(w1, status="paused")
+        research = FakeResearch(_company("acme-dental.com"))
+
+        outcome = await run_discovery("w1", icp["id"], research)
+
+        assert outcome.error == "icp is paused"
+        assert research.calls == []
+        assert await _prospects(w1) == []
+
+    @pytest.mark.asyncio
+    async def test_rows_land_in_the_icps_workspace_only(self, w1, w2):
+        icp = await _create_icp(w1)
+
+        await run_discovery("w1", icp["id"], FakeResearch(_company("acme-dental.com")))
+
+        assert len(await _prospects(w1)) == 1
+        assert await _prospects(w2) == []
+
+    @pytest.mark.asyncio
+    async def test_another_tenants_icp_id_is_a_404(self, w1, w2):
+        icp = await _create_icp(w1)
+        with pytest.raises(NotFound):
+            await run_discovery("w2", icp["id"], FakeResearch(_company("acme.com")))
+
+
+class TestProductionResearchSeam:
+    """Until a real loop is wired, the engine is visibly idle rather than a
+    source of half-researched rows."""
+
+    def test_no_loop_is_wired_by_default(self):
+        assert resolve_research_fn() is None
+
+    def test_wiring_and_clearing_round_trip(self):
+        fake = FakeResearch()
+        set_production_research_fn(fake)
+        try:
+            assert resolve_research_fn() is fake
+        finally:
+            set_production_research_fn(None)
+        assert resolve_research_fn() is None
