@@ -20,6 +20,13 @@ path. What it does:
   * Writes ``requests.jsonl`` + ``samples.csv`` and prints a percentile summary
     with an error breakdown and a saturation verdict.
 
+Updated 2026-07-29 (same day) for the in-process-backend baseline: polls the
+server's ``/__loadtest/metrics`` probe for event-loop lag and server RSS when
+one is exposed (``serve_sim.py`` installs it), counts completions that carried
+no assistant text, and reports prompt-cache read share. Those are the metrics
+that decide whether an in-process agent backend can replace a subprocess one,
+and none of them are visible from response timings alone.
+
 Run it against a deploy you are allowed to saturate. It costs real tokens.
 
 Usage:
@@ -55,6 +62,12 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+# A Windows console defaults to a codepage that mangles the summary's em dashes
+# and arrows. The report is the product here, so make it render.
+for _stream in (sys.stdout, sys.stderr):
+    with contextlib.suppress(AttributeError, ValueError):
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 
 try:  # host sampling is optional — the driver still works without it
     import psutil
@@ -216,6 +229,7 @@ class HostSampler:
         mongo_url: str | None,
         mongo_db: str,
         inflight: dict[str, int],
+        server_metrics_url: str | None = None,
     ) -> None:
         self.interval = interval
         self.jail_root = os.path.expanduser(jail_root) if jail_root else None
@@ -223,9 +237,11 @@ class HostSampler:
         self.mongo_url = mongo_url
         self.mongo_db = mongo_db
         self.inflight = inflight
+        self.server_metrics_url = server_metrics_url
         self.rows: list[dict[str, Any]] = []
         self._redis = None
         self._mongo = None
+        self._probe: httpx.AsyncClient | None = None
 
     async def _connect(self) -> None:
         if self.redis_url:
@@ -246,6 +262,36 @@ class HostSampler:
             except Exception as exc:  # noqa: BLE001
                 print(f"[sampler] mongo disabled: {exc}", file=sys.stderr)
                 self._mongo = None
+        if self.server_metrics_url:
+            self._probe = httpx.AsyncClient(timeout=2.0)
+            try:
+                r = await self._probe.get(self.server_metrics_url)
+                r.raise_for_status()
+            except Exception:  # noqa: BLE001
+                # Not every target exposes the probe — a plain deploy has no
+                # such route. Say so once, then stop asking.
+                print(
+                    f"[sampler] no server probe at {self.server_metrics_url} — "
+                    "event-loop lag will be blank (serve_sim.py installs one)",
+                    file=sys.stderr,
+                )
+                await self._probe.aclose()
+                self._probe = None
+
+    async def _server_metrics(self) -> dict[str, Any]:
+        """Pull loop lag + RSS measured inside the server process.
+
+        Reading drains the server's sample buffer, so each row covers the
+        window since the previous sample rather than the whole run.
+        """
+        if self._probe is None or not self.server_metrics_url:
+            return {}
+        try:
+            r = await self._probe.get(self.server_metrics_url)
+            payload = r.json()
+        except Exception:  # noqa: BLE001
+            return {}
+        return {k: v for k, v in payload.items() if v is not None}
 
     def _process_metrics(self) -> dict[str, Any]:
         """Count Claude CLI subprocesses, python web procs, and node build procs."""
@@ -324,9 +370,12 @@ class HostSampler:
                 except OSError:
                     pass
             row.update(await self._queue_metrics())
+            row.update(await self._server_metrics())
             self.rows.append(row)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=self.interval)
+        if self._probe is not None:
+            await self._probe.aclose()
 
     def write_csv(self, path: Path) -> None:
         if not self.rows:
@@ -456,6 +505,14 @@ def summarize(records: list[RequestRecord], sampler: HostSampler, wall_s: float)
     lines.append(f"  requests sent      {total}")
     pct_ok = 100 * len(completed) / max(total, 1)
     lines.append(f"  completed          {len(completed)} ({pct_ok:.1f}%)")
+    # A run can terminate cleanly and still have said nothing. That is what
+    # concurrent truncation looks like from the outside, so it is counted
+    # separately rather than folded into the success rate.
+    empty = [r for r in completed if r.text_chars == 0]
+    lines.append(
+        f"  empty completions  {len(empty)}"
+        + ("   <-- clean stream_end carrying no assistant text" if empty else "")
+    )
     lines.append(f"  wall clock         {wall_s:.1f}s")
     if completed:
         lines.append(f"  throughput         {60 * len(completed) / wall_s:.2f} completed runs/min")
@@ -494,11 +551,24 @@ def summarize(records: list[RequestRecord], sampler: HostSampler, wall_s: float)
 
     tokens_in = sum(int(r.usage.get("input_tokens") or 0) for r in completed)
     tokens_out = sum(int(r.usage.get("output_tokens") or 0) for r in completed)
+    cache_read = sum(int(r.usage.get("cache_read_input_tokens") or 0) for r in completed)
+    cache_write = sum(int(r.usage.get("cache_creation_input_tokens") or 0) for r in completed)
     if tokens_in or tokens_out:
         lines.append("")
         lines.append("TOKENS")
         lines.append(f"  input   {tokens_in:,}   ({tokens_in * 60 / max(wall_s, 1):,.0f}/min)")
         lines.append(f"  output  {tokens_out:,}   ({tokens_out * 60 / max(wall_s, 1):,.0f}/min)")
+        if cache_read or cache_write:
+            billable = tokens_in + cache_read + cache_write
+            share = 100 * cache_read / max(billable, 1)
+            lines.append(f"  cache read   {cache_read:,}")
+            lines.append(f"  cache write  {cache_write:,}")
+            lines.append(f"  cache read share  {share:.1f}% of input-side tokens")
+        else:
+            lines.append(
+                "  cache read/write  not reported — either the backend does not "
+                "surface it in stream_end usage, or caching is not engaging"
+            )
         lines.append("  ^ compare against your org's ITPM / OTPM limit for the model in use")
 
     if sampler.rows:
@@ -525,6 +595,9 @@ def summarize(records: list[RequestRecord], sampler: HostSampler, wall_s: float)
             ("runs_queued", "mongo runs queued"),
             ("runs_running", "mongo runs running"),
             ("jail_disk_free_gb", "jail disk free (GB)"),
+            ("srv_rss_mb", "server RSS (MB)"),
+            ("loop_lag_p95_ms", "event-loop lag p95 (ms)"),
+            ("loop_lag_max_ms", "event-loop lag max (ms)"),
         ):
             pk = peak(col)
             if pk is None:
@@ -534,6 +607,24 @@ def summarize(records: list[RequestRecord], sampler: HostSampler, wall_s: float)
             "  (process counts are for THIS host — run the driver on the app box, or "
             "sample it separately, or these numbers describe your laptop)"
         )
+
+        # Per-run memory cost, which is the number that decides how many boxes
+        # the agent tier needs. Derived, not measured directly: the server's
+        # RSS growth over its idle baseline, divided by peak concurrency. It
+        # assumes the growth is the runs, so treat it as an estimate and read
+        # it next to the raw RSS peak above.
+        rss_rows = [r["srv_rss_mb"] for r in sampler.rows if r.get("srv_rss_mb") is not None]
+        peak_inflight = peak("inflight") or 0
+        if len(rss_rows) >= 2 and peak_inflight:
+            growth = max(rss_rows) - min(rss_rows)
+            lines.append("")
+            lines.append("AGENT TIER")
+            lines.append(f"  peak concurrent runs      {peak_inflight:.0f}")
+            lines.append(f"  server RSS baseline/peak  {min(rss_rows)} / {max(rss_rows)} MB")
+            lines.append(
+                f"  approx RSS per run        {growth / peak_inflight:.2f} MB "
+                f"({growth:.1f} MB growth ÷ {peak_inflight:.0f} peak runs)"
+            )
 
     lines.append("")
     lines.append("SATURATION VERDICT")
@@ -582,6 +673,24 @@ def _verdict(records: list[RequestRecord], sampler: HostSampler) -> list[str]:
             f"System memory peaked at {peak('sys_mem_pct'):.0f}% — each concurrent run holds a "
             "Claude Code CLI (Node) subprocess; memory is usually the first wall."
         )
+    empty = sum(1 for r in records if r.outcome == "completed" and r.text_chars == 0)
+    if empty:
+        out.append(
+            f"{empty} run(s) ended with a clean stream_end and no assistant text. That is "
+            "not a capacity signal — it is concurrent truncation. Check that the backend "
+            "keeps cancellation state per run (AgentPool shares ONE instance per agent), "
+            "and that there are at least as many pockets as concurrent VUs."
+        )
+
+    lag95 = peak("loop_lag_p95_ms")
+    if lag95 > 250:
+        out.append(
+            f"Event-loop lag p95 peaked at {lag95:.0f}ms inside the server process. The loop "
+            "is the constraint, not the box — add web processes rather than RAM."
+        )
+    elif lag95:
+        out.append(f"Event-loop lag p95 peaked at {lag95:.0f}ms — the loop kept up.")
+
     cli_peak = peak("cli_procs")
     if cli_peak:
         out.append(f"Peak concurrent Claude CLI subprocesses: {cli_peak:.0f}.")
@@ -620,6 +729,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=900, help="per-request timeout (s)")
 
     p.add_argument("--sample-interval", type=float, default=2.0)
+    p.add_argument(
+        "--no-server-probe",
+        action="store_true",
+        help="skip GET {base-url}/__loadtest/metrics (event-loop lag + server RSS)",
+    )
     p.add_argument("--jail-root", default=None, help="e.g. ~/.pocketpaw/workspaces")
     p.add_argument("--redis-url", default=os.environ.get("POCKETPAW_REDIS_URL"))
     p.add_argument("--mongo-url", default=None)
@@ -632,7 +746,11 @@ async def main_async(args: argparse.Namespace) -> int:
     prompts: list[str]
     if args.prompt_file:
         raw = Path(args.prompt_file).read_text("utf-8").splitlines()
-        prompts = [ln.strip() for ln in raw if ln.strip()]
+        # Blank lines and '#' comments are dropped so a fixture can carry its
+        # own provenance note at the top instead of needing a sidecar file.
+        prompts = [ln.strip() for ln in raw if ln.strip() and not ln.lstrip().startswith("#")]
+        if not prompts:
+            raise SystemExit(f"[driver] no prompts in {args.prompt_file}")
     elif args.prompt:
         prompts = [args.prompt]
     else:
@@ -676,6 +794,9 @@ async def main_async(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     inflight = {"n": 0}
+    probe_url = None
+    if not args.no_server_probe:
+        probe_url = f"{args.base_url.rstrip('/')}/__loadtest/metrics"
     sampler = HostSampler(
         interval=args.sample_interval,
         jail_root=args.jail_root,
@@ -683,6 +804,7 @@ async def main_async(args: argparse.Namespace) -> int:
         mongo_url=args.mongo_url,
         mongo_db=args.mongo_db,
         inflight=inflight,
+        server_metrics_url=probe_url,
     )
     stop = asyncio.Event()
     sampler_task = asyncio.create_task(sampler.run(stop))

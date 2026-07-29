@@ -1,24 +1,38 @@
-"""Boot the cloud stack with the simulated agent backend and seed a workspace,
-so ``chat_loadtest.py`` has something to hammer at zero token cost.
+"""Boot the cloud stack against a chosen agent backend and seed a workspace, so
+``chat_loadtest.py`` has something to hammer.
 
 Created 2026-07-29 — the load-test rig's server half. It:
 
   1. Mints a local license + auth secret and points Beanie at a SCRATCH Mongo
-     database (dropped on exit unless ``--keep-db``).
-  2. Registers ``sim_backend.SimBackend`` under the backend name ``sim`` and
-     selects it, so no Anthropic key is needed and no tokens are spent.
+     database (dropped on exit unless ``--keep-db``). The drop runs in a
+     ``finally``, so a hard kill leaves the database behind — clean up with
+     ``db.getMongo().getDBNames().filter(n => n.startsWith('loadtest_'))``.
+  2. Selects the backend under test. Default ``--backend sim`` registers
+     ``sim_backend.SimBackend``, so no provider key is needed and no tokens are
+     spent. Any other value selects a backend already in the registry
+     (``deep_agents``, ``claude_agent_sdk``, …) and then the run is real: it
+     needs a working provider key in the environment and it spends money.
   3. Mounts the real cloud FastAPI app — real router, real run executor, real
      Redis stream transport, real Mongo writes, real SSE.
   4. Seeds user → workspace → agent → pocket over the real HTTP API.
   5. Serves it with uvicorn and prints the exact ``chat_loadtest.py`` command,
      with token / workspace / scope id already filled in.
 
-What this measures: YOUR stack's concurrency ceiling. What it does NOT measure:
-Anthropic rate limits, or the memory cost of a real Claude Code CLI subprocess
-per run (set ``PAW_SIM_SUBPROC=1`` / ``PAW_SIM_RSS_MB`` to approximate that).
+Updated 2026-07-29 (same day) for the baseline measurement: added ``--backend``
+and ``--model`` so a registered backend can be measured instead of the
+simulator, and added the ``/__loadtest/metrics`` probe. The probe reports event
+loop lag sampled from INSIDE this process, which is the number that decides the
+in-process ceiling — a client-side measurement sees the network and the
+driver's own loop instead, and would flatter the server.
+
+What this measures: YOUR stack's concurrency ceiling. With ``--backend sim`` it
+does NOT measure provider rate limits or the memory cost of a real Claude Code
+CLI subprocess per run (set ``PAW_SIM_SUBPROC=1`` / ``PAW_SIM_RSS_MB`` to
+approximate the latter).
 
 Usage:
     uv run python scripts/loadtest/serve_sim.py --port 8099
+    uv run python scripts/loadtest/serve_sim.py --backend deep_agents --pockets 250
     # then, in another shell, paste the command it prints.
 """
 
@@ -33,12 +47,30 @@ import json
 import os
 import sys
 import uuid
+from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover - optional dep
+    psutil = None  # type: ignore[assignment]
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
+
+# A Windows console defaults to cp1252, which has no U+2192. Without this,
+# --help dies in the encoder before printing a single option, because the
+# module docstring below contains arrows.
+for _stream in (sys.stdout, sys.stderr):
+    with contextlib.suppress(AttributeError, ValueError):
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+
+# Bounded so a long run cannot grow this without limit. At the 50ms probe
+# interval below, 20k samples is ~17 minutes of history, and the driver drains
+# it on every poll anyway.
+_LAG_SAMPLES: deque[float] = deque(maxlen=20_000)
 
 
 def _license_key(secret: str) -> str:
@@ -63,7 +95,7 @@ def _configure_env(args: argparse.Namespace, db_name: str) -> str:
             "AUTH_SECRET": "loadtest-auth-secret",
             "POCKETPAW_CLOUD_MONGO_URI": uri,
             "CLOUD_MONGODB_URI": uri,
-            "POCKETPAW_AGENT_BACKEND": "sim",
+            "POCKETPAW_AGENT_BACKEND": args.backend,
             # Billing off: a load test should hit capacity limits, not the
             # 402 credit gate at run start.
             "POCKETPAW_BILLING_ENFORCED": "0",
@@ -73,10 +105,63 @@ def _configure_env(args: argparse.Namespace, db_name: str) -> str:
     os.environ.pop("POCKETPAW_MEMORY_BACKEND", None)
     if args.redis_url:
         os.environ["POCKETPAW_REDIS_URL"] = args.redis_url
+    if args.model:
+        # Per-backend model attribute, not a single global. Omitting a backend
+        # from _BACKEND_MODEL_ATTR silently drops the per-agent model, so set
+        # the generic key too and let the backend read whichever it honours.
+        os.environ["POCKETPAW_AGENT_MODEL"] = args.model
+        os.environ[f"POCKETPAW_{args.backend.upper()}_MODEL"] = args.model
     return uri
 
 
-async def _seed(app, base_url: str, n_pockets: int) -> dict[str, str]:
+async def _loop_lag_probe(interval: float = 0.05) -> None:
+    """Record event-loop scheduling delay, sampled inside the server process.
+
+    Sleep for a known interval and measure the overshoot. On an idle loop that
+    is near zero; under load it is how long a ready callback waited behind
+    other work, which is the thing that actually gives out first when the agent
+    tier runs in-process rather than in a subprocess.
+    """
+    loop = asyncio.get_running_loop()
+    while True:
+        t0 = loop.time()
+        await asyncio.sleep(interval)
+        _LAG_SAMPLES.append(max(0.0, (loop.time() - t0 - interval) * 1000))
+
+
+def _install_probe(app) -> None:
+    """Expose the loop-lag samples and this process's RSS to the driver.
+
+    Registered BEFORE ``mount_cloud`` so a catch-all route cannot shadow it.
+    Reading drains the buffer, so each poll describes the window since the
+    previous poll rather than the whole run to date.
+    """
+
+    @app.get("/__loadtest/metrics")
+    async def _loadtest_metrics() -> dict:  # pyright: ignore[reportUnusedFunction]
+        samples = sorted(_LAG_SAMPLES)
+        _LAG_SAMPLES.clear()
+
+        def pct(p: float) -> float | None:
+            if not samples:
+                return None
+            idx = min(len(samples) - 1, int(round((p / 100) * (len(samples) - 1))))
+            return round(samples[idx], 2)
+
+        rss_mb = None
+        if psutil is not None:
+            with contextlib.suppress(Exception):
+                rss_mb = round(psutil.Process().memory_info().rss / 1_048_576, 1)
+        return {
+            "loop_lag_p50_ms": pct(50),
+            "loop_lag_p95_ms": pct(95),
+            "loop_lag_max_ms": round(samples[-1], 2) if samples else None,
+            "loop_lag_n": len(samples),
+            "srv_rss_mb": rss_mb,
+        }
+
+
+async def _seed(app, base_url: str, n_pockets: int, backend: str) -> dict[str, str]:
     """Create user → workspace → agent → pocket over the real API."""
     from httpx import ASGITransport, AsyncClient
 
@@ -116,9 +201,9 @@ async def _seed(app, base_url: str, n_pockets: int) -> dict[str, str]:
         r = await http.post(
             "/api/v1/agents",
             json={
-                "name": "Sim Agent",
-                "slug": f"sim-agent-{uuid.uuid4().hex[:6]}",
-                "backend": "sim",
+                "name": f"Loadtest Agent ({backend})",
+                "slug": f"loadtest-agent-{uuid.uuid4().hex[:6]}",
+                "backend": backend,
                 "system_prompt": "You are a test agent.",
             },
             headers=headers,
@@ -146,9 +231,9 @@ async def _seed(app, base_url: str, n_pockets: int) -> dict[str, str]:
             pocket_id = str(payload.get("_id") or payload.get("id"))
             pocket_ids.append(pocket_id)
 
-            # Attach the sim agent, or a chat addressed to it comes back 400
-            # agent.not_in_scope — and an unaddressed one resolves to the
-            # pocket's default agent, which is NOT the sim backend.
+            # Attach the loadtest agent, or a chat addressed to it comes back
+            # 400 agent.not_in_scope — and an unaddressed one resolves to the
+            # pocket's default agent, which is NOT the backend under test.
             if agent_id:
                 r = await http.post(
                     f"/api/v1/pockets/{pocket_id}/agents",
@@ -184,24 +269,37 @@ async def main_async(args: argparse.Namespace) -> int:
     from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
     from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
-    from pocketpaw.agents.registry import register_backend
+    from pocketpaw.agents.registry import _BACKEND_REGISTRY, register_backend
 
-    register_backend("sim", "sim_backend", "SimBackend")
+    if args.backend == "sim":
+        register_backend("sim", "sim_backend", "SimBackend")
+    elif args.backend not in _BACKEND_REGISTRY:
+        known = ", ".join(sorted(_BACKEND_REGISTRY))
+        raise SystemExit(f"[serve] unknown backend {args.backend!r}. Registered: {known}")
+    else:
+        print(
+            f"[serve] REAL BACKEND {args.backend} — this spends provider tokens and "
+            "needs a working key in the environment.",
+            flush=True,
+        )
     lic_mod._cached_license = None
     lic_mod._license_error = None
 
     print(f"[serve] mongo   {uri}")
+    print(f"[serve] backend {args.backend}   model {args.model or '(backend default)'}")
     print(f"[serve] executor {args.executor}   redis {os.environ.get('POCKETPAW_REDIS_URL')}")
     await init_beanie(connection_string=uri, document_models=[*ALL_DOCUMENTS, MemoryFactDoc])
     register_default_backend()
 
     app = FastAPI(title="pocketpaw loadtest rig")
+    _install_probe(app)
     mount_cloud(app)
 
     print("[serve] seeding workspace…", flush=True)
-    seed = await _seed(app, f"http://127.0.0.1:{args.port}", args.pockets)
+    seed = await _seed(app, f"http://127.0.0.1:{args.port}", args.pockets, args.backend)
     seed["mongo_db"] = db_name
     seed["port"] = str(args.port)
+    seed["backend"] = args.backend
     n_pk = len(seed["pocket_ids"].split(","))
     print(f"[serve] workspace={seed['workspace_id']} pockets={n_pk}", flush=True)
     if seed["agent_id"]:
@@ -215,6 +313,8 @@ async def main_async(args: argparse.Namespace) -> int:
     print(f"[serve] seed written to {seed_path}", flush=True)
 
     agent_flag = f" \\\n    --agent-id {seed['agent_id']}" if seed["agent_id"] else ""
+    briefs = _HERE / "briefs" / "site-briefs.txt"
+    briefs_rel = briefs.relative_to(Path.cwd()) if briefs.is_relative_to(Path.cwd()) else briefs
     print(
         "\n"
         + "=" * 78
@@ -224,11 +324,11 @@ async def main_async(args: argparse.Namespace) -> int:
     --token {seed["token"]} \\
     --workspace {seed["workspace_id"]} \\
     --scope pocket --scope-id {seed["pocket_ids"]}{agent_flag} \\
-    --surface sites --prompt "Build a landing page for a dentist {{n}}" \\
+    --surface sites --prompt-file {briefs_rel.as_posix()} \\
     --mode open --rate 1 --duration 60 --jitter \\
     --redis-url {os.environ.get("POCKETPAW_REDIS_URL", "redis://localhost:6379")} \\
     --mongo-url {args.mongo_url} --mongo-db {db_name} \\
-    --out out/sim-1rps"""
+    --out out/{args.backend}-1rps"""
         + "\n\n"
         + "=" * 78
         + "\n"
@@ -240,9 +340,13 @@ async def main_async(args: argparse.Namespace) -> int:
         app, host="127.0.0.1", port=args.port, log_level=args.log_level, access_log=False
     )
     server = uvicorn.Server(config)
+    probe = asyncio.create_task(_loop_lag_probe())
     try:
         await server.serve()
     finally:
+        probe.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await probe
         if not args.keep_db:
             print(f"\n[serve] dropping scratch db {db_name}")
             client = AsyncIOMotorClient(args.mongo_url)
@@ -256,6 +360,18 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument("--port", type=int, default=8099)
+    p.add_argument(
+        "--backend",
+        default="sim",
+        help=(
+            "agent backend under test. 'sim' (default) is the free simulator; "
+            "anything else must already be in the registry (deep_agents, "
+            "claude_agent_sdk, …) and needs a real provider key"
+        ),
+    )
+    p.add_argument(
+        "--model", default=None, help="model id for a real backend (default: the backend's own)"
+    )
     p.add_argument("--mongo-url", default="mongodb://localhost:27017")
     p.add_argument(
         "--redis-url", default=os.environ.get("POCKETPAW_REDIS_URL", "redis://localhost:6379")
