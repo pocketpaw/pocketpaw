@@ -182,6 +182,32 @@ class TestTheParseDegrades:
         assert result.companies[0].domain == "mixedcase.com"
 
 
+class TestToolOutputNeverPollutesTheAnswer:
+    """A REGRESSION, and one that cost a real run to find.
+
+    ``agent_research`` originally collected every event carrying string
+    content. ``tool_result`` events carry the raw WebSearch payload, which is
+    itself JSON — so the buffer held a search result's opening brace long
+    before the answer's, and the extractor (which scans for the outermost
+    object) parsed a page of search hits instead of the research. Every hunt
+    reported "the researcher's response could not be read" while the agent was
+    in fact answering perfectly.
+
+    The fix is the ``type == "message"`` filter in ``agent_research``. This
+    pins the parse side of it: even if tool noise ever reaches the buffer
+    again, a leading foreign JSON blob must not be mistaken for the answer.
+    """
+
+    def test_a_leading_search_payload_does_not_shadow_the_answer(self) -> None:
+        tool_noise = json.dumps(
+            {"results": [{"title": "Pune Web Design", "url": "https://example.com"}]}
+        )
+        answer = _response([{"domain": "realfind.com", "company": "Real Find"}])
+        # The failure mode: outermost-brace scanning across the concatenation.
+        result = parse_research_response(tool_noise + "\n" + answer, max_results=5)
+        assert [c.domain for c in result.companies] == ["realfind.com"]
+
+
 class TestThePrompt:
     def test_it_carries_the_run_specifics(self) -> None:
         prompt = build_research_prompt(
