@@ -945,6 +945,15 @@ class TestGrowthRouteRbac:
             # ``sent`` is gate-owned.
             ("GET", "/growth/linkedin/queue"): "growth.read",
             ("POST", "/growth/linkedin/{draft_id}/mark-sent"): "growth.manage",
+            # The ICP surface (feat/growth-discovery). Describing who you want
+            # is authoring work, so it sits at the same MEMBER tier as writing
+            # a draft — an ICP cannot send anything, and the discovery run it
+            # schedules files prospects at ``status="new"`` with no draft.
+            ("GET", "/growth/icps"): "growth.read",
+            ("GET", "/growth/icps/{icp_id}"): "growth.read",
+            ("POST", "/growth/icps"): "growth.write",
+            ("PATCH", "/growth/icps/{icp_id}"): "growth.write",
+            ("DELETE", "/growth/icps/{icp_id}"): "growth.write",
         }
 
         seen: dict[tuple[str, str], str] = {}

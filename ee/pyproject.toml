@@ -859,6 +859,12 @@ name = "Growth — Beanie writes only from service.py"
 # integration/growth-v1 — G-6's ``WhatsAppSendLog`` was folded into G-5's
 # ``MessageLog`` (one send record, not two), so only ``models.message_log``
 # stays on the forbidden list.
+# feat/growth-discovery — the ``Icp`` doc joins the forbidden list and
+# ``growth.discovery`` joins the source list. The discovery run reaches ICPs
+# and prospects ONLY through the service's system-identity seams, exactly as
+# ``followups`` does: it is the second cron on this queue, and a module that
+# files rows on a schedule is precisely where a direct doc write would be
+# least visible.
 type = "forbidden"
 allow_indirect_imports = "true"
 # feat/growth-mcp — the agent surface joins the boundary:
@@ -884,6 +890,7 @@ forbidden_modules = [
     "pocketpaw_ee.cloud.models.prospect",
     "pocketpaw_ee.cloud.models.draft",
     "pocketpaw_ee.cloud.models.message_log",
+    "pocketpaw_ee.cloud.models.icp",
 ]
 
 [[tool.importlinter.contracts]]

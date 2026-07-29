@@ -57,6 +57,13 @@
 # G-4 per-route RBAC guards their branch predated — ``growth.read`` on the
 # queue, ``growth.manage`` on mark-sent (it is an OUTBOUND verb, same tier as
 # propose).
+# Updated 2026-07-29 (feat/growth-discovery): the ICP surface — POST/GET
+# /icps, GET/PATCH/DELETE /icps/{id}. Reads at ``growth.read``, mutations at
+# ``growth.write``: an ICP is a description of who you want, which is authoring
+# work, not the outbound verb. Turning a cadence on is an ordinary PATCH for
+# the same reason — the BOUNDS (per run, and per workspace per month) are what
+# make a standing schedule safe, not a second approval on the switch. Every one
+# of these has an entry in the guard-coverage test in test_gate.py.
 
 from __future__ import annotations
 
@@ -71,6 +78,7 @@ from pocketpaw_ee.cloud.growth import service as growth_service
 from pocketpaw_ee.cloud.growth.domain import (
     DraftChannel,
     DraftStatus,
+    IcpStatus,
     ProspectSort,
     ProspectSource,
     ProspectStatus,
@@ -80,8 +88,10 @@ from pocketpaw_ee.cloud.growth.dto import (
     BulkIngestRequest,
     BulkIngestResponse,
     CreateDraftRequest,
+    CreateIcpRequest,
     CreateProspectRequest,
     DraftResponse,
+    IcpResponse,
     LinkedInQueueItemResponse,
     ProposeBatchRequest,
     ProposeBatchResponse,
@@ -91,6 +101,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     ProspectResponse,
     TransitionDraftRequest,
     UpdateDraftRequest,
+    UpdateIcpRequest,
     UpdateProspectRequest,
 )
 from pocketpaw_ee.cloud.license import require_license
@@ -217,6 +228,87 @@ async def update_prospect(
     ctx: RequestContext = Depends(request_context),
 ) -> ProspectResponse:
     return await growth_service.update(ctx, prospect_id, body)
+
+
+# ---------------------------------------------------------------------------
+# ICPs (feat/growth-discovery)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/icps",
+    response_model=IcpResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def create_icp(
+    body: CreateIcpRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> IcpResponse:
+    """Define who this workspace wants. ``cadence`` defaults to ``off`` — the
+    ICP exists and can be previewed, but nothing runs on a schedule until
+    someone switches it on."""
+    return await growth_service.create_icp(ctx, body)
+
+
+@router.get(
+    "/icps",
+    response_model=list[IcpResponse],
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def list_icps(
+    project_id: str | None = Query(default=None, max_length=64),
+    status: IcpStatus | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    ctx: RequestContext = Depends(request_context),
+) -> list[IcpResponse]:
+    """The workspace's ICPs, newest first. A bare list, not the prospect
+    list's page envelope — a workspace holds a handful of hand-written
+    profiles, not thousands of rows."""
+    return await growth_service.list_icps(ctx, project_id=project_id, status=status, limit=limit)
+
+
+@router.get(
+    "/icps/{icp_id}",
+    response_model=IcpResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def get_icp(
+    icp_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> IcpResponse:
+    return await growth_service.get_icp(ctx, icp_id)
+
+
+@router.patch(
+    "/icps/{icp_id}",
+    response_model=IcpResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def update_icp(
+    icp_id: str,
+    body: UpdateIcpRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> IcpResponse:
+    """Edit an ICP. Changing ``criteria`` does not re-run anything — the next
+    tick (or a preview) picks the new text up, so tuning stays free."""
+    return await growth_service.update_icp(ctx, icp_id, body)
+
+
+@router.delete(
+    "/icps/{icp_id}",
+    status_code=204,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def delete_icp(
+    icp_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> Response:
+    """Delete an ICP. Prospects it discovered keep their ``icp_id`` and source
+    URLs — provenance records what happened, and deleting the profile does not
+    un-find the companies. To stop the cron without losing the definition,
+    PATCH ``status`` to ``paused`` instead."""
+    await growth_service.delete_icp(ctx, icp_id)
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------

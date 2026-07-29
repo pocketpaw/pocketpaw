@@ -86,6 +86,15 @@
 # ``count_whatsapp_attempts_since`` own the WhatsApp compliance record and its
 # rate-cap window, and ``record_whatsapp_inbound_reply`` applies the opt-in +
 # status flips an inbound reply implies.
+# Updated 2026-07-29 (feat/growth-discovery): the ICP store — ``create_icp`` /
+# ``get_icp`` / ``list_icps`` / ``update_icp`` / ``delete_icp``, the same
+# workspace-scoped shape as the prospect CRUD (identical 404s for malformed,
+# missing and cross-tenant ids). No uniqueness constraint: two ICPs may share a
+# name, told apart by ``project_id``. Delete leaves discovered prospects'
+# ``icp_id`` intact — see ``delete_icp`` on why provenance is not a foreign key.
+# Also ``upsert_by_domain`` learned the two provenance fields, both SET-ONLY
+# like ``project_id``: an enrichment call carrying neither must not erase the
+# record of where a discovered row came from.
 # Updated 2026-07-27 (integration/growth-v1): G-5's ``MessageLog`` and G-6's
 # ``WhatsAppSendLog`` were the same record under two names (parallel branches,
 # neither could see the other). Unified onto ``MessageLog``: the WhatsApp
@@ -121,6 +130,7 @@ from pocketpaw_ee.cloud.growth.domain import (
     PROVIDER_REACHED_OUTCOMES,
     TIER_SORT_ORDER,
     Draft,
+    Icp,
     MessageLog,
     Prospect,
 )
@@ -129,8 +139,10 @@ from pocketpaw_ee.cloud.growth.dto import (
     BulkIngestResponse,
     BulkRowError,
     CreateDraftRequest,
+    CreateIcpRequest,
     CreateProspectRequest,
     DraftResponse,
+    IcpResponse,
     LinkedInQueueItemResponse,
     ProposeBatchError,
     ProposeBatchRequest,
@@ -141,9 +153,11 @@ from pocketpaw_ee.cloud.growth.dto import (
     ProspectResponse,
     TransitionDraftRequest,
     UpdateDraftRequest,
+    UpdateIcpRequest,
     UpdateProspectRequest,
 )
 from pocketpaw_ee.cloud.models.draft import Draft as _DraftDoc
+from pocketpaw_ee.cloud.models.icp import Icp as _IcpDoc
 from pocketpaw_ee.cloud.models.message_log import MessageLog as _MessageLogDoc
 from pocketpaw_ee.cloud.models.prospect import Prospect as _ProspectDoc
 
@@ -813,6 +827,160 @@ async def bulk_ingest(ctx: RequestContext, body: BulkIngestRequest) -> BulkInges
         len(errors),
     )
     return BulkIngestResponse(created=created, updated=updated, errors=errors)
+
+
+# ---------------------------------------------------------------------------
+# ICPs (feat/growth-discovery)
+# ---------------------------------------------------------------------------
+
+
+def _icp_to_domain(doc: _IcpDoc) -> Icp:
+    return Icp(
+        id=str(doc.id),
+        workspace_id=doc.workspace,
+        name=doc.name,
+        criteria=doc.criteria,
+        project_id=doc.project_id,
+        geography=doc.geography,
+        exclusions=doc.exclusions,
+        cadence=doc.cadence,
+        max_per_run=doc.max_per_run,
+        status=doc.status,
+        last_run_at=doc.last_run_at,
+        created_at=getattr(doc, "createdAt", None),
+        updated_at=getattr(doc, "updatedAt", None),
+    )
+
+
+def _icp_to_response(icp: Icp) -> IcpResponse:
+    return IcpResponse(
+        id=icp.id,
+        workspace_id=icp.workspace_id,
+        name=icp.name,
+        criteria=icp.criteria,
+        project_id=icp.project_id,
+        geography=icp.geography,
+        exclusions=icp.exclusions,
+        cadence=icp.cadence,
+        max_per_run=icp.max_per_run,
+        status=icp.status,
+        last_run_at=iso_utc(icp.last_run_at),
+        created_at=iso_utc(icp.created_at),
+        updated_at=iso_utc(icp.updated_at),
+    )
+
+
+async def _fetch_icp_in_workspace(workspace_id: str, icp_id: str) -> _IcpDoc:
+    """Fetch an ICP scoped to the caller's workspace — identical 404s for a
+    malformed id, a missing row, or another tenant's row, so existence never
+    leaks (same shape as ``_fetch_in_workspace``)."""
+    try:
+        oid = PydanticObjectId(icp_id)
+    except Exception as exc:  # noqa: BLE001 — malformed id == not found
+        raise NotFound("icp", icp_id) from exc
+    doc = await _IcpDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        raise NotFound("icp", icp_id)
+    return doc
+
+
+async def create_icp(ctx: RequestContext, body: CreateIcpRequest) -> IcpResponse:
+    """Create an ICP. No uniqueness constraint: two ICPs may share a name (an
+    agency running "dental clinics" for two clients holds two of them, told
+    apart by ``project_id``), so there is no 409 here."""
+    body = CreateIcpRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    if body.project_id:
+        await _ensure_project_in_workspace(workspace_id, body.project_id)
+
+    doc = _IcpDoc(workspace=workspace_id, **body.model_dump())
+    await doc.insert()
+    # no-event: growth has no realtime subscriber in v1; the ICP view polls.
+    return _icp_to_response(_icp_to_domain(doc))
+
+
+async def get_icp(ctx: RequestContext, icp_id: str) -> IcpResponse:
+    workspace_id = _require_workspace(ctx)
+    doc = await _fetch_icp_in_workspace(workspace_id, icp_id)
+    return _icp_to_response(_icp_to_domain(doc))
+
+
+async def list_icps(
+    ctx: RequestContext,
+    *,
+    project_id: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[IcpResponse]:
+    """The workspace's ICPs, newest first.
+
+    A bare list rather than the prospect list's page envelope: an ICP is a
+    hand-written artifact and a workspace holds a handful, not thousands. If
+    that ever stops being true the answer is the same cursor machinery the
+    prospect list already carries, not a bigger limit.
+
+    ``project_id`` is three-valued like the prospect list — omitted means every
+    project, an id scopes to that client, ``""`` selects the unassigned ones.
+    """
+    workspace_id = _require_workspace(ctx)
+    filters: dict[str, Any] = {"workspace": workspace_id}
+    if project_id is not None:
+        filters["project_id"] = project_id or None
+    if status is not None:
+        filters["status"] = status
+    docs = await _IcpDoc.find(filters).sort([("createdAt", -1), ("_id", -1)]).limit(limit).to_list()
+    return [_icp_to_response(_icp_to_domain(doc)) for doc in docs]
+
+
+async def update_icp(ctx: RequestContext, icp_id: str, body: UpdateIcpRequest) -> IcpResponse:
+    """Partial update. Switching ``cadence`` on is how discovery starts running
+    on a schedule — the field is an ordinary edit here because the BOUNDS (per
+    run and per workspace per month) are what make an always-on cadence safe,
+    not a second approval on the switch."""
+    body = UpdateIcpRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    doc = await _fetch_icp_in_workspace(workspace_id, icp_id)
+
+    if body.project_id is not None:
+        if body.project_id:
+            await _ensure_project_in_workspace(workspace_id, body.project_id)
+            doc.project_id = body.project_id
+        else:
+            doc.project_id = None
+    for field in (
+        "name",
+        "criteria",
+        "geography",
+        "exclusions",
+        "cadence",
+        "max_per_run",
+        "status",
+    ):
+        value = getattr(body, field)
+        if value is not None:
+            setattr(doc, field, value)
+    await doc.save()  # bumps updatedAt
+    # no-event: growth has no realtime subscriber in v1; the ICP view polls.
+    return _icp_to_response(_icp_to_domain(doc))
+
+
+async def delete_icp(ctx: RequestContext, icp_id: str) -> None:
+    """Delete an ICP.
+
+    Prospects it discovered are LEFT ALONE, ``icp_id`` and all. Provenance is a
+    record of what happened, not a foreign key: those rows really were found by
+    a profile that really existed, and deleting the definition does not un-find
+    them. The alternative — nulling the pointer across every discovered row —
+    is a mass write that erases the only answer to "where did this company come
+    from" for rows a human is about to review.
+
+    An operator who wants the ICP to stop running without losing the definition
+    pauses it instead (``status="paused"``).
+    """
+    workspace_id = _require_workspace(ctx)
+    doc = await _fetch_icp_in_workspace(workspace_id, icp_id)
+    await doc.delete()
+    # no-event: growth has no realtime subscriber in v1; the ICP view polls.
 
 
 # ---------------------------------------------------------------------------
