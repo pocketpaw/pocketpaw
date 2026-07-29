@@ -13,6 +13,10 @@ the attempts the opt-in guard REFUSED) to the imports and
 into ``init_beanie``. Kept out of ``__all__`` like ``Prospect`` / ``Draft`` —
 only ``ee.cloud.growth.service`` imports the doc class directly (import-linter
 "Growth" contract).
+Updated: 2026-07-29 (feat/growth-discovery) — added ``Icp`` (the standing
+description of who a workspace wants, plus the discovery cadence) to the
+imports and ``get_all_documents()`` so the ``growth_icps`` collection is wired
+into ``init_beanie``. Kept out of ``__all__`` like the other growth docs.
 Updated: 2026-07-27 (feat/growth-g4 merge) — merged integration/ship-v1 into the
 growth stack so the ``_growth_send`` gate slice can wire the sixth gated kind on
 top of ship's instinct-router changes; both changelog blocks below retained.
@@ -198,6 +202,7 @@ from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
     ForesightWorkspaceScenario,
 )
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
+from pocketpaw_ee.cloud.models.icp import Icp
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
 from pocketpaw_ee.cloud.models.instinct_workspace_config import InstinctWorkspaceConfig
@@ -533,6 +538,10 @@ def get_all_documents():
         # ATTEMPT (sent | failed) written by the dispatch worker through
         # ``growth.service.record_message_log``. Same import boundary.
         MessageLog,
+        # Growth ICP (feat/growth-discovery) — the standing description of who
+        # a workspace wants, and the cadence the discovery cron runs it on.
+        # Same import boundary as Prospect / Draft / MessageLog.
+        Icp,
         PushSubscription,
         VapidKeypair,
         WorkspaceSensePreference,

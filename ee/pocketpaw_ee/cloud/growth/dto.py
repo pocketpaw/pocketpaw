@@ -113,6 +113,12 @@ class CreateProspectRequest(BaseModel):
     whatsapp_number: str | None = None
     opted_in: bool = False
     status: ProspectStatus = "new"
+    # Discovery provenance. Both are written by the discovery run and left at
+    # their defaults by every other caller. ``emails`` reaching this model has
+    # ALREADY passed the observed-only filter (``domain.recordable_emails``) —
+    # the DTO cannot re-check it, because by here an address is just a string.
+    icp_id: str | None = None
+    source_urls: list[str] = Field(default_factory=list, max_length=20)
 
     @field_validator("domain")
     @classmethod
@@ -188,6 +194,8 @@ class ProspectResponse(BaseModel):
     whatsapp_number: str | None
     opted_in: bool
     status: str
+    icp_id: str | None = None
+    source_urls: list[str] = Field(default_factory=list)
     created_at: str | None
     updated_at: str | None
 

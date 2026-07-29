@@ -8,6 +8,10 @@
 # Created 2026-07-28 (feat/growth-api-scale): G-10a — the list endpoint could
 # not reach row 3,000, find a company by name, or say "n of m". Split into its
 # own file rather than growing test_router.py past readability.
+# Updated 2026-07-29 (feat/growth-discovery): the source facet now asserts a
+# ``discovery: 0`` bucket. That is the derived ``PROSPECT_SOURCE_ORDER`` doing
+# its job — a new source can never go missing from the chip row — so adding a
+# source is SUPPOSED to land here rather than pass silently.
 
 from __future__ import annotations
 
@@ -375,7 +379,7 @@ async def test_facets_count_every_tier_status_and_source(w1_client):
         "replied": 2,
         "dead": 0,
     }
-    assert body["source"] == {"clay": 2, "directory": 1, "manual": 2}
+    assert body["source"] == {"clay": 2, "directory": 1, "discovery": 0, "manual": 2}
 
 
 @pytest.mark.asyncio
@@ -384,7 +388,7 @@ async def test_facets_include_zero_counts_for_a_stable_chip_row(w1_client):
     doesn't reshuffle as rows arrive."""
     body = (await w1_client.get(FACETS_URL)).json()
     assert set(body["tier"]) == {"a", "b", "c", "unqualified"}
-    assert set(body["source"]) == {"clay", "directory", "manual"}
+    assert set(body["source"]) == {"clay", "directory", "discovery", "manual"}
     assert sum(body["status"].values()) == 0
 
 
@@ -395,7 +399,7 @@ async def test_tier_counts_respect_an_active_status_filter(w1_client):
     await _seed(w1_client, FACET_ROWS)
     body = (await w1_client.get(FACETS_URL, params={"status": "new"})).json()
     assert body["tier"] == {"a": 1, "b": 1, "c": 1, "unqualified": 0}
-    assert body["source"] == {"clay": 1, "directory": 1, "manual": 1}
+    assert body["source"] == {"clay": 1, "directory": 1, "discovery": 0, "manual": 1}
 
 
 @pytest.mark.asyncio
