@@ -59,7 +59,12 @@ from arq.worker import func
 
 from pocketpaw_ee.cloud import init_realtime
 from pocketpaw_ee.cloud._core.realtime import xproc
-from pocketpaw_ee.cloud.growth.domain import GROWTH_DISPATCH_JOB_NAME, GROWTH_QUEUE_NAME
+from pocketpaw_ee.cloud.growth.discovery import discovery_sweep
+from pocketpaw_ee.cloud.growth.domain import (
+    GROWTH_DISCOVERY_SWEEP_JOB_NAME,
+    GROWTH_DISPATCH_JOB_NAME,
+    GROWTH_QUEUE_NAME,
+)
 from pocketpaw_ee.cloud.growth.followups import (
     GROWTH_FOLLOWUP_SWEEP_JOB_NAME,
     followup_sweep,
@@ -168,7 +173,27 @@ class WorkerSettings:
             minute=0,
             unique=True,
             run_at_startup=False,
-        )
+        ),
+        # G-13 — discovery runs at 06:00 UTC, seven hours AHEAD of the
+        # follow-up sweep rather than near it. Two reasons, in order of
+        # importance. First, they must not contend: discovery is the expensive
+        # tick (an agent research run per due ICP) and the follow-up sweep is
+        # the time-sensitive one, so stacking them would let a slow hunt delay
+        # outreach that is already overdue. Second, discovery FEEDS the list a
+        # human then triages — landing it at the start of the working day in
+        # Europe and India means the morning's finds are waiting when someone
+        # sits down, instead of arriving mid-afternoon behind the day's other
+        # work. ``unique=True`` for the same reason as above: a scaled worker
+        # fleet must run one sweep per tick, and discovery WRITES prospects, so
+        # a duplicate tick would double-file rather than no-op.
+        cron(
+            discovery_sweep,
+            name=GROWTH_DISCOVERY_SWEEP_JOB_NAME,
+            hour=6,
+            minute=0,
+            unique=True,
+            run_at_startup=False,
+        ),
     ]
     on_startup = _startup
     on_shutdown = _shutdown

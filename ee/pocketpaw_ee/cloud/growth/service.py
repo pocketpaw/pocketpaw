@@ -1762,6 +1762,60 @@ async def prospect_exists_by_domain(workspace_id: str, domain: str) -> bool:
     return doc is not None
 
 
+async def count_discovered_since(workspace_id: str, since: datetime) -> int:
+    """How many prospects DISCOVERY has filed for this workspace since ``since``.
+
+    The monthly ceiling reads this before every run. It counts by ``source``
+    rather than by ``icp_id`` on purpose: the bound is on how much automated
+    volume one workspace generates in a period, and splitting the work across
+    five ICPs must not multiply the allowance by five. Manually created and
+    imported rows are not counted — a human typing a domain is not the thing
+    the ceiling is protecting anyone from.
+    """
+    return await _ProspectDoc.find(
+        {"workspace": workspace_id, "source": "discovery", "createdAt": {"$gte": since}}
+    ).count()
+
+
+async def list_due_icps(cadences: list[str], *, limit: int = 500) -> list[IcpResponse]:
+    """Every ACTIVE ICP whose cadence is in ``cadences``, across all tenants.
+
+    # global-read: the discovery cron runs under the worker's system identity
+    # with no workspace context — it exists precisely to serve every tenant on
+    # one tick. Identical to ``list_sent_drafts_for_followup``: the read is
+    # global, and every row it returns carries its own ``workspace_id``, which
+    # the sweep threads back into the tenant-scoped run.
+
+    Oldest-first so a workspace that has been waiting longest is served first
+    if the batch is capped. Paused ICPs and ``cadence="off"`` never appear —
+    the cron cannot run something a human switched off.
+    """
+    docs = (
+        await _IcpDoc.find({"status": "active", "cadence": {"$in": cadences}})
+        .sort([("createdAt", 1), ("_id", 1)])
+        .limit(limit)
+        .to_list()
+    )
+    return [_icp_to_response(_icp_to_domain(doc)) for doc in docs]
+
+
+async def mark_icp_run(workspace_id: str, icp_id: str, when: datetime) -> None:
+    """Stamp ``last_run_at`` after a run. Best-effort and idempotent.
+
+    Deliberately NOT the due-check's input: the sweep decides what is due from
+    the cadence and the tick, so a worker that was down for three days resumes
+    with one normal run rather than a backlog that fires all at once. This
+    field answers an operator's "has this thing actually been running?", which
+    is a different question from "should it run now".
+    """
+    doc = await _IcpDoc.find_one({"_id": PydanticObjectId(icp_id), "workspace": workspace_id})
+    if doc is None:
+        return
+    doc.last_run_at = when
+    await doc.save()  # bumps updatedAt
+    # no-event: growth has no realtime subscriber in v1; the ICP view polls.
+
+
 async def mark_prospect_dead(workspace_id: str, prospect_id: str) -> ProspectResponse:
     """Retire a prospect the sequence is done with (G-7 cap reached).
 
