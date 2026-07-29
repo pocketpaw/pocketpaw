@@ -1,6 +1,26 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-07-30 (feat/paw-bar-autoembed): a published site now GROWS its own
+# concierge. Until this, a site we generated with a concierge we auto-provisioned
+# went live with nothing on the page: the bar was embedded only by a snippet the
+# dashboard printed for a human to paste. ``_deploy_site_doc`` gains two steps,
+# both on the LIVE path only (a preview publish returns from ``publish`` before it
+# reaches either):
+#   * ``_embed_concierge_bar`` — between the build and the deploy, write the embed
+#     snippet into every built page (engine-aware root via ``static_output_rel``),
+#     but only for a site that has earned one: concierge on, an embed key, a
+#     paw-bar widget for the pocket, an agent bound to it. Idempotent (guarded on
+#     the snippet's marker attribute) and failure-soft — an injection problem logs
+#     and the site still deploys, because a site going live matters more than its
+#     bar. The snippet, the marker and the gates live in ``paw_bar/embed.py``.
+#   * ``_with_deployed_host`` — stamp the site's OWN deployed host onto
+#     ``allowed_origins`` (both the insert and the update branch).
+#     ``_default_allowed_origins`` seeds localhost only, so before this a visitor on
+#     the real deployed host was refused by the very origin gate the bar and the
+#     capture endpoint share. Additive, deduped, and never a wildcard or a
+#     user-supplied host — only the URL we just deployed to.
+#
 # Updated 2026-07-23 (feat/site-dedicated-agent): added the public
 # ``canonical_site_for_pocket(workspace_id, pocket_id)`` — a thin, tenant-scoped
 # wrapper over the private ``_canonical_site_doc`` so the paw-bar concierge
@@ -1990,6 +2010,19 @@ async def _deploy_site_doc(
         smoke=True,
     )
 
+    # Grow the concierge onto the built pages BEFORE they deploy, so the artifact
+    # that goes live already carries the bar. This is a LIVE-publish-only step: a
+    # preview returns from ``publish`` long before it reaches here, so a draft never
+    # gets an embedded bar pointed at the live key. Failure-soft inside.
+    await _embed_concierge_bar(
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        site_id=site_id,
+        signed_key=signed_key,
+        project_dir=build.project_dir,
+        engine=engine,
+    )
+
     # DS-2: a DYNAMIC site (pattern == "dynamic", or a spec carrying live
     # bindings) is backed by a per-tenant Cloudflare D1, so its deployed Worker
     # needs a D1 binding to reach that DB. Resolve the site's D1 id BEFORE deploy:
@@ -2113,8 +2146,10 @@ async def _deploy_site_doc(
             # Seed capture config so a lead lands with no manual Mongo edit: a default
             # mapping keyed on the form_type the generated endpoint sends, and the
             # local dev origins so the local smoke works. add_domain() appends the
-            # production hostname when a custom domain is connected.
-            allowed_origins=_default_allowed_origins(),
+            # production hostname when a custom domain is connected. The site's OWN
+            # deployed host goes on too — without it a visitor on the real page is
+            # refused by the origin gate the bar and the capture endpoint both run.
+            allowed_origins=_with_deployed_host(_default_allowed_origins(), url),
             event_mapping=_DEFAULT_EVENT_MAPPING,
         )
         await doc.insert()
@@ -2126,6 +2161,11 @@ async def _deploy_site_doc(
         doc.deployed = True
         doc.deployed_at = now
         doc.url = url
+        # The deploy may have moved (local → workers, or a new sites domain), so
+        # re-assert the site's own host on every publish. Idempotent and additive:
+        # a host already present is not duplicated, and a custom domain appended by
+        # ``add_domain`` is preserved (the list is only ever grown here).
+        doc.allowed_origins = _with_deployed_host(doc.allowed_origins, url)
         # charge-first: a live deploy clears any captured pending inputs — the site
         # is no longer pending payment, so the snapshot is no longer needed.
         doc.pending_deploy_inputs = {}
@@ -2145,6 +2185,101 @@ async def _deploy_site_doc(
     # (it returns earlier), so a draft never rewrites the live KB.
     _schedule_site_knowledge_sync(doc)
     return doc
+
+
+async def _embed_concierge_bar(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    site_id: str,
+    signed_key: str,
+    project_dir: str,
+    engine: str,
+) -> None:
+    """Write the concierge embed snippet into the built pages, before they deploy.
+
+    A site we generated, with a concierge we auto-provisioned, used to ship with no
+    concierge on it: the bar was embedded ONLY by a snippet the dashboard printed
+    for a human to copy-paste, and nothing here ever wrote it. This is that missing
+    step. It runs between the build and the deploy, so the artifact that goes live
+    already carries the bar — no second deploy, no post-publish patch.
+
+    ``concierge_enabled`` is read off the site's EXISTING doc, defaulting to True
+    when there is none: this is a first publish, and the doc about to be inserted
+    below carries the model's ``concierge_enabled=True`` default, so reading the
+    absent doc as "on" is what makes a brand-new site behave like the one it is
+    about to become rather than silently skipping its own first bar.
+
+    FAILURE-SOFT, and that is the whole point of the try/except: this sits in the
+    middle of a live publish. A site going live matters more than its bar, so an
+    unreadable build tree, a store that will not answer, or anything else escaping
+    here logs and lets the publish continue to deploy.
+    """
+    try:
+        from pocketpaw_ee.paw_bar import embed
+        from pocketpaw_ee.sites.engines import static_output_rel
+
+        doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+        concierge_enabled = True if doc is None else bool(doc.concierge_enabled)
+
+        snippet = await embed.concierge_snippet(
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            site_key=signed_key,
+            # The SAME base the generated capture endpoint posts leads to. Deriving
+            # the loader URL from it (instead of a CDN constant) is what makes a
+            # locally served site get a working localhost URL, and means there is
+            # only one env var to move when the deploy moves.
+            api_base=_capture_base(),
+            concierge_enabled=concierge_enabled,
+        )
+        if not snippet:
+            return
+
+        # HE-4: where the deployable pages live differs by engine — the SvelteKit
+        # adapter output for ripple/svelte, the project dir itself for html.
+        root = Path(project_dir, static_output_rel(engine))
+        changed = embed.inject_into_tree(root, snippet)
+        logger.info(
+            "sites: embedded the concierge bar into %d page(s) of site %s",
+            len(changed),
+            site_id,
+        )
+    except Exception:  # noqa: BLE001 — a site going live matters more than its bar
+        logger.warning(
+            "sites: could not embed the concierge bar for site %s — publishing without it",
+            site_id,
+            exc_info=True,
+        )
+
+
+def _with_deployed_host(allowed_origins: list[str], url: str) -> list[str]:
+    """Ensure a site's OWN deployed host is on its capture/concierge allowlist.
+
+    ``_default_allowed_origins`` seeds localhost only, so a site that deploys to a
+    real host had a bar its own visitors were refused by: ``resolve_site_key``'s
+    origin gate and the frame's ``frame-ancestors`` CSP both read this list, and
+    both fail closed. The host is derived from the URL WE just deployed to — never
+    from user input, never a wildcard — and appended only when missing, so a
+    re-publish does not grow the list and a connected custom domain (appended by
+    ``add_domain``) survives untouched.
+    """
+    host = _embed_deployed_host(url)
+    if not host:
+        return allowed_origins
+    hosts = _normalize_origin_hosts(allowed_origins)
+    if host not in hosts:
+        hosts.append(host)
+    return hosts
+
+
+def _embed_deployed_host(url: str) -> str:
+    """The bare host of a deployed URL. Thin indirection over ``embed.deployed_host``
+    so the host-shape rule lives with the rest of the embed logic and this module
+    keeps its lazy-import convention for reaching into paw_bar."""
+    from pocketpaw_ee.paw_bar.embed import deployed_host
+
+    return deployed_host(url)
 
 
 def _schedule_site_knowledge_sync(site: _SiteDoc) -> None:

@@ -1,6 +1,16 @@
 # ee/pocketpaw_ee/paw_bar/agent_provisioning.py — auto-provision a DEDICATED
 # concierge agent per Paw Site.
 #
+# Updated 2026-07-30 (feat/paw-bar-autoembed): extracted ``site_widget(pocket_id,
+# workspace_id)`` — the "which paw-bar widget belongs to this site's pocket"
+# lookup that ``provision_on_concierge_enable`` used to do inline. The publish
+# path now needs the SAME answer (to decide whether a site has earned an embedded
+# concierge bar and which widget id to put in the snippet), and two copies of a
+# tenancy-scoped lookup is exactly the kind of pair that drifts apart. Behaviour is
+# unchanged: the same workspace-scoped ``list_widgets(limit=1)``, the same
+# empty-pocket_id guard that keeps a blank pocket from widening the query onto a
+# sibling's widget.
+#
 # Created 2026-07-23 (feat/site-dedicated-agent): every site's concierge is
 # answered by an agent that exists FOR that site — never a shared/universal
 # agent. ``ensure_site_agent(site, widget)`` is idempotent: a widget already
@@ -301,6 +311,22 @@ async def provision_widget_on_create(widget: Any, workspace_id: str) -> Any:
         return widget
 
 
+async def site_widget(pocket_id: str, workspace_id: str) -> Any | None:
+    """The paw-bar widget for a site's pocket, or ``None``.
+
+    The single resolution both the provisioner and the publish-time bar embed use.
+    Workspace-scoped, and an EMPTY ``pocket_id`` returns ``None`` rather than
+    querying: an unfiltered ``list_widgets`` would widen to the workspace and hand
+    back a SIBLING site's widget (the same guard the router's
+    ``_resolve_site_and_widget`` carries). A site has at most one bar, so the limit
+    is 1.
+    """
+    if not pocket_id:
+        return None
+    widgets = await _store().list_widgets(pocket_id=pocket_id, workspace_id=workspace_id, limit=1)
+    return widgets[0] if widgets else None
+
+
 async def provision_on_concierge_enable(site: Any, workspace_id: str) -> None:
     """Concierge-enable trigger: provision the site's widget when it is unbound.
 
@@ -311,12 +337,7 @@ async def provision_on_concierge_enable(site: Any, workspace_id: str) -> None:
     an agent (manual or previously provisioned).
     """
     try:
-        if not site.pocket_id:
-            return
-        widgets = await _store().list_widgets(
-            pocket_id=site.pocket_id, workspace_id=workspace_id, limit=1
-        )
-        widget = widgets[0] if widgets else None
+        widget = await site_widget(site.pocket_id, workspace_id)
         if widget is None or getattr(widget, "agent_id", ""):
             return
         await ensure_site_agent(site, widget)
@@ -336,4 +357,5 @@ __all__ = [
     "ensure_site_agent",
     "provision_on_concierge_enable",
     "provision_widget_on_create",
+    "site_widget",
 ]
