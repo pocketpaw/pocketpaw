@@ -15,6 +15,12 @@
 # the client container (``cloud/projects``) a prospect belongs to — plus a
 # (workspace, project_id, createdAt) index, because an agency's default view is
 # one client's pipeline rather than the whole workspace's.
+# Updated 2026-07-29 (feat/growth-discovery): provenance for a row nobody typed
+# — ``icp_id`` (the standing profile that found it) and ``source_urls`` (the
+# pages the research actually read). Both empty on a manually created or
+# imported prospect. Plus a (workspace, source, createdAt) index: the monthly
+# discovery ceiling counts this workspace's discovered rows in the current
+# period, and that count runs on every discovery run.
 
 from __future__ import annotations
 
@@ -36,7 +42,8 @@ class Prospect(TimestampedDocument):
     company: str = ""
     # Company website domain, lowercased at the service boundary — the dedupe key.
     domain: str
-    source: str  # clay | directory | manual (validated at the DTO boundary)
+    # clay | directory | discovery | manual (validated at the DTO boundary)
+    source: str
     # The client this prospect belongs to (``cloud/projects``), or None on a
     # workspace that doesn't use projects. Validated against the workspace by
     # the service before it is written.
@@ -48,6 +55,12 @@ class Prospect(TimestampedDocument):
     whatsapp_number: str | None = None
     opted_in: bool = False
     status: str = "new"  # new | qualified | drafted | in_sequence | replied | dead
+    # The standing ICP that discovered this row, when discovery did. None on a
+    # typed or imported prospect.
+    icp_id: str | None = None
+    # The pages the research read to produce this row — the audit trail for a
+    # prospect nobody typed. Empty on a manually created one.
+    source_urls: list[str] = Field(default_factory=list)
 
     class Settings:
         name = "growth_prospects"
@@ -66,4 +79,8 @@ class Prospect(TimestampedDocument):
             # client's pipeline, so the project filter belongs in the index
             # rather than as a post-filter over the whole workspace.
             [("workspace", 1), ("project_id", 1), ("createdAt", -1)],
+            # The discovery monthly ceiling: count this workspace's rows with
+            # ``source="discovery"`` created since the period start. Runs on
+            # every discovery run, before anything is filed.
+            [("workspace", 1), ("source", 1), ("createdAt", -1)],
         ]

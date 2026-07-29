@@ -171,6 +171,8 @@ def _to_domain(doc: _ProspectDoc) -> Prospect:
         whatsapp_number=doc.whatsapp_number,
         opted_in=doc.opted_in,
         status=doc.status,
+        icp_id=getattr(doc, "icp_id", None),
+        source_urls=tuple(getattr(doc, "source_urls", None) or ()),
         created_at=getattr(doc, "createdAt", None),
         updated_at=getattr(doc, "updatedAt", None),
     )
@@ -224,6 +226,8 @@ def _to_response(p: Prospect) -> ProspectResponse:
         whatsapp_number=p.whatsapp_number,
         opted_in=p.opted_in,
         status=p.status,
+        icp_id=p.icp_id,
+        source_urls=list(p.source_urls),
         created_at=iso_utc(p.created_at),
         updated_at=iso_utc(p.updated_at),
     )
@@ -734,14 +738,22 @@ async def upsert_by_domain(
         "status",
     ):
         setattr(doc, field, getattr(body, field))
-    # ``project_id`` is the ONE field an upsert only ever SETS, never clears. A
-    # re-import that names a project reassigns the row; one that says nothing
-    # leaves the assignment alone. The alternative — treating the DTO's default
-    # ``None`` as "unassign" — would make every agent enrichment call
+    # ``project_id`` is one of the fields an upsert only ever SETS, never
+    # clears. A re-import that names a project reassigns the row; one that says
+    # nothing leaves the assignment alone. The alternative — treating the DTO's
+    # default ``None`` as "unassign" — would make every agent enrichment call
     # (``growth_upsert_prospect``, which carries no project) silently orphan a
     # client's prospect. Un-assigning is an explicit act: PATCH with ``""``.
     if body.project_id:
         doc.project_id = body.project_id
+    # Discovery provenance follows the same set-only rule, for the same reason
+    # doubled: an enrichment call that carries no ICP and no source URLs must
+    # not ERASE the record of where a discovered row came from. Provenance that
+    # a later write can silently delete is not provenance.
+    if body.icp_id:
+        doc.icp_id = body.icp_id
+    if body.source_urls:
+        doc.source_urls = list(body.source_urls)
     await doc.save()  # bumps updatedAt
     # no-event: growth has no realtime subscriber in v1.
     return _to_response(_to_domain(doc))
