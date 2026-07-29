@@ -12,12 +12,50 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 from pocketpaw_ee.cloud.growth.domain import (
     RECORDABLE_EMAIL_CONFIDENCE,
     EmailEvidence,
     recordable_emails,
 )
+
+from tests.cloud.growth.test_router import _build_app
+
+ICPS_URL = "/api/v1/growth/icps"
+
+
+@pytest_asyncio.fixture
+async def w1(mongo_db: Any) -> AsyncClient:
+    transport = ASGITransport(app=_build_app(workspace_id="w1"))
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        yield client
+
+
+@pytest_asyncio.fixture
+async def w2(mongo_db: Any) -> AsyncClient:
+    transport = ASGITransport(app=_build_app(workspace_id="w2"))
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        yield client
+
+
+def _icp_payload(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "name": "Small dental practices",
+        "criteria": "Dental practices with 2-6 chairs that still book by phone.",
+    }
+    base.update(overrides)
+    return base
+
+
+async def _create_icp(client: AsyncClient, **overrides: Any) -> dict[str, Any]:
+    resp = await client.post(ICPS_URL, json=_icp_payload(**overrides))
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
 
 # ---------------------------------------------------------------------------
 # The provenance rule at the domain level
@@ -95,3 +133,109 @@ class TestRecordableEmails:
             ]
         )
         assert found == ("hello@acme.com",)
+
+
+# ---------------------------------------------------------------------------
+# ICP CRUD
+# ---------------------------------------------------------------------------
+
+
+class TestIcpCrud:
+    """The ICP is a hand-written artifact: create it, read it, tune it, retire
+    it. The interesting assertions are the DEFAULTS (a new ICP does not run)
+    and the tenant boundary (identical 404s, never a cross-tenant read)."""
+
+    @pytest.mark.asyncio
+    async def test_a_new_icp_does_not_run(self, w1):
+        """The default that matters. Writing down who you want is free;
+        going looking for them on a schedule is a recurring spend, so the
+        cadence has to be switched on deliberately."""
+        icp = await _create_icp(w1)
+        assert icp["cadence"] == "off"
+        assert icp["status"] == "active"
+        assert icp["max_per_run"] == 10
+        assert icp["workspace_id"] == "w1"
+        assert icp["last_run_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_criteria_is_required_and_cannot_be_blank(self, w1):
+        assert (await w1.post(ICPS_URL, json={"name": "n"})).status_code == 422
+        assert (await w1.post(ICPS_URL, json={"name": "n", "criteria": "  "})).status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_max_per_run_is_capped_at_the_boundary(self, w1):
+        """A run is an LLM research pass, not a database scan — past the cap
+        the right tool is a second ICP with narrower criteria."""
+        resp = await w1.post(ICPS_URL, json=_icp_payload(max_per_run=500))
+        assert resp.status_code == 422
+        assert (await w1.post(ICPS_URL, json=_icp_payload(max_per_run=0))).status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_get_and_list_return_the_created_icp(self, w1):
+        icp = await _create_icp(w1)
+        assert (await w1.get(f"{ICPS_URL}/{icp['id']}")).json()["name"] == icp["name"]
+        listed = (await w1.get(ICPS_URL)).json()
+        assert [row["id"] for row in listed] == [icp["id"]]
+
+    @pytest.mark.asyncio
+    async def test_two_icps_may_share_a_name(self, w1):
+        """No uniqueness constraint: an agency runs "dental clinics" for two
+        clients and holds two profiles, told apart by their project."""
+        first = await _create_icp(w1)
+        second = await _create_icp(w1)
+        assert first["id"] != second["id"]
+        assert len((await w1.get(ICPS_URL)).json()) == 2
+
+    @pytest.mark.asyncio
+    async def test_patch_switches_the_cadence_on(self, w1):
+        icp = await _create_icp(w1)
+        resp = await w1.patch(f"{ICPS_URL}/{icp['id']}", json={"cadence": "weekly"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["cadence"] == "weekly"
+        # Untouched fields survive a partial update.
+        assert resp.json()["criteria"] == icp["criteria"]
+
+    @pytest.mark.asyncio
+    async def test_patch_rejects_an_unknown_cadence(self, w1):
+        icp = await _create_icp(w1)
+        resp = await w1.patch(f"{ICPS_URL}/{icp['id']}", json={"cadence": "hourly"})
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_delete_removes_it_from_the_list(self, w1):
+        icp = await _create_icp(w1)
+        assert (await w1.delete(f"{ICPS_URL}/{icp['id']}")).status_code == 204
+        assert (await w1.get(f"{ICPS_URL}/{icp['id']}")).status_code == 404
+        assert (await w1.get(ICPS_URL)).json() == []
+
+    @pytest.mark.asyncio
+    async def test_list_filters_by_status(self, w1):
+        active = await _create_icp(w1)
+        paused = await _create_icp(w1, status="paused")
+        ids = [r["id"] for r in (await w1.get(ICPS_URL, params={"status": "paused"})).json()]
+        assert ids == [paused["id"]]
+        ids = [r["id"] for r in (await w1.get(ICPS_URL, params={"status": "active"})).json()]
+        assert ids == [active["id"]]
+
+    @pytest.mark.parametrize("method", ["get", "patch", "delete"])
+    @pytest.mark.asyncio
+    async def test_another_tenants_icp_is_a_404(self, w1, w2, method: str):
+        """Identical 404s for a foreign row and a row that never existed —
+        existence must not leak across tenants."""
+        icp = await _create_icp(w1)
+        url = f"{ICPS_URL}/{icp['id']}"
+        resp = (
+            await w2.patch(url, json={"name": "stolen"})
+            if method == "patch"
+            else await getattr(w2, method)(url)
+        )
+        assert resp.status_code == 404, resp.text
+
+    @pytest.mark.asyncio
+    async def test_a_foreign_icp_never_appears_in_the_list(self, w1, w2):
+        await _create_icp(w1)
+        assert (await w2.get(ICPS_URL)).json() == []
+
+    @pytest.mark.asyncio
+    async def test_a_malformed_id_is_a_404_not_a_500(self, w1):
+        assert (await w1.get(f"{ICPS_URL}/not-an-object-id")).status_code == 404

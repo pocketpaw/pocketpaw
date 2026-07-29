@@ -42,6 +42,15 @@
 # dedupe identity, and a row without one is not a prospect. The LinkedIn queue
 # row gained ``prospect_domain`` so an export can still title a section for a
 # prospect whose name nobody has filled in yet.
+# Updated 2026-07-29 (feat/growth-discovery): the ICP shapes — CreateIcpRequest
+# (name + criteria required, everything else optional; ``cadence`` defaults to
+# ``off`` and ``max_per_run`` is capped at the boundary), UpdateIcpRequest
+# (partial, ``project_id`` three-valued like the prospect update), IcpResponse.
+# Plus ``icp_id`` / ``source_urls`` on the prospect create + response: the
+# provenance of a row nobody typed. The DTO cannot enforce the observed-email
+# rule — by the time an address reaches ``emails`` it is a plain string — so
+# that filter lives one layer up, in ``domain.recordable_emails``, which the
+# discovery run is the only caller of.
 # Updated 2026-07-28 (feat/growth-projects): ``project_id`` on the create,
 # update and response shapes — the client a prospect belongs to. On the UPDATE
 # it is three-valued the way ``tasks`` does it (None = leave alone, an id =
@@ -55,9 +64,13 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from pocketpaw_ee.cloud.growth.domain import (
+    DEFAULT_ICP_MAX_PER_RUN,
+    MAX_ICP_MAX_PER_RUN,
     DraftChannel,
     DraftStatus,
     DraftVariant,
+    IcpCadence,
+    IcpStatus,
     ProspectSource,
     ProspectStatus,
     ProspectTier,
@@ -230,6 +243,85 @@ class ProspectFacetsResponse(BaseModel):
     source: dict[str, int]
 
 
+# ---------------------------------------------------------------------------
+# ICPs (feat/growth-discovery)
+# ---------------------------------------------------------------------------
+
+
+class CreateIcpRequest(BaseModel):
+    """A standing description of who the workspace wants.
+
+    ``name`` and ``criteria`` are the only required fields — an ICP with no
+    criteria describes nobody, and the research would have nothing to read.
+    ``cadence`` defaults to ``off``: writing down who you want is free, going
+    looking for them on a schedule is a recurring spend, so the schedule is an
+    explicit act rather than the shape a new ICP arrives in.
+    """
+
+    name: str = Field(min_length=1, max_length=200)
+    criteria: str = Field(min_length=1, max_length=4000)
+    # The client this ICP prospects for. The SERVICE validates it against the
+    # caller's workspace (a project from another tenant is a 404) — the DTO has
+    # no tenancy context, exactly like ``CreateProspectRequest``.
+    project_id: str | None = None
+    geography: str = Field(default="", max_length=500)
+    exclusions: str = Field(default="", max_length=2000)
+    cadence: IcpCadence = "off"
+    max_per_run: int = Field(default=DEFAULT_ICP_MAX_PER_RUN, ge=1, le=MAX_ICP_MAX_PER_RUN)
+    status: IcpStatus = "active"
+
+    @field_validator("name", "criteria")
+    @classmethod
+    def _non_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("must not be blank")
+        return v
+
+
+class UpdateIcpRequest(BaseModel):
+    """Partial update — every field optional, ``None`` means "leave as-is".
+
+    Editing ``criteria`` deliberately does NOT re-run anything: the next
+    scheduled tick (or a preview) picks the new text up. An edit that
+    immediately spent an LLM budget would make tuning an ICP expensive, and
+    tuning is the main thing anyone does with one.
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    criteria: str | None = Field(default=None, min_length=1, max_length=4000)
+    # Three-valued like ``UpdateProspectRequest``: ``None`` leaves the
+    # assignment alone, an id reassigns, ``""`` clears it.
+    project_id: str | None = None
+    geography: str | None = Field(default=None, max_length=500)
+    exclusions: str | None = Field(default=None, max_length=2000)
+    cadence: IcpCadence | None = None
+    max_per_run: int | None = Field(default=None, ge=1, le=MAX_ICP_MAX_PER_RUN)
+    status: IcpStatus | None = None
+
+    @field_validator("name", "criteria")
+    @classmethod
+    def _non_blank(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError("must not be blank")
+        return v
+
+
+class IcpResponse(BaseModel):
+    id: str
+    workspace_id: str
+    name: str
+    criteria: str
+    project_id: str | None
+    geography: str
+    exclusions: str
+    cadence: str
+    max_per_run: int
+    status: str
+    last_run_at: str | None
+    created_at: str | None
+    updated_at: str | None
+
+
 class CreateDraftRequest(BaseModel):
     """One channel's outreach copy for a prospect.
 
@@ -377,8 +469,10 @@ __all__ = [
     "BulkIngestResponse",
     "BulkRowError",
     "CreateDraftRequest",
+    "CreateIcpRequest",
     "CreateProspectRequest",
     "DraftResponse",
+    "IcpResponse",
     "LinkedInQueueItemResponse",
     "ProposeBatchError",
     "ProposeBatchRequest",
@@ -389,5 +483,6 @@ __all__ = [
     "ProspectResponse",
     "TransitionDraftRequest",
     "UpdateDraftRequest",
+    "UpdateIcpRequest",
     "UpdateProspectRequest",
 ]
