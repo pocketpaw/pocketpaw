@@ -19,9 +19,20 @@
 #   nothing when the site's concierge_store_transcripts is off (while the AGENT
 #   still receives the full message either way), the stored copy is length-capped,
 #   and create_run actually lands the field on the run document.
+# Updated 2026-07-29 (concierge conversation memory): a fifth layer covers the
+#   rehydrated RunSpec.history — prior turns of the SAME visitor come back
+#   oldest-first in the {"role","content"} shape the agent consumes; a sibling
+#   visitor's, a sibling site's, and another tenant's turns never do (the isolation
+#   property, one test each); the replay is bounded by turns, by per-line
+#   characters, and by a total character budget that drops the oldest turns first;
+#   a retention-off site yields no memory at all; a read error answers without
+#   memory instead of 500-ing; and the visitor's current message reaches the agent
+#   exactly once.
 
 from __future__ import annotations
 
+import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -359,7 +370,7 @@ async def test_chat_happy_path_streams_and_dispatches_concierge_run(concierge_cl
     assert spec.workspace_id == "ws-1"
     assert spec.agent_id == "agent-xyz"
     assert spec.user_id == "cust-1"  # anonymous handle, never a principal
-    assert spec.history == []  # stateless MVP — no cross-visitor bleed
+    assert spec.history == []  # first turn — this visitor has nothing to replay
     assert spec.surface_meta.get("pocket_id") == "pocket-1"
 
 
@@ -500,8 +511,16 @@ async def test_chat_rate_limit_is_429(concierge_client):
 # --------------------------------------------------------------------------- #
 
 
-async def _dispatch(client, store, monkeypatch, *, site_kw=None, **payload_ov):
-    """Run one chat request through the endpoint and return the dispatched RunSpec."""
+async def _dispatch(
+    client, store, monkeypatch, *, site_kw=None, real_create_run=False, **payload_ov
+):
+    """Run one chat request through the endpoint and return the dispatched RunSpec.
+
+    ``create_run`` is stubbed by default (nothing needs the document). Pass
+    ``real_create_run=True`` to let the REAL one write this turn's run doc — that is
+    what makes the "current message isn't replayed into history" test meaningful,
+    since the doc it writes is exactly the row a mis-ordered read would pick up.
+    """
     from pocketpaw_ee.cloud.chat.runs.memory_stream import InMemoryStreamTransport
 
     await _site(**(site_kw or {}))
@@ -517,7 +536,8 @@ async def _dispatch(client, store, monkeypatch, *, site_kw=None, **payload_ov):
     async def _fake_create_run(spec):
         return SimpleNamespace(run_id=spec.run_id)
 
-    monkeypatch.setattr("pocketpaw_ee.cloud.chat.runs.service.create_run", _fake_create_run)
+    if not real_create_run:
+        monkeypatch.setattr("pocketpaw_ee.cloud.chat.runs.service.create_run", _fake_create_run)
 
     res = await client.post(
         "/paw-bar/chat", json=_payload(widget.id, **payload_ov), headers={"Origin": _ORIGIN}
@@ -619,3 +639,275 @@ async def test_create_run_defaults_visitor_text_to_empty(mongo_db):
     )
     doc = await create_run(spec)
     assert doc.user_text == ""
+
+
+# --------------------------------------------------------------------------- #
+# Layer 5 — conversation memory (rehydrated RunSpec.history)
+#
+# The concierge used to answer every turn cold: tell it your name, ask for it
+# back, and it had never heard of you. The stored run docs are now replayed into
+# the run. The property that must not be got wrong is WHOSE turns come back —
+# one visitor, on one site, in one tenant — so that has a test each.
+# --------------------------------------------------------------------------- #
+
+# A fixed clock so seeded turns have an unambiguous order (equal timestamps would
+# leave the newest-first sort at the mercy of insertion order).
+_MEMORY_CLOCK = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+
+
+async def _mk_run(*, minutes_ago: int = 0, **ov):
+    """Insert one stored concierge turn — the row conversation memory reads back.
+
+    Defaults describe cust-1's turn on pocket-1 in ws-1, which is exactly what
+    ``_dispatch``'s request resolves to; override a field to seed the turn of a
+    sibling visitor, a sibling site, or another tenant.
+    """
+    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+    d = dict(
+        run_id=uuid.uuid4().hex,
+        workspace="ws-1",
+        context_type="concierge",
+        scope_id="pocket-1",
+        session_key="cloud:concierge:pocket-1:cust-1:agent-xyz",
+        user_id="cust-1",
+        agent_id="agent-xyz",
+        client_message_id=uuid.uuid4().hex,
+        user_message_id="",
+        status="completed",
+        user_text="",
+        partial_text="",
+        createdAt=_MEMORY_CLOCK - timedelta(minutes=minutes_ago),
+    )
+    d.update(ov)
+    doc = ChatRunDoc(**d)
+    await doc.insert()
+    return doc
+
+
+@pytest.mark.asyncio
+async def test_chat_rehydrates_this_visitors_prior_turns(concierge_client, monkeypatch):
+    """The defect this closes: prior turns come back, oldest-first, in the
+    {"role","content"} shape ``load_history_for_scope`` returns for authed
+    surfaces — so the agent can answer "what is my name" from what it was told."""
+    client, store = concierge_client
+    await _mk_run(
+        minutes_ago=10,
+        user_text="My name is Priya.",
+        partial_text="Nice to meet you, Priya.",
+    )
+    await _mk_run(minutes_ago=5, user_text="I have 12 clients.", partial_text="Twelve, noted.")
+
+    spec = await _dispatch(client, store, monkeypatch, message="What is my name?")
+
+    assert spec.history == [
+        {"role": "user", "content": "My name is Priya."},
+        {"role": "assistant", "content": "Nice to meet you, Priya."},
+        {"role": "user", "content": "I have 12 clients."},
+        {"role": "assistant", "content": "Twelve, noted."},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chat_history_never_carries_a_sibling_visitors_turns(concierge_client, monkeypatch):
+    """ISOLATION: two anonymous visitors share the widget, the pocket, and the
+    agent — only the customer handle separates them. One visitor's words must
+    never be replayed into another's run."""
+    client, store = concierge_client
+    await _mk_run(minutes_ago=5, user_text="I am cust-1.", partial_text="Hello, cust-1.")
+    await _mk_run(
+        minutes_ago=4,
+        user_id="cust-2",
+        session_key="cloud:concierge:pocket-1:cust-2:agent-xyz",
+        user_text="My order number is 99887 and my name is Bob.",
+        partial_text="Thanks Bob, order 99887 ships Tuesday.",
+    )
+
+    spec = await _dispatch(client, store, monkeypatch, message="Where is my order?")
+
+    assert spec.history == [
+        {"role": "user", "content": "I am cust-1."},
+        {"role": "assistant", "content": "Hello, cust-1."},
+    ]
+    assert "Bob" not in str(spec.history)
+    assert "99887" not in str(spec.history)
+
+
+@pytest.mark.asyncio
+async def test_chat_history_never_carries_a_sibling_sites_turns(concierge_client, monkeypatch):
+    """ISOLATION: the same visitor handle on a SIBLING site's pocket is a separate
+    conversation — the run's scope is the key's own pocket."""
+    client, store = concierge_client
+    await _mk_run(
+        minutes_ago=5,
+        scope_id="pocket-2",
+        session_key="cloud:concierge:pocket-2:cust-1:agent-xyz",
+        user_text="I asked this on the other site.",
+        partial_text="Answered on the other site.",
+    )
+
+    spec = await _dispatch(client, store, monkeypatch, message="What did I ask?")
+
+    assert spec.history == []
+
+
+@pytest.mark.asyncio
+async def test_chat_history_never_carries_another_tenants_turns(concierge_client, monkeypatch):
+    """ISOLATION: tenant boundary. A row matching on every other predicate but
+    belonging to a different workspace must not be readable."""
+    client, store = concierge_client
+    await _mk_run(
+        minutes_ago=5,
+        workspace="ws-other",
+        user_text="Another tenant's visitor.",
+        partial_text="Another tenant's reply.",
+    )
+
+    spec = await _dispatch(client, store, monkeypatch, message="What did I ask?")
+
+    assert spec.history == []
+
+
+@pytest.mark.asyncio
+async def test_chat_history_is_empty_when_retention_is_off(concierge_client, monkeypatch):
+    """The owner's privacy choice governs memory too. With
+    concierge_store_transcripts off there is nothing being written down to
+    remember from, and replaying the agent's half alone would hand it a
+    conversation with the questions missing. No memory is the correct outcome,
+    and the concierge still answers."""
+    client, store = concierge_client
+    await _mk_run(
+        minutes_ago=5,
+        user_text="My name is Priya.",
+        partial_text="Nice to meet you, Priya.",
+    )
+
+    spec = await _dispatch(
+        client,
+        store,
+        monkeypatch,
+        site_kw={"concierge_store_transcripts": False},
+        message="What is my name?",
+    )
+
+    assert spec.history == []
+    assert spec.content == "What is my name?"
+
+
+@pytest.mark.asyncio
+async def test_chat_history_is_bounded_by_the_turn_cap(concierge_client, monkeypatch):
+    """A long conversation replays its most recent exchanges, not all of them —
+    the per-turn prompt cost stays flat instead of growing with the visitor."""
+    from pocketpaw_ee.paw_bar.router import _HISTORY_TURN_CAP
+
+    client, store = concierge_client
+    seeded = _HISTORY_TURN_CAP + 3
+    for i in range(seeded):
+        await _mk_run(minutes_ago=seeded - i, user_text=f"q{i}", partial_text=f"a{i}")
+
+    spec = await _dispatch(client, store, monkeypatch, message="and now?")
+
+    assert len(spec.history) == _HISTORY_TURN_CAP * 2
+    # The OLDEST three were dropped; the surviving stretch ends at the newest.
+    assert spec.history[0] == {"role": "user", "content": "q3"}
+    assert spec.history[-1] == {"role": "assistant", "content": f"a{seeded - 1}"}
+
+
+@pytest.mark.asyncio
+async def test_chat_history_is_bounded_by_the_character_budget(concierge_client, monkeypatch):
+    """A visitor pasting walls of text cannot grow the prompt without limit. The
+    budget drops whole exchanges from the OLDEST end, so what survives is the most
+    recent contiguous stretch — never half a turn, never a gappy conversation."""
+    from pocketpaw_ee.paw_bar.router import _HISTORY_TOTAL_CHARS, _HISTORY_TURN_CAP
+
+    client, store = concierge_client
+    line = 1500
+    per_turn = line * 2
+    fits = _HISTORY_TOTAL_CHARS // per_turn  # whole exchanges the budget holds
+    seeded = fits * 2
+    # The premises this test reasons from — the char budget must be the binding
+    # bound here, not the turn cap.
+    assert 0 < fits < seeded <= _HISTORY_TURN_CAP
+
+    for i in range(seeded):
+        await _mk_run(
+            minutes_ago=seeded - i,
+            user_text=f"{i}" + "x" * (line - 1),
+            partial_text=f"{i}" + "y" * (line - 1),
+        )
+
+    spec = await _dispatch(client, store, monkeypatch, message="and now?")
+
+    assert sum(len(m["content"]) for m in spec.history) <= _HISTORY_TOTAL_CHARS
+    assert len(spec.history) == fits * 2  # whole exchanges only
+    assert spec.history[0]["content"].startswith(str(seeded - fits))
+    assert spec.history[-1]["content"].startswith(str(seeded - 1))
+    assert [m["role"] for m in spec.history] == ["user", "assistant"] * fits
+
+
+@pytest.mark.asyncio
+async def test_chat_history_clips_one_long_line_instead_of_evicting_the_turn(
+    concierge_client, monkeypatch
+):
+    """A verbose agent reply is clipped rather than allowed to eat the whole
+    budget, which is what guarantees the newest exchange always fits."""
+    from pocketpaw_ee.paw_bar.router import _HISTORY_MESSAGE_CHARS
+
+    client, store = concierge_client
+    await _mk_run(
+        minutes_ago=5,
+        user_text="Tell me everything.",
+        partial_text="z" * (_HISTORY_MESSAGE_CHARS + 500),
+    )
+
+    spec = await _dispatch(client, store, monkeypatch, message="and now?")
+
+    assert [m["role"] for m in spec.history] == ["user", "assistant"]
+    assert len(spec.history[1]["content"]) == _HISTORY_MESSAGE_CHARS
+
+
+@pytest.mark.asyncio
+async def test_chat_answers_without_memory_when_the_history_read_fails(
+    concierge_client, monkeypatch
+):
+    """Failure-soft: memory is best-effort, the reply is not. A run-collection
+    hiccup degrades to a cold answer, it never 500s the visitor's chat."""
+    client, store = concierge_client
+    await _mk_run(minutes_ago=5, user_text="My name is Priya.", partial_text="Hello, Priya.")
+
+    async def _boom(*_a, **_kw):
+        raise RuntimeError("run collection unavailable")
+
+    monkeypatch.setattr("pocketpaw_ee.paw_bar.router._concierge_runs_for_visitor", _boom)
+
+    # ``_dispatch`` asserts 200 — the chat survived.
+    spec = await _dispatch(client, store, monkeypatch, message="What is my name?")
+
+    assert spec.history == []
+
+
+@pytest.mark.asyncio
+async def test_chat_does_not_replay_the_current_message_into_history(concierge_client, monkeypatch):
+    """The current turn rides in ``content`` and appears EXACTLY once. The real
+    ``create_run`` writes this turn's doc here, so a history read ordered after it
+    would pick the visitor's own message straight back up — this is the test that
+    pins the ordering."""
+    client, store = concierge_client
+    await _mk_run(minutes_ago=5, user_text="My name is Priya.", partial_text="Hello, Priya.")
+
+    message = "What is my name?"
+    spec = await _dispatch(client, store, monkeypatch, real_create_run=True, message=message)
+
+    occurrences = [spec.content, *(m["content"] for m in spec.history)].count(message)
+    assert occurrences == 1
+    assert spec.history == [
+        {"role": "user", "content": "My name is Priya."},
+        {"role": "assistant", "content": "Hello, Priya."},
+    ]
+
+    # And the doc create_run wrote IS visible to the next turn's read — the
+    # exclusion above is ordering, not a blind spot.
+    from pocketpaw_ee.paw_bar.router import _load_concierge_history
+
+    next_turn = await _load_concierge_history("pocket-1", "cust-1", "ws-1")
+    assert {"role": "user", "content": message} in next_turn
