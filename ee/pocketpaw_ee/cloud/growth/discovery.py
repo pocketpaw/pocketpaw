@@ -245,6 +245,66 @@ def _to_preview(company: DiscoveredCompany, *, already_known: bool) -> Previewed
 
 
 # ---------------------------------------------------------------------------
+# The preview — the same research, none of the writes
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DiscoveryPreview:
+    """What a run WOULD file, and why it might file less than it found."""
+
+    icp_id: str
+    workspace_id: str
+    items: tuple[PreviewedProspect, ...] = ()
+    notes: str = ""
+    error: str = ""
+
+
+async def preview_discovery(
+    workspace_id: str,
+    icp_id: str,
+    research_fn: ResearchFn,
+) -> DiscoveryPreview:
+    """Run the research once and report what WOULD be filed. Writes nothing.
+
+    This is how someone comes to trust an ICP before switching a cadence on.
+    Criteria are prose, and prose that reads precisely to its author routinely
+    describes the wrong companies — the only way to find that out is to look at
+    the rows it produces. Doing that by turning a cadence on and reading the
+    pipeline afterwards means cleaning up a list you did not want.
+
+    The projection is the SAME ``_to_preview`` the run uses, so the preview
+    cannot drift from what a run actually stores — including the email rule.
+    Showing raw evidence here would advertise addresses the engine refuses to
+    keep, which is exactly the confusion the rule exists to prevent.
+
+    A paused ICP still previews: checking whether a profile is worth resuming
+    is the reason to look at one.
+    """
+    from pocketpaw_ee.cloud.growth import service as growth_service
+
+    icp = await growth_service.get_icp_system(workspace_id, icp_id)
+    result, error = await _research(icp, research_fn, workspace_id=workspace_id)
+    if result is None:
+        return DiscoveryPreview(icp_id=icp_id, workspace_id=workspace_id, error=error)
+
+    items: list[PreviewedProspect] = []
+    for company in result.companies[: max(icp.max_per_run, 0)]:
+        preview = _to_preview(company, already_known=False)
+        if not preview.domain:
+            continue
+        known = await growth_service.prospect_exists_by_domain(workspace_id, preview.domain)
+        items.append(_to_preview(company, already_known=known))
+
+    return DiscoveryPreview(
+        icp_id=icp_id,
+        workspace_id=workspace_id,
+        items=tuple(items),
+        notes=result.notes,
+    )
+
+
+# ---------------------------------------------------------------------------
 # The run
 # ---------------------------------------------------------------------------
 
@@ -387,10 +447,12 @@ def resolve_research_fn() -> ResearchFn | None:
 __all__ = [
     "DiscoveredCompany",
     "DiscoveryOutcome",
+    "DiscoveryPreview",
     "PreviewedProspect",
     "ResearchFn",
     "ResearchRequest",
     "ResearchResult",
+    "preview_discovery",
     "resolve_research_fn",
     "run_discovery",
     "set_production_research_fn",

@@ -91,6 +91,7 @@ from pocketpaw_ee.cloud.growth.dto import (
     CreateIcpRequest,
     CreateProspectRequest,
     DraftResponse,
+    IcpPreviewResponse,
     IcpResponse,
     LinkedInQueueItemResponse,
     ProposeBatchRequest,
@@ -292,6 +293,31 @@ async def update_icp(
     """Edit an ICP. Changing ``criteria`` does not re-run anything — the next
     tick (or a preview) picks the new text up, so tuning stays free."""
     return await growth_service.update_icp(ctx, icp_id, body)
+
+
+@router.post(
+    "/icps/{icp_id}/preview",
+    response_model=IcpPreviewResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.write"))],
+)
+async def preview_icp(
+    icp_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> IcpPreviewResponse:
+    """Dry-run this ICP: research once, return what it WOULD file, write
+    nothing.
+
+    This is how someone comes to trust an ICP before switching its cadence on
+    — criteria are prose, and prose that reads precisely to its author
+    routinely describes the wrong companies. Rows already in the pipeline come
+    back flagged ``already_known`` rather than hidden, because a preview full
+    of them is the useful signal.
+
+    A POST despite writing nothing: it spends a real research pass, so it is
+    not safe to retry blindly and does not belong on a GET. It sits at
+    ``growth.write`` for the same reason — it is not the outbound verb (it
+    cannot reach a prospect), but it is not free either."""
+    return await growth_service.preview_icp(ctx, icp_id)
 
 
 @router.delete(

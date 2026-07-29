@@ -142,8 +142,10 @@ from pocketpaw_ee.cloud.growth.dto import (
     CreateIcpRequest,
     CreateProspectRequest,
     DraftResponse,
+    IcpPreviewResponse,
     IcpResponse,
     LinkedInQueueItemResponse,
+    PreviewedProspectResponse,
     ProposeBatchError,
     ProposeBatchRequest,
     ProposeBatchResponse,
@@ -963,6 +965,52 @@ async def update_icp(ctx: RequestContext, icp_id: str, body: UpdateIcpRequest) -
     await doc.save()  # bumps updatedAt
     # no-event: growth has no realtime subscriber in v1; the ICP view polls.
     return _icp_to_response(_icp_to_domain(doc))
+
+
+async def preview_icp(ctx: RequestContext, icp_id: str) -> IcpPreviewResponse:
+    """Dry-run an ICP: research once, report what WOULD be filed, write nothing.
+
+    Lives here rather than in the router because tenancy does — the router
+    stays a thin shell and every workspace check in this entity is in one file.
+    The actual work is ``discovery.preview_discovery``; the import is lazy
+    because discovery imports this module back (it may only reach docs through
+    these seams), and a lazy import is how the followups cron already resolves
+    the same loop.
+
+    A deployment with no research backend wired returns 503 rather than an
+    empty preview. "Found nobody" and "nothing went looking" are different
+    answers, and an operator tuning criteria against a silently-disabled engine
+    would rewrite them forever.
+    """
+    from pocketpaw_ee.cloud.growth import discovery as growth_discovery
+
+    workspace_id = _require_workspace(ctx)
+    research_fn = growth_discovery.resolve_research_fn()
+    if research_fn is None:
+        raise CloudError(
+            503,
+            "icp.research_unavailable",
+            "Discovery research is not configured on this deployment",
+        )
+
+    preview = await growth_discovery.preview_discovery(workspace_id, icp_id, research_fn)
+    return IcpPreviewResponse(
+        icp_id=preview.icp_id,
+        items=[
+            PreviewedProspectResponse(
+                domain=item.domain,
+                name=item.name,
+                company=item.company,
+                research_brief=item.research_brief,
+                source_urls=list(item.source_urls),
+                emails=list(item.emails),
+                already_known=item.already_known,
+            )
+            for item in preview.items
+        ],
+        notes=preview.notes,
+        error=preview.error,
+    )
 
 
 async def delete_icp(ctx: RequestContext, icp_id: str) -> None:
