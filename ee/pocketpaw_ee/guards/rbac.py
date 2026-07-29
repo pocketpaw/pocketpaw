@@ -12,6 +12,7 @@ from enum import StrEnum
 
 class WorkspaceRole(StrEnum):
     MEMBER = "member"
+    EDITOR = "editor"
     ADMIN = "admin"
     OWNER = "owner"
 
@@ -30,8 +31,9 @@ class WorkspaceRole(StrEnum):
 
 _ROLE_LEVELS: dict[WorkspaceRole, int] = {
     WorkspaceRole.MEMBER: 1,
-    WorkspaceRole.ADMIN: 2,
-    WorkspaceRole.OWNER: 3,
+    WorkspaceRole.EDITOR: 2,
+    WorkspaceRole.ADMIN: 3,
+    WorkspaceRole.OWNER: 4,
 }
 
 

@@ -66,7 +66,7 @@ class WorkspaceMember:
     email: str
     name: str
     avatar: str
-    role: str  # owner | admin | member | viewer
+    role: str  # owner | admin | editor | member
     joined_at: datetime
 
 

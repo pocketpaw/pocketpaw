@@ -154,10 +154,15 @@ ACTIONS: dict[str, ActionRule] = {
     "workspace.invite": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     "workspace.member.remove": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     "workspace.member.role_change": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Member-permission management (route + connector access). EDITOR is the
+    # minimum: editors can assign routes, connectors, and channel/group
+    # memberships to members but cannot change workspace-level roles or
+    # remove members (those stay ADMIN-gated).
+    "workspace.member.permissions": ActionRule(WorkspaceRole.EDITOR, "workspace.insufficient_role"),
     # Group (chat)
     "group.view": ActionRule(GroupRole.VIEW, "group.not_member"),
     "group.create": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
-    "channel.create": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    "channel.create": ActionRule(WorkspaceRole.EDITOR, "workspace.insufficient_role"),
     "group.post": ActionRule(GroupRole.MEMBER, "group.view_only"),
     "group.admin": ActionRule(GroupRole.ADMIN, "group.not_admin"),
     "group.delete": ActionRule(GroupRole.OWNER, "group.not_owner"),
@@ -174,8 +179,8 @@ ACTIONS: dict[str, ActionRule] = {
     # Agent
     "agent.run": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "agent.create": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
-    "agent.edit": ActionRule(WorkspaceRole.ADMIN, "agent.not_owner"),
-    "agent.delete": ActionRule(WorkspaceRole.ADMIN, "agent.not_owner"),
+    "agent.edit": ActionRule(WorkspaceRole.EDITOR, "agent.not_owner"),
+    "agent.delete": ActionRule(WorkspaceRole.EDITOR, "agent.not_owner"),
     # Session
     "session.read_own": ActionRule(WorkspaceRole.MEMBER, "session.not_owner"),
     "session.read_any": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
