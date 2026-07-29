@@ -7,6 +7,14 @@ exactly.
 
 Updated: 2026-06-28 (feat/aiam-agent-revoke, AW-4) — ``agent_to_dict`` now
 emits ``disabled`` so callers can see whether an agent has been soft-disabled.
+
+Updated: 2026-07-15 (feat/agent-scoped-discover-fields, ASG-1) —
+``DiscoverRequest`` gained ``scoped: bool = True`` (the gallery default that
+excludes other members' public agents). ``CreateAgentRequest`` /
+``UpdateAgentRequest`` accept the additive presentation fields
+(``welcome_message`` / ``conversation_starters`` / ``voice`` / ``appearance`` /
+``tags``); ``agent_to_dict`` (+ ``_config_to_dict``) and ``AgentResponse`` now
+emit them on the wire.
 """
 
 from __future__ import annotations
@@ -45,6 +53,13 @@ class CreateAgentRequest(BaseModel):
     soul_archetype: str = ""
     soul_values: list[str] | None = None
     soul_ocean: dict[str, float] | None = None
+    # Presentation fields (ASG-1) — additive; all optional so old clients
+    # keep working. ``welcome_message`` defaults to "" like ``system_prompt``.
+    welcome_message: str = ""
+    conversation_starters: list[str] | None = None
+    voice: dict | None = None
+    appearance: dict | None = None
+    tags: list[str] | None = None
 
     @field_validator("scopes")
     @classmethod
@@ -72,6 +87,12 @@ class UpdateAgentRequest(BaseModel):
     soul_archetype: str | None = None
     soul_values: list[str] | None = None
     soul_ocean: dict[str, float] | None = None
+    # Presentation fields (ASG-1) — all optional (None == "leave unchanged").
+    welcome_message: str | None = None
+    conversation_starters: list[str] | None = None
+    voice: dict | None = None
+    appearance: dict | None = None
+    tags: list[str] | None = None
 
     @field_validator("scopes")
     @classmethod
@@ -98,6 +119,10 @@ class DiscoverRequest(BaseModel):
     visibility: str | None = None
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1, le=100)
+    # When True (the gallery default) the no-explicit-visibility union excludes
+    # other members' public agents — see ``service.discover``. Pass False to
+    # restore the legacy cross-workspace public union.
+    scoped: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +148,10 @@ def _config_to_dict(cfg: AgentConfigSpec) -> dict[str, Any]:
         "soul_archetype": cfg.soul_archetype,
         "soul_values": list(cfg.soul_values),
         "soul_ocean": dict(cfg.soul_ocean),
+        "welcome_message": cfg.welcome_message,
+        "conversation_starters": list(cfg.conversation_starters),
+        "voice": cfg.voice,
+        "appearance": dict(cfg.appearance),
     }
 
 
@@ -144,6 +173,7 @@ def agent_to_dict(agent: Agent) -> dict[str, Any]:
         "config": _config_to_dict(agent.config),
         "owner": agent.owner,
         "disabled": agent.disabled,
+        "tags": list(agent.tags),
         "createdOn": iso_utc(agent.created_at),
         "lastUpdatedOn": iso_utc(agent.updated_at),
     }
@@ -162,6 +192,7 @@ class AgentResponse(BaseModel):
     visibility: str
     config: dict
     owner: str
+    tags: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

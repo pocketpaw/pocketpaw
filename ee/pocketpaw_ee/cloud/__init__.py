@@ -227,6 +227,7 @@ def mount_cloud(app: FastAPI) -> None:
     import pocketpaw_ee.cloud.ripple_sources  # noqa: F401
 
     # Import and mount domain routers
+    from pocketpaw_ee.cloud.agent_activity.router import router as agent_activity_router
     from pocketpaw_ee.cloud.agents.router import router as agents_router
     from pocketpaw_ee.cloud.audit.router import router as audit_router
     from pocketpaw_ee.cloud.audit.router import workspace_router as audit_workspace_router
@@ -251,6 +252,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.discovery.router import router as discovery_router
     from pocketpaw_ee.cloud.entitlements.router import router as entitlements_router
     from pocketpaw_ee.cloud.foresight.router import router as foresight_router
+    from pocketpaw_ee.cloud.herdr_cockpit.router import router as herdr_cockpit_router
     from pocketpaw_ee.cloud.jobs.router import router as jobs_router
     from pocketpaw_ee.cloud.license import get_license_info
     from pocketpaw_ee.cloud.meetings.providers.recall.webhooks import (
@@ -301,6 +303,17 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(deep_work_log_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(runs_router, prefix="/api/v1")
+    # Herdr cockpit telemetry (HR-10a) — ADMIN-gated, flag-gated read-only SSE
+    # stream of herdr pane "dots" (GET /cockpit/stream) + on-demand pane preview
+    # (GET /cockpit/pane/{id}/preview). Fails open when herdr is disabled/absent;
+    # panes are NOT paw-workspace-scoped yet, hence ADMIN-only (see router).
+    app.include_router(herdr_cockpit_router, prefix="/api/v1")
+    # Agent activity (HR-12a) — the product-facing counterpart to the cockpit
+    # above: GET /agent-activity, MEMBER-gated, one entry per agent in the
+    # CALLER'S workspace with a run in the last 24h. Reads the durable
+    # ChatRunDoc turn record through chat.runs.service, so it sees /chat agents
+    # (which never appear as herdr panes) and stays correct across arq workers.
+    app.include_router(agent_activity_router, prefix="/api/v1")
     app.include_router(connectors_router, prefix="/api/v1")
     # Discovery — zero-setup workspace-discovery TRIGGER
     # (POST /cloud/discovery/run). Workspace-scoped (no path param); fires the

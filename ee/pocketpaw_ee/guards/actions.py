@@ -55,6 +55,19 @@
 # ban-capable writes (resolve a decision, PATCH the egress deny/allow config)
 # AND its read feed exposes who-tried-to-egress-what; the whole surface is
 # owner-only, mirroring workspace.delete / billing.manage / instinct.activate.
+#
+# Updated: 2026-07-28 (feat/cockpit-agent-activity, HR-12a) — added
+# ``agent_activity.read`` (MEMBER) gating the workspace agent-activity board
+# (ee.cloud.agent_activity.router). MEMBER, not the ADMIN ``cockpit.read``
+# below: this surface reads the caller's OWN workspace runs and is scoped to
+# them at the query, so it carries the tenancy property that keeps the herdr
+# cockpit admin-only.
+#
+# Updated: 2026-07-24 (feat/herdr-cockpit-sse, HR-10a) — added ``cockpit.read``
+# (ADMIN) gating both routes of the herdr cockpit telemetry surface
+# (ee.cloud.herdr_cockpit.router). ADMIN (not MEMBER) because herdr panes are not
+# paw-workspace-scoped, so a member-visible cockpit on a shared box could leak
+# other tenants' panes; see the entry's inline note and the router's TODO(track-b).
 
 from __future__ import annotations
 
@@ -285,6 +298,35 @@ ACTIONS: dict[str, ActionRule] = {
     # action guards every route (reads included) because the decision feed
     # itself carries who-tried-to-egress-what, which is sensitive.
     "security.manage": ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
+    # Herdr cockpit — the read-only pane-telemetry surface (ee.cloud.herdr_cockpit
+    # .router, HR-10a). ADMIN because herdr panes are NOT paw-workspace-scoped
+    # (herdr mints its own workspace ids), so on a shared box a member-visible
+    # cockpit could leak other tenants' panes. ADMIN + the default-off
+    # ``herdr_runtime_enabled`` flag keeps v1 safe on the dedicated-box case; a
+    # single read action gates both the stream and the preview. TODO(track-b):
+    # scope panes to the caller's workspace before relaxing this for multi-tenant.
+    "cockpit.read": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Agent activity — the workspace's own agent board (ee.cloud.agent_activity
+    # .router, HR-12a): which of MY agents are working right now. MEMBER, the
+    # same bar as session.read_own / outcomes.read, because every row is the
+    # caller's own workspace data — the board is built from ChatRunDoc rows
+    # filtered to the caller's workspace at the query, so there is no cross-tenant
+    # leak of the kind that forces ``cockpit.read`` above to stay ADMIN. Its
+    # payload is activity metadata only (agent id, status, run count, timestamps)
+    # — no message content, no credentials.
+    #
+    # MEMBER is the whole RBAC statement for this surface, and it is deliberate:
+    # the board is workspace-WIDE, so any member sees every member's agent
+    # activity. That is the team-coordination fact an Agent — a workspace
+    # resource, not a personal one — exists to expose. It knowingly reads wider
+    # than ``chat.runs.router._authorize``, which hides another member's
+    # individual run; the split is aggregate-state-is-shared,
+    # individual-turn-is-private (no user_id, no run id, no content on the wire).
+    # Narrowing to a personal board would be a ``user_id`` filter on the two
+    # reads in ``chat.runs.service``, NOT a role change here — and raising this
+    # to ADMIN would hide the board from exactly the people who need it.
+    # See ee.cloud.agent_activity.router's header for the full rationale.
+    "agent_activity.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
 }
 
 

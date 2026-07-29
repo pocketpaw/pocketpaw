@@ -193,6 +193,10 @@ Changes:
     CREATE surface runs the guided authoring-crew flow (clarity gate →
     interview → design-system + assets → build) instead of the single-shot
     create preamble; default off (feat/sites-crew-create-flow, SC-crew).
+  - 2026-07-18: Added ``herdr_runtime_enabled`` (kill-switch, default off),
+    ``herdr_cli_path`` and ``herdr_cli_timeout_ms`` for the flagged,
+    fail-open HerdrRuntime adapter over the external ``herdr`` terminal
+    multiplexer (feat/herdr-runtime-adapter, HR-1).
   - 2026-05-22: Added ``auto_install_bundled_templates`` — toggles the
     boot-time mirror of built-in pocket templates into
     ``~/.pocketpaw/templates/`` (feat/bundled-templates, Increment 2a).
@@ -515,6 +519,56 @@ class Settings(BaseSettings):
             "use (no human to approve). Pair with codex_cli_sandbox_mode="
             "'danger-full-access' on Windows or anywhere the agent can't "
             "be interactively supervised."
+        ),
+    )
+
+    # Herdr Runtime Settings (HR-1) — the flagged, fail-open adapter that lets
+    # PocketPaw spawn and drive coding-agent terminals through the external
+    # ``herdr`` binary (a terminal multiplexer for coding agents). Off by
+    # default: when disabled or when herdr is absent the adapter reports itself
+    # unavailable and PocketPaw keeps today's behaviour.
+    herdr_runtime_enabled: bool = Field(
+        default=False,
+        description=(
+            "Kill-switch for the HerdrRuntime adapter "
+            "(``pocketpaw.agents.herdr_runtime``). When False (default) the "
+            "adapter reports itself unavailable and every method raises "
+            "``HerdrUnavailable`` — PocketPaw runs exactly as it does today "
+            "with no herdr dependency. Flip to True (and install the ``herdr`` "
+            "binary + run a headless herdr server, see the HR-2 runbook) to let "
+            "consumers spawn and drive coding-agent panes through herdr. herdr "
+            "is used ONLY as a separate process over its CLI — never imported "
+            "or linked (it is AGPL-3.0; process-boundary use only). "
+            "DEDICATED-BOX ONLY: herdr has no tenant model (it mints a flat "
+            "workspace namespace with no link to a paw workspace), so on a "
+            "shared box one tenant's admin could observe another's panes. This "
+            "flag is therefore honoured only on a single-operator deployment — "
+            "a per-tenant dedicated box, a dev machine, or a self-hosted stack. "
+            "If ``POCKETPAW_REQUIRE_WORKSPACE_SCOPE`` is set (the shared "
+            "multi-tenant cloud marker) the adapter REFUSES to enable "
+            "regardless of this flag, logs an error, and degrades through the "
+            "ordinary herdr-unavailable path."
+        ),
+    )
+    herdr_cli_path: str | None = Field(
+        default=None,
+        description=(
+            "Explicit path to the ``herdr`` executable. When unset (default) "
+            "the adapter resolves it from PATH via ``shutil.which('herdr')``. "
+            "Set this to pin a specific herdr install (e.g. the version the "
+            "HR-2 runbook installs) so a stray PATH entry can't shadow it. If "
+            "the path is set but not an executable file, the adapter treats "
+            "herdr as unavailable (fail-safe) rather than falling back to PATH."
+        ),
+    )
+    herdr_cli_timeout_ms: int = Field(
+        default=15000,
+        description=(
+            "Default per-command timeout (milliseconds) for non-blocking herdr "
+            "CLI calls (list/get/read/send/spawn/worktree). A command that "
+            "exceeds it raises ``HerdrUnavailable`` so a wedged herdr socket "
+            "can never hang PocketPaw. Blocking ``wait`` calls use their own "
+            "``--timeout`` plus a small buffer, not this value."
         ),
     )
 
