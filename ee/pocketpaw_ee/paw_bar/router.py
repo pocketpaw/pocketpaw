@@ -1,4 +1,20 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-30 (feat/paw-bar-autoembed) — added GET /paw-bar/widget.js, the
+#   PUBLIC loader route. The glass bar could only ever be embedded by hand, and the
+#   snippet the dashboard printed pointed at ``https://pp.pocketpaw.dev/widget.js``
+#   — a placeholder host nobody provisioned, so even a pasted snippet 404'd. There
+#   was no way to load the bar from anywhere. This route serves the loader bundle
+#   off the SAME origin as the rest of the API, which is what lets ``sites.service``
+#   embed it into a published site automatically (see ``paw_bar/embed.py``). The
+#   file is resolved by ``paw_bar_widget_file()``: ``PAW_BAR_WIDGET_JS`` when set,
+#   else the copy vendored in this package (``static/paw-bar.js``) so the route
+#   resolves on any machine rather than depending on a sibling checkout. A missing
+#   bundle returns a clean 404 naming the env var, never a stack trace. PUBLIC by
+#   design and deliberately tenant-BLIND: it is a world-visible script served
+#   byte-identically to every visitor of every site, so it takes no key, reads no
+#   Site, and carries nothing tenant-specific — the per-site config rides on the
+#   embedding ``<script>`` tag's data attributes, and the credential check happens
+#   downstream at /paw-bar/frame.
 # Updated: 2026-07-26 (site knowledge sync) — two owner endpoints over the site's
 #   own knowledge: GET /paw-bar/admin/site/{id}/knowledge reports how many articles
 #   the concierge can quote and how the last sync went, and POST
@@ -236,7 +252,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from pocketpaw.api.deps import require_scope
@@ -347,6 +363,76 @@ def _asset_version() -> str:
         except OSError:
             continue
     return str(newest)
+
+
+# ---------------------------------------------------------------------------
+# The loader bundle (GET /paw-bar/widget.js)
+#
+# The one script a foreign page loads to grow a concierge. It reads its config off
+# its own <script> tag and mounts the /paw-bar/frame iframe; everything
+# tenant-specific lives in those attributes, so this file is the same bytes for
+# every site and needs no auth. Before this existed the only advertised URL was an
+# unprovisioned CDN placeholder, which is why a published site could carry a
+# concierge and still show nothing.
+# ---------------------------------------------------------------------------
+
+# How long a browser may reuse the loader without re-asking. Short on purpose: the
+# glass app's own assets are cache-busted by ``_asset_version`` in the frame HTML,
+# but a <script src> baked into a customer's deployed page has no version stamp we
+# control, so a long max-age would pin every embedder to whatever loader shipped on
+# the day their site was published. Five minutes keeps the edge useful and keeps a
+# fix at most one coffee away.
+_WIDGET_JS_MAX_AGE = 300
+
+
+def paw_bar_widget_file() -> Path:
+    """Path of the loader bundle ``GET /paw-bar/widget.js`` serves.
+
+    ``PAW_BAR_WIDGET_JS`` wins when set — that is the seam for serving a freshly
+    built bundle (e.g. ``paw-print-widget/dist/…``) without a redeploy. Otherwise
+    the copy vendored beside this module. The default is deliberately IN the
+    package rather than an absolute path into a sibling checkout: the publish path
+    now bakes this URL into customers' deployed HTML, so it has to resolve on every
+    machine that runs the backend, not just a developer's.
+    """
+    override = os.environ.get("PAW_BAR_WIDGET_JS", "").strip()
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent / "static" / "paw-bar.js"
+
+
+@router.get("/paw-bar/widget.js")
+async def widget_js() -> Response:
+    """Serve the glass-bar loader — PUBLIC, unauthenticated, tenant-blind.
+
+    No key, no Site read, no per-caller variation: this is a world-visible static
+    script, and the credential (the embed key) is presented later by the iframe it
+    mounts, at ``/paw-bar/frame``. Read from disk per request rather than cached in
+    memory so replacing the file takes effect without a restart — the file is a few
+    KB and the OS page cache absorbs the repeat reads.
+
+    A missing bundle is a clean 404 naming the env var that fixes it, not a
+    FileNotFoundError escaping as an opaque 500: the operator seeing this is
+    debugging why a live site shows no bar, and the message is the answer.
+    """
+    path = paw_bar_widget_file()
+    try:
+        body = path.read_bytes()
+    except OSError:
+        logger.warning("paw-bar: loader bundle unavailable at %s", path)
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Paw Bar loader bundle not found. Set PAW_BAR_WIDGET_JS to the "
+                "path of a built widget bundle, or restore the copy shipped at "
+                "pocketpaw_ee/paw_bar/static/paw-bar.js."
+            ),
+        ) from None
+    return Response(
+        content=body,
+        media_type="application/javascript; charset=utf-8",
+        headers={"Cache-Control": f"public, max-age={_WIDGET_JS_MAX_AGE}"},
+    )
 
 
 # A frame-ancestors host-source is host[:port] with NO scheme, path, or whitespace.
