@@ -191,22 +191,34 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     throw away a whole run's research over formatting. What it will NOT do is
     guess at malformed JSON: unparseable means zero findings, never a partial
     object assembled by hand.
+
+    It also IDENTIFIES the answer rather than taking the first brace it sees. That
+    distinction is not theoretical: tool output is itself JSON, so a response
+    buffer that picked up a WebSearch payload would otherwise yield a page of
+    search hits parsed as "the research". Every candidate object is decoded and
+    the one carrying a ``companies`` key wins, whatever its position.
     """
     if not text or not text.strip():
         return None
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    candidates = [fenced.group(1)] if fenced else []
-    start, end = text.find("{"), text.rfind("}")
-    if start != -1 and end > start:
-        candidates.append(text[start : end + 1])
-    for candidate in candidates:
+
+    objects: list[dict[str, Any]] = []
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
         try:
-            parsed = json.loads(candidate)
+            parsed, _ = decoder.raw_decode(text, match.start())
         except (json.JSONDecodeError, ValueError):
             continue
         if isinstance(parsed, dict):
-            return parsed
-    return None
+            objects.append(parsed)
+
+    if not objects:
+        return None
+    # The answer is the object shaped like an answer. Falling back to the first
+    # decodable object keeps a model that renamed the key from costing the run.
+    for obj in objects:
+        if "companies" in obj:
+            return obj
+    return objects[0]
 
 
 def _evidence_from(raw: Any) -> EmailEvidence | None:
@@ -338,6 +350,16 @@ async def agent_research(request: ResearchRequest) -> ResearchResult:
             message=prompt,
             session_key=session_key,
         ):
+            # ONLY the assistant's own text. This filter is load-bearing, not
+            # tidiness: ``tool_result`` events carry the raw WebSearch payload,
+            # which is itself JSON. Collecting those too would leave the buffer
+            # holding a search result's opening brace long before the answer's
+            # — and the extractor, scanning for the outermost object, would
+            # parse a page of search hits instead of the research. Cost a real
+            # run to find; every hunt returned "could not be read" while the
+            # agent was in fact answering perfectly.
+            if getattr(event, "type", None) != "message":
+                continue
             content = getattr(event, "content", None)
             if isinstance(content, str) and content:
                 chunks.append(content)
