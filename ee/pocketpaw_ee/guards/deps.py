@@ -220,8 +220,10 @@ def _has_action_override(workspace_id: str, user_id: str, action: str) -> bool:
     cache_key = (workspace_id, user_id)
     if cache_key not in _ACTION_OVERRIDE_CACHE:
         try:
-            from pocketpaw_ee.cloud.workspace.service import get_member_action_overrides
             import asyncio
+
+            from pocketpaw_ee.cloud.workspace.service import get_member_action_overrides
+
             overrides = asyncio.get_event_loop().run_until_complete(
                 get_member_action_overrides(workspace_id, user_id)
             )
