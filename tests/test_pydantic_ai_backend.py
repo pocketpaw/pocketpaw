@@ -61,9 +61,15 @@ def _backend_with_model(model, **overrides) -> PydanticAIBackend:
       real 49-tool builtin surface gets EXECUTED: ~58s per run, 1479 events, and
       ``code_mode`` trying to bind a unix socket on Windows.
 
+    Skills default OFF here for the same reason: they contribute ``list_skills``
+    / ``load_skill`` tools, which ``TestModel`` then calls with dummy arguments
+    until the retry limit trips. Tests that want skills pass
+    ``pydantic_ai_skills_enabled=True`` explicitly.
+
     Tests that exercise tools install their own; ``test_bridged_tools_are_all_async``
     covers the real bridge separately without running a model.
     """
+    overrides.setdefault("pydantic_ai_skills_enabled", False)
     backend = PydanticAIBackend(_settings(**overrides))
     backend._build_model = lambda: model  # type: ignore[method-assign]
     backend._mcp_tools = []
@@ -504,7 +510,9 @@ async def test_mcp_servers_spawn_once_across_many_runs(monkeypatch):
     pytest.importorskip("fastmcp", reason="pydantic-ai-slim[mcp] not installed")
 
     server = _SpawnCountingServer()
-    backend = PydanticAIBackend(_settings(pydantic_ai_mcp_enabled=True))
+    backend = PydanticAIBackend(
+        _settings(pydantic_ai_mcp_enabled=True, pydantic_ai_skills_enabled=False)
+    )
     backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     backend._custom_tools = []
     _drive_real_mcp(monkeypatch, [server])
@@ -534,7 +542,9 @@ async def test_concurrent_first_runs_do_not_double_spawn(monkeypatch):
     pytest.importorskip("fastmcp", reason="pydantic-ai-slim[mcp] not installed")
 
     servers = [_SpawnCountingServer() for _ in range(4)]
-    backend = PydanticAIBackend(_settings(pydantic_ai_mcp_enabled=True))
+    backend = PydanticAIBackend(
+        _settings(pydantic_ai_mcp_enabled=True, pydantic_ai_skills_enabled=False)
+    )
     backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     backend._custom_tools = []
     _drive_real_mcp(monkeypatch, servers)
@@ -557,7 +567,9 @@ async def test_mcp_server_that_fails_to_start_is_dropped_not_fatal(monkeypatch):
         async def __aexit__(self, *exc):
             return False
 
-    backend = PydanticAIBackend(_settings(pydantic_ai_mcp_enabled=True))
+    backend = PydanticAIBackend(
+        _settings(pydantic_ai_mcp_enabled=True, pydantic_ai_skills_enabled=False)
+    )
     backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     backend._custom_tools = []
     _drive_real_mcp(monkeypatch, [_Broken()])
@@ -581,7 +593,9 @@ async def test_one_broken_server_does_not_take_down_a_healthy_one(monkeypatch):
             return False
 
     healthy = _SpawnCountingServer()
-    backend = PydanticAIBackend(_settings(pydantic_ai_mcp_enabled=True))
+    backend = PydanticAIBackend(
+        _settings(pydantic_ai_mcp_enabled=True, pydantic_ai_skills_enabled=False)
+    )
     backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     backend._custom_tools = []
     _drive_real_mcp(monkeypatch, [_Broken(), healthy], n_configs=2)
@@ -637,7 +651,9 @@ async def test_mcp_loading_is_cached_per_instance_not_per_run(monkeypatch):
 
     monkeypatch.setattr("pocketpaw.mcp.config.load_mcp_config", counting_loader)
 
-    backend = PydanticAIBackend(_settings(pydantic_ai_mcp_enabled=True))
+    backend = PydanticAIBackend(
+        _settings(pydantic_ai_mcp_enabled=True, pydantic_ai_skills_enabled=False)
+    )
     backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     # Not _backend_with_model: this test needs MCP loading live, so it pins the
     # builtin tool surface itself (TestModel would otherwise execute all 49).
@@ -677,6 +693,53 @@ def test_harness_capabilities_are_wired():
     } <= names, names
 
 
+def _fake_skills(monkeypatch, *names, **flags):
+    """Make ``_load_bundled_skills`` return synthetic skills."""
+    from pathlib import Path
+
+    from pocketpaw.skills.loader import Skill as PawSkill
+
+    skills = [
+        PawSkill(
+            name=n,
+            description=f"{n} skill.",
+            content=f"# {n}",
+            path=Path("."),
+            disable_model_invocation=flags.get(n, False),
+        )
+        for n in names
+    ]
+    monkeypatch.setattr(PydanticAIBackend, "_load_bundled_skills", staticmethod(lambda: skills))
+    return skills
+
+
+def test_skills_come_from_bundled_not_the_operators_home():
+    """The source must be PocketPaw's shipped skills, never the machine's dirs.
+
+    ``SkillLoader``'s default ``SKILL_PATHS`` scan ``~/.agents/skills``,
+    ``~/.claude/skills`` and ``~/.pocketpaw/skills`` — the OPERATOR's skills.
+    In a multi-tenant process those are not tenant content, and the cost scales
+    with whatever the operator happens to have installed. Measured on a dev box
+    with 42 such skills: 8,644 input tokens per turn versus 833 with skills off.
+    """
+    from pathlib import Path
+
+    import pocketpaw.bundled_skills as bundled_pkg
+    from pocketpaw.skills.loader import SKILL_PATHS
+
+    skills = PydanticAIBackend._load_bundled_skills()
+    assert skills, "expected PocketPaw to ship at least one bundled skill"
+
+    bundled_dir = (Path(bundled_pkg.__file__).parent / "_bundled" / "skills").resolve()
+    for skill in skills:
+        resolved = Path(skill.path).resolve()
+        assert bundled_dir in resolved.parents or resolved == bundled_dir, resolved
+        for home_path in SKILL_PATHS:
+            assert home_path.resolve() not in resolved.parents, (
+                f"{skill.name} came from the operator's {home_path}, not the package"
+            )
+
+
 async def test_skills_capability_engages_and_excludes_script_execution(monkeypatch):
     """Skills reach the model, and the script-execution tool does NOT.
 
@@ -686,17 +749,7 @@ async def test_skills_capability_engages_and_excludes_script_execution(monkeypat
     """
     pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
 
-    from pocketpaw.skills.loader import Skill as PawSkill
-
-    fake = {
-        "demo": PawSkill(
-            name="demo",
-            description="A demo skill.",
-            content="# Demo\nDo the demo thing.",
-            path=__import__("pathlib").Path("."),
-        )
-    }
-    monkeypatch.setattr("pocketpaw.skills.loader.SkillLoader.load", lambda self, force=False: fake)
+    _fake_skills(monkeypatch, "demo")
 
     seen: dict = {}
 
@@ -704,7 +757,9 @@ async def test_skills_capability_engages_and_excludes_script_execution(monkeypat
         seen["tools"] = {t.name for t in info.function_tools}
         yield "ok"
 
-    backend = _backend_with_model(FunctionModel(stream_function=stream_fn))
+    backend = _backend_with_model(
+        FunctionModel(stream_function=stream_fn), pydantic_ai_skills_enabled=True
+    )
     await _collect(backend, "use a skill")
 
     assert "list_skills" in seen["tools"], seen["tools"]
@@ -717,12 +772,7 @@ def test_skills_are_passed_programmatically_not_discovered(monkeypatch):
     """No directory / git / S3 discovery — PocketPaw's loader is the one source."""
     pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
 
-    from pocketpaw.skills.loader import Skill as PawSkill
-
-    fake = {
-        "a": PawSkill(name="a", description="d", content="c", path=__import__("pathlib").Path("."))
-    }
-    monkeypatch.setattr("pocketpaw.skills.loader.SkillLoader.load", lambda self, force=False: fake)
+    _fake_skills(monkeypatch, "a")
 
     cap = PydanticAIBackend(_settings())._build_skills_capability()
     assert cap is not None
@@ -733,19 +783,40 @@ def test_skills_are_passed_programmatically_not_discovered(monkeypatch):
 def test_skills_respect_disable_model_invocation(monkeypatch):
     pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
 
-    from pocketpaw.skills.loader import Skill as PawSkill
-
-    p = __import__("pathlib").Path(".")
-    fake = {
-        "on": PawSkill(name="on", description="d", content="c", path=p),
-        "off": PawSkill(
-            name="off", description="d", content="c", path=p, disable_model_invocation=True
-        ),
-    }
-    monkeypatch.setattr("pocketpaw.skills.loader.SkillLoader.load", lambda self, force=False: fake)
+    _fake_skills(monkeypatch, "on", "off", off=True)
 
     names = {s.name for s in PydanticAIBackend(_settings())._build_skills_capability().skills}
     assert names == {"on"}
+
+
+def test_skill_names_narrows_the_set(monkeypatch):
+    """A per-entity subset must actually narrow what the model is offered.
+
+    Each skill costs prompt tokens on every turn, and there is no prompt cache
+    on the proxy path to amortise them.
+    """
+    pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
+
+    _fake_skills(monkeypatch, "alpha", "beta", "gamma")
+    backend = PydanticAIBackend(_settings())
+
+    everything = {s.name for s in backend._build_skills_capability().skills}
+    assert everything == {"alpha", "beta", "gamma"}
+
+    narrowed = backend._build_skills_capability(frozenset({"beta"}))
+    assert {s.name for s in narrowed.skills} == {"beta"}
+
+
+def test_skill_names_is_part_of_the_agent_cache_key(monkeypatch):
+    """An entity with a narrower skill set must not be served a wider cached agent."""
+    pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
+
+    _fake_skills(monkeypatch, "alpha", "beta")
+    backend = _backend_with_model(TestModel())
+
+    wide = backend._get_or_create_agent(TestModel(), "sys", [])
+    narrow = backend._get_or_create_agent(TestModel(), "sys", [], frozenset({"alpha"}))
+    assert wide is not narrow, "cached agent reused across different skill subsets"
 
 
 def test_skills_disabled_returns_none():
@@ -759,7 +830,7 @@ def test_skills_absent_when_loader_yields_nothing(monkeypatch):
     """An empty capability would add tool surface for nothing."""
     pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
 
-    monkeypatch.setattr("pocketpaw.skills.loader.SkillLoader.load", lambda self, force=False: {})
+    monkeypatch.setattr(PydanticAIBackend, "_load_bundled_skills", staticmethod(list))
     assert PydanticAIBackend(_settings())._build_skills_capability() is None
 
 

@@ -143,14 +143,16 @@ exists on purpose.
 
 ### Skills
 
-Skills come from PocketPaw's own loader and are handed to the model with
-**progressive disclosure**: it sees names and descriptions, and pulls a skill's
-full body only when it decides to use one. The alternative — every skill in the
-system prompt on every turn — is expensive on a backend whose per-run cost *is*
-the context.
+PocketPaw's **bundled** skills are handed to the model with **progressive
+disclosure**: it sees names and descriptions, and pulls a skill's full body only
+when it decides to use one.
 
-Two constraints worth knowing:
+Three constraints worth knowing:
 
+- The source is the skills PocketPaw **ships**, not the machine's skill
+  directories (`~/.agents/skills`, `~/.claude/skills`, `~/.pocketpaw/skills`).
+  Those hold the operator's own skills, which aren't tenant content and whose
+  cost scales with whatever happens to be installed there.
 - Skills are passed **programmatically**. The underlying package can also scan
   directories, clone git repos, or read S3; none of that is used, because
   PocketPaw already owns skill discovery and a second mechanism is a second
@@ -159,16 +161,41 @@ Two constraints worth knowing:
   locally, which is what dispatch-only rules out and what has no per-tenant jail
   here.
 
+Measured input tokens for one trivial turn against `deepseek-v3.2`:
+
+| Configuration | Input tokens |
+|---------------|-------------|
+| Harness off, skills off | 13 |
+| Harness on, skills off | 833 |
+| Harness on + 19 bundled skills | 5,784 |
+| Harness on + 42 skills from `~/.claude` | 8,644 |
+
+Progressive disclosure is doing real work — inlining those 42 would have been
+~118k tokens — and prompt caching absorbs most of what remains on warm turns.
+A caller can narrow further per entity with `skill_names`.
+
 ## Prompt caching
 
-Prompt-cache behaviour through the OpenAI-compatible path is **not yet
-verified**. The Deep Agents backend inserts Anthropic `cache_control` markers
-into requests directly; there is no equivalent hook here, so caching is whatever
-the proxy negotiates upstream.
+Prompt caching **works** through the proxy — no `cache_control` markers needed on
+our side. Measured against `deepseek-v3.2`, six turns sharing one ~4.4k-token
+system prefix:
 
-The backend reports what it observes rather than assuming: when a run returns
-non-zero cache tokens it emits a `token_usage` event carrying read and write
-counts and a hit rate, so the answer can be measured on your own traffic.
+| Turn | Cache read | Uncached input | Hit rate |
+|------|-----------|----------------|----------|
+| 0 (cold) | 0 | full prompt | 0% |
+| 1 | 4,416 | 19 | 100% |
+| 2 | 4,416 | 9,316 | 32% |
+| 3 | 4,416 | 19 | 100% |
+| 4 | 8,000 | 943 | 89% |
+| 5 | 4,416 | 19 | 100% |
+
+Two things to know. The first turn is always a cold write, and hits are not
+guaranteed — one turn in six missed. So when comparing cost against another
+backend, measure a warm window rather than a single turn.
+
+Whenever a run returns non-zero cache tokens the backend emits a `token_usage`
+event with read and write counts and a hit rate, so you can measure this on your
+own traffic and model rather than trusting the table above.
 
 ## Concurrency notes
 
@@ -195,5 +222,4 @@ Rollback is the same setting — set it back to `deep_agents`.
 
 - Beta. The dependencies are pinned exactly; expect breaking changes on upgrade.
 - No local shell or filesystem tools (by design — see above).
-- Prompt-cache margin unverified on the proxy path.
 - Subagents not wired.

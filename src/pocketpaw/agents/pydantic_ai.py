@@ -45,14 +45,36 @@ Two failure modes this file is deliberately shaped around:
    concurrent run in the process. ``build_pydantic_ai_tools`` asserts every
    bridged tool is a coroutine.
 
-Prompt caching is an OPEN QUESTION on this path. ``deep_agents`` patches
-Anthropic ``cache_control`` markers directly into the request; the
-OpenAI-compatible route through LiteLLM has no equivalent hook here, so cache
-behaviour is whatever the proxy negotiates upstream. The token counts are
-reported (``token_usage`` event) precisely so the answer is measured rather
-than assumed — ``pydantic_ai``'s ``RunUsage`` documents ``input_tokens`` as the
-INCLUSIVE total with ``cache_read_tokens`` / ``cache_write_tokens`` as subsets,
-and normalizes providers (Anthropic, Bedrock) that report them disjointly.
+**Prompt caching DOES survive this path — measured, not assumed.** This was the
+design's open question 2, and the answer is yes, at least for
+``litellm:deepseek-v3.2``. Six turns sharing one ~4.4k-token system prefix,
+2026-07-29:
+
+===========  ==========  ================  ==========
+turn         cache read  uncached input    hit rate
+===========  ==========  ================  ==========
+0 (cold)              0  (full prompt)             0%
+1                 4,416                19          100%
+2                 4,416             9,316           32%
+3                 4,416                19          100%
+4                 8,000               943           89%
+5                 4,416                19          100%
+===========  ==========  ================  ==========
+
+So the prefix is cached upstream and read back without us doing anything:
+``deep_agents`` earns its margin by patching Anthropic ``cache_control`` markers
+into the request, and this route needs no equivalent hook. Note the first turn
+is always a cold write and one turn in six missed, so measure a WARM window when
+comparing against ``deep_agents`` rather than reading turn 1 alone.
+
+The counts come from ``RunUsage``, which documents ``input_tokens`` as the
+INCLUSIVE total with ``cache_read_tokens`` / ``cache_write_tokens`` as subsets
+and normalizes providers (Anthropic, Bedrock) that report them disjointly — so
+``_usage_event`` subtracts them back out to get the uncached remainder.
+
+Verified live 2026-07-29 through a real LiteLLM proxy: a streamed turn, a tool
+round-trip (tool actually executed, ``tool_use`` before ``tool_result``), and 8
+concurrent runs on ONE cached instance with zero empty ``stream_end``.
 """
 
 from __future__ import annotations
@@ -469,7 +491,7 @@ class PydanticAIBackend:
         """
         return None
 
-    def _build_capabilities(self) -> list:
+    def _build_capabilities(self, skill_names: frozenset[str] = frozenset()) -> list:
         """Build the ``pydantic-ai-harness`` capabilities for this backend.
 
         Four of the PRD's six are wired. The other two are dropped, with the
@@ -530,12 +552,12 @@ class PydanticAIBackend:
                 OverflowingToolOutput(bands=[Band(over=limit, action=Truncate(max_chars=limit))])
             )
 
-        skills = self._build_skills_capability()
+        skills = self._build_skills_capability(skill_names)
         if skills is not None:
             capabilities.append(skills)
         return capabilities
 
-    def _build_skills_capability(self) -> Any:
+    def _build_skills_capability(self, skill_names: frozenset[str] = frozenset()) -> Any:
         """Expose PocketPaw's skills through ``pydantic-ai-skills``.
 
         Skills reach the model by progressive disclosure: the agent sees a list
@@ -544,20 +566,48 @@ class PydanticAIBackend:
         every skill into the system prompt — is what makes the prompt enormous
         on a backend whose per-run cost IS the context.
 
-        Two deliberate constraints:
+        Three deliberate constraints, and the first is the one measured:
 
-        * **Skills are passed programmatically, never discovered from disk.**
-          ``SkillsCapability`` can scan directories, clone git repos, or read
-          S3. All three are declined: PocketPaw already owns skill discovery
-          (``pocketpaw.skills.loader.SkillLoader``), and a second discovery
-          mechanism would be one more place a tenant's surface could differ
-          from what the policy says it is. We hand over what the loader already
-          resolved.
+        * **Source is PocketPaw's BUNDLED skills, not the machine's skill
+          directories.** ``SkillLoader``'s default ``SKILL_PATHS`` scan
+          ``~/.agents/skills``, ``~/.claude/skills`` and
+          ``~/.pocketpaw/skills`` — the OPERATOR's own skills. In a
+          multi-tenant process those are not tenant content and have no
+          business in a tenant's agent, and the cost scales with whatever the
+          operator happens to have installed.
+
+          Measured live 2026-07-29 against ``litellm:deepseek-v3.2``, input
+          tokens for one trivial turn:
+
+          ===========================================  =============
+          configuration                                input tokens
+          ===========================================  =============
+          harness off, skills off                                 13
+          harness on, skills off                                 833
+          harness on + 19 BUNDLED skills (shipped)             5,784
+          harness on + 42 skills from ``~/.claude``            8,644
+          ===========================================  =============
+
+          Progressive disclosure is doing its job — inlining the 42 would have
+          been ~118k tokens. The prefix does get cached upstream (see the module
+          docstring), so a warm turn pays little of this; the cold turn and any
+          cache miss pay all of it. Hence: ship the product's own skills, which
+          is a bounded and intentional set, and let a caller narrow further with
+          ``skill_names``.
+        * **Skills are passed programmatically, never discovered by the
+          capability.** ``SkillsCapability`` can scan directories, clone git
+          repos, or read S3. All three are declined: PocketPaw owns skill
+          discovery, and a second mechanism is a second place a tenant's
+          surface could differ from what the policy says it is.
         * **``run_skill_script`` is excluded.** It executes a skill's bundled
-          script — local execution, which is exactly what dispatch-only rules
-          out and what has no per-tenant jail on an in-process backend.
-          ``read_skill_resource`` goes too, since we pass no resources, so
-          leaving it would advertise a tool that can only fail.
+          script — local execution, which dispatch-only rules out and which has
+          no per-tenant jail on an in-process backend. ``read_skill_resource``
+          goes too, since we pass no resources, so leaving it would advertise a
+          tool that can only fail.
+
+        *only* is the subset named by ``skill_names`` when the caller supplies
+        one — the same per-entity kwarg the Claude SDK backend uses to narrow a
+        run's skills.
 
         Returns ``None`` when the package is absent, the feature is off, or no
         skills resolve — an empty capability would just add tool surface.
@@ -572,21 +622,16 @@ class PydanticAIBackend:
             return None
 
         try:
-            from pocketpaw.skills.loader import SkillLoader
-
-            loaded = SkillLoader().load()
+            loaded = self._load_bundled_skills()
         except Exception as exc:  # noqa: BLE001
             logger.info("Could not load PocketPaw skills: %s", exc)
             return None
 
         skills = [
-            PaiSkill(
-                name=skill.name,
-                description=skill.description,
-                content=skill.content,
-            )
-            for skill in loaded.values()
-            if not getattr(skill, "disable_model_invocation", False)
+            PaiSkill(name=s.name, description=s.description, content=s.content)
+            for s in loaded
+            if not getattr(s, "disable_model_invocation", False)
+            and (not skill_names or s.name in skill_names)
         ]
         if not skills:
             return None
@@ -598,9 +643,36 @@ class PydanticAIBackend:
             validate=False,
         )
 
+    @staticmethod
+    def _load_bundled_skills() -> list:
+        """Load ONLY the skills PocketPaw ships, ignoring the machine's dirs.
+
+        ``SkillLoader`` is reused for the parsing, but pointed exclusively at
+        the package's own ``_bundled/skills`` tree by clearing the default
+        ``SKILL_PATHS``. See ``_build_skills_capability`` for why the operator's
+        home directories are deliberately not a source.
+        """
+        from pathlib import Path
+
+        import pocketpaw.bundled_skills as bundled_pkg
+        from pocketpaw.skills.loader import SkillLoader
+
+        bundled_dir = Path(bundled_pkg.__file__).parent / "_bundled" / "skills"
+        if not bundled_dir.is_dir():
+            return []
+        loader = SkillLoader()
+        loader.paths = [bundled_dir]  # NOT extra_paths — replaces the home dirs
+        return list(loader.load(force=True).values())
+
     # -- agent assembly -----------------------------------------------------
 
-    def _get_or_create_agent(self, model: Any, instructions: str, mcp_toolsets: list) -> Any:
+    def _get_or_create_agent(
+        self,
+        model: Any,
+        instructions: str,
+        mcp_toolsets: list,
+        skill_names: frozenset[str] = frozenset(),
+    ) -> Any:
         """Build (and cache) the pydantic-ai ``Agent``.
 
         Cached on everything that shapes the tool surface or the model, so
@@ -625,6 +697,10 @@ class PydanticAIBackend:
             len(mcp_toolsets),
             id(self._custom_tools),
             len(tools),
+            # In the key, not just a constructor argument: the skill subset
+            # shapes the agent's capabilities, so an entity with a narrower set
+            # must not be served an agent cached for a wider one.
+            tuple(sorted(skill_names)),
         )
         if self._cached_agent is not None and self._cached_agent_key == agent_key:
             return self._cached_agent
@@ -643,7 +719,7 @@ class PydanticAIBackend:
             instructions=instructions,
             tools=tools,
             toolsets=list(mcp_toolsets) or None,
-            capabilities=self._build_capabilities() or None,
+            capabilities=self._build_capabilities(skill_names) or None,
             # The agent is shared across concurrent runs; conversation state
             # rides in ``message_history`` per run, never on the agent.
             retries=2,
@@ -681,6 +757,10 @@ class PydanticAIBackend:
         system_prompt: str | None = None,
         history: list[dict] | None = None,
         session_key: str | None = None,  # noqa: ARG002
+        # Per-entity skill subset. Rides the withhold-when-empty contract:
+        # ``AgentPool.run`` forwards it only when non-empty, so an empty set
+        # means "no per-entity narrowing" and every bundled skill is offered.
+        skill_names: frozenset[str] = frozenset(),
     ) -> AsyncIterator[AgentEvent]:
         if not self._sdk_available:
             yield AgentEvent(
@@ -705,7 +785,7 @@ class PydanticAIBackend:
             model = self._build_model()
             instructions = system_prompt or _DEFAULT_IDENTITY
             mcp_toolsets = await self._build_mcp_tools()
-            agent = self._get_or_create_agent(model, instructions, mcp_toolsets)
+            agent = self._get_or_create_agent(model, instructions, mcp_toolsets, skill_names)
 
             kwargs: dict[str, Any] = {"message_history": self._build_history(history)}
             max_turns = self.settings.pydantic_ai_max_turns
