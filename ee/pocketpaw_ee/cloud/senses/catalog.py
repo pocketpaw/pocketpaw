@@ -1,4 +1,5 @@
-# Catalog search — keyword/BM25 discovery over the FULL connector catalog.
+# Catalog search + listing — keyword/BM25 discovery AND full browse over the
+#   FULL connector catalog.
 # Created: 2026-07-16 (SR-1 catalog-wide discovery) — the search half of the
 #   new ``sense_search`` MCP tool. Where ``list_pocket_connectors`` /
 #   ``list_senses`` only enumerate what a pocket ALREADY bound, this searches
@@ -18,6 +19,19 @@
 #   store by the MCP handler), keeping this module pure + fully unit-testable.
 #   ``cost_estimate`` is a placeholder (None) — real per-action pricing lands in
 #   a later task; this module builds NO metering.
+# Updated: 2026-07-16 (SR-2 catalog listing API) — added ``list_catalog``: the
+#   BROWSE half (no query) behind ``GET /api/v1/cloud/senses/catalog``, the data
+#   behind a tools-style front door. It reuses the SAME ``_build_index`` path
+#   (trust / execution-mode / senses come from the same adapter-schema source as
+#   search — no duplicated index logic), then GROUPS every connector by CATEGORY
+#   (the connector def's ``type`` field, e.g. ``developer`` / ``communication``),
+#   deterministically sorted. Each connector carries its actions (with per-action
+#   trust + execution mode + availability + the ``cost_estimate=None``
+#   placeholder), its declared senses, and a BOUND flag overlaid from the same
+#   caller-supplied reachable set search uses. Availability follows the identical
+#   rule as search: ``local`` / ``sandbox`` actions the shared cloud can't
+#   dispatch are marked UNAVAILABLE. Pure + dependency-free — the tenant-filtered
+#   bound read still happens in the EE connectors service, not here.
 
 from __future__ import annotations
 
@@ -131,6 +145,10 @@ class _ActionDoc:
     trust_level: str
     execution_mode: str
     senses: tuple[str, ...]
+    # The connector's category — its ``type`` field (e.g. "developer",
+    # "communication"). Carried on every action doc so ``list_catalog`` can group
+    # without a second registry pass; search ignores it.
+    category: str = "generic"
     tokens: Counter[str] = field(default_factory=Counter)
 
     @property
@@ -167,6 +185,9 @@ async def _build_index(registry) -> list[_ActionDoc]:
     docs: list[_ActionDoc] = []
     for defn in registry.definitions:
         senses = tuple(getattr(defn, "senses", None) or ())
+        # Category = the connector def's ``type`` (ConnectorDef has no separate
+        # ``category`` field; ``type`` is the deterministic grouping key).
+        category = str(getattr(defn, "type", None) or "generic")
         try:
             adapter = connectors_service._adapter_for_definition(defn, defn.name)  # noqa: SLF001
             schemas = await adapter.actions()
@@ -193,6 +214,7 @@ async def _build_index(registry) -> list[_ActionDoc]:
                     trust_level=str(schema.trust_level),
                     execution_mode=str(schema.execution_mode),
                     senses=senses,
+                    category=category,
                     tokens=tokens,
                 )
             )
@@ -302,4 +324,145 @@ async def search_catalog(
     return hits
 
 
-__all__ = ["CatalogHit", "search_catalog"]
+# ---------------------------------------------------------------------------
+# Listing (browse, no query) — the grouped catalog behind GET /senses/catalog.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CatalogActionEntry:
+    """One action of a connector, as it appears in the browse catalog.
+
+    ``available`` is False for non-cloud execution modes the shared cloud can't
+    dispatch (``local`` / ``sandbox``) — the SAME rule ``search_catalog`` applies
+    — with ``unavailable_reason`` naming why. ``cost_estimate`` is a placeholder
+    (None) until per-action pricing ships.
+    """
+
+    action: str
+    description: str
+    trust_level: str  # "auto" | "confirm" | "restricted"
+    execution_mode: str  # "cloud" | "local" | "sandbox"
+    available: bool
+    unavailable_reason: str | None
+    cost_estimate: float | None
+
+
+@dataclass(frozen=True)
+class CatalogConnectorEntry:
+    """One connector in the browse catalog, with its actions + per-tenant state.
+
+    ``bound`` is True when the connector is enabled + reachable from the current
+    pocket (overlaid from the caller's reachable-set). ``senses`` are the
+    provider-agnostic capabilities the connector declares.
+    """
+
+    connector: str
+    display_name: str
+    category: str
+    senses: tuple[str, ...]
+    bound: bool
+    actions: tuple[CatalogActionEntry, ...]
+
+
+@dataclass(frozen=True)
+class CatalogCategoryGroup:
+    """Every connector sharing one category (the connector def's ``type``)."""
+
+    category: str
+    connectors: tuple[CatalogConnectorEntry, ...]
+
+
+async def list_catalog(
+    *,
+    bound_connectors: set[str] | None = None,
+    registry=None,
+) -> list[CatalogCategoryGroup]:
+    """Browse the WHOLE connector catalog, grouped by category.
+
+    The listing half of the catalog (search's sibling): no query, every connector
+    the registry knows, each with its full action list. Reuses ``_build_index``
+    verbatim so trust level, execution mode, and senses come from the SAME
+    adapter-schema source ``search_catalog`` reads — no duplicated index logic.
+
+    Grouping is deterministic: categories sorted alphabetically, connectors sorted
+    by name within a category, actions kept in the adapter's natural (YAML) order.
+    The category is the connector def's ``type`` field.
+
+    ``bound_connectors`` is the set of connector names reachable from the current
+    pocket (resolved from the EE store by the caller); each connector's ``bound``
+    flag is set from it. Passing ``None`` treats everything as unbound.
+    ``available`` is intrinsic to each action (False for ``local`` / ``sandbox``
+    the shared cloud can't dispatch). ``registry`` defaults to the EE connector-
+    service singleton; tests inject a registry built from a fixed connectors dir.
+    """
+    if registry is None:
+        from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+        registry = connectors_service._get_registry()  # noqa: SLF001 — reuse the EE singleton
+
+    bound = bound_connectors or set()
+    docs = await _build_index(registry)
+
+    # Fold the flat per-action index into per-connector accumulators, preserving
+    # first-seen action order (the adapter's YAML order).
+    by_connector: dict[str, dict] = {}
+    for doc in docs:
+        entry = by_connector.setdefault(
+            doc.connector,
+            {
+                "display_name": doc.display_name,
+                "category": doc.category,
+                "senses": doc.senses,
+                "actions": [],
+            },
+        )
+        reason = _UNAVAILABLE_REASONS.get(doc.execution_mode)
+        entry["actions"].append(
+            CatalogActionEntry(
+                action=doc.action,
+                description=doc.description,
+                trust_level=doc.trust_level,
+                execution_mode=doc.execution_mode,
+                available=reason is None,
+                unavailable_reason=reason,
+                # TODO(SR-pricing): real per-action cost lands in a later task;
+                # placeholder until then. Do NOT build metering here.
+                cost_estimate=None,
+            )
+        )
+
+    connectors = [
+        CatalogConnectorEntry(
+            connector=name,
+            display_name=data["display_name"],
+            category=data["category"],
+            senses=data["senses"],
+            bound=name in bound,
+            actions=tuple(data["actions"]),
+        )
+        for name, data in by_connector.items()
+    ]
+
+    # Group by category, sorting both levels for a stable, deterministic response.
+    by_category: dict[str, list[CatalogConnectorEntry]] = {}
+    for conn in connectors:
+        by_category.setdefault(conn.category, []).append(conn)
+
+    return [
+        CatalogCategoryGroup(
+            category=category,
+            connectors=tuple(sorted(members, key=lambda c: c.connector)),
+        )
+        for category, members in sorted(by_category.items())
+    ]
+
+
+__all__ = [
+    "CatalogActionEntry",
+    "CatalogCategoryGroup",
+    "CatalogConnectorEntry",
+    "CatalogHit",
+    "list_catalog",
+    "search_catalog",
+]
