@@ -25,7 +25,8 @@ you address by adding web processes rather than machines.
 - **Status**: Beta
 - **Provider support**: LiteLLM (default), Anthropic, OpenAI, OpenRouter, OpenAI-compatible, Ollama
 - **Built-in tools**: none of its own — see [Dispatch-only](#dispatch-only)
-- **MCP support**: Off by default — see [MCP](#mcp)
+- **MCP support**: Yes, servers held open per process — see [MCP](#mcp)
+- **Harness capabilities**: compaction, planning, tool-output limits, step persistence, skills
 - **Required key**: none at the top level; the LiteLLM virtual key is used instead
 
 ## Quick Start
@@ -50,7 +51,10 @@ pip install 'pocketpaw[pydantic-ai]'
 | `POCKETPAW_PYDANTIC_AI_MODEL` | `litellm:claude-sonnet-4-6` | Model in `provider:model` form |
 | `POCKETPAW_PYDANTIC_AI_PROVIDER` | `auto` | Provider when the model carries no prefix |
 | `POCKETPAW_PYDANTIC_AI_MAX_TURNS` | `100` | Max model requests per run (`0` = unlimited) |
-| `POCKETPAW_PYDANTIC_AI_MCP_ENABLED` | `false` | Attach configured MCP servers |
+| `POCKETPAW_PYDANTIC_AI_MCP_ENABLED` | `true` | Attach configured MCP servers |
+| `POCKETPAW_PYDANTIC_AI_HARNESS_ENABLED` | `true` | Attach harness capabilities |
+| `POCKETPAW_PYDANTIC_AI_SKILLS_ENABLED` | `true` | Expose PocketPaw skills to the model |
+| `POCKETPAW_PYDANTIC_AI_COMPACTION_MAX_MESSAGES` | `200` | History size that triggers compaction |
 | `POCKETPAW_PYDANTIC_AI_MAX_TOOL_OUTPUT_CHARS` | `200000` | Per-tool-result truncation ceiling |
 
 The model string accepts either form:
@@ -97,21 +101,63 @@ If you run single-tenant and want local execution, use `claude_agent_sdk`.
 
 ## MCP
 
-MCP support is present but **off by default**. Pydantic AI's MCP servers are
-refcounted: a shared server shuts down once concurrent runs reach zero and
-respawns on the next one. At low concurrency that puts a stdio subprocess spawn
-back on the request path — the exact cost this backend exists to remove.
+MCP servers configured in PocketPaw are attached automatically. Each server is
+started **once per backend instance and held open** for that instance's
+lifetime.
 
-Turning it on is gated on holding servers open for the process lifetime and
-measuring that subprocess count stays flat under load:
+That detail is the whole feature. Pydantic AI's MCP toolsets are refcounted: a
+server that is merely cached still shuts down the moment concurrent runs reach
+zero, and respawns on the next one. At sparse traffic — which is most traffic —
+that means a stdio subprocess spawn on every single turn, the exact cost this
+backend exists to remove. Holding the servers open pins the refcount above zero
+so it never happens, and stdio transports additionally run with fastmcp's
+`keep_alive`, which keeps the child process alive across sessions.
+
+A server that fails to start is dropped with a warning rather than failing the
+run. MCP is additive to the tool surface, never load-bearing.
 
 ```bash
-export POCKETPAW_PYDANTIC_AI_MCP_ENABLED="true"
-pip install 'pydantic-ai-slim[mcp]'
+export POCKETPAW_PYDANTIC_AI_MCP_ENABLED="false"   # drop MCP entirely
 ```
 
-The `mcp` extra is not pulled in by `pocketpaw[pydantic-ai]` because it forces a
-major `starlette` upgrade across the whole application.
+## Harness capabilities
+
+The backend attaches [`pydantic-ai-harness`](https://ai.pydantic.dev/) capabilities:
+
+| Capability | What it does |
+|-----------|--------------|
+| Compaction | Sliding window + clearing old tool results once history passes `COMPACTION_MAX_MESSAGES` |
+| Planning | A todo list the agent maintains across a long task |
+| Tool output limits | Truncates any single oversized tool result before it re-enters context |
+| Step persistence | An in-memory record of the run's steps |
+| Skills | PocketPaw's skills, with progressive disclosure — see below |
+
+Two are deliberately **not** wired. `DeduplicateFileReads` and `RepoContext` key
+off file-read tools and an on-disk repo that a dispatch-only agent doesn't have.
+`SubAgents` discovers agents from a folder on disk and there are no in-code
+subagents to register, so wiring it would add a capability that can never fire.
+
+`POCKETPAW_PYDANTIC_AI_HARNESS_ENABLED=false` runs the bare agent loop. The
+dependency is pinned exactly and releases frequently, so that escape hatch
+exists on purpose.
+
+### Skills
+
+Skills come from PocketPaw's own loader and are handed to the model with
+**progressive disclosure**: it sees names and descriptions, and pulls a skill's
+full body only when it decides to use one. The alternative — every skill in the
+system prompt on every turn — is expensive on a backend whose per-run cost *is*
+the context.
+
+Two constraints worth knowing:
+
+- Skills are passed **programmatically**. The underlying package can also scan
+  directories, clone git repos, or read S3; none of that is used, because
+  PocketPaw already owns skill discovery and a second mechanism is a second
+  place a tenant's surface could drift from policy.
+- The **script-execution tool is excluded**. It runs a skill's bundled script
+  locally, which is what dispatch-only rules out and what has no per-tenant jail
+  here.
 
 ## Prompt caching
 
@@ -147,7 +193,7 @@ Rollback is the same setting — set it back to `deep_agents`.
 
 ## Limitations
 
-- Beta. The dependency is pinned exactly; expect breaking changes on upgrade.
+- Beta. The dependencies are pinned exactly; expect breaking changes on upgrade.
 - No local shell or filesystem tools (by design — see above).
-- MCP off by default.
 - Prompt-cache margin unverified on the proxy path.
+- Subagents not wired.

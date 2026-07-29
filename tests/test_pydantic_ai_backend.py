@@ -412,17 +412,211 @@ async def test_status_reports_active_runs():
 # --------------------------------------------------------------------------
 
 
-async def test_mcp_is_off_by_default():
-    """Default-off is the shipped state, not an accident of the test fixture.
+def test_mcp_is_on_by_default():
+    """On by default, now that servers are held open for the instance lifetime.
 
-    pydantic-ai's MCP servers are refcounted: a shared server tears down when
-    concurrent runs reach zero and respawns on the next run, putting stdio
-    subprocess churn back on the request path. Enabling it is gated on the
-    subprocess-count measurement (PRD chunk 4).
+    ``test_mcp_servers_spawn_once_across_many_runs`` is the measurement that
+    earns this default; before the exit-stack hold, MCP shipped off.
     """
-    backend = PydanticAIBackend(_settings())
-    assert backend.settings.pydantic_ai_mcp_enabled is False
-    assert await backend._build_mcp_tools() == []
+    assert PydanticAIBackend(_settings()).settings.pydantic_ai_mcp_enabled is True
+
+
+class _SpawnCountingServer:
+    """Stand-in for an MCP toolset that records start/stop like the real one.
+
+    Mirrors ``MCPToolset``'s refcount contract (``mcp.py:_running_count``):
+    ``__aenter__`` starts the process only on the 0 -> 1 transition, and
+    ``__aexit__`` stops it on 1 -> 0. Counting spawns against this measures OUR
+    lifecycle handling, which is the thing under test — a real stdio server
+    would measure fastmcp's ``keep_alive`` instead, and would need a live MCP
+    binary on the box.
+    """
+
+    def __init__(self) -> None:
+        self.spawns = 0
+        self.stops = 0
+        self._count = 0
+
+    async def __aenter__(self):
+        # The sleep is load-bearing, not padding. Starting a real MCP server
+        # does I/O and therefore suspends; without a suspension point here the
+        # "concurrent" runs never actually interleave, and the cold-start-lock
+        # test silently passes with the lock removed (confirmed by probe).
+        if self._count == 0:
+            await asyncio.sleep(0.02)
+            self.spawns += 1
+        self._count += 1
+        return self
+
+    async def __aexit__(self, *exc):
+        self._count -= 1
+        if self._count == 0:
+            self.stops += 1
+        return False
+
+    @property
+    def running(self) -> bool:
+        return self._count > 0
+
+
+class _FakeCfg:
+    def __init__(self, name="fake", **kw):
+        self.name = name
+        self.enabled = True
+        self.transport = "stdio"
+        self.command = "node"
+        self.args = []
+        self.env = None
+        self.url = None
+        self.__dict__.update(kw)
+
+
+def _drive_real_mcp(monkeypatch, servers, *, n_configs=1):
+    """Make the REAL ``_start_mcp_servers`` build *servers*.
+
+    Deliberately does NOT stub ``_start_mcp_servers`` itself. An earlier version
+    of these tests replaced that method with a helper carrying its own copy of
+    the exit-stack hold, so the mutation probe passed — the test was measuring
+    the fixture, not the code. Only the leaf collaborators are stubbed here
+    (config loading and toolset construction) so the hold, the failure
+    handling and the lock all execute for real.
+    """
+    monkeypatch.setattr(
+        "pocketpaw.mcp.config.load_mcp_config",
+        lambda: [_FakeCfg(name=f"s{i}") for i in range(n_configs)],
+    )
+    it = iter(servers)
+    monkeypatch.setattr("pydantic_ai.mcp.MCPToolset", lambda client, **kw: next(it))
+    monkeypatch.setattr("pydantic_ai.toolsets.PrefixedToolset", lambda ts, prefix: ts)
+
+
+async def test_mcp_servers_spawn_once_across_many_runs(monkeypatch):
+    """A server must start ONCE per backend instance, not once per run.
+
+    This is the measurement that earns MCP being on by default. pydantic-ai's
+    MCP toolsets are refcounted, so a cached-but-unheld server tears down the
+    moment concurrent runs reach zero and respawns on the next one — at sparse
+    traffic, a stdio subprocess spawn on every single turn.
+
+    Mutation-checked: drop the ``AsyncExitStack`` hold in ``_start_mcp_servers``
+    and this fails (the server is stopped straight after being started).
+    """
+    pytest.importorskip("fastmcp", reason="pydantic-ai-slim[mcp] not installed")
+
+    server = _SpawnCountingServer()
+    backend = PydanticAIBackend(_settings(pydantic_ai_mcp_enabled=True))
+    backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
+    backend._custom_tools = []
+    _drive_real_mcp(monkeypatch, [server])
+
+    for i in range(5):
+        await _collect(backend, f"run {i}")
+
+    assert server.spawns == 1, f"server spawned {server.spawns} times across 5 runs"
+    assert server.stops == 0, "server torn down between runs — it will respawn on the next"
+    assert server.running is True, "refcount fell to zero; the next run pays a spawn"
+
+    # Only stop() releases it.
+    await backend.stop()
+    assert server.stops == 1
+    assert backend._mcp_stack is None
+
+
+async def test_concurrent_first_runs_do_not_double_spawn(monkeypatch):
+    """Two runs racing on a cold instance must not each start the server set.
+
+    ``_start_mcp_servers`` awaits, so without ``_mcp_lock`` both runs see an
+    empty cache and each spawns a full set of subprocesses.
+
+    Mutation-checked: replace the lock with a no-op context manager and the
+    spawn count rises with concurrency.
+    """
+    pytest.importorskip("fastmcp", reason="pydantic-ai-slim[mcp] not installed")
+
+    servers = [_SpawnCountingServer() for _ in range(4)]
+    backend = PydanticAIBackend(_settings(pydantic_ai_mcp_enabled=True))
+    backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
+    backend._custom_tools = []
+    _drive_real_mcp(monkeypatch, servers)
+
+    await asyncio.gather(*(_collect(backend, f"run {i}") for i in range(4)))
+
+    started = [s for s in servers if s.spawns]
+    assert len(started) == 1, f"cold-start race started {len(started)} server sets, expected 1"
+    assert started[0].spawns == 1
+
+
+async def test_mcp_server_that_fails_to_start_is_dropped_not_fatal(monkeypatch):
+    """MCP is additive to the tool surface, never load-bearing."""
+    pytest.importorskip("fastmcp", reason="pydantic-ai-slim[mcp] not installed")
+
+    class _Broken:
+        async def __aenter__(self):
+            raise RuntimeError("no such command")
+
+        async def __aexit__(self, *exc):
+            return False
+
+    backend = PydanticAIBackend(_settings(pydantic_ai_mcp_enabled=True))
+    backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
+    backend._custom_tools = []
+    _drive_real_mcp(monkeypatch, [_Broken()])
+
+    events = await _collect(backend, "hi")
+
+    assert events[-1].type == "done"
+    assert not any(e.type == "error" for e in events)
+    assert backend._mcp_tools == []
+    assert backend._mcp_stack is None, "an all-failed start must not leak an open stack"
+
+
+async def test_one_broken_server_does_not_take_down_a_healthy_one(monkeypatch):
+    pytest.importorskip("fastmcp", reason="pydantic-ai-slim[mcp] not installed")
+
+    class _Broken:
+        async def __aenter__(self):
+            raise RuntimeError("no such command")
+
+        async def __aexit__(self, *exc):
+            return False
+
+    healthy = _SpawnCountingServer()
+    backend = PydanticAIBackend(_settings(pydantic_ai_mcp_enabled=True))
+    backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
+    backend._custom_tools = []
+    _drive_real_mcp(monkeypatch, [_Broken(), healthy], n_configs=2)
+
+    await _collect(backend, "hi")
+
+    assert backend._mcp_tools == [healthy]
+    assert healthy.running is True
+
+
+def test_mcp_transport_mapping():
+    """stdio must go through an explicit StdioTransport with keep_alive on."""
+    pytest.importorskip("fastmcp", reason="pydantic-ai-slim[mcp] not installed")
+
+    class _Cfg:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    stdio = PydanticAIBackend._mcp_client_for(
+        _Cfg(transport="stdio", command="node", args=["s.js"], env=None, url=None)
+    )
+    assert stdio.command == "node"
+    assert stdio.keep_alive is True, "keep_alive off means the child dies between sessions"
+
+    http = PydanticAIBackend._mcp_client_for(
+        _Cfg(transport="streamable-http", url="https://x/mcp", command=None, args=None, env=None)
+    )
+    assert http == "https://x/mcp"
+
+    assert (
+        PydanticAIBackend._mcp_client_for(
+            _Cfg(transport="stdio", command=None, args=None, env=None, url=None)
+        )
+        is None
+    )
 
 
 async def test_mcp_loading_is_cached_per_instance_not_per_run(monkeypatch):
@@ -431,9 +625,9 @@ async def test_mcp_loading_is_cached_per_instance_not_per_run(monkeypatch):
     # "install fastmcp" ImportError to attribute access, so only touching the
     # class tells you whether the extra is really there.
     try:
-        from pydantic_ai.mcp import MCPServerStdio  # noqa: F401
+        from pydantic_ai.mcp import MCPToolset  # noqa: F401
     except ImportError:
-        pytest.skip("pydantic-ai-slim[mcp] not installed — MCP ships OFF until PRD chunk 4")
+        pytest.skip("pydantic-ai-slim[mcp] not installed")
 
     calls = {"n": 0}
 
@@ -456,14 +650,192 @@ async def test_mcp_loading_is_cached_per_instance_not_per_run(monkeypatch):
     assert calls["n"] == 1, "MCP config re-read per run — that is the subprocess-per-run shape"
 
 
-async def test_mcp_absent_dependency_degrades_to_empty():
-    """With the ``mcp`` extra uninstalled the branch must return empty, not raise.
-
-    This is the SHIPPED configuration — the extra is deliberately excluded
-    because it forces a starlette major bump for a default-OFF capability.
-    """
-    backend = PydanticAIBackend(_settings(pydantic_ai_mcp_enabled=True))
+async def test_mcp_disabled_returns_empty():
+    backend = PydanticAIBackend(_settings(pydantic_ai_mcp_enabled=False))
     assert await backend._build_mcp_tools() == []
+    assert backend._mcp_stack is None
+
+
+# --------------------------------------------------------------------------
+# harness capabilities
+# --------------------------------------------------------------------------
+
+
+def test_harness_capabilities_are_wired():
+    """The four capabilities that fit a dispatch-only agent must be attached."""
+    pytest.importorskip("pydantic_ai_harness", reason="harness not installed")
+
+    caps = PydanticAIBackend(_settings())._build_capabilities()
+    names = {type(c).__name__ for c in caps}
+
+    assert {
+        "SlidingWindow",
+        "ClearToolResults",
+        "Planning",
+        "StepPersistence",
+        "OverflowingToolOutput",
+    } <= names, names
+
+
+async def test_skills_capability_engages_and_excludes_script_execution(monkeypatch):
+    """Skills reach the model, and the script-execution tool does NOT.
+
+    ``run_skill_script`` executes a skill's bundled script locally. That is the
+    thing dispatch-only rules out, and on an in-process backend it has no
+    per-tenant jail — so its ABSENCE is a security property, not a preference.
+    """
+    pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
+
+    from pocketpaw.skills.loader import Skill as PawSkill
+
+    fake = {
+        "demo": PawSkill(
+            name="demo",
+            description="A demo skill.",
+            content="# Demo\nDo the demo thing.",
+            path=__import__("pathlib").Path("."),
+        )
+    }
+    monkeypatch.setattr("pocketpaw.skills.loader.SkillLoader.load", lambda self, force=False: fake)
+
+    seen: dict = {}
+
+    async def stream_fn(messages, info: AgentInfo):
+        seen["tools"] = {t.name for t in info.function_tools}
+        yield "ok"
+
+    backend = _backend_with_model(FunctionModel(stream_function=stream_fn))
+    await _collect(backend, "use a skill")
+
+    assert "list_skills" in seen["tools"], seen["tools"]
+    assert "load_skill" in seen["tools"], seen["tools"]
+    assert "run_skill_script" not in seen["tools"], "local script execution reached the model"
+    assert "read_skill_resource" not in seen["tools"], seen["tools"]
+
+
+def test_skills_are_passed_programmatically_not_discovered(monkeypatch):
+    """No directory / git / S3 discovery — PocketPaw's loader is the one source."""
+    pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
+
+    from pocketpaw.skills.loader import Skill as PawSkill
+
+    fake = {
+        "a": PawSkill(name="a", description="d", content="c", path=__import__("pathlib").Path("."))
+    }
+    monkeypatch.setattr("pocketpaw.skills.loader.SkillLoader.load", lambda self, force=False: fake)
+
+    cap = PydanticAIBackend(_settings())._build_skills_capability()
+    assert cap is not None
+    assert not getattr(cap, "directories", None)
+    assert not getattr(cap, "registries", None)
+
+
+def test_skills_respect_disable_model_invocation(monkeypatch):
+    pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
+
+    from pocketpaw.skills.loader import Skill as PawSkill
+
+    p = __import__("pathlib").Path(".")
+    fake = {
+        "on": PawSkill(name="on", description="d", content="c", path=p),
+        "off": PawSkill(
+            name="off", description="d", content="c", path=p, disable_model_invocation=True
+        ),
+    }
+    monkeypatch.setattr("pocketpaw.skills.loader.SkillLoader.load", lambda self, force=False: fake)
+
+    names = {s.name for s in PydanticAIBackend(_settings())._build_skills_capability().skills}
+    assert names == {"on"}
+
+
+def test_skills_disabled_returns_none():
+    assert (
+        PydanticAIBackend(_settings(pydantic_ai_skills_enabled=False))._build_skills_capability()
+        is None
+    )
+
+
+def test_skills_absent_when_loader_yields_nothing(monkeypatch):
+    """An empty capability would add tool surface for nothing."""
+    pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
+
+    monkeypatch.setattr("pocketpaw.skills.loader.SkillLoader.load", lambda self, force=False: {})
+    assert PydanticAIBackend(_settings())._build_skills_capability() is None
+
+
+def test_harness_drops_capabilities_that_need_a_filesystem():
+    """Dropped ones must be dropped, not quietly half-wired.
+
+    ``DeduplicateFileReads`` keys off file-read tools this backend does not
+    have; ``RepoContext`` scans a repo from disk; ``SubAgents`` discovers
+    agents from an on-disk folder by default. A capability that can never fire
+    is worse than none — it reads as covered.
+    """
+    pytest.importorskip("pydantic_ai_harness", reason="harness not installed")
+
+    names = {type(c).__name__ for c in PydanticAIBackend(_settings())._build_capabilities()}
+    assert "DeduplicateFileReads" not in names
+    assert "RepoContext" not in names
+    assert "SubAgents" not in names
+
+
+def test_step_persistence_store_is_in_memory():
+    """Disk-backed stores share a process-global path across tenants."""
+    pytest.importorskip("pydantic_ai_harness", reason="harness not installed")
+
+    from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepPersistence
+
+    caps = PydanticAIBackend(_settings())._build_capabilities()
+    sp = next(c for c in caps if isinstance(c, StepPersistence))
+    assert isinstance(sp.store, InMemoryStepStore)
+
+
+def test_harness_can_be_disabled():
+    """Escape hatch: the dependency is pre-1.0 in cadence and pinned exactly."""
+    assert (
+        PydanticAIBackend(_settings(pydantic_ai_harness_enabled=False))._build_capabilities() == []
+    )
+
+
+async def test_planning_capability_engages_on_a_real_run():
+    """Proof it fires, not just that it was constructed.
+
+    Planning contributes a todo toolset, so the write-todos tool has to be
+    visible to the model on an actual run.
+    """
+    pytest.importorskip("pydantic_ai_harness", reason="harness not installed")
+
+    seen: dict = {}
+
+    async def stream_fn(messages, info: AgentInfo):
+        seen["tools"] = {t.name for t in info.function_tools}
+        yield "ok"
+
+    backend = _backend_with_model(FunctionModel(stream_function=stream_fn))
+    await _collect(backend, "plan something")
+
+    # write_plan comes from Planning; read_tool_result from OverflowingToolOutput.
+    # Both are harness-contributed, so seeing them proves the capabilities are
+    # live on the run rather than merely constructed.
+    assert "write_plan" in seen["tools"], seen["tools"]
+    assert "read_tool_result" in seen["tools"], seen["tools"]
+
+
+async def test_harness_disabled_removes_the_capability_tools():
+    """The mirror of the test above — proves the toggle is real."""
+    seen: dict = {}
+
+    async def stream_fn(messages, info: AgentInfo):
+        seen["tools"] = {t.name for t in info.function_tools}
+        yield "ok"
+
+    backend = _backend_with_model(
+        FunctionModel(stream_function=stream_fn), pydantic_ai_harness_enabled=False
+    )
+    await _collect(backend, "plan something")
+
+    assert "write_plan" not in seen["tools"], seen["tools"]
+    assert "read_tool_result" not in seen["tools"], seen["tools"]
 
 
 def test_attach_specialist_tools_makes_backend_eligible():

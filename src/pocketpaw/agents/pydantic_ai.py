@@ -142,7 +142,13 @@ class PydanticAIBackend:
         self._sdk_available = False
         self._custom_tools: list | None = None
         self._mcp_tools: list | None = None
-        self._mcp_client: Any = None
+        # Holds every MCP server open for this instance's lifetime so the
+        # refcount never returns to zero. Unwound in ``stop()``.
+        self._mcp_stack: Any = None
+        # ``_build_mcp_tools`` awaits while starting servers, so two concurrent
+        # first runs would otherwise both see an empty cache and each spawn a
+        # full set of subprocesses — the exact cost this guards against.
+        self._mcp_lock = asyncio.Lock()
         self._policy = ToolPolicy(
             profile=settings.tool_profile,
             allow=settings.tools_allow,
@@ -311,41 +317,74 @@ class PydanticAIBackend:
     async def _build_mcp_tools(self) -> list:
         """Build pydantic-ai toolsets from PocketPaw's configured MCP servers.
 
-        Cached PER BACKEND INSTANCE, never per run. An MCP stdio server
-        instantiated per run would reintroduce exactly the subprocess-per-run
-        cost this backend exists to remove — the toolset here is built once and
-        shared across every concurrent run on this instance.
+        Two separate things keep this off the request path, and BOTH are
+        required — instance caching alone is not enough:
 
-        **Returns empty unless ``pydantic_ai_mcp_enabled`` is set.** Instance
-        caching is necessary but NOT sufficient: pydantic-ai's MCP servers are
-        refcounted (``mcp.py:_running_count``), so a shared server still tears
-        down the moment concurrent runs reach zero and respawns on the next run.
-        At low concurrency that is a stdio subprocess spawn on the request path —
-        the cost this backend exists to remove, reintroduced quietly. Closing
-        that gap means holding the servers open across the instance's lifetime
-        and proving subprocess count stays flat under concurrent load, which is
-        a measurement (PRD chunk 4), not a code tweak. Until it is taken, this
-        stays off by default rather than shipping a silent regression.
+        1. **Built once per instance.** Constructing servers per run would put a
+           process spawn in every turn.
+        2. **Held open for the instance's lifetime.** pydantic-ai's MCP servers
+           are refcounted (``mcp.py:_running_count``): a shared server tears down
+           the moment concurrent runs reach zero and RESPAWNS on the next run. A
+           cached-but-unheld server therefore still spawns a stdio subprocess per
+           run whenever traffic is sparse — which is most of the time outside a
+           load test. Entering each server once into ``self._mcp_stack`` pins the
+           refcount at >= 1, so per-run enter/exit can never drop it to zero.
+           ``stop()`` unwinds the stack.
+
+        ``test_mcp_servers_spawn_once_across_many_runs`` measures exactly that
+        and is mutation-checked: drop the exit-stack hold and the spawn count
+        goes from 1 to one-per-run.
         """
         if self._mcp_tools is not None:
             return self._mcp_tools
 
-        if not getattr(self.settings, "pydantic_ai_mcp_enabled", False):
-            self._mcp_tools = []
+        async with self._mcp_lock:
+            # Re-check: a concurrent first run may have built it while we waited.
+            if self._mcp_tools is None:
+                self._mcp_tools = await self._start_mcp_servers()
             return self._mcp_tools
 
+    @staticmethod
+    def _mcp_client_for(cfg: Any) -> Any:
+        """Build the fastmcp transport for one PocketPaw MCP server config.
+
+        ``MCPToolset`` takes anything fastmcp can build a transport from. Stdio
+        needs an explicit ``StdioTransport`` so ``keep_alive`` is set on purpose
+        rather than inherited: it keeps the child process alive across client
+        sessions, which is the second half of not spawning per run (the first
+        being the exit-stack hold in the caller).
+        """
+        transport = getattr(cfg, "transport", "")
+        if transport == "stdio" and getattr(cfg, "command", None):
+            from fastmcp.client.transports import StdioTransport
+
+            return StdioTransport(
+                command=cfg.command,
+                args=list(cfg.args or []),
+                env=cfg.env or None,
+                keep_alive=True,
+            )
+        if transport in ("sse", "http", "streamable-http") and getattr(cfg, "url", None):
+            # fastmcp infers SSE vs streamable-HTTP from the URL.
+            return cfg.url
+        return None
+
+    async def _start_mcp_servers(self) -> list:
+        """Construct and start the configured MCP servers. Caller holds the lock."""
+        if not getattr(self.settings, "pydantic_ai_mcp_enabled", True):
+            return []
+
         try:
-            from pydantic_ai.mcp import MCPServerSSE, MCPServerStdio, MCPServerStreamableHTTP
+            from pydantic_ai.mcp import MCPToolset
+            from pydantic_ai.toolsets import PrefixedToolset
         except ImportError:
             logger.debug("pydantic-ai MCP extra not installed, skipping MCP tools")
-            self._mcp_tools = []
-            return self._mcp_tools
+            return []
 
         try:
             from pocketpaw.mcp.config import load_mcp_config
         except ImportError:
-            self._mcp_tools = []
-            return self._mcp_tools
+            return []
 
         servers: list = []
         for cfg in load_mcp_config() or []:
@@ -355,26 +394,48 @@ class PydanticAIBackend:
                 logger.info("MCP server '%s' blocked by tool policy", cfg.name)
                 continue
             try:
-                if cfg.transport == "stdio" and cfg.command:
-                    servers.append(
-                        MCPServerStdio(
-                            command=cfg.command,
-                            args=list(cfg.args or []),
-                            env=cfg.env or None,
-                            tool_prefix=cfg.name,
-                        )
-                    )
-                elif cfg.transport == "sse" and cfg.url:
-                    servers.append(MCPServerSSE(url=cfg.url, tool_prefix=cfg.name))
-                elif cfg.transport in ("http", "streamable-http") and cfg.url:
-                    servers.append(MCPServerStreamableHTTP(url=cfg.url, tool_prefix=cfg.name))
+                client = self._mcp_client_for(cfg)
+                if client is None:
+                    continue
+                # Prefix with the server name so tools from two servers can't
+                # collide, matching what ``load_mcp_toolsets`` does for the
+                # config-file path.
+                servers.append(PrefixedToolset(MCPToolset(client), cfg.name))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Skipping MCP server '%s': %s", cfg.name, exc)
 
-        self._mcp_tools = servers
+        # Pin the refcount. Without this every server is torn down as soon as
+        # concurrent runs reach zero and respawned on the next turn — see the
+        # docstring. A server that fails to start is dropped rather than
+        # failing the run: MCP is additive to the tool surface, never
+        # load-bearing.
         if servers:
-            logger.info("Built %d MCP toolsets for Pydantic AI", len(servers))
-        return self._mcp_tools
+            from contextlib import AsyncExitStack
+
+            stack = AsyncExitStack()
+            held: list = []
+            for server in servers:
+                try:
+                    await stack.enter_async_context(server)
+                    held.append(server)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "MCP server %r failed to start; continuing without it: %s",
+                        getattr(server, "tool_prefix", server),
+                        exc,
+                    )
+            if held:
+                self._mcp_stack = stack
+            else:
+                await stack.aclose()
+            servers = held
+
+        if servers:
+            logger.info(
+                "Built %d MCP toolsets for Pydantic AI, held open for the instance lifetime",
+                len(servers),
+            )
+        return servers
 
     def attach_specialist_tools(self, tools: list[Any]) -> None:
         """Merge specialist-internal tools into the cache for an isolated run.
@@ -407,6 +468,135 @@ class PydanticAIBackend:
         reaches it through ContextVars instead.
         """
         return None
+
+    def _build_capabilities(self) -> list:
+        """Build the ``pydantic-ai-harness`` capabilities for this backend.
+
+        Four of the PRD's six are wired. The other two are dropped, with the
+        reason recorded here rather than left as a silent gap — the PRD's own
+        done-condition allows dropping a capability that assumes the FileSystem
+        or Shell this design excludes.
+
+        **Wired:**
+
+        * ``SlidingWindow`` + ``ClearToolResults`` (Compaction) — a long tool
+          loop is exactly what blows the context on a dispatch-only agent, and
+          neither strategy touches disk. ``DeduplicateFileReads`` is NOT used:
+          it keys off file-read tools this backend does not have.
+        * ``Planning`` — a todo toolset, no filesystem.
+        * ``OverflowingToolOutput`` — the per-tool ceiling, enforced in the
+          harness rather than only in our bridge wrapper. ``Truncate``, not
+          ``Spill``: spilling writes overflow to a store on disk, and a
+          process-global path is shared across tenants here.
+        * ``StepPersistence`` with an in-memory store — ``FileStepStore`` and
+          ``SqliteStepStore`` are both disk-backed. In-memory keeps the run
+          record available for the turn without a shared-path write.
+
+        * **Skills** — via ``pydantic-ai-skills`` (``SkillsCapability``), NOT
+          the harness, which ships no skills capability of its own in 0.8.0.
+          See ``_build_skills_capability``.
+
+        **Dropped:**
+
+        * **Subagents** — ``SubAgents`` defaults to discovering agents from an
+          ``agents`` FOLDER on disk, and we have no in-code subagents to
+          register. Wiring it with an empty list would add a capability that
+          can never fire. Revisit when there is a real subagent to declare.
+        """
+        if not getattr(self.settings, "pydantic_ai_harness_enabled", True):
+            return []
+        try:
+            from pydantic_ai_harness.compaction import ClearToolResults, SlidingWindow
+            from pydantic_ai_harness.overflowing_tool_output import (
+                Band,
+                OverflowingToolOutput,
+                Truncate,
+            )
+            from pydantic_ai_harness.planning import Planning
+            from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepPersistence
+        except ImportError:
+            logger.debug("pydantic-ai-harness not installed, running without capabilities")
+            return []
+
+        limit = int(getattr(self.settings, "pydantic_ai_max_tool_output_chars", 0) or 0)
+        capabilities: list = [
+            SlidingWindow(max_messages=self.settings.pydantic_ai_compaction_max_messages),
+            ClearToolResults(max_messages=self.settings.pydantic_ai_compaction_max_messages),
+            Planning(),
+            StepPersistence(store=InMemoryStepStore(), agent_name="pocketpaw"),
+        ]
+        if limit:
+            capabilities.append(
+                OverflowingToolOutput(bands=[Band(over=limit, action=Truncate(max_chars=limit))])
+            )
+
+        skills = self._build_skills_capability()
+        if skills is not None:
+            capabilities.append(skills)
+        return capabilities
+
+    def _build_skills_capability(self) -> Any:
+        """Expose PocketPaw's skills through ``pydantic-ai-skills``.
+
+        Skills reach the model by progressive disclosure: the agent sees a list
+        of names and descriptions, and pulls a skill's full body only when it
+        decides to use one. That matters here because the alternative — pasting
+        every skill into the system prompt — is what makes the prompt enormous
+        on a backend whose per-run cost IS the context.
+
+        Two deliberate constraints:
+
+        * **Skills are passed programmatically, never discovered from disk.**
+          ``SkillsCapability`` can scan directories, clone git repos, or read
+          S3. All three are declined: PocketPaw already owns skill discovery
+          (``pocketpaw.skills.loader.SkillLoader``), and a second discovery
+          mechanism would be one more place a tenant's surface could differ
+          from what the policy says it is. We hand over what the loader already
+          resolved.
+        * **``run_skill_script`` is excluded.** It executes a skill's bundled
+          script — local execution, which is exactly what dispatch-only rules
+          out and what has no per-tenant jail on an in-process backend.
+          ``read_skill_resource`` goes too, since we pass no resources, so
+          leaving it would advertise a tool that can only fail.
+
+        Returns ``None`` when the package is absent, the feature is off, or no
+        skills resolve — an empty capability would just add tool surface.
+        """
+        if not getattr(self.settings, "pydantic_ai_skills_enabled", True):
+            return None
+        try:
+            from pydantic_ai_skills import Skill as PaiSkill
+            from pydantic_ai_skills import SkillsCapability
+        except ImportError:
+            logger.debug("pydantic-ai-skills not installed, running without skills")
+            return None
+
+        try:
+            from pocketpaw.skills.loader import SkillLoader
+
+            loaded = SkillLoader().load()
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Could not load PocketPaw skills: %s", exc)
+            return None
+
+        skills = [
+            PaiSkill(
+                name=skill.name,
+                description=skill.description,
+                content=skill.content,
+            )
+            for skill in loaded.values()
+            if not getattr(skill, "disable_model_invocation", False)
+        ]
+        if not skills:
+            return None
+
+        logger.info("Pydantic AI: exposing %d PocketPaw skills", len(skills))
+        return SkillsCapability(
+            skills=skills,
+            exclude_tools={"run_skill_script", "read_skill_resource"},
+            validate=False,
+        )
 
     # -- agent assembly -----------------------------------------------------
 
@@ -453,6 +643,7 @@ class PydanticAIBackend:
             instructions=instructions,
             tools=tools,
             toolsets=list(mcp_toolsets) or None,
+            capabilities=self._build_capabilities() or None,
             # The agent is shared across concurrent runs; conversation state
             # rides in ``message_history`` per run, never on the agent.
             retries=2,
@@ -694,17 +885,16 @@ class PydanticAIBackend:
         for handle in list(self._active):
             handle.stopped = True
 
-        if self._mcp_client is not None:
+        # Release the MCP servers this instance has been holding open. This is
+        # the ONLY place they are torn down — the whole point of the exit stack
+        # is that no per-run exit can do it.
+        if self._mcp_stack is not None:
+            stack, self._mcp_stack = self._mcp_stack, None
             try:
-                close = getattr(self._mcp_client, "close", None) or getattr(
-                    self._mcp_client, "aclose", None
-                )
-                if close:
-                    await close()
+                await stack.aclose()
             except Exception as exc:  # noqa: BLE001
-                logger.debug("MCP client cleanup error: %s", exc)
+                logger.debug("MCP server shutdown error: %s", exc)
             finally:
-                self._mcp_client = None
                 self._mcp_tools = None
 
     async def get_status(self) -> dict[str, Any]:
@@ -714,6 +904,7 @@ class PydanticAIBackend:
             "available": self._sdk_available,
             "running": bool(self._active),
             "active_runs": len(self._active),
+            "mcp_servers": len(self._mcp_tools or ()),
             "model": self.settings.pydantic_ai_model,
             "provider": provider,
             "resolved_model": model,

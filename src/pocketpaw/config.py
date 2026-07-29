@@ -634,16 +634,44 @@ class Settings(BaseSettings):
         ),
     )
     pydantic_ai_mcp_enabled: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Attach configured MCP servers to the Pydantic AI backend. OFF by "
-            "default and deliberately so: pydantic-ai's MCP servers are "
-            "refcounted, so a server tears down when concurrent runs drop to "
-            "zero and RESPAWNS on the next run — putting stdio subprocess churn "
-            "back on the request path, which is the exact cost this backend "
-            "exists to remove. Turning this on is gated on holding the servers "
-            "open for the backend instance's lifetime and MEASURING subprocess "
-            "count flat under concurrent load (PRD chunk 4)."
+            "Attach configured MCP servers to the Pydantic AI backend. The "
+            "backend holds each server open for the lifetime of the backend "
+            "instance, so pydantic-ai's refcount never returns to zero and a "
+            "server is started exactly once rather than respawning whenever "
+            "concurrent runs briefly reach zero. Set false to drop MCP from the "
+            "tool surface entirely."
+        ),
+    )
+    pydantic_ai_harness_enabled: bool = Field(
+        default=True,
+        description=(
+            "Attach the pydantic-ai-harness capabilities (compaction, planning, "
+            "tool-output limits, step persistence) to the Pydantic AI backend. "
+            "Set false to run the bare agent loop — the escape hatch if a "
+            "harness release regresses, since the dependency is pre-1.0 in "
+            "cadence and pinned exactly."
+        ),
+    )
+    pydantic_ai_skills_enabled: bool = Field(
+        default=True,
+        description=(
+            "Expose PocketPaw's skills to the Pydantic AI backend via "
+            "pydantic-ai-skills, using progressive disclosure — the model sees "
+            "names and descriptions and pulls a skill's body only when it uses "
+            "one, instead of the whole set riding in the system prompt every "
+            "turn. Skills are passed programmatically from PocketPaw's own "
+            "loader; directory / git / S3 discovery is not used, and the "
+            "script-execution tool is excluded (dispatch-only)."
+        ),
+    )
+    pydantic_ai_compaction_max_messages: int = Field(
+        default=200,
+        description=(
+            "Message count above which the Pydantic AI backend compacts a run's "
+            "history (sliding window + clearing old tool results). A long tool "
+            "loop is what blows the context window on a dispatch-only agent."
         ),
     )
     pydantic_ai_max_tool_output_chars: int = Field(
