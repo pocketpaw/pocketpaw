@@ -30,6 +30,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import BaseModel
 from pymongo.errors import DuplicateKeyError
 
 from pocketpaw_ee.cloud._core.errors import NotFound
@@ -47,7 +48,29 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _to_activity_row(doc: ChatRunDoc) -> RunActivityRow:
+class _RunActivityProjection(BaseModel):
+    """Wire-minimal projection for the two activity reads (HR-12a).
+
+    Without this, both reads pull WHOLE run documents just to keep six fields —
+    and ``ChatRunDoc.partial_text`` holds the entire assistant answer (see
+    ``run_core`` writing ``partial_text=full_text``), plus ``usage``. On a
+    board polled every few seconds by every signed-in member, the recent read
+    would drag up to ``MAX_RECENT_RUNS_SCANNED`` full answers across the wire
+    and discard all of them; it also inflates the top-K sort buffer, which on a
+    workspace with long turns can reach Mongo's 32MB in-memory sort limit and
+    fail the endpoint outright. Field names mirror the document exactly so
+    ``_to_activity_row`` reads either shape.
+    """
+
+    run_id: str
+    agent_id: str
+    status: str
+    createdAt: datetime
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+
+def _to_activity_row(doc: ChatRunDoc | _RunActivityProjection) -> RunActivityRow:
     """Project a run document onto the Beanie-free activity value object."""
     return RunActivityRow(
         run_id=doc.run_id,
@@ -243,6 +266,7 @@ async def find_active_runs_for_workspace(
             ChatRunDoc.createdAt >= since,
             {"status": {"$in": list(ACTIVE_RUN_STATUSES)}},
         )
+        .project(_RunActivityProjection)
         .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
         .limit(limit)
         .to_list()
@@ -267,6 +291,7 @@ async def find_recent_runs_for_workspace(
             ChatRunDoc.workspace == workspace_id,
             ChatRunDoc.createdAt >= since,
         )
+        .project(_RunActivityProjection)
         .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
         .limit(limit)
         .to_list()
