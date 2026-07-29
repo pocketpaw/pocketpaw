@@ -61,6 +61,18 @@
 #   ``_adapt_member_role_change``. The execute-time RBAC re-check + args-hash +
 #   idempotency + fail-closed chokepoint are UNCHANGED and already apply to every
 #   whitelist entry (they key off the blob, not the specific action).
+# Updated: 2026-07-16 (SR-4 just-in-time connector bind) — the ``connector.manage``
+#   op=enable dispatch now accepts an OPTIONAL connector SCOPE so the agent's
+#   ``sense_request_bind`` MCP tool can bind a discovered connector to the CURRENT
+#   pocket (scope=pocket + pocket_id), not only workspace-wide. ``_adapt_connector_
+#   manage`` reads ONLY the extra ``scope`` + ``pocket_id`` keys (STRICT — enum-
+#   constrained, pocket_id required for scope=pocket), and ``_call_connector_manage``
+#   folds them into the typed ``EnableConnectorRequest``. Absent scope → the
+#   historical workspace-scope enable, so ``workspace_admin.connector_enable`` is
+#   unchanged. THE security posture is reused wholesale: a bind is still a
+#   ``connector.manage`` (ADMIN) write, RE-CHECKED against the PROPOSER's CURRENT
+#   role at execute time (a member's bind proposal fails closed — member→admin
+#   routing is SR-6, not built here). No new approve→execute path, no new subsystem.
 #
 # What this module does (the apply-on-approve half of the admin-action gate): the
 # propose helper (``admin_proposals.propose.propose_admin_action``) files an
@@ -365,6 +377,28 @@ def _adapt_connector_manage(
         if not isinstance(config, dict):
             raise ValueError("connector.manage op=config requires a config object")
         out["config"] = config  # opaque data — the service validates + merges it
+    if op == "enable":
+        # SR-4 just-in-time bind — op=enable may carry an optional connector
+        # SCOPE so the agent's ``sense_request_bind`` can bind a connector to the
+        # CURRENT pocket (not just workspace-wide). STRICT: read ONLY ``scope`` +
+        # ``pocket_id``, constrain scope to the enum, and require pocket_id for a
+        # pocket-scoped bind. Absent ``scope`` → the historical workspace-scope
+        # enable (backward compatible with workspace_admin.connector_enable). The
+        # values ride into the typed EnableConnectorRequest in the call wrapper —
+        # never splatted as kwargs.
+        scope = args.get("scope")
+        if scope is not None:
+            scope = str(scope)
+            if scope not in ("pocket", "workspace", "user"):
+                raise ValueError(
+                    "connector.manage op=enable scope must be one of pocket|workspace|user"
+                )
+            out["scope"] = scope
+            if scope == "pocket":
+                pocket_id = str(args.get("pocket_id") or "")
+                if not pocket_id:
+                    raise ValueError("connector.manage op=enable scope=pocket requires pocket_id")
+                out["pocket_id"] = pocket_id
     return out
 
 
@@ -381,9 +415,16 @@ async def _call_connector_manage(**kwargs: Any) -> Any:
     if op == "enable":
         from pocketpaw_ee.cloud.connectors.dto import EnableConnectorRequest
 
-        return await connectors_service.enable_connector(
-            workspace_id, name, EnableConnectorRequest()
+        # SR-4 — carry the optional connector scope (pocket-scoped bind) into the
+        # typed request. The adapter already validated scope/pocket_id; absent
+        # scope defaults to workspace (the DTO's own default), so the historical
+        # workspace-wide enable is unchanged. The service re-validates that
+        # scope=pocket has a pocket_id (defense in depth).
+        req = EnableConnectorRequest(
+            scope=kwargs.get("scope") or "workspace",
+            pocket_id=kwargs.get("pocket_id"),
         )
+        return await connectors_service.enable_connector(workspace_id, name, req)
     if op == "disable":
         return await connectors_service.disable_connector(workspace_id, name)
     # op == "config"

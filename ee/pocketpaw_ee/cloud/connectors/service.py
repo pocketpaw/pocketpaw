@@ -68,6 +68,13 @@
 #   per-connector ``is_connector_bound_to_pocket`` calls. Keeps the
 #   WorkspaceConnector read in THIS service (OSS-EE boundary §2 + tenant rule
 #   §7) so the catalog / MCP layers never import the Beanie doc.
+# Updated: 2026-07-16 (SR-4 just-in-time bind) — added ``is_known_connector``: a
+#   registry-only (no Beanie) existence check the new ``sense_request_bind`` MCP
+#   tool calls at PROPOSE time so an unknown connector name fails with a clean
+#   error immediately, rather than filing a doomed Instinct bind proposal that
+#   only ``NotFound``s at execute time. The bind itself reuses ``enable_connector``
+#   (scope=pocket) through the existing admin-proposal approve→execute path — no
+#   new enable code here.
 # Module-level async API. Sole owner of writes to the
 # ``WorkspaceConnector`` Beanie document. Reads merge the static
 # registry catalog from src/pocketpaw/connectors/registry.py with the
@@ -966,6 +973,20 @@ async def is_connector_enabled_for_workspace(workspace_id: str, name: str) -> bo
     return doc is not None
 
 
+def is_known_connector(name: str) -> bool:
+    """True when ``name`` is a connector the registry knows (no Beanie read).
+
+    Registry-only existence check — the lightweight companion to
+    ``is_connector_enabled_for_workspace`` (which ALSO reads the tenant's
+    WorkspaceConnector row). SR-4's ``sense_request_bind`` MCP tool calls this at
+    PROPOSE time so an unknown connector fails with a clean error immediately,
+    instead of filing a doomed Instinct proposal that only ``NotFound``s at
+    execute time. Keeping the registry read HERE (not in the MCP layer) holds the
+    OSS-EE boundary — the MCP module never touches the registry/Beanie directly.
+    """
+    return name in {a.name for a in _available_from_registry()}
+
+
 def _adapter_for_definition(defn, name: str):
     """Build an adapter without connecting — for static metadata reads.
 
@@ -1138,6 +1159,7 @@ __all__ = [
     "get_connector",
     "is_connector_bound_to_pocket",
     "is_connector_enabled_for_workspace",
+    "is_known_connector",
     "list_bound_connector_names",
     "list_connectors",
     "list_pocket_connectors",
