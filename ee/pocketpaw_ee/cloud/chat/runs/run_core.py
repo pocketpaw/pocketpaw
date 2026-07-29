@@ -647,7 +647,20 @@ _TITLE_PLACEHOLDER_LIMIT = 60
 
 
 def _truncate_for_title(message: str) -> str:
-    raw = (message or "").strip().replace("\n", " ").replace("\r", " ")
+    """One-line excerpt of the user's message, used as the placeholder title.
+
+    Strips any client context preamble first (2026-07-22). This placeholder is
+    written to Mongo and pushed over SSE *before* Haiku runs, so it is what the
+    user actually sees in the sidebar — titling the raw wire content named every
+    home-started chat "[Home page snapshot] Time of day: afternoon…". Shares the
+    strip helper with the Haiku path so both agree where the user's words start.
+    """
+    from pocketpaw.memory.titler import (  # type: ignore[import-untyped]
+        strip_context_preamble,
+    )
+
+    cleaned = strip_context_preamble(message or "")
+    raw = cleaned.strip().replace("\n", " ").replace("\r", " ")
     one_line = " ".join(raw.split())
     if len(one_line) > _TITLE_PLACEHOLDER_LIMIT:
         return one_line[:_TITLE_PLACEHOLDER_LIMIT].rstrip() + "…"

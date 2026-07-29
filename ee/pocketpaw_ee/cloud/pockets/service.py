@@ -9,6 +9,10 @@ Updated: 2026-07-23 (SI-5, feat/sites-import-crawler) — added
 html source map on the imported pocket through THIS service (entity isolation —
 the sites service never touches the Pocket model). Workspace-checked fail-closed,
 html-engine pockets only, background-safe (no request context required).
+Updated: 2026-07-15 (fix/agent-visibility-enforcement, ASG-7) — ``add_agent``
+now gates on ``agents.service.ensure_can_use`` (against the pocket's workspace)
+in addition to pocket edit-access, so a pocket editor can no longer attach
+another user's PRIVATE agent.
 
 Updated: 2026-06-28 (AW-7 template gate deny-on-no-match) — added
 ``resolve_workspace_template_default_deny`` — the effective TEMPLATE-level
@@ -2865,8 +2869,18 @@ async def remove_team_member(
 
 
 async def add_agent(pocket_id: str, user_id: str, agent_id: str) -> dict:
+    # Visibility gate (ASG-7): pocket edit-access alone does not authorize
+    # attaching ANY agent. The editor must also be able to USE the agent, or a
+    # pocket editor could wire in another user's PRIVATE agent. ``ensure_can_use``
+    # applies the canonical predicate (owner always; else same-workspace +
+    # ``workspace`` visibility; else ``public``) against the pocket's workspace —
+    # a foreign private agent surfaces as ``NotFound``.
+    from pocketpaw_ee.cloud.agents import service as agents_service
+
     doc = await _fetch_pocket(pocket_id)
-    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    pocket = _pocket_to_domain(doc)
+    _check_domain_edit_access(pocket, user_id)
+    await agents_service.ensure_can_use(agent_id, pocket.workspace_id, user_id)
     await _mutate_list_field(pocket_id, "agents", agent_id, "add")
     doc = await _fetch_pocket(pocket_id)
     return await _resolved_wire_dict(doc, user_id)

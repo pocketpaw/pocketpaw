@@ -135,6 +135,11 @@ class Workspace(TimestampedDocument):
     # Per-member connector-level permissions: user_id → list of allowed connector names.
     # An empty list or missing entry means the user has full access (no restrictions).
     connector_permissions: dict[str, list[str]] = Field(default_factory=dict)
+    # Per-member granular action overrides: user_id → list of action keys
+    # (e.g. "channel.create") granted beyond the member's base workspace role.
+    # Only keys in OVERRIDABLE_ACTIONS are valid. An empty list or missing
+    # entry means the member's permissions match their role defaults.
+    action_permissions: dict[str, list[str]] = Field(default_factory=dict)
     # Layered/learning Instinct gate (T6) — per-workspace triager activation
     # level. None = use the global config default (Settings.
     # instinct_approval_level, "ASK"). A workspace owner opts in to "TRIAGE"

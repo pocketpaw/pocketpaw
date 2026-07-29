@@ -6,6 +6,12 @@
 # depends on the OSS core package `pocketpaw`.
 #
 # Changes:
+#   - 2026-07-27 (fix/dev-ci): the "CodeAgent — runtime-agnostic" contract now
+#     sources the codeagent PACKAGE instead of a hand-kept list of its modules.
+#     The list had gone stale twice over — `delegates.py` was never added, and
+#     `transport.py` / `domain.py` were deleted with the turn-agent — and a
+#     contract that names a module which no longer exists fails the whole
+#     `lint-imports` run, not just that contract. See the contract below.
 #   - 2026-07-01 (ee-cython gate): the cython build hook is now GATED OFF by
 #     default (`enable-by-default = false`) so dev / CI / editable installs stay
 #     fast and readable — the ~25-min compile only fires when
@@ -666,13 +672,14 @@ allow_indirect_imports = "true"
 #
 # A human reviewer will not catch that on a diff that otherwise looks like a
 # helpful refactor. The linter will.
-source_modules = [
-    "pocketpaw_ee.cloud.codeagent.router",
-    "pocketpaw_ee.cloud.codeagent.service",
-    "pocketpaw_ee.cloud.codeagent.transport",
-    "pocketpaw_ee.cloud.codeagent.dto",
-    "pocketpaw_ee.cloud.codeagent.domain",
-]
+#
+# Sourced from the PACKAGE, not a file list. The original list named the five
+# modules codeagent had on 2026-07-21; `delegates.py` (added 2026-07-22) never
+# got added to it, and `transport.py` / `domain.py` were deleted 2026-07-23 with
+# the turn-agent, which broke the run outright. `as_packages` defaults to true,
+# so naming the package covers every submodule — including the ones added after
+# this contract was written.
+source_modules = ["pocketpaw_ee.cloud.codeagent"]
 forbidden_modules = [
     "pocketpaw_ee.cloud.daytona",
     "pocketpaw_ee.cloud.websandbox",
@@ -731,6 +738,24 @@ forbidden_modules = [
     "pocketpaw_ee.cloud.models.user",
     "pocketpaw_ee.cloud.models.agent",
 ]
+
+[[tool.importlinter.contracts]]
+name = "AgentActivity — reads runs only through the chat-runs service"
+type = "forbidden"
+allow_indirect_imports = "true"
+# HR-12a. Unlike its siblings this entity owns NO document — it is a read-only
+# view over someone else's. The rule it pins is the one that makes that safe:
+# the activity board must reach ChatRunDoc only through
+# ``chat.runs.service``, which is where the workspace filter and the window
+# live. Import the doc here and the tenancy filter becomes this module's job
+# to remember on every future query — the exact shape of bug that leaks one
+# tenant's agents into another's board, and one a reviewer reads as a harmless
+# "query it directly, it's simpler" diff.
+#
+# Sourced from the PACKAGE (as_packages defaults to true) so submodules added
+# later are covered without anyone remembering to extend a file list.
+source_modules = ["pocketpaw_ee.cloud.agent_activity"]
+forbidden_modules = ["pocketpaw_ee.cloud.models.chat_run"]
 
 [[tool.importlinter.contracts]]
 name = "Tasks — Beanie writes only from service.py"

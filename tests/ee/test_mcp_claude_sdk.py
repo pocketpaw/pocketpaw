@@ -1,5 +1,13 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-07-27 (fix/dev-ci) — ``_strip_builtin_servers`` now also drops
+  ``pocketpaw_code`` (the Code Mode delegate server: readFile / search /
+  listDir / writeFile), registered always-on via the ``code`` mcp_servers entry
+  point (``CloudCodeMcpProvider``) since #1763. That PR shipped the server and
+  its own test file but never taught this helper, so six assertions here counted
+  it as an external config and dev went red. Same regime as
+  ``pocketpaw_daytona``: ambient registration, scoped by the /code
+  SurfaceProfile allowlist rather than by being withheld.
 Updated: 2026-07-06 (feat/paw-sites-stock-imagery) — ``_strip_builtin_servers``
   now also drops ``pocketpaw_stock`` (search_stock_images: free Pexels +
   Unsplash photo search for site imagery, registered always-on via the
@@ -73,6 +81,7 @@ from unittest.mock import patch
 
 from pocketpaw_ee.agent.mcp_servers.ask import SERVER_NAME as _ASK_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.belt import SERVER_NAME as _BELT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.code import SERVER_NAME as _CODE_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.connectors import SERVER_NAME as _CONNECTORS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.daytona import SERVER_NAME as _DAYTONA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.decisions import SERVER_NAME as _DECISIONS_MCP_SERVER_NAME
@@ -175,6 +184,13 @@ def _strip_builtin_servers(result: dict) -> dict:
     # ``pocketpaw_daytona`` is always-on too — the /code surface scopes access
     # via its profile allowlist, same regime as fabric / instinct / media.
     out.pop(_DAYTONA_MCP_SERVER_NAME, None)
+    # ``pocketpaw_code`` is always-on too — the four /code file tools
+    # (readFile / search / listDir / writeFile) are ambient, NOT in
+    # ``OPT_IN_MCP_SERVERS``. The /code SurfaceProfile scopes them via
+    # ``tool_mode="exclusive"`` + ``_CODE_FILE_TOOL_IDS``, so the allowlist is
+    # the boundary, not registration — the same regime as its sibling
+    # ``pocketpaw_daytona`` directly above.
+    out.pop(_CODE_MCP_SERVER_NAME, None)
     # ``pocketpaw_atlas`` is always-on too — the capability atlas
     # (atlas_search / atlas_describe) is registered unconditionally in core
     # ``claude_sdk._get_mcp_servers`` so every agent can ground PocketPaw
