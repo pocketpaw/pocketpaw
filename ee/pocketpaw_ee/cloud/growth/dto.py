@@ -322,6 +322,40 @@ class IcpResponse(BaseModel):
     updated_at: str | None
 
 
+class PreviewedProspectResponse(BaseModel):
+    """One company as a run WOULD file it.
+
+    ``emails`` has already been through the observed-only filter, so this is
+    exactly what would be stored — never the raw evidence, which would
+    advertise addresses the engine refuses to keep.
+    """
+
+    domain: str
+    name: str
+    company: str
+    research_brief: str
+    source_urls: list[str]
+    emails: list[str]
+    # A run would SKIP this one — the workspace already has it. Shown rather
+    # than filtered out, because a preview full of these is the useful signal
+    # that the criteria describe people you already know.
+    already_known: bool
+
+
+class IcpPreviewResponse(BaseModel):
+    """The result of a dry run: what would land, and why it might be short.
+
+    ``error`` is populated when the research itself failed — a preview that
+    returned nothing because the search provider was down must not be
+    indistinguishable from an ICP that describes nobody.
+    """
+
+    icp_id: str
+    items: list[PreviewedProspectResponse]
+    notes: str = ""
+    error: str = ""
+
+
 class CreateDraftRequest(BaseModel):
     """One channel's outreach copy for a prospect.
 
@@ -472,8 +506,10 @@ __all__ = [
     "CreateIcpRequest",
     "CreateProspectRequest",
     "DraftResponse",
+    "IcpPreviewResponse",
     "IcpResponse",
     "LinkedInQueueItemResponse",
+    "PreviewedProspectResponse",
     "ProposeBatchError",
     "ProposeBatchRequest",
     "ProposeBatchResponse",

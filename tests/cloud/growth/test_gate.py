@@ -954,6 +954,9 @@ class TestGrowthRouteRbac:
             ("POST", "/growth/icps"): "growth.write",
             ("PATCH", "/growth/icps/{icp_id}"): "growth.write",
             ("DELETE", "/growth/icps/{icp_id}"): "growth.write",
+            # Preview writes nothing, but it spends a real research pass — not
+            # the outbound verb (it cannot reach a prospect), not free either.
+            ("POST", "/growth/icps/{icp_id}/preview"): "growth.write",
         }
 
         seen: dict[tuple[str, str], str] = {}

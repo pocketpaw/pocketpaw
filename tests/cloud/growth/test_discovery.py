@@ -535,3 +535,142 @@ class TestProductionResearchSeam:
         finally:
             set_production_research_fn(None)
         assert resolve_research_fn() is None
+
+
+# ---------------------------------------------------------------------------
+# Preview — the same research, none of the writes
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def wired():
+    """Wire a research loop for the duration of one test and clear it after.
+
+    The route resolves the production seam, so an HTTP-level preview test has
+    to install one. Cleared in a finally so a failure can't leak a fake into
+    the next test."""
+    installed: list[Any] = []
+
+    def _install(fn: Any) -> Any:
+        set_production_research_fn(fn)
+        installed.append(fn)
+        return fn
+
+    try:
+        yield _install
+    finally:
+        set_production_research_fn(None)
+
+
+class TestPreview:
+    """Trust before cadence. A preview shows exactly what a run would file —
+    same projection, same email rule — and leaves the pipeline untouched."""
+
+    @pytest.mark.asyncio
+    async def test_preview_writes_nothing(self, w1, wired):
+        icp = await _create_icp(w1)
+        wired(FakeResearch(_company("acme-dental.com"), _company("brightsmile.com")))
+
+        resp = await w1.post(f"{ICPS_URL}/{icp['id']}/preview")
+
+        assert resp.status_code == 200, resp.text
+        assert len(resp.json()["items"]) == 2
+        assert await _prospects(w1) == []
+        assert (await w1.get("/api/v1/growth/drafts")).json() == []
+
+    @pytest.mark.asyncio
+    async def test_preview_shows_only_recordable_emails(self, w1, wired):
+        """A preview that displayed the raw evidence would advertise addresses
+        the engine refuses to keep — the projection is shared with the run
+        precisely so the two cannot drift."""
+        icp = await _create_icp(w1)
+        wired(
+            FakeResearch(
+                _company(
+                    "acme-dental.com",
+                    emails=(
+                        EmailEvidence("guess@acme-dental.com", "guessed"),
+                        EmailEvidence(
+                            "hello@acme-dental.com",
+                            "observed",
+                            "https://acme-dental.com/contact",
+                        ),
+                    ),
+                )
+            )
+        )
+
+        (item,) = (await w1.post(f"{ICPS_URL}/{icp['id']}/preview")).json()["items"]
+
+        assert item["emails"] == ["hello@acme-dental.com"]
+
+    @pytest.mark.asyncio
+    async def test_a_known_company_is_flagged_not_hidden(self, w1, wired):
+        """A preview full of already_known rows is the useful signal that the
+        criteria describe people you already have."""
+        await w1.post(
+            "/api/v1/growth/prospects",
+            json={"domain": "acme-dental.com", "source": "manual"},
+        )
+        icp = await _create_icp(w1)
+        wired(FakeResearch(_company("acme-dental.com"), _company("brightsmile.com")))
+
+        items = (await w1.post(f"{ICPS_URL}/{icp['id']}/preview")).json()["items"]
+
+        assert {i["domain"]: i["already_known"] for i in items} == {
+            "acme-dental.com": True,
+            "brightsmile.com": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_paused_icp_still_previews(self, w1, wired):
+        """Checking whether a profile is worth resuming is the reason to look
+        at a paused one."""
+        icp = await _create_icp(w1, status="paused")
+        wired(FakeResearch(_company("acme-dental.com")))
+
+        resp = await w1.post(f"{ICPS_URL}/{icp['id']}/preview")
+
+        assert resp.status_code == 200, resp.text
+        assert len(resp.json()["items"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_research_failure_is_reported_not_swallowed(self, w1, wired):
+        """ "Found nobody" and "the search provider was down" must not look the
+        same to someone tuning criteria."""
+        icp = await _create_icp(w1)
+        wired(ExplodingResearch())
+
+        body = (await w1.post(f"{ICPS_URL}/{icp['id']}/preview")).json()
+
+        assert body["items"] == []
+        assert "research failed" in body["error"]
+
+    @pytest.mark.asyncio
+    async def test_preview_respects_max_per_run(self, w1, wired):
+        icp = await _create_icp(w1, max_per_run=2)
+        wired(FakeResearch(*[_company(f"co-{i:02d}.com") for i in range(6)]))
+
+        items = (await w1.post(f"{ICPS_URL}/{icp['id']}/preview")).json()["items"]
+
+        assert len(items) == 2
+
+    @pytest.mark.asyncio
+    async def test_no_research_backend_is_a_503_not_an_empty_preview(self, w1):
+        """An operator tuning criteria against a silently-disabled engine would
+        rewrite them forever."""
+        icp = await _create_icp(w1)
+
+        resp = await w1.post(f"{ICPS_URL}/{icp['id']}/preview")
+
+        assert resp.status_code == 503, resp.text
+        assert resp.json()["error"]["code"] == "icp.research_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_another_tenants_icp_is_a_404(self, w1, w2, wired):
+        icp = await _create_icp(w1)
+        wired(FakeResearch(_company("acme-dental.com")))
+
+        resp = await w2.post(f"{ICPS_URL}/{icp['id']}/preview")
+
+        assert resp.status_code == 404, resp.text
