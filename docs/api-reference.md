@@ -974,6 +974,68 @@ conversion, a pricing-rules engine, and disputes / clawback. This endpoint
 returns a raw sum of declared values — the queryable figure those layers
 will build on later (see `outcome-spec.md`).
 
+## Agent Activity
+
+HR-12a. The workspace-scoped answer to "which of my agents are working
+right now". Distinct from the herdr cockpit (`GET /cockpit/*`), which reads
+terminal panes on one operator box, is ADMIN-only, and never shows a `/chat`
+agent — that agent runs as an in-process SDK client, not a pane.
+
+The board is built from `ChatRunDoc`, the durable per-turn record, so it is
+correct whether runs execute in the web process or an arq worker, complete
+across multiple workers, and intact after a restart.
+
+### `GET /agent-activity`
+
+One entry per agent in the caller's workspace with at least one run in the
+last **24 hours**. Requires the `agent_activity.read` action (MEMBER). Takes
+no query params; tenancy comes from the auth context and a `workspace_id`
+query param is **rejected** (`400`), not ignored.
+
+This is a **team board**: it covers every member's runs, not just the
+caller's. An Agent is a workspace resource, so its aggregate state is shared.
+The individual turn is not — the response carries no `user_id`, no run id and
+no message content, and `GET /cloud/chat/runs/{run_id}/stream` still returns
+`404` for a run belonging to another member.
+
+`agent_id` is the agent's ObjectId hex (`Agent._id`), the same key
+`GET /agents` returns — not a display name.
+
+Response `200`:
+
+```json
+{ "agents": [
+    { "agent_id": "66f1a2b3c4d5e6f708192a3b", "status": "active",
+      "active_runs": 2, "last_active": "2026-07-28T11:58:04+00:00" },
+    { "agent_id": "66f1a2b3c4d5e6f708192a3c", "status": "blocked",
+      "active_runs": 0, "last_active": "2026-07-28T10:12:44+00:00" }
+  ],
+  "ts": "2026-07-28T12:00:00+00:00" }
+```
+
+`status` uses the Mission Control `AgentStatus` vocabulary, the same one
+the cockpit's pane dots use:
+
+| Status | Meaning |
+|--------|---------|
+| `active` | The agent has at least one `queued` or `running` run. Wins over any earlier failure. |
+| `blocked` | No live run, and the agent's newest run `failed` or was `interrupted`. |
+| `idle` | No live run, and the newest run `completed` or was `cancelled` (a user stopping their own turn does not block the agent). |
+
+Agents with **no run in the window are omitted** rather than returned as
+`offline`: this surface reads runs, not the agent roster. A client that
+wants every configured agent joins this board against `GET /agents` and
+treats the absent ones as offline.
+
+`active_runs` is how many of that agent's runs are live now; `last_active`
+is the newest run's end, else its start, else its creation; `last_run_id`
+identifies that run. Entries are ordered working-first, then most recently
+active. `ts` stamps when the board was built.
+
+v1 is a plain GET for the client to poll. A push stream is the upgrade path
+if polling stops being enough — event-driven off the existing run-status
+transitions, not a faster poll.
+
 ## Files — Versioned Writes
 
 The `file_versions` entity layers a versioned write path over the uploads

@@ -10,6 +10,13 @@
 # Updated 2026-05-30 (security hardening): added C1 oversized-payload→413 (no
 # lead written) and H1 constant-time signed-key compare (secrets.compare_digest
 # is the mechanism; valid key still 200, bad key still 401) coverage.
+# Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): added coverage for the
+# NATIVE-FORM capture sibling POST /capture/form (final URL /api/v1/capture/form)
+# — the endpoint imported sites' rewired <form>s post to as urlencoded, with
+# hidden paw_site_id / paw_key / paw_page / paw_redirect fields. Valid key →
+# recorded through the SAME capture pipeline + 303 back to Origin+paw_redirect;
+# bad key → 401; absolute / protocol-relative paw_redirect → 400 (open-redirect
+# guard); wrong origin → 403; urlencoded content-type accepted natively.
 from __future__ import annotations
 
 import pytest
@@ -159,3 +166,131 @@ async def test_capture_uses_constant_time_key_compare(mongo_db, capture_app, mon
     assert resp.status_code == 200
     assert calls, "signed-key check must route through secrets.compare_digest"
     assert ("key_ok", "key_ok") in calls
+
+
+# --------------------------------------------------------------------------- #
+# SI-4 — native-form capture: POST /capture/form (final URL /api/v1/capture/form).
+# Imported sites rewire their <form>s to a plain urlencoded POST here, with hidden
+# paw_site_id / paw_key / paw_page / paw_redirect fields. Same hardening ladder as
+# the JSON path, then a 303 back to Origin + the RELATIVE paw_redirect.
+# --------------------------------------------------------------------------- #
+
+
+async def _form_site(ws="ws1", site_id="site_form") -> Site:
+    """A site seeded the way create/publish seeds it: a 'lead' event mapping (the
+    default form_type the rewired form posts under)."""
+    site = Site(
+        workspace=ws,
+        pocket_id="pk_form",
+        owner="u1",
+        script_name=site_id,
+        allowed_origins=["brightsmiledental.com"],
+        signed_key="key_ok",
+        event_mapping={
+            "lead": {
+                "creates": "Lead",
+                "fields": {"full_name": "{{ payload.full_name }}", "email": "{{ payload.email }}"},
+            }
+        },
+    )
+    await site.insert()
+    return site
+
+
+def _form_fields(**overrides) -> dict:
+    fields = {
+        "full_name": "Sam Smiles",
+        "email": "sam@example.com",
+        "paw_site_id": "site_form",
+        "paw_key": "key_ok",
+        "paw_page": "index.html",
+        "paw_redirect": "/thanks.html",
+    }
+    fields.update(overrides)
+    return fields
+
+
+@pytest.mark.asyncio
+async def test_capture_form_valid_key_records_and_303s(mongo_db, capture_app):
+    """A valid urlencoded native-form POST records the lead through the SAME
+    capture pipeline (mapping applied, paw_* control fields stripped) and 303s to
+    the validated Origin + the relative paw_redirect."""
+    from pocketpaw_ee.cloud.leads import service as leads_service
+
+    site = await _form_site()
+    async with AsyncClient(transport=ASGITransport(app=capture_app), base_url="http://t") as c:
+        # httpx ``data=`` sends application/x-www-form-urlencoded — the exact
+        # content type a native <form method=post> submits.
+        resp = await c.post(
+            "/api/v1/capture/form",
+            data=_form_fields(),
+            headers={"origin": "https://brightsmiledental.com"},
+        )
+    assert resp.status_code == 303, resp.text
+    assert resp.headers["location"] == "https://brightsmiledental.com/thanks.html"
+
+    leads = await leads_service.list_for_site(site.workspace, "site_form")
+    assert len(leads) == 1
+    assert leads[0].properties["full_name"] == "Sam Smiles"
+    assert leads[0].properties["email"] == "sam@example.com"
+    # The paw_* control fields never become lead properties.
+    assert not any(k.startswith("paw_") for k in leads[0].properties)
+
+
+@pytest.mark.asyncio
+async def test_capture_form_invalid_key_is_401(mongo_db, capture_app):
+    from pocketpaw_ee.cloud.leads import service as leads_service
+
+    site = await _form_site()
+    async with AsyncClient(transport=ASGITransport(app=capture_app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/capture/form",
+            data=_form_fields(paw_key="WRONG"),
+            headers={"origin": "https://brightsmiledental.com"},
+        )
+    assert resp.status_code == 401
+    assert await leads_service.count_for_site(site.workspace, "site_form") == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_redirect",
+    ["https://evil.example.com/phish", "//evil.example.com", "/\\evil", "javascript://alert(1)"],
+)
+async def test_capture_form_non_relative_redirect_is_400(mongo_db, capture_app, bad_redirect):
+    """Open-redirect guard: an absolute / protocol-relative / backslash / scheme'd
+    paw_redirect is rejected BEFORE anything is recorded."""
+    from pocketpaw_ee.cloud.leads import service as leads_service
+
+    site = await _form_site()
+    async with AsyncClient(transport=ASGITransport(app=capture_app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/capture/form",
+            data=_form_fields(paw_redirect=bad_redirect),
+            headers={"origin": "https://brightsmiledental.com"},
+        )
+    assert resp.status_code == 400, resp.text
+    assert await leads_service.count_for_site(site.workspace, "site_form") == 0
+
+
+@pytest.mark.asyncio
+async def test_capture_form_wrong_origin_is_403(mongo_db, capture_app):
+    await _form_site()
+    async with AsyncClient(transport=ASGITransport(app=capture_app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/capture/form",
+            data=_form_fields(),
+            headers={"origin": "https://evil.example.com"},
+        )
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_capture_form_unknown_site_is_404(mongo_db, capture_app):
+    async with AsyncClient(transport=ASGITransport(app=capture_app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/capture/form",
+            data=_form_fields(paw_site_id="site_missing"),
+            headers={"origin": "https://brightsmiledental.com"},
+        )
+    assert resp.status_code == 404

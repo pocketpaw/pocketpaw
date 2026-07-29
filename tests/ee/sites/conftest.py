@@ -46,10 +46,13 @@
 
 from __future__ import annotations
 
+import base64
+import re
 from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+import pytest_asyncio
 
 pytest.importorskip("pocketpaw_ee")
 
@@ -159,3 +162,67 @@ def _default_sites_plan(request: pytest.FixtureRequest):
         new=AsyncMock(return_value="go"),
     ):
         yield
+
+
+# Updated 2026-07-23 (SI-FIX — wire the import rewire pipeline): a shared stub for
+# the paw-sites ``import`` generator subcommand. The real generator_client.run_import
+# shells out to paw-sites-gen (Bun); this deterministic stand-in lets the import +
+# crawler tests exercise the backend WIRING (publish receives the REWIRED source, the
+# authoritative report persists) without Bun on PATH. Real rewire fidelity is proven
+# by paw-sites' own tests + the cross-repo integration check.
+def stub_import_result(
+    files: dict, *, site_id: str, capture_api_base: str, capture_signed_key: str
+) -> dict:
+    source: dict[str, str] = {}
+    assets: dict[str, str] = {}
+    pages: list[dict[str, str]] = []
+    forms: list[dict[str, Any]] = []
+    scripts: list[str] = []
+    asset_bytes = 0
+    for path in sorted(files):
+        raw = base64.b64decode(files[path])
+        if path.endswith((".html", ".htm")):
+            text = raw.decode("utf-8")
+            m = re.search(r"action=['\"]([^'\"]+)['\"]", text)
+            if m:
+                text = re.sub(
+                    r"action=['\"][^'\"]+['\"]",
+                    f"action='{capture_api_base}/capture/form'",
+                    text,
+                    count=1,
+                )
+                text = text.replace("<form ", f"<form data-paw-original-action='{m.group(1)}' ", 1)
+                forms.append({"page": path, "original_action": m.group(1), "rewired": True})
+            source[path] = text
+            tm = re.search(r"<title>([^<]*)</title>", text)
+            pages.append({"path": path, "title": (tm.group(1) if tm else "").strip()})
+        elif path.endswith((".css", ".js", ".txt", ".json", ".xml", ".svg")):
+            source[path] = raw.decode("utf-8")
+            if path.endswith(".js"):
+                scripts.append(path)
+        else:
+            assets[path] = files[path]
+            asset_bytes += len(raw)
+    return {
+        "source": source,
+        "assets": assets,
+        "report": {
+            "pages": pages,
+            "asset_count": len(assets),
+            "asset_bytes": asset_bytes,
+            "forms": forms,
+            "scripts": scripts,
+            "warnings": [],
+        },
+    }
+
+
+@pytest_asyncio.fixture
+async def _fake_run_import(monkeypatch):
+    """Stub generator_client.run_import with the deterministic rewire above."""
+    from pocketpaw_ee.sites import generator_client
+
+    async def _run(files, **kw):
+        return stub_import_result(files, **kw)
+
+    monkeypatch.setattr(generator_client, "run_import", _run)

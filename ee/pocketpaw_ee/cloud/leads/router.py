@@ -22,6 +22,20 @@
 # ``rate_key``. The caller-controlled ``body.submitter_ref`` is no longer the
 # limiter key (it was randomizable to dodge the cap); it rides through only as an
 # opaque, non-PII label on the stored Lead.
+#
+# Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): added the NATIVE-FORM
+# capture sibling, POST /capture/form (final URL: {captureApiBase}/capture/form,
+# i.e. /api/v1/capture/form — captureApiBase already carries /api/v1, so the
+# spec's "/v1/capture/form" would have doubled the segment; this is the
+# router-consistent resolution and the cross-repo contract paw-sites' import
+# rewiring must target). IMPORTED sites rewire their <form>s to a plain
+# application/x-www-form-urlencoded POST here, with hidden fields ``paw_site_id``,
+# ``paw_key`` (the per-site signed key), ``paw_page``, ``paw_redirect`` and
+# optionally ``paw_form_type``. The endpoint runs the SAME hardening ladder as the
+# JSON capture (site exists → origin pin → constant-time signed key → payload size
+# cap → leads_service.capture), then 303-redirects to ``paw_redirect`` — which MUST
+# be a relative path (open-redirect guard: absolute / protocol-relative /
+# backslash / CR-LF all 400), resolved against the validated request Origin.
 
 from __future__ import annotations
 
@@ -29,7 +43,7 @@ import hashlib
 import json
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from pocketpaw.sites_capture.ingest import origin_allowed
 from pocketpaw.sites_capture.models import MAX_PAYLOAD_BYTES
@@ -85,6 +99,88 @@ async def capture_lead(site_id: str, body: CaptureRequest, request: Request) -> 
     if lead is None:
         return CaptureResponse(ok=False, reason="dropped")
     return CaptureResponse(ok=True, lead_id=lead.id)
+
+
+def _safe_relative_redirect(path: str) -> bool:
+    """Open-redirect guard for the native-form 303: the redirect target must be a
+    RELATIVE path on the submitting site. Rejects absolute URLs (no leading "/"),
+    protocol-relative ("//host"), backslash tricks, embedded schemes, and CR/LF
+    (header injection). The accepted value is later prefixed with the VALIDATED
+    request Origin, so the browser can only ever land back on the pinned site."""
+    if not path.startswith("/") or path.startswith("//"):
+        return False
+    if "\\" in path or "\r" in path or "\n" in path or "://" in path:
+        return False
+    return len(path) <= 2048
+
+
+@router.post("/capture/form")
+async def capture_form(request: Request) -> Response:
+    """Native-form ingest for IMPORTED sites (SI-4). The imported page's <form>s
+    are rewired to POST application/x-www-form-urlencoded here with hidden fields:
+    ``paw_site_id`` (the site), ``paw_key`` (the per-site signed key), ``paw_page``
+    (provenance label), ``paw_redirect`` (relative post-submit path), and optional
+    ``paw_form_type`` (event-mapping key; defaults to "lead" — the mapping every
+    site doc seeds). CROSS-REPO CONTRACT: the final URL is
+    {captureApiBase}/capture/form (/api/v1/capture/form) — see the module comment.
+
+    Hardening mirrors the JSON capture exactly: site exists → origin pin →
+    constant-time key compare → payload size cap → the SAME
+    ``leads_service.capture`` pipeline (honeypot / rate limit / injection screen /
+    mapping). The open-redirect guard rejects any non-relative ``paw_redirect``
+    BEFORE anything is recorded. The response is a 303 See Other back to the
+    validated Origin + redirect path — a DROPPED submission still 303s (the
+    visitor is never shown an error that leaks the drop heuristics)."""
+    form = await request.form()
+    site_id = str(form.get("paw_site_id") or "")
+    key = str(form.get("paw_key") or "")
+    page = str(form.get("paw_page") or "")
+    redirect = str(form.get("paw_redirect") or "") or "/"
+    form_type = str(form.get("paw_form_type") or "lead")
+
+    # global-read: public ingest is keyed by site, not by a workspace session.
+    site = await _SiteDoc.find_one({"script_name": site_id}) if site_id else None
+    if site is None:
+        raise HTTPException(404, "Site not found")
+
+    if not origin_allowed(site.allowed_origins, request.headers.get("origin")):
+        raise HTTPException(403, "Origin not allowed for this site")
+
+    # H1 (same as the JSON path): constant-time compare — no timing side channel.
+    if not secrets.compare_digest(key, site.signed_key):
+        raise HTTPException(401, "Invalid signed key")
+
+    # Open-redirect guard BEFORE any write: a bad redirect fails the whole submit.
+    if not _safe_relative_redirect(redirect):
+        raise HTTPException(400, "paw_redirect must be a relative path on the site")
+
+    # The lead payload is every NON-``paw_*`` text field. UploadFile parts (a file
+    # input on an imported form) are skipped — the capture pipeline stores JSON
+    # properties, never file bodies.
+    payload = {
+        k: v for k, v in form.multi_items() if isinstance(v, str) and not k.startswith("paw_")
+    }
+
+    # C1 (same as the JSON path): cap the payload size before the service runs.
+    if len(json.dumps(payload, default=str).encode("utf-8")) > MAX_PAYLOAD_BYTES:
+        raise HTTPException(413, "Payload exceeds size cap")
+
+    await leads_service.capture(
+        site=site,
+        form_type=form_type,
+        payload=payload,
+        # Opaque provenance label (mirrors submitter_ref on the JSON path — never
+        # a limiter key). Truncated: paw_page is caller-controlled text.
+        submitter_ref=f"form:{page}"[:256] if page else "form",
+        rate_key=_rate_key(request),  # server-derived; the real per-IP limiter key
+    )
+
+    # 303 back to the site. The Location is the VALIDATED Origin (already pinned
+    # against site.allowed_origins above) + the RELATIVE redirect path, so the
+    # browser can only land back on the submitting site. origin_allowed fails
+    # closed on a missing Origin, so it is always present here.
+    origin = (request.headers.get("origin") or "").rstrip("/")
+    return Response(status_code=303, headers={"Location": f"{origin}{redirect}"})
 
 
 # Leads is a Sites surface, so its plan gate is the "sites" feature (go+) — the

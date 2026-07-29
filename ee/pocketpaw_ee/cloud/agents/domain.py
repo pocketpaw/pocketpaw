@@ -9,11 +9,24 @@ Beanie sub-model would require touching every caller of
 Updated: 2026-06-28 (feat/aiam-agent-revoke, AW-4) — added ``Agent.disabled``
 mirroring the new top-level flag on the Beanie doc, so callers (and the wire
 dict) can read whether an agent has been soft-disabled / revoked.
+
+Updated: 2026-07-15 (feat/agent-scoped-discover-fields, ASG-1) — added the
+additive presentation fields that mirror the new Beanie fields:
+``AgentConfigSpec.welcome_message`` / ``conversation_starters`` / ``voice`` /
+``appearance`` and ``Agent.tags``. Lists stay frozen-friendly tuples (matching
+``tools`` / ``soul_values``); ``voice`` / ``appearance`` are free-form blobs
+kept as dicts (nothing hashes these value objects — only ``!=`` equality is
+used, in ``service.update``).
+Updated: 2026-07-24 (CX-2, feat/code-agent-exclusive-tools) — added
+``AgentConfigSpec.tool_mode`` (``"additive"`` | ``"exclusive"``) mirroring the
+Beanie ``AgentConfig.tool_mode``. An ``"exclusive"`` agent's ``tools`` become the
+run's MCP allow-list and suppress the universal pocket/widget/atlas grant
+(CX-1); ``"additive"`` (the default) is the unchanged legacy grant-union.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 
@@ -25,6 +38,11 @@ class AgentConfigSpec:
     model: str = ""
     system_prompt: str = ""
     tools: tuple[str, ...] = ()
+    # Tool-surface policy. "additive" (default) UNIONs the agent's tools with the
+    # universal MCP grant (legacy). "exclusive" caps the run's MCP surface to
+    # exactly ``tools`` (CX-1/CX-2) — a non-empty ``tools`` list alone does NOT
+    # imply exclusive; only this flag does.
+    tool_mode: str = "additive"
     trust_level: int = 3
     temperature: float = 0.7
     max_tokens: int = 4096
@@ -36,6 +54,11 @@ class AgentConfigSpec:
     soul_archetype: str = ""
     soul_values: tuple[str, ...] = ()
     soul_ocean: tuple[tuple[str, float], ...] = ()  # frozen-friendly dict
+    # Presentation fields (ASG-1) — mirror ``models.agent.AgentConfig``.
+    welcome_message: str = ""
+    conversation_starters: tuple[str, ...] = ()  # frozen-friendly list
+    voice: dict | None = None
+    appearance: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -53,6 +76,7 @@ class Agent:
     created_at: datetime
     updated_at: datetime
     disabled: bool = False  # soft-disable / revoke-everywhere (AW-4)
+    tags: tuple[str, ...] = ()  # free-form gallery tags (ASG-1)
 
 
 __all__ = ["Agent", "AgentConfigSpec"]

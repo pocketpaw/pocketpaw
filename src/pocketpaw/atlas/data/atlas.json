@@ -1687,6 +1687,62 @@
     },
     {
       "gist": "",
+      "how": "a user invokes it as /code-next in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:code-next",
+      "keywords": [
+        "code-next"
+      ],
+      "kind": "skill",
+      "name": "code-next",
+      "narrative": "Next.js 15 App Router projects with TypeScript and Tailwind CSS v4. Invoke when the work is Next: \"add a page\", \"why is this a client component\", \"params is a Promise now\", \"fetch data in a Server Component\", \"write a server action\", \"add an API route\", \"my data is stale\", \"set the page title\", \"protect a route\". Covers the Server/Client Component boundary, async request APIs, the app/ file conventions, route handlers, server actions and revalidation, metadata, next/image and next/font, middleware, and Tailwind v4's CSS-first configuration. This is the Next 15 line specifically — Cache Components, \"use cache\", proxy.ts, updateTag, and Turbopack-by-default are Next 16 and are NOT available. This is not a dashboard, not a pocket, and it produces no ui-spec.",
+      "requires": [],
+      "summary": "Next.js 15 App Router projects with TypeScript and Tailwind CSS v4.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "a user invokes it as /code-react in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:code-react",
+      "keywords": [
+        "code-react"
+      ],
+      "kind": "skill",
+      "name": "code-react",
+      "narrative": "React 19 + Vite + TypeScript projects — the client-rendered SPA scaffold, not Next.js. Invoke when the work is React inside a Vite project: \"build a React component\", \"why is this effect firing twice\", \"add a form\", \"this state isn't updating\", \"share state between components\", \"add a route\", \"typing this prop is fighting me\", \"fetch data on mount\". Covers hooks and when not to reach for them, React 19 client APIs (Actions, useActionState, useOptimistic, use(), ref as a prop, Context as provider), Vite conventions (import.meta.env, assets, aliases), and the strict TypeScript settings this template turns on. There is NO server in this project: no App Router, no Server Components, no \"use server\". Those belong to the Next.js skill. This is not a dashboard, not a pocket, and it produces no ui-spec.",
+      "requires": [],
+      "summary": "React 19 + Vite + TypeScript projects — the client-rendered SPA scaffold, not Next.js.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "a user invokes it as /code-svelte in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:code-svelte",
+      "keywords": [
+        "code-svelte"
+      ],
+      "kind": "skill",
+      "name": "code-svelte",
+      "narrative": "Plain Svelte 5 + Vite + TypeScript projects — components mounted into one page, NOT SvelteKit. Invoke when the work is Svelte: \"build a Svelte component\", \"why isn't my $state updating\", \"$derived vs $effect\", \"pass a snippet to a child\", \"bind a value both ways\", \"share state between components\", \"this prop isn't reactive\", \"add a transition\". Covers runes ($state, $derived, $effect, $props, $bindable), snippets and {@render}, event props, .svelte.ts state modules, context, attachments, and scoped styling. There is NO SvelteKit in this project: no file-based routing, no load functions, no form actions, no +page/+layout files, no adapters, no $app imports, no server rendering. This is not a dashboard, not a pocket, and it produces no ui-spec.",
+      "requires": [],
+      "summary": "Plain Svelte 5 + Vite + TypeScript projects — components mounted into one page, NOT SvelteKit.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "a user invokes it as /code-vue in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:code-vue",
+      "keywords": [
+        "code-vue"
+      ],
+      "kind": "skill",
+      "name": "code-vue",
+      "narrative": "Vue 3 + Vite + TypeScript projects — the flat single-file-component scaffold, with no router and no store bundled. Invoke when the work is Vue: \"build a Vue component\", \"why isn't this ref updating\", \"v-model on a custom component\", \"extract a composable\", \"add a page\", \"props are losing reactivity\", \"watch is firing too often\", \"scoped styles aren't applying\". Covers <script setup>, refs vs reactive, computed and watchers, reactive props destructure, defineModel, useTemplateRef, composables, slots, provide/inject, scoped styling, and the strict TypeScript settings this template turns on. Vue Router and Pinia are NOT installed here; this skill frames them as things to add, not things present. This is not a dashboard, not a pocket, and it produces no ui-spec.",
+      "requires": [],
+      "summary": "Vue 3 + Vite + TypeScript projects — the flat single-file-component scaffold, with no router and no store bundled.",
+      "surface": ""
+    },
+    {
+      "gist": "",
       "how": "a user invokes it as /foresight-create-sim in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
       "id": "skill:foresight-create-sim",
       "keywords": [

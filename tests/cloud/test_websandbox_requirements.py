@@ -99,19 +99,237 @@ def _assert_every_true_flag_has_a_reason(result) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_package_json_implies_install_and_native_toolchain() -> None:
+def test_package_json_implies_install() -> None:
     result = requirements.infer_from_package_json(json.dumps({"dependencies": {"express": "^4"}}))
 
     assert result.install is True
-    # An npm install of any non-trivial tree fetches or builds native binaries.
-    assert result.nativeToolchain is True
     assert result.rawSockets is False
+    _assert_every_true_flag_has_a_reason(result)
+
+
+# ---------------------------------------------------------------------------
+# nativeToolchain — EVIDENCE, not assumption.
+#
+# The probe used to hardcode ``nativeToolchain=True`` for every manifest,
+# reasoning that "any non-trivial tree pulls prebuilt native binaries (esbuild,
+# rollup's native bindings, sharp, node-gyp fallbacks)". That conflated two
+# different things under one flag:
+#
+#   • a package that ships a prebuilt binary WITH a WASM fallback (esbuild,
+#     rollup) — runs fine in an in-tab runtime, which our own 2026-07-18
+#     WebContainers gate run demonstrated: npm install exit 0 over 320 packages,
+#     then a working Vite dev server on the rollup toolchain.
+#   • a package that must COMPILE native code or load a binary with no WASM
+#     path (better-sqlite3, node-gyp, sharp) — genuinely cannot.
+#
+# ``Capabilities.nativeToolchain`` in the client registry is defined as the
+# SECOND ("compile and run NATIVE code: gcc, node-gyp, native node modules"), so
+# the blanket true made every project claim a need it did not have, and no
+# in-tab runtime could ever be selected for anything. The flag is unselectable-
+# by-construction in one direction and useless in the other; these tests pin the
+# distinction.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "dependencies",
+    [
+        {"express": "^4"},
+        # The exact packages the old blanket reason cited. Both ship prebuilt
+        # binaries with a WASM/JS fallback, and both are proven to work in an
+        # in-tab runtime by the gate run.
+        {"vite": "^5", "rollup": "^4"},
+        {"esbuild": "^0.20"},
+        {"svelte": "^5", "@sveltejs/kit": "^2"},
+    ],
+)
+def test_a_plain_node_project_does_not_need_a_native_toolchain(dependencies: dict) -> None:
+    result = requirements.infer_from_package_json(json.dumps({"dependencies": dependencies}))
+
+    assert result.nativeToolchain is False, (
+        f"{sorted(dependencies)} compiles nothing native; claiming otherwise makes every "
+        f"in-tab runtime unselectable. Reasons: {result.reasons}"
+    )
     _assert_every_true_flag_has_a_reason(result)
 
 
 @pytest.mark.parametrize(
     "package",
-    ["pg", "mysql2", "mongodb", "mongoose", "ioredis", "better-sqlite3", "amqplib", "tedious"],
+    [
+        "better-sqlite3",
+        "sqlite3",
+        "sharp",
+        "canvas",
+        "bcrypt",
+        "node-gyp",
+        "serialport",
+        # The under-provisioning gap review caught: @playwright/test is the
+        # canonical Playwright install (npm init playwright), and the bare
+        # `playwright` name alone left it routing to an in-tab runtime it cannot
+        # run. sass-embedded / electron each ship a platform binary with no WASM
+        # path. All three would have STRANDED the user before this coverage.
+        "@playwright/test",
+        "sass-embedded",
+        "electron",
+    ],
+)
+def test_a_package_that_compiles_native_code_raises_the_flag(package: str) -> None:
+    result = requirements.infer_from_package_json(json.dumps({"dependencies": {package: "^1"}}))
+
+    assert result.nativeToolchain is True
+    assert any(package in reason for reason in result.reasons), (
+        f"the reason must name the evidence, got: {result.reasons}"
+    )
+    _assert_every_true_flag_has_a_reason(result)
+
+
+@pytest.mark.parametrize("package", ["better-sqlite3", "sqlite3"])
+def test_an_embedded_database_needs_a_toolchain_but_opens_no_socket(package: str) -> None:
+    """The mislabel review caught: sqlite is a native FFI binding, not a socket.
+
+    It needs a VM (it compiles), and it must say so via nativeToolchain — but it
+    must NOT claim rawSockets, because it opens none. An earlier cut kept it in
+    the raw-socket table as the only lever that could force a VM; now that
+    nativeToolchain exists, the wrong lever is removed rather than left to send a
+    debugger hunting a network problem that does not exist.
+    """
+    result = requirements.infer_from_package_json(json.dumps({"dependencies": {package: "^1"}}))
+
+    assert result.nativeToolchain is True
+    assert result.rawSockets is False, (
+        f"{package} opens no socket; the reason must not claim one: {result.reasons}"
+    )
+    assert not any("-> rawSockets" in reason for reason in result.reasons)
+
+
+def test_a_native_dev_dependency_also_counts() -> None:
+    # A build step that compiles an addon needs the toolchain just as much as a
+    # runtime dependency does.
+    result = requirements.infer_from_package_json(
+        json.dumps({"devDependencies": {"sharp": "^0.33"}})
+    )
+
+    assert result.nativeToolchain is True
+    assert any("devDependencies" in reason for reason in result.reasons)
+
+
+@pytest.mark.parametrize(
+    "scripts",
+    [
+        {"install": "node-gyp rebuild"},
+        {"postinstall": "node-pre-gyp install --fallback-to-build"},
+        {"rebuild": "cmake-js compile"},
+        {"build:native": "make -C src/native"},
+        # make with no trailing space (end of command) still counts.
+        {"build": "cd src/native && make"},
+        # cmake invoked directly compiles native code.
+        {"build": "cmake ."},
+    ],
+)
+def test_a_build_script_that_compiles_raises_the_flag(scripts: dict) -> None:
+    # The strongest possible evidence: the manifest says, in its own words, that
+    # it shells out to a compiler.
+    result = requirements.infer_from_package_json(json.dumps({"scripts": scripts}))
+
+    assert result.nativeToolchain is True
+    _assert_every_true_flag_has_a_reason(result)
+
+
+def test_a_cmake_script_reports_cmake_not_make() -> None:
+    """The mislabel review caught: substring matching read `make` inside `cmake`.
+
+    Verdict was always right (cmake compiles), but the reason named the wrong
+    tool — and a reason that names a tool the command never ran is the same class
+    of defect as the sqlite rawSockets mislabel.
+    """
+    result = requirements.infer_from_package_json(json.dumps({"scripts": {"build": "cmake ."}}))
+
+    assert result.nativeToolchain is True
+    assert any("runs cmake" in reason for reason in result.reasons), result.reasons
+    assert not any("runs make" in reason for reason in result.reasons), result.reasons
+
+
+@pytest.mark.parametrize(
+    "scripts",
+    [
+        # `prebuild` as a substring is NOT evidence: it is the name of an npm
+        # lifecycle script (and any prebuild:* task), and firing on it re-hid the
+        # in-tab runtime for projects that merely ran another script. The
+        # `prebuild`/`prebuild-install` PACKAGES are covered by the table instead.
+        {"build": "npm run prebuild:clean && tsc"},
+        {"prebuild": "rimraf dist", "build": "tsc"},
+        # A plain JS/TS toolchain compiles nothing native.
+        {"build": "vite build", "test": "vitest run"},
+    ],
+)
+def test_a_plain_build_script_does_not_raise_the_flag(scripts: dict) -> None:
+    result = requirements.infer_from_package_json(json.dumps({"scripts": scripts}))
+
+    assert result.nativeToolchain is False, (
+        f"{scripts} shells out to no compiler; a false positive re-hides the in-tab "
+        f"runtime. Reasons: {result.reasons}"
+    )
+
+
+def test_gypfile_raises_the_flag() -> None:
+    # npm's own marker that this package carries a binding.gyp.
+    result = requirements.infer_from_package_json(json.dumps({"gypfile": True}))
+
+    assert result.nativeToolchain is True
+
+
+@pytest.mark.parametrize("package", ["@napi-rs/canvas", "@node-rs/argon2", "@playwright/test"])
+def test_a_scoped_native_package_is_matched_by_prefix(package: str) -> None:
+    result = requirements.infer_from_package_json(json.dumps({"dependencies": {package: "^0.1"}}))
+
+    assert result.nativeToolchain is True
+
+
+def test_platform_binaries_in_optional_dependencies_do_not_raise_the_flag() -> None:
+    """The regression that would silently restore the old behaviour.
+
+    Rollup, esbuild and swc all declare their per-platform prebuilt binaries as
+    ``optionalDependencies`` — ``@rollup/rollup-linux-x64-gnu`` and friends. npm
+    installs whichever matches the host and SKIPS the rest, and every one of them
+    has a JS or WASM fallback, which is exactly why the gate run's Vite app
+    worked. Scanning that section for native-looking names would mark every
+    modern frontend project as needing a compiler again.
+    """
+    result = requirements.infer_from_package_json(
+        json.dumps(
+            {
+                "dependencies": {"vite": "^5"},
+                "optionalDependencies": {
+                    "@rollup/rollup-linux-x64-gnu": "4.9.0",
+                    "@esbuild/darwin-arm64": "0.20.0",
+                },
+            }
+        )
+    )
+
+    assert result.nativeToolchain is False, (
+        f"optionalDependencies are per-platform prebuilds with fallbacks: {result.reasons}"
+    )
+
+
+def test_an_unreadable_manifest_still_routes_up() -> None:
+    """The fail-up policy is unchanged by this fix, and must stay that way.
+
+    Narrowing ``nativeToolchain`` is only safe because "we could not tell" still
+    resolves to most-capable. If a future change ever made the unknown path
+    default small, an unreachable GitHub would start routing real projects to a
+    runtime that cannot build them.
+    """
+    result = requirements.infer_from_package_json("{not json at all")
+
+    assert result.nativeToolchain is True
+
+
+@pytest.mark.parametrize(
+    # NOTE: no sqlite here — it opens no socket. See
+    # test_an_embedded_database_needs_a_toolchain_but_opens_no_socket.
+    "package",
+    ["pg", "mysql2", "mongodb", "mongoose", "ioredis", "amqplib", "tedious"],
 )
 def test_raw_socket_dependency_raises_the_flag(package: str) -> None:
     result = requirements.infer_from_package_json(json.dumps({"dependencies": {package: "^1"}}))
