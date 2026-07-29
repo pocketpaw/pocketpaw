@@ -80,6 +80,13 @@ GROWTH_TOOL_NAMES: tuple[str, ...] = (
     "growth_propose_send",
     "growth_propose_send_batch",
     "growth_linkedin_queue",
+    # Discovery (G-15). Define and dry-run a hunt — never schedule one: there
+    # is deliberately no cadence tool, because a schedule is a standing spend
+    # commitment a human makes after seeing a preview.
+    "growth_list_icps",
+    "growth_get_icp",
+    "growth_create_icp",
+    "growth_preview_icp",
 )
 
 GROWTH_TOOL_IDS: tuple[str, ...] = tuple(f"mcp__{SERVER_NAME}__{n}" for n in GROWTH_TOOL_NAMES)
@@ -380,6 +387,146 @@ async def _list_drafts_handler(args: dict) -> dict:
                 "status is moved by proposing it and by a human approving it, "
                 "never by an argument."
             ),
+        }
+    )
+
+
+def _icp_row(icp: Any) -> dict[str, Any]:
+    """One hunt, as the agent sees it."""
+    return {
+        "id": str(getattr(icp, "id", "")),
+        "name": getattr(icp, "name", ""),
+        "criteria": getattr(icp, "criteria", ""),
+        "geography": getattr(icp, "geography", ""),
+        "exclusions": getattr(icp, "exclusions", ""),
+        "cadence": getattr(icp, "cadence", "off"),
+        "max_per_run": getattr(icp, "max_per_run", 0),
+        "status": getattr(icp, "status", ""),
+        "last_run_at": getattr(icp, "last_run_at", None),
+    }
+
+
+async def _list_icps_handler(args: dict) -> dict:
+    gate = await _gate("growth_list_icps", READ_ACTION)
+    if isinstance(gate, dict):
+        return gate
+    _ws, _user, ctx = gate
+
+    from pocketpaw_ee.cloud.growth import service
+
+    try:
+        icps = await service.list_icps(ctx, project_id=_opt_str(args, "project_id"))
+    except Exception as exc:  # noqa: BLE001
+        return _service_error(exc, "list the hunts")
+
+    return _success_response({"icps": [_icp_row(i) for i in icps], "showing": len(icps)})
+
+
+async def _get_icp_handler(args: dict) -> dict:
+    gate = await _gate("growth_get_icp", READ_ACTION)
+    if isinstance(gate, dict):
+        return gate
+    _ws, _user, ctx = gate
+
+    icp_id = _opt_str(args, "icp_id")
+    if not icp_id:
+        return _error_response("growth_get_icp needs an `icp_id`.")
+
+    from pocketpaw_ee.cloud.growth import service
+
+    try:
+        icp = await service.get_icp(ctx, icp_id)
+    except Exception as exc:  # noqa: BLE001
+        return _service_error(exc, "read that hunt")
+
+    return _success_response({"icp": _icp_row(icp)})
+
+
+async def _create_icp_handler(args: dict) -> dict:
+    gate = await _gate("growth_create_icp", WRITE_ACTION)
+    if isinstance(gate, dict):
+        return gate
+    _ws, _user, ctx = gate
+
+    name = (_opt_str(args, "name") or "").strip()
+    criteria = (_opt_str(args, "criteria") or "").strip()
+    if not name or not criteria:
+        return _error_response(
+            "growth_create_icp needs a `name` and `criteria` — criteria is the "
+            "sentence the researcher reads, so a hunt without one describes nobody."
+        )
+
+    from pocketpaw_ee.cloud.growth import service
+    from pocketpaw_ee.cloud.growth.dto import CreateIcpRequest
+
+    try:
+        # NOTE: no `cadence` is accepted here, deliberately — see the tool
+        # description and the module header. The hunt lands `off`.
+        icp = await service.create_icp(
+            ctx,
+            CreateIcpRequest(
+                name=name,
+                criteria=criteria,
+                geography=(_opt_str(args, "geography") or "").strip(),
+                exclusions=(_opt_str(args, "exclusions") or "").strip(),
+                max_per_run=int(args.get("max_per_run") or 10),
+                project_id=_opt_str(args, "project_id"),
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _service_error(exc, "create that hunt")
+
+    return _success_response(
+        {
+            "icp": _icp_row(icp),
+            "note": (
+                "The hunt is saved and switched OFF. Preview it with "
+                "growth_preview_icp, then a human switches on a cadence in the "
+                "Hunts page — running on a schedule is a spend commitment and is "
+                "not yours to make."
+            ),
+        }
+    )
+
+
+async def _preview_icp_handler(args: dict) -> dict:
+    gate = await _gate("growth_preview_icp", WRITE_ACTION)
+    if isinstance(gate, dict):
+        return gate
+    _ws, _user, ctx = gate
+
+    icp_id = _opt_str(args, "icp_id")
+    if not icp_id:
+        return _error_response("growth_preview_icp needs an `icp_id`.")
+
+    from pocketpaw_ee.cloud.growth import service
+
+    try:
+        preview = await service.preview_icp(ctx, icp_id)
+    except Exception as exc:  # noqa: BLE001
+        return _service_error(exc, "preview that hunt")
+
+    return _success_response(
+        {
+            "icp_id": preview.icp_id,
+            "wrote_nothing": True,
+            "error": preview.error,
+            "notes": preview.notes,
+            "items": [
+                {
+                    "domain": item.domain,
+                    "company": item.company,
+                    "name": item.name,
+                    "research_brief": item.research_brief,
+                    "source_urls": list(item.source_urls),
+                    # Already through the observed-only filter: these are the
+                    # addresses that WOULD be stored, never the raw claims.
+                    "emails": list(item.emails),
+                    "already_known": item.already_known,
+                }
+                for item in preview.items
+            ],
+            "showing": len(preview.items),
         }
     )
 
@@ -952,7 +1099,101 @@ def _build_tools() -> list[Any] | None:
     async def growth_linkedin_queue(args):  # type: ignore[no-untyped-def]
         return await _linkedin_queue_handler(args)
 
+    @tool(
+        "growth_list_icps",
+        (
+            "List the workspace's hunts — the standing descriptions of who it "
+            "wants to reach, each with its cadence and how many prospects it "
+            "may file per run."
+        ),
+        {
+            "type": "object",
+            "properties": {"project_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    )
+    async def growth_list_icps(args):  # type: ignore[no-untyped-def]
+        return await _list_icps_handler(args)
+
+    @tool(
+        "growth_get_icp",
+        "Read one hunt in full — its criteria, geography, exclusions and cadence.",
+        {
+            "type": "object",
+            "properties": {"icp_id": {"type": "string"}},
+            "required": ["icp_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def growth_get_icp(args):  # type: ignore[no-untyped-def]
+        return await _get_icp_handler(args)
+
+    @tool(
+        "growth_create_icp",
+        (
+            "Write down who the workspace wants to reach, as a hunt. `criteria` "
+            "is a SENTENCE the researcher reads — 'web design shops in Pune, "
+            "5-30 people, still hand-rolling WordPress builds' — not a set of "
+            "filters. Be specific about the shape of the business, not just the "
+            "industry.\n\n"
+            "The hunt is saved SWITCHED OFF and you cannot switch it on: there "
+            "is no cadence argument here and no tool that sets one. Running on a "
+            "schedule is a recurring spend commitment, so a human makes it in "
+            "the Hunts page after seeing a preview. Create it, preview it, and "
+            "tell them what it found."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Short label, e.g. 'Pune web shops'."},
+                "criteria": {
+                    "type": "string",
+                    "description": "Who to look for, in a sentence the researcher reads.",
+                },
+                "geography": {"type": "string"},
+                "exclusions": {"type": "string", "description": "Who to skip."},
+                "max_per_run": {"type": "integer", "minimum": 1, "maximum": 100},
+                "project_id": {
+                    "type": "string",
+                    "description": (
+                        "The client this hunt prospects for, when the workspace uses projects."
+                    ),
+                },
+            },
+            "required": ["name", "criteria"],
+            "additionalProperties": False,
+        },
+    )
+    async def growth_create_icp(args):  # type: ignore[no-untyped-def]
+        return await _create_icp_handler(args)
+
+    @tool(
+        "growth_preview_icp",
+        (
+            "Dry-run a hunt: research once and report what it WOULD file. "
+            "Writes nothing — no prospect is created. This is how a human "
+            "decides whether the criteria are worded well before committing to "
+            "a schedule, so run it after creating a hunt and show them the "
+            "result.\n\n"
+            "`emails` in the result are only addresses that were actually seen "
+            "on a page. An empty list is normal and correct — never present a "
+            "constructed address as a finding."
+        ),
+        {
+            "type": "object",
+            "properties": {"icp_id": {"type": "string"}},
+            "required": ["icp_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def growth_preview_icp(args):  # type: ignore[no-untyped-def]
+        return await _preview_icp_handler(args)
+
     return [
+        growth_list_icps,
+        growth_get_icp,
+        growth_create_icp,
+        growth_preview_icp,
         growth_list_prospects,
         growth_get_prospect,
         growth_list_drafts,
