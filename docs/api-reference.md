@@ -976,19 +976,27 @@ across multiple workers, and intact after a restart.
 ### `GET /agent-activity`
 
 One entry per agent in the caller's workspace with at least one run in the
-last **24 hours**. Requires the `agent_activity.read` action (MEMBER — this
-is the caller's own workspace data). Takes no query params; tenancy comes
-from the auth context and a `workspace_id` query param is **rejected**
-(`400`), not ignored.
+last **24 hours**. Requires the `agent_activity.read` action (MEMBER). Takes
+no query params; tenancy comes from the auth context and a `workspace_id`
+query param is **rejected** (`400`), not ignored.
+
+This is a **team board**: it covers every member's runs, not just the
+caller's. An Agent is a workspace resource, so its aggregate state is shared.
+The individual turn is not — the response carries no `user_id`, no run id and
+no message content, and `GET /cloud/chat/runs/{run_id}/stream` still returns
+`404` for a run belonging to another member.
+
+`agent_id` is the agent's ObjectId hex (`Agent._id`), the same key
+`GET /agents` returns — not a display name.
 
 Response `200`:
 
 ```json
 { "agents": [
-    { "agent_id": "researcher", "status": "active", "active_runs": 2,
-      "last_active": "2026-07-28T11:58:04+00:00", "last_run_id": "run_9f2c" },
-    { "agent_id": "editor", "status": "blocked", "active_runs": 0,
-      "last_active": "2026-07-28T10:12:44+00:00", "last_run_id": "run_71ab" }
+    { "agent_id": "66f1a2b3c4d5e6f708192a3b", "status": "active",
+      "active_runs": 2, "last_active": "2026-07-28T11:58:04+00:00" },
+    { "agent_id": "66f1a2b3c4d5e6f708192a3c", "status": "blocked",
+      "active_runs": 0, "last_active": "2026-07-28T10:12:44+00:00" }
   ],
   "ts": "2026-07-28T12:00:00+00:00" }
 ```
