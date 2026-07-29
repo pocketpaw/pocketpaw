@@ -21,18 +21,23 @@ class AgentActivityOut(BaseModel):
     ``active_runs`` is how many of this agent's runs are currently ``queued`` or
     ``running`` — 0 whenever the status is not ``active``. ``last_active`` is an
     ISO-8601 UTC timestamp of the most recent state change on the agent's newest
-    run (its end, else its start, else its creation), and ``last_run_id``
-    identifies that run so a client can deep-link to the turn.
+    run (its end, else its start, else its creation).
 
     An agent with no run in the window is absent from the board entirely rather
     than reported ``offline`` — see ``service.build_activity``.
+
+    Deliberately NOT here: a run id. This is a TEAM board (see the router
+    header), so an agent's newest run often belongs to a different member — and
+    ``chat.runs.router._authorize`` 404s another member's run by design. A run
+    id would therefore be a handle the recipient cannot open, while still
+    proving that specific run exists. Aggregate agent state is the shared fact;
+    an individual member's turn is not.
     """
 
     agent_id: str
     status: str
     active_runs: int
     last_active: str
-    last_run_id: str
 
 
 class AgentActivityResponse(BaseModel):

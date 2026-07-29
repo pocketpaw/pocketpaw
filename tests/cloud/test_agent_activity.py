@@ -46,6 +46,7 @@ async def _run(
     run_id: str | None = None,
     minutes_ago: int = 5,
     ended: bool = True,
+    user_id: str = "u1",
 ) -> str:
     """Insert one ChatRunDoc. Returns its run_id.
 
@@ -54,7 +55,7 @@ async def _run(
     """
     from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 
-    rid = run_id or f"r-{workspace}-{agent_id}-{status}-{minutes_ago}"
+    rid = run_id or f"r-{workspace}-{agent_id}-{status}-{minutes_ago}-{user_id}"
     created = NOW - timedelta(minutes=minutes_ago)
     terminal = status not in ("queued", "running")
     doc = ChatRunDoc(
@@ -63,7 +64,7 @@ async def _run(
         context_type="dm",
         scope_id=f"scope-{agent_id}",
         session_key=f"sess-{agent_id}",
-        user_id="u1",
+        user_id=user_id,
         agent_id=agent_id,
         client_message_id=f"cm-{rid}",
         user_message_id=f"um-{rid}",
@@ -87,7 +88,7 @@ async def _build(workspace: str = "w1"):
 
 async def test_board_shape(mongo_db):  # noqa: ARG001 — fixture initializes Beanie
     """Every entry carries the full wire shape, and ts stamps the build."""
-    rid = await _run(workspace="w1", agent_id="scout", status="completed", minutes_ago=3)
+    await _run(workspace="w1", agent_id="scout", status="completed", minutes_ago=3)
 
     board = await _build()
 
@@ -97,7 +98,6 @@ async def test_board_shape(mongo_db):  # noqa: ARG001 — fixture initializes Be
     assert entry.agent_id == "scout"
     assert entry.status == AgentStatus.IDLE.value
     assert entry.active_runs == 0
-    assert entry.last_run_id == rid
     assert entry.last_active == (NOW - timedelta(minutes=3)).isoformat()
 
 
@@ -209,6 +209,48 @@ async def test_working_agents_sort_first_then_most_recent(mongo_db):  # noqa: AR
 
 
 # ===========================================================================
+# Cross-MEMBER visibility — a decision, pinned so it can't drift silently
+# ===========================================================================
+
+
+async def test_team_board_shows_every_members_activity(mongo_db):  # noqa: ARG001
+    """The board is workspace-WIDE across members, ON PURPOSE.
+
+    ``chat.runs.router._authorize`` 404s another member's individual run so run
+    existence doesn't leak to a teammate. This board deliberately reads wider,
+    because an Agent is a WORKSPACE resource and "is this agent busy right now"
+    is the fact a team coordinates around. The split: aggregate state is shared,
+    the individual turn stays private — no user_id, no run id, no message
+    content crosses the wire.
+
+    If this should ever become a personal board, this test must be edited by
+    hand. That is the point of it — the narrowing should be a conscious change,
+    never a silent drift in either direction.
+    """
+    await _run(workspace="w1", agent_id="shared-agent", status="running", user_id="member-a")
+    await _run(
+        workspace="w1",
+        agent_id="other-agent",
+        status="completed",
+        minutes_ago=10,
+        user_id="member-b",
+    )
+
+    board = await _build("w1")
+
+    assert sorted(a.agent_id for a in board.agents) == ["other-agent", "shared-agent"]
+
+    # …and the private parts stay off the wire even on a team board.
+    payload = board.model_dump()
+    flat = str(payload)
+    assert "member-a" not in flat and "member-b" not in flat, "user_id must never surface"
+    for entry in payload["agents"]:
+        assert "last_run_id" not in entry, (
+            "a run id would be an unopenable handle to a teammate's run"
+        )
+
+
+# ===========================================================================
 # Cross-workspace isolation — the property this surface exists to hold
 # ===========================================================================
 
@@ -304,7 +346,6 @@ async def test_endpoint_returns_the_board(mongo_db):  # noqa: ARG001
             "status": "active",
             "active_runs": 1,
             "last_active": (NOW - timedelta(minutes=2)).isoformat(),
-            "last_run_id": "r-w1-a1-running-2",
         }
     ]
 

@@ -309,6 +309,18 @@ ACTIONS: dict[str, ActionRule] = {
     # leak of the kind that forces ``cockpit.read`` above to stay ADMIN. Its
     # payload is activity metadata only (agent id, status, run count, timestamps)
     # — no message content, no credentials.
+    #
+    # MEMBER is the whole RBAC statement for this surface, and it is deliberate:
+    # the board is workspace-WIDE, so any member sees every member's agent
+    # activity. That is the team-coordination fact an Agent — a workspace
+    # resource, not a personal one — exists to expose. It knowingly reads wider
+    # than ``chat.runs.router._authorize``, which hides another member's
+    # individual run; the split is aggregate-state-is-shared,
+    # individual-turn-is-private (no user_id, no run id, no content on the wire).
+    # Narrowing to a personal board would be a ``user_id`` filter on the two
+    # reads in ``chat.runs.service``, NOT a role change here — and raising this
+    # to ADMIN would hide the board from exactly the people who need it.
+    # See ee.cloud.agent_activity.router's header for the full rationale.
     "agent_activity.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
 }
 

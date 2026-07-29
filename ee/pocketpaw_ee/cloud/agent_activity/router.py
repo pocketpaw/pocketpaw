@@ -9,12 +9,29 @@
 # the only module allowed to touch ``ChatRunDoc``. Mounted under /api/v1 from
 # ee/pocketpaw_ee/cloud/__init__.py.
 #
-# Auth: MEMBER, via a new ``agent_activity.read`` action. This is the caller's
-# OWN workspace data — its agents, its runs — so it sits at the same bar as
-# ``session.read_own`` / ``outcomes.read``. It deliberately does NOT reuse the
-# herdr cockpit's ADMIN ``cockpit.read``: that guards a host-level surface whose
-# panes are not paw-workspace-scoped, which is precisely why it is admin-only.
-# Different surface, different tenancy story, different action.
+# Auth: MEMBER, via a new ``agent_activity.read`` action. It deliberately does
+# NOT reuse the herdr cockpit's ADMIN ``cockpit.read``: that guards a host-level
+# surface whose panes are not paw-workspace-scoped, which is precisely why it is
+# admin-only. Different surface, different tenancy story, different action.
+#
+# THIS IS A TEAM BOARD — a deliberate decision, recorded here because it departs
+# from a sibling in the same entity. ``chat.runs.router._authorize`` 404s a run
+# belonging to another member of the same workspace, commented "so we don't leak
+# run existence to a workspace teammate who didn't own the run". This board does
+# NOT filter on ``user_id``: every member sees every agent's aggregate state.
+#
+# Why the departure is intended rather than an oversight: an Agent is a
+# WORKSPACE resource, not a personal one — several members share one agent, and
+# "is this agent busy right now" is the shared fact a team needs to coordinate
+# around. What stays private is the individual turn: the board carries agent
+# state, run COUNTS and timing, never message content, never ``user_id``, and
+# (see dto.py) never a run id, so it cannot be used as a handle to open a
+# teammate's run. ``/cloud/chat/runs/{run_id}/stream`` remains 404 for a
+# non-owner, unchanged.
+#
+# If this should ever become a personal board, the change is one filter on both
+# reads in ``chat.runs.service`` plus flipping ``test_team_board_shows_every_
+# members_activity`` — which exists to make that a conscious edit, not a drift.
 #
 # v1 is a plain GET, polled by the client. An SSE stream like the cockpit's was
 # rejected on cost: the cockpit re-polls a local subprocess for one operator,

@@ -134,7 +134,6 @@ async def build_activity(
                 status=_status_for(rows, newest).value,
                 active_runs=sum(1 for r in rows if r.status in runs_service.ACTIVE_RUN_STATUSES),
                 last_active=_last_activity_at(newest).isoformat(),
-                last_run_id=newest.run_id,
             )
         )
 
