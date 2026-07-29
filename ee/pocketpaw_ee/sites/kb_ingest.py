@@ -461,8 +461,27 @@ async def sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
         report.ingested += 1
         report.article_ids.append(article_id)
 
+    if not report.ingested:
+        # The site HAS pages and not one of them made it in — the ingest engine is
+        # unreachable or broken. That is a failure, not a clean sync of nothing, and
+        # saying so is the difference between a dashboard that reads "nothing
+        # learned yet" and one that tells the owner something is wrong.
+        report.error = "ingest_failed"
+        await _record_sync(site, report, previous=previous)
+        logger.warning(
+            "sites.kb: every page failed to ingest for site %s (%d skipped)",
+            getattr(site, "id", "?"),
+            report.skipped,
+        )
+        return report
+
     # Prune what this site used to publish and no longer does. Anything not in the
     # fresh set is a page that was renamed or deleted.
+    #
+    # Reachable ONLY after a successful ingest, deliberately: the fresh set is the
+    # thing "no longer produced" is measured against, so an empty one from a failed
+    # run would mark EVERY existing article stale and delete the site's whole
+    # knowledge base over a transient outage.
     stale = [a for a in previous if a not in set(report.article_ids)]
     for article_id in stale:
         if await KnowledgeService.remove_article(scope, article_id):

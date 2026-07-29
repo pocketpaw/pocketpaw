@@ -385,3 +385,61 @@ async def test_sync_only_writes_its_own_fields(monkeypatch):
 
     assert len(site.set_calls) == 1
     assert set(site.set_calls[0]) == {"kb_article_ids", "kb_synced_at", "kb_sync_error"}
+
+
+@pytest.mark.asyncio
+async def test_total_ingest_failure_is_reported_not_called_clean(monkeypatch):
+    """A site that HAS pages where not one of them made it in means the ingest
+    engine is unreachable. Reporting that as a clean sync of nothing leaves the
+    dashboard saying "nothing learned yet" while the real problem is invisible."""
+
+    async def _broken(scope, text, source):
+        raise RuntimeError("kb binary not found")
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.ingest_text_to_scope", _broken
+    )
+    _patch_pocket(
+        monkeypatch,
+        {"engine": "html", "source": {"index.html": f"<p>{_long('We open at 8am.')}</p>"}},
+    )
+    site = _FakeSite()
+
+    report = await kb_ingest.sync_site_knowledge(site)
+
+    assert report.ingested == 0
+    assert report.skipped == 1
+    assert report.error == "ingest_failed"
+    assert site.kb_sync_error == "ingest_failed"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_ingest_never_purges_the_existing_knowledge(monkeypatch):
+    """The fresh set is what "no longer produced" is measured against, so an empty
+    one from a failed run would mark every existing article stale. A transient
+    outage must not wipe the site's whole knowledge base."""
+    removed: list[str] = []
+
+    async def _broken(scope, text, source):
+        raise RuntimeError("kb down")
+
+    async def _remove(scope, article_id):
+        removed.append(article_id)
+        return True
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.ingest_text_to_scope", _broken
+    )
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.remove_article", _remove
+    )
+    _patch_pocket(
+        monkeypatch,
+        {"engine": "html", "source": {"index.html": f"<p>{_long('We open at 8am.')}</p>"}},
+    )
+    site = _FakeSite(kb_article_ids=["site-home", "site-about", "site-pricing"])
+
+    await kb_ingest.sync_site_knowledge(site)
+
+    assert removed == []  # nothing deleted
+    assert site.kb_article_ids == ["site-home", "site-about", "site-pricing"]  # all kept
