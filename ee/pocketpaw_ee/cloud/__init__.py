@@ -817,6 +817,15 @@ def mount_cloud(app: FastAPI) -> None:
 
     register_agent_bridge()
 
+    # Wire the /growth discovery cron's research loop. Until this call the
+    # seam is empty and the sweep is a deliberate no-op — see
+    # ``growth/discovery.py``. The agent itself still has to be seeded per
+    # workspace; a workspace without it stays idle rather than failing.
+    from pocketpaw_ee.cloud.growth.discovery import set_production_research_fn
+    from pocketpaw_ee.cloud.growth.researcher import agent_research
+
+    set_production_research_fn(agent_research)
+
     # NOTE: Composio is wired per-backend via ``pocketpaw_ee.cloud.composio.providers``
     # — each agent backend (claude_sdk, openai_agents, google_adk,
     # deep_agents) calls ``build_tools_for_backend()`` in its own tool-build
