@@ -103,9 +103,7 @@ async def list_agents(
 ) -> list[dict]:
     # Visibility gate: pass the caller as ``viewer_user_id`` so another user's
     # private agents are filtered out of the tenant list.
-    items = await agents_service.list_agents(
-        workspace_id, query=query, viewer_user_id=user_id
-    )
+    items = await agents_service.list_agents(workspace_id, query=query, viewer_user_id=user_id)
     return [agent_to_dict(a) for a in items]
 
 

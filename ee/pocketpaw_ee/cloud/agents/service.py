@@ -362,11 +362,7 @@ def can_read_agent(doc: _AgentDoc, workspace_id: str | None, user_id: str | None
     """
     if user_id is not None and doc.owner == user_id:
         return True
-    if (
-        doc.visibility == "workspace"
-        and workspace_id is not None
-        and doc.workspace == workspace_id
-    ):
+    if doc.visibility == "workspace" and workspace_id is not None and doc.workspace == workspace_id:
         return True
     return doc.visibility == "public"
 
@@ -394,9 +390,7 @@ async def get(agent_id: str) -> Agent:
     return _to_domain(doc)
 
 
-async def get_for_viewer(
-    agent_id: str, workspace_id: str | None, user_id: str | None
-) -> Agent:
+async def get_for_viewer(agent_id: str, workspace_id: str | None, user_id: str | None) -> Agent:
     """Load an agent by id, enforcing visibility for ``user_id``.
 
     Raises ``NotFound`` when the viewer may not read the agent — a private or
@@ -409,9 +403,7 @@ async def get_for_viewer(
     return _to_domain(doc)
 
 
-async def ensure_can_read(
-    agent_id: str, workspace_id: str | None, user_id: str | None
-) -> None:
+async def ensure_can_read(agent_id: str, workspace_id: str | None, user_id: str | None) -> None:
     """Raise ``NotFound`` unless ``user_id`` may READ the agent.
 
     Used by the knowledge-read endpoints, which key on the ``agent:{id}`` kb
@@ -422,9 +414,7 @@ async def ensure_can_read(
         raise NotFound("agent", agent_id)
 
 
-async def ensure_can_use(
-    agent_id: str, workspace_id: str | None, user_id: str | None
-) -> None:
+async def ensure_can_use(agent_id: str, workspace_id: str | None, user_id: str | None) -> None:
     """Raise ``NotFound`` unless ``user_id`` may USE (attach) the agent.
 
     Used by the group + pocket attach paths so a group admin / pocket editor
