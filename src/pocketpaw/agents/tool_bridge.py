@@ -5,6 +5,7 @@ Provides:
 - build_openai_function_tools(): wrap tools as OpenAI Agents SDK FunctionTool objects
 - build_adk_function_tools(): wrap tools as Google ADK FunctionTool objects
 - build_deep_agents_tools(): wrap tools as LangChain StructuredTool objects for Deep Agents
+- build_pydantic_ai_tools(): wrap tools as pydantic-ai Tool objects
 - get_tool_instructions_compact(): compact markdown for system-prompt injection
 
 Backend-aware exclusion:
@@ -13,6 +14,14 @@ Backend-aware exclusion:
 - BrowserTool/DesktopTool: always excluded (need special session state)
 
 Changes:
+- 2026-07-29 (feat/pydantic-ai-backend): added build_pydantic_ai_tools() plus the
+  two signature builders it shares. pydantic-ai derives a tool's JSON schema from
+  the wrapper's *signature*, so the wrappers synthesize one instead of emitting
+  schema by hand. Two differences from the LangChain bridge, both deliberate:
+  the JSON-schema path honours ``required`` (optional params become
+  ``str | None = None`` rather than all-required), and every wrapper is asserted
+  async — a sync tool would run on anyio's bounded thread pool and throttle every
+  concurrent run in the in-process backend.
 - 2026-03-12: Added EditFileTool to _CLAUDE_SDK_EXCLUDED (has native Edit)
 - 2026-05-21 (#1160): _scan_tool_output now also caps oversized results via
   cap_tool_output(), so tool blobs returned through the OpenAI / ADK /
@@ -462,6 +471,170 @@ def build_deep_agents_tools(
 
     logger.info("Built %d LangChain StructuredTools from PocketPaw tools", len(structured_tools))
     return structured_tools
+
+
+def build_pydantic_ai_tools(
+    settings: Any, backend: str = "pydantic_ai", policy: ToolPolicy | None = None
+) -> list:
+    """Build a list of pydantic-ai ``Tool`` objects for PocketPaw tools.
+
+    The pydantic-ai analogue of :func:`build_deep_agents_tools`. Only tools
+    permitted by the active ``ToolPolicy`` are included, so the RFC-14 surface
+    policy — ``(agent ∪ surface ∪ entity).allow − deny`` — is enforced by
+    ABSENCE from the model's tool list rather than by a refusal at call time.
+
+    Every returned tool is a coroutine, and that is asserted rather than
+    assumed. The Pydantic AI backend runs in-process and shares one event loop
+    with the API tier: a single blocking tool function would execute on anyio's
+    bounded worker-thread pool and throttle every concurrent run in the process,
+    which is precisely the ceiling this backend exists to raise.
+
+    Args:
+        settings: A ``Settings`` instance used to build the ToolPolicy.
+        backend: Backend name passed to the tool instantiator.
+        policy: Explicit policy; built from *settings* when omitted.
+
+    Returns:
+        List of ``pydantic_ai.tools.Tool`` (empty if pydantic-ai isn't installed).
+    """
+    try:
+        from pydantic_ai.tools import Tool
+    except ImportError:
+        logger.debug("pydantic-ai not installed — returning empty tools list")
+        return []
+
+    if policy is None:
+        policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
+
+    registry = ToolRegistry(policy=policy)
+    for tool in _instantiate_all_tools(backend=backend):
+        registry.register(tool)
+
+    tools: list = []
+    for tool_name in registry.allowed_tool_names:
+        tool = registry.get(tool_name)
+        if tool is None:
+            continue
+        try:
+            tools.append(_make_pydantic_ai_tool(Tool, tool, settings))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Skipping tool %s — could not build wrapper: %s", tool_name, exc)
+
+    logger.info("Built %d Pydantic AI Tools from PocketPaw tools", len(tools))
+    return tools
+
+
+def _make_pydantic_ai_tool(tool_cls: Any, tool: Any, settings: Any) -> Any:
+    """Wrap one PocketPaw tool as a pydantic-ai ``Tool``.
+
+    pydantic-ai derives a tool's JSON schema from the wrapper's *signature*, so
+    both paths below build a synthetic signature rather than hand-writing schema:
+
+    * ``args_schema`` present — mirror the Pydantic model's fields with their
+      real annotations and defaults, so nested objects (the pocket specialist's
+      ``hints``) round-trip as ``$defs`` instead of being flattened to strings.
+    * otherwise — one ``str`` parameter per declared property, optional ones
+      annotated ``str | None`` with a ``None`` default so the model isn't forced
+      to invent a value for every field. (The LangChain bridge marks all
+      parameters required; respecting ``required`` here is deliberate.)
+    """
+    import inspect
+
+    defn = tool.definition
+    limit = int(getattr(settings, "pydantic_ai_max_tool_output_chars", 0) or 0)
+
+    async def _run(**kwargs: Any) -> str:
+        try:
+            result = await tool.execute(**kwargs)
+        except Exception as exc:
+            logger.error("Pydantic AI tool %s execution error: %s", tool.name, exc)
+            return f"Error executing {tool.name}: {exc}"
+        scanned = _scan_tool_output(result, tool.name)
+        if limit and isinstance(scanned, str) and len(scanned) > limit:
+            # Announce the truncation with the true length. A silent "...(truncated)"
+            # on a tool whose contract asks for complete content is how the /code
+            # fabrication bug happened (2026-07-28): past the cap the instruction
+            # pair became jointly unobeyable and the model reconstructed the tail.
+            return (
+                f"{scanned[:limit]}\n\n[truncated: {tool.name} returned "
+                f"{len(scanned)} chars, limit {limit}. This output is INCOMPLETE — "
+                f"narrow the request rather than inferring the remainder.]"
+            )
+        return scanned
+
+    _run.__name__ = defn.name
+    _run.__qualname__ = defn.name
+    _run.__doc__ = defn.description
+
+    schema_cls = getattr(tool, "args_schema", None)
+    if schema_cls is not None:
+        params, annotations = _signature_from_model(inspect, schema_cls)
+    else:
+        params, annotations = _signature_from_json_schema(inspect, defn.parameters or {})
+
+    annotations["return"] = str
+    _run.__signature__ = inspect.Signature(parameters=params, return_annotation=str)
+    _run.__annotations__ = annotations
+
+    if not inspect.iscoroutinefunction(_run):  # pragma: no cover - defensive
+        raise TypeError(
+            f"Bridged tool {defn.name} is not async. Sync tools run on anyio's "
+            "bounded thread pool and throttle every concurrent run in the process."
+        )
+
+    return tool_cls(_run, name=defn.name, description=defn.description)
+
+
+def _signature_from_model(inspect: Any, model: Any) -> tuple[list, dict]:
+    """Build signature params from a Pydantic model's fields, preserving types."""
+    params: list = []
+    annotations: dict = {}
+    for name, field in model.model_fields.items():
+        if field.is_required():
+            default = inspect.Parameter.empty
+        else:
+            default = field.get_default(call_default_factory=True)
+        params.append(
+            inspect.Parameter(
+                name,
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=field.annotation,
+                default=default,
+            )
+        )
+        annotations[name] = field.annotation
+    return params, annotations
+
+
+def _signature_from_json_schema(inspect: Any, parameters: dict) -> tuple[list, dict]:
+    """Build ``str``-typed signature params from a tool's JSON-schema properties.
+
+    Honours the schema's ``required`` list: optional properties become
+    ``str | None = None`` so the model may omit them.
+    """
+    props = parameters.get("properties", {}) or {}
+    required = set(parameters.get("required", []) or [])
+    params: list = []
+    annotations: dict = {}
+    for name in props:
+        if name in required:
+            params.append(inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, annotation=str))
+            annotations[name] = str
+        else:
+            params.append(
+                inspect.Parameter(
+                    name,
+                    inspect.Parameter.KEYWORD_ONLY,
+                    annotation=str | None,
+                    default=None,
+                )
+            )
+            annotations[name] = str | None
+    return params, annotations
 
 
 def _make_langchain_wrapper(tool: Any):

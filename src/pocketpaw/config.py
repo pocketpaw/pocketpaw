@@ -603,14 +603,70 @@ class Settings(BaseSettings):
             "don't recognize the shape ignore it."
         ),
     )
+    # Pydantic AI Settings — in-process, dispatch-only agent backend.
+    # See docs/design/drafts/2026-07-29-pydantic-ai-agent-backend-prd.md.
+    pydantic_ai_model: str = Field(
+        default="litellm:claude-sonnet-4-6",
+        description=(
+            "Model for the Pydantic AI backend in ``provider:model`` format. "
+            "Defaults to the ``litellm`` provider so model access goes through "
+            "the self-hosted LiteLLM proxy (RFC 11), which already owns spend "
+            "logs, virtual keys and per-customer budgets — a second model layer "
+            "would fork metering. A bare model name with no ``provider:`` prefix "
+            "falls back to ``pydantic_ai_provider``."
+        ),
+    )
+    pydantic_ai_provider: str = Field(
+        default="auto",
+        description=(
+            "Provider for the Pydantic AI backend when ``pydantic_ai_model`` "
+            "carries no ``provider:`` prefix. ``auto`` defers to ``llm_provider``, "
+            "then to ``litellm``. One of: litellm, anthropic, openai, "
+            "openai_compatible, openrouter, ollama."
+        ),
+    )
+    pydantic_ai_max_turns: int = Field(
+        default=100,
+        description=(
+            "Max model requests per run in the Pydantic AI backend (0 = "
+            "unlimited). Maps to the agent's request limit, which bounds a "
+            "runaway tool loop."
+        ),
+    )
+    pydantic_ai_mcp_enabled: bool = Field(
+        default=False,
+        description=(
+            "Attach configured MCP servers to the Pydantic AI backend. OFF by "
+            "default and deliberately so: pydantic-ai's MCP servers are "
+            "refcounted, so a server tears down when concurrent runs drop to "
+            "zero and RESPAWNS on the next run — putting stdio subprocess churn "
+            "back on the request path, which is the exact cost this backend "
+            "exists to remove. Turning this on is gated on holding the servers "
+            "open for the backend instance's lifetime and MEASURING subprocess "
+            "count flat under concurrent load (PRD chunk 4)."
+        ),
+    )
+    pydantic_ai_max_tool_output_chars: int = Field(
+        default=200_000,
+        description=(
+            "Truncate any single bridged tool result above this many characters "
+            "before it re-enters the model context (0 = no limit). Guards the "
+            "context against one oversized tool return. NOT a read cap on file "
+            "content — a cap that a tool contract cannot satisfy is how the "
+            "/code fabrication bug happened (2026-07-28); bridged tools here are "
+            "dispatch-only and return summaries, not whole files."
+        ),
+    )
     # Pocket Specialist Settings — see docs/superpowers/specs/2026-05-09-pocket-specialist-design.md
     pocket_specialist_backend: str = Field(
         default="deep_agents",
         description=(
             "Which agent backend runs the pocket specialist's LLM work. Must be a "
             "registered backend name (deep_agents, langchain_react, claude_agent_sdk, "
-            "openai_agents, google_adk, codex_cli, opencode, copilot_sdk). Default "
-            "deep_agents avoids subprocess cold-start."
+            "openai_agents, google_adk, codex_cli, opencode, copilot_sdk, "
+            "pydantic_ai). Default deep_agents avoids subprocess cold-start. The "
+            "backend must implement ``attach_specialist_tools`` — one that raises "
+            "is excluded from the eligible set (``agents/backend.py``)."
         ),
     )
     pocket_specialist_model: str = Field(

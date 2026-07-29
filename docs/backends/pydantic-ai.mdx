@@ -1,0 +1,153 @@
+---
+title: "Pydantic AI: In-Process Backend"
+description: "The Pydantic AI backend runs the agent loop inside the API process instead of spawning a subprocess per turn, and reaches models through the LiteLLM proxy. Built for high concurrency."
+section: Agent Backends
+ogType: article
+keywords: ["pydantic ai", "in-process agent", "litellm", "concurrency", "agent backend", "dispatch-only"]
+tags: ["backends", "pydantic-ai", "litellm"]
+---
+
+# Pydantic AI: In-Process Backend
+
+The Pydantic AI backend runs the agent loop **inside the API process** using
+[Pydantic AI](https://ai.pydantic.dev/) (`pydantic-ai-slim`), and reaches models
+through an OpenAI-compatible client pointed at a LiteLLM proxy.
+
+It exists for one reason: concurrency. The default `claude_agent_sdk` backend
+spawns a Claude Code CLI subprocess per concurrent run at roughly 300–500 MB
+RSS. That is fine for a laptop and expensive for a server serving hundreds of
+simultaneous sessions. This backend's per-run cost is roughly the conversation
+context, which moves the limit from process memory to the event loop — something
+you address by adding web processes rather than machines.
+
+## Overview
+
+- **Status**: Beta
+- **Provider support**: LiteLLM (default), Anthropic, OpenAI, OpenRouter, OpenAI-compatible, Ollama
+- **Built-in tools**: none of its own — see [Dispatch-only](#dispatch-only)
+- **MCP support**: Off by default — see [MCP](#mcp)
+- **Required key**: none at the top level; the LiteLLM virtual key is used instead
+
+## Quick Start
+
+```bash
+export POCKETPAW_AGENT_BACKEND="pydantic_ai"
+export POCKETPAW_PYDANTIC_AI_MODEL="litellm:claude-sonnet-4-6"
+export POCKETPAW_LITELLM_API_BASE="http://localhost:4000"
+export POCKETPAW_LITELLM_API_KEY="sk-your-virtual-key"
+```
+
+Install the extra:
+
+```bash
+pip install 'pocketpaw[pydantic-ai]'
+```
+
+## Configuration
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `POCKETPAW_PYDANTIC_AI_MODEL` | `litellm:claude-sonnet-4-6` | Model in `provider:model` form |
+| `POCKETPAW_PYDANTIC_AI_PROVIDER` | `auto` | Provider when the model carries no prefix |
+| `POCKETPAW_PYDANTIC_AI_MAX_TURNS` | `100` | Max model requests per run (`0` = unlimited) |
+| `POCKETPAW_PYDANTIC_AI_MCP_ENABLED` | `false` | Attach configured MCP servers |
+| `POCKETPAW_PYDANTIC_AI_MAX_TOOL_OUTPUT_CHARS` | `200000` | Per-tool-result truncation ceiling |
+
+The model string accepts either form:
+
+```bash
+POCKETPAW_PYDANTIC_AI_MODEL="litellm:claude-sonnet-4-6"   # explicit provider
+POCKETPAW_PYDANTIC_AI_MODEL="claude-sonnet-4-6"           # uses PYDANTIC_AI_PROVIDER
+```
+
+## Why LiteLLM by default
+
+Model access goes through the LiteLLM proxy rather than straight to a vendor,
+because the proxy already owns spend logs, virtual keys, and per-customer
+budgets. Pointing the backend at a vendor SDK directly would work, but it would
+fork metering into two places.
+
+<Callout type="info">
+The proxy base URL needs no `/v1` suffix in your config — the backend appends it.
+This differs from the Deep Agents backend, which passes the same setting to the
+LiteLLM SDK, which builds the path itself.
+</Callout>
+
+Other providers are supported and bypass the proxy:
+
+```bash
+POCKETPAW_PYDANTIC_AI_MODEL="anthropic:claude-sonnet-4-6"   # direct Anthropic
+POCKETPAW_PYDANTIC_AI_MODEL="ollama:llama3.2"               # fully local
+```
+
+## Dispatch-only
+
+This backend emits tool calls; it does not execute local file or shell work.
+Execution belongs to sandboxes (Daytona, WebContainers, the desktop app), object
+storage, or MCP servers.
+
+That is a security property, not just a design preference. PocketPaw's built-in
+shell and filesystem tools confine themselves to a **process-global** jail path.
+A subprocess-per-run backend can give each tenant its own working directory; an
+in-process backend cannot, so every tenant would share one jail. Pocket sessions
+therefore have shell and filesystem tools stripped from the tool surface
+mechanically, and this backend ships no such tools of its own.
+
+If you run single-tenant and want local execution, use `claude_agent_sdk`.
+
+## MCP
+
+MCP support is present but **off by default**. Pydantic AI's MCP servers are
+refcounted: a shared server shuts down once concurrent runs reach zero and
+respawns on the next one. At low concurrency that puts a stdio subprocess spawn
+back on the request path — the exact cost this backend exists to remove.
+
+Turning it on is gated on holding servers open for the process lifetime and
+measuring that subprocess count stays flat under load:
+
+```bash
+export POCKETPAW_PYDANTIC_AI_MCP_ENABLED="true"
+pip install 'pydantic-ai-slim[mcp]'
+```
+
+The `mcp` extra is not pulled in by `pocketpaw[pydantic-ai]` because it forces a
+major `starlette` upgrade across the whole application.
+
+## Prompt caching
+
+Prompt-cache behaviour through the OpenAI-compatible path is **not yet
+verified**. The Deep Agents backend inserts Anthropic `cache_control` markers
+into requests directly; there is no equivalent hook here, so caching is whatever
+the proxy negotiates upstream.
+
+The backend reports what it observes rather than assuming: when a run returns
+non-zero cache tokens it emits a `token_usage` event carrying read and write
+counts and a hit rate, so the answer can be measured on your own traffic.
+
+## Concurrency notes
+
+Two properties matter when many runs share one backend instance:
+
+- **Cancellation is per-run.** Stopping one run never truncates a sibling, and a
+  run that starts after a stop is not born cancelled.
+- **Every bridged tool is async.** A single blocking tool would run on the
+  bounded worker-thread pool and throttle every concurrent run in the process,
+  so the tool bridge rejects sync tools rather than accepting them quietly.
+
+## Pocket specialist
+
+The backend implements dynamic tool attachment, so it can run the pocket/site
+specialist:
+
+```bash
+export POCKETPAW_POCKET_SPECIALIST_BACKEND="pydantic_ai"
+```
+
+Rollback is the same setting — set it back to `deep_agents`.
+
+## Limitations
+
+- Beta. The dependency is pinned exactly; expect breaking changes on upgrade.
+- No local shell or filesystem tools (by design — see above).
+- MCP off by default.
+- Prompt-cache margin unverified on the proxy path.

@@ -147,6 +147,32 @@ deep-agents = [
     # LangChain needs this adapter package. 1.x line matches langchain-core 1.x.
     "langchain-ollama>=1.0,<2.0",
 ]
+pydantic-ai = [
+    # In-process agent backend (agents/pydantic_ai.py). ``-slim`` + the
+    # ``openai`` extra deliberately: the model client is an OpenAI-compatible
+    # one pointed at OUR LiteLLM proxy, so pulling the full ``pydantic-ai``
+    # meta-package (every vendor SDK) would add weight we never call.
+    #
+    # PINNED EXACTLY, and to a version that is NOT the newest. Two reasons:
+    # (1) pre-1.0-shaped release cadence — 16 releases in 3.5 months — so a
+    # floating range puts breaking changes on the request path; (2) the
+    # workspace's 7-day minimum-release-age supply-chain policy. 2.14.1 is the
+    # newest release that is >=7 days old as of 2026-07-29 (2.15.0 landed
+    # 2026-07-22 and every version above it is newer still).
+    #
+    # The ``mcp`` extra is deliberately NOT included. It is only needed once
+    # ``pydantic_ai_mcp_enabled`` is turned on (PRD chunk 4), and it forces
+    # ``starlette`` from 0.52.x to 1.3.x across the whole app — a major bump on
+    # FastAPI's own dependency, taken for a capability that currently ships OFF.
+    # Chunk 4 owns that call, with the subprocess-count measurement to justify it.
+    "pydantic-ai-slim[openai]==2.14.1",
+    # Harness capabilities (compaction, subagents, skills, planning, tool
+    # output limits, step persistence). 0.8.0 is likewise the newest release
+    # clearing the 7-day window — note this CORRECTS the PRD, which specified
+    # 0.12.x while citing the same policy that excludes it (0.12.0 shipped
+    # 2026-07-28, one day before this was written).
+    "pydantic-ai-harness==0.8.0",
+]
 litellm = [
     "litellm>=1.40.0",
 ]

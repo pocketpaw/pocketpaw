@@ -1,0 +1,720 @@
+"""Pydantic AI agent backend — in-process, dispatch-only.
+
+Created 2026-07-29 (feat/pydantic-ai-backend). Backend #9 in
+``_BACKEND_REGISTRY``. Implements the ``AgentBackend`` protocol on top of
+``pydantic-ai-slim`` with an OpenAI-compatible model client pointed at the
+self-hosted LiteLLM proxy.
+
+Design source: ``docs/design/drafts/2026-07-29-pydantic-ai-agent-backend-prd.md``.
+
+Why this exists: ``claude_agent_sdk`` spawns a Claude Code CLI Node subprocess
+per concurrent run (~300-500 MB RSS). At the 300-400 concurrent-user target
+that is ~75 GB of agent RSS before any other cost. This backend runs the agent
+loop IN-PROCESS, so per-run cost is roughly the conversation context and the
+binding constraint moves from process memory to the event loop — which is
+addressed by adding web processes rather than boxes.
+
+**Dispatch-only.** This backend emits tool calls; it does NOT execute local
+file or shell work. Execution happens in Daytona / WebContainers / Tauri, S3,
+or MCP servers. That is what collapses per-run memory AND what removes the
+tenant-jail requirement: the per-run cwd jail (``agent_jail.resolve_agent_cwd``)
+exists only on the ``claude_sdk`` chain, and PocketPaw's own
+``tools/builtin/{shell,filesystem}.py`` jail against a PROCESS-GLOBAL
+``file_jail_path``, so any in-process backend granted local fs/shell tools
+would share one jail across every tenant. ``_POCKET_BLOCKED_TOOLS`` below is the
+mechanical expression of that constraint, not a preference.
+
+Two failure modes this file is deliberately shaped around:
+
+1. **Per-run cancellation, never instance state.** ``AgentPool`` caches ONE
+   backend instance per agent and drives concurrent runs through it. The
+   sibling ``deep_agents`` backend keeps a single ``self._stop_flag``, so one
+   run's ``stop()`` truncates every concurrent run and each new run's entry
+   reset un-stops the others — observed 2026-07-29 in the load-test rig, where
+   33 of 49 concurrent runs returned a clean ``stream_end`` carrying no
+   content. Here each run owns a private ``_RunHandle``; ``stop()`` signals the
+   handles that are live AT THAT MOMENT and a run starting afterwards gets a
+   fresh one. The property is pinned by
+   ``test_a_new_run_does_not_resurrect_a_stopped_one``, which was mutation-checked
+   against a faithful shared-flag reproduction — note that the obvious
+   "N concurrent runs all produce content" test does NOT catch the bug, because
+   no ``stop()`` lands between those runs.
+
+2. **Sync tools cap the whole process.** One blocking tool function runs on
+   anyio's bounded worker thread pool, so a single sync tool throttles every
+   concurrent run in the process. ``build_pydantic_ai_tools`` asserts every
+   bridged tool is a coroutine.
+
+Prompt caching is an OPEN QUESTION on this path. ``deep_agents`` patches
+Anthropic ``cache_control`` markers directly into the request; the
+OpenAI-compatible route through LiteLLM has no equivalent hook here, so cache
+behaviour is whatever the proxy negotiates upstream. The token counts are
+reported (``token_usage`` event) precisely so the answer is measured rather
+than assumed — ``pydantic_ai``'s ``RunUsage`` documents ``input_tokens`` as the
+INCLUSIVE total with ``cache_read_tokens`` / ``cache_write_tokens`` as subsets,
+and normalizes providers (Anthropic, Bedrock) that report them disjointly.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import AsyncIterator
+from typing import Any
+
+from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
+from pocketpaw.agents.protocol import AgentEvent
+from pocketpaw.config import Settings
+from pocketpaw.tools.policy import ToolPolicy
+
+logger = logging.getLogger(__name__)
+
+# Providers whose wire format is OpenAI chat-completions. All of them are
+# served by ``OpenAIChatModel`` + ``OpenAIProvider(base_url=...)``; only the
+# base URL and key source differ.
+_OPENAI_COMPATIBLE = frozenset({"litellm", "openai", "openai_compatible", "openrouter", "ollama"})
+
+# Same gate as ``claude_sdk`` and ``deep_agents``: ``<pocket-scope>`` opens every
+# pocket/site prompt. On a pocket session the agent's needs are fully covered by
+# MCP tools, and leaving shell/fs attached has been observed sending the agent
+# off to introspect its own environment (``env | grep pocket; curl localhost``).
+# On THIS backend the filter is load-bearing rather than cosmetic — see the
+# dispatch-only note in the module docstring.
+_POCKET_SCOPE_SENTINEL = "<pocket-scope>"
+_POCKET_BLOCKED_TOOLS = frozenset({"shell", "read_file", "write_file", "edit_file", "list_dir"})
+
+
+class _RunHandle:
+    """Private per-run cancellation state.
+
+    One instance per ``run()`` invocation, held in the generator's own frame.
+    This is the whole fix for failure mode 1 in the module docstring: because
+    the flag lives here and not on the backend, a ``stop()`` for one run cannot
+    truncate a sibling, and a run that starts after a ``stop()`` is not born
+    already-cancelled.
+    """
+
+    __slots__ = ("stopped",)
+
+    def __init__(self) -> None:
+        self.stopped = False
+
+
+class PydanticAIBackend:
+    """Pydantic AI backend — in-process agent loop, dispatch-only tools."""
+
+    @staticmethod
+    def info() -> BackendInfo:
+        return BackendInfo(
+            name="pydantic_ai",
+            display_name="Pydantic AI",
+            capabilities=(
+                Capability.STREAMING
+                | Capability.TOOLS
+                | Capability.MCP
+                | Capability.MULTI_TURN
+                | Capability.CUSTOM_SYSTEM_PROMPT
+            ),
+            # Dispatch-only: this backend ships no built-in local file or shell
+            # tools of its own. Everything it can call arrives through the tool
+            # bridge under the active ToolPolicy.
+            builtin_tools=[],
+            tool_policy_map={},
+            required_keys=[],
+            supported_providers=[
+                "litellm",
+                "anthropic",
+                "openai",
+                "openai_compatible",
+                "openrouter",
+                "ollama",
+            ],
+            install_hint={
+                "pip_package": "pydantic-ai-slim",
+                "pip_spec": "pocketpaw[pydantic-ai]",
+                "verify_import": "pydantic_ai",
+            },
+            beta=True,
+        )
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self._sdk_available = False
+        self._custom_tools: list | None = None
+        self._mcp_tools: list | None = None
+        self._mcp_client: Any = None
+        self._policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
+        # Live runs. A set, not a flag — see ``_RunHandle``.
+        self._active: set[_RunHandle] = set()
+        self._cached_agent: Any = None
+        self._cached_agent_key: Any = None
+        self._initialize()
+
+    # -- policy -------------------------------------------------------------
+
+    def get_tool_policy(self) -> ToolPolicy:
+        return self._policy
+
+    def set_tool_policy(self, policy: ToolPolicy) -> None:
+        self._policy = policy
+        self._custom_tools = None
+        self._mcp_tools = None
+        self._cached_agent = None
+        self._cached_agent_key = None
+
+    def _initialize(self) -> None:
+        try:
+            import pydantic_ai  # noqa: F401
+
+            self._sdk_available = True
+            logger.info("Pydantic AI SDK ready")
+        except ImportError:
+            logger.warning("Pydantic AI SDK not installed -- pip install 'pocketpaw[pydantic-ai]'")
+
+    # -- model --------------------------------------------------------------
+
+    def _parse_provider_model(self) -> tuple[str, str]:
+        """Split ``pydantic_ai_model`` into ``(provider, model)``.
+
+        Accepts ``provider:model`` or a bare model name, falling back to
+        ``pydantic_ai_provider`` then ``llm_provider`` then ``litellm``.
+        Mirrors ``DeepAgentsBackend._parse_provider_model`` so an operator can
+        move a value between the two settings without reformatting it.
+        """
+        model_str = (self.settings.pydantic_ai_model or "").strip()
+        if ":" in model_str:
+            provider, _, model = model_str.partition(":")
+            return provider.strip(), model.strip()
+
+        provider = getattr(self.settings, "pydantic_ai_provider", "auto")
+        if provider == "auto":
+            provider = self.settings.llm_provider
+        if provider == "auto":
+            provider = "litellm"
+        return provider, model_str
+
+    def _build_model(self) -> Any:
+        """Build the pydantic-ai model client for the configured provider."""
+        provider, model = self._parse_provider_model()
+
+        if provider == "anthropic":
+            from pydantic_ai.models.anthropic import AnthropicModel
+            from pydantic_ai.providers.anthropic import AnthropicProvider
+
+            return AnthropicModel(
+                model or "claude-sonnet-4-6",
+                provider=AnthropicProvider(api_key=self.settings.anthropic_api_key or ""),
+            )
+
+        if provider not in _OPENAI_COMPATIBLE:
+            raise ValueError(
+                f"pydantic_ai backend: unsupported provider {provider!r}. "
+                f"Supported: {', '.join(sorted(_OPENAI_COMPATIBLE | {'anthropic'}))}."
+            )
+
+        from pydantic_ai.models.openai import OpenAIChatModel
+        from pydantic_ai.providers.openai import OpenAIProvider
+
+        base_url, api_key, model = self._resolve_openai_compatible(provider, model)
+        logger.info(
+            "Pydantic AI: OpenAIChatModel(%r) via provider=%s base_url=%s",
+            model,
+            provider,
+            base_url,
+        )
+        return OpenAIChatModel(
+            model,
+            provider=OpenAIProvider(base_url=base_url, api_key=api_key),
+        )
+
+    def _resolve_openai_compatible(self, provider: str, model: str) -> tuple[str | None, str, str]:
+        """Return ``(base_url, api_key, model)`` for an OpenAI-compatible provider."""
+        if provider == "litellm":
+            # NOTE the ``/v1``. ``deep_agents`` passes ``litellm_api_base`` WITHOUT
+            # it because ChatLiteLLM hands the URL to the LiteLLM SDK, which
+            # appends the path itself. Here the OpenAI client appends only
+            # ``/chat/completions``, so the version segment has to be on the base
+            # URL or every request 404s. Same setting, two different contracts —
+            # this is the single easiest thing to get wrong in this file.
+            base = (self.settings.litellm_api_base or "http://localhost:4000").rstrip("/")
+            if not base.endswith("/v1"):
+                base = f"{base}/v1"
+            # The proxy is the auth boundary: this is the tenant's virtual key,
+            # not an upstream provider key. A placeholder keeps the OpenAI client
+            # happy on proxies configured without auth.
+            return (
+                base,
+                self.settings.litellm_api_key or "not-needed",
+                (model or self.settings.litellm_model or ""),
+            )
+
+        if provider == "openai":
+            return (
+                None,
+                self.settings.openai_api_key or "",
+                (model or self.settings.openai_model or "gpt-5.2"),
+            )
+
+        if provider == "openrouter":
+            return (
+                "https://openrouter.ai/api/v1",
+                self.settings.openrouter_api_key or self.settings.openai_compatible_api_key or "",
+                model or self.settings.openrouter_model or "",
+            )
+
+        if provider == "ollama":
+            host = (self.settings.ollama_host or "http://localhost:11434").rstrip("/")
+            if not host.endswith("/v1"):
+                host = f"{host}/v1"
+            # Ollama's OpenAI-compatible endpoint ignores the key but the client
+            # requires a non-empty one.
+            return host, "ollama", (model or self.settings.ollama_model or "llama3.2")
+
+        # openai_compatible
+        base = (self.settings.openai_compatible_base_url or "").rstrip("/") or None
+        return (
+            base,
+            self.settings.openai_compatible_api_key or "",
+            (model or self.settings.openai_compatible_model or ""),
+        )
+
+    # -- tools --------------------------------------------------------------
+
+    def _build_custom_tools(self) -> list:
+        """Lazily build and cache PocketPaw tools as pydantic-ai ``Tool`` objects.
+
+        Early-returns when ``_custom_tools`` is already populated. That guard is
+        load-bearing, not an optimisation: ``attach_specialist_tools`` pre-fills
+        the list for an isolated specialist run, and returning here is what keeps
+        ``pocket_specialist__create`` — auto-injected by the bridge for every
+        main-agent run — OUT of the specialist's own backend. Without it the
+        specialist can call itself. (``deep_agents._build_custom_tools`` carries
+        the same guard for the same reason.)
+        """
+        if self._custom_tools is not None:
+            return self._custom_tools
+        try:
+            from pocketpaw.agents.tool_bridge import build_pydantic_ai_tools
+
+            self._custom_tools = build_pydantic_ai_tools(
+                self.settings, backend="pydantic_ai", policy=self._policy
+            )
+        except Exception as exc:
+            logger.info("Could not build custom tools: %s", exc)
+            self._custom_tools = []
+        return self._custom_tools
+
+    async def _build_mcp_tools(self) -> list:
+        """Build pydantic-ai toolsets from PocketPaw's configured MCP servers.
+
+        Cached PER BACKEND INSTANCE, never per run. An MCP stdio server
+        instantiated per run would reintroduce exactly the subprocess-per-run
+        cost this backend exists to remove — the toolset here is built once and
+        shared across every concurrent run on this instance.
+
+        **Returns empty unless ``pydantic_ai_mcp_enabled`` is set.** Instance
+        caching is necessary but NOT sufficient: pydantic-ai's MCP servers are
+        refcounted (``mcp.py:_running_count``), so a shared server still tears
+        down the moment concurrent runs reach zero and respawns on the next run.
+        At low concurrency that is a stdio subprocess spawn on the request path —
+        the cost this backend exists to remove, reintroduced quietly. Closing
+        that gap means holding the servers open across the instance's lifetime
+        and proving subprocess count stays flat under concurrent load, which is
+        a measurement (PRD chunk 4), not a code tweak. Until it is taken, this
+        stays off by default rather than shipping a silent regression.
+        """
+        if self._mcp_tools is not None:
+            return self._mcp_tools
+
+        if not getattr(self.settings, "pydantic_ai_mcp_enabled", False):
+            self._mcp_tools = []
+            return self._mcp_tools
+
+        try:
+            from pydantic_ai.mcp import MCPServerSSE, MCPServerStdio, MCPServerStreamableHTTP
+        except ImportError:
+            logger.debug("pydantic-ai MCP extra not installed, skipping MCP tools")
+            self._mcp_tools = []
+            return self._mcp_tools
+
+        try:
+            from pocketpaw.mcp.config import load_mcp_config
+        except ImportError:
+            self._mcp_tools = []
+            return self._mcp_tools
+
+        servers: list = []
+        for cfg in load_mcp_config() or []:
+            if not cfg.enabled:
+                continue
+            if not self._policy.is_mcp_server_allowed(cfg.name):
+                logger.info("MCP server '%s' blocked by tool policy", cfg.name)
+                continue
+            try:
+                if cfg.transport == "stdio" and cfg.command:
+                    servers.append(
+                        MCPServerStdio(
+                            command=cfg.command,
+                            args=list(cfg.args or []),
+                            env=cfg.env or None,
+                            tool_prefix=cfg.name,
+                        )
+                    )
+                elif cfg.transport == "sse" and cfg.url:
+                    servers.append(MCPServerSSE(url=cfg.url, tool_prefix=cfg.name))
+                elif cfg.transport in ("http", "streamable-http") and cfg.url:
+                    servers.append(MCPServerStreamableHTTP(url=cfg.url, tool_prefix=cfg.name))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Skipping MCP server '%s': %s", cfg.name, exc)
+
+        self._mcp_tools = servers
+        if servers:
+            logger.info("Built %d MCP toolsets for Pydantic AI", len(servers))
+        return self._mcp_tools
+
+    def attach_specialist_tools(self, tools: list[Any]) -> None:
+        """Merge specialist-internal tools into the cache for an isolated run.
+
+        Implementing this is what makes ``pydantic_ai`` eligible for
+        ``pocket_specialist_backend`` at all — ``AgentBackend`` excludes any
+        backend whose ``attach_specialist_tools`` raises (``backend.py:218``).
+
+        Also pre-sets ``_mcp_tools = []`` to short-circuit MCP loading:
+        specialist runs are short-lived and need only the tools passed here, so
+        spinning up the user's full MCP server set would add startup latency and
+        a hang risk for no benefit.
+
+        Each call EXTENDS the list; tools are not deduplicated. Use an isolated
+        backend instance (``AgentRouter.create_isolated_backend``) so tools don't
+        accumulate across specialist runs.
+        """
+        if self._custom_tools is None:
+            self._custom_tools = []
+        self._custom_tools.extend(tools)
+        self._mcp_tools = []
+        self._cached_agent = None
+        self._cached_agent_key = None
+
+    def attach_subprocess_env(self, env: dict[str, str]) -> None:  # noqa: ARG002
+        """No-op — this backend spawns no subprocess.
+
+        Part of the ``AgentBackend`` contract that is subprocess-shaped. An
+        in-process backend has nothing to inject into, and per-request tenancy
+        reaches it through ContextVars instead.
+        """
+        return None
+
+    # -- agent assembly -----------------------------------------------------
+
+    def _get_or_create_agent(self, model: Any, instructions: str, mcp_toolsets: list) -> Any:
+        """Build (and cache) the pydantic-ai ``Agent``.
+
+        Cached on everything that shapes the tool surface or the model, so
+        flipping between pocket and non-pocket sessions on one instance rebuilds
+        rather than silently reusing the wrong tool set.
+        """
+        from pydantic_ai import Agent
+
+        is_pocket_session = _POCKET_SCOPE_SENTINEL in (instructions or "")
+
+        # Build tools BEFORE the cache key. ``_build_custom_tools`` populates
+        # ``self._custom_tools`` on first call, so keying off it beforehand
+        # compares ``id(None)`` against ``id(list)`` on the next run and the
+        # cache NEVER hits — every run re-instantiates the whole tool set. That
+        # is not a slow path, it is a per-run cost on the thing whose entire
+        # purpose is a low per-run cost, and it is invisible except as latency.
+        tools = list(self._build_custom_tools())
+
+        agent_key = (
+            self.settings.pydantic_ai_model,
+            is_pocket_session,
+            len(mcp_toolsets),
+            id(self._custom_tools),
+            len(tools),
+        )
+        if self._cached_agent is not None and self._cached_agent_key == agent_key:
+            return self._cached_agent
+
+        if is_pocket_session:
+            before = len(tools)
+            tools = [t for t in tools if getattr(t, "name", "") not in _POCKET_BLOCKED_TOOLS]
+            if before != len(tools):
+                logger.info(
+                    "Pocket session — stripped %d shell/fs tools from agent",
+                    before - len(tools),
+                )
+
+        agent = Agent(
+            model,
+            instructions=instructions,
+            tools=tools,
+            toolsets=list(mcp_toolsets) or None,
+            # The agent is shared across concurrent runs; conversation state
+            # rides in ``message_history`` per run, never on the agent.
+            retries=2,
+        )
+        self._cached_agent = agent
+        self._cached_agent_key = agent_key
+        return agent
+
+    def _build_history(self, history: list[dict] | None) -> list:
+        """Convert PocketPaw's ``[{role, content}]`` history to pydantic-ai messages."""
+        from pydantic_ai.messages import (
+            ModelRequest,
+            ModelResponse,
+            TextPart,
+            UserPromptPart,
+        )
+
+        messages: list = []
+        for msg in history or []:
+            content = msg.get("content") or ""
+            if not content:
+                continue
+            if msg.get("role") == "assistant":
+                messages.append(ModelResponse(parts=[TextPart(content=content)]))
+            else:
+                messages.append(ModelRequest(parts=[UserPromptPart(content=content)]))
+        return messages
+
+    # -- run ----------------------------------------------------------------
+
+    async def run(
+        self,
+        message: str,
+        *,
+        system_prompt: str | None = None,
+        history: list[dict] | None = None,
+        session_key: str | None = None,  # noqa: ARG002
+    ) -> AsyncIterator[AgentEvent]:
+        if not self._sdk_available:
+            yield AgentEvent(
+                type="error",
+                content=(
+                    "Pydantic AI SDK not installed.\n\n"
+                    "Install with: pip install 'pocketpaw[pydantic-ai]'"
+                ),
+            )
+            return
+
+        # Per-run cancellation. Registered so ``stop()`` can reach it, but owned
+        # by this frame so no sibling run can flip it. See ``_RunHandle``.
+        handle = _RunHandle()
+        self._active.add(handle)
+
+        # Tool ids already announced, so the early PartStartEvent signal and the
+        # authoritative FunctionToolCallEvent don't double-announce one call.
+        announced: set[str] = set()
+
+        try:
+            model = self._build_model()
+            instructions = system_prompt or _DEFAULT_IDENTITY
+            mcp_toolsets = await self._build_mcp_tools()
+            agent = self._get_or_create_agent(model, instructions, mcp_toolsets)
+
+            kwargs: dict[str, Any] = {"message_history": self._build_history(history)}
+            max_turns = self.settings.pydantic_ai_max_turns
+            if max_turns and max_turns > 0:
+                from pydantic_ai.usage import UsageLimits
+
+                kwargs["usage_limits"] = UsageLimits(request_limit=max_turns)
+
+            async with agent.run_stream_events(message, **kwargs) as stream:
+                async for event in stream:
+                    if handle.stopped:
+                        break
+                    for agent_event in self._map_event(event, announced):
+                        yield agent_event
+
+        except asyncio.CancelledError:
+            # Caller cancelled this run specifically — the correct per-run
+            # cancellation path. Propagate; do not degrade it into "done".
+            raise
+        except Exception as exc:
+            logger.error("Pydantic AI streaming error: %s", exc, exc_info=True)
+            yield AgentEvent(type="error", content=f"Pydantic AI error: {exc}")
+            yield AgentEvent(type="done", content="")
+            return
+        finally:
+            self._active.discard(handle)
+
+        yield AgentEvent(type="done", content="")
+
+    def _map_event(self, event: Any, announced: set[str]) -> list[AgentEvent]:
+        """Translate one pydantic-ai stream event into zero or more ``AgentEvent``.
+
+        The mapping was read off the real event stream rather than the docs:
+
+          PartStartEvent(TextPart)         -> message   (initial content, if any)
+          PartDeltaEvent(TextPartDelta)    -> message
+          PartStartEvent(ThinkingPart)     -> thinking
+          PartDeltaEvent(ThinkingPartDelta)-> thinking
+          PartStartEvent(ToolCallPart)     -> tool_use  (early UI signal)
+          FunctionToolCallEvent            -> tool_use  (authoritative args)
+          FunctionToolResultEvent          -> tool_result
+          AgentRunResultEvent              -> token_usage
+        """
+        from pydantic_ai.messages import (
+            FunctionToolCallEvent,
+            FunctionToolResultEvent,
+            PartDeltaEvent,
+            PartStartEvent,
+            TextPart,
+            TextPartDelta,
+            ThinkingPart,
+            ThinkingPartDelta,
+            ToolCallPart,
+        )
+        from pydantic_ai.run import AgentRunResultEvent
+
+        out: list[AgentEvent] = []
+
+        if isinstance(event, PartStartEvent):
+            part = event.part
+            if isinstance(part, TextPart) and part.content:
+                out.append(AgentEvent(type="message", content=part.content))
+            elif isinstance(part, ThinkingPart) and part.content:
+                out.append(AgentEvent(type="thinking", content=part.content))
+            elif isinstance(part, ToolCallPart):
+                # Early signal so the UI flips from "Thinking..." to
+                # "Using <tool>..." before the args finish streaming.
+                self._announce_tool(part, announced, out, args={})
+
+        elif isinstance(event, PartDeltaEvent):
+            delta = event.delta
+            if isinstance(delta, TextPartDelta) and delta.content_delta:
+                out.append(AgentEvent(type="message", content=delta.content_delta))
+            elif isinstance(delta, ThinkingPartDelta) and delta.content_delta:
+                out.append(AgentEvent(type="thinking", content=delta.content_delta))
+
+        elif isinstance(event, FunctionToolCallEvent):
+            self._announce_tool(event.part, announced, out, args=event.part.args)
+
+        elif isinstance(event, FunctionToolResultEvent):
+            part = event.part
+            content = getattr(part, "content", "")
+            text = content if isinstance(content, str) else str(content)
+            out.append(
+                AgentEvent(
+                    type="tool_result",
+                    content=text[:200],
+                    metadata={"name": getattr(part, "tool_name", "tool")},
+                )
+            )
+
+        elif isinstance(event, AgentRunResultEvent):
+            usage_event = self._usage_event(event)
+            if usage_event is not None:
+                out.append(usage_event)
+
+        return out
+
+    @staticmethod
+    def _announce_tool(part: Any, announced: set[str], out: list[AgentEvent], *, args: Any) -> None:
+        """Emit a ``tool_use`` for *part* unless its call id was already announced."""
+        name = getattr(part, "tool_name", None)
+        if not name:
+            return
+        call_id = getattr(part, "tool_call_id", None)
+        if call_id:
+            if call_id in announced:
+                return
+            announced.add(call_id)
+        out.append(
+            AgentEvent(
+                type="tool_use",
+                content=f"Using {name}...",
+                metadata={"name": name, "input": args if isinstance(args, dict) else {}},
+            )
+        )
+
+    def _usage_event(self, event: Any) -> AgentEvent | None:
+        """Build the ``token_usage`` event from a finished run's ``RunUsage``.
+
+        ``RunUsage.input_tokens`` is the INCLUSIVE total — pydantic-ai documents
+        cache reads/writes as subsets of it and normalizes the providers that
+        report them disjointly. ``report_savings`` wants the Anthropic-native
+        shape, where ``input_tokens`` is the UNCACHED remainder, so the two
+        subsets come back out here. Getting this subtraction backwards inflates
+        the reported hit rate, which is exactly the number the A/B turns on.
+        """
+        usage = getattr(getattr(event, "result", None), "usage", None)
+        if usage is None:
+            return None
+        total = int(getattr(usage, "input_tokens", 0) or 0)
+        read = int(getattr(usage, "cache_read_tokens", 0) or 0)
+        write = int(getattr(usage, "cache_write_tokens", 0) or 0)
+        if not read and not write:
+            return None
+
+        from pocketpaw.llm.caching import report_savings
+
+        savings = report_savings(
+            {
+                "input_tokens": max(0, total - read - write),
+                "cache_read_input_tokens": read,
+                "cache_creation_input_tokens": write,
+            }
+        )
+        logger.info(
+            "[pydantic_ai] prompt-cache: read=%d write=%d hit_rate=%.1f%% "
+            "est_saved=%.0f input-tok-equiv",
+            savings.cache_read_tokens,
+            savings.cache_write_tokens,
+            savings.hit_rate * 100,
+            savings.est_tokens_saved,
+        )
+        return AgentEvent(
+            type="token_usage",
+            content="",
+            metadata={
+                "input_tokens": max(0, total - read - write),
+                "cache_read_tokens": savings.cache_read_tokens,
+                "cache_write_tokens": savings.cache_write_tokens,
+                "cache_hit_rate": savings.hit_rate,
+                "cache_est_tokens_saved": savings.est_tokens_saved,
+                "backend": "pydantic_ai",
+            },
+        )
+
+    # -- lifecycle ----------------------------------------------------------
+
+    async def stop(self) -> None:
+        """Signal every run live RIGHT NOW, then release MCP resources.
+
+        Snapshot-then-signal, and no instance-level flag: a run started after
+        this call gets a fresh ``_RunHandle`` and is unaffected. To cancel ONE
+        run, close its generator (or cancel its task) instead — that is the
+        per-run path, and it is what the cloud executor uses on supersession.
+        """
+        for handle in list(self._active):
+            handle.stopped = True
+
+        if self._mcp_client is not None:
+            try:
+                close = getattr(self._mcp_client, "close", None) or getattr(
+                    self._mcp_client, "aclose", None
+                )
+                if close:
+                    await close()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("MCP client cleanup error: %s", exc)
+            finally:
+                self._mcp_client = None
+                self._mcp_tools = None
+
+    async def get_status(self) -> dict[str, Any]:
+        provider, model = self._parse_provider_model()
+        return {
+            "backend": "pydantic_ai",
+            "available": self._sdk_available,
+            "running": bool(self._active),
+            "active_runs": len(self._active),
+            "model": self.settings.pydantic_ai_model,
+            "provider": provider,
+            "resolved_model": model,
+        }
