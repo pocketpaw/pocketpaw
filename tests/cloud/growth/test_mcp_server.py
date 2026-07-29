@@ -167,11 +167,55 @@ class TestTheGateHolds:
             "growth_propose_send",
             "growth_propose_send_batch",
             "growth_linkedin_queue",
+            # G-15: discovery. Read, define and dry-run a hunt — see
+            # ``test_no_tool_can_switch_a_hunt_on`` for what is deliberately
+            # absent from this list.
+            "growth_list_icps",
+            "growth_get_icp",
+            "growth_create_icp",
+            "growth_preview_icp",
         }
         assert set(growth_mcp.GROWTH_TOOL_NAMES) == {t.name for t in tools}
         assert set(growth_mcp.GROWTH_TOOL_IDS) == {
             f"mcp__pocketpaw_growth__{t.name}" for t in tools
         }
+
+    def test_no_tool_can_switch_a_hunt_on(self):
+        """The agent may DEFINE and DRY-RUN a hunt. It may not schedule one.
+
+        A cadence is a standing spend commitment, and the Hunts page keeps that
+        control inert until a human has seen a real preview. A ``cadence``
+        argument here — or any ``set_cadence`` / ``update_icp`` tool — would
+        route around that gate exactly as ``growth_upsert_prospect`` would have
+        routed around the email guard. Same shape as the send gate: the agent
+        prepares, a human commits.
+        """
+        tools = growth_mcp._build_tools()
+        assert tools is not None
+        by_name = {t.name: t for t in tools}
+
+        for banned in ("growth_update_icp", "growth_set_cadence", "growth_run_icp"):
+            assert banned not in by_name
+
+        # No tool takes a cadence — not even the one that creates the hunt.
+        for name, tool in by_name.items():
+            props = (getattr(tool, "input_schema", None) or {}).get("properties", {})
+            assert "cadence" not in props, f"{name} must not accept a cadence"
+
+        # And nothing offers to run one on a schedule.
+        for name, tool in by_name.items():
+            description = (getattr(tool, "description", "") or "").lower()
+            if name == "growth_create_icp":
+                # It must SAY it can't, so the model doesn't try.
+                assert "switched off" in description
+            assert "schedule it" not in description
+
+    def test_preview_is_honest_about_writing_nothing(self):
+        """The dry-run tool must not read as though it files prospects — the
+        whole trust step is that a human can run it without consequence."""
+        tools = growth_mcp._build_tools()
+        preview = next(t for t in tools if t.name == "growth_preview_icp")
+        assert "writes nothing" in (preview.description or "").lower()
 
     def test_no_tool_name_claims_to_send(self):
         """A tool is named for what it does. Nothing here sends, dispatches or
