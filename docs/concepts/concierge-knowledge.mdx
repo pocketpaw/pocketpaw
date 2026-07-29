@@ -95,7 +95,7 @@ an email address, or an order number. Each site therefore has its own switch:
   `GET`/`PATCH /paw-bar/admin/site/{site_id}/settings`.
 - With it **off**, the concierge keeps working and keeps storing its own replies.
   Only the visitor's words are dropped, and transcripts for that site show the
-  assistant side alone.
+  assistant side alone. It also stops remembering across turns — see below.
 - The agent always receives the full message either way. The switch governs storage,
   never the answer.
 - It is read on every message, so turning it off stops collection from the next
@@ -107,3 +107,30 @@ off does not silence the bar, and disabling the concierge does not reset retenti
 
 Stored visitor messages are length-capped, so a pasted wall of text cannot grow the
 run collection without bound.
+
+## What a concierge remembers
+
+Those stored turns are also the concierge's memory. A visitor can say their name in
+one message and be recognised in the next, because each turn replays that visitor's
+earlier turns back to the agent. Without it the concierge answers every message cold:
+it has no thread and no message records of its own to fall back on, unlike a
+signed-in chat.
+
+What comes back is scoped to one visitor on one site in one workspace. Another
+visitor of the same bar, the same visitor on a different site, and any other tenant
+are all separate conversations, and none of them can appear in a run that is not
+theirs.
+
+The replay is bounded three ways: a limited number of recent exchanges, a cap on any
+single line, and a total character budget. When the budget runs out the oldest
+exchanges drop first, so what the agent sees is the most recent stretch of the
+conversation rather than a patchy sample of it. This keeps the cost of a turn flat
+however long a visitor keeps talking.
+
+Memory follows retention. With `concierge_store_transcripts` **off** nothing the
+visitor says is written down, so there is nothing to remember and the concierge
+answers each message fresh. That is the switch working as intended: it is one
+decision about whether the site keeps a record of its visitors, not two.
+
+If the record cannot be read for any reason, the concierge answers without memory
+rather than failing the visitor's chat.
