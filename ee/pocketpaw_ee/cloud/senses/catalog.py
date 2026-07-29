@@ -50,8 +50,26 @@ _UNAVAILABLE_REASONS: dict[str, str] = {
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _STOPWORDS: frozenset[str] = frozenset(
     {
-        "a", "an", "the", "to", "of", "for", "in", "on", "and", "or",
-        "my", "me", "is", "it", "with", "this", "that", "from", "at", "by",
+        "a",
+        "an",
+        "the",
+        "to",
+        "of",
+        "for",
+        "in",
+        "on",
+        "and",
+        "or",
+        "my",
+        "me",
+        "is",
+        "it",
+        "with",
+        "this",
+        "that",
+        "from",
+        "at",
+        "by",
     }
 )
 
@@ -199,11 +217,7 @@ def _bm25_scores(query_tokens: list[str], docs: list[_ActionDoc]) -> list[float]
         return [0.0] * n
 
     unique_q = set(query_tokens)
-    idf = {
-        t: math.log(1 + (n - df[t] + 0.5) / (df[t] + 0.5))
-        for t in unique_q
-        if df.get(t, 0) > 0
-    }
+    idf = {t: math.log(1 + (n - df[t] + 0.5) / (df[t] + 0.5)) for t in unique_q if df.get(t, 0) > 0}
 
     scores: list[float] = []
     for doc in docs:
@@ -259,11 +273,7 @@ async def search_catalog(
     scores = _bm25_scores(query_tokens, docs)
 
     ranked = sorted(
-        (
-            (doc, score)
-            for doc, score in zip(docs, scores, strict=True)
-            if score > 0
-        ),
+        ((doc, score) for doc, score in zip(docs, scores, strict=True) if score > 0),
         key=lambda pair: pair[1],
         reverse=True,
     )[: max(0, limit)]
