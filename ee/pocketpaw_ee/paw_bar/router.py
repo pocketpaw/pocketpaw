@@ -1960,7 +1960,14 @@ async def patch_site_conversation(
             widget.id, customer_ref, workspace_id=workspace_id, **fields
         )
         conversation = updated or conversation
-    return ConversationPatchResponse(ok=True, conversation=_conversation_row(conversation))
+    # Resolve the display email the same way the LIST does, so a client that
+    # re-renders a row from this echo doesn't watch a named visitor turn back into
+    # an anonymous handle.
+    _pending, emails = await _decision_side_data(widget, [customer_ref])
+    return ConversationPatchResponse(
+        ok=True,
+        conversation=_conversation_row(conversation, emails.get(customer_ref, "")),
+    )
 
 
 @router.get(
@@ -2293,8 +2300,14 @@ def _validated_conversation_fields(req: ConversationPatchRequest, author: str) -
     return fields
 
 
-def _conversation_row(conversation: Any) -> ConversationRow:
-    """Project a stored :class:`Conversation` into the wire shape."""
+def _conversation_row(conversation: Any, captured_email: str = "") -> ConversationRow:
+    """Project a stored :class:`Conversation` into the wire shape.
+
+    ``captured_email`` is the address the visitor left on a decision, resolved by
+    the caller (slice 1 never writes it onto the row itself). It fills both
+    ``contact_email`` and the display name so this echo and the list agree.
+    """
+    contact_email = conversation.contact_email or captured_email
     return ConversationRow(
         id=conversation.id,
         widget_id=conversation.widget_id,
@@ -2305,8 +2318,8 @@ def _conversation_row(conversation: Any) -> ConversationRow:
         assignee=conversation.assignee,
         tags=list(conversation.tags),
         notes=[note.model_dump() for note in conversation.notes],
-        contact_email=conversation.contact_email,
-        display_name=_display_name(conversation.contact_email, conversation.customer_ref),
+        contact_email=contact_email,
+        display_name=_display_name(contact_email, conversation.customer_ref),
         last_visitor_at=conversation.last_visitor_at,
         last_owner_at=conversation.last_owner_at,
         unread_for_owner=conversation.unread_for_owner,
@@ -2346,23 +2359,46 @@ async def _conversation_side_data(
     the store hiccups the list still renders, just without the queue metadata.
     """
     states: dict[str, Any] = {}
-    pending: set[str] = set()
-    emails: dict[str, str] = {}
     if widget is None or not refs:
-        return states, pending, emails
-    store = _store()
+        return states, set(), {}
     try:
-        rows = await store.list_conversations(
+        rows = await _store().list_conversations(
             widget.id, workspace_id=workspace_id, limit=len(refs), customer_refs=refs
         )
         states = {row.customer_ref: row for row in rows}
     except Exception:  # noqa: BLE001 — queue metadata is additive, never fatal
         logger.warning("conversation state read failed for widget %s", widget.id, exc_info=True)
+    pending, emails = await _decision_side_data(widget, refs)
+    return states, pending, emails
+
+
+async def _decision_side_data(
+    widget: PawBarWidget | None, refs: list[str]
+) -> tuple[set[str], dict[str, str]]:
+    """What this widget's DECISION rows say about a set of visitors.
+
+    Returns ``(refs with an undecided action, contact email by ref)`` from ONE
+    bounded read of the rows the Decisions list already serves — never a second
+    query into Instinct, whose rows are stamped with the widget owner rather than
+    the tenant and so can't be read workspace-scoped.
+
+    The email is READ here rather than copied onto the conversation row: it stays
+    in the one place the PII invariant names, and this owner-authed surface is
+    exactly who the visitor left it for. Shared by the list and the PATCH echo so
+    a row can't change its display name depending on which one produced it.
+    Best-effort — a store hiccup costs the metadata, never the response.
+    """
+    if widget is None or not refs:
+        return set(), {}
     try:
-        decisions = await store.list_decisions_for_widget(widget.id, limit=_CONVERSATION_SCAN_CAP)
-    except Exception:  # noqa: BLE001 — same posture as the state read
+        decisions = await _store().list_decisions_for_widget(
+            widget.id, limit=_CONVERSATION_SCAN_CAP
+        )
+    except Exception:  # noqa: BLE001 — additive metadata, never fatal
         logger.warning("decision read failed for widget %s", widget.id, exc_info=True)
-        decisions = []
+        return set(), {}
+    pending: set[str] = set()
+    emails: dict[str, str] = {}
     wanted = set(refs)
     for decision in decisions:
         ref = decision.customer_ref
@@ -2374,7 +2410,7 @@ async def _conversation_side_data(
         # a visitor is their most recent one.
         if decision.contact_email and ref not in emails:
             emails[ref] = decision.contact_email
-    return states, pending, emails
+    return pending, emails
 
 
 async def _list_conversations(

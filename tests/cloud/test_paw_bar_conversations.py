@@ -576,6 +576,28 @@ async def test_patch_note_appends_and_is_attributed_to_the_caller(client):
 
 
 @pytest.mark.asyncio
+async def test_patch_echo_names_the_visitor_the_same_way_the_list_does(client):
+    """A client re-rendering a row from the PATCH echo must not watch a named
+    visitor turn back into an anonymous handle."""
+    c, store = client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    await _mk_run()
+    await store.upsert_conversation_on_visitor_turn(widget.id, _REF, "ws-1")
+    await _mk_decision(store, widget.id, contact_email="ada@brewco.com")
+
+    listed = (await c.get(f"/paw-bar/admin/site/{site.id}/conversations")).json()["items"][0]
+    patched = (
+        await c.patch(
+            f"/paw-bar/admin/site/{site.id}/conversations/{_REF}", json={"state": "closed"}
+        )
+    ).json()["conversation"]
+
+    assert patched["display_name"] == listed["display_name"] == "ada@brewco.com"
+    assert patched["contact_email"] == "ada@brewco.com"
+
+
+@pytest.mark.asyncio
 async def test_patch_only_touches_the_fields_sent(client):
     c, store = client
     site = await _site()
