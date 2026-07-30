@@ -1684,10 +1684,16 @@ class AgentConversationsResponse(BaseModel):
 class ConversationRow(BaseModel):
     """The full conversation state row, as the PATCH echoes it back.
 
-    Everything the owner surface needs to re-render one row without a refetch.
     ``state`` is the EFFECTIVE state (an expired snooze reads ``open``) while
     ``snooze_until`` keeps the stored timestamp, so the UI can say "was snoozed
     until 9am" on a row that has already come back.
+
+    DELIBERATELY NOT a whole list item. ``preview``, ``last_message_at`` and
+    ``has_pending_action`` are derived from the run docs, not from this row, so a
+    client re-rendering a list row from this echo must carry those three over from
+    the item it already had (or refetch the list). Completing the shape here would
+    put a run query on a write path purely to hand back data the caller is already
+    displaying — don't add it without a reason that survives that sentence.
     """
 
     id: str
@@ -1715,6 +1721,12 @@ class ConversationPatchRequest(BaseModel):
     can flip one thing without echoing the row back. ``note`` APPENDS a private
     operator note; it never replaces the existing ones. ``tags`` DOES replace (a
     tag set is edited as a whole in the UI).
+
+    ``unread_for_owner`` is deliberately absent: mark-as-read has no UI yet, and
+    the store already supports the write, so this is one field away whenever a
+    surface wants it. A client must NOT fake it locally — a browser-side read flag
+    disagrees with the next poll seconds later, which reads as a counter that
+    un-marks itself. Ask for the field instead.
     """
 
     state: str | None = None

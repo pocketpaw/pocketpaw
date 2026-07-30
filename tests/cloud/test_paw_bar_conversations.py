@@ -31,6 +31,7 @@ from typing import Any
 import aiosqlite
 import pytest
 import pytest_asyncio
+from beanie import PydanticObjectId
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
@@ -123,7 +124,15 @@ async def _mk_decision(store: PawBarStore, widget_id: str, **ov: Any) -> Decisio
     return await store.create_decision(DecisionStatus(widget_id=widget_id, **d))
 
 
-def _fake_user(role: str, workspace_id: str = "ws-1", user_id: str = "u1") -> SimpleNamespace:
+# The authenticated caller's id is a PydanticObjectId, NOT a str. A stand-in that
+# used a friendly "u1" is exactly why a note built from the real caller reached
+# production shape only on the rig, where it 500'd on pydantic string_type. Every
+# endpoint test in this file now runs against the real-shaped principal, so the
+# whole class of "works with a str id" bug is caught here rather than live.
+_USER_ID = PydanticObjectId()
+
+
+def _fake_user(role: str, workspace_id: str = "ws-1", user_id: Any = _USER_ID) -> SimpleNamespace:
     return SimpleNamespace(
         id=user_id,
         active_workspace=workspace_id,
@@ -571,7 +580,8 @@ async def test_patch_note_appends_and_is_attributed_to_the_caller(client):
     ]
 
     assert [n["text"] for n in row["notes"]] == ["called them back", "left a voicemail"]
-    assert {n["author"] for n in row["notes"]} == {"u1"}
+    # Attributed to the REAL caller id, stringified — never the raw ObjectId.
+    assert {n["author"] for n in row["notes"]} == {str(_USER_ID)}
     assert row["state"] == "closed"
 
 
