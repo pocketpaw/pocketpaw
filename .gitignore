@@ -78,6 +78,8 @@ private.key
 
 # Backups and secrets
 .env.bak
+.env.backup*
+.env.backup-*
 *.bak
 
 output.txt

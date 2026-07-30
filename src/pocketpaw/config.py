@@ -603,6 +603,24 @@ class Settings(BaseSettings):
             "don't recognize the shape ignore it."
         ),
     )
+    # AgentAPI Settings — drive a terminal coding agent via coder/agentapi.
+    agentapi_base_url: ExternalUrl = Field(
+        default="http://localhost:3284",
+        description=(
+            "Base URL of a running AgentAPI server (`agentapi server -- claude`). "
+            "The backend borrows the wrapped CLI's OWN authentication, so it needs "
+            "no provider key — which is why it is useful for development when no "
+            "API key or working proxy is available. One server is ONE conversation: "
+            "turns are serialized, so this is a single-user tool, not a serving path."
+        ),
+    )
+    agentapi_timeout: int = Field(
+        default=600,
+        description=(
+            "Seconds to wait on an AgentAPI turn. Generous by default because the "
+            "wrapped agent may run long tool chains of its own."
+        ),
+    )
     # Pydantic AI Settings — in-process, dispatch-only agent backend.
     # See docs/design/drafts/2026-07-29-pydantic-ai-agent-backend-prd.md.
     pydantic_ai_model: str = Field(
