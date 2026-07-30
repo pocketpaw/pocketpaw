@@ -157,6 +157,7 @@ class PydanticAIBackend:
             required_keys=[],
             supported_providers=[
                 "litellm",
+                "agentapi",
                 "anthropic",
                 "openai",
                 "openai_compatible",
@@ -241,6 +242,19 @@ class PydanticAIBackend:
         """Build the pydantic-ai model client for the configured provider."""
         provider, model = self._parse_provider_model()
 
+        if provider == "agentapi":
+            # Development path: borrow a local CLI's own authentication instead
+            # of a provider key. Text only — the wrapped agent never emits
+            # structured tool calls, so the tool loop is inert. See
+            # pydantic_ai_agentapi for the full caveat.
+            from pocketpaw.agents.pydantic_ai_agentapi import AgentAPIModel
+
+            return AgentAPIModel(
+                model or "claude",
+                base_url=str(getattr(self.settings, "agentapi_base_url", "") or ""),
+                timeout=float(getattr(self.settings, "agentapi_timeout", 0) or 600),
+            )
+
         if provider == "anthropic":
             from pydantic_ai.models.anthropic import AnthropicModel
             from pydantic_ai.providers.anthropic import AnthropicProvider
@@ -253,7 +267,7 @@ class PydanticAIBackend:
         if provider not in _OPENAI_COMPATIBLE:
             raise ValueError(
                 f"pydantic_ai backend: unsupported provider {provider!r}. "
-                f"Supported: {', '.join(sorted(_OPENAI_COMPATIBLE | {'anthropic'}))}."
+                f"Supported: {', '.join(sorted(_OPENAI_COMPATIBLE | {'anthropic', 'agentapi'}))}."
             )
 
         from pydantic_ai.models.openai import OpenAIChatModel
@@ -819,13 +833,46 @@ class PydanticAIBackend:
             raise
         except Exception as exc:
             logger.error("Pydantic AI streaming error: %s", exc, exc_info=True)
-            yield AgentEvent(type="error", content=f"Pydantic AI error: {exc}")
+            yield AgentEvent(type="error", content=self._explain_error(exc))
             yield AgentEvent(type="done", content="")
             return
         finally:
             self._active.discard(handle)
 
         yield AgentEvent(type="done", content="")
+
+    def _explain_error(self, exc: Exception) -> str:
+        """Turn a provider error into something that names the actual problem.
+
+        A proxy auth failure is the single most confusing error on this path,
+        because there are TWO credentials and the raw body implicates neither.
+        The virtual key authenticated fine — the request was routed, a model
+        group was chosen, fallbacks were attempted — and then the PROXY's own
+        upstream credential was rejected. The unhelpful default reading is
+        "my key is wrong", which sends you to change the one thing that works.
+
+        This cost real time to diagnose by hand, so the backend says it now.
+        """
+        text = str(exc)
+        raw = f"Pydantic AI error: {text}"
+
+        is_auth = "status_code: 401" in text or "authentication_error" in text
+        provider, model = self._parse_provider_model()
+        if not (is_auth and provider == "litellm"):
+            return raw
+
+        base = (self.settings.litellm_api_base or "").rstrip("/")
+        return (
+            f"The LiteLLM proxy rejected model {model!r} with a 401 from its UPSTREAM "
+            f"provider — not from your virtual key, which authenticated fine (the request "
+            f"was routed and fallbacks were tried).\n\n"
+            f"So the credential to fix is the one the PROXY holds for that model's "
+            f"provider, not POCKETPAW_LITELLM_API_KEY.\n\n"
+            f"To pick a model whose upstream is alive:\n"
+            f"  curl -H \"Authorization: Bearer $POCKETPAW_LITELLM_API_KEY\" {base}/health\n"
+            f"and set POCKETPAW_PYDANTIC_AI_MODEL=litellm:<a healthy model group>.\n\n"
+            f"Original error: {text[:400]}"
+        )
 
     def _map_event(self, event: Any, announced: set[str]) -> list[AgentEvent]:
         """Translate one pydantic-ai stream event into zero or more ``AgentEvent``.

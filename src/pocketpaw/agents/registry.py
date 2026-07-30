@@ -26,7 +26,6 @@ _BACKEND_REGISTRY: dict[str, tuple[str, str]] = {
     "deep_agents": ("pocketpaw.agents.deep_agents", "DeepAgentsBackend"),
     "langchain_react": ("pocketpaw.agents.langchain_react", "LangchainReactBackend"),
     "pydantic_ai": ("pocketpaw.agents.pydantic_ai", "PydanticAIBackend"),
-    "agentapi": ("pocketpaw.agents.agentapi", "AgentAPIBackend"),
 }
 
 # Backends that were removed — map to fallback for graceful migration
