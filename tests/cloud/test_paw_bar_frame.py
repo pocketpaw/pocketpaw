@@ -389,3 +389,29 @@ async def test_chat_frozen_inline_origin_still_works(chat_client, monkeypatch):
     )
     assert res.status_code == 200
     assert len(fake_exec.submitted) == 1
+
+
+class TestDeadFrameShell:
+    """A refused frame renders INSIDE a visible iframe on the customer's site —
+    the body must be a blank self-removing shell, never an error payload
+    (2026-07-30 captain report: literal JSON on the page while disabled)."""
+
+    def test_dead_frame_is_blank_html_403(self) -> None:
+        from pocketpaw_ee.paw_bar.router import _dead_frame_response
+
+        res = _dead_frame_response("", ["brewco.com"])
+        assert res.status_code == 403
+        body = res.body.decode()
+        assert body.startswith("<!doctype html>")
+        # Never an error payload — no JSON detail shape anywhere in the shell.
+        assert '"detail"' not in body and "concierge_disabled" not in body
+        assert res.headers["cache-control"] == "no-store"
+
+    def test_dead_frame_posts_dead_to_validated_parent_only(self) -> None:
+        from pocketpaw_ee.paw_bar.router import _dead_frame_response
+
+        allowed = _dead_frame_response("https://brewco.com", ["brewco.com"]).body.decode()
+        assert "pawbar:'dead'" in allowed and "https://brewco.com" in allowed
+        # An unlisted parent gets NO script — nothing is posted anywhere.
+        stranger = _dead_frame_response("https://evil.example", ["brewco.com"]).body.decode()
+        assert "postMessage" not in stranger

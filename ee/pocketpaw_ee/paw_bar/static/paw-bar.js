@@ -197,6 +197,11 @@
           }
           break;
         }
+        case 'pawbar:dead':
+          // The frame declined to render (concierge disabled / unusable
+          // allowlist): remove the iframe entirely so the site shows NOTHING.
+          iframe.remove();
+          break;
         case 'pawbar:open':
           overlay = true;
           goFullscreen();

@@ -560,6 +560,35 @@ def _configured_frame_origin(request: Request) -> str:
     return f"{request.url.scheme}://{request.url.netloc}"
 
 
+def _dead_frame_response(po: str, allowed_origins: list[str]) -> HTMLResponse:
+    """The invisible shell a declined frame renders: nothing, then self-remove.
+
+    A refused GET /paw-bar/frame lands inside a VISIBLE iframe on the
+    customer's site, so the body must render blank — never an error payload.
+    The inline script posts ``{pawbar: 'dead'}`` to the (allowlist-validated)
+    parent so a loader that understands it removes the iframe entirely; an
+    older loader simply keeps an invisible 48px sliver. Status stays 403:
+    programmatic callers still see a refusal.
+    """
+    parent = _safe_parent_origin(po, allowed_origins)
+    script = (
+        "<script>try{parent.postMessage({type:'pawbar:dead'},"
+        + json.dumps(parent)
+        + ")}catch(e){}</script>"
+        if parent
+        else ""
+    )
+    return HTMLResponse(
+        content=(
+            "<!doctype html><html><head><meta charset='utf-8'>"
+            "<style>html,body{background:transparent;margin:0}</style>"
+            f"</head><body>{script}</body></html>"
+        ),
+        status_code=403,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def _request_origin(request: Request) -> str | None:
     """The effective Origin for the public GET gates — same-origin case resolved.
 
@@ -788,18 +817,25 @@ async def frame(
     site = await lookup_site_by_key(key)
 
     # (1b) Kill switch (D1 / SS-6): the owner's ``concierge_enabled`` toggle. When
-    # off, refuse to render (403) — the same fail-closed shape as the empty-allowlist
-    # refusal below. Re-read on every request (``lookup_site_by_key`` does a fresh
-    # find_one, nothing is cached), so toggling off silences the frame immediately.
-    # Distinct from ``revoked`` (which cuts the KEY at 401 inside lookup_site_by_key).
+    # off, refuse to RENDER — but this response body lands inside a visible
+    # iframe on the customer's site, so a JSON error is a defect, not a refusal
+    # (the 2026-07-30 rig showed literal {"detail":"concierge_disabled"} on the
+    # page). Return the invisible shell: a blank document that tells the loader
+    # to remove the iframe (``pawbar:dead``). Still 403 — curl callers see the
+    # status; browsers see nothing. Re-read per request (``lookup_site_by_key``
+    # does a fresh find_one), so toggling off silences the frame immediately.
+    # Distinct from ``revoked`` (which cuts the KEY at 401 inside
+    # lookup_site_by_key — an api-shaped JSON 401 stays correct there: a revoked
+    # key means the embed script itself is stale/removed on next publish).
     if not site.concierge_enabled:
-        raise HTTPException(status_code=403, detail="concierge_disabled")
+        return _dead_frame_response(po, site.allowed_origins)
 
     # (2) The embedder gate: the CSP frame-ancestors header. Fail closed when no
-    # allowlisted origin survives sanitization — refuse to render.
+    # allowlisted origin survives sanitization — refuse to render (same
+    # invisible-shell shape: this body also lands in a visible iframe).
     csp = _frame_ancestors_csp(site.allowed_origins)
     if csp is None:
-        raise HTTPException(status_code=403, detail="frame_ancestors_unset")
+        return _dead_frame_response(po, site.allowed_origins)
 
     # (3) Bootstrap config. ``endpoint`` is the API base derived from the request
     # path (mount-agnostic: /api/v1 in prod, "" when the router is mounted bare in

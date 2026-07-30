@@ -148,7 +148,10 @@ async def test_frame_disabled_concierge_is_403(client):
     await _site(concierge_enabled=False)
     res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY})
     assert res.status_code == 403
-    assert "concierge_disabled" in res.text
+    # The refusal renders inside a VISIBLE iframe — it must be the blank
+    # self-removing shell, never an error payload (2026-07-30 rig report).
+    assert res.text.startswith("<!doctype html>")
+    assert "concierge_disabled" not in res.text
 
 
 @pytest.mark.asyncio
@@ -312,7 +315,9 @@ async def test_toggle_off_silences_frame_immediately(client):
 
     after = await c.get("/paw-bar/frame", params={"key": _VALID_KEY})
     assert after.status_code == 403
-    assert "concierge_disabled" in after.text
+    # Blank shell, not an error payload — the body renders on the site.
+    assert after.text.startswith("<!doctype html>")
+    assert "concierge_disabled" not in after.text
 
 
 # --------------------------------------------------------------------------- #
