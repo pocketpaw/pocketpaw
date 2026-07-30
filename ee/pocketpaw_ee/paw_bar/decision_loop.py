@@ -1,4 +1,14 @@
 # ee/paw_bar/decision_loop.py — Close the customer decision loop via Instinct.
+# Updated: 2026-07-30 (async decision delivery) — deliver_customer_decision now
+#   closes the loop for a visitor who LEFT the page: if the flipped row carries
+#   a ``contact_email`` (attached via POST /paw-bar/decision-contact while the
+#   row was pending), it sends ONE email with the SAME customer-facing reply
+#   the poll returns. Sent only on the PENDING → decided transition (the prior
+#   row state is read before the flip), so an approve replay / re-delivery
+#   never re-sends. Fail-soft via paw_bar.mailer — a mail failure (or no SMTP
+#   transport at all) logs and moves on; the poll delivery is untouched. The
+#   email address never leaves the DecisionStatus row (PII invariant — see
+#   models.DecisionStatus.contact_email).
 # Updated: 2026-07-30 (visitor-reply leak) — both proposal paths pre-filled
 #   ``recommendation`` with the OWNER-facing framing ("A visitor (ref …) asked …
 #   untrusted input … Suggested reply: …"), and deliver_customer_decision sends
@@ -538,6 +548,10 @@ async def deliver_customer_decision(action: Any, *, declined: bool = False) -> N
         blob_workspace = str(blob.get("workspace_id") or "") or None
 
         store = get_paw_bar_store()
+        # Read the PRIOR state before flipping: the async email below fires only
+        # on the PENDING → decided transition, so a re-delivery / approve replay
+        # (prior state already delivered/declined) never re-sends.
+        prior = await store.get_decision_by_action(action_id, workspace_id=blob_workspace)
         updated = await store.set_decision(
             action_id,
             state=state,
@@ -559,6 +573,31 @@ async def deliver_customer_decision(action: Any, *, declined: bool = False) -> N
             updated.widget_id,
             updated.customer_ref,
         )
+
+        # Async half of the loop: the visitor left the page and parked an email
+        # on the pending row (POST /paw-bar/decision-contact). Send them the
+        # SAME customer-facing reply the poll returns — approved or declined —
+        # exactly once (guarded on the state transition above). Best-effort:
+        # the mailer is fail-soft and this whole block must never break the
+        # approve/reject response.
+        if prior is not None and prior.state == DecisionState.PENDING and updated.contact_email:
+            try:
+                from pocketpaw_ee.paw_bar import mailer
+
+                widget = await store.get_widget(updated.widget_id)
+                site_name = str(getattr(widget, "name", "") or "") or "the site"
+                await mailer.send_decision_email(
+                    updated.contact_email,
+                    f"Update from {site_name}",
+                    updated.reply,
+                )
+            except Exception:  # noqa: BLE001 — mail is best-effort over delivery
+                logger.warning(
+                    "async decision email failed for action %s — the decision "
+                    "is still readable on the poll endpoint",
+                    action_id,
+                    exc_info=True,
+                )
     except Exception:  # noqa: BLE001 — delivery is best-effort over approve/reject
         logger.warning(
             "failed to deliver customer decision for action %s — the parked row "

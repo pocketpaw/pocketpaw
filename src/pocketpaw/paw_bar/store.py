@@ -1,4 +1,12 @@
 # ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
+# Updated: 2026-07-30 (async decision delivery) — paw_bar_decisions gains a
+#   contact_email TEXT DEFAULT '' column (additive: SCHEMA_SQL for fresh DBs +
+#   _migrate_columns ALTER for deployed ones, same pattern as workspace_id).
+#   New attach_contact_email(widget_id, customer_ref, email, workspace_id):
+#   stamps the email onto that visitor's PENDING rows only (a decided row is
+#   already answered on-page) and returns the count. set_decision deliberately
+#   does NOT touch the column, so the delivery hook can read it off the flipped
+#   row. The email is row-only PII — see the DecisionStatus field comment.
 # Updated: 2026-07-16 (D2 owner aggregation reads) — added two widget-keyed
 #   decision reads for the per-site Concierge dashboard: list_decisions_for_widget
 #   (recent decisions for ONE widget, newest first) and count_pending_decisions
@@ -132,6 +140,7 @@ CREATE TABLE IF NOT EXISTS paw_bar_decisions (
     state TEXT DEFAULT 'pending',
     reply TEXT DEFAULT '',
     decided_by TEXT DEFAULT '',
+    contact_email TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -252,13 +261,15 @@ class PawBarStore:
                     await db.execute(
                         f"ALTER TABLE paw_bar_widgets ADD COLUMN {name} TEXT DEFAULT ''"
                     )
-        # paw_bar_decisions: workspace_id (W4a) — the decision-scope reads need it.
-        if "paw_bar_decisions" in existing and "workspace_id" not in await _columns(
-            "paw_bar_decisions"
-        ):
-            await db.execute(
-                "ALTER TABLE paw_bar_decisions ADD COLUMN workspace_id TEXT DEFAULT ''"
-            )
+        # paw_bar_decisions: workspace_id (W4a) — the decision-scope reads need
+        # it — and contact_email (2026-07-30 async delivery).
+        if "paw_bar_decisions" in existing:
+            cols = await _columns("paw_bar_decisions")
+            for name in ("workspace_id", "contact_email"):
+                if name not in cols:
+                    await db.execute(
+                        f"ALTER TABLE paw_bar_decisions ADD COLUMN {name} TEXT DEFAULT ''"
+                    )
 
     def _conn(self) -> aiosqlite.Connection:
         return aiosqlite.connect(self._db_path)
@@ -583,8 +594,9 @@ class PawBarStore:
             await db.execute(
                 "INSERT INTO paw_bar_decisions"
                 " (id, widget_id, customer_ref, event_type, instinct_action_id,"
-                " workspace_id, state, reply, decided_by, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " workspace_id, state, reply, decided_by, contact_email,"
+                " created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     decision.id,
                     decision.widget_id,
@@ -595,6 +607,7 @@ class PawBarStore:
                     decision.state.value,
                     decision.reply,
                     decision.decided_by,
+                    decision.contact_email,
                     decision.created_at.isoformat(),
                     decision.updated_at.isoformat(),
                 ),
@@ -677,6 +690,42 @@ class PawBarStore:
             await db.execute(sql, params)
             await db.commit()
         return await self.get_decision_by_action(instinct_action_id, workspace_id=workspace_id)
+
+    async def attach_contact_email(
+        self,
+        widget_id: str,
+        customer_ref: str,
+        email: str,
+        workspace_id: str | None = None,
+    ) -> int:
+        """Stamp a contact email onto this visitor's PENDING decision rows.
+
+        The async half of the decision loop: a visitor who is about to leave the
+        page leaves an email; when the owner later decides, the delivery hook
+        reads it off the flipped row and sends the same customer-facing reply
+        there. Only ``state = 'pending'`` rows are touched — a decided row was
+        already answered on-page and re-stamping it would re-arm nothing.
+
+        ``workspace_id``, when supplied, scopes the UPDATE with the same tenancy
+        fragment as every other decision write (legacy ''/NULL rows still
+        match), so a cross-tenant (widget, customer) pair flips nothing.
+        Returns the number of rows stamped. PII posture: the email lives ONLY
+        on these rows — see the ``DecisionStatus.contact_email`` comment.
+        """
+        ws_cond, ws_params = _decision_workspace_scope(workspace_id)
+        sql = (
+            "UPDATE paw_bar_decisions SET contact_email = ?, updated_at = ?"
+            " WHERE widget_id = ? AND customer_ref = ? AND state = 'pending'"
+        )
+        params: list[Any] = [email, datetime.now().isoformat(), widget_id, customer_ref]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
+        await self._ensure_schema()
+        async with self._conn() as db:
+            cur = await db.execute(sql, params)
+            await db.commit()
+            return cur.rowcount or 0
 
     async def get_latest_decision(self, widget_id: str, customer_ref: str) -> DecisionStatus | None:
         """Return the most-recent decision for a (widget, customer) pair.
@@ -879,6 +928,7 @@ class PawBarStore:
             state=DecisionState(row["state"]),
             reply=row["reply"] or "",
             decided_by=row["decided_by"] or "",
+            contact_email=row["contact_email"] or "",
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )

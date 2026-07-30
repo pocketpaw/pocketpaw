@@ -1,4 +1,11 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-30 (async decision delivery) — added POST
+#   /paw-bar/decision-contact: a visitor whose request is still PENDING leaves
+#   an optional email before closing the tab; the delivery hook later emails
+#   them the same customer-facing reply the poll returns. Same fail-closed
+#   armor as chat/action via the shared ``_front_gate_for_key``; email is
+#   validated (RFC-ish regex + 254 cap → 422), stamped onto PENDING rows only,
+#   and NEVER echoed back on any public read (the poll response omits it).
 # Updated: 2026-07-30 (feat/paw-bar-autoembed) — added GET /paw-bar/widget.js, the
 #   PUBLIC loader route. The glass bar could only ever be embedded by hand, and the
 #   snippet the dashboard printed pointed at ``https://pp.pocketpaw.dev/widget.js``
@@ -2745,6 +2752,88 @@ async def get_cart(
         logger.debug("cart-read marker record failed (non-fatal)", exc_info=True)
     cart = await store.get_cart(w, customer_ref)
     return JSONResponse(cart_wire(widget, customer_ref, cart))
+
+
+# ---------------------------------------------------------------------------
+# Async decision delivery (2026-07-30) — the visitor who leaves the page
+#
+# The decision loop's on-page half is the poll endpoint above; this is the
+# async half. A visitor whose request is still PENDING can leave an email
+# before closing the tab; when the owner decides, the delivery hook emails
+# them the SAME customer-facing reply the poll would have shown. Same armor
+# class as /paw-bar/chat via the shared ``_front_gate_for_key``. The email is
+# row-only PII (see models.DecisionStatus.contact_email) and is NEVER echoed
+# back by any public read — the decision poll response omits it by shape.
+# ---------------------------------------------------------------------------
+
+# Simple RFC-ish shape check — one local part, one @, a dotted domain. The
+# 254-char cap is the SMTP path limit; anything longer is refused outright.
+_CONTACT_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_MAX_CONTACT_EMAIL_CHARS = 254
+
+
+class DecisionContactRequest(BaseModel):
+    widget_id: str
+    # The public, origin-bound embed key (Site.signed_key) — same credential
+    # model as ConciergeChatRequest; there is no signed-in user.
+    signed_key: str
+    customer_ref: str
+    email: str
+
+
+@router.post("/paw-bar/decision-contact")
+async def post_decision_contact(body: DecisionContactRequest, request: Request) -> JSONResponse:
+    """Attach a contact email to this visitor's PENDING decision rows.
+
+    Gates mirror ``concierge_chat`` via the shared ``_front_gate_for_key``
+    (fail-closed, cheap gates first): widget exists (404) → rate limit (429) →
+    embed-key auth + dual-mode origin gate (401/403) → widget∩key binding
+    (403). Then the email is validated (422) and stamped onto the visitor's
+    pending rows only — a decided row was already answered on-page. Returns
+    ``{ok: true, attached: N}``; the address itself is never echoed back here
+    or on any other public read.
+    """
+    origin = request.headers.get("origin")
+    widget, _ctx = await _front_gate_for_key(
+        widget_id=body.widget_id,
+        signed_key=body.signed_key,
+        customer_ref=body.customer_ref,
+        origin=origin,
+        request=request,
+    )
+
+    email = body.email.strip()
+    if len(email) > _MAX_CONTACT_EMAIL_CHARS or not _CONTACT_EMAIL_RE.match(email):
+        raise HTTPException(422, "invalid_email")
+
+    store = _store()
+    # Record a marker so contact posts count toward the shared rate limiter
+    # (the front gate only CHECKS the limit). Payload stays EMPTY — the email
+    # must never land in the event log (PII invariant). Best-effort.
+    try:
+        await store.record_event(
+            PawBarEvent(
+                widget_id=widget.id,
+                type="pawbar_decision_contact",
+                payload={},
+                customer_ref=body.customer_ref,
+            )
+        )
+    except Exception:
+        logger.debug("decision-contact marker record failed (non-fatal)", exc_info=True)
+
+    # Scope the write with the same workspace value the decision rows were
+    # stamped with at propose time (decision_loop.resolve_workspace_id — the
+    # widget's real workspace, or the owner label for a legacy row).
+    from pocketpaw_ee.paw_bar.decision_loop import resolve_workspace_id
+
+    attached = await store.attach_contact_email(
+        widget.id,
+        body.customer_ref,
+        email,
+        workspace_id=resolve_workspace_id(widget) or None,
+    )
+    return JSONResponse({"ok": True, "attached": attached})
 
 
 # ---------------------------------------------------------------------------

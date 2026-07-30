@@ -1,4 +1,9 @@
 # ee/paw_bar/models.py — Pydantic models for the Paw Bar widget layer.
+# Updated: 2026-07-30 (async decision delivery) — DecisionStatus gains an
+#   optional ``contact_email`` (empty default). A visitor who leaves the page
+#   while their request is PENDING can leave an email; when the owner decides,
+#   the delivery hook sends the same customer-facing reply there. PII posture:
+#   the email lives ONLY on this row — see the field comment.
 # Updated: 2026-07-16 (Paw Bar action registry, C1) — the visitor-commerce
 #   vocabulary. PawBarSpec gains three optional fields: ``actions`` (declared
 #   verbs: {verb, policy in {auto,gated}, args flat-type-map, label}), ``catalog``
@@ -442,6 +447,14 @@ class DecisionStatus(BaseModel):
     state: DecisionState = DecisionState.PENDING
     reply: str = ""
     decided_by: str = ""
+    # PII INVARIANT (binding): the visitor's optional contact email lives ONLY
+    # on this DecisionStatus row. It must never be copied into the Instinct
+    # Action / its ``_customer_reply`` blob, the agent's context, the KB,
+    # transcripts, or the soul — and it is never echoed back by any public
+    # read (the decision poll response omits it). Storage is capped here at
+    # the row level; the only consumer is the one-shot email the delivery
+    # hook sends when the row flips out of PENDING.
+    contact_email: str = ""
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 

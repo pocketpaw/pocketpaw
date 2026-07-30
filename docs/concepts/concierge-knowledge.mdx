@@ -134,3 +134,26 @@ decision about whether the site keeps a record of its visitors, not two.
 
 If the record cannot be read for any reason, the concierge answers without memory
 rather than failing the visitor's chat.
+
+## When the visitor leaves the page
+
+Some requests need a human decision, and humans take longer than a browser tab
+stays open. While a request is pending, the visitor can leave an email address
+(`POST /paw-bar/decision-contact`, guarded by the same key, origin and rate
+gates as the chat itself). When the owner approves or declines, the visitor is
+sent one email carrying exactly the reply the on-page poll would have shown —
+no more, no less — with a subject that names the site.
+
+The address is handled as narrowly as possible:
+
+- It is stored **only** on the pending decision rows it was left for. It never
+  enters the agent's context, the knowledge base, transcripts, or the proposal
+  the owner reviews, and no public endpoint ever returns it — the decision poll
+  response does not carry it.
+- One decision, one email. An approval that is re-delivered later (a retry, a
+  sweep) does not send again.
+- Email is best-effort on top of the poll, never instead of it. If no SMTP
+  transport is configured (`POCKETPAW_SMTP_HOST`, `POCKETPAW_SMTP_PORT`,
+  `POCKETPAW_SMTP_USER`, `POCKETPAW_SMTP_PASSWORD`, `POCKETPAW_SMTP_FROM`,
+  with STARTTLS on by default) or a send fails, the decision still lands on the
+  poll endpoint and the approve/reject flow is unaffected.
