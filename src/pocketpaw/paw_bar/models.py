@@ -1,4 +1,11 @@
 # ee/paw_bar/models.py — Pydantic models for the Paw Bar widget layer.
+# Updated: 2026-07-30 (owner inbox, slice 1) — the conversation STATE vocabulary:
+#   ``ConversationState`` (open | needs_human | snoozed | closed),
+#   ``ConversationNote`` (an owner's private {author, text, at}) and
+#   ``Conversation`` — a thin lifecycle row over the concierge run docs, keyed by
+#   (widget_id, customer_ref). It stores NO messages: the transcript stays derived
+#   from ChatRunDoc and this row adds only lifecycle + operator metadata, so the
+#   queue and the log never disagree about what was said.
 # Updated: 2026-07-30 (async decision delivery) — DecisionStatus gains an
 #   optional ``contact_email`` (empty default). A visitor who leaves the page
 #   while their request is PENDING can leave an email; when the owner decides,
@@ -455,6 +462,107 @@ class DecisionStatus(BaseModel):
     # the row level; the only consumer is the one-shot email the delivery
     # hook sends when the row flips out of PENDING.
     contact_email: str = ""
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
+# ---------------------------------------------------------------------------
+# Conversation lifecycle — the owner inbox's state row (slice 1)
+#
+# A concierge conversation already EXISTS as a stream of ChatRunDoc rows keyed by
+# (workspace, context_type='concierge', scope_id, customer_ref). What it lacks is
+# a place to say "this one still needs me". These models are that place, and
+# nothing more: no messages, no copies of the transcript. One row per
+# (widget_id, customer_ref), created lazily on the visitor's first turn, so the
+# log becomes a queue without a backfill.
+# ---------------------------------------------------------------------------
+
+
+def _gen_conversation_id() -> str:
+    """Fresh conversation row id (``ppc_…``).
+
+    Named rather than inlined so the model default and the store's INSERT mint
+    ids the same way — the store writes rows with raw SQL, so without this the
+    prefix would live in two places and drift.
+    """
+    return _gen_id("ppc")
+
+
+class ConversationState(StrEnum):
+    """Where a visitor conversation sits in the owner's queue.
+
+    ``OPEN``        — live; the bot is handling it (or the owner is) and it sits
+                      in the default inbox view.
+    ``NEEDS_HUMAN`` — escalated: the visitor asked for a person, or the bot could
+                      not answer. It is the ONE state a visitor reply does not
+                      change — already at the top of the queue, nowhere to raise.
+    ``SNOOZED``     — deliberately hidden until ``snooze_until``. Expiry is
+                      computed on READ (see the store) — there is no sweeper, so
+                      a snooze always ends on time even if nothing is running.
+    ``CLOSED``      — done. A new visitor message re-opens it automatically.
+    """
+
+    OPEN = "open"
+    NEEDS_HUMAN = "needs_human"
+    SNOOZED = "snoozed"
+    CLOSED = "closed"
+
+
+class ConversationNote(BaseModel):
+    """One private operator note on a conversation — never shown to the visitor.
+
+    Notes are append-only from the owner API (a PATCH carrying ``note`` appends
+    rather than replaces), so the internal thread of "what we know about this
+    person" survives every other edit. ``at`` is an ISO timestamp string, matching
+    how the row's other time fields are stored.
+    """
+
+    author: str = ""
+    text: str = ""
+    at: str = ""
+
+
+class Conversation(BaseModel):
+    """The lifecycle + operator metadata for ONE visitor conversation.
+
+    Identity is ``(widget_id, customer_ref)`` — 1:1 with the concierge run
+    stream's ``session_key`` — and the row is deliberately thin: the transcript is
+    NOT here, it stays derived from the run docs. What lives here is only what the
+    runs cannot express: the queue state, whether the bot is muted, the owner's
+    tags and private notes, and the unread counter.
+
+    ``workspace_id`` is the REAL tenant workspace (the concierge run's
+    ``ctx.workspace_id``), unlike ``DecisionStatus.workspace_id``, which stores
+    the widget owner — so scoped reads here are a true tenancy filter.
+
+    ``snooze_until`` / ``last_visitor_at`` / ``last_owner_at`` are ISO strings
+    rather than datetimes so the store can compare them in SQL (the snooze-expiry
+    CASE) without a round trip through Python.
+
+    PII posture: ``contact_email`` mirrors the invariant on
+    ``DecisionStatus.contact_email`` — a visitor-supplied address, owner-visible
+    only. It must never reach the Instinct action, the agent's context, the KB,
+    the transcript, the soul, or any PUBLIC read. Slice 1 never writes it (the
+    owner list derives the display name from the decision row that captured it);
+    the column exists so a later slice can promote it explicitly.
+    """
+
+    id: str = Field(default_factory=_gen_conversation_id)
+    widget_id: str
+    customer_ref: str
+    workspace_id: str = ""
+    state: ConversationState = ConversationState.OPEN
+    bot_paused: bool = False
+    snooze_until: str = ""
+    # Present for the operator toolkit later; there is no assignment UI in v1
+    # (solo-owner posture), so nothing writes it yet.
+    assignee: str = ""
+    tags: list[str] = Field(default_factory=list)
+    notes: list[ConversationNote] = Field(default_factory=list)
+    contact_email: str = ""
+    last_visitor_at: str = ""
+    last_owner_at: str = ""
+    unread_for_owner: int = 0
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 

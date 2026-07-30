@@ -1,4 +1,17 @@
 # ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
+# Updated: 2026-07-30 (owner inbox, slice 1) — new paw_bar_conversations table:
+#   the thin lifecycle row that turns the concierge log into a queue, keyed
+#   UNIQUE(widget_id, customer_ref). Mirrors the paw_bar_decisions conventions
+#   (SCHEMA_SQL for fresh DBs + additive _migrate_columns ALTERs for deployed
+#   ones, a _conversation_workspace_scope tenancy fragment). Methods:
+#   upsert_conversation_on_visitor_turn (lazy create-or-touch — bumps the unread
+#   counter and AUTO-REOPENS a closed/snoozed row, leaving needs_human alone),
+#   ensure_conversation (create-without-touch, for the first owner-side read),
+#   get_conversation / list_conversations / update_conversation (whitelisted
+#   fields; a single ``note`` APPENDS) / conversation_counts. Snooze expiry is
+#   computed on READ via _EFFECTIVE_STATE_SQL — a snooze ends on time with no
+#   sweeper process. list_widgets also gains an ``agent_id`` filter so the
+#   agent-scoped inbox can resolve one agent's widgets in one query.
 # Updated: 2026-07-30 (async decision delivery) — paw_bar_decisions gains a
 #   contact_email TEXT DEFAULT '' column (additive: SCHEMA_SQL for fresh DBs +
 #   _migrate_columns ALTER for deployed ones, same pattern as workspace_id).
@@ -90,6 +103,9 @@ import aiosqlite
 
 from pocketpaw.paw_bar.models import (
     MAX_CART_ITEMS,
+    Conversation,
+    ConversationNote,
+    ConversationState,
     DecisionState,
     DecisionStatus,
     PawBarCart,
@@ -97,8 +113,28 @@ from pocketpaw.paw_bar.models import (
     PawBarEvent,
     PawBarSpec,
     PawBarWidget,
+    _gen_conversation_id,
     _gen_token,
 )
+
+
+def _as_note(value: Any) -> ConversationNote:
+    """Coerce whatever a caller passed as a note into a :class:`ConversationNote`.
+
+    Accepts a model, a dict, or a bare string (treated as the text). ``at`` is
+    stamped now when the caller didn't supply one, so a note is always ordered in
+    the thread even if the API omitted the timestamp.
+    """
+    if isinstance(value, ConversationNote):
+        note = value
+    elif isinstance(value, dict):
+        note = ConversationNote.model_validate(value)
+    else:
+        note = ConversationNote(text=str(value))
+    if not note.at:
+        note = note.model_copy(update={"at": datetime.now().isoformat()})
+    return note
+
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS paw_bar_widgets (
@@ -169,6 +205,33 @@ CREATE TABLE IF NOT EXISTS paw_bar_carts (
     PRIMARY KEY (widget_id, customer_ref)
 );
 
+-- Owner inbox (slice 1): the conversation STATE row. One per
+-- (widget_id, customer_ref) — the same identity as the concierge run stream's
+-- session_key — holding lifecycle + operator metadata ONLY. No messages: the
+-- transcript stays derived from the run docs, so there is one source of truth
+-- for what was said and one for how the owner is handling it. Created lazily on
+-- the visitor's first turn (or the owner's first read), so no backfill is needed
+-- and a legacy conversation with no row still lists with defaults.
+CREATE TABLE IF NOT EXISTS paw_bar_conversations (
+    id TEXT PRIMARY KEY,
+    widget_id TEXT NOT NULL,
+    customer_ref TEXT NOT NULL,
+    workspace_id TEXT DEFAULT '',
+    state TEXT DEFAULT 'open',
+    bot_paused INTEGER DEFAULT 0,
+    snooze_until TEXT DEFAULT '',
+    assignee TEXT DEFAULT '',
+    tags TEXT DEFAULT '[]',
+    notes TEXT DEFAULT '[]',
+    contact_email TEXT DEFAULT '',
+    last_visitor_at TEXT DEFAULT '',
+    last_owner_at TEXT DEFAULT '',
+    unread_for_owner INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE (widget_id, customer_ref)
+);
+
 CREATE INDEX IF NOT EXISTS idx_pp_widgets_pocket ON paw_bar_widgets(pocket_id);
 CREATE INDEX IF NOT EXISTS idx_pp_widgets_owner ON paw_bar_widgets(owner);
 CREATE INDEX IF NOT EXISTS idx_pp_widgets_workspace ON paw_bar_widgets(workspace_id);
@@ -182,7 +245,41 @@ CREATE INDEX IF NOT EXISTS idx_pp_decisions_action
     ON paw_bar_decisions(instinct_action_id);
 CREATE INDEX IF NOT EXISTS idx_pp_spec_revisions_widget
     ON paw_bar_spec_revisions(widget_id, revision DESC);
+CREATE INDEX IF NOT EXISTS idx_pp_conversations_state
+    ON paw_bar_conversations(widget_id, state, updated_at DESC);
 """
+
+# The paw_bar_conversations columns, with the exact declaration each ALTER must
+# use when adding it to an already-deployed table. Keep in lockstep with the
+# CREATE TABLE above (the primary key + the UNIQUE constraint can't be ALTERed in
+# and are therefore not listed — a table that old is recreated, not migrated).
+_CONVERSATION_COLUMNS: dict[str, str] = {
+    "workspace_id": "TEXT DEFAULT ''",
+    "state": "TEXT DEFAULT 'open'",
+    "bot_paused": "INTEGER DEFAULT 0",
+    "snooze_until": "TEXT DEFAULT ''",
+    "assignee": "TEXT DEFAULT ''",
+    "tags": "TEXT DEFAULT '[]'",
+    "notes": "TEXT DEFAULT '[]'",
+    "contact_email": "TEXT DEFAULT ''",
+    "last_visitor_at": "TEXT DEFAULT ''",
+    "last_owner_at": "TEXT DEFAULT ''",
+    "unread_for_owner": "INTEGER DEFAULT 0",
+    "created_at": "TEXT",
+    "updated_at": "TEXT",
+}
+
+# Snooze expiry, decided in SQL at READ time. A row is only really snoozed while
+# its ``snooze_until`` is still in the future; once that instant passes it reads
+# as ``open`` again — no sweeper process, no cron, nothing to fail silently at
+# 3am and leave a customer waiting. An empty ``snooze_until`` means "snoozed
+# indefinitely" (the owner never set an end), so it never expires. Every state
+# filter and every count goes through this ONE expression so the list, the badge,
+# and the row detail can never disagree about what state a conversation is in.
+_EFFECTIVE_STATE_SQL = (
+    "CASE WHEN state = 'snoozed' AND snooze_until != '' AND snooze_until <= ?"
+    " THEN 'open' ELSE state END"
+)
 
 
 def _decision_workspace_scope(workspace_id: str | None) -> tuple[str | None, list[Any]]:
@@ -208,6 +305,21 @@ def _widget_workspace_scope(workspace_id: str | None) -> tuple[str | None, list[
     so a legacy/global row is matched on ``= ''`` as well as ``IS NULL``.
     Returns ``(None, [])`` when ``workspace_id`` is ``None`` — no scoping,
     fully backward-compatible.
+    """
+    if workspace_id is None:
+        return None, []
+    return "(workspace_id = ? OR workspace_id = '' OR workspace_id IS NULL)", [workspace_id]
+
+
+def _conversation_workspace_scope(workspace_id: str | None) -> tuple[str | None, list[Any]]:
+    """Build the tenancy WHERE fragment + bound params for a scoped conversation read.
+
+    Same shape as :func:`_decision_workspace_scope`, but the column means what it
+    says here: a conversation row stores the REAL tenant workspace (the concierge
+    run's ``ctx.workspace_id``), not the widget owner, so this IS a true tenancy
+    filter rather than a widget-owner match. A legacy row written before the
+    column carried a value (''/NULL) still matches, so the queue never loses a
+    conversation to a migration. ``None`` leaves the read unscoped.
     """
     if workspace_id is None:
         return None, []
@@ -270,6 +382,19 @@ class PawBarStore:
                     await db.execute(
                         f"ALTER TABLE paw_bar_decisions ADD COLUMN {name} TEXT DEFAULT ''"
                     )
+        # paw_bar_conversations (owner inbox, slice 1). The table is new, so a
+        # fresh DB gets the whole thing from SCHEMA_SQL and this is a no-op. It is
+        # listed anyway because the SAME trap that bit widgets and decisions
+        # applies the moment a column is added later: CREATE TABLE IF NOT EXISTS
+        # no-ops on the deployed table, and the SCHEMA_SQL index over
+        # (widget_id, state, updated_at) then fails with "no such column". Each
+        # entry carries its own type + default so the INTEGER counters don't
+        # arrive as text.
+        if "paw_bar_conversations" in existing:
+            cols = await _columns("paw_bar_conversations")
+            for name, decl in _CONVERSATION_COLUMNS.items():
+                if name not in cols:
+                    await db.execute(f"ALTER TABLE paw_bar_conversations ADD COLUMN {name} {decl}")
 
     def _conn(self) -> aiosqlite.Connection:
         return aiosqlite.connect(self._db_path)
@@ -329,7 +454,16 @@ class PawBarStore:
         owner: str | None = None,
         limit: int = 100,
         workspace_id: str | None = None,
+        agent_id: str | None = None,
     ) -> list[PawBarWidget]:
+        """List widgets, optionally filtered by pocket / owner / bound agent.
+
+        ``agent_id`` backs the agent-scoped inbox: a site concierge IS a normal
+        agent, so "this agent's conversations" resolves agent → its widget(s) →
+        their sites. Combined with ``workspace_id`` it is one query instead of a
+        workspace-wide list filtered in Python. An empty/None ``agent_id`` drops
+        the filter (it never means "unbound widgets").
+        """
         conditions: list[str] = []
         params: list[Any] = []
         if pocket_id:
@@ -338,6 +472,9 @@ class PawBarStore:
         if owner:
             conditions.append("owner = ?")
             params.append(owner)
+        if agent_id:
+            conditions.append("agent_id = ?")
+            params.append(agent_id)
         ws_cond, ws_params = _widget_workspace_scope(workspace_id)
         if ws_cond:
             conditions.append(ws_cond)
@@ -794,6 +931,292 @@ class PawBarStore:
                 row = await cur.fetchone()
                 return row[0] if row else 0
 
+    # ---------------- Conversations (owner inbox, slice 1) ----------------
+    #
+    # The state row over a concierge conversation. Everything here is keyed by
+    # (widget_id, customer_ref) and, like the decision reads, relies on the caller
+    # having ALREADY resolved the widget workspace-scoped — so ``widget_id`` names
+    # a widget in the caller's tenant and a sibling site's rows can never match.
+    # The ``workspace_id`` argument is the second, independent guard (this column
+    # holds the real tenant, unlike the decisions table's owner column).
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _conversation_select(
+        where: str, params: list[Any], *, order: str = "", now: str | None = None
+    ) -> tuple[str, list[Any]]:
+        """Build a conversation SELECT that carries the EFFECTIVE state.
+
+        Every read goes through here so snooze expiry is applied in exactly one
+        place: the extra ``effective_state`` column is the ``_EFFECTIVE_STATE_SQL``
+        CASE, and ``_row_to_conversation`` presents it as the row's state. The CASE
+        parameter binds BEFORE the WHERE parameters because it sits in the select
+        list — hence the explicit assembly rather than string concatenation at the
+        call sites.
+        """
+        stamp = now or datetime.now().isoformat()
+        sql = (
+            f"SELECT *, {_EFFECTIVE_STATE_SQL} AS effective_state"
+            f" FROM paw_bar_conversations WHERE {where}"
+        )
+        if order:
+            sql += f" {order}"
+        return sql, [stamp, *params]
+
+    async def upsert_conversation_on_visitor_turn(
+        self, widget_id: str, customer_ref: str, workspace_id: str = ""
+    ) -> Conversation:
+        """Create-or-touch the conversation row for a visitor's message.
+
+        Called on every visitor turn (from ``concierge_chat``), which is what makes
+        the queue backfill-free: the first message a visitor ever sends mints the
+        row, and every message after that keeps it current. Three effects:
+
+          * ``last_visitor_at`` = now, ``unread_for_owner`` += 1 — the owner has
+            something new to look at.
+          * AUTO-REOPEN: a ``closed`` or ``snoozed`` row goes back to ``open``, and
+            forgets any ``snooze_until`` it was carrying — a live conversation is
+            not due back later, it is here now. This is the universal
+            behaviour every inbox in this class has, and the one whose absence
+            reads as a lost customer: a visitor who comes back after you closed
+            them out must land in the queue, not in an archive.
+          * ``needs_human`` is left ALONE — it is already the top of the queue, so
+            "reopening" it would be a demotion.
+
+        Idempotent per message by construction (one row, counters advance). The
+        write is a single UPSERT so two turns racing can't lose an increment.
+        """
+        await self._ensure_schema()
+        now = datetime.now().isoformat()
+        row_id = _gen_conversation_id()
+        async with self._conn() as db:
+            await db.execute(
+                "INSERT INTO paw_bar_conversations"
+                " (id, widget_id, customer_ref, workspace_id, state, last_visitor_at,"
+                " unread_for_owner, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, 'open', ?, 1, ?, ?)"
+                " ON CONFLICT (widget_id, customer_ref) DO UPDATE SET"
+                "   last_visitor_at = excluded.last_visitor_at,"
+                "   unread_for_owner = paw_bar_conversations.unread_for_owner + 1,"
+                "   state = CASE WHEN paw_bar_conversations.state IN ('closed', 'snoozed')"
+                "     THEN 'open' ELSE paw_bar_conversations.state END,"
+                "   snooze_until = CASE WHEN paw_bar_conversations.state IN ('closed', 'snoozed')"
+                "     THEN '' ELSE paw_bar_conversations.snooze_until END,"
+                "   updated_at = excluded.updated_at",
+                (row_id, widget_id, customer_ref, workspace_id, now, now, now),
+            )
+            await db.commit()
+        conversation = await self.get_conversation(widget_id, customer_ref)
+        # The row was just written, so this can only be None if the DB vanished
+        # underneath us; return an unsaved value object rather than raising, so a
+        # visitor's chat is never broken by an inbox bookkeeping read.
+        return conversation or Conversation(
+            widget_id=widget_id, customer_ref=customer_ref, workspace_id=workspace_id
+        )
+
+    async def ensure_conversation(
+        self, widget_id: str, customer_ref: str, workspace_id: str = ""
+    ) -> Conversation:
+        """Return the conversation row, creating a DEFAULT one if it doesn't exist.
+
+        The owner-side sibling of :meth:`upsert_conversation_on_visitor_turn`: it
+        does NOT touch ``last_visitor_at`` or the unread counter, because an owner
+        opening or filing a conversation is not new visitor activity. This is how a
+        LEGACY conversation (one that predates the table) becomes manageable — the
+        first owner action on it mints the row with the same defaults the list
+        already renders for it, so nothing appears to change.
+        """
+        existing = await self.get_conversation(widget_id, customer_ref, workspace_id=workspace_id)
+        if existing is not None:
+            return existing
+        now = datetime.now().isoformat()
+        await self._ensure_schema()
+        async with self._conn() as db:
+            await db.execute(
+                "INSERT INTO paw_bar_conversations"
+                " (id, widget_id, customer_ref, workspace_id, state, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, 'open', ?, ?)"
+                " ON CONFLICT (widget_id, customer_ref) DO NOTHING",
+                (_gen_conversation_id(), widget_id, customer_ref, workspace_id, now, now),
+            )
+            await db.commit()
+        conversation = await self.get_conversation(
+            widget_id, customer_ref, workspace_id=workspace_id
+        )
+        return conversation or Conversation(
+            widget_id=widget_id, customer_ref=customer_ref, workspace_id=workspace_id
+        )
+
+    async def get_conversation(
+        self, widget_id: str, customer_ref: str, workspace_id: str | None = None
+    ) -> Conversation | None:
+        """One conversation's state row, or ``None`` when it has none yet.
+
+        ``None`` is a normal answer, not an error: a conversation that predates
+        this table (or one whose visitor never sent a turn after it shipped) simply
+        has no row, and every caller renders it with the model defaults.
+        """
+        conditions = "widget_id = ? AND customer_ref = ?"
+        params: list[Any] = [widget_id, customer_ref]
+        ws_cond, ws_params = _conversation_workspace_scope(workspace_id)
+        if ws_cond:
+            conditions += f" AND {ws_cond}"
+            params.extend(ws_params)
+        sql, bound = self._conversation_select(conditions, params, order="LIMIT 1")
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, bound) as cur:
+                row = await cur.fetchone()
+                return self._row_to_conversation(row) if row else None
+
+    async def list_conversations(
+        self,
+        widget_id: str,
+        workspace_id: str | None = None,
+        state: str | None = None,
+        limit: int = 50,
+        customer_refs: list[str] | None = None,
+    ) -> list[Conversation]:
+        """A widget's conversation rows, most recently updated first.
+
+        ``state`` filters on the EFFECTIVE state, so an expired snooze is found
+        under ``open`` and not under ``snoozed`` — the same rule the row detail and
+        the counts use. ``customer_refs``, when given, restricts the read to those
+        visitors: that is the join path for the owner list, which is driven by the
+        run docs and needs the state rows for exactly the refs on the page (an
+        exact IN-list beats hoping a "most recent 200 rows" window covers them).
+        Rows that don't exist are simply absent — the caller supplies defaults.
+        """
+        conditions = "widget_id = ?"
+        params: list[Any] = [widget_id]
+        ws_cond, ws_params = _conversation_workspace_scope(workspace_id)
+        if ws_cond:
+            conditions += f" AND {ws_cond}"
+            params.extend(ws_params)
+        now = datetime.now().isoformat()
+        if state:
+            conditions += f" AND {_EFFECTIVE_STATE_SQL} = ?"
+            params.extend([now, state])
+        if customer_refs is not None:
+            if not customer_refs:
+                return []
+            placeholders = ", ".join("?" for _ in customer_refs)
+            conditions += f" AND customer_ref IN ({placeholders})"
+            params.extend(customer_refs)
+        sql, bound = self._conversation_select(
+            conditions, params, order="ORDER BY updated_at DESC LIMIT ?", now=now
+        )
+        bound.append(limit)
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, bound) as cur:
+                return [self._row_to_conversation(row) async for row in cur]
+
+    async def update_conversation(
+        self,
+        widget_id: str,
+        customer_ref: str,
+        workspace_id: str | None = None,
+        **fields: Any,
+    ) -> Conversation | None:
+        """Patch a conversation's operator fields. Returns ``None`` if it has no row.
+
+        Only whitelisted keys are written (an unknown key is ignored, never
+        interpolated into SQL). ``note`` is the one special case: a SINGLE note
+        APPENDS to the existing list rather than replacing it, because private
+        notes are the operator's running record of a customer and a PATCH that
+        silently dropped the earlier ones would be a data-loss bug wearing an
+        edit's clothes. Pass ``notes=[…]`` to replace the whole list deliberately.
+
+        The lookup and the UPDATE are both workspace-scoped, so a cross-tenant
+        (widget, customer) pair writes nothing and reads back ``None``.
+        """
+        existing = await self.get_conversation(widget_id, customer_ref, workspace_id=workspace_id)
+        if existing is None:
+            return None
+        allowed = {
+            "state",
+            "bot_paused",
+            "snooze_until",
+            "assignee",
+            "tags",
+            "notes",
+            "contact_email",
+            "last_owner_at",
+            "unread_for_owner",
+        }
+        assignments: list[str] = []
+        values: list[Any] = []
+        note = fields.pop("note", None)
+        if note is not None:
+            appended = [*existing.notes, _as_note(note)]
+            fields["notes"] = [n.model_dump() for n in appended]
+        for key, val in fields.items():
+            if key not in allowed:
+                continue
+            if key == "state":
+                # Normalize + validate here too: the store is called from more than
+                # one surface, and an unknown state would poison every filter.
+                val = ConversationState(val).value
+            elif key in ("tags", "notes"):
+                val = json.dumps(
+                    [n.model_dump() if isinstance(n, ConversationNote) else n for n in val]
+                )
+            elif key == "bot_paused":
+                val = 1 if val else 0
+            assignments.append(f"{key} = ?")
+            values.append(val)
+        if not assignments:
+            return existing
+        assignments.append("updated_at = ?")
+        values.append(datetime.now().isoformat())
+        sql = (
+            f"UPDATE paw_bar_conversations SET {', '.join(assignments)}"
+            " WHERE widget_id = ? AND customer_ref = ?"
+        )
+        values.extend([widget_id, customer_ref])
+        ws_cond, ws_params = _conversation_workspace_scope(workspace_id)
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            values.extend(ws_params)
+        await self._ensure_schema()
+        async with self._conn() as db:
+            await db.execute(sql, values)
+            await db.commit()
+        return await self.get_conversation(widget_id, customer_ref, workspace_id=workspace_id)
+
+    async def conversation_counts(
+        self, widget_id: str, workspace_id: str | None = None
+    ) -> dict[str, int]:
+        """Per-state counts for one widget — the inbox filter chips.
+
+        All four keys are always present (0 when empty) so the dashboard renders a
+        stable set of chips. Counted on the EFFECTIVE state, so a snooze that has
+        expired shows up under ``open`` exactly where the owner will find it. Only
+        rows that EXIST are counted: a legacy conversation with no row is listed
+        with default state but is deliberately not invented into a count.
+        """
+        counts = {s.value: 0 for s in ConversationState}
+        conditions = "widget_id = ?"
+        params: list[Any] = [widget_id]
+        ws_cond, ws_params = _conversation_workspace_scope(workspace_id)
+        if ws_cond:
+            conditions += f" AND {ws_cond}"
+            params.extend(ws_params)
+        await self._ensure_schema()
+        async with self._conn() as db:
+            async with db.execute(
+                f"SELECT {_EFFECTIVE_STATE_SQL} AS s, COUNT(*)"
+                f" FROM paw_bar_conversations WHERE {conditions} GROUP BY s",
+                [datetime.now().isoformat(), *params],
+            ) as cur:
+                async for row in cur:
+                    if row[0] in counts:
+                        counts[row[0]] = row[1]
+        return counts
+
     # ---------------- Carts (C1 — visitor-scoped commerce state) ----------------
 
     async def get_cart(self, widget_id: str, customer_ref: str) -> PawBarCart | None:
@@ -915,6 +1338,37 @@ class PawBarStore:
             payload=json.loads(row["payload"]) if row["payload"] else {},
             customer_ref=row["customer_ref"],
             timestamp=datetime.fromisoformat(row["timestamp"]),
+        )
+
+    def _row_to_conversation(self, row: Any) -> Conversation:
+        """Rebuild a :class:`Conversation` from a row read via ``_conversation_select``.
+
+        ``state`` is the row's EFFECTIVE state (the ``effective_state`` column the
+        select computes), so callers never have to remember to re-apply snooze
+        expiry. ``snooze_until`` is left as stored: an expired snooze reads as
+        ``open`` but keeps the timestamp that says when it lapsed.
+        """
+        raw_tags = json.loads(row["tags"]) if row["tags"] else []
+        raw_notes = json.loads(row["notes"]) if row["notes"] else []
+        keys = row.keys()
+        state = row["effective_state"] if "effective_state" in keys else row["state"]
+        return Conversation(
+            id=row["id"],
+            widget_id=row["widget_id"],
+            customer_ref=row["customer_ref"],
+            workspace_id=row["workspace_id"] or "",
+            state=ConversationState(state or ConversationState.OPEN.value),
+            bot_paused=bool(row["bot_paused"]),
+            snooze_until=row["snooze_until"] or "",
+            assignee=row["assignee"] or "",
+            tags=[str(t) for t in raw_tags],
+            notes=[_as_note(n) for n in raw_notes],
+            contact_email=row["contact_email"] or "",
+            last_visitor_at=row["last_visitor_at"] or "",
+            last_owner_at=row["last_owner_at"] or "",
+            unread_for_owner=row["unread_for_owner"] or 0,
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
         )
 
     def _row_to_decision(self, row: Any) -> DecisionStatus:
