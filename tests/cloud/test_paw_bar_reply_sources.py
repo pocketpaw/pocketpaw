@@ -551,3 +551,18 @@ async def test_articles_widget_from_other_workspace_is_403(concierge_client):
         "/paw-bar/articles", params=_articles_params(widget.id), headers={"Origin": _ORIGIN}
     )
     assert res.status_code == 403
+
+
+class TestHumanizedTitles:
+    """Slug-shaped article ids never reach the visitor as titles (2026-07-30
+    rig smoke: chips read "site-services")."""
+
+    def test_slug_titles_humanize(self) -> None:
+        from pocketpaw_ee.paw_bar.router import _humanize_article_title
+
+        assert _humanize_article_title("site-home") == "Home"
+        assert _humanize_article_title("site-services") == "Services"
+        assert _humanize_article_title("site-contact-us") == "Contact Us"
+        assert _humanize_article_title("site-") == "Home"
+        # A real compiled title passes through untouched.
+        assert _humanize_article_title("Our Service Areas") == "Our Service Areas"

@@ -2377,6 +2377,23 @@ _SOURCES_SEARCH_LIMIT = 8
 _SOURCES_WAIT_S = 0.1
 
 
+def _humanize_article_title(title: str) -> str:
+    """Visitor-facing title for a synced page article — never the raw KB id.
+
+    Slug-sourced articles carry their ``site-<slug>`` id as the title
+    ("site-services"), which read as internals in the Sources chips and the
+    articles list during the 2026-07-30 rig smoke. Strip the prefix, break the
+    slug on dashes, and title-case ("site-home" → "Home"). A title that isn't
+    id-shaped (an LLM-compiled article's real title) passes through untouched.
+    """
+    t = title.strip()
+    if t.startswith("site-"):
+        slug = t[len("site-") :].strip("-")
+        words = [w for w in slug.split("-") if w]
+        return " ".join(w.capitalize() for w in words) if words else "Home"
+    return t
+
+
 def _article_page_url(article_id: str, base_url: str) -> str:
     """Best-effort public page URL for a synced KB article — "" when unmappable.
 
@@ -2432,7 +2449,7 @@ async def _concierge_sources(pocket_id: str, message: str, site: Any) -> list[di
             if not url or url in seen_urls:
                 continue
             seen_urls.add(url)
-            sources.append({"title": title, "url": url})
+            sources.append({"title": _humanize_article_title(title), "url": url})
             if len(sources) >= _SOURCES_MAX:
                 break
         return sources
@@ -3002,7 +3019,9 @@ async def list_public_articles(
         if not url:
             continue
         snippet = " ".join(str(entry.get("summary") or "").split())[:_ARTICLE_SNIPPET_CHARS]
-        articles.append(ConciergeArticle(title=title, url=url, snippet=snippet))
+        articles.append(
+            ConciergeArticle(title=_humanize_article_title(title), url=url, snippet=snippet)
+        )
         if len(articles) >= _ARTICLES_MAX:
             break
     return ArticlesResponse(articles=articles)
