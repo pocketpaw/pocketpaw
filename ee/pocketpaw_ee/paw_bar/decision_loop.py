@@ -1,4 +1,12 @@
 # ee/paw_bar/decision_loop.py — Close the customer decision loop via Instinct.
+# Updated: 2026-07-30 (visitor-reply leak) — both proposal paths pre-filled
+#   ``recommendation`` with the OWNER-facing framing ("A visitor (ref …) asked …
+#   untrusted input … Suggested reply: …"), and deliver_customer_decision sends
+#   ``recommendation`` to the visitor VERBATIM on approve — so an unedited
+#   approval leaked the internal analysis text to the customer surface. Now
+#   ``recommendation`` carries ONLY the editable customer-facing default reply,
+#   and the framing/context moved into ``description`` (Tray-only). Found live
+#   in the 2026-07-30 demo smoke.
 # Updated: 2026-07-16 (C1 hardening) — propose_customer_action now sanitizes the
 #   visitor-controlled portions of the owner-facing proposal: customer_ref + the
 #   args summary are run through _sanitize_for_human (strip control chars, collapse
@@ -231,11 +239,15 @@ async def propose_customer_decision(
         default_reply = _default_reply(event_type)
 
         title = f"Customer request on {widget_name}: {event_type}".strip()
-        recommendation = (
+        # ``recommendation`` is the editable, CUSTOMER-FACING reply — the approve
+        # hook (deliver_customer_decision) sends it to the visitor VERBATIM, so
+        # it must never carry the owner-facing framing. That context lives in
+        # ``description``, which stays inside the Tray.
+        recommendation = default_reply
+        description = (
             f"A customer ({customer_ref}) sent a '{event_type}' request via the "
-            f"'{widget_name}' widget. Suggested reply: {default_reply}"
+            f"'{widget_name}' widget. Request payload: {summary}"
         )
-        description = f"Request payload: {summary}"
 
         trigger = ActionTrigger(
             type="connector",
@@ -387,12 +399,16 @@ async def propose_customer_action(
             f"Thanks, we've passed your '{verb}' request to the team and will follow up shortly."
         )
         title = f"Visitor action on {safe_widget_name}: {verb}".strip()
-        recommendation = (
+        # Same contract as the event path above: ``recommendation`` is delivered
+        # to the visitor VERBATIM on approve, so it carries ONLY the editable
+        # customer-facing reply; the owner-facing analysis stays in
+        # ``description`` (Tray-only).
+        recommendation = default_reply
+        description = (
             f"A visitor (ref {safe_customer}) asked to run the '{verb}' action via "
             f"the '{safe_widget_name}' concierge. Visitor-provided details "
-            f"(untrusted input): [{safe_summary}]. Suggested reply: {default_reply}"
+            f"(untrusted input): [{safe_summary}]"
         )
-        description = f"Action '{verb}'. Visitor details (untrusted input): [{safe_summary}]"
 
         trigger = ActionTrigger(
             type="connector",

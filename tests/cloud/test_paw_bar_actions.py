@@ -284,9 +284,14 @@ class TestExecutorGated:
         )
         for field in (action.recommendation, action.description, action.title):
             assert "\n" not in field and "\x00" not in field
-        assert "untrusted input" in action.recommendation
+        # The hostile arg lands in the owner-facing DESCRIPTION, demarcated as
+        # untrusted; the recommendation is the customer-facing reply and must
+        # carry NO visitor input at all (it is delivered verbatim on approve).
+        assert "untrusted input" in action.description
         # The 400-char run was capped, not carried whole into the human text.
-        assert "x" * 300 not in action.recommendation
+        assert "x" * 300 not in action.description
+        assert "x" not in action.recommendation or "x" * 20 not in action.recommendation
+        assert "SYSTEM" not in action.recommendation
 
 
 # --------------------------------------------------------------------------- #

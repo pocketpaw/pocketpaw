@@ -219,6 +219,30 @@ class TestCloseLoop:
         assert out["reply"]  # non-empty operator reply
         assert out["decided_by"] == "user:dr_jones"
 
+    async def test_unedited_approval_delivers_customer_reply_not_framing(
+        self, client, stores
+    ) -> None:
+        """An approve with NO edit must deliver the customer-facing default reply
+        — never the owner-facing proposal framing (2026-07-30 leak regression:
+        ``recommendation`` used to carry "A customer (…) sent a … request …"
+        and delivery sent it to the visitor verbatim)."""
+        _, instinct_store = stores
+        created = _create_widget(client)
+        body = _ingest(client, created["id"])
+        action_id = body["instinct_action_id"]
+
+        approved = await instinct_store.approve(action_id, approver="user:dr_jones")
+        await deliver_customer_decision(approved, declined=False)
+
+        reply = _poll(client, created["id"]).json()["reply"]
+        assert reply  # non-empty
+        # The internal framing vocabulary must never reach the visitor.
+        for leak in ("A customer (", "A visitor (ref", "untrusted input", "widget."):
+            assert leak not in reply
+        # The owner-facing context still exists — in the Tray description.
+        action = await instinct_store.get_action(action_id)
+        assert action is not None and "sent a" in action.description
+
     async def test_edited_reply_is_what_customer_reads(self, client, stores) -> None:
         """If the operator edits the recommendation, that wording is delivered."""
         import aiosqlite
