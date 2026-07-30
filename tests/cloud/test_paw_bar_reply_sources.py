@@ -566,3 +566,53 @@ class TestHumanizedTitles:
         assert _humanize_article_title("site-") == "Home"
         # A real compiled title passes through untouched.
         assert _humanize_article_title("Our Service Areas") == "Our Service Areas"
+
+
+class TestSameOriginFrameGets:
+    """Same-origin GETs from OUR frame carry no Origin header (browsers omit it)
+    — the gates must resolve Sec-Fetch-Site: same-origin as the frame origin
+    instead of 403ing (2026-07-30 rig find: the frame's articles fetch and
+    decision poll were dead)."""
+
+    async def test_articles_same_origin_no_origin_header_passes(
+        self, concierge_client, monkeypatch
+    ) -> None:
+        client, store = concierge_client
+        await _site(kb_article_ids=["site-home"])
+        widget = await store.create_widget(_widget())
+        _stub_kb_list(monkeypatch, [{"id": "site-home", "title": "Home", "summary": "hi"}])
+
+        res = await client.get(
+            "/paw-bar/articles",
+            params=_articles_params(widget.id),
+            headers={"Sec-Fetch-Site": "same-origin"},
+        )
+        assert res.status_code == 200
+
+    async def test_articles_originless_without_fetch_metadata_stays_403(
+        self, concierge_client, monkeypatch
+    ) -> None:
+        client, store = concierge_client
+        await _site(kb_article_ids=["site-home"])
+        widget = await store.create_widget(_widget())
+        _stub_kb_list(monkeypatch, [{"id": "site-home", "title": "Home", "summary": "hi"}])
+
+        res = await client.get("/paw-bar/articles", params=_articles_params(widget.id))
+        assert res.status_code == 403
+
+    async def test_articles_cross_site_fetch_metadata_stays_gated(
+        self, concierge_client, monkeypatch
+    ) -> None:
+        # A cross-site GET (Sec-Fetch-Site: cross-site, no Origin) must not
+        # inherit the frame's pass — it stays on the fail-closed allowlist gate.
+        client, store = concierge_client
+        await _site(kb_article_ids=["site-home"])
+        widget = await store.create_widget(_widget())
+        _stub_kb_list(monkeypatch, [{"id": "site-home", "title": "Home", "summary": "hi"}])
+
+        res = await client.get(
+            "/paw-bar/articles",
+            params=_articles_params(widget.id),
+            headers={"Sec-Fetch-Site": "cross-site"},
+        )
+        assert res.status_code == 403

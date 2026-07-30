@@ -560,6 +560,29 @@ def _configured_frame_origin(request: Request) -> str:
     return f"{request.url.scheme}://{request.url.netloc}"
 
 
+def _request_origin(request: Request) -> str | None:
+    """The effective Origin for the public GET gates — same-origin case resolved.
+
+    Browsers OMIT the ``Origin`` header on same-origin GETs, so a fetch from OUR
+    OWN frame (the glass app polling its decision, loading articles) arrives
+    origin-less and the fail-closed gates 403'd it — found live on the
+    2026-07-30 rig: the frame's decision poll and articles fetch were dead while
+    every curl with an explicit Origin passed. When the browser-set
+    ``Sec-Fetch-Site: same-origin`` header is present, the caller can only be a
+    page on our own origin — i.e. the frame — so resolve it AS the frame origin
+    and let the dual-mode gate's frame branch do its normal work. Non-browser
+    callers can forge any Origin header anyway; the origin gates are
+    browser-defense, so this widens nothing. A request with neither header stays
+    origin-less and the gates stay fail-closed.
+    """
+    origin = request.headers.get("origin")
+    if origin:
+        return origin
+    if request.headers.get("sec-fetch-site", "").strip().lower() == "same-origin":
+        return _configured_frame_origin(request)
+    return None
+
+
 def _safe_parent_origin(po: str, allowed_origins: list[str]) -> str:
     """Validate the loader-supplied parent origin against the Site's allowlist.
 
@@ -2312,8 +2335,13 @@ async def get_decision(
     if widget is None:
         raise HTTPException(404, "Widget not found")
 
-    origin = request.headers.get("origin")
-    if not _origin_allowed(widget, origin):
+    # Same-origin GETs carry no Origin header — resolve the frame case first
+    # (see _request_origin), then apply the widget allowlist for real embedders.
+    # A request FROM our frame equals the frame origin and is allowed: the
+    # embedder was already gated by the frame CSP at render time (the same
+    # dual-mode reasoning as resolve_site_key).
+    origin = _request_origin(request)
+    if origin != _configured_frame_origin(request) and not _origin_allowed(widget, origin):
         raise HTTPException(403, "Origin not allowed for this widget")
 
     decision = await store.get_latest_decision(widget_id, customer_ref)
@@ -2966,8 +2994,12 @@ async def list_public_articles(
     disallowed origin / widget∩key binding mismatch → 403. An empty KB (or a
     site whose pages never synced) is a real state, not an error → 200 with
     ``{"articles": []}``. The kb read itself is fail-soft the same way.
+
+    ``_request_origin`` (not the raw header): a same-origin GET from our own
+    frame carries no Origin header, and the raw read made the frame's articles
+    fetch 403 on the live rig.
     """
-    origin = request.headers.get("origin")
+    origin = _request_origin(request)
     widget, ctx, site = await _front_gate_for_key(
         widget_id=widget_id,
         signed_key=signed_key,
