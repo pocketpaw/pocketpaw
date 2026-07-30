@@ -467,6 +467,22 @@ def _sanitize_ancestor(raw: Any) -> str | None:
     # injection / directive split). Keep .strip() ahead of this match.
     if not _SAFE_ANCESTOR_RE.match(v):
         return None
+    # PORT (bug found 2026-07-30 by framing a real published site): a CSP
+    # host-source with NO port matches only the scheme's DEFAULT port, so a bare
+    # ``127.0.0.1`` refuses to be framed by ``http://127.0.0.1:4174`` and the bar
+    # renders as an empty grey box. ``allowed_origins`` is normalized to bare HOSTS
+    # (``_normalize_origin_hosts``), so in practice NO entry ever carries a port and
+    # every site served on a non-default port was unframeable — every local, dev and
+    # demo deploy, and any customer site not on 80/443.
+    #
+    # Emitting ``host:*`` (any port) is the fix, and it is a CONSISTENCY change
+    # rather than a loosening: the origin gate this CSP mirrors
+    # (``site_keys.origin_allowed``) compares HOSTS and ignores the port entirely,
+    # so a request from any port on an allowed host is already accepted for chat.
+    # The CSP was the stricter of the two. An entry that DOES carry an explicit port
+    # is honored as written.
+    if ":" not in v:
+        return f"{v}:*"
     return v
 
 

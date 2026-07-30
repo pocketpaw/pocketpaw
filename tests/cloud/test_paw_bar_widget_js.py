@@ -122,3 +122,39 @@ def test_vendored_loader_keeps_its_globals_to_itself():
     ]
     assert stray == []
     assert "win.PawBar" in source
+
+
+# --------------------------------------------------------------------------- #
+# frame-ancestors port matching
+#
+# Found 2026-07-30 by framing a real published site: the bar rendered as an empty
+# grey box because a CSP host-source with no port matches only the scheme's
+# DEFAULT port, so a site served on any other port could not be framed at all.
+# --------------------------------------------------------------------------- #
+
+
+def test_portless_allowlist_entry_permits_any_port():
+    """``allowed_origins`` is normalized to bare HOSTS, so without this every site
+    not on 80/443 was unframeable — every local, dev and demo deploy."""
+    from pocketpaw_ee.paw_bar.router import _frame_ancestors_csp
+
+    assert _frame_ancestors_csp(["localhost", "127.0.0.1"]) == (
+        "frame-ancestors localhost:* 127.0.0.1:*"
+    )
+
+
+def test_explicit_port_is_honored_as_written():
+    from pocketpaw_ee.paw_bar.router import _frame_ancestors_csp
+
+    assert _frame_ancestors_csp(["example.com:8443"]) == "frame-ancestors example.com:8443"
+
+
+def test_scheme_and_path_are_still_stripped_and_junk_still_dropped():
+    """The port change must not weaken the header-injection guard."""
+    from pocketpaw_ee.paw_bar.router import _frame_ancestors_csp
+
+    assert _frame_ancestors_csp(["https://shop.example.com/embed"]) == (
+        "frame-ancestors shop.example.com:*"
+    )
+    # A newline would split the header into extra directives; still refused.
+    assert _frame_ancestors_csp(["evil.example\nscript-src *"]) is None
