@@ -1,4 +1,8 @@
 # tests/cloud/test_paw_bar_actions.py — Paw Bar action registry (C1), end to end.
+# Updated 2026-07-30: TestFormCardPreamble pins the form-card instruction block —
+# rendered only for gated actions WITH args (contract fence, per-verb arg list,
+# name-based type mapping, emit-once + skip-when-details-present), absent for
+# no-actions / auto-only / gated-argless widgets.
 # Created 2026-07-16: covers the visitor commerce loop + the concierge tool
 # injection. Layers:
 #   * Spec validation — bad action/catalog/checkout declarations are rejected.
@@ -754,3 +758,89 @@ class TestCatalogPreamble:
         pre = await build_preamble("ws", "u", SurfaceMeta(route_path="/paw-bar"))
         assert "Products you can sell" not in pre
         assert "don't act" in pre
+
+
+class TestFormCardPreamble:
+    """The form-card instruction block: rendered only for gated actions with args."""
+
+    @staticmethod
+    async def _preamble(actions: list[dict]) -> str:
+        from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
+        from pocketpaw_ee.cloud.surface.handlers.concierge import build_preamble
+
+        return await build_preamble(
+            "ws", "u", SurfaceMeta(route_path="/paw-bar", pawbar_actions=actions)
+        )
+
+    async def test_gated_action_with_args_renders_form_instructions(self) -> None:
+        """A gated action with typed args teaches the "form" pawbar-card: the
+        contract fence, the verb's arg list, and the name-based type mapping."""
+        pre = await self._preamble(
+            [
+                {
+                    "verb": "book_visit",
+                    "policy": "gated",
+                    "args": {"name": "str", "phone": "str", "issue": "str"},
+                    "label": "Book a visit",
+                }
+            ]
+        )
+        assert '"kind": "form"' in pre
+        assert "FORMS for gated actions" in pre
+        # The verb's declared args are listed so field names stay in-contract.
+        assert "book_visit: name (str), phone (str), issue (str)" in pre
+        # The type mapping travels in the prompt (no server-side enforcement).
+        assert "text | tel | email | number | textarea" in pre
+        assert '"tel" if the arg name contains "phone"' in pre
+        # Emit-once + skip-when-details-present behavior is instructed.
+        assert "Emit the form ONCE" in pre
+        assert "skip the form and call the action tool directly" in pre
+
+    async def test_no_actions_has_no_form_instructions(self) -> None:
+        from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
+        from pocketpaw_ee.cloud.surface.handlers.concierge import build_preamble
+
+        pre = await build_preamble("ws", "u", SurfaceMeta(route_path="/paw-bar"))
+        assert "FORMS for gated actions" not in pre
+        assert '"kind": "form"' not in pre
+
+    async def test_auto_only_actions_have_no_form_instructions(self) -> None:
+        """Auto actions run immediately — no gate, no form."""
+        pre = await self._preamble(
+            [
+                {
+                    "verb": "add_to_cart",
+                    "policy": "auto",
+                    "args": {"product_id": "str"},
+                    "label": "Add",
+                }
+            ]
+        )
+        assert "FORMS for gated actions" not in pre
+
+    async def test_gated_action_without_args_has_no_form_instructions(self) -> None:
+        """A gated verb with no declared args has nothing to build a form for."""
+        pre = await self._preamble(
+            [{"verb": "request_callback", "policy": "gated", "args": {}, "label": "Call me"}]
+        )
+        assert "FORMS for gated actions" not in pre
+
+    async def test_mixed_actions_list_only_gated_args(self) -> None:
+        pre = await self._preamble(
+            [
+                {
+                    "verb": "add_to_cart",
+                    "policy": "auto",
+                    "args": {"product_id": "str"},
+                    "label": "Add",
+                },
+                {
+                    "verb": "book_table",
+                    "policy": "gated",
+                    "args": {"name": "str", "party_size": "int"},
+                    "label": "Book a table",
+                },
+            ]
+        )
+        assert "book_table: name (str), party_size (int)" in pre
+        assert "add_to_cart: product_id" not in pre

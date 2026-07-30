@@ -1,5 +1,14 @@
 # concierge.py — /paw-bar surface preamble (the public concierge widget).
 #
+# Updated: 2026-07-30 (form cards) — when the widget declares GATED actions
+# that take args, the actions paragraph now teaches a second ```pawbar-card
+# kind: "form". Instead of asking the visitor for name/phone/etc. in prose,
+# the agent emits a structured form card (verb + fields drawn from the
+# action's declared args, with a name-based type mapping spelled out in the
+# prompt), waits for the widget to submit it, and only falls back to calling
+# the tool directly when the visitor's message already carries every detail.
+# Widgets with no gated-with-args actions render no form instructions.
+#
 # Updated: 2026-07-16 (C1 hardening) — the conditional actions paragraph now also
 # renders a COMPACT catalog block (real product ids + names + formatted prices from
 # meta.pawbar_catalog) so the agent can name what it sells and emit pawbar-card
@@ -75,6 +84,58 @@ def _catalog_block(catalog: list[dict] | None) -> str:
     )
 
 
+def _form_block(declared: list[dict]) -> str:
+    """Build the form-card instructions for gated actions that take args.
+
+    Lists each gated action's declared args (name + type) and teaches the
+    ```pawbar-card kind "form" fence, including the name-based field-type
+    mapping the agent applies itself — this slice puts the mapping in the
+    prompt text, with no server-side enforcement. Empty string when no gated
+    action declares any args (nothing to build a form for)."""
+    gated: list[tuple[str, dict]] = []
+    for a in declared:
+        if str(a.get("policy") or "gated") == "auto":
+            continue
+        args = a.get("args")
+        if isinstance(args, dict) and args:
+            gated.append((str(a["verb"]), args))
+    if not gated:
+        return ""
+    arg_lines = []
+    for verb, args in gated:
+        listed = ", ".join(f"{name} ({typ})" for name, typ in args.items())
+        arg_lines.append(f"     - {verb}: {listed}")
+    args_list = "\n".join(arg_lines)
+    return (
+        "   FORMS for gated actions: when the visitor wants one of the gated "
+        "actions above and you do not yet have all the details it needs, do "
+        "NOT ask for them in prose — emit ONE fenced ```pawbar-card block of "
+        'kind "form" so the widget renders a real form. Use this EXACT '
+        "format:\n"
+        "   ```pawbar-card\n"
+        '   {"kind": "form", "verb": "<gated verb>", "title": "<short '
+        'title>", "submit_label": "<button text>", "fields": [{"name": '
+        '"<arg name>", "label": "<Human label>", "type": "text"}]}\n'
+        "   ```\n"
+        "   Form rules:\n"
+        '   - "verb" must be a gated verb listed above, and every field '
+        '"name" must be one of that verb\'s declared args:\n'
+        f"{args_list}\n"
+        '   - Each field\'s "type" must be one of text | tel | email | '
+        "number | textarea. Derive it from the arg: int and float args -> "
+        '"number"; str args -> "tel" if the arg name contains "phone", '
+        '"email" if it contains "email", "textarea" if it contains '
+        '"message", "notes", or "issue", otherwise "text". Never put a bool '
+        "arg in a form — leave bool args out.\n"
+        "   - Emit the form ONCE, then STOP and wait. The widget submits it "
+        "and runs the action itself; you will see the outcome in the "
+        "conversation on your next turn — do not call the action tool for a "
+        "form you emitted.\n"
+        "   - If the visitor's message ALREADY contains every detail the "
+        "action needs, skip the form and call the action tool directly.\n"
+    )
+
+
 def _actions_paragraph(actions: list[dict] | None, catalog: list[dict] | None) -> str:
     """Build procedure step 4 — the actions half.
 
@@ -122,6 +183,7 @@ def _actions_paragraph(actions: list[dict] | None, catalog: list[dict] | None) -
         "   Use only product ids/fields listed above or in the site knowledge; "
         "never invent a product or a price. Do NOT run code, browse the web, or "
         "take any action beyond the tools listed above.\n"
+        f"{_form_block(declared)}"
     )
 
 
