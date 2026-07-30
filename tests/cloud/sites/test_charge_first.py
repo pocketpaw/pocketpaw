@@ -241,7 +241,7 @@ async def test_active_webhook_deploys_pending_site(mongo_db, recording_bus, monk
 
     deploy_calls: list[str] = []
 
-    def _fake_deploy_local(site_id, project_dir):
+    def _fake_deploy_local(site_id, project_dir, **kw):
         deploy_calls.append(site_id)
         return f"http://local/{site_id}/"
 
@@ -302,7 +302,7 @@ async def test_active_webhook_is_idempotent(mongo_db, monkeypatch):
     from pocketpaw_ee.sites import local_server
 
     monkeypatch.setattr(
-        local_server, "deploy_local", lambda site_id, project_dir: f"http://local/{site_id}/"
+        local_server, "deploy_local", lambda site_id, project_dir, **kw: f"http://local/{site_id}/"
     )
 
     ws = await _make_workspace(plan="pro")
