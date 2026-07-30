@@ -762,6 +762,64 @@ def _fake_get_workspace(mapping: dict[str, str]):
     return _get_workspace
 
 
+async def _real_agent(name: str = "Brew & Co Concierge", workspace_id: str = "ws-1"):
+    """Create an agent through the REAL agents service and return it."""
+    from pocketpaw_ee.cloud.agents import service as agents_service
+    from pocketpaw_ee.cloud.agents.dto import CreateAgentRequest
+
+    ctx = agents_service.legacy_ctx("user:maya", workspace_id)
+    return await agents_service.create(
+        ctx,
+        workspace_id,
+        CreateAgentRequest(name=name, slug=f"concierge-{uuid.uuid4().hex[:8]}"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_conversations_resolve_a_real_agent(client):
+    """No mocked resolver anywhere in this test.
+
+    Every other agent-endpoint test patches ``agents_service.get_workspace``, so
+    none of them prove the endpoint works against the real one — the same shape of
+    hole that let the note-author 500 through. It matters here because the real
+    resolver parses the id as an ObjectId first: the friendly ``agent-xyz`` handles
+    the other tests use resolve to None and 404, so a stubbed resolver is the only
+    reason those pass.
+    """
+    c, store = client
+    site = await _site()
+    agent = await _real_agent()
+    widget = await store.create_widget(_widget(agent_id=agent.id))
+    await _mk_run(user_id="cust-a")
+    await store.upsert_conversation_on_visitor_turn(widget.id, "cust-a", "ws-1")
+
+    res = await c.get(f"/paw-bar/admin/agent/{agent.id}/conversations")
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert [i["customer_ref"] for i in body["items"]] == ["cust-a"]
+    assert body["items"][0]["site_id"] == str(site.id)
+    assert body["items"][0]["site_name"] == "Brew & Co"
+    assert body["widget_count"] == 1
+    assert body["counts"]["open"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_real_agent_in_another_workspace_is_404(client):
+    """The tenancy gate proven against the real resolver, not a stub that was
+    handed the answer."""
+    c, store = client
+    await _site(workspace="ws-2", pocket_id="pocket-9")
+    agent = await _real_agent(name="Someone Else Concierge", workspace_id="ws-2")
+    widget = await store.create_widget(
+        _widget(pocket_id="pocket-9", workspace_id="ws-2", agent_id=agent.id)
+    )
+    await _mk_run(workspace="ws-2", scope_id="pocket-9", user_id="cust-ws2")
+    await store.upsert_conversation_on_visitor_turn(widget.id, "cust-ws2", "ws-2")
+
+    assert (await c.get(f"/paw-bar/admin/agent/{agent.id}/conversations")).status_code == 404
+
+
 @pytest.mark.asyncio
 async def test_agent_conversations_state_filter(client, monkeypatch):
     c, store = client
