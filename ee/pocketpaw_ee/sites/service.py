@@ -2021,6 +2021,10 @@ async def _deploy_site_doc(
         signed_key=signed_key,
         project_dir=build.project_dir,
         engine=engine,
+        # A FIRST publish has no Site doc yet — it is inserted further down — so
+        # pass the two fields provisioning needs to stand one up in memory.
+        user_id=user_id,
+        site_name=site_name,
     )
 
     # DS-2: a DYNAMIC site (pattern == "dynamic", or a spec carrying live
@@ -2195,6 +2199,8 @@ async def _embed_concierge_bar(
     signed_key: str,
     project_dir: str,
     engine: str,
+    user_id: str = "",
+    site_name: str = "",
 ) -> None:
     """Write the concierge embed snippet into the built pages, before they deploy.
 
@@ -2229,10 +2235,31 @@ async def _embed_concierge_bar(
         # snippet check below would silently skip the bar. Mint the widget +
         # agent here so the first publish ships with its concierge. Idempotent
         # and failure-soft inside; requires the site doc (draft flows have one).
-        if concierge_enabled and doc is not None:
+        if concierge_enabled:
             from pocketpaw_ee.paw_bar.agent_provisioning import ensure_site_widget
 
-            await ensure_site_widget(doc, workspace_id)
+            # A FIRST publish reaches here BEFORE the Site doc is inserted, so
+            # ``doc`` is None and the old ``doc is not None`` guard skipped
+            # provisioning entirely: no widget, no dedicated agent, the
+            # four-gate snippet check returned "" and the page shipped bar-less
+            # — with no log line, because the empty snippet returns early. Only
+            # a SECOND publish (doc now present) grew a bar, which is exactly
+            # why this looked fixed. Stand up a transient doc for that first
+            # pass: ``ensure_site_widget``/``ensure_site_agent`` only read
+            # ``.workspace``/``.owner``/``.id``/``.name``/``.pocket_id`` off the
+            # object, never re-reading the DB, and the real insert below carries
+            # the same values.
+            provisioning_doc = doc
+            if provisioning_doc is None:
+                provisioning_doc = _SiteDoc(
+                    id=ObjectId(site_id),
+                    workspace=workspace_id,
+                    pocket_id=pocket_id,
+                    owner=user_id,
+                    name=site_name,
+                    signed_key=signed_key,
+                )
+            await ensure_site_widget(provisioning_doc, workspace_id)
 
         snippet = await embed.concierge_snippet(
             workspace_id=workspace_id,

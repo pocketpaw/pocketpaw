@@ -472,3 +472,74 @@ class TestIdentityAndFrameStarters:
         res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY})
         assert res.status_code == 200
         assert "starters" in res.text
+
+
+class TestFirstPublishProvisioning:
+    """The FIRST publish must provision too (audit finding, 2026-07-30).
+
+    ``_embed_concierge_bar`` guarded provisioning on ``doc is not None``, but on
+    a first publish the Site doc is inserted AFTER the embed step — so ``doc``
+    was None, provisioning was skipped, the four-gate snippet check returned ""
+    and the page shipped bar-less with no log line at all. A re-publish (doc now
+    present) grew a bar, which is precisely why this read as working. These
+    tests pin the transient-doc path used when no Site doc exists yet.
+    """
+
+    @pytest.mark.asyncio
+    async def test_transient_doc_provisions_widget_and_agent(self, client) -> None:
+        from bson import ObjectId
+        from pocketpaw_ee.cloud.models.site import Site
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        _c, store = client
+        # No Site doc in the DB at all — the first-publish state.
+        site_id = ObjectId()
+        transient = Site(
+            id=site_id,
+            workspace=_WS,
+            pocket_id=_POCKET,
+            owner=_OWNER,
+            name="Northwind Plumbing",
+            signed_key=_VALID_KEY,
+        )
+
+        widget = await ap.ensure_site_widget(transient, _WS)
+
+        assert widget is not None, "a first publish must still mint the widget"
+        assert widget.agent_id, "and bind it to a dedicated agent"
+        assert widget.pocket_id == _POCKET
+        # The agent is named off the transient doc, not a DB re-read.
+        from pocketpaw_ee.cloud.agents import service as agents_service
+
+        agent = await agents_service.get(widget.agent_id)
+        assert agent.name == "Northwind Plumbing Concierge"
+        assert agent.slug == f"concierge-{site_id}"
+
+    @pytest.mark.asyncio
+    async def test_second_publish_adopts_the_first_publish_widget(self, client) -> None:
+        """Idempotent across the first→second publish boundary: the real doc
+        must adopt what the transient pass created, never mint a sibling."""
+        from bson import ObjectId
+        from pocketpaw_ee.cloud.models.site import Site
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        _c, store = client
+        site_id = ObjectId()
+        transient = Site(
+            id=site_id,
+            workspace=_WS,
+            pocket_id=_POCKET,
+            owner=_OWNER,
+            name="Northwind Plumbing",
+            signed_key=_VALID_KEY,
+        )
+        first = await ap.ensure_site_widget(transient, _WS)
+
+        # Now the doc really exists (the publish inserted it) and we publish again.
+        await transient.insert()
+        second = await ap.ensure_site_widget(transient, _WS)
+
+        assert second is not None and first is not None
+        assert second.id == first.id
+        widgets = await store.list_widgets(pocket_id=_POCKET, workspace_id=_WS, limit=10)
+        assert len(widgets) == 1, "a second publish must not mint a sibling widget"
