@@ -1939,7 +1939,11 @@ async def patch_site_conversation(
     """
     if not _CUSTOMER_REF_RE.match(customer_ref or ""):
         raise HTTPException(400, "invalid_customer_ref")
-    fields = _validated_conversation_fields(req, getattr(user, "id", "") or "")
+    # str(): the authenticated caller's id arrives as a PydanticObjectId, and a
+    # note carrying it raw fails ConversationNote's string_type validation with a
+    # 500. Unit tests hand-build notes with plain strings, so only a live PATCH
+    # showed it (rig, 2026-07-30).
+    fields = _validated_conversation_fields(req, str(getattr(user, "id", "") or ""))
     site, widget = await _resolve_site_and_widget(site_id, workspace_id)
     if widget is None:
         raise HTTPException(404, "conversation_not_found")

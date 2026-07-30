@@ -124,11 +124,20 @@ def _as_note(value: Any) -> ConversationNote:
     Accepts a model, a dict, or a bare string (treated as the text). ``at`` is
     stamped now when the caller didn't supply one, so a note is always ordered in
     the thread even if the API omitted the timestamp.
+
+    ``author`` is coerced with ``str()`` because the router passes the AUTHENTICATED
+    caller's id, and that arrives as a ``PydanticObjectId`` — not a ``str``. Unit
+    tests that hand-build a note pass a plain string and never see it, so the real
+    PATCH 500'd on a pydantic string_type error the first time an owner filed a
+    note against a live session (found on the rig, 2026-07-30).
     """
     if isinstance(value, ConversationNote):
         note = value
     elif isinstance(value, dict):
-        note = ConversationNote.model_validate(value)
+        raw = dict(value)
+        if raw.get("author") is not None:
+            raw["author"] = str(raw["author"])
+        note = ConversationNote.model_validate(raw)
     else:
         note = ConversationNote(text=str(value))
     if not note.at:

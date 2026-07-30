@@ -927,3 +927,40 @@ async def test_upsert_failure_never_breaks_the_visitor_chat(client, monkeypatch)
     assert res.status_code == 200, res.text
     assert "event: chunk" in res.text
     assert "event: stream_end" in res.text
+
+
+class TestNoteAuthorCoercion:
+    """A note filed by a REAL authenticated owner (rig, 2026-07-30).
+
+    ``current_user`` hands back a ``PydanticObjectId``, not a str. Notes built
+    from it failed ConversationNote's string_type validation and the PATCH 500'd
+    — invisible to every unit test that hand-builds a note with a plain string.
+    """
+
+    def test_store_coerces_an_objectid_author(self) -> None:
+        from beanie import PydanticObjectId
+
+        from pocketpaw.paw_bar.store import _as_note
+
+        oid = PydanticObjectId()
+        note = _as_note({"author": oid, "text": "rang them back"})
+
+        assert note.author == str(oid)
+        assert isinstance(note.author, str)
+        assert note.text == "rang them back"
+        assert note.at, "a note must always be ordered in the thread"
+
+    def test_router_stringifies_the_caller_id(self) -> None:
+        from beanie import PydanticObjectId
+        from pocketpaw_ee.paw_bar.router import (
+            ConversationPatchRequest,
+            _validated_conversation_fields,
+        )
+
+        author = str(PydanticObjectId())
+        fields = _validated_conversation_fields(
+            ConversationPatchRequest(note="called them"), author
+        )
+
+        assert fields["note"]["author"] == author
+        assert isinstance(fields["note"]["author"], str)
