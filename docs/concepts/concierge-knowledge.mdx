@@ -151,6 +151,62 @@ decision about whether the site keeps a record of its visitors, not two.
 If the record cannot be read for any reason, the concierge answers without memory
 rather than failing the visitor's chat.
 
+## The conversation queue
+
+Those stored turns make a log. A log tells the owner what happened; it does not tell
+them what still needs them. Each conversation therefore carries a small state row —
+identified, like the runs themselves, by the site's widget and the visitor's handle.
+
+The row holds lifecycle and operator notes only: a state, whether the bot is paused,
+a snooze deadline, tags, private notes, a contact address, and an unread counter. No
+messages. The transcript stays derived from the run documents, so there is exactly
+one record of what was said and a separate one of how the owner is handling it.
+
+Four states, and one rule that matters more than the rest:
+
+| State | Meaning |
+|---|---|
+| `open` | live and in the default view |
+| `needs_human` | escalated — the visitor asked for a person, or the bot could not answer |
+| `snoozed` | hidden until a deadline the owner set |
+| `closed` | done |
+
+**A visitor's message re-opens their conversation.** Closed or snoozed, it comes
+back to `open` the moment they write again — a returning customer must land in the
+queue, not in an archive. The one exception is `needs_human`: that is already the
+top of the queue, so "re-opening" it would be a demotion.
+
+The row is created on a visitor's first message, and on the owner's first action on
+an older conversation. Nothing was backfilled when this shipped, and nothing needs
+to be: a conversation with no row still lists, reading as a plain open conversation.
+
+Snooze expiry is decided when the queue is read, not by a background sweep. A snooze
+that has passed shows up as open wherever the owner looks — the list, the filters,
+the counts — with nothing scheduled that could fail quietly overnight and leave a
+customer waiting. A snooze with no deadline is indefinite until the owner says
+otherwise.
+
+### Reading and filing the queue
+
+- `GET /paw-bar/admin/site/{site_id}/conversations` lists a site's conversations
+  newest first, each carrying its state, unread count, tags, and whether a decision
+  of theirs is waiting on the owner. `?state=` filters the page; the per-state counts
+  that come back are the totals for the whole site, so the filter chips stay stable
+  while one of them is active.
+- `PATCH /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` files one:
+  state, snooze, tags, a private note, or pausing the bot. A note appends rather than
+  replaces — an operator's running record of a customer is not something an edit
+  should quietly drop. It gates on `paw_bar.manage`, the write action, not the read.
+- `GET /paw-bar/admin/agent/{agent_id}/conversations` asks the same question of the
+  **agent**. A site concierge is an ordinary agent, and each site is one, so "this
+  site's conversations" and "this agent's visitor conversations" are the same list.
+  For an agent that fronts more than one site, they union, and each conversation
+  names the site it came from.
+
+Visitors are shown by the email they left, when they left one, and otherwise by a
+short stub of their anonymous handle. The email is still stored only where it was
+captured; the owner's list reads it there rather than keeping a second copy.
+
 ## When the visitor leaves the page
 
 Some requests need a human decision, and humans take longer than a browser tab

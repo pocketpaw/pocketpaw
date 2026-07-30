@@ -1,4 +1,28 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-30 (owner inbox, slice 1) — the concierge LOG becomes a QUEUE.
+#   A lifecycle row (``paw_bar_conversations``) is now upserted on every visitor
+#   turn from ``concierge_chat`` (failure-soft — inbox bookkeeping never costs a
+#   visitor their answer) and joined onto the owner reads:
+#     ~ GET  .../site/{id}/conversations — ADDITIVE. Every existing field keeps
+#       its name and meaning; each item GAINS state / bot_paused /
+#       unread_for_owner / tags / snooze_until / contact_email / display_name /
+#       has_pending_action, all with safe defaults so a LEGACY conversation with
+#       no state row still lists (no backfill, ever). The response gains
+#       ``counts`` (per-state totals, UNFILTERED so the filter chips stay stable)
+#       and an optional ``?state=`` filter (unknown value → 422).
+#     + PATCH .../site/{id}/conversations/{customer_ref} — {state?, snooze_until?,
+#       tags?, note?, bot_paused?} → {ok, conversation}. ``note`` APPENDS a
+#       private operator note attributed to the caller; ``tags`` replaces. Gated
+#       on ``paw_bar.manage`` (this router's existing write action — there is no
+#       ``paw_bar.write``). A conversation with no row yet gets one minted on this
+#       first owner action; a ref with no concierge runs on the site 404s.
+#     + GET  .../agent/{agent_id}/conversations — the agent-scoped union (D1): the
+#       concierge IS a normal agent, so its widgets' sites are unioned into one
+#       list, each item carrying site_id + site_name. ``widget_count`` / ``sites``
+#       are the positive binding signal (an ordinary agent answers 200 with 0).
+#   Snooze expiry is computed on READ in the store, so a snooze always ends on
+#   time with no sweeper. ``has_pending_action`` reuses the decision rows the
+#   Decisions list already reads — never a second query into Instinct.
 # Updated: 2026-07-30 (reply sources + articles) — visible grounding for the
 #   concierge. (1) ``concierge_chat`` now emits at most ONE ``event: sources``
 #   SSE frame ({"sources": [{title, url}]}, max 3, deduped by url) after the
@@ -294,6 +318,7 @@ import os
 import re
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -304,6 +329,8 @@ from pydantic import BaseModel, Field
 from pocketpaw.api.deps import require_scope
 from pocketpaw.paw_bar.models import (
     MAX_PAYLOAD_BYTES,
+    ConversationState,
+    DecisionState,
     PawBarEvent,
     PawBarEventMapping,
     PawBarSpec,
@@ -1472,6 +1499,23 @@ _CONVERSATION_SCAN_CAP = 200
 # never ships the whole history in one response.
 _TRANSCRIPT_CAP = 200
 
+# Owner-supplied conversation metadata bounds (slice 1). The owner is trusted, but
+# these fields are stored and echoed on every list read, so they are capped like
+# every other persisted string on this surface — a runaway paste can't turn one
+# row into the payload of the whole inbox.
+_MAX_CONVERSATION_TAGS = 20
+_MAX_TAG_CHARS = 40
+_MAX_NOTE_CHARS = 2000
+
+# How many of a visitor's ref characters survive into the fallback display name.
+# Enough to tell two visitors apart at a glance, short enough to read as a label.
+_DISPLAY_REF_CHARS = 6
+
+# How many widgets one agent's inbox unions over. An agent normally fronts ONE
+# site; the cap keeps a pathological binding from fanning out into an unbounded
+# number of per-site scans.
+_AGENT_WIDGET_CAP = 20
+
 # Max characters of a visitor's own message persisted on the run doc for the
 # transcript. The agent still receives the FULL message — this caps only what we
 # write down, so a pasted wall of text (or a deliberate storage-stuffing attempt)
@@ -1551,24 +1595,138 @@ class SiteOverviewResponse(BaseModel):
 
 
 class ConversationItem(BaseModel):
+    """One row in the owner's conversation list (D2 + the slice-1 queue fields).
+
+    The first three fields are the frozen D2 contract, derived from the run docs.
+    Everything after them comes from the ``paw_bar_conversations`` state row and
+    carries a SAFE DEFAULT: a conversation that has no row yet — every one that
+    predates the table — still serializes, reading as a plain open conversation
+    with nothing pending. That is what makes the queue backfill-free.
+    """
+
     customer_ref: str
     last_message_at: str
     preview: str
+    state: str = "open"
+    bot_paused: bool = False
+    unread_for_owner: int = 0
+    tags: list[str] = Field(default_factory=list)
+    snooze_until: str = ""
+    contact_email: str = ""
+    # What the owner should SEE instead of a 32-char hex handle: the visitor's
+    # email when they left one, else a short readable stub of the ref.
+    display_name: str = ""
+    # True when this visitor has an undecided gated action waiting on the owner —
+    # the "needs you" chip. Read from the SAME decision rows the Decisions list
+    # uses (never a second query against Instinct, whose rows are keyed by the
+    # widget owner rather than the tenant).
+    has_pending_action: bool = False
 
 
 class ConversationsResponse(BaseModel):
-    """GET /paw-bar/admin/site/{id}/conversations payload (D2).
+    """GET /paw-bar/admin/site/{id}/conversations payload (D2 + slice 1).
 
     ``unsupported`` stays False on this deployment: concierge runs ARE listable
     (the ChatRunDoc compound index backs the per-site query). The field is part of
     the frozen contract so the frontend degrades gracefully if a future backend
     can't serve the list. ``cursor`` is the ISO ``createdAt`` to page older
     conversations from; ``None`` when the scan reached the end.
+
+    ``counts`` is the per-state total for the whole widget — UNFILTERED, so the
+    filter chips keep showing all four numbers while one of them is active. It is
+    ``{}`` when the site has no paw-bar widget (there is nothing to count), and
+    counts only conversations that actually have a state row: a legacy row still
+    LISTS with defaults, but it is never invented into a total.
     """
 
     items: list[ConversationItem] = Field(default_factory=list)
     cursor: str | None = None
     unsupported: bool = False
+    counts: dict[str, int] = Field(default_factory=dict)
+
+
+class AgentConversationItem(ConversationItem):
+    """A conversation in the AGENT-scoped inbox — the site lens made explicit.
+
+    One agent can front more than one site (manual widget binds are never
+    overwritten by the provisioner), so the union carries which site each
+    conversation came from. Identical to :class:`ConversationItem` otherwise.
+    """
+
+    site_id: str = ""
+    site_name: str = ""
+
+
+class AgentSiteRef(BaseModel):
+    """One site included in an agent-scoped union."""
+
+    site_id: str
+    site_name: str = ""
+
+
+class AgentConversationsResponse(BaseModel):
+    """GET /paw-bar/admin/agent/{agent_id}/conversations payload (D1 seed).
+
+    ``sites`` + ``widget_count`` are the POSITIVE binding signal: an agent that
+    fronts no paw-bar widget answers 200 with ``widget_count=0`` and empty
+    everything, so a client can tell "a concierge with a quiet inbox" from "an
+    ordinary agent that should not show a Conversations tab at all" without a
+    second call. ``counts`` sums the per-widget state counts across the union and
+    is UNFILTERED, like the site read's.
+    """
+
+    items: list[AgentConversationItem] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+    sites: list[AgentSiteRef] = Field(default_factory=list)
+    widget_count: int = 0
+
+
+class ConversationRow(BaseModel):
+    """The full conversation state row, as the PATCH echoes it back.
+
+    Everything the owner surface needs to re-render one row without a refetch.
+    ``state`` is the EFFECTIVE state (an expired snooze reads ``open``) while
+    ``snooze_until`` keeps the stored timestamp, so the UI can say "was snoozed
+    until 9am" on a row that has already come back.
+    """
+
+    id: str
+    widget_id: str
+    customer_ref: str
+    state: str
+    bot_paused: bool
+    snooze_until: str
+    assignee: str
+    tags: list[str] = Field(default_factory=list)
+    notes: list[dict[str, str]] = Field(default_factory=list)
+    contact_email: str
+    display_name: str
+    last_visitor_at: str
+    last_owner_at: str
+    unread_for_owner: int
+    created_at: str
+    updated_at: str
+
+
+class ConversationPatchRequest(BaseModel):
+    """Body of PATCH .../conversations/{customer_ref} — every field optional.
+
+    Only the fields actually SENT are applied (``model_fields_set``), so a client
+    can flip one thing without echoing the row back. ``note`` APPENDS a private
+    operator note; it never replaces the existing ones. ``tags`` DOES replace (a
+    tag set is edited as a whole in the UI).
+    """
+
+    state: str | None = None
+    snooze_until: str | None = None
+    tags: list[str] | None = None
+    note: str | None = None
+    bot_paused: bool | None = None
+
+
+class ConversationPatchResponse(BaseModel):
+    ok: bool = True
+    conversation: ConversationRow
 
 
 class TranscriptMessage(BaseModel):
@@ -1723,9 +1881,10 @@ async def get_site_conversations(
     site_id: str,
     limit: int = Query(20, ge=1, le=100),
     cursor: str | None = Query(None),
+    state: str | None = Query(None, description="open | needs_human | snoozed | closed"),
     workspace_id: str = Depends(current_workspace_id),
 ) -> ConversationsResponse:
-    """Recent concierge conversations for a site, newest first (D2).
+    """Recent concierge conversations for a site, newest first (D2 + slice 1).
 
     Concierge runs persist as ``ChatRunDoc`` (context_type "concierge",
     scope_id = the site's pocket). The compound (workspace, context_type,
@@ -1734,9 +1893,167 @@ async def get_site_conversations(
     one conversation each (most-recent run wins for the preview + timestamp). The
     scan window is bounded (never a full-collection read). Cross-site isolation:
     scope_id is the site's OWN pocket, so a sibling site's runs never match.
+
+    Slice 1 joins each conversation's state row onto its item (queue state, unread
+    count, tags, whether a decision is waiting) and returns the widget's unfiltered
+    per-state ``counts``. ``?state=`` filters the page on the joined state; an
+    unknown value 422s rather than silently returning everything.
     """
-    site = await _load_site_scoped(site_id, workspace_id)
-    return await _list_conversations(site.pocket_id, workspace_id, limit=limit, cursor=cursor)
+    if state is not None and state not in {s.value for s in ConversationState}:
+        raise HTTPException(422, "invalid_state")
+    site, widget = await _resolve_site_and_widget(site_id, workspace_id)
+    return await _list_conversations(
+        site.pocket_id, workspace_id, limit=limit, cursor=cursor, widget=widget, state=state
+    )
+
+
+@router.patch(
+    "/paw-bar/admin/site/{site_id}/conversations/{customer_ref}",
+    response_model=ConversationPatchResponse,
+)
+async def patch_site_conversation(
+    site_id: str,
+    customer_ref: str,
+    req: ConversationPatchRequest,
+    # The gate doubles as the author lookup: ``require_action`` RETURNS the caller
+    # once it clears the role check, so a note is attributed without a second dep.
+    user: Any = Depends(_require_paw_bar_manage),
+    workspace_id: str = Depends(current_workspace_id),
+) -> ConversationPatchResponse:
+    """File a conversation: change its state, snooze it, tag it, or note it.
+
+    The owner WRITE half of the inbox. Gated on ``paw_bar.manage`` — the paw-bar
+    write action (there is no ``paw_bar.write``; ``manage`` is the mutation gate
+    this router already uses, and both resolve to ADMIN) — and workspace-scoped at
+    the same two seams as the reads: the Site loads scoped (cross-tenant → 404),
+    then its widget, so the row being written always belongs to this tenant.
+
+    LAZY ROW CREATION: a conversation that predates the state table has no row.
+    Rather than 404 on the owner's first snooze, the row is minted with defaults
+    (``ensure_conversation`` — it does NOT touch the unread counter or the visitor
+    timestamps, because an owner filing something is not visitor activity) and the
+    patch applies to it. A ``customer_ref`` with no concierge runs on this site
+    404s: that is not a conversation, it's a guess.
+
+    Only the fields SENT are applied. ``note`` appends; ``tags`` replaces.
+    """
+    if not _CUSTOMER_REF_RE.match(customer_ref or ""):
+        raise HTTPException(400, "invalid_customer_ref")
+    fields = _validated_conversation_fields(req, getattr(user, "id", "") or "")
+    site, widget = await _resolve_site_and_widget(site_id, workspace_id)
+    if widget is None:
+        raise HTTPException(404, "conversation_not_found")
+
+    store = _store()
+    conversation = await store.get_conversation(widget.id, customer_ref, workspace_id=workspace_id)
+    if conversation is None:
+        # No row yet — only mint one if this ref actually HAS a conversation here.
+        runs = await _concierge_runs_for_visitor(
+            site.pocket_id, customer_ref, workspace_id, limit=1
+        )
+        if not runs:
+            raise HTTPException(404, "conversation_not_found")
+        conversation = await store.ensure_conversation(widget.id, customer_ref, workspace_id)
+
+    if fields:
+        updated = await store.update_conversation(
+            widget.id, customer_ref, workspace_id=workspace_id, **fields
+        )
+        conversation = updated or conversation
+    return ConversationPatchResponse(ok=True, conversation=_conversation_row(conversation))
+
+
+@router.get(
+    "/paw-bar/admin/agent/{agent_id}/conversations",
+    response_model=AgentConversationsResponse,
+    dependencies=[Depends(_require_paw_bar_read)],
+)
+async def get_agent_conversations(
+    agent_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    state: str | None = Query(None, description="open | needs_human | snoozed | closed"),
+    workspace_id: str = Depends(current_workspace_id),
+) -> AgentConversationsResponse:
+    """Every visitor conversation this AGENT is answering, across its sites (D1).
+
+    A site concierge is a normal Agent, and "this site's conversations" and "this
+    agent's visitor conversations" are the same list — the site is 1:1 with its
+    concierge. This endpoint is the agent-centric side of that identity, and the
+    seed of the cross-site inbox: it resolves agent → its bound widget(s) → their
+    sites and unions the per-site lists, newest first, each item carrying the site
+    it came from.
+
+    Tenancy, three seams deep: the AGENT must live in the caller's workspace (a
+    cross-tenant id 404s, never leaking that it exists), the widgets are read
+    workspace-scoped, and each widget's Site must resolve in this workspace or the
+    widget is skipped — so a legacy widget row with a blank workspace can't drag a
+    foreign site's conversations into the union.
+
+    An agent with no bound widget answers 200 with ``widget_count=0`` and empty
+    everything: "not a concierge" is a normal answer, not an error, and the
+    positive marker lets a client hide the tab rather than guess from emptiness.
+    """
+    if state is not None and state not in {s.value for s in ConversationState}:
+        raise HTTPException(422, "invalid_state")
+    from pocketpaw_ee.cloud.agents import service as agents_service
+    from pocketpaw_ee.sites.service import _canonical_site_doc
+
+    try:
+        agent_workspace = await agents_service.get_workspace(agent_id)
+    except Exception:  # noqa: BLE001 — an unresolvable agent is a 404, not a 500
+        agent_workspace = None
+    if agent_workspace != workspace_id:
+        raise HTTPException(404, "agent_not_found")
+
+    widgets = await _store().list_widgets(
+        agent_id=agent_id, workspace_id=workspace_id, limit=_AGENT_WIDGET_CAP
+    )
+
+    items: list[AgentConversationItem] = []
+    sites: list[AgentSiteRef] = []
+    counts: dict[str, int] = {}
+    for widget in widgets:
+        if not widget.pocket_id:
+            continue
+        # ``_canonical_site_doc`` rather than a bare find_one: a pocket published
+        # before stable site identity can still have duplicate Site docs, and the
+        # arbitrary one is how a dashboard ends up deep-linking a stale site id.
+        # Reused rather than re-derived so there is one answer to "which Site doc
+        # is this pocket's site".
+        site = await _canonical_site_doc(workspace_id, widget.pocket_id)
+        if site is None:
+            # The widget's pocket has no published site in this workspace — there
+            # is no conversation surface to read, and (belt-and-suspenders) this is
+            # where a legacy blank-workspace widget stops.
+            continue
+        sites.append(AgentSiteRef(site_id=str(site.id), site_name=site.name or ""))
+        page = await _list_conversations(
+            widget.pocket_id, workspace_id, limit=limit, cursor=None, widget=widget, state=state
+        )
+        for item in page.items:
+            items.append(
+                AgentConversationItem(
+                    **item.model_dump(), site_id=str(site.id), site_name=site.name or ""
+                )
+            )
+        for key, value in page.counts.items():
+            counts[key] = counts.get(key, 0) + value
+
+    # Newest first across the whole union, then cut to the page size. Sorting on
+    # the ISO timestamp is a string sort on purpose — the values are all produced
+    # by ``datetime.isoformat`` and an empty one sorts last, where a conversation
+    # with no timestamp belongs.
+    items.sort(key=lambda i: i.last_message_at or "", reverse=True)
+    return AgentConversationsResponse(
+        items=items[:limit],
+        counts=counts,
+        sites=sites,
+        # The BINDING signal: how many paw-bar widgets this agent answers for,
+        # counted before the site resolution. ``sites`` can be shorter (a widget
+        # whose site was never published has nothing to list) — but the agent is a
+        # concierge either way, and that is the question a client is asking.
+        widget_count=len(widgets),
+    )
 
 
 @router.get(
@@ -1924,8 +2241,150 @@ async def get_site_preview_frame(
 # --- D2 aggregation data-source helpers -------------------------------------
 
 
+def _validated_conversation_fields(req: ConversationPatchRequest, author: str) -> dict[str, Any]:
+    """Turn a validated PATCH body into the store's keyword fields.
+
+    Only the keys the client actually SENT survive (``model_fields_set``), so a
+    PATCH carrying one field can't blank the others. Validation is strict and
+    up-front — a bad value is a 422 before anything is written, never a row in a
+    state no filter can find:
+
+      * ``state`` must be one of the four; anything else 422s.
+      * ``snooze_until`` must be an ISO timestamp (the store compares it as a
+        string in SQL, so a free-form value would silently never expire). Empty
+        string is allowed — it clears the snooze.
+      * ``tags`` are trimmed, de-duplicated, and capped in count and length.
+      * ``note`` is capped and attributed to the CALLER, never to a client-
+        supplied author.
+    """
+    fields: dict[str, Any] = {}
+    sent = req.model_fields_set
+    if "state" in sent and req.state is not None:
+        if req.state not in {s.value for s in ConversationState}:
+            raise HTTPException(422, "invalid_state")
+        fields["state"] = req.state
+    if "snooze_until" in sent and req.snooze_until is not None:
+        stamp = req.snooze_until.strip()
+        if stamp:
+            try:
+                datetime.fromisoformat(stamp)
+            except ValueError as exc:
+                raise HTTPException(422, "invalid_snooze_until") from exc
+        fields["snooze_until"] = stamp
+    if "tags" in sent and req.tags is not None:
+        cleaned: list[str] = []
+        for tag in req.tags:
+            value = str(tag).strip()[:_MAX_TAG_CHARS]
+            if value and value not in cleaned:
+                cleaned.append(value)
+        if len(cleaned) > _MAX_CONVERSATION_TAGS:
+            raise HTTPException(422, "too_many_tags")
+        fields["tags"] = cleaned
+    if "note" in sent and req.note is not None:
+        text = req.note.strip()[:_MAX_NOTE_CHARS]
+        if text:
+            fields["note"] = {
+                "author": author,
+                "text": text,
+                "at": datetime.now().isoformat(),
+            }
+    if "bot_paused" in sent and req.bot_paused is not None:
+        fields["bot_paused"] = bool(req.bot_paused)
+    return fields
+
+
+def _conversation_row(conversation: Any) -> ConversationRow:
+    """Project a stored :class:`Conversation` into the wire shape."""
+    return ConversationRow(
+        id=conversation.id,
+        widget_id=conversation.widget_id,
+        customer_ref=conversation.customer_ref,
+        state=conversation.state.value,
+        bot_paused=conversation.bot_paused,
+        snooze_until=conversation.snooze_until,
+        assignee=conversation.assignee,
+        tags=list(conversation.tags),
+        notes=[note.model_dump() for note in conversation.notes],
+        contact_email=conversation.contact_email,
+        display_name=_display_name(conversation.contact_email, conversation.customer_ref),
+        last_visitor_at=conversation.last_visitor_at,
+        last_owner_at=conversation.last_owner_at,
+        unread_for_owner=conversation.unread_for_owner,
+        created_at=conversation.created_at.isoformat(),
+        updated_at=conversation.updated_at.isoformat(),
+    )
+
+
+def _display_name(contact_email: str, customer_ref: str) -> str:
+    """What to call a visitor in the owner's list.
+
+    Their email when they left one during a decision capture — that is the whole
+    point of collecting it — otherwise a short stub of the anonymous handle
+    (``visitor-ab12cd``). Never the raw 32-char ref: an inbox of hex strings is
+    unreadable, and the stub is enough to tell two live conversations apart.
+    """
+    if contact_email:
+        return contact_email
+    return f"visitor-{customer_ref[:_DISPLAY_REF_CHARS]}" if customer_ref else "visitor"
+
+
+async def _conversation_side_data(
+    widget: PawBarWidget | None, workspace_id: str, refs: list[str]
+) -> tuple[dict[str, Any], set[str], dict[str, str]]:
+    """Load the per-visitor extras a conversation list row needs.
+
+    Returns ``(state rows by ref, refs with a pending action, contact email by
+    ref)``. Two bounded store reads for the WHOLE page, never one per row:
+
+      * the ``paw_bar_conversations`` rows for exactly the refs on this page, and
+      * this widget's decision rows, which answer both "is something waiting on
+        the owner" and "did this visitor ever leave an email".
+
+    The email is READ from the decision row rather than copied onto the
+    conversation row — it stays in the one place the PII invariant names, and this
+    owner-authed list is exactly who it was left for. Best-effort throughout: if
+    the store hiccups the list still renders, just without the queue metadata.
+    """
+    states: dict[str, Any] = {}
+    pending: set[str] = set()
+    emails: dict[str, str] = {}
+    if widget is None or not refs:
+        return states, pending, emails
+    store = _store()
+    try:
+        rows = await store.list_conversations(
+            widget.id, workspace_id=workspace_id, limit=len(refs), customer_refs=refs
+        )
+        states = {row.customer_ref: row for row in rows}
+    except Exception:  # noqa: BLE001 — queue metadata is additive, never fatal
+        logger.warning("conversation state read failed for widget %s", widget.id, exc_info=True)
+    try:
+        decisions = await store.list_decisions_for_widget(widget.id, limit=_CONVERSATION_SCAN_CAP)
+    except Exception:  # noqa: BLE001 — same posture as the state read
+        logger.warning("decision read failed for widget %s", widget.id, exc_info=True)
+        decisions = []
+    wanted = set(refs)
+    for decision in decisions:
+        ref = decision.customer_ref
+        if ref not in wanted:
+            continue
+        if decision.state == DecisionState.PENDING:
+            pending.add(ref)
+        # list_decisions_for_widget is newest-first, so the FIRST email we see for
+        # a visitor is their most recent one.
+        if decision.contact_email and ref not in emails:
+            emails[ref] = decision.contact_email
+    return states, pending, emails
+
+
 async def _list_conversations(
-    pocket_id: str, workspace_id: str, *, limit: int, cursor: str | None
+    pocket_id: str,
+    workspace_id: str,
+    *,
+    limit: int,
+    cursor: str | None,
+    widget: PawBarWidget | None = None,
+    state: str | None = None,
 ) -> ConversationsResponse:
     """Group concierge ``ChatRunDoc`` runs into per-customer conversations.
 
@@ -1935,6 +2394,16 @@ async def _list_conversations(
     cursor (the oldest scanned run's timestamp) when the window filled — the
     signal that older conversations remain. Best-effort: a store error degrades to
     an empty, well-shaped payload rather than failing the dashboard.
+
+    The RUNS stay the source of the list (a conversation exists because someone
+    talked to the concierge, not because a row was written), and the state row is
+    joined onto each one where it exists. A conversation with no row keeps every
+    default — which is why nothing had to be backfilled when the table shipped.
+
+    ``state`` filters on that joined state, AFTER the dedupe, so an unjoined
+    legacy conversation is found under ``open`` where the owner expects it.
+    Filtering is a page-level operation: a filtered page can come back shorter
+    than ``limit`` while older matches remain behind the cursor.
     """
     from datetime import datetime
 
@@ -1961,7 +2430,10 @@ async def _list_conversations(
         logger.warning("conversations read failed for pocket %s", pocket_id, exc_info=True)
         return ConversationsResponse(items=[], cursor=None, unsupported=False)
 
-    items: list[ConversationItem] = []
+    # Dedupe the scanned window first (most-recent run per customer wins), THEN
+    # join and filter, THEN cut to `limit` — cutting first would hide a matching
+    # conversation behind a page of non-matching ones.
+    candidates: list[tuple[str, str, str]] = []
     seen: set[str] = set()
     for run in runs:
         if run.user_id in seen:
@@ -1973,11 +2445,34 @@ async def _list_conversations(
         # cut off used to render a blank row, which told the owner nothing; the
         # question at least says what the visitor wanted.
         preview = (run.partial_text or "") or (getattr(run, "user_text", "") or "")
+        candidates.append(
+            (run.user_id, when.isoformat() if when else "", preview[:_CONVERSATION_PREVIEW_CHARS])
+        )
+
+    states, pending, emails = await _conversation_side_data(
+        widget, workspace_id, [ref for ref, _, _ in candidates]
+    )
+
+    items: list[ConversationItem] = []
+    for ref, last_message_at, preview in candidates:
+        row = states.get(ref)
+        row_state = row.state.value if row is not None else "open"
+        if state and row_state != state:
+            continue
+        email = (row.contact_email if row is not None else "") or emails.get(ref, "")
         items.append(
             ConversationItem(
-                customer_ref=run.user_id,
-                last_message_at=when.isoformat() if when else "",
-                preview=preview[:_CONVERSATION_PREVIEW_CHARS],
+                customer_ref=ref,
+                last_message_at=last_message_at,
+                preview=preview,
+                state=row_state,
+                bot_paused=bool(row.bot_paused) if row is not None else False,
+                unread_for_owner=row.unread_for_owner if row is not None else 0,
+                tags=list(row.tags) if row is not None else [],
+                snooze_until=row.snooze_until if row is not None else "",
+                contact_email=email,
+                display_name=_display_name(email, ref),
+                has_pending_action=ref in pending,
             )
         )
         if len(items) >= limit:
@@ -1988,7 +2483,23 @@ async def _list_conversations(
     next_cursor = (
         runs[-1].createdAt.isoformat() if len(runs) >= _CONVERSATION_SCAN_CAP and runs else None
     )
-    return ConversationsResponse(items=items, cursor=next_cursor, unsupported=False)
+    counts = await _conversation_counts(widget, workspace_id)
+    return ConversationsResponse(items=items, cursor=next_cursor, unsupported=False, counts=counts)
+
+
+async def _conversation_counts(widget: PawBarWidget | None, workspace_id: str) -> dict[str, int]:
+    """Per-state totals for a widget's inbox — ``{}`` when there is no widget.
+
+    Deliberately NOT derived from the listed page: the chips report the whole
+    queue, so they stay stable while a filter is active. Best-effort → ``{}``.
+    """
+    if widget is None:
+        return {}
+    try:
+        return await _store().conversation_counts(widget.id, workspace_id=workspace_id)
+    except Exception:  # noqa: BLE001 — a badge must not 500 the list
+        logger.warning("conversation counts failed for widget %s", widget.id, exc_info=True)
+        return {}
 
 
 async def _concierge_runs_for_visitor(
@@ -2661,6 +3172,22 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
         )
     except Exception:
         logger.debug("concierge chat marker record failed (non-fatal)", exc_info=True)
+
+    # Touch the conversation's state row (owner inbox, slice 1). THIS is what makes
+    # the queue backfill-free: the row is minted on a visitor's first message and
+    # kept current on every one after — no migration, no sweeper, no separate
+    # producer to forget. It also carries the auto-reopen rule, so a visitor coming
+    # back to a conversation the owner closed lands back in the inbox.
+    #
+    # FAILURE-SOFT, deliberately and non-negotiably: inbox bookkeeping is the
+    # owner's convenience, and a hiccup writing it must never cost a visitor their
+    # answer. Worst case the owner's queue is one message stale until the next turn.
+    try:
+        await store.upsert_conversation_on_visitor_turn(
+            body.widget_id, body.customer_ref, ctx.workspace_id
+        )
+    except Exception:
+        logger.warning("conversation state upsert failed (non-fatal)", exc_info=True)
 
     # (8) Dispatch a CONCIERGE run over the SAME machinery the authed chat uses.
     from pocketpaw_ee.cloud.chat.runs import service as run_service
