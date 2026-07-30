@@ -2222,6 +2222,18 @@ async def _embed_concierge_bar(
         doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
         concierge_enabled = True if doc is None else bool(doc.concierge_enabled)
 
+        # Publish-time provisioning (the third trigger): an agent-created site
+        # published in the same conversation has passed through NEITHER
+        # widget-create NOR a concierge-enable transition, so it reaches this
+        # embed with no widget and no dedicated agent — and the four-gate
+        # snippet check below would silently skip the bar. Mint the widget +
+        # agent here so the first publish ships with its concierge. Idempotent
+        # and failure-soft inside; requires the site doc (draft flows have one).
+        if concierge_enabled and doc is not None:
+            from pocketpaw_ee.paw_bar.agent_provisioning import ensure_site_widget
+
+            await ensure_site_widget(doc, workspace_id)
+
         snippet = await embed.concierge_snippet(
             workspace_id=workspace_id,
             pocket_id=pocket_id,

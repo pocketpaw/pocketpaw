@@ -1,6 +1,16 @@
 # ee/pocketpaw_ee/paw_bar/agent_provisioning.py — auto-provision a DEDICATED
 # concierge agent per Paw Site.
 #
+# Updated 2026-07-30 (publish-time provisioning): added ``ensure_site_widget`` —
+# the missing THIRD trigger. A site created AND published by the agent in one
+# conversation never passes through widget-create (a dashboard flow) or a
+# concierge-enable TRANSITION (the model defaults to enabled), so neither
+# existing trigger fired, the publish-time embed's four-gate check failed
+# silently, and a brand-new site shipped bar-less with no dedicated agent.
+# ``ensure_site_widget`` runs at publish (from ``sites.service._embed_concierge_bar``):
+# resolve-or-mint the site's paw-bar widget, then funnel into ``ensure_site_agent``.
+# Idempotent + failure-soft like its siblings. Found live in the 2026-07-30 smoke.
+#
 # Updated 2026-07-30 (feat/paw-bar-autoembed): extracted ``site_widget(pocket_id,
 # workspace_id)`` — the "which paw-bar widget belongs to this site's pocket"
 # lookup that ``provision_on_concierge_enable`` used to do inline. The publish
@@ -327,6 +337,59 @@ async def site_widget(pocket_id: str, workspace_id: str) -> Any | None:
     return widgets[0] if widgets else None
 
 
+async def ensure_site_widget(site: Any, workspace_id: str) -> Any | None:
+    """Publish-time trigger: a concierge-enabled site must HAVE a paw-bar widget.
+
+    Resolve-or-mint the widget for ``site``'s pocket, then ensure its dedicated
+    agent. This is the third trigger beside widget-create and concierge-enable:
+    a site created and published by the agent in one conversation hits neither
+    (there is no dashboard widget-create, and ``concierge_enabled`` defaults to
+    True so no enable transition ever fires) — without this, the publish-time
+    embed found no widget and silently shipped the site bar-less.
+
+    Idempotent: an existing widget is returned as-is (after a best-effort agent
+    bind if it is unbound). FAILURE-SOFT: any error logs and returns ``None`` —
+    a site going live matters more than its bar.
+    """
+    try:
+        existing = await site_widget(site.pocket_id, workspace_id)
+        if existing is not None:
+            if not getattr(existing, "agent_id", ""):
+                await ensure_site_agent(site, existing)
+                refreshed = await _store().get_widget(existing.id, workspace_id=workspace_id)
+                return refreshed or existing
+            return existing
+
+        from pocketpaw.paw_bar.models import PawBarSpec, PawBarWidget
+
+        site_name = str(getattr(site, "name", "") or "").strip() or "This site"
+        widget = PawBarWidget(
+            pocket_id=site.pocket_id,
+            owner=str(getattr(site, "owner", "") or "site"),
+            workspace_id=workspace_id,
+            name=f"{site_name} concierge",
+            # The glass bar renders its own chat surface; blocks stay empty and
+            # the spec is the same "pending" shell the dashboard flow starts from.
+            spec=PawBarSpec(widget_id="pending", pocket_id=site.pocket_id, blocks=[]),
+        )
+        created = await _store().create_widget(widget)
+        logger.info(
+            "paw-bar concierge: minted widget %s for site %s at publish",
+            created.id,
+            getattr(site, "id", "?"),
+        )
+        await ensure_site_agent(site, created)
+        refreshed = await _store().get_widget(created.id, workspace_id=workspace_id)
+        return refreshed or created
+    except Exception:  # noqa: BLE001 — provisioning must never break a publish
+        logger.warning(
+            "paw-bar concierge: publish-time widget provisioning failed for site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
+        return None
+
+
 async def provision_on_concierge_enable(site: Any, workspace_id: str) -> None:
     """Concierge-enable trigger: provision the site's widget when it is unbound.
 
@@ -355,6 +418,7 @@ __all__ = [
     "concierge_slug",
     "derive_conversation_starters",
     "ensure_site_agent",
+    "ensure_site_widget",
     "provision_on_concierge_enable",
     "provision_widget_on_create",
     "site_widget",

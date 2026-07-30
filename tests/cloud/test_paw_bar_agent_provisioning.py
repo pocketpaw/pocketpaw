@@ -288,6 +288,51 @@ class TestWidgetCreateTrigger:
 # --------------------------------------------------------------------------- #
 
 
+class TestPublishTimeTrigger:
+    """``ensure_site_widget`` — the third trigger (2026-07-30 regression).
+
+    A site created and published by the agent in ONE conversation goes through
+    neither widget-create nor a concierge-enable transition, so before this
+    trigger the publish-time embed found no widget and silently shipped the
+    site bar-less with no dedicated agent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_publish_provisioning_mints_widget_and_agent(self, client) -> None:
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        _c, store = client
+        site = await _site()
+
+        # No widget exists for the pocket (the agent-created-site shape).
+        assert await ap.site_widget(_POCKET, _WS) is None
+
+        widget = await ap.ensure_site_widget(site, _WS)
+        assert widget is not None
+        assert widget.pocket_id == _POCKET
+        assert widget.workspace_id == _WS
+        assert widget.agent_id, "minted widget must be bound to a dedicated agent"
+
+        # Idempotent: a second call returns the SAME widget, not a sibling.
+        again = await ap.ensure_site_widget(site, _WS)
+        assert again is not None and again.id == widget.id
+        widgets = await store.list_widgets(pocket_id=_POCKET, workspace_id=_WS, limit=10)
+        assert len(widgets) == 1
+
+    @pytest.mark.asyncio
+    async def test_publish_provisioning_binds_existing_unbound_widget(self, client) -> None:
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        c, _store = client
+        site = await _site()
+        # An unbound widget exists (agent deleted / legacy row): reuse, don't mint.
+        res = await c.post("/paw-bar/widgets", json=_create_payload(agent_id="agent-manual"))
+        existing_id = res.json()["id"]
+
+        widget = await ap.ensure_site_widget(site, _WS)
+        assert widget is not None and widget.id == existing_id
+
+
 class TestConciergeEnableTrigger:
     @pytest.mark.asyncio
     async def test_enabling_provisions_unbound_widget(self, client) -> None:
