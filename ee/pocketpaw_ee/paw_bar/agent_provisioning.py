@@ -1,6 +1,15 @@
 # ee/pocketpaw_ee/paw_bar/agent_provisioning.py — auto-provision a DEDICATED
 # concierge agent per Paw Site.
 #
+# Updated 2026-07-30 (Paw Bar inbox D5): added ``widget_for_agent(agent_id,
+# workspace_id)`` — the REVERSE of the bind ``ensure_site_agent`` writes. D5 lets a
+# concierge run read its own ``agent:<id>`` knowledge scope, which makes "is this
+# agent answering public site visitors?" a question the agent Knowledge surface has
+# to answer out loud (``agents.service.is_visible_to_site_visitors`` is its one
+# caller). It reads the real binding — ``widget.agent_id`` — rather than sniffing
+# the deterministic ``concierge-<site_id>`` slug, so a MANUALLY bound agent (which
+# the provisioner never renames) is recognised too.
+#
 # Updated 2026-07-30 (publish-time provisioning): added ``ensure_site_widget`` —
 # the missing THIRD trigger. A site created AND published by the agent in one
 # conversation never passes through widget-create (a dashboard flow) or a
@@ -55,6 +64,10 @@ _MAX_STARTERS = 4
 
 # Max length of the generated agent display name (Agent.name is capped at 100).
 _MAX_AGENT_NAME = 100
+
+# How many of a workspace's paw-bar widgets ``widget_for_agent`` will scan for a
+# bind. One bar per site, so this is far above any real tenant.
+_AGENT_BIND_SCAN_LIMIT = 500
 
 
 def _store():
@@ -337,6 +350,34 @@ async def site_widget(pocket_id: str, workspace_id: str) -> Any | None:
     return widgets[0] if widgets else None
 
 
+async def widget_for_agent(agent_id: str, workspace_id: str) -> Any | None:
+    """The paw-bar widget bound to ``agent_id`` in ``workspace_id``, or ``None``.
+
+    The reverse of the bind ``ensure_site_agent`` writes, and the only honest way
+    to answer "does this agent front a public site bar?" — it reads the binding
+    itself (``widget.agent_id``), not the deterministic ``concierge-<site_id>``
+    slug, so an agent a human bound by hand in the dashboard counts exactly the
+    same as a provisioned one.
+
+    Workspace-scoped, and an empty ``agent_id`` / ``workspace_id`` returns
+    ``None`` rather than querying — an unscoped scan would hand back a sibling
+    tenant's widget (the same guard ``site_widget`` carries).
+
+    The store has no ``agent_id`` predicate, so this lists the workspace's bars
+    and scans. Bounded by ``_AGENT_BIND_SCAN_LIMIT``: a workspace holds one bar
+    per site, so the cap is far above any real tenant, and being over it degrades
+    to "not visible" rather than to a slow query.
+    """
+    if not agent_id or not workspace_id:
+        return None
+    widgets = await _store().list_widgets(workspace_id=workspace_id, limit=_AGENT_BIND_SCAN_LIMIT)
+    target = str(agent_id)
+    for widget in widgets:
+        if str(getattr(widget, "agent_id", "") or "") == target:
+            return widget
+    return None
+
+
 async def ensure_site_widget(site: Any, workspace_id: str) -> Any | None:
     """Publish-time trigger: a concierge-enabled site must HAVE a paw-bar widget.
 
@@ -422,4 +463,5 @@ __all__ = [
     "provision_on_concierge_enable",
     "provision_widget_on_create",
     "site_widget",
+    "widget_for_agent",
 ]
