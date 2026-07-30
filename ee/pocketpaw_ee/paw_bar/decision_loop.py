@@ -438,7 +438,14 @@ async def propose_customer_action(
             "default_reply": default_reply,
             "payload_summary": summary,
         }
-        store = get_instinct_store()
+        # ISO-2 store routing — the SAME per-workspace factory the event path
+        # uses (H1). The bare factory only resolved the right store when an
+        # AGENT run's ContextVars carried the workspace; the PUBLIC
+        # POST /paw-bar/action endpoint has no run context, so a form-card
+        # submit landed its proposal in the BARE instinct.db — invisible to the
+        # owner's workspace-scoped Tray/dashboard (found live 2026-07-30, first
+        # exercise of the endpoint path off an agent run).
+        store = get_instinct_store(workspace_id=ws or None)
         action = await store.propose(
             pocket_id=pocket_id or widget_id,
             title=title,

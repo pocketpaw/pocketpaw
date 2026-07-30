@@ -107,3 +107,38 @@ async def test_cloud_proposal_lands_in_the_tenants_pending_feed(tmp_path: Path) 
     assert blob["workspace_id"] == WS_REAL, (
         f"proposal scoped to {blob['workspace_id']!r}, expected the real workspace"
     )
+
+
+async def test_gated_action_proposal_lands_in_the_tenants_pending_feed(
+    tmp_path: Path,
+) -> None:
+    """The ACTION path (public POST /paw-bar/action → propose_customer_action)
+    must route through the per-workspace store exactly like the event path.
+
+    Pre-fix (found live 2026-07-30, the first exercise of this path OFF an
+    agent run): the bare ``get_instinct_store()`` only resolved the workspace
+    when an agent run's ContextVars carried it — the public endpoint has no run
+    context, so a form-card submit landed its proposal in the BARE instinct.db,
+    invisible to the owner's workspace-scoped Tray and dashboard.
+    """
+    from pocketpaw_ee.paw_bar.decision_loop import propose_customer_action
+
+    pp_store = PawBarStore(tmp_path / "paw_bar.db")
+    action_id = await propose_customer_action(
+        widget=_widget(),
+        workspace_id=WS_REAL,
+        customer_ref="cust-1",
+        verb="book_visit",
+        args={"name": "Asha", "phone": "512-555-3344"},
+        summary="name=Asha, phone=512-555-3344",
+        paw_bar_store=pp_store,
+    )
+
+    assert action_id is not None, "the gated proposal was dropped"
+
+    dashboard_store = stores.get_instinct_store(workspace_id=WS_REAL)
+    pending = await dashboard_store.pending(workspace_id=WS_REAL)
+    assert action_id in {a.id for a in pending}, (
+        "the gated-action proposal is not in the tenant's per-workspace feed — "
+        "it landed in the bare store the dashboard never reads"
+    )
