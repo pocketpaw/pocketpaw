@@ -1,7 +1,7 @@
 // ee/pocketpaw_ee/paw_bar/static/paw-bar.js — the Paw Bar glass-bar LOADER, the
 // ~7KB zero-dependency IIFE a site includes to grow a concierge.
 //
-// Vendored 2026-07-30 (feat/paw-bar-autoembed) from the paw-print-widget repo's
+// Vendored 2026-07-30 (feat/paw-bar-autoembed) from the paw-bar repo's
 // ``loader/src/loader.ts`` (branch ``feat/glass-bar``), type annotations stripped
 // — this is that file as plain ES2020, nothing added, nothing removed. It is
 // vendored rather than fetched because ``GET /paw-bar/widget.js`` must resolve to

@@ -410,7 +410,7 @@ def paw_bar_widget_file() -> Path:
     """Path of the loader bundle ``GET /paw-bar/widget.js`` serves.
 
     ``PAW_BAR_WIDGET_JS`` wins when set — that is the seam for serving a freshly
-    built bundle (e.g. ``paw-print-widget/dist/…``) without a redeploy. Otherwise
+    built bundle (e.g. ``paw-bar/dist/…``) without a redeploy. Otherwise
     the copy vendored beside this module. The default is deliberately IN the
     package rather than an absolute path into a sibling checkout: the publish path
     now bakes this URL into customers' deployed HTML, so it has to resolve on every
