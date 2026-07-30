@@ -81,6 +81,22 @@ so it syncs zero documents and reports `no_content`. Grounding one of those mean
 crawling the customer's own origin through the SSRF-hardened import crawler, and is
 not part of this path.
 
+## What the visitor sees as sources
+
+A reply can end with a short "Sources" list — up to three of the site's own pages,
+each a title and a public link. It is sent as a single `sources` event on the chat
+stream, just before the stream ends, and the same pages are browsable through a
+public articles listing (`GET /paw-bar/articles`, behind the same key, origin and
+rate gates as the chat; capped at twenty entries with a short snippet each).
+
+Attribution is approximate by design. The server re-runs a quick knowledge search
+of the visitor's question against the same pocket scope the run reads, and shows
+the synced pages that match — "what the knowledge base would ground this question
+on", not a verified trace of what the model actually quoted. Only pages the site
+sync itself produced can appear; owner-uploaded files sharing the scope are never
+listed or linked. When nothing matches, or the search fails, no sources are shown
+and the reply is unaffected.
+
 ## What a concierge records
 
 The agent's replies have always been durable. The visitor's own messages are stored

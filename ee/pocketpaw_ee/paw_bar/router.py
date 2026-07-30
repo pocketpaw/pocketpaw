@@ -1,4 +1,21 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-30 (reply sources + articles) — visible grounding for the
+#   concierge. (1) ``concierge_chat`` now emits at most ONE ``event: sources``
+#   SSE frame ({"sources": [{title, url}]}, max 3, deduped by url) after the
+#   model stream completes and immediately BEFORE the terminal ``stream_end``
+#   frame. Attribution is deliberately APPROXIMATE (Crisp-style): a server-side
+#   KB search of the visitor's message against the SAME ``pocket:<pocket_id>``
+#   scope the concierge run reads, filtered to the articles the site's page sync
+#   produced (``Site.kb_article_ids``) and mapped back to public page URLs via
+#   the ``site-<slug>`` article-id convention — NOT an exact tool trace. The
+#   search runs CONCURRENTLY with the model stream so it adds ~0ms; fail-soft
+#   (any error / timeout emits nothing). (2) GET /paw-bar/articles — a public
+#   listing of the site's synced KB pages ({title, url, snippet ≤160}), capped
+#   at 20, behind the SAME ``_front_gate_for_key`` chain as chat (404 → 429 →
+#   401 → 403); no injection screen because there is no free text. The shared
+#   front-gate now resolves via ``resolve_site_key_with_site`` and hands back
+#   the Site too, so articles (and any future public read) can use owner-set
+#   Site fields without a second query.
 # Updated: 2026-07-30 (async decision delivery) — added POST
 #   /paw-bar/decision-contact: a visitor whose request is still PENDING leaves
 #   an optional email before closing the tab; the delivery hook later emails
@@ -270,6 +287,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -2332,6 +2350,97 @@ async def get_decision(
 # ---------------------------------------------------------------------------
 
 
+# --- Reply sources (visible grounding) -------------------------------------
+#
+# APPROXIMATE ATTRIBUTION, ON PURPOSE (Crisp-style "Sources"): the concierge run
+# grounds itself with a KB search inside the agent loop, and that trace is not
+# surfaced by the transport. Rather than plumb a tool trace through the run
+# machinery, we re-run a cheap server-side KB search of the visitor's OWN message
+# against the SAME ``pocket:<pocket_id>`` scope the run reads, and show the synced
+# site pages that match. The pages shown are therefore "what the KB would ground
+# this question on", not "what the model verifiably quoted" — good enough to give
+# the visitor a place to read more, and honest about being a heuristic.
+#
+# Fail-soft and near-free: the search task starts before the stream is relayed and
+# runs CONCURRENTLY with the model turn (seconds), so by ``stream_end`` it is
+# almost always already done; a short grace wait bounds the added latency, and any
+# error or timeout emits nothing at all (never an empty ``sources`` event).
+
+# At most this many entries ride the ``sources`` event (CONTRACT: max 3).
+_SOURCES_MAX = 3
+# Search a few more than we show — hits are filtered to synced site pages and
+# deduped by url, so over-fetching keeps the event full when some hits drop.
+_SOURCES_SEARCH_LIMIT = 8
+# Grace wait at stream end for a search that somehow outlived the model turn.
+# The budget for ADDED latency is ~100ms; past it we drop sources, not delay the
+# terminal frame.
+_SOURCES_WAIT_S = 0.1
+
+
+def _article_page_url(article_id: str, base_url: str) -> str:
+    """Best-effort public page URL for a synced KB article — "" when unmappable.
+
+    The page sync ingests each page under a deterministic ``site-<slug>`` source
+    (``kb_ingest._path_slug``), and kb-go's compile fallback keeps that as the
+    article id. Reversing the slug is LOSSY (slashes and dashes both became "-"),
+    and an LLM-compiled article is titled — not sourced — so its id carries no
+    slug at all; both cases degrade to the site's base URL. That is the accepted
+    cost of approximate attribution: the link always lands on the right SITE,
+    usually on the right page.
+    """
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        return ""
+    if article_id.startswith("site-"):
+        slug = article_id[len("site-") :]
+        if slug and slug != "home":
+            return f"{base}/{slug}"
+    return f"{base}/"
+
+
+async def _concierge_sources(pocket_id: str, message: str, site: Any) -> list[dict[str, str]]:
+    """Sources for one concierge reply: synced site pages that match the message.
+
+    Searches the SAME ``pocket:<pocket_id>`` scope the concierge run reads (the
+    one scope ``_kb_scopes_for_context`` grants a CONCIERGE run), then keeps only
+    hits whose article id is in ``Site.kb_article_ids`` — the articles the page
+    sync wrote — so an owner-uploaded private file can never surface as a public
+    "source". Entries need BOTH a non-empty title and url; deduped by url; capped
+    at ``_SOURCES_MAX``. Fail-soft: any error returns [] and the reply is
+    unaffected.
+    """
+    try:
+        base_url = str(getattr(site, "url", "") or "")
+        synced = set(getattr(site, "kb_article_ids", None) or [])
+        if not pocket_id or not message.strip() or not base_url.strip() or not synced:
+            return []
+        from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
+
+        hits = await KnowledgeService.search_articles_for_scope(
+            f"pocket:{pocket_id}", message, limit=_SOURCES_SEARCH_LIMIT
+        )
+        sources: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        for hit in hits:
+            if not isinstance(hit, dict):
+                continue
+            article_id = str(hit.get("id") or "")
+            title = str(hit.get("title") or "").strip()
+            if article_id not in synced or not title:
+                continue
+            url = _article_page_url(article_id, base_url)
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            sources.append({"title": title, "url": url})
+            if len(sources) >= _SOURCES_MAX:
+                break
+        return sources
+    except Exception:  # noqa: BLE001 — sources are best-effort, the reply is not
+        logger.debug("concierge sources lookup failed (non-fatal)", exc_info=True)
+        return []
+
+
 class ConciergeChatRequest(BaseModel):
     widget_id: str
     # The public, origin-bound embed key (Site.signed_key) baked into the widget.
@@ -2573,27 +2682,54 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
 
     transport = get_stream_transport()
 
+    # Reply sources (visible grounding): kick the approximate-attribution KB
+    # search off NOW so it runs concurrently with the model turn — by the time
+    # ``stream_end`` arrives it is effectively always finished, so surfacing it
+    # adds ~0ms. Fail-soft by construction (``_concierge_sources`` never raises).
+    sources_task = asyncio.create_task(_concierge_sources(ctx.pocket_id or "", body.message, site))
+
     async def gen() -> AsyncIterator[bytes]:
         # Mirror agent_router.post_agent_chat's tail: announce the run, then relay
         # the transport frames the executor writes, verbatim, until a terminal one.
-        yield _sse(
-            "message.persisted",
-            {"run_id": run_id, "client_message_id": client_message_id},
-        )
-        cursor = "0"
-        while True:
-            saw_terminal = False
-            async for ev in transport.read_events(run_id, after=cursor, block_ms=2000):
-                cursor = ev.entry_id
-                yield _sse(ev.event, ev.data, entry_id=ev.entry_id)
-                if ev.is_terminal:
-                    saw_terminal = True
-            if saw_terminal:
-                return
-            if await transport.is_cancelled(run_id):
-                yield _sse("interrupted", {"reason": "cancelled"})
-                return
-            yield b": ping\n\n"
+        # One insertion: immediately BEFORE relaying a terminal ``stream_end``
+        # frame, emit at most one ``sources`` event (CONTRACT: the widget renders
+        # it only between the model stream completing and stream_end; nothing is
+        # emitted when no source qualifies, and never after stream_end).
+        try:
+            yield _sse(
+                "message.persisted",
+                {"run_id": run_id, "client_message_id": client_message_id},
+            )
+            cursor = "0"
+            while True:
+                saw_terminal = False
+                async for ev in transport.read_events(run_id, after=cursor, block_ms=2000):
+                    cursor = ev.entry_id
+                    if ev.event == "stream_end":
+                        # The model stream is complete. Give the concurrent
+                        # search a short grace, then either surface it or drop
+                        # it — the terminal frame is never delayed past the
+                        # ~100ms budget and never blocked by a wedged search.
+                        try:
+                            sources = await asyncio.wait_for(
+                                asyncio.shield(sources_task), timeout=_SOURCES_WAIT_S
+                            )
+                        except Exception:  # noqa: BLE001 — timeout/err ⇒ no event
+                            sources = []
+                        if sources:
+                            yield _sse("sources", {"sources": sources})
+                    yield _sse(ev.event, ev.data, entry_id=ev.entry_id)
+                    if ev.is_terminal:
+                        saw_terminal = True
+                if saw_terminal:
+                    return
+                if await transport.is_cancelled(run_id):
+                    yield _sse("interrupted", {"reason": "cancelled"})
+                    return
+                yield b": ping\n\n"
+        finally:
+            # Client gone or stream over — never leave the search task dangling.
+            sources_task.cancel()
 
     return StreamingResponse(
         gen(),
@@ -2632,19 +2768,23 @@ async def _front_gate_for_key(
     customer_ref: str,
     origin: str | None,
     request: Request,
-) -> tuple[PawBarWidget, Any]:
+) -> tuple[PawBarWidget, Any, Any]:
     """The shared public front-gate: resolve the widget + authenticate the key.
 
     Mirrors ``concierge_chat`` steps 1-6 (fail-closed, cheap gates first):
       0. ``customer_ref`` matches the charset + length bound (400) — cheapest gate.
       1. Widget exists (404) — UNSCOPED (workspace unknown until the key resolves).
       2. Rate limit, overall + per-customer (429).
-      3. Authenticate the embed key + dual-mode origin gate (``resolve_site_key`` —
-         401 bad/unknown/revoked key, 403 disallowed/missing origin, fail-closed).
+      3. Authenticate the embed key + dual-mode origin gate
+         (``resolve_site_key_with_site`` — 401 bad/unknown/revoked key, 403
+         disallowed/missing origin, fail-closed).
       4. Bind the widget to the RESOLVED key: it must belong to the key's workspace
          AND pocket (403) — a key for pocket A must not drive a widget for pocket B.
-    Returns ``(widget, ctx)`` where ``ctx.workspace_id`` is the authenticated
-    tenant used to scope any gated Instinct proposal."""
+    Returns ``(widget, ctx, site)`` where ``ctx.workspace_id`` is the
+    authenticated tenant used to scope any gated Instinct proposal and ``site`` is
+    the Site the gate already loaded — handed back (same pattern as
+    ``resolve_site_key_with_site``) so a caller that needs an owner-set Site field
+    (the articles listing reads ``url`` + ``kb_article_ids``) never re-queries."""
     if not _CUSTOMER_REF_RE.match(customer_ref or ""):
         raise HTTPException(400, "invalid_customer_ref")
     store = _store()
@@ -2662,16 +2802,18 @@ async def _front_gate_for_key(
         raise HTTPException(429, "Rate limit exceeded")
 
     frame_origin = _configured_frame_origin(request)
-    from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key
+    from pocketpaw_ee.cloud.auth.site_keys import resolve_site_key_with_site
 
-    ctx = await resolve_site_key(signed_key, origin, customer_ref, frame_origin=frame_origin)
+    ctx, site = await resolve_site_key_with_site(
+        signed_key, origin, customer_ref, frame_origin=frame_origin
+    )
 
     # Bind the widget to the resolved key (finding #2 — no sibling-pocket reach).
     if widget.workspace_id and widget.workspace_id != ctx.workspace_id:
         raise HTTPException(403, "widget_workspace_mismatch")
     if widget.pocket_id != ctx.pocket_id:
         raise HTTPException(403, "widget_pocket_mismatch")
-    return widget, ctx
+    return widget, ctx, site
 
 
 class PawBarActionRequest(BaseModel):
@@ -2695,7 +2837,7 @@ async def post_action(body: PawBarActionRequest, request: Request) -> JSONRespon
     decision endpoint. The executor's status hint becomes the HTTP status on
     failure (422 bad verb/args, 409 empty cart / unavailable)."""
     origin = request.headers.get("origin")
-    widget, ctx = await _front_gate_for_key(
+    widget, ctx, _site = await _front_gate_for_key(
         widget_id=body.w,
         signed_key=body.key,
         customer_ref=body.customer_ref,
@@ -2732,7 +2874,7 @@ async def get_cart(
     from pocketpaw_ee.paw_bar.actions import cart_wire
 
     origin = request.headers.get("origin")
-    widget, _ctx = await _front_gate_for_key(
+    widget, _ctx, _site = await _front_gate_for_key(
         widget_id=w,
         signed_key=key,
         customer_ref=customer_ref,
@@ -2752,6 +2894,118 @@ async def get_cart(
         logger.debug("cart-read marker record failed (non-fatal)", exc_info=True)
     cart = await store.get_cart(w, customer_ref)
     return JSONResponse(cart_wire(widget, customer_ref, cart))
+
+
+# ---------------------------------------------------------------------------
+# Public articles listing (2026-07-30) — the concierge's visible library
+#
+# The reply-side "sources" event shows WHICH pages grounded one answer; this is
+# the browsable other half: everything the concierge can quote, i.e. the site's
+# synced KB pages. Same armor class as chat via the shared ``_front_gate_for_key``
+# (404 unknown widget → 429 rate limit → 401 bad key → 403 origin/binding). No
+# injection screen — there is no free text on this endpoint. The listing is
+# filtered to ``Site.kb_article_ids`` (the page sync's own articles), so an
+# owner-uploaded private file in the same pocket scope is never listed publicly.
+# ---------------------------------------------------------------------------
+
+# Cap on listed articles (CONTRACT: 20) and on the plain-text snippet length
+# (CONTRACT: ≤160 chars).
+_ARTICLES_MAX = 20
+_ARTICLE_SNIPPET_CHARS = 160
+
+# The articles listing has no per-visitor handle in its contract (widget_id +
+# signed_key only), but the shared front-gate rate-limits per customer_ref — so
+# bare listing calls share ONE fixed, well-formed bucket per widget. A caller MAY
+# pass its real visitor handle to get the same per-visitor accounting as chat.
+_ARTICLES_DEFAULT_REF = "pawbar-articles"
+
+
+class ConciergeArticle(BaseModel):
+    """One publicly listable synced page: title + public url + short snippet."""
+
+    title: str
+    url: str
+    snippet: str = ""
+
+
+class ArticlesResponse(BaseModel):
+    articles: list[ConciergeArticle]
+
+
+@router.get("/paw-bar/articles", response_model=ArticlesResponse)
+async def list_public_articles(
+    request: Request,
+    widget_id: str = Query("", description="The Paw Bar widget id"),
+    signed_key: str = Query("", description="The public Site.signed_key"),
+    customer_ref: str = Query(
+        "",
+        description="Optional visitor handle for per-visitor rate accounting",
+    ),
+) -> ArticlesResponse:
+    """List the site's synced KB pages → {"articles": [{title, url, snippet}]}.
+
+    Gates are the SAME front-gate chain as chat, via ``_front_gate_for_key``:
+    unknown widget → 404, rate limit → 429, bad/unknown/revoked key → 401,
+    disallowed origin / widget∩key binding mismatch → 403. An empty KB (or a
+    site whose pages never synced) is a real state, not an error → 200 with
+    ``{"articles": []}``. The kb read itself is fail-soft the same way.
+    """
+    origin = request.headers.get("origin")
+    widget, ctx, site = await _front_gate_for_key(
+        widget_id=widget_id,
+        signed_key=signed_key,
+        customer_ref=customer_ref or _ARTICLES_DEFAULT_REF,
+        origin=origin,
+        request=request,
+    )
+
+    # Record a marker so listing reads count toward the shared rate limiter (the
+    # front gate only CHECKS the limit — same reasoning as the cart read).
+    # Best-effort; a store hiccup must not fail the read.
+    try:
+        await _store().record_event(
+            PawBarEvent(
+                widget_id=widget.id,
+                type="pawbar_articles_read",
+                payload={},
+                customer_ref=customer_ref or _ARTICLES_DEFAULT_REF,
+            )
+        )
+    except Exception:
+        logger.debug("articles-read marker record failed (non-fatal)", exc_info=True)
+
+    base_url = str(getattr(site, "url", "") or "")
+    synced = set(getattr(site, "kb_article_ids", None) or [])
+    pocket_id = ctx.pocket_id or ""
+    if not pocket_id or not base_url.strip() or not synced:
+        return ArticlesResponse(articles=[])
+
+    from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
+
+    try:
+        raw = await KnowledgeService.list_articles_for_scope(f"pocket:{pocket_id}")
+    except Exception:  # noqa: BLE001 — a kb hiccup lists nothing, never 500s
+        logger.warning("paw-bar articles: kb list failed for pocket %s", pocket_id, exc_info=True)
+        return ArticlesResponse(articles=[])
+
+    articles: list[ConciergeArticle] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        article_id = str(entry.get("id") or "")
+        title = str(entry.get("title") or "").strip()
+        # Only the page sync's own articles are listable — an owner-uploaded
+        # file sharing the pocket scope stays private.
+        if article_id not in synced or not title:
+            continue
+        url = _article_page_url(article_id, base_url)
+        if not url:
+            continue
+        snippet = " ".join(str(entry.get("summary") or "").split())[:_ARTICLE_SNIPPET_CHARS]
+        articles.append(ConciergeArticle(title=title, url=url, snippet=snippet))
+        if len(articles) >= _ARTICLES_MAX:
+            break
+    return ArticlesResponse(articles=articles)
 
 
 # ---------------------------------------------------------------------------
@@ -2794,7 +3048,7 @@ async def post_decision_contact(body: DecisionContactRequest, request: Request) 
     or on any other public read.
     """
     origin = request.headers.get("origin")
-    widget, _ctx = await _front_gate_for_key(
+    widget, _ctx, _site = await _front_gate_for_key(
         widget_id=body.widget_id,
         signed_key=body.signed_key,
         customer_ref=body.customer_ref,
