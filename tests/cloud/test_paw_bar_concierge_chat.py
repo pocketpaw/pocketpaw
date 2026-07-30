@@ -19,6 +19,14 @@
 #   nothing when the site's concierge_store_transcripts is off (while the AGENT
 #   still receives the full message either way), the stored copy is length-capped,
 #   and create_run actually lands the field on the run document.
+# Updated 2026-07-30 (Paw Bar inbox D5): the layer-1 grounding guard was WIDENED
+#   deliberately — a concierge run now reads ``agent:<its own id>`` alongside
+#   ``pocket:<its site>``, because a site concierge is a dedicated agent bijective
+#   with its site and an owner attaching knowledge to it was silently getting
+#   nothing on the site. ``workspace:`` and ``user:`` stay dropped. The isolation
+#   matrix that guards the widened blast radius lives beside it: a sibling agent's
+#   scope is never granted (unit + end-to-end through the resolver), the
+#   tenant-wide scope is never granted, and two tenants' scope sets are disjoint.
 # Updated 2026-07-29 (concierge conversation memory): a fifth layer covers the
 #   rehydrated RunSpec.history — prior turns of the SAME visitor come back
 #   oldest-first in the {"role","content"} shape the agent consumes; a sibling
@@ -93,15 +101,81 @@ def _concierge_ctx(pocket_id="pk-1", workspace_id="ws-1", customer="cust-42", ag
     )
 
 
-def test_concierge_kb_scope_is_pocket_only():
-    """Finding #2 (KB half): a concierge run grounds on its Site pocket ALONE —
-    never the agent's cross-pocket KB nor the whole tenant's workspace KB."""
+def test_concierge_kb_scope_is_site_pocket_plus_own_agent():
+    """A concierge run grounds on its Site pocket AND its own agent's scope.
+
+    DELIBERATE CHANGE (Paw Bar inbox D5, 2026-07-30). This test previously asserted
+    ``scopes == ["pocket:pk-1"]`` and that no ``agent:`` scope was present. That
+    was too tight and failed SILENTLY in the owner's face: a site concierge is a
+    DEDICATED agent bijective with its site, so an owner who opened it in /agents
+    and attached knowledge to the agent got nothing on the site — only the
+    site→pocket page sync ever reached a visitor, with no error and no warning.
+
+    ``agent:`` is now granted; ``workspace:`` is NOT, and that asymmetry is the
+    whole security argument: ``agent:`` is one site's own knowledge (the id comes
+    from the widget binding, and ``_resolve_concierge`` already proved the agent
+    belongs to this Site's workspace), while ``workspace:`` is the tenant-wide
+    tier an anonymous visitor must never reach. See the sibling-agent, workspace
+    and cross-tenant isolation tests immediately below.
+    """
     scopes = _kb_scopes_for_context(_concierge_ctx(pocket_id="pk-1", workspace_id="ws-1"))
-    assert scopes == ["pocket:pk-1"]
-    # The leaky scopes a member run would carry are absent.
+    assert scopes == ["pocket:pk-1", "agent:agent-1"]
+    # The scopes that stay leaky for a public caller are still absent.
     assert not any(s.startswith("workspace:") for s in scopes)
-    assert not any(s.startswith("agent:") for s in scopes)
     assert not any(s.startswith("user:") for s in scopes)
+
+
+def test_concierge_kb_scope_excludes_a_sibling_agent():
+    """Blast-radius guard: the ``agent:`` scope granted is the RUN'S OWN agent and
+    nothing else. A sibling agent in the same workspace stays unreachable — the id
+    comes from the widget binding the resolver validated, never from the caller."""
+    scopes = _kb_scopes_for_context(_concierge_ctx(agent="agent-mine"))
+    assert "agent:agent-mine" in scopes
+    assert "agent:agent-sibling" not in scopes
+    # Exactly one agent scope, ever.
+    assert [s for s in scopes if s.startswith("agent:")] == ["agent:agent-mine"]
+
+
+def test_concierge_kb_scope_never_carries_workspace_or_user():
+    """The two tiers D5 keeps DROPPED: ``workspace:`` (every pocket, agent and
+    upload in the tenant) and ``user:`` (a member's private mail/calendar KB).
+    Widening the concierge to ``agent:`` must not have widened it to either."""
+    scopes = _kb_scopes_for_context(
+        _concierge_ctx(pocket_id="pk-1", workspace_id="ws-1", customer="cust-42")
+    )
+    assert "workspace:ws-1" not in scopes
+    assert not any(s.startswith("workspace:") for s in scopes)
+    # ``user:`` can't fire anyway (members is empty for a concierge) — asserted
+    # explicitly so a future change to the member-private gate can't leak here.
+    assert "user:cust-42" not in scopes
+    assert not any(s.startswith("user:") for s in scopes)
+
+
+def test_concierge_kb_scopes_share_nothing_across_tenants():
+    """Two concierge runs in different tenants have DISJOINT scope sets — neither
+    site's pocket nor either agent appears in the other's grounding."""
+    mine = _kb_scopes_for_context(
+        _concierge_ctx(pocket_id="pk-mine", workspace_id="ws-mine", agent="agent-mine")
+    )
+    theirs = _kb_scopes_for_context(
+        _concierge_ctx(pocket_id="pk-theirs", workspace_id="ws-theirs", agent="agent-theirs")
+    )
+    assert set(mine).isdisjoint(theirs)
+    assert "pocket:pk-theirs" not in mine
+    assert "agent:agent-theirs" not in mine
+
+
+def test_concierge_kb_scope_degrades_when_a_binding_is_missing():
+    """Defensive shape: each scope is emitted only when its id is present, so a
+    half-resolved context can never produce a malformed ``agent:``/``pocket:``
+    scope string (which kb-go would sanitize into some OTHER scope's directory)."""
+    no_agent = _kb_scopes_for_context(_concierge_ctx(pocket_id="pk-1", agent=""))
+    assert no_agent == ["pocket:pk-1"]
+
+    no_pocket = _kb_scopes_for_context(_concierge_ctx(pocket_id="", agent="agent-1"))
+    assert no_pocket == ["agent:agent-1"]
+
+    assert _kb_scopes_for_context(_concierge_ctx(pocket_id="", agent="")) == []
 
 
 def test_member_pocket_scope_still_carries_full_set():
@@ -177,8 +251,11 @@ async def test_resolve_concierge_binds_pocket_and_agent(mongo_db):
     assert ctx.user_id == "cust-1"
     # No workspace participant is exposed to a public concierge.
     assert ctx.members == []
-    # And its KB is locked to the pocket (end-to-end through the resolved ctx).
-    assert _kb_scopes_for_context(ctx) == [f"pocket:{pocket.id}"]
+    # And its KB is the site pocket + THIS agent, end-to-end through the resolved
+    # ctx — the agent id the scope grants is the one the resolver just proved
+    # belongs to this workspace, never a value the caller supplied unchecked.
+    assert _kb_scopes_for_context(ctx) == [f"pocket:{pocket.id}", f"agent:{agent.id}"]
+    assert f"workspace:{ctx.workspace_id}" not in _kb_scopes_for_context(ctx)
 
 
 @pytest.mark.asyncio
@@ -215,6 +292,30 @@ async def test_resolve_concierge_rejects_agent_from_another_workspace(mongo_db):
             expected_workspace_id="ws-1",
         )
     assert exc.value.code == "concierge.agent_forbidden"
+
+
+@pytest.mark.asyncio
+async def test_concierge_scope_never_names_a_sibling_agent_end_to_end(mongo_db):
+    """D5 blast radius, end-to-end: two agents live in the SAME workspace and the
+    widget binds ONE. The resolved run grounds on that agent's scope alone — the
+    sibling's knowledge is unreachable even though it is only one tenant away, and
+    the tenant-wide ``workspace:`` scope is absent entirely."""
+    pocket = await _pocket(workspace="ws-1")
+    bound = await _agent(workspace="ws-1", slug="concierge-bound")
+    sibling = await _agent(workspace="ws-1", slug="hr-assistant")
+
+    ctx = await resolve_scope_context(
+        scope="concierge",
+        scope_id=str(pocket.id),
+        user_id="cust-1",
+        agent_id_hint=str(bound.id),
+        expected_workspace_id="ws-1",
+    )
+
+    scopes = _kb_scopes_for_context(ctx)
+    assert scopes == [f"pocket:{pocket.id}", f"agent:{bound.id}"]
+    assert f"agent:{sibling.id}" not in scopes
+    assert "workspace:ws-1" not in scopes
 
 
 @pytest.mark.asyncio

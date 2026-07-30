@@ -401,8 +401,9 @@ def _concierge_profile(meta: SurfaceMeta) -> SurfaceProfile:
     """/paw-bar — the PUBLIC concierge widget. Ripple OFF (it answers questions,
     never builds a dashboard) + the public-safe tool lockdown (``_CONCIERGE_DENY``
     hard-strips web/code/write/subagent/pocket-write tools) + the site-scoped MCP
-    allow-list. KB grounding is locked to ``pocket:<id>`` by
-    ``ScopeKind.CONCIERGE`` in ``agent_service._kb_scopes_for_context`` — the
+    allow-list. KB grounding is locked to ``pocket:<id>`` + ``agent:<id>`` (the
+    site's own pocket and its own dedicated concierge agent, never ``workspace:``)
+    by ``ScopeKind.CONCIERGE`` in ``agent_service._kb_scopes_for_context`` — the
     profile governs tools, the scope governs KB.
 
     C1 — action registry: when the widget declares actions (carried on
