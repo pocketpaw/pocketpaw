@@ -193,6 +193,16 @@ Two things to know. The first turn is always a cold write, and hits are not
 guaranteed — one turn in six missed. So when comparing cost against another
 backend, measure a warm window rather than a single turn.
 
+**Caching covers the text prefix, not tool schemas.** With a short system prompt
+and the full 49-tool surface attached, the same model reported 13,509 input
+tokens and *zero* cache reads on every turn. Drop the tools and a 4.4k system
+prompt caches at 100%.
+
+This matters for which workload you run. The pocket/site specialist carries a
+~12-17k-token design-rules prompt — exactly the shape that caches. A chat agent
+with a small prompt and a large tool surface is the case that won't, so measure
+it rather than assuming from the specialist's numbers.
+
 Whenever a run returns non-zero cache tokens the backend emits a `token_usage`
 event with read and write counts and a hit rate, so you can measure this on your
 own traffic and model rather than trusting the table above.

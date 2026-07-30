@@ -61,11 +61,23 @@ turn         cache read  uncached input    hit rate
 5                 4,416                19          100%
 ===========  ==========  ================  ==========
 
-So the prefix is cached upstream and read back without us doing anything:
-``deep_agents`` earns its margin by patching Anthropic ``cache_control`` markers
-into the request, and this route needs no equivalent hook. Note the first turn
-is always a cold write and one turn in six missed, so measure a WARM window when
-comparing against ``deep_agents`` rather than reading turn 1 alone.
+So a large stable SYSTEM PROMPT is cached upstream and read back without us
+doing anything: ``deep_agents`` earns its margin by patching Anthropic
+``cache_control`` markers into the request, and this route needs no equivalent
+hook. The first turn is always a cold write and one turn in six missed, so
+measure a WARM window when comparing rather than reading turn 1 alone.
+
+**It does NOT appear to cover tool schemas, which is the load-bearing caveat.**
+Same model, same day, with a SHORT system prompt and the full 49-tool bridged
+surface attached: 13,509 input tokens and ``cache_read_tokens`` of **zero** on
+every turn, repeatedly. Drop the tools and a 4.4k-token system prompt caches at
+100%. So the cacheable thing here is the text prefix, not the tool definitions.
+
+What that means for the ``/sites`` A/B: the pocket specialist's prompt is a
+~12-17k-token design-rules block, which is exactly the shape that DOES cache, so
+the target workload is likely fine. A chat agent carrying a small prompt and a
+big tool surface is the case that will not cache and should be measured on its
+own rather than assumed from the specialist's numbers.
 
 The counts come from ``RunUsage``, which documents ``input_tokens`` as the
 INCLUSIVE total with ``cache_read_tokens`` / ``cache_write_tokens`` as subsets
