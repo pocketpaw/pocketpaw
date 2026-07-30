@@ -411,7 +411,7 @@ class TestDeadFrameShell:
         from pocketpaw_ee.paw_bar.router import _dead_frame_response
 
         allowed = _dead_frame_response("https://brewco.com", ["brewco.com"]).body.decode()
-        assert "pawbar:'dead'" in allowed and "https://brewco.com" in allowed
+        assert "type:'pawbar:dead'" in allowed and "https://brewco.com" in allowed
         # An unlisted parent gets NO script — nothing is posted anywhere.
         stranger = _dead_frame_response("https://evil.example", ["brewco.com"]).body.decode()
         assert "postMessage" not in stranger
