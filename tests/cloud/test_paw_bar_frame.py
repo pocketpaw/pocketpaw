@@ -3,6 +3,11 @@
 # Created 2026-07-15: covers GET /paw-bar/frame (the iframe document + the CSP
 # frame-ancestors embedder gate) and the CSP/parent-origin helper functions.
 # Three layers:
+# Updated 2026-07-30 (frame-ancestors port fix): the expected header now carries a
+#   ``:*`` port on every portless entry. A CSP host-source with no port matches only
+#   the scheme's DEFAULT port, so a site served on any other port could not be framed
+#   and the bar rendered as an empty grey box. These assertions pinned that. The
+#   header-injection guard is unchanged and still covered.
 #   * Pure-function proofs (no I/O): the frame-ancestors builder emits EXACTLY the
 #     Site's allowed_origins, fails closed (None) on an empty/unusable allowlist,
 #     sanitizes header-injection attempts, and the parent-origin validator only
@@ -39,10 +44,10 @@ _FRAME_ORIGIN = "https://frame.pocketpaw.test"
 def test_frame_ancestors_emits_exactly_allowed_origins():
     from pocketpaw_ee.paw_bar.router import _frame_ancestors_csp
 
-    assert _frame_ancestors_csp(["brewco.com"]) == "frame-ancestors brewco.com"
+    assert _frame_ancestors_csp(["brewco.com"]) == "frame-ancestors brewco.com:*"
     assert (
         _frame_ancestors_csp(["brewco.com", "shop.example.com"])
-        == "frame-ancestors brewco.com shop.example.com"
+        == "frame-ancestors brewco.com:* shop.example.com:*"
     )
 
 
@@ -66,7 +71,7 @@ def test_frame_ancestors_sanitizes_header_injection():
         ["brewco.com", "evil.com; default-src *", "bad\nhost", "https://ok.example.com/path"]
     )
     # The two malformed entries are dropped; the scheme+path entry is reduced to host.
-    assert csp == "frame-ancestors brewco.com ok.example.com"
+    assert csp == "frame-ancestors brewco.com:* ok.example.com:*"
     assert ";" not in csp
     assert "\n" not in csp
 
@@ -130,7 +135,9 @@ async def test_frame_valid_key_renders_with_csp(frame_client):
     assert res.status_code == 200
     assert res.headers["content-type"].startswith("text/html")
     # The embedder gate: frame-ancestors with EXACTLY the Site's allowed_origins.
-    assert res.headers["content-security-policy"] == "frame-ancestors brewco.com shop.example.com"
+    assert (
+        res.headers["content-security-policy"] == "frame-ancestors brewco.com:* shop.example.com:*"
+    )
     body = res.text
     # The document seeds window.__PAWBAR__ before loading the app.
     assert "window.__PAWBAR__" in body

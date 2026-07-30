@@ -772,7 +772,11 @@ async def test_preview_frame_csp_is_dashboard_origin(client, monkeypatch):
     await store.create_widget(_widget())
     res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
     assert res.status_code == 200
-    assert res.headers["content-security-policy"] == "frame-ancestors dash.example.com"
+    # The ``:*`` port comes from the frame-ancestors port fix (2026-07-30): a
+    # portless host-source matches only the default port. The REAL dashboard
+    # origin carries one (localhost:5173) and is emitted as written; this
+    # fixture omits it, so it picks up the any-port form.
+    assert res.headers["content-security-policy"] == "frame-ancestors dash.example.com:*"
     # The Site's public allowlist must NOT be the framer here.
     assert "brewco.com" not in res.headers["content-security-policy"]
 
