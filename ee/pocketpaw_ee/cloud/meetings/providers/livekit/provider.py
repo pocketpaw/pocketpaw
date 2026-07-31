@@ -31,6 +31,9 @@ class LiveKitProvider:
 
         Do NOT create the LiveKit room yet. Rooms are created lazily on
         start() so they don't accumulate for meetings that never happen.
+
+        join_url is left empty — the frontend generates a proper shareable
+        invite link via the /livekit/rooms/{group_id}/invite endpoint.
         """
         group_id = body.group_id
         if group_id:
@@ -40,11 +43,9 @@ class LiveKitProvider:
             room_name = f"meeting-{id(ctx)}"
             provider_payload = {"room_name": room_name}
 
-        join_url = f"pocketpaw://meetings/{body.title or 'call'}?join"
-
         return ProviderCreateResult(
             provider_payload=provider_payload,
-            join_url=join_url,
+            join_url="",
         )
 
     async def start(self, ctx: RequestContext, meeting) -> ProviderStartResult:
