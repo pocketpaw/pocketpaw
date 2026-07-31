@@ -1,5 +1,19 @@
 # tests/cloud/test_agent_activity.py — workspace agent-activity board (HR-12a).
 #
+# Updated: 2026-07-31 (fix/agent-activity-endpoint-tests-time-bomb) — the two
+# ENDPOINT tests dated their runs against the frozen ``NOW`` (2026-07-28) while
+# the endpoint reads through the REAL clock: the router calls ``build_activity``
+# with no ``now``, so nothing can inject one. Both passed on the day they were
+# written and went red the next, once the seeded runs aged past the service's
+# 24h ``RECENT_WINDOW`` and the board came back empty. dev's CI has been red on
+# exactly these two since 2026-07-29, on every Python version.
+#
+# They now date their runs against ``datetime.now(UTC)`` via ``_run(base=...)``.
+# The service-level tests keep the frozen NOW — they pass ``now=NOW`` into
+# ``build_activity``, so clock and data stay consistent by construction. The rule
+# for anything added here: inject the clock on BOTH sides or on neither. Freezing
+# only the data is what set this bomb.
+#
 # Created: 2026-07-28 (feat/cockpit-agent-activity) — pins the read-only board
 # end-to-end against REAL Beanie queries (mongomock-motor), because the property
 # that matters most here is a QUERY property: every read is filtered to the
@@ -47,16 +61,24 @@ async def _run(
     minutes_ago: int = 5,
     ended: bool = True,
     user_id: str = "u1",
+    base: datetime | None = None,
 ) -> str:
     """Insert one ChatRunDoc. Returns its run_id.
 
     Inserted directly (not through ``create_run``) so a test can express a
     terminal run in one line; the READ path under test is the real service.
+
+    ``base`` is the clock the run is dated against, defaulting to the frozen
+    ``NOW``. A test that reaches the service directly passes ``now=NOW`` too, so
+    the pair stays consistent forever. A test that goes through the HTTP endpoint
+    CANNOT inject a clock — the router calls ``build_activity`` with no ``now`` —
+    so it must date its runs against the real one, or ``RECENT_WINDOW`` ages them
+    out and the board reads empty.
     """
     from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 
     rid = run_id or f"r-{workspace}-{agent_id}-{status}-{minutes_ago}-{user_id}"
-    created = NOW - timedelta(minutes=minutes_ago)
+    created = (base or NOW) - timedelta(minutes=minutes_ago)
     terminal = status not in ("queued", "running")
     doc = ChatRunDoc(
         run_id=rid,
@@ -332,7 +354,13 @@ def _client(app: FastAPI) -> AsyncClient:
 
 
 async def test_endpoint_returns_the_board(mongo_db):  # noqa: ARG001
-    await _run(workspace="w1", agent_id="a1", status="running", minutes_ago=2)
+    # Dated against the REAL clock, not the frozen NOW: the endpoint gives the
+    # service no ``now``, so the run has to fall inside the live RECENT_WINDOW.
+    # Seconds resolution, because ``last_active`` is compared EXACTLY and BSON
+    # keeps only milliseconds — a raw ``now()`` writes .363291 and reads back
+    # .363000. The frozen NOW never exposed this; it had no sub-second part.
+    real_now = datetime.now(UTC).replace(microsecond=0)
+    await _run(workspace="w1", agent_id="a1", status="running", minutes_ago=2, base=real_now)
 
     async with _client(_build_app()) as client:
         resp = await client.get("/api/v1/agent-activity")
@@ -345,7 +373,7 @@ async def test_endpoint_returns_the_board(mongo_db):  # noqa: ARG001
             "agent_id": "a1",
             "status": "active",
             "active_runs": 1,
-            "last_active": (NOW - timedelta(minutes=2)).isoformat(),
+            "last_active": (real_now - timedelta(minutes=2)).isoformat(),
         }
     ]
 
@@ -356,8 +384,9 @@ async def test_endpoint_is_scoped_to_the_callers_workspace(mongo_db):  # noqa: A
     Membership is not the filter — the active workspace is. This is the test
     that would fail if the query ever stopped carrying the workspace.
     """
-    await _run(workspace="w1", agent_id="mine", status="running")
-    await _run(workspace="w2", agent_id="theirs", status="running")
+    real_now = datetime.now(UTC)
+    await _run(workspace="w1", agent_id="mine", status="running", base=real_now)
+    await _run(workspace="w2", agent_id="theirs", status="running", base=real_now)
 
     app = _build_app(active_workspace="w1", memberships=["w1", "w2"])
     async with _client(app) as client:
