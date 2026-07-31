@@ -1143,3 +1143,42 @@ async def test_transcript_survives_an_owner_message_store_failure(client, monkey
     monkeypatch.setattr(store, "list_owner_messages", _boom)
 
     assert await _transcript(c, str(site.id)) == [("assistant", "We open at 8.")]
+
+
+class TestAuthorCoercionAtTheModel:
+    """The authenticated principal is a PydanticObjectId, not a str.
+
+    An owner reply built straight from `current_active_user` failed
+    OwnerMessage's string_type validation and the endpoint 500'd — found by
+    driving the reply endpoint on the live rig, with the whole unit suite
+    green because every test hands in a plain string. This is the FOURTH time
+    this ObjectId-vs-str seam has bitten this layer, so the coercion lives on
+    the models rather than at each call site.
+    """
+
+    def test_owner_message_accepts_an_objectid_author(self) -> None:
+        from beanie import PydanticObjectId
+
+        from pocketpaw.paw_bar.models import OwnerMessage
+
+        oid = PydanticObjectId()
+        msg = OwnerMessage(widget_id="w1", customer_ref="c1", author=oid, content="hi")
+
+        assert msg.author == str(oid)
+        assert isinstance(msg.author, str)
+
+    def test_conversation_note_accepts_an_objectid_author(self) -> None:
+        from beanie import PydanticObjectId
+
+        from pocketpaw.paw_bar.models import ConversationNote
+
+        oid = PydanticObjectId()
+        note = ConversationNote(author=oid, text="rang them back", at="2026-07-31T00:00:00")
+
+        assert note.author == str(oid)
+
+    def test_a_missing_author_is_empty_not_none(self) -> None:
+        from pocketpaw.paw_bar.models import ConversationNote, OwnerMessage
+
+        assert OwnerMessage(widget_id="w1", customer_ref="c1", author=None).author == ""
+        assert ConversationNote(author=None).author == ""

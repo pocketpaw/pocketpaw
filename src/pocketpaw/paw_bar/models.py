@@ -532,6 +532,19 @@ class ConversationNote(BaseModel):
     text: str = ""
     at: str = ""
 
+    @field_validator("author", mode="before")
+    @classmethod
+    def _author_to_str(cls, value: Any) -> str:
+        """Same ObjectId-vs-str coercion as :class:`OwnerMessage.author`.
+
+        The router already stringifies before calling, but the model is the one
+        place every caller passes through — belt and braces against the seam
+        that has now bitten this layer four separate times.
+        """
+        if value is None:
+            return ""
+        return value if isinstance(value, str) else str(value)
+
 
 class Conversation(BaseModel):
     """The lifecycle + operator metadata for ONE visitor conversation.
@@ -637,6 +650,23 @@ class OwnerMessage(BaseModel):
     content: str = ""
     author: str = ""
     created_at: str = ""
+
+    @field_validator("author", mode="before")
+    @classmethod
+    def _author_to_str(cls, value: Any) -> str:
+        """Coerce the caller id, which arrives as a ``PydanticObjectId``.
+
+        The authenticated principal (``current_active_user``) carries an
+        ObjectId, not a str, so an owner reply built straight from it failed
+        string_type validation and the endpoint 500'd. Every unit test hands in
+        a plain string, which is why the suites were green and only a live
+        reply surfaced it — the fourth time this exact ObjectId-vs-str seam bit
+        this layer, so it is coerced at the MODEL now rather than at each of
+        the call sites that keep forgetting.
+        """
+        if value is None:
+            return ""
+        return value if isinstance(value, str) else str(value)
 
 
 # ---------------------------------------------------------------------------
