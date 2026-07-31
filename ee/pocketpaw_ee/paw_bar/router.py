@@ -1,4 +1,23 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-31 (owner inbox, slice 3) — THE ESCAPE HATCH. A visitor can
+#   always reach a person, and the owner is told when it happens:
+#     + POST /paw-bar/request-human — {key, w, customer_ref, message?, contact?}
+#       → {ok, handoff_id, state, message}. PUBLIC, same ``_front_gate_for_key``
+#       chain as chat/action/articles (404 → 429 → 401 → 403 origin, 403 binding,
+#       plus the site kill switch inside the key resolver) and the same injection
+#       screen on the free-text note. It runs the SHARED producer
+#       (``paw_bar.handoff.raise_handoff``) the concierge's own
+#       ``pawbar_request_human`` tool runs, so a visitor-raised and an
+#       agent-raised handoff are one record. Accepted in EVERY conversation
+#       state, including while the bot is answering confidently — the whole point
+#       is that reaching a human never depends on the agent offering it.
+#     ~ GET .../site/{id}/handoffs — unchanged in shape, no longer always empty.
+#     ~ POST /paw-bar/chat — notifies the workspace owner on the FIRST turn of a
+#       new conversation (the row's absence before the upsert is the signal), and
+#       the muted-bot branch notifies on a visitor reply while a human holds the
+#       thread. Both awaited but never-raising (``paw_bar.notify``), so a dead
+#       notifier costs the owner a badge, never the visitor an answer.
+#   Notification fan-out is the WORKSPACE OWNER ALONE in v1 (design §10 Q4).
 # Updated: 2026-07-30 (owner inbox, slice 2) — TYPE-TO-TAKEOVER. The owner types,
 #   the bot shuts up, and the visitor sees a human:
 #     + POST .../site/{id}/conversations/{customer_ref}/reply — {text} →
@@ -370,6 +389,7 @@ from pocketpaw.paw_bar.models import (
     PawBarWidgetPublic,
 )
 from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_action
+from pocketpaw_ee.paw_bar.handoff import PAW_HANDOFFS_TYPE
 
 logger = logging.getLogger(__name__)
 
@@ -1498,20 +1518,21 @@ async def sync_site_knowledge_now(
 #       pocket-scoped read IS site-scoped. Runs are grouped by ``user_id``
 #       (customer_ref) into one conversation each. No full-collection scan — the
 #       fetch window is bounded.
-#   * handoffs — the ``_paw_handoffs`` reserved Fabric object (SS-6). NO producer
-#       exists yet, so v1 defines the shape (contact / question / transcript_ref /
-#       created_at) and queries Fabric for objects of that type carrying this
-#       widget's id — an empty list until the capture path ships (deferred). The
-#       widget-id property filter is the same cross-site isolation guarantee.
+#   * handoffs — the ``_paw_handoffs`` reserved Fabric object (SS-6), written by
+#       ``paw_bar.handoff.raise_handoff`` since slice 3 (before that there was no
+#       producer and this read was always empty). The shape is unchanged — contact
+#       / question / transcript_ref / created_at — and the read still queries
+#       Fabric for objects of that type carrying this widget's id. The widget-id
+#       property filter is the same cross-site isolation guarantee.
 # Overview counts are cheap (COUNT / distinct) — never load a full list.
 # ---------------------------------------------------------------------------
 
 
-# The reserved Fabric object type for a human-handoff request (SS-6). No producer
-# yet; v1 only READS it. The shape below is the contract a future capture path
-# must write (each field is a Fabric object property; ``widget_id`` is the scope
-# key this read filters on).
-_PAW_HANDOFFS_TYPE = "_paw_handoffs"
+# The reserved Fabric object type for a human-handoff request (SS-6). Owned by
+# the PRODUCER (``paw_bar.handoff``) and imported here so the writer and this
+# reader can never name two different types. Each contract field is a Fabric
+# object property; ``widget_id`` is the scope key this read filters on.
+_PAW_HANDOFFS_TYPE = PAW_HANDOFFS_TYPE
 
 # The concierge run marker on ``ChatRunDoc`` — a concierge dispatch stamps
 # ``context_type="concierge"`` and ``scope_id=<pocket_id>`` (see ``concierge_chat``).
@@ -1562,6 +1583,10 @@ _PUBLIC_MESSAGE_ROLES = ["owner", "system"]
 # must never be rendered as one — the frame's own event name says so. Kept short
 # and specific: the visitor needs to know a person has this, not to read a policy.
 _HUMAN_REPLYING_MESSAGE = "Someone from the team is replying — hang tight."
+
+# What a visitor is told when they use the escape hatch. States the fact — a
+# person has been told — without promising a response time nobody committed to.
+_HUMAN_NOTIFIED_MESSAGE = "Someone from the team has been notified and will pick this up."
 
 # How many of a visitor's ref characters survive into the fallback display name.
 # Enough to tell two visitors apart at a glance, short enough to read as a label.
@@ -2395,11 +2420,14 @@ async def get_site_handoffs(
 ) -> HandoffsResponse:
     """Human-handoff requests captured for a site's concierge widget (D2).
 
-    Reads ``_paw_handoffs`` Fabric objects scoped to this widget + workspace. The
-    capture path does not exist yet (SS-6, deferred), so this returns an empty but
-    well-shaped list in v1. When a producer ships, each object's properties map to
-    {contact, question, transcript_ref, created_at}. Cross-site isolation is the
-    ``widget_id`` property filter (a sibling widget's handoffs never match).
+    Reads ``_paw_handoffs`` Fabric objects scoped to this widget + workspace, each
+    object's properties mapping to {contact, question, transcript_ref,
+    created_at}. Since slice 3 these are real rows: ``paw_bar.handoff`` writes one
+    whenever a visitor asks for a person (their own button, or the concierge's
+    ``pawbar_request_human`` tool). Empty is still the correct answer for a site
+    nobody has escalated. Cross-site isolation is the ``widget_id`` property
+    filter (a sibling widget's handoffs never match) on top of the
+    workspace-scoped Fabric store and the workspace-scoped widget resolution.
     """
     _site, widget = await _resolve_site_and_widget(site_id, workspace_id)
     if widget is None:
@@ -3051,9 +3079,9 @@ async def _count_conversations(pocket_id: str, workspace_id: str) -> int:
 async def _query_handoff_objects(widget_id: str, workspace_id: str, *, limit: int) -> list[Any]:
     """Query ``_paw_handoffs`` Fabric objects for one widget (D2 handoffs).
 
-    Scoped to the widget (a ``widget_id`` object property) AND the workspace. No
-    producer exists yet, so this returns [] in v1. Best-effort: a Fabric error
-    degrades to an empty list.
+    Scoped to the widget (a ``widget_id`` object property) AND the workspace —
+    the same two-key scoping ``handoff._write_handoff_object`` writes through.
+    Best-effort: a Fabric error degrades to an empty list.
     """
     try:
         from pocketpaw.fabric.models import FabricQuery
@@ -3078,7 +3106,7 @@ async def _count_handoffs(widget_id: str, workspace_id: str) -> int:
     """Cheap COUNT of a widget's ``_paw_handoffs`` objects (D2 overview).
 
     Reuses the scoped Fabric query but reads only its ``total`` (a COUNT(*)) — the
-    row payload isn't materialized. 0 in v1 (no producer). Best-effort → 0.
+    row payload isn't materialized. Best-effort → 0.
     """
     try:
         from pocketpaw.fabric.models import FabricQuery
@@ -3466,6 +3494,20 @@ async def _human_replying_response(
     except Exception:  # noqa: BLE001 — the visitor still gets told a human is on it
         logger.warning("paused-bot turn bookkeeping failed (non-fatal)", exc_info=True)
 
+    # Owner notification #3 of 3 (slice 3): a visitor wrote while the bot was
+    # muted — i.e. straight at the person who took the conversation over, who is
+    # by definition not watching the bot's queue. Never-raising by construction.
+    from pocketpaw_ee.paw_bar.notify import NOTIFY_VISITOR_REPLY, notify_workspace_owner
+
+    await notify_workspace_owner(
+        workspace_id=workspace_id,
+        kind=NOTIFY_VISITOR_REPLY,
+        title="A visitor replied to you",
+        body=text,
+        widget_id=widget_id,
+        customer_ref=customer_ref,
+    )
+
     async def gen() -> AsyncIterator[bytes]:
         yield _sse("human_replying", {"message": _HUMAN_REPLYING_MESSAGE})
         yield _sse("stream_end", {"assistant_message_id": None, "cancelled": False})
@@ -3616,13 +3658,41 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     # before this turn is classified — one cheap conditional UPDATE that no-ops for
     # every conversation nobody has taken over (the overwhelming majority).
     conversation = None
+    is_new_conversation = False
     try:
         await store.auto_resume_bot_if_idle(body.widget_id, body.customer_ref, ctx.workspace_id)
+        # Read BEFORE the upsert so "is this the first time we've heard from this
+        # person" is answered by the absence of a row, not inferred from counters
+        # the owner's own reads reset. It is the notification trigger below.
+        is_new_conversation = (
+            await store.get_conversation(
+                body.widget_id, body.customer_ref, workspace_id=ctx.workspace_id
+            )
+            is None
+        )
         conversation = await store.upsert_conversation_on_visitor_turn(
             body.widget_id, body.customer_ref, ctx.workspace_id
         )
     except Exception:
         logger.warning("conversation state upsert failed (non-fatal)", exc_info=True)
+
+    # Owner notification #1 of 3 (slice 3): a NEW conversation started. Not every
+    # turn — a bar that pinged on each message would train the owner to ignore the
+    # badge, which costs them the two escalations that actually need them. Awaited
+    # rather than fired-and-forgotten so a raising notifier is proven harmless by
+    # the tests rather than merely unobserved; ``notify_workspace_owner`` never
+    # raises, so this cannot cost the visitor their answer.
+    if is_new_conversation:
+        from pocketpaw_ee.paw_bar.notify import NOTIFY_NEW_CONVERSATION, notify_workspace_owner
+
+        await notify_workspace_owner(
+            workspace_id=ctx.workspace_id,
+            kind=NOTIFY_NEW_CONVERSATION,
+            title="New concierge conversation",
+            body=body.message,
+            widget_id=body.widget_id,
+            customer_ref=body.customer_ref,
+        )
 
     # (7c) THE MUTE. A human is holding this conversation, so the bot does not
     # answer over them — double-answering is the single loudest complaint about
@@ -4270,6 +4340,93 @@ async def post_decision_contact(body: DecisionContactRequest, request: Request) 
         workspace_id=resolve_workspace_id(widget) or None,
     )
     return JSONResponse({"ok": True, "attached": attached})
+
+
+# ---------------------------------------------------------------------------
+# The escape hatch (2026-07-31, owner inbox slice 3) — "talk to a human"
+#
+# The concierge agent has a ``pawbar_request_human`` tool and a prompt telling it
+# a request for a person is always honored. This endpoint is the half that does
+# not depend on the agent AGREEING: the bar can offer "talk to a human" as a
+# permanent affordance, and it works while the bot is answering confidently,
+# while it is muted, and while it is refusing to admit it can't help. Same armor
+# class as chat/action/articles via the shared ``_front_gate_for_key`` (which
+# also carries the owner's concierge kill switch), plus the same injection screen
+# chat runs on free text, because the note lands on a surface a human reads.
+# ---------------------------------------------------------------------------
+
+
+class RequestHumanRequest(BaseModel):
+    # Same public credential + widget naming as the action endpoint (``key`` /
+    # ``w``), so the glass app's existing fetcher shape is reused verbatim.
+    key: str
+    w: str
+    customer_ref: str
+    # Why they want a person. Optional: a visitor who taps the button without
+    # typing anything has still asked, and refusing that for want of a sentence
+    # would defeat the point.
+    message: str = ""
+    # An address they can be reached on, typed HERE and for this purpose. Never
+    # inherited from the decision-capture row, whose PII invariant keeps that
+    # address where it was left.
+    contact: str = ""
+
+
+@router.post("/paw-bar/request-human")
+async def post_request_human(body: RequestHumanRequest, request: Request) -> JSONResponse:
+    """Raise a human handoff for this visitor → ``{ok, handoff_id, state}``.
+
+    Front-gated by ``_front_gate_for_key`` (404 → 429 → 401 → 403 origin → 403
+    binding, plus the site's ``concierge_enabled`` kill switch inside the key
+    resolver), then the free-text note is injection-screened exactly as a chat
+    message is, then the SHARED producer runs — the same
+    ``handoff.raise_handoff`` the agent's tool calls, so a visitor-raised and an
+    agent-raised handoff are the same record.
+
+    Available in EVERY conversation state. A paused bot, an open thread, a
+    conversation that has never been escalated — all of them accept this, because
+    "I want a person" is not a fallback for when the bot fails, it is a thing
+    customers are entitled to ask for at any moment.
+    """
+    origin = request.headers.get("origin")
+    widget, ctx, _site = await _front_gate_for_key(
+        widget_id=body.w,
+        signed_key=body.key,
+        customer_ref=body.customer_ref,
+        origin=origin,
+        request=request,
+    )
+    if body.message and not await _screen_message_for_injection(body.message, widget.id):
+        raise HTTPException(400, "message_rejected")
+    if body.contact and (
+        len(body.contact) > _MAX_CONTACT_EMAIL_CHARS or not _CONTACT_EMAIL_RE.match(body.contact)
+    ):
+        raise HTTPException(422, "invalid_email")
+
+    from pocketpaw_ee.paw_bar.handoff import raise_handoff
+
+    outcome = await raise_handoff(
+        widget=widget,
+        workspace_id=ctx.workspace_id,
+        customer_ref=body.customer_ref,
+        question=body.message,
+        contact=body.contact,
+        source="visitor",
+        store=_store(),
+    )
+    if not outcome.ok:
+        raise HTTPException(outcome.http_status, outcome.error)
+    return JSONResponse(
+        {
+            "ok": True,
+            "handoff_id": outcome.handoff_id,
+            # The resulting queue state, reported honestly: on the rare partial
+            # failure where only the handoff record landed, the conversation was
+            # not moved and this must not claim that it was.
+            "state": ConversationState.NEEDS_HUMAN.value if outcome.escalated else "",
+            "message": _HUMAN_NOTIFIED_MESSAGE,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
