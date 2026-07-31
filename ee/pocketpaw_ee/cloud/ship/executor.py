@@ -236,6 +236,11 @@ async def _run_verb(blob: dict[str, Any]) -> tuple[bool, str]:
                 # destroy; here we make the box's apps gone).
                 for existing in await ship_store.list_apps(workspace_id, box_id=box_id):
                     await session.engine.destroy(existing.name)
+                    # Flip the ROW too, not just the container. Without this the
+                    # app kept its pre-teardown status and urls, so the console
+                    # listed live apps with reachable URLs for containers that no
+                    # longer existed (the destroy_app branch below always did it).
+                    await ship_store.set_app_status(existing, "destroyed")
                 await ship_store.set_status(box, "destroyed")
                 return True, f"destroyed box {box_id}"
             if verb == "destroy_app":
@@ -249,13 +254,21 @@ async def _run_verb(blob: dict[str, Any]) -> tuple[bool, str]:
                 result = await session.engine.rollback(app.name, image)  # type: ignore[union-attr]
                 return True, f"rolled back to {result.image}"
             if verb == "deploy_app":
-                from pocketpaw_ee.ship_engine.port import DeployRequest
+                from pocketpaw_ee.cloud.ship.deploy_job import deploy_over_session
 
                 image = str(params.get("image") or getattr(app, "image", "") or "")
-                if not image:
+                # A git-source app builds from its repo and needs no image; only
+                # the pre-built-image path requires one.
+                if not image and getattr(app, "source_kind", "image") != "git":
                     return False, "deploy requires an image"
-                result = await session.engine.deploy_app(
-                    DeployRequest(app=app.name, image=image)  # type: ignore[union-attr]
+                # ONE definition of deploying, shared with the queued path. This
+                # branch used to re-implement it and had drifted: it passed a str
+                # where an AppSpec is required (so every approved prod deploy died
+                # on AttributeError), skipped env decryption, and had no git path.
+                result = await deploy_over_session(
+                    session,
+                    app=app,  # type: ignore[arg-type]
+                    image=image,
                 )
                 await ship_store.record_app_deployed(
                     app,  # type: ignore[arg-type]

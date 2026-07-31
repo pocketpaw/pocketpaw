@@ -65,6 +65,11 @@ SHIP3_REPLIES: dict[str, str] = {
     f"dokku storage:mount {APP} {APP}-data --container-dir /data": "storage_mount.txt",
     f"dokku ps:restart {APP}": "ps_restart.txt",
     f"dokku ps:rebuild {APP}": "ps_rebuild.txt",
+    # The APPROVED-teardown + approved-deploy paths (fix/ship-review-p0). These
+    # were never mapped because tests/cloud/ship/test_instinct_gate.py stubs
+    # ``_run_verb`` out, so the executor's real verb bodies never ran under test.
+    f"dokku --force apps:destroy {APP}": "apps_destroy.txt",
+    (f"dokku config:set --no-restart {APP} API_KEY=hunter2-super-secret-value"): "config_set.txt",
     f"dokku logs {APP} --num 100": "logs.txt",
     ship_engine.BOX_METRICS_COMMAND: "box_metrics.txt",
     # App-level metrics (SHIP-12): ps:report state + df + real docker stats.

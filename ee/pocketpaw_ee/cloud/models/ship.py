@@ -147,8 +147,13 @@ class ShipBox(TimestampedDocument):
 
 
 # The app lifecycle. ``created`` is the birth state; a deploy job drives
-# ``deploying`` -> ``live`` / ``failed``.
-ShipAppStatus = Literal["created", "deploying", "live", "failed"]
+# ``deploying`` -> ``live`` / ``failed``. ``destroyed`` is the terminal state an
+# approved teardown writes — it MUST be a member here: the executor was already
+# writing it, and because a Beanie save does not validate on assignment the doc
+# persisted with a value outside this Literal, after which every READ of that
+# workspace's app list raised ValidationError (one torn-down app made the whole
+# list unreadable, unfixable through the API).
+ShipAppStatus = Literal["created", "deploying", "live", "failed", "destroyed"]
 
 # How the app's image is produced. v1 deploys a pre-built image reference; the
 # build strategy is recorded now so the SHIP-5 build path has somewhere to read
