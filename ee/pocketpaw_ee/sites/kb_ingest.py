@@ -7,11 +7,15 @@
 # carry a catalog. Ask a concierge "what are your opening hours" and the answer was
 # an honest "I don't know" about a business whose own homepage says 8am.
 #
-# The concierge's grounding scope is fixed: ``agent_service._kb_scopes_for_context``
-# locks a CONCIERGE run to ``pocket:<pocket_id>`` and nothing else (no agent:, no
-# workspace:, no user: — a public caller must never read the whole tenant's KB). So
-# "the concierge knows the business" reduces to one job: get the site's pages into
-# ``pocket:<pocket_id>``. That is all this module does.
+# The concierge's grounding scopes are fixed by
+# ``agent_service._kb_scopes_for_context``: a CONCIERGE run reads
+# ``pocket:<pocket_id>`` and ``agent:<its own agent id>``, and nothing else (no
+# workspace:, no user: — a public caller must never read the whole tenant's KB).
+# The second scope is the owner's own attachments on the site's agent; this module
+# owns the FIRST one, so "the concierge knows the business without anyone uploading
+# anything" reduces to one job: get the site's pages into ``pocket:<pocket_id>``.
+# That is all this module does, and it is why a re-publish can never clobber what an
+# owner attached to the agent — the two scopes have separate writers.
 #
 # SOURCE OF TRUTH — the POCKET, not the built artifact and not the live URL:
 #   * the pocket is durable, so this works at publish time, at agent-provision time
@@ -378,8 +382,11 @@ def extract_site_documents(
 
 
 def kb_scope_for_pocket(pocket_id: str) -> str:
-    """The scope a CONCIERGE run reads. Mirrors ``_kb_scopes_for_context``'s
-    concierge branch — if that ever changes, this is the other end of the pair."""
+    """The scope the page sync writes, and the first of the two a CONCIERGE run
+    reads. Mirrors the POCKET half of ``_kb_scopes_for_context``'s concierge branch
+    — if that ever changes, this is the other end of the pair. The other half,
+    ``agent:<agent_id>``, has a different writer (the owner, through the agent's
+    Knowledge tab), which is why a re-sync can never clobber it."""
     return f"pocket:{pocket_id}"
 
 

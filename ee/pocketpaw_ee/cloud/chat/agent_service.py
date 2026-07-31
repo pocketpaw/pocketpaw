@@ -187,6 +187,16 @@ cloud Mongo client is connected — so it hard-failed EVERY workspace-less run
 ``run_core.execute_run`` now wraps the run lifecycle in ``mark_cloud_chat_run``
 and the jail fails closed only when this marker is set; otherwise it falls back
 to ``settings.file_jail_path`` (pre-ART-2 behavior).
+
+Changes: 2026-07-30 (Paw Bar inbox D5) — ``_kb_scopes_for_context`` now grants a
+CONCIERGE run ``agent:<target_agent_id>`` ALONGSIDE ``pocket:<pocket_id>``.
+Before this, an owner who opened their site's concierge in ``/agents`` and
+attached knowledge to the AGENT got nothing on the site — only the site→pocket
+page sync reached the visitor, and the failure was silent. Each site concierge is
+a dedicated, bijective agent (``paw_bar.agent_provisioning.ensure_site_agent``),
+so its ``agent:`` scope is that one site's knowledge, not a cross-tenant pool.
+``workspace:`` and ``user:`` stay DROPPED — those are the tenant-wide and
+member-private tiers a public, anonymous visitor must never reach.
 """
 
 from __future__ import annotations
@@ -1974,17 +1984,44 @@ def _kb_scopes_for_context(ctx: ScopeContext) -> list[str]:
     is the cloud-side decision (the OSS resolver only honors the field it is
     handed).
 
-    CONCIERGE (T2, finding #2): a PUBLIC, anonymous concierge run is locked to
-    the Site's pocket ALONE — ``[pocket:<pocket_id>]`` and nothing else. The
-    ``agent:`` and ``workspace:`` scopes are deliberately DROPPED: a public
-    caller must never read the whole tenant's KB (``workspace:``) nor an agent's
-    cross-pocket KB (``agent:``), only the one pocket the Site is published from.
-    This is the KB half of "a concierge must not reach a sibling pocket in the
-    same workspace"; the pocket binding itself is set by ``_resolve_concierge``.
+    CONCIERGE (T2 finding #2, widened by Paw Bar inbox D5): a PUBLIC, anonymous
+    concierge run reads exactly TWO scopes — ``pocket:<pocket_id>`` (the Site's
+    own pocket, where the page sync writes) and ``agent:<target_agent_id>`` (the
+    knowledge the owner attached to this site's concierge agent directly). Site
+    pocket first: it is the more specific answer to "what is this site about".
+
+    ``agent:`` is safe here and ``workspace:`` is not, and the difference is not
+    cosmetic:
+
+    * Each site concierge is a DEDICATED agent, bijective with its site
+      (``paw_bar.agent_provisioning.ensure_site_agent``; deterministic slug
+      ``concierge-<site_id>``, never a shared/universal agent). Its ``agent:``
+      scope therefore holds one site's knowledge — the owner put it there for
+      these visitors — and ``_resolve_concierge`` has already proven that agent
+      belongs to this Site's workspace (``_agent_in_workspace``) and that the
+      run's pocket reconciles to the same tenant. A sibling agent's scope is
+      unreachable: the id comes from the widget binding, never from the caller.
+    * ``workspace:`` is the TENANT-WIDE tier — every pocket, every agent, every
+      owner upload in the workspace. Handing that to an anonymous caller is the
+      "ask the right question, read the whole company" hole, so it stays dropped.
+    * ``user:`` is the member-private tier and can never fire here anyway
+      (``members`` is empty for a concierge), but it is dropped explicitly.
+
+    The consequence is a product rule, not just a code rule: anything attached to
+    a site concierge agent is PUBLISHABLE BY DEFINITION. The agent knowledge read
+    advertises that with ``visible_to_site_visitors`` (see
+    ``agents.service.is_visible_to_site_visitors``) so the owner is told before
+    they attach, not after a visitor quotes it back at them.
     """
     if ctx.kind is ScopeKind.CONCIERGE:
-        # Public, site-scoped grounding ONLY. Never agent:/workspace:/user:.
-        return [f"pocket:{ctx.pocket_id}"] if ctx.pocket_id else []
+        # Public, site-scoped grounding: the Site's pocket + this site's own
+        # dedicated concierge agent. NEVER workspace:/user:.
+        concierge_scopes: list[str] = []
+        if ctx.pocket_id:
+            concierge_scopes.append(f"pocket:{ctx.pocket_id}")
+        if ctx.target_agent_id:
+            concierge_scopes.append(f"agent:{ctx.target_agent_id}")
+        return concierge_scopes
     scopes: list[str] = []
     seen: set[str] = set()
     for candidate in (

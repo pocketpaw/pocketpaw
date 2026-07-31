@@ -12,6 +12,14 @@ require ``require_agent_owner_or_admin`` — same guard as PATCH/DELETE agent
 CRUD. Previously they had no RBAC guard beyond ``require_license``, so any
 workspace member could inject content into any agent's knowledge base.
 
+Updated 2026-07-30 (Paw Bar inbox D5): ``GET /agents/{id}/knowledge`` now returns
+``visible_to_site_visitors`` beside ``items``. A concierge run reads its own
+``agent:<id>`` KB scope, so knowledge attached to a site-bound agent is reachable
+by anonymous site visitors; the flag lets the Knowledge tab badge that instead of
+leaving it silent. Derived from the real widget→agent binding
+(``agents_service.is_visible_to_site_visitors``), and failure-soft — a badge must
+never break the list.
+
 Updated 2026-06-28 (feat/aiam-agent-revoke, AW-4): added
 ``PATCH /agents/{id}/disable`` and ``PATCH /agents/{id}/enable`` for the agent
 soft-disable / revoke-everywhere flow. Both carry the SAME owner/admin guard
@@ -240,14 +248,24 @@ async def search_knowledge(agent_id: str, q: str = Query(..., min_length=1), lim
 
 @router.get("/{agent_id}/knowledge")
 async def list_knowledge(agent_id: str):
-    """List all knowledge articles for an agent."""
+    """List all knowledge articles for an agent.
+
+    ``visible_to_site_visitors`` (Paw Bar inbox D5) is ``True`` when a paw-bar
+    widget binds this agent to a published Paw Site. A concierge run reads its own
+    ``agent:<id>`` scope, so on such an agent EVERYTHING listed here is readable by
+    anonymous visitors — the flag exists so the Knowledge surface can say that
+    before an owner attaches something private. It is a label, not a gate: it
+    never changes what this endpoint returns to its (already owner/admin-scoped)
+    caller.
+    """
     from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
 
     try:
         articles = await KnowledgeService.list_articles(agent_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=f"Failed to list knowledge: {exc}")
-    return {"items": articles}
+    visible = await agents_service.is_visible_to_site_visitors(agent_id)
+    return {"items": articles, "visible_to_site_visitors": visible}
 
 
 @router.get("/{agent_id}/knowledge/{article_id}")

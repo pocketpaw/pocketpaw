@@ -15,18 +15,49 @@ what it is allowed to know, and what it writes down about the people it talks to
 
 ## What a concierge is allowed to know
 
-A concierge run is locked to **one** knowledge scope: `pocket:<pocket_id>`, the
-pocket its site was published from. It cannot read the `agent:` scope or the
-workspace-wide scope. That is deliberate. The concierge answers anonymous callers
-from the public internet, and a public caller must never be able to reach the rest
-of the tenant's knowledge base by asking the right question.
+A concierge run reads exactly **two** knowledge scopes:
 
-The upshot is that a concierge's usefulness is decided entirely by what is in that
-one scope.
+- `pocket:<pocket_id>` — the pocket its site was published from, where the page
+  sync writes.
+- `agent:<agent_id>` — whatever the owner attached to this site's concierge agent
+  directly, in the agent's own Knowledge tab.
+
+It reads neither the workspace-wide scope nor any member's private scope, and that
+line is where the security argument lives. Every site concierge is a **dedicated**
+agent, one per site, created for that site and never shared — so its `agent:` scope
+is one site's own material, put there by the owner for these visitors. The
+workspace scope is the opposite: every pocket, every other agent, every owner
+upload in the tenant. A concierge answers anonymous callers from the public
+internet, so handing it the tenant-wide scope would mean a stranger could reach the
+rest of the business by asking the right question. That scope stays out.
+
+The agent it runs is not the caller's choice either. It comes from the site's own
+widget binding, and the run is refused outright if that agent does not belong to
+the site's workspace, so no visitor can steer a concierge onto a sibling agent's
+knowledge.
+
+<Callout type="warning">
+**Anything you attach to a site concierge is publishable by definition.** The
+agent's Knowledge tab is a public surface once that agent fronts a site: a
+visitor can get any of it quoted back at them by asking a question it answers.
+Put the price list you would print on the site there. Do not put the internal one.
+
+Knowledge that must stay private belongs on a different agent — an internal agent
+with no site binding reads nothing to visitors, because no visitor ever runs it.
+</Callout>
+
+`GET /api/v1/agents/{agent_id}/knowledge` reports this per agent: it returns
+`visible_to_site_visitors` beside the article list, `true` when a Paw Bar widget
+binds that agent to a published site. It reads the real binding, so an agent bound
+by hand in the dashboard counts the same as an auto-provisioned one. The flag is a
+label, not a gate — it changes nothing about who may call the endpoint (still the
+agent's owner or a workspace admin) and nothing about what a visitor can reach. It
+exists so the owner is told before they attach something, rather than after a
+visitor quotes it.
 
 ## Where the knowledge comes from
 
-The site's own pages are synced into that scope automatically.
+The site's own pages are synced into the pocket scope automatically.
 
 The content is read from the **pocket**, not from the built artifact and not by
 fetching the live site. The pocket is durable, so a sync works long after a publish
@@ -90,12 +121,14 @@ public articles listing (`GET /paw-bar/articles`, behind the same key, origin an
 rate gates as the chat; capped at twenty entries with a short snippet each).
 
 Attribution is approximate by design. The server re-runs a quick knowledge search
-of the visitor's question against the same pocket scope the run reads, and shows
-the synced pages that match — "what the knowledge base would ground this question
-on", not a verified trace of what the model actually quoted. Only pages the site
-sync itself produced can appear; owner-uploaded files sharing the scope are never
-listed or linked. When nothing matches, or the search fails, no sources are shown
-and the reply is unaffected.
+of the visitor's question against the site's pocket scope and shows the synced pages
+that match — "what the knowledge base would ground this question on", not a verified
+trace of what the model actually quoted. Only pages the site sync itself produced
+can appear. Owner-uploaded files sharing the pocket scope, and anything attached to
+the agent's own scope, are never listed or linked: they have no public URL to point
+at, so a reply can be grounded in them without them showing up as a citation. When
+nothing matches, or the search fails, no sources are shown and the reply is
+unaffected.
 
 ## What a concierge records
 

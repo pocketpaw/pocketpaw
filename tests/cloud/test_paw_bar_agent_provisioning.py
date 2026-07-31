@@ -472,3 +472,137 @@ class TestIdentityAndFrameStarters:
         res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY})
         assert res.status_code == 200
         assert "starters" in res.text
+
+
+# --------------------------------------------------------------------------- #
+# Paw Bar inbox D5 — the "visible to site visitors" signal
+# --------------------------------------------------------------------------- #
+
+
+@pytest_asyncio.fixture
+async def bar_store(tmp_path, mongo_db):
+    """A tmp paw-bar store patched in at the source (no HTTP app), plus Beanie for
+    the Agent docs ``is_visible_to_site_visitors`` resolves the workspace from."""
+    from unittest.mock import patch
+
+    store = PawBarStore(tmp_path / "visibility.db")
+    with patch("pocketpaw_ee.api.get_paw_bar_store", return_value=store):
+        yield store
+
+
+async def _agent_doc(**ov: Any):
+    from pocketpaw_ee.cloud.models.agent import Agent
+
+    d: dict[str, Any] = dict(
+        workspace=_WS, name="Brew & Co Concierge", slug="concierge-site-1", owner=_OWNER
+    )
+    d.update(ov)
+    agent = Agent(**d)
+    await agent.insert()
+    return agent
+
+
+class TestSiteVisitorVisibility:
+    """D5 consequence 1: a concierge run reads its own ``agent:<id>`` scope, so the
+    agent's Knowledge surface must SAY that anything on it is publishable. The
+    machine-readable half of that badge is ``visible_to_site_visitors`` on
+    ``GET /agents/{id}/knowledge``, derived from the real widget→agent binding."""
+
+    @pytest.mark.asyncio
+    async def test_widget_for_agent_finds_the_bound_widget(self, bar_store) -> None:
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        widget = await bar_store.create_widget(_widget(agent_id="agent-bound"))
+        assert (await ap.widget_for_agent("agent-bound", _WS)).id == widget.id
+
+    @pytest.mark.asyncio
+    async def test_widget_for_agent_ignores_an_unbound_or_sibling_widget(self, bar_store) -> None:
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        await bar_store.create_widget(_widget(agent_id=""))
+        await bar_store.create_widget(_widget(pocket_id="pocket-2", agent_id="agent-other"))
+        assert await ap.widget_for_agent("agent-bound", _WS) is None
+
+    @pytest.mark.asyncio
+    async def test_widget_for_agent_is_workspace_scoped(self, bar_store) -> None:
+        """Another tenant's bar never answers for this workspace's agent."""
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        await bar_store.create_widget(_widget(agent_id="agent-bound", workspace_id="ws-other"))
+        assert await ap.widget_for_agent("agent-bound", _WS) is None
+        assert await ap.widget_for_agent("agent-bound", "ws-other") is not None
+
+    @pytest.mark.asyncio
+    async def test_widget_for_agent_refuses_an_unscoped_lookup(self, bar_store) -> None:
+        """An empty agent id or workspace returns None instead of scanning — an
+        unscoped list would hand back a sibling tenant's bar."""
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        await bar_store.create_widget(_widget(agent_id="agent-bound"))
+        assert await ap.widget_for_agent("", _WS) is None
+        assert await ap.widget_for_agent("agent-bound", "") is None
+
+    @pytest.mark.asyncio
+    async def test_site_bound_agent_is_flagged_visible(self, bar_store) -> None:
+        from pocketpaw_ee.cloud.agents import service as agents_service
+
+        agent = await _agent_doc()
+        await bar_store.create_widget(_widget(agent_id=str(agent.id)))
+        assert await agents_service.is_visible_to_site_visitors(str(agent.id)) is True
+
+    @pytest.mark.asyncio
+    async def test_internal_agent_is_not_flagged_visible(self, bar_store) -> None:
+        """An ordinary workspace agent fronts no bar — no badge, no false alarm."""
+        from pocketpaw_ee.cloud.agents import service as agents_service
+
+        internal = await _agent_doc(slug="hr-assistant", name="HR Assistant")
+        await bar_store.create_widget(_widget(agent_id="someone-else"))
+        assert await agents_service.is_visible_to_site_visitors(str(internal.id)) is False
+
+    @pytest.mark.asyncio
+    async def test_visibility_of_an_unknown_agent_is_false(self, bar_store) -> None:
+        """A missing / malformed agent id resolves no workspace, so there is
+        nothing to scan and nothing to claim."""
+        from pocketpaw_ee.cloud.agents import service as agents_service
+
+        assert await agents_service.is_visible_to_site_visitors("") is False
+        assert await agents_service.is_visible_to_site_visitors("not-an-object-id") is False
+
+    @pytest.mark.asyncio
+    async def test_visibility_is_failure_soft(self, bar_store) -> None:
+        """The flag labels a surface, it does not guard one — an unreadable store
+        yields False rather than 500-ing the owner's Knowledge tab."""
+        from unittest.mock import patch
+
+        from pocketpaw_ee.cloud.agents import service as agents_service
+
+        agent = await _agent_doc()
+        await bar_store.create_widget(_widget(agent_id=str(agent.id)))
+        with patch(
+            "pocketpaw_ee.paw_bar.agent_provisioning.widget_for_agent",
+            side_effect=RuntimeError("store is gone"),
+        ):
+            assert await agents_service.is_visible_to_site_visitors(str(agent.id)) is False
+
+    @pytest.mark.asyncio
+    async def test_knowledge_read_carries_the_flag(self, bar_store) -> None:
+        """The wire shape the frontend badge reads: ``GET /agents/{id}/knowledge``
+        returns ``visible_to_site_visitors`` beside ``items``."""
+        from unittest.mock import AsyncMock, patch
+
+        from pocketpaw_ee.cloud.agents.router import list_knowledge
+
+        agent = await _agent_doc()
+        await bar_store.create_widget(_widget(agent_id=str(agent.id)))
+        internal = await _agent_doc(slug="hr-assistant", name="HR Assistant")
+
+        with patch(
+            "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.list_articles",
+            new=AsyncMock(return_value=[{"id": "a1", "title": "Hours"}]),
+        ):
+            public = await list_knowledge(str(agent.id))
+            private = await list_knowledge(str(internal.id))
+
+        assert public["visible_to_site_visitors"] is True
+        assert public["items"] == [{"id": "a1", "title": "Hours"}]
+        assert private["visible_to_site_visitors"] is False
