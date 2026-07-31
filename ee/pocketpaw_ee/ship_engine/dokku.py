@@ -160,7 +160,15 @@ _STDERR_TAIL_CHARS = 500
 #     match starts mid-token (after the opening quote).
 #   * reported config vars — ``SOME_KEY: value`` where the name smells
 #     secret (KEY/TOKEN/SECRET/PASSWORD/PASSWD/PWD/DSN/URL)
-_URL_CREDS_RE = re.compile(r"(\w+://)[^\s/]+@")
+# The userinfo class deliberately excludes ONLY whitespace. It used to exclude
+# ``/`` as well, which meant any credential containing a slash — common in
+# base64 and generated secrets — could not match at all, and the WHOLE DSN
+# survived into logs and API responses. Verified: ``mongodb://user:pa/ss@host/db``
+# came back completely unredacted. Greedy up to the LAST ``@`` in the run, so a
+# password containing ``@`` is still fully scrubbed. A URL with an ``@`` in its
+# path is over-redacted, which the module's contract explicitly prefers:
+# over-redaction is fine, under-redaction is not.
+_URL_CREDS_RE = re.compile(r"(\w+://)\S+@")
 _ENV_ASSIGN_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=((?:'[^']*'|\"[^\"]*\"|\S)+)")
 _SECRET_VAR_RE = re.compile(
     r"\b([A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|DSN|URL)[A-Za-z0-9_]*)"

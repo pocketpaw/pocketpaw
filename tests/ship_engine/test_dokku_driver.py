@@ -332,6 +332,33 @@ def test_redact_url_password_containing_at() -> None:
     assert out == "connecting to mongodb://[redacted]@dokku-mongo:27017/db now"
 
 
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "mongodb://user:pa/ss@10.0.0.5:27017/db",
+        "postgres://u:ab/cd+ef@host:5432/d",
+        "https://x-access-token:ghp_ab/cd@github.com/owner/repo.git",
+    ],
+)
+def test_redact_scrubs_credentials_containing_a_slash(dsn: str) -> None:
+    """A ``/`` in the credential must not defeat redaction.
+
+    The userinfo class used to exclude ``/``, so any secret containing one —
+    common in base64 and generated passwords — could not match and the WHOLE DSN
+    survived unredacted into log lines and, via ``logs()``, into the
+    ``GET /ship/apps/{id}/logs`` response.
+    """
+    out = redact(dsn)
+    assert "[redacted]@" in out
+    assert "pa/ss" not in out and "ab/cd" not in out
+
+
+def test_redact_leaves_a_credential_free_url_alone() -> None:
+    """Over-redaction is acceptable; redacting an ordinary URL is not useful."""
+    text = "see https://example.com/path/to/thing for details"
+    assert redact(text) == text
+
+
 def test_redact_shlex_quoted_value_with_single_quotes() -> None:
     # shlex.quote splits a value containing quotes into multiple quoted
     # segments ('API_KEY=pa'"'"'ss word') — the whole run must be consumed,

