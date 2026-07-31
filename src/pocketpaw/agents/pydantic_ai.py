@@ -652,6 +652,20 @@ class PydanticAIBackend:
                 "Built %d MCP toolsets for Pydantic AI, held open for the instance lifetime",
                 len(servers),
             )
+
+        # PocketPaw's OWN in-process servers — sites, pocket, connectors, media.
+        # Appended after the exit-stack hold on purpose: they are ordinary
+        # objects in this process, with no subprocess to keep alive and nothing
+        # to tear down. Joining the MCP list rather than the function-tool list
+        # is what makes a surface's ``mcp__<server>__<tool>`` deny and allow ids
+        # apply to them, which is where those ids were always aimed.
+        try:
+            from pocketpaw.agents.tool_bridge import build_inprocess_mcp_toolsets
+
+            servers = servers + await build_inprocess_mcp_toolsets(self._policy)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not bridge in-process MCP servers: %s", exc)
+
         return servers
 
     def attach_specialist_tools(self, tools: list[Any]) -> None:

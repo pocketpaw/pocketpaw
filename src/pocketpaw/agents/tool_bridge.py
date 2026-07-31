@@ -744,3 +744,146 @@ def get_tool_instructions_compact(settings: Any, backend: str = "opencode") -> s
     lines.append("")
     lines.append(f"Total: {len(allowed)} tools available.")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# in-process MCP servers -> pydantic-ai toolsets
+# ---------------------------------------------------------------------------
+
+
+async def build_inprocess_mcp_toolsets(policy: ToolPolicy | None = None) -> list:
+    """Bridge PocketPaw's IN-PROCESS MCP servers into pydantic-ai toolsets.
+
+    Added 2026-07-31. These are the sites / pocket / connectors / media / …
+    servers registered through the ``pocketpaw.mcp_servers`` entry points, and
+    until now they reached the Claude SDK backend and NOTHING else — every
+    provider's ``build_server`` is written against ``claude_agent_sdk``'s
+    ``create_sdk_mcp_server`` and returns ``None`` without it.
+
+    The consequence was not a missing convenience. Asked to build a site on the
+    ``pydantic_ai`` backend the agent had no ``create_svelte_site`` to call, so
+    it did the next best thing it could see — and "the model wrote a file
+    instead of calling the tool" is what a missing tool looks like from outside.
+
+    What makes the bridge cheap is that ``create_sdk_mcp_server`` returns a
+    plain low-level ``mcp.server.Server``. Its ``request_handlers`` can be
+    driven directly, in this process, with no transport, no subprocess and no
+    second copy of the handler logic — the tools that run here are the same
+    objects the SDK backend calls.
+
+    Names come out as ``<server>_<tool>``, matching what pydantic-ai's
+    ``PrefixedToolset`` produces for external servers, so a surface's
+    ``mcp__<server>__<tool>`` deny/allow ids translate onto them with the
+    normalization that already exists.
+    """
+    try:
+        import mcp.types as mcp_types
+        from pydantic_ai.toolsets import FunctionToolset, PrefixedToolset
+    except ImportError:
+        logger.debug("mcp / pydantic-ai toolsets unavailable; in-process MCP bridge skipped")
+        return []
+
+    try:
+        from pocketpaw._registry import providers as _ext_providers
+        from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS
+    except ImportError:
+        return []
+
+    toolsets: list = []
+    for provider in _ext_providers("pocketpaw.mcp_servers"):
+        provider_name = type(provider).__name__
+        try:
+            built = provider.build_server()
+        except Exception as exc:  # noqa: BLE001
+            # WARNING, not DEBUG: a stale editable install silently swallowing
+            # this cost 30+ minutes to diagnose on the SDK path (claude_sdk:1143).
+            logger.warning(
+                "MCP provider %s failed to build: %s: %s", provider_name, type(exc).__name__, exc
+            )
+            continue
+        if not built:
+            continue
+
+        name, server = built
+        instance = server.get("instance") if isinstance(server, dict) else None
+        if instance is None:
+            logger.debug("MCP provider %s returned no server instance", provider_name)
+            continue
+        if policy is not None and not policy.is_mcp_server_allowed(name):
+            logger.info("In-process MCP server '%s' blocked by tool policy", name)
+            continue
+        # Opt-in servers stay off unless the agent named them, mirroring the
+        # SDK backend's allowlist rule rather than inventing a second one.
+        if name in OPT_IN_MCP_SERVERS and not (
+            policy is not None and policy.is_mcp_server_explicitly_allowed(name)
+        ):
+            continue
+
+        try:
+            tools = await _bridge_inprocess_server(name, instance, mcp_types)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not bridge in-process MCP server '%s': %s", name, exc)
+            continue
+        if tools:
+            toolsets.append(PrefixedToolset(FunctionToolset(tools), name))
+            logger.info("Bridged in-process MCP server '%s' (%d tools)", name, len(tools))
+
+    return toolsets
+
+
+async def _bridge_inprocess_server(name: str, instance: Any, mcp_types: Any) -> list:
+    """Enumerate one in-process MCP server's tools as pydantic-ai ``Tool``s."""
+    from pydantic_ai.tools import Tool
+
+    list_handler = instance.request_handlers.get(mcp_types.ListToolsRequest)
+    call_handler = instance.request_handlers.get(mcp_types.CallToolRequest)
+    if list_handler is None or call_handler is None:
+        return []
+
+    listed = await list_handler(mcp_types.ListToolsRequest(method="tools/list"))
+    tools: list = []
+    for spec in getattr(listed.root, "tools", None) or []:
+        tools.append(
+            Tool.from_schema(
+                _make_inprocess_caller(spec.name, call_handler, mcp_types),
+                name=spec.name,
+                description=spec.description or spec.name,
+                # The server's OWN schema, passed through untouched. Synthesizing
+                # a signature would flatten every object and array argument to a
+                # string — ``edit_svelte_component`` takes a list of edits and
+                # ``create_dynamic_site`` a whole spec object.
+                json_schema=spec.inputSchema or {"type": "object", "properties": {}},
+            )
+        )
+    return tools
+
+
+def _make_inprocess_caller(tool_name: str, call_handler: Any, mcp_types: Any):
+    """Build the coroutine that invokes one in-process MCP tool.
+
+    A factory rather than a closure written inline in the loop: the latter
+    captures the loop variable, so every tool ends up calling the last one.
+    """
+
+    async def _call(**kwargs: Any) -> str:
+        # Drop unset optionals — MCP handlers check presence, and an explicit
+        # ``None`` is not the same as an omitted argument to them.
+        arguments = {k: v for k, v in kwargs.items() if v is not None}
+        result = await call_handler(
+            mcp_types.CallToolRequest(
+                method="tools/call",
+                params=mcp_types.CallToolRequestParams(name=tool_name, arguments=arguments),
+            )
+        )
+        root = result.root
+        text = "\n".join(
+            getattr(block, "text", "") or "" for block in (getattr(root, "content", None) or [])
+        ).strip()
+        if getattr(root, "isError", False):
+            # Returned, not raised: the model can read the reason and correct
+            # its arguments. Raising would burn a retry on an error it never saw.
+            return text or f"Error: {tool_name} failed."
+        return text
+
+    _call.__name__ = tool_name
+    return _call

@@ -572,13 +572,18 @@ async def test_mcp_server_that_fails_to_start_is_dropped_not_fatal(monkeypatch):
     )
     backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     backend._custom_tools = []
-    _drive_real_mcp(monkeypatch, [_Broken()])
+    broken = _Broken()
+    _drive_real_mcp(monkeypatch, [broken])
 
     events = await _collect(backend, "hi")
 
     assert events[-1].type == "done"
     assert not any(e.type == "error" for e in events)
-    assert backend._mcp_tools == []
+    # Asserted by ABSENCE of the broken server, not by an empty list: the
+    # in-process bridge (sites / pocket / connectors) legitimately populates
+    # this too, and an equality check would make every one of those a failure
+    # here while proving nothing extra about the external one.
+    assert broken not in (backend._mcp_tools or [])
     assert backend._mcp_stack is None, "an all-failed start must not leak an open stack"
 
 
@@ -598,11 +603,13 @@ async def test_one_broken_server_does_not_take_down_a_healthy_one(monkeypatch):
     )
     backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     backend._custom_tools = []
-    _drive_real_mcp(monkeypatch, [_Broken(), healthy], n_configs=2)
+    broken = _Broken()
+    _drive_real_mcp(monkeypatch, [broken, healthy], n_configs=2)
 
     await _collect(backend, "hi")
 
-    assert backend._mcp_tools == [healthy]
+    assert healthy in (backend._mcp_tools or [])
+    assert broken not in (backend._mcp_tools or [])
     assert healthy.running is True
 
 
