@@ -1408,3 +1408,123 @@ async def test_stop_closes_the_client_and_drops_the_agent_holding_it():
     assert client.is_closed
     assert backend._http_client is None
     assert backend._cached_agent is None
+
+
+# --------------------------------------------------------------------------
+# per-session transcript retention
+# --------------------------------------------------------------------------
+
+
+def _draft_and_publish_tools() -> list:
+    from pydantic_ai.tools import Tool
+
+    async def create_html_site(source: str) -> str:
+        """Create an HTML site draft."""
+        return '{"ok": true, "pocket_id": "pkt_ABC123", "draft": true}'
+
+    async def publish(pocket_id: str) -> str:
+        """Publish a pocket as a site."""
+        return "published " + pocket_id
+
+    return [
+        Tool(create_html_site, name="create_html_site", description="Create an HTML draft."),
+        Tool(publish, name="publish", description="Publish a pocket as a site."),
+    ]
+
+
+async def _draft_turn(backend: PydanticAIBackend, session_key: str | None) -> str:
+    """Turn 1: the model calls the draft tool, which hands back a pocket_id."""
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        if len(messages) == 1:
+            yield {
+                0: DeltaToolCall(
+                    name="create_html_site", json_args='{"source": "<html/>"}', tool_call_id="c1"
+                )
+            }
+        else:
+            yield "Draft ready. Preview it at /sites."
+
+    backend._build_model = lambda: FunctionModel(stream_function=stream_fn)  # type: ignore[method-assign]
+    backend._cached_agent = None
+    events = await _collect(backend, "Build an HTML bakery site", session_key=session_key)
+    return "".join(e.content for e in events if e.type == "message")
+
+
+async def _what_turn_two_sees(
+    backend: PydanticAIBackend, text: str, session_key: str | None
+) -> str:
+    """Turn 2 with the history the CLOUD would persist: role/content text only."""
+    seen: dict = {}
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        seen["messages"] = str(messages)
+        yield "ok"
+
+    backend._build_model = lambda: FunctionModel(stream_function=stream_fn)  # type: ignore[method-assign]
+    backend._cached_agent = None
+    history = [
+        {"role": "user", "content": "Build an HTML bakery site"},
+        {"role": "assistant", "content": text},
+    ]
+    await _collect(backend, "publish it", history=history, session_key=session_key)
+    return seen["messages"]
+
+
+async def test_a_tool_result_survives_into_the_next_turn():
+    """The reason "publish it" failed after a draft.
+
+    The pocket_id exists ONLY in turn 1's tool result. The cloud persists
+    ``[{role, content}]`` text and nothing else, so rebuilding history from it
+    drops every tool call — and the agent reaches turn 2 with no id to publish.
+    ``claude_agent_sdk`` never had this problem because its CLI subprocess keeps
+    the real transcript; this backend had no equivalent until it retained one.
+    """
+    backend = _backend_with_model(TestModel())
+    backend._custom_tools = _draft_and_publish_tools()
+
+    text = await _draft_turn(backend, "ws1:session42")
+    assert "pkt_ABC123" not in text, "the id must NOT be in the prose, or this proves nothing"
+
+    seen = await _what_turn_two_sees(backend, text, "ws1:session42")
+    assert "pkt_ABC123" in seen
+    assert "create_html_site" in seen
+
+
+async def test_a_session_never_inherits_another_sessions_transcript():
+    """One backend instance serves every session on its agent."""
+    backend = _backend_with_model(TestModel())
+    backend._custom_tools = _draft_and_publish_tools()
+
+    text = await _draft_turn(backend, "ws1:session42")
+    seen = await _what_turn_two_sees(backend, text, "ws1:a-different-session")
+    assert "pkt_ABC123" not in seen
+
+
+async def test_without_a_session_key_the_text_history_is_still_used():
+    """Anonymous / one-shot runs keep working, just without tool memory."""
+    backend = _backend_with_model(TestModel())
+    backend._custom_tools = _draft_and_publish_tools()
+
+    text = await _draft_turn(backend, None)
+    seen = await _what_turn_two_sees(backend, text, None)
+    assert "pkt_ABC123" not in seen
+    assert "Build an HTML bakery site" in seen, "the text history must still arrive"
+
+
+async def test_retention_is_bounded_on_both_axes():
+    """A long-lived instance serves many sessions for a long time."""
+    from pocketpaw.agents.pydantic_ai import _MAX_SESSION_MESSAGES, _MAX_TRACKED_SESSIONS
+
+    backend = PydanticAIBackend(_settings())
+
+    backend._retain_session("s", list(range(_MAX_SESSION_MESSAGES * 3)))
+    kept = backend._session_messages["s"]
+    assert len(kept) == _MAX_SESSION_MESSAGES
+    assert kept[-1] == _MAX_SESSION_MESSAGES * 3 - 1, "must keep the TAIL, not the head"
+
+    for i in range(_MAX_TRACKED_SESSIONS + 25):
+        backend._retain_session(f"s{i}", ["m"])
+    assert len(backend._session_messages) <= _MAX_TRACKED_SESSIONS
+    assert "s0" not in backend._session_messages, "oldest session must evict first"
+    assert f"s{_MAX_TRACKED_SESSIONS + 24}" in backend._session_messages

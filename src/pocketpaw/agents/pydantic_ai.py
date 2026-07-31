@@ -99,6 +99,18 @@ that is a tenant reading the server. ``_LOCAL_MACHINE_TOOLS`` is now applied in
 ``_build_custom_tools`` — no surface, session type or deny set involved, because
 the constraint does not vary and a per-surface control implies it might.
 
+Updated 2026-07-31 (c) — **per-session transcript retention.** The cloud
+persists conversation as ``[{role, content}]`` TEXT; tool calls and their
+results are not stored at all. ``claude_agent_sdk`` does not care, because its
+CLI subprocess holds the real transcript and the text is only a
+restore-from-restart fallback (``load_history_for_scope`` says so in its
+docstring). This backend had no equivalent, so every turn rebuilt from text and
+dropped every tool result — including the ``pocket_id`` a site draft hands back,
+which is why "publish it" on the following turn had nothing to publish.
+``_session_messages`` keeps the real messages per ``session_key``, bounded by
+session count AND a trailing message window; a miss degrades to the text
+history rather than failing.
+
 Updated 2026-07-31 (b) — ``run`` accepts the per-surface tool-gating kwargs
 (``deny_mcp_tool_ids`` / ``allow_mcp_tool_ids`` / ``exclusive_mcp_tools``) and
 HONOURS them; see ``_expand_tool_ids`` and ``_gate_mcp_toolsets``. Omitting them
@@ -116,6 +128,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -136,6 +149,10 @@ _OPENAI_COMPATIBLE = frozenset({"litellm", "openai", "openai_compatible", "openr
 # agent cache key; the shell/fs strip it used to perform is now unconditional
 # (see below), because it was never really about pocket sessions.
 _POCKET_SCOPE_SENTINEL = "<pocket-scope>"
+
+# Bounds on the per-session transcript cache (see ``_session_messages``).
+_MAX_TRACKED_SESSIONS = 200
+_MAX_SESSION_MESSAGES = 60
 
 # Tools that act on THIS PROCESS'S MACHINE. Never built for this backend — not
 # gated by surface, not by session type, not by a deny set.
@@ -306,6 +323,21 @@ class PydanticAIBackend:
         # CACHED agent holding the previous model — so a client built here would
         # be created and dropped each turn, leaking its connection pool.
         self._http_client: Any = None
+        # Per-session pydantic-ai message history, keyed by ``session_key``.
+        #
+        # The cloud persists conversation as ``[{role, content}]`` TEXT — tool
+        # calls and their results are not stored at all. That is fine for
+        # ``claude_agent_sdk``, whose CLI subprocess keeps the real transcript
+        # and treats the text as a restore-from-restart fallback
+        # (``load_history_for_scope``'s docstring says exactly this). This
+        # backend had no equivalent, so every turn rebuilt from text and lost
+        # every tool result — including the ``pocket_id`` a site draft returns,
+        # which is why "publish it" on the next turn had no id to publish.
+        #
+        # Bounded on both axes: sessions evict oldest-first, and each session
+        # keeps a trailing window, so a long-lived instance cannot grow without
+        # limit. Losing an entry degrades to the text history, never to an error.
+        self._session_messages: OrderedDict[str, list] = OrderedDict()
         self._policy = ToolPolicy(
             profile=settings.tool_profile,
             allow=settings.tools_allow,
@@ -1002,6 +1034,54 @@ class PydanticAIBackend:
         self._cached_agent_key = agent_key
         return agent
 
+    def _retain_run_transcript(self, session_key: str | None, event: Any) -> None:
+        """Capture the finished run's messages off the terminal result event."""
+        if not session_key:
+            return
+        from pydantic_ai.run import AgentRunResultEvent
+
+        if not isinstance(event, AgentRunResultEvent):
+            return
+        try:
+            self._retain_session(session_key, event.result.all_messages())
+        except Exception as exc:  # noqa: BLE001
+            # Never fail a run over bookkeeping — the next turn just falls back
+            # to the text history.
+            logger.debug("Could not retain session transcript: %s", exc)
+
+    def _session_history(self, session_key: str | None, history: list[dict] | None) -> list:
+        """The message history for this turn — the real transcript when we have it.
+
+        Prefers the retained pydantic-ai messages for ``session_key`` because
+        they carry the TOOL CALLS AND RESULTS. The ``history`` argument cannot:
+        the cloud persists ``[{role, content}]`` text and nothing else, so a
+        ``pocket_id`` handed back by ``create_html_site`` is gone by the next
+        turn and "publish it" has no id to publish.
+
+        Falls back to the text history whenever nothing is retained — a fresh
+        process, an evicted entry, a first turn. That is a degraded context, not
+        a failure, which is the same trade ``claude_agent_sdk`` makes when its
+        subprocess is gone (``load_history_for_scope``).
+        """
+        if session_key:
+            retained = self._session_messages.get(session_key)
+            if retained:
+                self._session_messages.move_to_end(session_key)
+                return list(retained)
+        return self._build_history(history)
+
+    def _retain_session(self, session_key: str | None, messages: list | None) -> None:
+        """Keep this run's transcript for the next turn on the same session."""
+        if not session_key or not messages:
+            return
+        # Trailing window: the head of a conversation is the least useful part
+        # to carry and the most expensive, and compaction capabilities already
+        # operate inside a run.
+        self._session_messages[session_key] = list(messages)[-_MAX_SESSION_MESSAGES:]
+        self._session_messages.move_to_end(session_key)
+        while len(self._session_messages) > _MAX_TRACKED_SESSIONS:
+            self._session_messages.popitem(last=False)
+
     def _build_history(self, history: list[dict] | None) -> list:
         """Convert PocketPaw's ``[{role, content}]`` history to pydantic-ai messages."""
         from pydantic_ai.messages import (
@@ -1030,7 +1110,7 @@ class PydanticAIBackend:
         *,
         system_prompt: str | None = None,
         history: list[dict] | None = None,
-        session_key: str | None = None,  # noqa: ARG002
+        session_key: str | None = None,
         # Per-entity skill subset. Rides the withhold-when-empty contract:
         # ``AgentPool.run`` forwards it only when non-empty, so an empty set
         # means "no per-entity narrowing" and every bundled skill is offered.
@@ -1113,7 +1193,9 @@ class PydanticAIBackend:
                 exclusive_mcp_tools=exclusive_mcp_tools,
             )
 
-            kwargs: dict[str, Any] = {"message_history": self._build_history(history)}
+            kwargs: dict[str, Any] = {
+                "message_history": self._session_history(session_key, history)
+            }
             max_turns = self.settings.pydantic_ai_max_turns
             if max_turns and max_turns > 0:
                 from pydantic_ai.usage import UsageLimits
@@ -1124,6 +1206,10 @@ class PydanticAIBackend:
                 async for event in stream:
                     if handle.stopped:
                         break
+                    # Retain BEFORE mapping: a run that ends on the terminal
+                    # result event must still leave its transcript behind, and
+                    # ``_map_event`` returns nothing for a usage-less result.
+                    self._retain_run_transcript(session_key, event)
                     for agent_event in self._map_event(event, announced):
                         yield agent_event
 
