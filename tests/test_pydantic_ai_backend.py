@@ -939,13 +939,46 @@ def test_attach_subprocess_env_is_a_noop():
     assert backend.attach_subprocess_env({"X": "1"}) is None
 
 
-async def test_pocket_session_strips_shell_and_fs_tools():
-    """Dispatch-only is mechanical, not advisory.
+def test_local_machine_tools_are_never_offered():
+    """The load-bearing test for dispatch-only, and it is UNCONDITIONAL.
 
-    PocketPaw's builtin shell/fs tools jail against a PROCESS-GLOBAL
-    ``file_jail_path``, so an in-process backend granted them shares one jail
-    across every tenant.
+    This backend SERVES: one process answers every tenant over an API. The
+    builtin shell/fs tools jail against a PROCESS-GLOBAL ``file_jail_path`` and
+    the per-run cwd jail exists only on the ``claude_sdk`` chain, so a tenant's
+    ``read_file`` here reads the server in a directory shared with every other
+    tenant.
+
+    Asserted against the REAL bridged surface rather than doubles, and with no
+    surface, session type or deny set involved — until 2026-07-31 the strip ran
+    on pocket sessions ALONE and an ordinary chat turn was handed the lot.
     """
+    from pocketpaw.agents.pydantic_ai import _LOCAL_MACHINE_TOOLS
+
+    backend = PydanticAIBackend(_settings(pydantic_ai_skills_enabled=False))
+    names = {getattr(t, "name", "") for t in backend._build_custom_tools()}
+
+    assert names, "expected a bridged tool surface to test against"
+    assert not (names & _LOCAL_MACHINE_TOOLS)
+    # Not vacuous: the dispatch surface must survive the cut.
+    assert {"web_search", "create_pocket", "remember"} <= names
+
+
+def test_the_blocked_names_still_exist_upstream():
+    """Guards the OTHER failure mode: a tool RENAMED upstream silently drops out
+    of ``_LOCAL_MACHINE_TOOLS`` and comes back, and the test above still passes
+    because it only checks an intersection."""
+    from pocketpaw.agents.pydantic_ai import _LOCAL_MACHINE_TOOLS
+    from pocketpaw.agents.tool_bridge import build_pydantic_ai_tools
+
+    # The unfiltered bridge — what _build_custom_tools cuts down.
+    everything = {t.name for t in build_pydantic_ai_tools(_settings(), backend="pydantic_ai")}
+    stale = sorted(_LOCAL_MACHINE_TOOLS - everything)
+    assert not stale, f"blocklist names no upstream tool: {stale} — renamed or removed?"
+
+
+async def test_a_specialist_cannot_be_handed_a_local_machine_tool():
+    """``attach_specialist_tools`` takes whatever a caller passes and writes it
+    straight into the tool cache, bypassing the bridge filter."""
     from pydantic_ai.tools import Tool
 
     async def shell(command: str) -> str:
@@ -957,15 +990,15 @@ async def test_pocket_session_strips_shell_and_fs_tools():
         return ""
 
     backend = _backend_with_model(TestModel(custom_output_text="ok"))
-    backend._custom_tools = [
-        Tool(shell, name="shell", description="Run a shell command."),
-        Tool(safe_tool, name="safe_tool", description="A dispatch-only tool."),
-    ]
-
-    agent = backend._get_or_create_agent(
-        TestModel(), "<pocket-scope>build a site</pocket-scope>", []
+    backend._custom_tools = None
+    backend.attach_specialist_tools(
+        [
+            Tool(shell, name="shell", description="Run a shell command."),
+            Tool(safe_tool, name="safe_tool", description="A dispatch-only tool."),
+        ]
     )
-    names = {t.name for t in agent._function_toolset.tools.values()}
+
+    names = await _tool_surface(backend)
     assert "shell" not in names
     assert "safe_tool" in names
 
@@ -1185,17 +1218,19 @@ async def test_a_denied_mcp_tool_id_never_reaches_the_model():
     assert "pocketpaw_sites_manager_publish" in names
 
 
-async def test_a_denied_builtin_name_removes_the_tool_that_does_the_same_job():
-    """Surface deny sets are written in the Claude SDK's vocabulary (``Bash``,
-    ``Read``, …). Those names do not exist here, but the CAPABILITY does —
-    ``shell``, ``read_file``. Matching only literal names would leave a surface
-    that removed shell access holding ``shell``."""
+async def test_a_denied_id_removes_the_bridged_tool_that_is_the_same_capability():
+    """Surface deny sets name in-process MCP ids; this backend gets that same
+    capability bridged under a different name. Matching the id literally denies
+    nothing — and this one matters: it is how /sites stops the agent falling
+    back to a rippleSpec landing page."""
     backend = _backend_with_model(TestModel())
-    backend._custom_tools = _bridged("shell", "read_file", "web_search")
+    backend._custom_tools = _bridged("create_pocket", "web_search")
 
-    names = await _tool_surface(backend, deny_mcp_tool_ids=frozenset({"Bash", "Read"}))
-    assert "shell" not in names
-    assert "read_file" not in names
+    names = await _tool_surface(
+        backend,
+        deny_mcp_tool_ids=frozenset({"mcp__pocketpaw_pocket_specialist__create"}),
+    )
+    assert "create_pocket" not in names
     assert "web_search" in names
 
 
@@ -1228,19 +1263,22 @@ async def test_a_restricted_run_does_not_reuse_the_unrestricted_agent():
     through one instance. If the gating sets are not in the cache key, whichever
     surface runs first decides the tool surface for all of them."""
     backend = _backend_with_model(TestModel())
-    backend._custom_tools = _bridged("shell", "web_search")
+    backend._custom_tools = _bridged("create_pocket", "web_search")
 
     wide = await _tool_surface(backend)
-    assert "shell" in wide
+    assert "create_pocket" in wide
 
-    narrow = await _tool_surface(backend, deny_mcp_tool_ids=frozenset({"Bash"}))
+    narrow = await _tool_surface(
+        backend,
+        deny_mcp_tool_ids=frozenset({"mcp__pocketpaw_pocket_specialist__create"}),
+    )
     # Both halves are load-bearing. Asserting only the absence passes VACUOUSLY
     # when the stale agent is reused: the cached agent still holds the FIRST
     # run's model, so the second run's capture closure is never called and
     # ``narrow`` comes back empty. A mutation probe (deny dropped from the cache
     # key) passed against exactly that before this line was added.
     assert "web_search" in narrow, "the second run never reached its own model"
-    assert "shell" not in narrow
+    assert "create_pocket" not in narrow
 
 
 async def test_the_real_sites_deny_set_removes_the_ripple_fallback():

@@ -88,7 +88,18 @@ Verified live 2026-07-29 through a real LiteLLM proxy: a streamed turn, a tool
 round-trip (tool actually executed, ``tool_use`` before ``tool_result``), and 8
 concurrent runs on ONE cached instance with zero empty ``stream_end``.
 
-Updated 2026-07-31 — ``run`` accepts the per-surface tool-gating kwargs
+Updated 2026-07-31 (a) — **dispatch-only is now enforced unconditionally.** The
+paragraph above has always said this backend does not do local file or shell
+work, but the code stripped those tools on POCKET SESSIONS ALONE, so an ordinary
+chat turn was handed ``shell``, ``read_file``, ``write_file``, ``run_python``,
+``install_package``, ``delegate_claude_code`` and the rest — 49 tools where 37
+was the intent. On a backend whose whole point is that ONE process serves every
+tenant, and whose builtin tools jail against a PROCESS-GLOBAL ``file_jail_path``,
+that is a tenant reading the server. ``_LOCAL_MACHINE_TOOLS`` is now applied in
+``_build_custom_tools`` — no surface, session type or deny set involved, because
+the constraint does not vary and a per-surface control implies it might.
+
+Updated 2026-07-31 (b) — ``run`` accepts the per-surface tool-gating kwargs
 (``deny_mcp_tool_ids`` / ``allow_mcp_tool_ids`` / ``exclusive_mcp_tools``) and
 HONOURS them; see ``_expand_tool_ids`` and ``_gate_mcp_toolsets``. Omitting them
 crashed the run outright: ``AgentPool.run`` forwards each ONLY when a surface
@@ -121,13 +132,45 @@ logger = logging.getLogger(__name__)
 _OPENAI_COMPATIBLE = frozenset({"litellm", "openai", "openai_compatible", "openrouter", "ollama"})
 
 # Same gate as ``claude_sdk`` and ``deep_agents``: ``<pocket-scope>`` opens every
-# pocket/site prompt. On a pocket session the agent's needs are fully covered by
-# MCP tools, and leaving shell/fs attached has been observed sending the agent
-# off to introspect its own environment (``env | grep pocket; curl localhost``).
-# On THIS backend the filter is load-bearing rather than cosmetic — see the
-# dispatch-only note in the module docstring.
+# pocket/site prompt. Retained for the prompt-shape signal it carries into the
+# agent cache key; the shell/fs strip it used to perform is now unconditional
+# (see below), because it was never really about pocket sessions.
 _POCKET_SCOPE_SENTINEL = "<pocket-scope>"
-_POCKET_BLOCKED_TOOLS = frozenset({"shell", "read_file", "write_file", "edit_file", "list_dir"})
+
+# Tools that act on THIS PROCESS'S MACHINE. Never built for this backend — not
+# gated by surface, not by session type, not by a deny set.
+#
+# This backend SERVES: one process answers every tenant over an API. PocketPaw's
+# ``tools/builtin/{shell,filesystem}.py`` jail against a PROCESS-GLOBAL
+# ``file_jail_path``, and the per-run cwd jail (``agent_jail.resolve_agent_cwd``)
+# exists only on the ``claude_sdk`` chain — so a tenant's ``read_file`` here
+# reads the server, in a directory shared with every other tenant. The same
+# argument retires ``install_package`` (pip-installs into the shared runtime),
+# ``open_in_explorer`` (a GUI file browser on a headless box) and
+# ``delegate_claude_code`` (spawns the full CLI subprocess whose ~300-500 MB RSS
+# is the entire reason this backend exists) — and ``create_skill``, which writes
+# SKILL.md into the process-global skills directory every tenant loads from.
+#
+# The module docstring has always said dispatch-only. Until 2026-07-31 the code
+# enforced it on pocket sessions ALONE, so an ordinary chat turn was handed the
+# lot. Surface deny sets are not the mechanism for this and never were: they
+# vary per surface, and this constraint does not.
+_LOCAL_MACHINE_TOOLS = frozenset(
+    {
+        "shell",
+        "run_python",
+        "install_package",
+        "code_mode",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "list_dir",
+        "directory_tree",
+        "open_in_explorer",
+        "delegate_claude_code",
+        "create_skill",
+    }
+)
 
 # -- per-surface tool gating -------------------------------------------------
 #
@@ -147,34 +190,24 @@ def _normalize_tool_id(tool_id: str) -> str:
     return tool_id
 
 
-# A surface's tool id -> the bridged PocketPaw tools that do the SAME JOB. A
-# surface denying ``Bash`` is removing the ability to execute code on this box,
-# not the seven letters; keeping ``shell`` because the name differs honours the
-# letter of the deny and none of its point. The /code and /sites profiles deny
-# the built-ins precisely because the agent runs on the BACKEND SERVER, and that
-# hazard is identical here.
+# A surface's tool id -> the bridged PocketPaw tool that is the SAME CAPABILITY
+# under a different name. Without a row the deny matches nothing and the
+# capability survives.
 #
-# The same holds for the in-process MCP ids, which reach this backend as bridged
-# function tools rather than as ``mcp__`` ids: /sites svelte-create denies
-# ``pocket_specialist__create`` so the agent CANNOT fall back to building a
-# rippleSpec landing page (claude_sdk:1865 — "prose-only 'do not call the ripple
-# tool' routing was proven to fail"), and ``create_pocket`` is that same
-# capability under the OSS name.
-#
-# Deliberately over-inclusive where a capability spans several tools (``Bash``
-# also takes ``run_python`` / ``install_package``): over-denial costs a
-# capability, under-denial costs the boundary. Ids with no local equivalent
-# (``WebSearch``, ``Skill``, ``sites_manager__create_landing_site``) simply have
-# no row — normalization still covers them if they ever get bridged.
+# There is deliberately NO row for ``Bash`` / ``Read`` / ``Write`` / ``Edit`` /
+# ``Glob`` / ``Grep``. Those name local-machine work, which
+# ``_LOCAL_MACHINE_TOOLS`` removes from every run — a per-surface row would be
+# dead code implying a boundary that lives elsewhere.
+# ``test_local_machine_tools_are_never_offered`` is what holds that line.
 _SURFACE_TOOL_EQUIVALENTS: dict[str, frozenset[str]] = {
-    "Bash": frozenset({"shell", "run_python", "install_package"}),
-    "Read": frozenset({"read_file"}),
-    "Write": frozenset({"write_file"}),
-    "Edit": frozenset({"edit_file"}),
-    "Glob": frozenset({"list_dir", "directory_tree"}),
-    "Grep": frozenset({"list_dir", "directory_tree"}),
-    "Agent": frozenset({"delegate_claude_code", "delegate_to_a2a_agent"}),
+    # /sites svelte-create denies ``pocket_specialist__create`` so the agent
+    # CANNOT fall back to building a rippleSpec landing page (claude_sdk:1865 —
+    # "prose-only 'do not call the ripple tool' routing was proven to fail").
+    # It reaches this backend as a bridged tool under the OSS name.
     "mcp__pocketpaw_pocket_specialist__create": frozenset({"create_pocket"}),
+    # Local delegation is already gone with the rest of the local-machine
+    # family; this is the REMOTE one, a network call to an external agent.
+    "Agent": frozenset({"delegate_to_a2a_agent"}),
 }
 
 
@@ -423,9 +456,22 @@ class PydanticAIBackend:
         try:
             from pocketpaw.agents.tool_bridge import build_pydantic_ai_tools
 
-            self._custom_tools = build_pydantic_ai_tools(
+            bridged = build_pydantic_ai_tools(
                 self.settings, backend="pydantic_ai", policy=self._policy
             )
+            # Dropped HERE, at the only place the bridged surface is built, so
+            # no later code path can reintroduce them — a caller cannot forget
+            # to pass a flag and a surface cannot grant them back.
+            self._custom_tools = [
+                t for t in bridged if getattr(t, "name", "") not in _LOCAL_MACHINE_TOOLS
+            ]
+            dropped = len(bridged) - len(self._custom_tools)
+            if dropped:
+                logger.info(
+                    "Dispatch-only: withheld %d local-machine tool(s); %d tools offered",
+                    dropped,
+                    len(self._custom_tools),
+                )
         except Exception as exc:
             logger.info("Could not build custom tools: %s", exc)
             self._custom_tools = []
@@ -867,14 +913,12 @@ class PydanticAIBackend:
             mcp_toolsets, deny, allow_mcp_tool_ids, exclusive_mcp_tools
         )
 
-        if is_pocket_session:
-            before = len(tools)
-            tools = [t for t in tools if getattr(t, "name", "") not in _POCKET_BLOCKED_TOOLS]
-            if before != len(tools):
-                logger.info(
-                    "Pocket session — stripped %d shell/fs tools from agent",
-                    before - len(tools),
-                )
+        # A belt-and-braces sweep, cheap and last. ``_build_custom_tools`` is
+        # the real boundary, but ``attach_specialist_tools`` also writes into
+        # ``_custom_tools`` and takes whatever a caller hands it — this is what
+        # makes the guarantee hold for the tools THIS AGENT gets, whatever the
+        # source.
+        tools = [t for t in tools if getattr(t, "name", "") not in _LOCAL_MACHINE_TOOLS]
 
         agent = Agent(
             model,
