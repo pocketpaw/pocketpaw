@@ -743,18 +743,30 @@ async def upsert_by_domain(
         # no-event: growth has no realtime subscriber in v1.
         return _to_response(_to_domain(doc))
 
-    for field in (
-        "name",
-        "company",
-        "tier",
-        "research_brief",
-        "emails",
-        "linkedin_url",
-        "whatsapp_number",
-        "opted_in",
-        "status",
-    ):
+    # Fields a re-import may OVERWRITE. Everything omitted from this tuple is
+    # deliberate, not forgotten.
+    for field in ("name", "company", "tier", "research_brief", "whatsapp_number"):
         setattr(doc, field, getattr(body, field))
+
+    # ``status`` and ``opted_in`` are LIFECYCLE, not import data, and the DTO
+    # defaults them to "new" / False. Overwriting them meant re-uploading last
+    # month's CSV to the bulk route — the one whose docstring calls a re-run
+    # safe — revived every prospect the sweep had retired to ``dead`` and every
+    # one that had ``replied``, then the sweep re-entered the sequence on
+    # people it had deliberately given up on, including anyone marked dead for
+    # asking not to be contacted. A re-import must never resurrect.
+    if body.status != "new":
+        doc.status = body.status
+    if body.opted_in:
+        doc.opted_in = True
+
+    # ``emails`` / ``linkedin_url`` are set-only for the same reason
+    # ``project_id`` is below: a row that says nothing about them must not
+    # erase enrichment a later pass (or a human) added.
+    if body.emails:
+        doc.emails = body.emails
+    if body.linkedin_url:
+        doc.linkedin_url = body.linkedin_url
     # ``project_id`` is one of the fields an upsert only ever SETS, never
     # clears. A re-import that names a project reassigns the row; one that says
     # nothing leaves the assignment alone. The alternative — treating the DTO's
@@ -1791,8 +1803,14 @@ async def list_due_icps(cadences: list[str], *, limit: int = 500) -> list[IcpRes
     the cron cannot run something a human switched off.
     """
     docs = (
+        # Sorted by last_run_at ASCENDING (missing sorts first in Mongo), so
+        # the workspace that has genuinely waited longest is served first.
+        # ``createdAt`` was the wrong key: it is immutable, so when the batch
+        # cap bit, the SAME newest ICPs were skipped every single day rather
+        # than the starvation rotating. A deployment with more weekly ICPs than
+        # the cap could leave newer daily hunts permanently unrun.
         await _IcpDoc.find({"status": "active", "cadence": {"$in": cadences}})
-        .sort([("createdAt", 1), ("_id", 1)])
+        .sort([("last_run_at", 1), ("_id", 1)])
         .limit(limit)
         .to_list()
     )
@@ -1894,6 +1912,7 @@ async def record_whatsapp_attempt(
 async def finish_whatsapp_attempt(
     log_id: str,
     *,
+    workspace_id: str,
     status: str,
     provider_message_id: str = "",
     error_code: str = "",
@@ -1909,7 +1928,12 @@ async def finish_whatsapp_attempt(
         oid = PydanticObjectId(log_id)
     except Exception:  # noqa: BLE001 — nothing to finalise
         return
-    doc = await _MessageLogDoc.find_one({"_id": oid})
+    # Tenant-filtered, per cloud rule 7. It was the module's one unfiltered
+    # query: latent, because the only caller passes a log_id it just minted —
+    # but the seam takes a bare id, so the first retry route or provider
+    # status-callback that passed a request-supplied one would let a tenant
+    # finalise another tenant's delivery audit row.
+    doc = await _MessageLogDoc.find_one({"_id": oid, "workspace": workspace_id})
     if doc is None:
         return
     doc.outcome = status
@@ -2017,8 +2041,36 @@ async def record_whatsapp_inbound_reply(number: str) -> int:
     if not docs:
         return 0
 
+    # An inbound message IS the opt-in signal under Meta's rules, whether or not
+    # we had a sent draft outstanding — so "nobody messaged them" must still
+    # record consent. What it may NOT do is record it for a tenant the reply
+    # cannot be attributed to.
+    #
+    # The old `messaged or docs` fallback did exactly that: when no workspace
+    # had messaged the number, EVERY tenant holding it was stamped
+    # opted_in=True. Two agencies buying the same directory export was enough,
+    # and opted_in is the flag whatsapp.py checks before a business-initiated
+    # send — so one person's message manufactured consent for an agency that
+    # had never contacted them.
+    #
+    # Attribution, in order: whoever actually messaged them; failing that, the
+    # sole workspace holding the number. If several tenants hold it and none
+    # has messaged, the reply is genuinely unattributable and nothing is
+    # written. Scoping by the receiving ``integrated_number`` removes the
+    # ambiguity properly and stays the follow-up.
     messaged = [d for d in docs if await _has_sent_whatsapp_draft(d.workspace, str(d.id))]
-    targets = messaged or docs
+    if messaged:
+        targets = messaged
+    elif len({d.workspace for d in docs}) == 1:
+        targets = docs
+    else:
+        logger.info(
+            "growth.whatsapp_inbound: %d row(s) across %d workspaces hold this "
+            "number and none had messaged it — unattributable, recording nothing",
+            len(docs),
+            len({d.workspace for d in docs}),
+        )
+        return 0
 
     for doc in targets:
         doc.opted_in = True

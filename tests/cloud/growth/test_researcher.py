@@ -231,3 +231,74 @@ class TestThePrompt:
         )
         assert "Where:" not in prompt
         assert "Skip:" not in prompt
+
+
+class TestTheReviewFindings:
+    """Regressions for the code-review findings. Each of these passed a fully
+    green suite before the fix, which is the point: the fakes never echoed a
+    template, never resumed a session, and never returned a two-line address."""
+
+    def test_the_prompt_carries_no_parseable_json(self) -> None:
+        """The prompt's shape description must not itself be a valid answer.
+
+        It used to be — a complete JSON object with a `companies` key and an
+        `observed` email on example.com. A model that restated it before
+        answering had its own template filed as the research.
+        """
+        from pocketpaw_ee.cloud.growth.researcher import GROWTH_RESEARCHER_PROMPT
+
+        assert parse_research_response(GROWTH_RESEARCHER_PROMPT, max_results=5).companies == ()
+
+    def test_a_preamble_object_cannot_shadow_the_answer(self) -> None:
+        """The LAST qualifying object wins, so a restated shape loses to the
+        real findings that follow it."""
+        preamble = _response(
+            [
+                {
+                    "domain": "example.com",
+                    "emails": [
+                        {
+                            "address": "hello@example.com",
+                            "confidence": "observed",
+                            "source_url": "https://example.com/contact",
+                        }
+                    ],
+                }
+            ]
+        )
+        answer = _response([{"domain": "realclinic.co.uk"}])
+        result = parse_research_response(f"Shape:{preamble}\nResults:{answer}", max_results=5)
+        assert [c.domain for c in result.companies] == ["realclinic.co.uk"]
+
+    @pytest.mark.parametrize(
+        "address",
+        [
+            "hello@x.com\nbilling@x.com",  # two addresses off one contact page
+            "a@b@c.com",
+            "@x.com",
+            "a b@x.com",
+            "a@localhost",
+        ],
+    )
+    def test_a_malformed_address_is_never_storable(self, address: str) -> None:
+        """recordable_emails checks provenance, not syntax — so the shape check
+        has to happen at the parse, before a two-line string reaches a
+        provider as a recipient."""
+        result = parse_research_response(
+            _response([{"domain": "x.com", "emails": [
+                {"address": address, "confidence": "observed", "source_url": "https://x.com"}
+            ]}]),
+            max_results=5,
+        )
+        assert recordable_emails(result.companies[0].emails) == ()
+
+    def test_research_failure_raises_so_the_sweep_can_see_it(self) -> None:
+        """A failure must be distinguishable from 'searched and found nobody'.
+
+        Returning an empty result with the reason in `notes` meant the sweep
+        counted it as a successful run and advanced last_run_at, so a
+        workspace with no researcher agent reported healthy forever.
+        """
+        from pocketpaw_ee.cloud.growth.researcher import ResearchUnavailable
+
+        assert issubclass(ResearchUnavailable, Exception)

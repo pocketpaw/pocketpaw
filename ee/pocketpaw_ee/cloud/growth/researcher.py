@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import UTC, datetime
 from typing import Any
 
 from pocketpaw_ee.cloud.growth.discovery import (
@@ -49,6 +50,23 @@ from pocketpaw_ee.cloud.growth.discovery import (
 from pocketpaw_ee.cloud.growth.domain import EmailEvidence
 
 logger = logging.getLogger(__name__)
+
+
+class ResearchUnavailable(RuntimeError):
+    """The research could not run at all — distinct from running and finding nobody.
+
+    RAISED rather than returned as an empty ``ResearchResult``, because
+    ``_research`` turns an exception into ``DiscoveryOutcome.error`` and the
+    sweep counts an errored run as ``skipped`` instead of ``ran``.
+
+    An earlier version returned an empty result with the reason in ``notes``,
+    and nothing read ``notes``: a workspace that had never seeded the
+    researcher agent was counted as a successful run every single day, with
+    ``last_run_at`` advancing, so the one field whose stated purpose is
+    answering "is this thing actually running?" said yes forever. The only
+    signal was a warning line in a worker log.
+    """
+
 
 # The agent's slug. Resolved per workspace at run time — a workspace without
 # the agent seeded gets a clean "not available" rather than a crash.
@@ -111,31 +129,24 @@ retainer" is useful; "innovative digital agency" is noise.
 
 ## How to answer
 
-Return ONLY a JSON object, no prose around it, in exactly this shape:
+Return ONLY a JSON object, no prose around it, no fenced block, and do not \
+restate this shape back to me. The fields, described rather than shown — the \
+angle brackets are placeholders, not literal text:
 
-{
-  "companies": [
-    {
-      "domain": "example.com",
-      "company": "Example Ltd",
-      "name": "contact person's name, or empty string if you did not find one",
-      "research_brief": "what they do, why they fit, what the hook is",
-      "source_urls": ["https://example.com/about"],
-      "emails": [
-        {
-          "address": "hello@example.com",
-          "confidence": "observed",
-          "source_url": "https://example.com/contact"
-        }
-      ]
-    }
-  ],
-  "notes": "anything about the search itself worth logging"
-}
+  companies      a list, one entry per company, each with:
+    domain           <the company's website domain — REQUIRED>
+    company          <the company name>
+    name             <the contact person, or "" if you did not find one>
+    research_brief   <what they do, why they fit, what the hook is>
+    source_urls      <list of the page URLs you actually read>
+    emails           <list, usually EMPTY; one entry per address you SAW, each
+                      with: address, confidence (the literal string "observed"),
+                      and source_url — the page you read it on>
+  notes          <anything about the search itself worth logging>
 
-`domain` is the only required field. `emails` is usually an empty list — that \
-is normal. `notes` is for the run log ("three directories were paywalled"), \
-never a claim about a specific company.
+`domain` is the only required field. `emails` being an empty list is the normal \
+case, not a failure. `notes` is for the run log ("three directories were \
+paywalled"), never a claim about a specific company.
 """
 
 # The agent, as data. Seed this into a workspace to make discovery available
@@ -213,12 +224,22 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
     if not objects:
         return None
-    # The answer is the object shaped like an answer. Falling back to the first
-    # decodable object keeps a model that renamed the key from costing the run.
-    for obj in objects:
+    # The LAST qualifying object wins, not the first.
+    #
+    # This is the fix for a reproduced bug, so it is worth being explicit about
+    # why. The prompt used to carry a fully-valid JSON example — complete with
+    # an "observed" email on example.com — and this loop took the FIRST object
+    # with a ``companies`` key. A model that restated the shape before
+    # answering therefore had its own template parsed as the research: the real
+    # findings were discarded and a fabricated prospect was filed carrying an
+    # address nobody had ever seen. The prompt no longer contains parseable
+    # JSON, and this picks the last candidate, so a preamble cannot shadow the
+    # answer even if one reappears. Two independent guards, because the thing
+    # they protect is the one guarantee this module claims to be structural.
+    for obj in reversed(objects):
         if "companies" in obj:
             return obj
-    return objects[0]
+    return objects[-1]
 
 
 def _evidence_from(raw: Any) -> EmailEvidence | None:
@@ -241,6 +262,17 @@ def _evidence_from(raw: Any) -> EmailEvidence | None:
         return None
     confidence = str(raw.get("confidence") or "").strip().lower()
     if not confidence:
+        return None
+    # Shape-check the address itself. `.strip()` only trims the ends, and
+    # `recordable_emails` checks provenance, not syntax — so without this a
+    # plausible extraction artifact like "hello@x.com\nbilling@x.com" (two
+    # addresses on adjacent lines of a contact page) passes every guard and is
+    # stored as ONE address, which the dispatch path then hands to the provider
+    # as a recipient. Exactly one @, no whitespace, something on each side.
+    if any(ch.isspace() for ch in address) or address.count("@") != 1:
+        return None
+    local, _, host = address.partition("@")
+    if not local or "." not in host:
         return None
     return EmailEvidence(address=address, confidence=confidence, seen_at_url=source_url)
 
@@ -331,16 +363,21 @@ async def agent_research(request: ResearchRequest) -> ResearchResult:
             request.workspace_id,
             GROWTH_RESEARCHER_SLUG,
         )
-        return ResearchResult(notes="no researcher agent is available in this workspace")
+        raise ResearchUnavailable("no researcher agent is seeded in this workspace")
     agent_id = str(getattr(agent, "id", "") or "")
     if not agent_id:
-        return ResearchResult(notes="no researcher agent is available in this workspace")
+        raise ResearchUnavailable("no researcher agent is seeded in this workspace")
 
     prompt = build_research_prompt(request)
-    # One session per ICP run. Deliberately not a stable per-ICP key: a hunt
-    # that ran yesterday must not carry yesterday's page reads into today's
-    # judgement — each run should stand on what it read this time.
-    session_key = f"growth-discovery:{request.workspace_id}:{request.icp_id}"
+    # One session per RUN, not per ICP. The timestamp is the whole point: an
+    # earlier version keyed on (workspace, icp) alone while claiming in this
+    # very comment to do otherwise, which meant every daily run RESUMED the
+    # previous one. The model saw its own last answer in context and the
+    # natural completion became "I already reported those" — so a hunt filed
+    # nothing from day two onward while last_run_at kept advancing, and the
+    # session's context grew without bound.
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+    session_key = f"growth-discovery:{request.workspace_id}:{request.icp_id}:{stamp}"
 
     chunks: list[str] = []
     try:
@@ -369,7 +406,7 @@ async def agent_research(request: ResearchRequest) -> ResearchResult:
             request.icp_id,
             request.workspace_id,
         )
-        return ResearchResult(notes="the research run failed")
+        raise ResearchUnavailable("the research run failed")
 
     return parse_research_response("".join(chunks), max_results=request.max_results)
 
@@ -379,6 +416,7 @@ __all__ = [
     "GROWTH_RESEARCHER_PROMPT",
     "GROWTH_RESEARCHER_SLUG",
     "GROWTH_RESEARCHER_TOOLS",
+    "ResearchUnavailable",
     "agent_research",
     "build_research_prompt",
     "parse_research_response",

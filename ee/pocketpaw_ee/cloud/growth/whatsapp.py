@@ -250,14 +250,18 @@ async def dispatch_whatsapp(draft_id: str) -> None:
         provider_message_id = await client.send_template(to_number=to_number, body_text=draft.body)
     except Msg91Error as exc:
         await growth_service.finish_whatsapp_attempt(
-            log_id, status="failed", error_code=exc.code, error=exc.message
+            log_id,
+            workspace_id=workspace_id,
+            status="failed",
+            error_code=exc.code,
+            error=exc.message,
         )
         # The draft stays ``approved`` — the approval stands, the delivery
         # didn't. An operator can re-dispatch without a second human approval.
         raise WhatsAppDispatchError(f"MSG91 send failed: {exc.message}") from exc
 
     await growth_service.finish_whatsapp_attempt(
-        log_id, status="sent", provider_message_id=provider_message_id
+        log_id, workspace_id=workspace_id, status="sent", provider_message_id=provider_message_id
     )
     # The gate owns approved→sent; this module walks it through the existing
     # seam rather than writing the status itself.

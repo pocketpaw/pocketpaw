@@ -616,7 +616,6 @@ async def _upsert_prospect_handler(args: dict) -> dict:
         if isinstance(emails, list)
         else None
     )
-    opted_in = args.get("opted_in") if isinstance(args.get("opted_in"), bool) else None
 
     try:
         # Build once to canonicalise the domain (the DTO validator strips the
@@ -663,7 +662,13 @@ async def _upsert_prospect_handler(args: dict) -> dict:
             emails=_pick(emails, "emails", []),
             linkedin_url=_pick(_opt_str(args, "linkedin_url"), "linkedin_url", None),
             whatsapp_number=_pick(_opt_str(args, "whatsapp_number"), "whatsapp_number", None),
-            opted_in=_pick(opted_in, "opted_in", False),
+            # NEVER from the agent. opted_in is the flag whatsapp.py checks
+            # before a business-initiated send, so an agent that could set it
+            # could manufacture the consent a human is meant to verify — the
+            # Tray card shows channel and copy, never opt-in provenance. It is
+            # carried forward from the stored row and is otherwise only
+            # settable by a human through PATCH /growth/prospects/{id}.
+            opted_in=bool(getattr(existing, "opted_in", False)),
             # NOT settable by the agent. The outbound lifecycle is driven by
             # what happens to the prospect (a draft written, a reply received,
             # the sweep giving up), never by an argument in a research call.
@@ -969,10 +974,6 @@ def _build_tools() -> list[Any] | None:
                 "emails": {"type": "array", "items": {"type": "string"}},
                 "linkedin_url": {"type": "string"},
                 "whatsapp_number": {"type": "string"},
-                "opted_in": {
-                    "type": "boolean",
-                    "description": "Whether the prospect opted in to WhatsApp contact.",
-                },
             },
             "required": ["domain"],
             "additionalProperties": False,
