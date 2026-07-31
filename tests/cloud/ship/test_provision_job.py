@@ -59,3 +59,33 @@ async def test_unknown_box_is_a_no_op(mongo_db, enc_key, monkeypatch):  # noqa: 
     monkeypatch.delenv(_TOKEN_ENV, raising=False)
     result = await job.provision_box_job({}, "6a60f31a511281a88103bb5f", "ws-1")
     assert result == {"ok": False, "reason": "box_not_found"}
+
+
+# ---------------------------------------------------------------------------
+# Shared provider credential (fix/ship-review-p0)
+# ---------------------------------------------------------------------------
+
+
+async def test_shared_operator_token_is_refused_in_multi_tenant_cloud(
+    mongo_db, enc_key, monkeypatch
+):  # noqa: ARG001
+    """A process-global Hetzner token must not create servers for tenants.
+
+    connectors/ship.yaml declares a PER-WORKSPACE HCLOUD_TOKEN precisely so the
+    central project never holds a shared infrastructure credential. Reading the
+    operator's env var in multi-tenant cloud would create and bill every
+    tenant's servers on one account, so the job fails closed and the box is
+    marked degraded with an actionable reason.
+    """
+    from pocketpaw_ee.cloud.ship import job as ship_job
+
+    monkeypatch.setenv("POCKETPAW_HCLOUD_TOKEN", "operator-token")
+    monkeypatch.setattr(ship_job, "is_multi_tenant_cloud", lambda: True)
+    box = await _make_box(workspace="w1")
+
+    result = await ship_job.provision_box_job({}, str(box.id), "w1")
+
+    assert result == {"ok": False, "reason": "shared_provider_token_refused"}
+    refreshed = await store.get_box("w1", str(box.id))
+    assert refreshed is not None and refreshed.status == "degraded"
+    assert "per-workspace" in (refreshed.status_reason or "")
