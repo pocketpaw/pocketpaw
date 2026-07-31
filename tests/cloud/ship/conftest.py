@@ -162,7 +162,18 @@ def install_refused_engine(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_app(workspace_id: str) -> FastAPI:
+def _build_app(workspace_id: str, *, role: str = "admin") -> FastAPI:
+    """Build the /ship app for one workspace, acting as ``role``.
+
+    ``role`` drives the RBAC route deps: ``ship.read`` is MEMBER and
+    ``ship.manage`` is ADMIN, so a ``member`` app can read but must be refused on
+    every mutating route. The suites default to ``admin`` (the pre-RBAC
+    behaviour); test_ship_rbac.py builds a ``member`` client to prove the gate.
+    """
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud._core.deps import current_active_user
+
     app = FastAPI()
     add_error_handler(app)
     app.include_router(ship_router)
@@ -176,8 +187,16 @@ def _build_app(workspace_id: str) -> FastAPI:
             started_at=datetime.now(UTC),
         )
 
+    async def _user():
+        return SimpleNamespace(
+            id="u1",
+            active_workspace=workspace_id,
+            workspaces=[SimpleNamespace(workspace=workspace_id, role=role)],
+        )
+
     app.dependency_overrides[request_context] = _ctx
     app.dependency_overrides[require_license] = lambda: None
+    app.dependency_overrides[current_active_user] = _user
     return app
 
 

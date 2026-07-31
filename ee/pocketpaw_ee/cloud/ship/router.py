@@ -50,6 +50,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
+from pocketpaw_ee.cloud._core.deps import require_action_any_workspace
 from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.ship import service as ship_service
@@ -79,7 +80,25 @@ from pocketpaw_ee.cloud.ship.dto import (
     SetSourceRequest,
 )
 
-router = APIRouter(prefix="/ship", tags=["Ship"], dependencies=[Depends(require_license)])
+# RBAC. ``ship.read`` (MEMBER) is a ROUTER-level dependency, so every route —
+# including any added later — needs at least read. Each mutating route then adds
+# ``ship.manage`` (ADMIN) explicitly via ``_MANAGE``.
+#
+# This was missing entirely: both actions were registered in guards/actions.py
+# and then never consulted on any request path, so the only real check was
+# "is there an active workspace". Any MEMBER could provision billable servers,
+# write secrets, deploy, restart and tear down — the ADMIN tier the action
+# registry declares was documentation-only. The executor's post-approval
+# re-check is NOT a substitute: it guards the one path that already required a
+# human, not the unattended ones that spend money.
+_READ = Depends(require_action_any_workspace("ship.read"))
+_MANAGE = Depends(require_action_any_workspace("ship.manage"))
+
+router = APIRouter(
+    prefix="/ship",
+    tags=["Ship"],
+    dependencies=[Depends(require_license), _READ],
+)
 
 
 def _require_workspace(ctx: RequestContext) -> str:
@@ -94,7 +113,7 @@ def _require_workspace(ctx: RequestContext) -> str:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/boxes", response_model=BoxOut)
+@router.post("/boxes", response_model=BoxOut, dependencies=[_MANAGE])
 async def create_box(
     body: CreateBoxRequest,
     ctx: RequestContext = Depends(request_context),
@@ -123,7 +142,7 @@ async def get_box_metrics(
     return ship_service.metrics_to_wire(view)
 
 
-@router.delete("/boxes/{box_id}", response_model=PendingApprovalOut)
+@router.delete("/boxes/{box_id}", response_model=PendingApprovalOut, dependencies=[_MANAGE])
 async def request_box_destroy(
     box_id: str,
     ctx: RequestContext = Depends(request_context),
@@ -139,7 +158,7 @@ async def request_box_destroy(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/apps", response_model=AppOut)
+@router.post("/apps", response_model=AppOut, dependencies=[_MANAGE])
 async def create_app(
     body: CreateAppRequest,
     ctx: RequestContext = Depends(request_context),
@@ -159,7 +178,7 @@ async def list_apps(
     return [ship_service.app_to_wire(v) for v in views]
 
 
-@router.put("/apps/{app_id}/source", response_model=AppOut)
+@router.put("/apps/{app_id}/source", response_model=AppOut, dependencies=[_MANAGE])
 async def set_app_source(
     app_id: str,
     body: SetSourceRequest,
@@ -172,7 +191,7 @@ async def set_app_source(
     return ship_service.app_to_wire(view)
 
 
-@router.post("/apps/{app_id}/deploy", response_model=DeployOut)
+@router.post("/apps/{app_id}/deploy", response_model=DeployOut, dependencies=[_MANAGE])
 async def deploy_app(
     app_id: str,
     ctx: RequestContext = Depends(request_context),
@@ -193,7 +212,7 @@ async def list_deploys(
     return [ship_service.deploy_to_wire(v) for v in views]
 
 
-@router.post("/apps/{app_id}/domains", response_model=DomainOut)
+@router.post("/apps/{app_id}/domains", response_model=DomainOut, dependencies=[_MANAGE])
 async def add_domain(
     app_id: str,
     body: AddDomainRequest,
@@ -214,7 +233,7 @@ async def list_domains(
     return ship_service.domains_to_wire(views)
 
 
-@router.post("/apps/{app_id}/db", response_model=DbOut)
+@router.post("/apps/{app_id}/db", response_model=DbOut, dependencies=[_MANAGE])
 async def create_db(
     app_id: str,
     ctx: RequestContext = Depends(request_context),
@@ -229,7 +248,7 @@ async def create_db(
     return ship_service.db_to_wire(view)
 
 
-@router.put("/apps/{app_id}/scale", response_model=AppOut)
+@router.put("/apps/{app_id}/scale", response_model=AppOut, dependencies=[_MANAGE])
 async def set_app_scale(
     app_id: str,
     body: SetScaleRequest,
@@ -241,7 +260,7 @@ async def set_app_scale(
     return ship_service.app_to_wire(view)
 
 
-@router.put("/apps/{app_id}/checks", response_model=AppOut)
+@router.put("/apps/{app_id}/checks", response_model=AppOut, dependencies=[_MANAGE])
 async def set_app_checks(
     app_id: str,
     body: SetChecksRequest,
@@ -253,7 +272,7 @@ async def set_app_checks(
     return ship_service.app_to_wire(view)
 
 
-@router.put("/apps/{app_id}/resources", response_model=AppOut)
+@router.put("/apps/{app_id}/resources", response_model=AppOut, dependencies=[_MANAGE])
 async def set_app_resources(
     app_id: str,
     body: SetResourcesRequest,
@@ -265,7 +284,7 @@ async def set_app_resources(
     return ship_service.app_to_wire(view)
 
 
-@router.post("/apps/{app_id}/volumes", response_model=AppOut)
+@router.post("/apps/{app_id}/volumes", response_model=AppOut, dependencies=[_MANAGE])
 async def create_volume(
     app_id: str,
     body: CreateVolumeRequest,
@@ -277,7 +296,7 @@ async def create_volume(
     return ship_service.app_to_wire(view)
 
 
-@router.post("/apps/{app_id}/restart", response_model=LifecycleOut)
+@router.post("/apps/{app_id}/restart", response_model=LifecycleOut, dependencies=[_MANAGE])
 async def restart_app(
     app_id: str,
     ctx: RequestContext = Depends(request_context),
@@ -288,7 +307,7 @@ async def restart_app(
     return ship_service.lifecycle_to_wire(view)
 
 
-@router.post("/apps/{app_id}/rebuild", response_model=LifecycleOut)
+@router.post("/apps/{app_id}/rebuild", response_model=LifecycleOut, dependencies=[_MANAGE])
 async def rebuild_app(
     app_id: str,
     ctx: RequestContext = Depends(request_context),
@@ -336,7 +355,7 @@ async def get_app_env(
     return ship_service.env_to_wire(views)
 
 
-@router.put("/apps/{app_id}/env", response_model=EnvOut)
+@router.put("/apps/{app_id}/env", response_model=EnvOut, dependencies=[_MANAGE])
 async def set_app_env(
     app_id: str,
     body: SetEnvRequest,
@@ -349,7 +368,7 @@ async def set_app_env(
     return ship_service.env_to_wire(views)
 
 
-@router.post("/apps/{app_id}/env/import", response_model=EnvOut)
+@router.post("/apps/{app_id}/env/import", response_model=EnvOut, dependencies=[_MANAGE])
 async def import_app_env(
     app_id: str,
     body: ImportEnvRequest,
@@ -361,7 +380,7 @@ async def import_app_env(
     return ship_service.env_to_wire(views)
 
 
-@router.delete("/apps/{app_id}/env/{key}", response_model=EnvOut)
+@router.delete("/apps/{app_id}/env/{key}", response_model=EnvOut, dependencies=[_MANAGE])
 async def delete_app_env(
     app_id: str,
     key: str,
@@ -373,7 +392,7 @@ async def delete_app_env(
     return ship_service.env_to_wire(views)
 
 
-@router.delete("/apps/{app_id}", response_model=PendingApprovalOut)
+@router.delete("/apps/{app_id}", response_model=PendingApprovalOut, dependencies=[_MANAGE])
 async def request_app_destroy(
     app_id: str,
     ctx: RequestContext = Depends(request_context),
