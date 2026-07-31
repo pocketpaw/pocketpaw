@@ -87,6 +87,18 @@ and normalizes providers (Anthropic, Bedrock) that report them disjointly — so
 Verified live 2026-07-29 through a real LiteLLM proxy: a streamed turn, a tool
 round-trip (tool actually executed, ``tool_use`` before ``tool_result``), and 8
 concurrent runs on ONE cached instance with zero empty ``stream_end``.
+
+Updated 2026-07-31 — ``run`` accepts the per-surface tool-gating kwargs
+(``deny_mcp_tool_ids`` / ``allow_mcp_tool_ids`` / ``exclusive_mcp_tools``) and
+HONOURS them; see ``_expand_tool_ids`` and ``_gate_mcp_toolsets``. Omitting them
+crashed the run outright: ``AgentPool.run`` forwards each ONLY when a surface
+sets it, so /chat (empty deny, no allow) worked while the first /sites turn died
+with ``TypeError: run() got an unexpected keyword argument
+'deny_mcp_tool_ids'``. Accepting them is only half the fix — they are a
+surface's tool-REMOVAL controls, so swallowing them would have handed a
+restricted surface the full tool set and reported success. The other six
+non-Claude backends still carry the narrow signature and will crash the same way
+on that surface.
 """
 
 from __future__ import annotations
@@ -116,6 +128,63 @@ _OPENAI_COMPATIBLE = frozenset({"litellm", "openai", "openai_compatible", "openr
 # dispatch-only note in the module docstring.
 _POCKET_SCOPE_SENTINEL = "<pocket-scope>"
 _POCKET_BLOCKED_TOOLS = frozenset({"shell", "read_file", "write_file", "edit_file", "list_dir"})
+
+# -- per-surface tool gating -------------------------------------------------
+#
+# A ``SurfaceProfile``'s deny/allow sets are written in the Claude SDK's
+# vocabulary, because that is the backend they were built for: MCP tools spelled
+# ``mcp__<server>__<tool>`` and bare built-in names like ``Bash``. NEITHER
+# spelling exists here — pydantic-ai's ``PrefixedToolset`` names an MCP tool
+# ``<server>_<tool>``, and there are no SDK built-ins at all. Comparing the raw
+# strings therefore matches nothing, which is the dangerous failure: a surface
+# that removed shell access would run with the full tool set and report success.
+
+
+def _normalize_tool_id(tool_id: str) -> str:
+    """``mcp__srv__do_thing`` -> ``srv_do_thing``. Other spellings pass through."""
+    if tool_id.startswith("mcp__"):
+        return tool_id.removeprefix("mcp__").replace("__", "_")
+    return tool_id
+
+
+# A surface's tool id -> the bridged PocketPaw tools that do the SAME JOB. A
+# surface denying ``Bash`` is removing the ability to execute code on this box,
+# not the seven letters; keeping ``shell`` because the name differs honours the
+# letter of the deny and none of its point. The /code and /sites profiles deny
+# the built-ins precisely because the agent runs on the BACKEND SERVER, and that
+# hazard is identical here.
+#
+# The same holds for the in-process MCP ids, which reach this backend as bridged
+# function tools rather than as ``mcp__`` ids: /sites svelte-create denies
+# ``pocket_specialist__create`` so the agent CANNOT fall back to building a
+# rippleSpec landing page (claude_sdk:1865 — "prose-only 'do not call the ripple
+# tool' routing was proven to fail"), and ``create_pocket`` is that same
+# capability under the OSS name.
+#
+# Deliberately over-inclusive where a capability spans several tools (``Bash``
+# also takes ``run_python`` / ``install_package``): over-denial costs a
+# capability, under-denial costs the boundary. Ids with no local equivalent
+# (``WebSearch``, ``Skill``, ``sites_manager__create_landing_site``) simply have
+# no row — normalization still covers them if they ever get bridged.
+_SURFACE_TOOL_EQUIVALENTS: dict[str, frozenset[str]] = {
+    "Bash": frozenset({"shell", "run_python", "install_package"}),
+    "Read": frozenset({"read_file"}),
+    "Write": frozenset({"write_file"}),
+    "Edit": frozenset({"edit_file"}),
+    "Glob": frozenset({"list_dir", "directory_tree"}),
+    "Grep": frozenset({"list_dir", "directory_tree"}),
+    "Agent": frozenset({"delegate_claude_code", "delegate_to_a2a_agent"}),
+    "mcp__pocketpaw_pocket_specialist__create": frozenset({"create_pocket"}),
+}
+
+
+def _expand_tool_ids(tool_ids: frozenset[str]) -> frozenset[str]:
+    """Translate a surface's tool ids into the names this backend uses."""
+    out: set[str] = set()
+    for raw in tool_ids:
+        out.add(_normalize_tool_id(raw))
+        out |= _SURFACE_TOOL_EQUIVALENTS.get(raw, frozenset())
+    return frozenset(out)
 
 
 class _RunHandle:
@@ -692,12 +761,56 @@ class PydanticAIBackend:
 
     # -- agent assembly -----------------------------------------------------
 
+    @staticmethod
+    def _gate_mcp_toolsets(
+        mcp_toolsets: list,
+        deny: frozenset[str],
+        allow_mcp_tool_ids: frozenset[str] | None,
+        exclusive_mcp_tools: bool,
+    ) -> list:
+        """Apply the surface's deny / allow sets to the MCP toolsets.
+
+        Mirrors ``claude_sdk``'s precedence: deny is subtracted first and is the
+        hard boundary, then the RESTRICTIVE allow set keeps only what it names.
+
+        The allow set is applied to MCP toolsets ONLY, matching the SDK, where
+        "built-in SDK tools are NEVER filtered here — only ``mcp__*`` ids". The
+        split lands differently on this backend but in the same place: our MCP
+        toolsets are the user's EXTERNAL configured servers, while the
+        in-process pocket / widget / sites tools arrive as bridged function
+        tools — which is exactly the group the SDK's grant unions back in
+        (``POCKET_CREATION_GRANT`` / widget / atlas ids). Restricting them here
+        would be stricter than the surface asks for and would break /sites.
+        """
+        if not mcp_toolsets or (not deny and allow_mcp_tool_ids is None):
+            return mcp_toolsets
+
+        # An exclusive turn CAPS the surface to the allow set alone — with no
+        # allow set that is an EMPTY permitted set, so every MCP tool goes. That
+        # is how a dedicated agent wins over a broad surface (claude_sdk CX-1).
+        permitted = (
+            (allow_mcp_tool_ids or frozenset()) if exclusive_mcp_tools else allow_mcp_tool_ids
+        )
+        allowed = None if permitted is None else _expand_tool_ids(permitted)
+
+        def _keep(_ctx: Any, tool_def: Any) -> bool:
+            name = getattr(tool_def, "name", "")
+            if name in deny:
+                return False
+            return allowed is None or name in allowed
+
+        return [ts.filtered(_keep) for ts in mcp_toolsets]
+
     def _get_or_create_agent(
         self,
         model: Any,
         instructions: str,
         mcp_toolsets: list,
         skill_names: frozenset[str] = frozenset(),
+        *,
+        deny_mcp_tool_ids: frozenset[str] = frozenset(),
+        allow_mcp_tool_ids: frozenset[str] | None = None,
+        exclusive_mcp_tools: bool = False,
     ) -> Any:
         """Build (and cache) the pydantic-ai ``Agent``.
 
@@ -708,6 +821,7 @@ class PydanticAIBackend:
         from pydantic_ai import Agent
 
         is_pocket_session = _POCKET_SCOPE_SENTINEL in (instructions or "")
+        deny = _expand_tool_ids(deny_mcp_tool_ids)
 
         # Build tools BEFORE the cache key. ``_build_custom_tools`` populates
         # ``self._custom_tools`` on first call, so keying off it beforehand
@@ -727,9 +841,31 @@ class PydanticAIBackend:
             # shapes the agent's capabilities, so an entity with a narrower set
             # must not be served an agent cached for a wider one.
             tuple(sorted(skill_names)),
+            # Same reason, and here it decides a security boundary rather than a
+            # capability: ``AgentPool`` drives EVERY surface through one cached
+            # instance, so without these in the key whichever surface ran first
+            # would pick the tool surface for all of them — a restricted turn
+            # would silently be served the unrestricted agent.
+            tuple(sorted(deny)),
+            None if allow_mcp_tool_ids is None else tuple(sorted(allow_mcp_tool_ids)),
+            exclusive_mcp_tools,
         )
         if self._cached_agent is not None and self._cached_agent_key == agent_key:
             return self._cached_agent
+
+        if deny:
+            before = len(tools)
+            tools = [t for t in tools if getattr(t, "name", "") not in deny]
+            if before != len(tools):
+                logger.info(
+                    "Surface tool-deny: stripped %d tool(s) for %s",
+                    before - len(tools),
+                    sorted(deny_mcp_tool_ids),
+                )
+
+        mcp_toolsets = self._gate_mcp_toolsets(
+            mcp_toolsets, deny, allow_mcp_tool_ids, exclusive_mcp_tools
+        )
 
         if is_pocket_session:
             before = len(tools)
@@ -787,6 +923,33 @@ class PydanticAIBackend:
         # ``AgentPool.run`` forwards it only when non-empty, so an empty set
         # means "no per-entity narrowing" and every bundled skill is offered.
         skill_names: frozenset[str] = frozenset(),
+        # -- per-surface tool gating (see ``_gate_mcp_toolsets``) ------------
+        # These ride the same withhold-when-empty contract, which is why their
+        # absence was invisible: the pool forwards them ONLY when a surface
+        # actually sets one, so every test and every /chat turn passed and the
+        # first /sites turn died with ``TypeError: run() got an unexpected
+        # keyword argument 'deny_mcp_tool_ids'`` (observed live 2026-07-31).
+        # ``test_run_accepts_every_kwarg_the_pool_forwards`` reads the pool's
+        # real forwarding table so the next kwarg fails a test, not a run.
+        deny_mcp_tool_ids: frozenset[str] = frozenset(),
+        allow_mcp_tool_ids: frozenset[str] | None = None,
+        exclusive_mcp_tools: bool = False,
+        # Accepted and deliberately unused — each is Claude-SDK plumbing with no
+        # analogue here, and each is safe to drop:
+        #   ``allow_sdk_tools``   ADDITIVE grant of SDK built-ins. There are no
+        #                         SDK built-ins on this backend, so there is
+        #                         nothing to grant; ignoring it removes tools,
+        #                         never adds them.
+        #   ``model_override``    per-send model choice, consumed only by the
+        #                         Claude SDK backend (as on the other six).
+        #   ``session_handle`` /  native CLI-session resume and warm-client
+        #   ``warm_client`` /     reuse — this backend has no subprocess to
+        #   ``on_client_built``   resume or lease.
+        allow_sdk_tools: frozenset[str] = frozenset(),  # noqa: ARG002
+        model_override: str | None = None,  # noqa: ARG002
+        session_handle: Any = None,  # noqa: ARG002
+        warm_client: Any = None,  # noqa: ARG002
+        on_client_built: Any = None,  # noqa: ARG002
     ) -> AsyncIterator[AgentEvent]:
         if not self._sdk_available:
             yield AgentEvent(
@@ -811,7 +974,15 @@ class PydanticAIBackend:
             model = self._build_model()
             instructions = system_prompt or _DEFAULT_IDENTITY
             mcp_toolsets = await self._build_mcp_tools()
-            agent = self._get_or_create_agent(model, instructions, mcp_toolsets, skill_names)
+            agent = self._get_or_create_agent(
+                model,
+                instructions,
+                mcp_toolsets,
+                skill_names,
+                deny_mcp_tool_ids=deny_mcp_tool_ids,
+                allow_mcp_tool_ids=allow_mcp_tool_ids,
+                exclusive_mcp_tools=exclusive_mcp_tools,
+            )
 
             kwargs: dict[str, Any] = {"message_history": self._build_history(history)}
             max_turns = self.settings.pydantic_ai_max_turns
@@ -869,7 +1040,7 @@ class PydanticAIBackend:
             f"So the credential to fix is the one the PROXY holds for that model's "
             f"provider, not POCKETPAW_LITELLM_API_KEY.\n\n"
             f"To pick a model whose upstream is alive:\n"
-            f"  curl -H \"Authorization: Bearer $POCKETPAW_LITELLM_API_KEY\" {base}/health\n"
+            f'  curl -H "Authorization: Bearer $POCKETPAW_LITELLM_API_KEY" {base}/health\n'
             f"and set POCKETPAW_PYDANTIC_AI_MODEL=litellm:<a healthy model group>.\n\n"
             f"Original error: {text[:400]}"
         )

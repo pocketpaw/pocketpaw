@@ -1087,3 +1087,224 @@ def test_bridged_tools_are_all_async():
     assert tools, "expected at least one bridged builtin tool"
     for tool in tools:
         assert inspect.iscoroutinefunction(tool.function), f"{tool.name} is not async"
+
+
+# --------------------------------------------------------------------------
+# per-surface tool gating (deny / allow)
+#
+# ``AgentPool.run`` forwards these kwargs only when non-empty, so a backend
+# that omits them looks fine until a surface that actually sets one routes to
+# it — then the run dies with ``TypeError: run() got an unexpected keyword
+# argument 'deny_mcp_tool_ids'`` (observed live 2026-07-31). Accepting them is
+# only half the fix: ``deny``/``allow`` are the surface's tool-removal
+# controls, so swallowing them silently would hand a restricted surface the
+# full tool set and report success.
+# --------------------------------------------------------------------------
+
+
+async def _tool_surface(backend: PydanticAIBackend, **run_kwargs) -> set[str]:
+    """The tool names the MODEL is actually offered on one run.
+
+    Asserting against ``AgentInfo.function_tools`` rather than an internal
+    filter is deliberate: it is the surface the model can call, so it covers
+    bridged tools and prefixed MCP toolset tools with one assertion and cannot
+    pass while the filter runs somewhere the agent never reads.
+    """
+    seen: set[str] = set()
+
+    async def capture(messages: list[ModelMessage], info: AgentInfo):
+        seen.update(t.name for t in info.function_tools)
+        yield "ok"
+
+    model = FunctionModel(stream_function=capture)
+    backend._build_model = lambda: model  # type: ignore[method-assign]
+    await _collect(backend, "hi", **run_kwargs)
+    return seen
+
+
+def _mcp_toolset(prefix: str, *names: str):
+    """A prefixed toolset shaped like ``_start_mcp_servers`` builds."""
+    from pydantic_ai.toolsets import FunctionToolset, PrefixedToolset
+
+    def _make(name: str):
+        async def _tool(q: str) -> str:
+            return ""
+
+        _tool.__name__ = name
+        _tool.__doc__ = f"The {name} tool."
+        return _tool
+
+    return PrefixedToolset(FunctionToolset([_make(n) for n in names]), prefix)
+
+
+def _bridged(*names: str) -> list:
+    from pydantic_ai.tools import Tool
+
+    def _make(name: str):
+        async def _tool(q: str) -> str:
+            return ""
+
+        return Tool(_tool, name=name, description=f"The {name} tool.")
+
+    return [_make(n) for n in names]
+
+
+def test_run_accepts_every_kwarg_the_pool_forwards():
+    """Signature conformance against the pool's REAL forwarding table.
+
+    Read out of ``AgentPool.run``'s source rather than duplicated here, so a
+    kwarg added to the pool fails this test instead of waiting to crash on
+    whichever surface first sets it.
+    """
+    import inspect
+    import re
+
+    from pocketpaw.agents import pool
+
+    src = inspect.getsource(pool.AgentPool.run)
+    forwarded = set(re.findall(r'run_kwargs\["(\w+)"\]\s*=', src))
+    forwarded |= {"system_prompt", "history", "session_key"}
+    assert "deny_mcp_tool_ids" in forwarded, "regex stopped matching the pool's table"
+
+    accepted = set(inspect.signature(PydanticAIBackend.run).parameters)
+    assert not sorted(forwarded - accepted)
+
+
+async def test_a_denied_mcp_tool_id_never_reaches_the_model():
+    """``mcp__<server>__<tool>`` is the surface's spelling; pydantic-ai's
+    ``PrefixedToolset`` spells the same tool ``<server>_<tool>``. Comparing the
+    raw strings matches nothing and denies nothing."""
+    backend = _backend_with_model(TestModel())
+    backend._mcp_tools = [_mcp_toolset("pocketpaw_sites_manager", "create_landing_site", "publish")]
+
+    names = await _tool_surface(
+        backend,
+        deny_mcp_tool_ids=frozenset({"mcp__pocketpaw_sites_manager__create_landing_site"}),
+    )
+    assert "pocketpaw_sites_manager_create_landing_site" not in names
+    assert "pocketpaw_sites_manager_publish" in names
+
+
+async def test_a_denied_builtin_name_removes_the_tool_that_does_the_same_job():
+    """Surface deny sets are written in the Claude SDK's vocabulary (``Bash``,
+    ``Read``, …). Those names do not exist here, but the CAPABILITY does —
+    ``shell``, ``read_file``. Matching only literal names would leave a surface
+    that removed shell access holding ``shell``."""
+    backend = _backend_with_model(TestModel())
+    backend._custom_tools = _bridged("shell", "read_file", "web_search")
+
+    names = await _tool_surface(backend, deny_mcp_tool_ids=frozenset({"Bash", "Read"}))
+    assert "shell" not in names
+    assert "read_file" not in names
+    assert "web_search" in names
+
+
+async def test_allow_mcp_tool_ids_caps_the_mcp_surface():
+    """Restrictive, so ignoring it fails OPEN — the agent keeps tools the
+    surface never granted."""
+    backend = _backend_with_model(TestModel())
+    backend._mcp_tools = [_mcp_toolset("srv", "wanted", "unwanted")]
+
+    names = await _tool_surface(backend, allow_mcp_tool_ids=frozenset({"mcp__srv__wanted"}))
+    assert "srv_wanted" in names
+    assert "srv_unwanted" not in names
+
+
+async def test_deny_wins_over_allow():
+    """``effective = (agent ∪ allow) − deny`` — deny is the hard boundary."""
+    backend = _backend_with_model(TestModel())
+    backend._mcp_tools = [_mcp_toolset("srv", "thing")]
+
+    names = await _tool_surface(
+        backend,
+        allow_mcp_tool_ids=frozenset({"mcp__srv__thing"}),
+        deny_mcp_tool_ids=frozenset({"mcp__srv__thing"}),
+    )
+    assert "srv_thing" not in names
+
+
+async def test_a_restricted_run_does_not_reuse_the_unrestricted_agent():
+    """The agent is cached per instance and the pool drives every surface
+    through one instance. If the gating sets are not in the cache key, whichever
+    surface runs first decides the tool surface for all of them."""
+    backend = _backend_with_model(TestModel())
+    backend._custom_tools = _bridged("shell", "web_search")
+
+    wide = await _tool_surface(backend)
+    assert "shell" in wide
+
+    narrow = await _tool_surface(backend, deny_mcp_tool_ids=frozenset({"Bash"}))
+    # Both halves are load-bearing. Asserting only the absence passes VACUOUSLY
+    # when the stale agent is reused: the cached agent still holds the FIRST
+    # run's model, so the second run's capture closure is never called and
+    # ``narrow`` comes back empty. A mutation probe (deny dropped from the cache
+    # key) passed against exactly that before this line was added.
+    assert "web_search" in narrow, "the second run never reached its own model"
+    assert "shell" not in narrow
+
+
+async def test_the_real_sites_deny_set_removes_the_ripple_fallback():
+    """Pinned to the LIVE ``/sites`` profile, not a hand-written double.
+
+    ``/sites`` svelte-create denies ``pocket_specialist__create`` so the agent
+    cannot fall back to building a rippleSpec landing page — prose-only "do not
+    call the ripple tool" routing was proven to fail (claude_sdk:1865). On this
+    backend that same capability is the bridged ``create_pocket``, so matching
+    the id literally denies nothing and the fallback stays open.
+
+    Skipped on an OSS-only install; the profile lives in ``pocketpaw_ee``.
+    """
+    registry = pytest.importorskip(
+        "pocketpaw_ee.cloud.surface.surface_registry", reason="pocketpaw-ee not installed"
+    )
+    deny = registry._SITES_SVELTE_CREATE_DENY | registry._SITES_BUILTIN_DENY
+
+    backend = _backend_with_model(TestModel())
+    backend._custom_tools = _bridged("create_pocket", "shell", "read_file", "web_search")
+
+    names = await _tool_surface(backend, deny_mcp_tool_ids=deny)
+    assert "create_pocket" not in names
+    assert "shell" not in names
+    assert "read_file" not in names
+    assert "web_search" in names, "the deny set must not strip research tools"
+
+
+# --------------------------------------------------------------------------
+# error explanation
+# --------------------------------------------------------------------------
+
+
+def test_proxy_401_names_the_upstream_credential_not_the_virtual_key():
+    """Two credentials, and the raw body implicates neither.
+
+    A LiteLLM 401 means the virtual key authenticated FINE — the request was
+    routed and fallbacks were tried — and then the proxy's own upstream
+    credential was rejected. The obvious reading is "my key is wrong", which
+    sends you to change the one thing that works.
+    """
+    backend = PydanticAIBackend(_settings(pydantic_ai_model="litellm:claude-sonnet-4-6"))
+    exc = RuntimeError(
+        "status_code: 401, model_name: claude-sonnet-4-6, "
+        "body: {'message': 'litellm.AuthenticationError: AnthropicException - "
+        "API key is invalid. LiteLLM Retried: 3 times', 'code': '401'}"
+    )
+
+    msg = backend._explain_error(exc)
+    assert "UPSTREAM" in msg
+    assert "not from your virtual key" in msg
+    assert "/health" in msg, "must say how to find a model group that works"
+    assert "claude-sonnet-4-6" in msg
+
+
+def test_a_non_auth_error_is_not_dressed_up_as_a_proxy_problem():
+    backend = PydanticAIBackend(_settings())
+    msg = backend._explain_error(RuntimeError("connection reset by peer"))
+    assert msg == "Pydantic AI error: connection reset by peer"
+
+
+def test_a_401_from_a_direct_provider_is_left_alone():
+    """Only the proxy has the two-credential ambiguity — direct Anthropic
+    really does mean the configured key is wrong."""
+    backend = PydanticAIBackend(_settings(pydantic_ai_model="anthropic:claude-haiku-4-5"))
+    msg = backend._explain_error(RuntimeError("status_code: 401, authentication_error"))
+    assert "UPSTREAM" not in msg
