@@ -308,6 +308,75 @@ either.
 `after` takes the timestamp of the last message the page rendered and returns only
 what came after it, so a poll never shows the same reply twice.
 
+## Reaching a human
+
+A concierge that cannot hand a visitor to a person is a wall with a friendly
+voice. Two paths lead out of it, and they write the same record.
+
+The visitor's own path is `POST /paw-bar/request-human`, behind the same key,
+origin and rate gates as the chat, carrying an optional note and an optional
+address to reach them on. It works in **every** state — while the bot is
+answering confidently, while a human already holds the thread, on a conversation
+nobody has escalated before. That is the point: asking for a person is not a
+fallback for when the bot fails, and it must not depend on the bot agreeing that
+it has failed.
+
+The agent's path is a tool, `pawbar_request_human`, present on every site
+concierge whether or not the owner declared any actions, alongside a prompt rule
+with no judgement left in it: a request to talk to a person is always honored,
+never deflected, never answered with an offer to try again — and once the tool
+returns, the concierge says plainly that a human has been notified and stops
+guessing. It is also the move when the same question has failed twice.
+
+The tool takes no other action. It escalates the conversation and notifies the
+business, and that is the whole of its authority — a public concierge cannot
+place an order, change data, or reach anything of the tenant's through it.
+
+Either path does the same four things:
+
+- the conversation moves to `needs_human`, so it sits at the top of the owner's
+  queue (and stays there — a later visitor message does not demote it);
+- a handoff record is stored, carrying the note, the address if one was left, and
+  a pointer back to the conversation;
+- an audit marker is written, which also feeds a small per-visitor cap so a
+  handoff button cannot be used to flood the owner;
+- the workspace owner is notified.
+
+The two are recorded independently on purpose. The queue and the handoffs list
+are separate surfaces, so if one write fails the request still reaches the owner
+through the other, and the visitor is only told nobody could be reached when
+neither landed.
+
+`GET /paw-bar/admin/site/{site_id}/handoffs` lists them for one site, newest
+first, each with the note, the contact, the conversation pointer and a timestamp.
+It is scoped to that site's widget, so a sibling site in the same workspace never
+appears in it, and the overview's `handoffs` count is the same read.
+
+## Notifications
+
+The owner is told about a conversation on three occasions, and no others:
+
+| Trigger | Kind |
+|---|---|
+| the first message of a new conversation | `paw_bar_conversation_new` |
+| a handoff — someone asked for a person | `paw_bar_needs_human` |
+| a visitor replying while the bot is paused | `paw_bar_visitor_reply` |
+
+Deliberately not every message. A bar that pinged on each turn would train the
+owner to ignore the badge, which costs them the two escalations that actually
+need them. The third exists because a visitor typing into a paused conversation
+is writing to the person who took it over, and that person is by definition not
+watching the bot's queue.
+
+These are ordinary in-app notifications, so they carry the same unread badge and
+the same external delivery (Slack, webhook) the workspace already configured.
+They go to the **workspace owner** in v1; fan-out to other members lands with
+assignment, not before.
+
+Notification is never load-bearing. If it fails — no owner resolves, the backend
+is down, a webhook times out — the visitor's turn is unaffected and the
+conversation is still in the queue where the owner will find it.
+
 ## When the visitor leaves the page
 
 Some requests need a human decision, and humans take longer than a browser tab

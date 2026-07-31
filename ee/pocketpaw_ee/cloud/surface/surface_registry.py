@@ -411,16 +411,29 @@ def _concierge_profile(meta: SurfaceMeta) -> SurfaceProfile:
     is WIDENED by EXACTLY this widget's per-verb tool ids
     (``mcp__pawbar_actions__pawbar_<verb>``) so those tools survive the lockdown —
     and nothing else does. A widget with no declared actions keeps the empty
-    allow-list, so the concierge tool surface is byte-identical deny-all."""
+    allow-list, so the concierge tool surface is byte-identical deny-all.
+
+    Slice 3 — the escape hatch: a run bound to a widget (``meta.widget_id``, also
+    stamped server-side by ``concierge_chat``) additionally allows the built-in
+    ``pawbar_request_human`` tool, whether or not the widget declares actions. It
+    is the one tool every site's concierge gets, because "let me talk to a person"
+    must never depend on what the owner happened to configure. It executes no
+    declared verb — see ``paw_bar.handoff`` — so the zero-authority posture is
+    unchanged."""
     allow = _concierge_allow_mcp("foreign")
     actions = getattr(meta, "pawbar_actions", None)
-    if actions:
-        from pocketpaw_ee.agent.mcp_servers.pawbar import pawbar_tool_id
+    widget_id = getattr(meta, "widget_id", None)
+    if actions or widget_id:
+        from pocketpaw_ee.agent.mcp_servers.pawbar import handoff_tool_id, pawbar_tool_id
 
         verb_ids = frozenset(
-            pawbar_tool_id(a["verb"]) for a in actions if isinstance(a, dict) and a.get("verb")
+            pawbar_tool_id(a["verb"])
+            for a in (actions or [])
+            if isinstance(a, dict) and a.get("verb")
         )
         allow = allow | verb_ids
+        if widget_id:
+            allow = allow | {handoff_tool_id()}
     return SurfaceProfile(
         ripple_mode="off",
         deny_mcp_tool_ids=_CONCIERGE_DENY,

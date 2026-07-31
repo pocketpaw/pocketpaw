@@ -443,21 +443,31 @@ async def _resolve_entity_profile(ctx: ScopeContext) -> SurfaceProfile:
 
 
 def _pawbar_run_from_ctx(ctx: ScopeContext) -> dict[str, Any] | None:
-    """Build the per-stream Paw Bar action context for a CONCIERGE run, or None.
+    """Build the per-stream Paw Bar tool context for a CONCIERGE run, or None.
 
     A concierge run whose widget declares actions carries them on
     ``surface_context.meta.pawbar_actions`` (threaded there by ``concierge_chat``).
-    Return ``{"widget_id", "actions"}`` so the ``pawbar_actions`` MCP server can
-    build one tool per verb and its handlers can resolve the widget. Any other run
-    (no surface, no actions) returns ``None`` — the server builds NO tools, so the
-    concierge tool surface stays deny-all exactly as before this slice."""
+    Return ``{"widget_id", "actions", "handoff"}`` so the ``pawbar_actions`` MCP
+    server can build one tool per verb, plus the built-in escape hatch, and its
+    handlers can resolve the widget.
+
+    ``handoff`` (owner inbox, slice 3) is True for ANY concierge run bound to a
+    widget, declared actions or not: a visitor's request to talk to a person is
+    always honored, and a site that sells nothing needs that at least as much as
+    one that does. It is the reason this returns a context where it used to
+    return None. Every non-concierge run still returns ``None`` — the server
+    builds NO tools, so their tool surface is unchanged."""
     sc = ctx.surface_context
     if sc is None:
         return None
-    actions = getattr(sc.meta, "pawbar_actions", None)
-    if not actions:
+    actions = list(getattr(sc.meta, "pawbar_actions", None) or [])
+    widget_id = getattr(sc.meta, "widget_id", "") or ""
+    # The escape hatch needs a widget to escalate against; the concierge kind is
+    # what makes this a public visitor conversation rather than an owner's chat.
+    handoff = bool(widget_id) and sc.kind is SurfaceKind.CONCIERGE
+    if not actions and not handoff:
         return None
-    return {"widget_id": getattr(sc.meta, "widget_id", "") or "", "actions": list(actions)}
+    return {"widget_id": widget_id, "actions": actions, "handoff": handoff}
 
 
 async def _persist_assistant_message(

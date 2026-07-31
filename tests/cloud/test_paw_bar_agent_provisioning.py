@@ -606,6 +606,8 @@ class TestSiteVisitorVisibility:
         assert public["visible_to_site_visitors"] is True
         assert public["items"] == [{"id": "a1", "title": "Hours"}]
         assert private["visible_to_site_visitors"] is False
+
+
 class TestFirstPublishProvisioning:
     """The FIRST publish must provision too (audit finding, 2026-07-30).
 
