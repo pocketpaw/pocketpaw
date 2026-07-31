@@ -621,7 +621,13 @@ def _sites_profile(meta: SurfaceMeta) -> SurfaceProfile:
             ripple_mode="off",
             deny_mcp_tool_ids=_SITES_SVELTE_CREATE_DENY | _SITES_BUILTIN_DENY,
             allow_mcp_tool_ids=sites_allow,
-            skill_names=frozenset({"create-svelte-site"}),
+            # The BUNDLED skill's real name. It was "create-svelte-site" until
+            # 2026-07-31, which matched nothing — and a non-empty skill_names
+            # suppresses the wholesale bundled plugin, so this surface ran with
+            # ZERO skills and the agent authored sites by hand instead of
+            # through the sites tools. Guarded by
+            # test_every_surface_skill_name_resolves_to_a_real_skill.
+            skill_names=frozenset({"pocketpaw-create-svelte-site"}),
         )
     # Ripple-create + refine: keep ripple + the sites tool scope, but still drop the
     # file/shell built-ins — no /sites mode authors on disk (refine edits the ripple
