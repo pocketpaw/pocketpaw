@@ -38,12 +38,18 @@ logger = logging.getLogger(__name__)
 _HCLOUD_TOKEN_ENV = "POCKETPAW_HCLOUD_TOKEN"
 
 
-async def _ssh_dokku_ready(handle: BoxHandle, ssh_private_key: str) -> bool:
+async def _ssh_dokku_ready(handle: BoxHandle, ssh_private_key: str) -> tuple[bool, str]:
     """Real readiness probe: SSH in with the box key, confirm ``dokku version``.
 
-    Writes the key to a private temp file (asyncssh reads a key path), connects
-    via SHIP-1's ``AsyncSSHTransport``, and runs ``dokku version``. Any failure
-    (still booting, connection refused) returns False; the orchestrator retries.
+    Returns ``(ready, host_key)``. ``host_key`` is the box's SSH HOST key,
+    captured trust-on-first-use during this probe so the caller can pin it on the
+    ShipBox — every connect after provisioning verifies against it. It is the
+    box's server identity, not a secret.
+
+    Writes the client key to a private temp file (asyncssh reads a key path),
+    connects via SHIP-1's ``AsyncSSHTransport``, and runs ``dokku version``. Any
+    failure (still booting, connection refused) returns ``(False, "")``; the
+    orchestrator retries.
     """
     from pocketpaw_ee.ship_engine.dokku import AsyncSSHTransport
 
@@ -53,15 +59,26 @@ async def _ssh_dokku_ready(handle: BoxHandle, ssh_private_key: str) -> bool:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w") as fh:
             fh.write(ssh_private_key)
+        # TRUST ON FIRST USE. The box was created seconds ago, so its host key
+        # cannot be known in advance and asyncssh's default verification would
+        # refuse every connection — which is exactly why no box could ever reach
+        # ``ready``. Accept the key on this one probe, hand it back so the caller
+        # pins it on the ShipBox, and every later connect verifies against it.
         transport = AsyncSSHTransport(
             handle.host,
             port=handle.ssh_port,
             username=handle.ssh_user,
             client_key_path=key_path,
+            trust_on_first_use=True,
         )
-        result = await transport.run("dokku version")
-        await _safe_close(transport)
-        return result.exit_code == 0
+        try:
+            result = await transport.run("dokku version")
+        finally:
+            # In the finally, not on the success line — a probe that raised
+            # mid-command used to leak an open asyncssh connection, and the
+            # orchestrator retries up to 30 times per box.
+            await _safe_close(transport)
+        return (result.exit_code == 0, transport.captured_host_key)
     finally:
         if key_path and os.path.exists(key_path):
             os.unlink(key_path)

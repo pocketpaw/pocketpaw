@@ -126,6 +126,14 @@ class ShipBox(TimestampedDocument):
     # cloud-init and re-supplied to the provisioner on a retry. Stored so the
     # public half never has to be re-derived from the encrypted private key.
     ssh_public_key: str = ""
+    # The BOX's SSH host key (its server identity, not secret), captured on the
+    # first successful probe of a freshly provisioned box and pinned on every
+    # connect thereafter. Without this the driver could not reach a new box at
+    # all: asyncssh's default verification consults ~/.ssh/known_hosts, a brand
+    # new box is by definition absent from it, and every connection was refused —
+    # so no box could ever leave ``provisioning``. Empty means "not captured
+    # yet" (a pre-existing box), which falls back to the default posture.
+    ssh_host_key: str = ""
     # The provider's quoted monthly price for the server type, captured at
     # provision (provenance; the cost recorder in SHIP-7 reads it).
     price_monthly: float | None = None

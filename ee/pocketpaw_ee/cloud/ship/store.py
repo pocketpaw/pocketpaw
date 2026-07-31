@@ -109,6 +109,18 @@ async def list_boxes(workspace_id: str) -> list[ShipBox]:
     return await ShipBox.find(ShipBox.workspace == workspace_id).sort("-createdAt").to_list()
 
 
+async def record_host_key(box: ShipBox, *, host_key: str) -> ShipBox:
+    """Pin the box's SSH HOST key, captured trust-on-first-use at provisioning.
+
+    Not a secret — it is the box's server identity, the same string an operator
+    would find in ``~/.ssh/known_hosts``. Every connect after provisioning
+    verifies against it, which is what makes a fresh box reachable at all.
+    """
+    box.ssh_host_key = host_key.strip()
+    await box.save()
+    return box
+
+
 async def mark_ready(
     box: ShipBox, *, server_id: str, ip: str, price_monthly: float | None
 ) -> ShipBox:

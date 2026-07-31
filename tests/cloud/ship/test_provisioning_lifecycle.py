@@ -53,11 +53,17 @@ class FakeProvisioner:
 
 
 def probe_script(*results):
-    """A readiness probe that returns each scripted result in turn."""
+    """A readiness probe that returns each scripted result in turn.
+
+    The probe contract is ``(ready, host_key)`` — the real probe captures the
+    box's SSH host key trust-on-first-use so it can be pinned on the box. A
+    scripted bool is lifted into that shape with a stub key.
+    """
     seq = list(results)
 
-    async def _probe(handle: BoxHandle, key: str) -> bool:
-        return seq.pop(0) if seq else False
+    async def _probe(handle: BoxHandle, key: str) -> tuple[bool, str]:
+        ready = seq.pop(0) if seq else False
+        return (ready, "ssh-ed25519 AAAAFAKEHOSTKEY" if ready else "")
 
     return _probe
 
@@ -143,7 +149,7 @@ async def test_probe_exception_is_tolerated_then_ready(mongo_db, enc_key):  # no
         calls["n"] += 1
         if calls["n"] == 1:
             raise ConnectionRefusedError("still booting")
-        return True
+        return (True, "ssh-ed25519 AAAAFAKEHOSTKEY")
 
     updated = await provisioning.run_provision(
         box,
@@ -209,3 +215,32 @@ async def test_get_box_is_workspace_scoped(mongo_db, enc_key):  # noqa: ARG001
     assert await store.get_box("ws-owner", str(box.id)) is not None
     # A different tenant may not read it, even with the right id.
     assert await store.get_box("ws-attacker", str(box.id)) is None
+
+
+# ---------------------------------------------------------------------------
+# Host-key pinning (fix/ship-review-p0)
+# ---------------------------------------------------------------------------
+
+
+async def test_ready_box_pins_the_host_key(mongo_db, enc_key):  # noqa: ARG001
+    """The probe's captured host key must land on the box BEFORE it goes ready.
+
+    Without this no box could ever be reached: asyncssh's default verification
+    consults ~/.ssh/known_hosts, a freshly created box is by definition absent
+    from it, and every connection was refused — so the readiness probe failed on
+    every attempt and every box ended ``degraded``. The probe now trusts the key
+    on first use and the box pins it for every connect thereafter.
+    """
+    box = await _make_box()
+
+    updated = await provisioning.run_provision(
+        box,
+        provisioner=FakeProvisioner(),
+        ssh_public_key="ssh-ed25519 AAAAPUB test",
+        ssh_private_key="PRIVATE",
+        probe=probe_script(True),
+        sleep=_noop_sleep,
+    )
+
+    assert updated.status == "ready"
+    assert updated.ssh_host_key == "ssh-ed25519 AAAAFAKEHOSTKEY"

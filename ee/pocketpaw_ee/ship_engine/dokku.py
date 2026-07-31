@@ -299,13 +299,19 @@ class AsyncSSHTransport:
         username: str = "root",
         client_key_path: str | None = None,
         known_hosts: str | None = None,
+        host_key: str = "",
+        trust_on_first_use: bool = False,
     ) -> None:
         self._host = host
         self._port = port
         self._username = username
         self._client_key_path = client_key_path
         self._known_hosts = known_hosts
+        self._host_key = host_key.strip()
+        self._trust_on_first_use = trust_on_first_use
         self._conn: Any = None
+        # Set after a TOFU connect so the caller can persist the box's key.
+        self.captured_host_key: str = ""
 
     async def _connect(self) -> Any:
         if self._conn is None:
@@ -317,11 +323,28 @@ class AsyncSSHTransport:
             }
             if self._client_key_path:
                 kwargs["client_keys"] = [self._client_key_path]
-            if self._known_hosts is not None:
+            if self._host_key:
+                # PINNED: verify against the key recorded when the box was
+                # provisioned. asyncssh takes (host_keys, ca_keys, revoked_keys).
+                import asyncssh as _assh
+
+                kwargs["known_hosts"] = ([_assh.import_public_key(self._host_key)], [], [])
+            elif self._trust_on_first_use:
+                # TOFU, used ONLY by the provisioning probe against a box we just
+                # created and whose key cannot be known yet. Verification is off
+                # for this one connect; the key is captured below and pinned on
+                # every connect thereafter.
+                kwargs["known_hosts"] = None
+            elif self._known_hosts is not None:
                 # Only when configured — an explicit known_hosts=None would
                 # DISABLE asyncssh's host-key verification (see class docstring).
                 kwargs["known_hosts"] = self._known_hosts
             self._conn = await asyncssh.connect(self._host, **kwargs)
+            if self._trust_on_first_use and not self._host_key:
+                key = self._conn.get_server_host_key()
+                self.captured_host_key = (
+                    key.export_public_key().decode().strip() if key is not None else ""
+                )
         return self._conn
 
     async def run(self, command: str) -> CommandResult:
