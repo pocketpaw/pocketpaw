@@ -211,6 +211,21 @@ _SURFACE_TOOL_EQUIVALENTS: dict[str, frozenset[str]] = {
 }
 
 
+_AGENTAPI_GATED_SURFACE = (
+    "This surface controls which tools the agent may use, and the `agentapi` "
+    "model cannot honour that.\n\n"
+    "AgentAPI wraps a COMPLETE CLI agent. That agent plans and calls its own "
+    "tools — Write, Bash, Edit — on this server, underneath PocketPaw. It never "
+    "receives the tools this surface granted and never sees the ones it denied, "
+    "so instead of building a site it writes a file to the server's disk and "
+    "waits on a permission prompt in the terminal running `agentapi server`.\n\n"
+    "`agentapi` is a text-only development model. Point this at a real one:\n"
+    "  POCKETPAW_PYDANTIC_AI_MODEL=openrouter:<model>   (or litellm:<model>)\n\n"
+    "To make the wrapped CLI genuinely text-only, restart it as:\n"
+    "  agentapi server -- claude --permission-mode plan"
+)
+
+
 def _expand_tool_ids(tool_ids: frozenset[str]) -> frozenset[str]:
     """Translate a surface's tool ids into the names this backend uses."""
     out: set[str] = set()
@@ -1016,6 +1031,23 @@ class PydanticAIBackend:
 
         try:
             model = self._build_model()
+
+            # A gated surface is one where WHICH tools the agent has is part of
+            # the contract. The agentapi model cannot be part of that contract —
+            # it wraps a complete CLI agent that plans and uses its OWN tools,
+            # below this backend entirely, so it receives nothing this surface
+            # granted and honours nothing it denied. Observed 2026-07-31 on
+            # /sites: the wrapped CLI wrote a landing page to the SERVER's disk
+            # and blocked on a permission prompt in the `agentapi server`
+            # terminal, having never called a sites tool. Refuse rather than let
+            # that read as a working turn.
+            if (deny_mcp_tool_ids or allow_mcp_tool_ids is not None) and (
+                getattr(model, "system", "") == "agentapi"
+            ):
+                yield AgentEvent(type="error", content=_AGENTAPI_GATED_SURFACE)
+                yield AgentEvent(type="done", content="")
+                return
+
             instructions = system_prompt or _DEFAULT_IDENTITY
             mcp_toolsets = await self._build_mcp_tools()
             agent = self._get_or_create_agent(

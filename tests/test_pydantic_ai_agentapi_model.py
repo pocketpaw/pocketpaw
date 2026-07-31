@@ -256,3 +256,57 @@ def test_agentapi_needs_no_provider_key():
     s = Settings(pydantic_ai_model="agentapi:claude")
     s.anthropic_api_key = s.openai_api_key = s.litellm_api_key = None
     assert isinstance(PydanticAIBackend(s)._build_model(), AgentAPIModel)
+
+
+async def test_agentapi_refuses_a_surface_that_gates_tools():
+    """The wrapped CLI does its OWN tool use, below this backend.
+
+    Observed live 2026-07-31 on /sites: it wrote a landing page to the SERVER's
+    disk and blocked on a permission prompt in the `agentapi server` terminal,
+    having never called a sites tool. Nothing above the model seam can prevent
+    that — the tools it uses were never ours — so the only honest move is to
+    refuse the run instead of letting a wrong-machine write read as success.
+    """
+    from pocketpaw.agents.pydantic_ai import PydanticAIBackend
+    from pocketpaw.config import Settings
+
+    backend = PydanticAIBackend(
+        Settings(pydantic_ai_model="agentapi:claude", pydantic_ai_skills_enabled=False)
+    )
+    backend._mcp_tools = []
+    backend._custom_tools = []
+
+    events = [
+        e async for e in backend.run("build me a site", deny_mcp_tool_ids=frozenset({"Bash"}))
+    ]
+    errors = [e for e in events if e.type == "error"]
+    assert errors, "a gated surface on agentapi must not run"
+    assert "text-only development model" in errors[0].content
+    assert "openrouter:" in errors[0].content, "must name the way out"
+    assert events[-1].type == "done", "the run still has to terminate cleanly"
+
+
+async def test_an_ungated_surface_still_runs_on_agentapi(monkeypatch):
+    """The dev path stays usable for plain chat — that is the whole point."""
+    from pocketpaw.agents.pydantic_ai import PydanticAIBackend
+    from pocketpaw.config import Settings
+
+    _install(
+        monkeypatch,
+        _Client(
+            events=[
+                *_sse("status_change", {"status": "running"}),
+                *_frames("● hello"),
+                *_sse("status_change", {"status": "stable"}),
+            ]
+        ),
+    )
+    backend = PydanticAIBackend(
+        Settings(pydantic_ai_model="agentapi:claude", pydantic_ai_skills_enabled=False)
+    )
+    backend._mcp_tools = []
+    backend._custom_tools = []
+
+    events = [e async for e in backend.run("hi")]
+    assert not [e for e in events if e.type == "error"]
+    assert "hello" in "".join(e.content for e in events if e.type == "message")
