@@ -484,3 +484,33 @@ def test_asyncssh_dependency_is_installed() -> None:
     # SHIP-1 adds asyncssh to ee/pyproject.toml; the driver lazy-imports it,
     # so this is the one place the environment claim is actually proven.
     assert importlib.import_module("asyncssh") is not None
+
+
+# --------------------------------------------------------------------- #
+# _parse_app_url — the one output path that skipped redaction
+# --------------------------------------------------------------------- #
+
+
+def test_parse_app_url_ignores_urls_before_the_deployed_banner() -> None:
+    """The result is PERSISTED to app.urls and served on GET /ship/apps.
+
+    Taking the first bare URL anywhere in stdout meant a build-log line could
+    win — and on the deploy_source path that stdout is a buildpack log produced
+    from a TOKENIZED clone URL.
+    """
+    from pocketpaw_ee.ship_engine.dokku import _parse_app_url
+
+    out = _parse_app_url(
+        "-----> Fetching from https://x-access-token:ghp_SECRET123@github.com/o/r.git\n"
+        "=====> Application deployed:\n"
+        "       http://demo.paw.example\n"
+    )
+    assert out == "http://demo.paw.example"
+    assert "ghp_SECRET123" not in out
+
+
+def test_parse_app_url_never_returns_a_credential_bearing_url() -> None:
+    """With no banner at all, a tokenized URL must not become the app's URL."""
+    from pocketpaw_ee.ship_engine.dokku import _parse_app_url
+
+    assert _parse_app_url("https://x-access-token:ghp_SECRET123@github.com/o/r.git") == ""

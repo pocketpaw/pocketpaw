@@ -677,13 +677,31 @@ _PS_REPORT_FIELD_RE = re.compile(r"^\s{2,}([A-Za-z][A-Za-z0-9 ]*?):\s+(.*)$")
 
 
 def _parse_app_url(stdout: str) -> str:
-    """Pull the deployed-app URL out of ``git:from-image`` output ("" if none).
+    """Pull the deployed-app URL out of a deploy's output ("" if none).
 
     Dokku ends a successful deploy with ``=====> Application deployed:``
     followed by indented URL lines; the first one is the canonical URL.
+
+    TWO things this must get right, because the result is PERSISTED to
+    ``app.urls`` and served on ``GET /ship/apps``:
+
+    * Scan only from the ``Application deployed:`` banner onward. Taking the
+      first bare URL anywhere in stdout meant a build-log line could win — and on
+      the ``deploy_source`` path that stdout is a full buildpack log produced
+      from a TOKENIZED clone URL, so a ``Fetching from https://user:pass@host/…``
+      line would have been stored as the app's URL.
+    * Redact before returning. Every other consumer of command output goes
+      through ``redact()``; this was the sole path that did not.
     """
-    match = _APP_URL_RE.search(stdout)
-    return match.group(1) if match else ""
+    banner = stdout.rfind("Application deployed")
+    scope = stdout[banner:] if banner != -1 else stdout
+    match = _APP_URL_RE.search(scope)
+    if not match:
+        return ""
+    url = redact(match.group(1))
+    # A redacted credential means we matched something that carried one — that is
+    # never an app URL worth recording.
+    return "" if "[redacted]" in url else url
 
 
 def _parse_exposed_env_var(stdout: str, *, default: str = "MONGO_URL") -> str:
