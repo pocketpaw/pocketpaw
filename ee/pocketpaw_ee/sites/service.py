@@ -1,6 +1,20 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-07-31 (provisioning brick): the dynamic single-flight guard is now
+# BOUNDED. A job that was never consumed — no worker running — or that died
+# without writing a terminal status used to leave the Site in
+# ``provision_status="provisioning"`` forever, so every later publish of that
+# pocket returned the in-progress no-op: an unpublishable pocket, HTTP 200, and
+# no error anywhere to see. Sites stamp ``provision_started_at`` on entering the
+# state and ``_provisioning_is_stale`` re-enqueues past the window.
+#
+# Updated 2026-07-31 (first-publish concierge): ``_embed_concierge_bar`` no longer
+# guards provisioning on an existing Site doc. A FIRST publish reaches it before
+# that doc is inserted, so the old guard skipped provisioning entirely and the
+# page shipped bar-less with no log line — only a RE-publish grew a bar, which is
+# exactly why the earlier fix read as working when it was verified that way.
+#
 # Updated 2026-07-30 (feat/paw-bar-autoembed): a published site now GROWS its own
 # concierge. Until this, a site we generated with a concierge we auto-provisioned
 # went live with nothing on the page: the bar was embedded only by a snippet the

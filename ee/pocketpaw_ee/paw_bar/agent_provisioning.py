@@ -36,9 +36,11 @@
 # bound to a LIVE agent is returned unchanged (manual binds are never
 # overwritten); otherwise ONE dedicated agent is created (via the agents service
 # — never a direct Beanie write) and bound to the widget through the paw-bar
-# store's ``update_fields`` path. Two triggers funnel here: widget-create (no
-# agent_id + the pocket resolves to a Site) and concierge-enable (the site's
-# widget is still unbound). Both are FAILURE-SOFT — a provisioning failure logs
+# store's ``update_fields`` path. THREE triggers funnel here: widget-create (no
+# agent_id + the pocket resolves to a Site), concierge-enable (the site's widget
+# is still unbound), and ``ensure_site_widget`` — the publish-time path that
+# covers a site whose widget never existed at all. All are FAILURE-SOFT — a
+# provisioning failure logs
 # and leaves the widget unbound rather than 500-ing the caller (chat still 409s;
 # the dashboard offers a manual create).
 #

@@ -455,7 +455,14 @@ async def propose_customer_action(
             category=ActionCategory.EXTERNAL,
             parameters={CUSTOMER_REPLY_KEY: blob},
             workspace_id=ws or None,
-            assignee=ws or None,
+            # Same split as the event path above: the WORKSPACE scopes the row,
+            # the OWNER is the assignee. Passing the workspace id as the assignee
+            # (as this path did) hides a form-card submit from the operator's
+            # "assigned to me" Tray filter — a workspace id is not a user identity,
+            # so it matches no operator. The event path has always routed to the
+            # owner; the two must agree, or the same visitor raises two
+            # differently-routed proposals depending on which path caught them.
+            assignee=str(getattr(widget, "owner", "") or "") or None,
         )
         decision = DecisionStatus(
             widget_id=widget_id,

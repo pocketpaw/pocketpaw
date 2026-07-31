@@ -37,8 +37,10 @@
 #   PawBarWidgetPublic gain `agent_id: str = ""`, mirroring the workspace_id
 #   column right beside it (same nullability/default). It binds a concierge
 #   widget to the agent that answers its chats; "" = unbound (legacy / no agent).
-#   The KB scope is NOT stored — it is derived as `pocket:<pocket_id>` where
-#   needed — so this is the only new tenancy-adjacent field.
+#   The KB scope is NOT stored — it is derived where needed (as of D5, the union
+#   of `pocket:<pocket_id>` and `agent:<the widget's own agent_id>`, never a
+#   `workspace:` or `user:` scope) — so this is the only new tenancy-adjacent
+#   field.
 # Updated: 2026-07-11 (W4a tenancy seam) — PawBarWidget + PawBarWidgetPublic
 #   gain `workspace_id: str = ""` (in-row tenancy, same model as DecisionStatus).
 #   Empty string = legacy/single-tenant row; the store's scoped reads match it.

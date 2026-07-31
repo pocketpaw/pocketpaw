@@ -1,5 +1,13 @@
 # tests/cloud/test_paw_bar_decision_loop_tenancy.py — B0 H1 (store-split repro).
 #
+# Updated: 2026-07-31 (code review, integration/paw-bar-inbox). Added the
+# assignee-split test. The two proposal paths disagreed: the event path assigned
+# the widget OWNER (a human identity the Tray's "assigned to me" filter matches),
+# the action path assigned the WORKSPACE id — the same value it already passed as
+# the row's scope. Store routing was right on both, so the earlier tests here
+# stayed green while a form-card submit was still hidden from the filter an
+# operator actually works out of.
+#
 # Created: 2026-07-15 (fix/paw-bar-decision-loop-tenancy). Reproduces the H1
 # tenancy defect: a paw-bar customer-decision proposal was written through the
 # BARE ``get_instinct_store()`` (no workspace) with the in-row workspace resolved
@@ -141,4 +149,44 @@ async def test_gated_action_proposal_lands_in_the_tenants_pending_feed(
     assert action_id in {a.id for a in pending}, (
         "the gated-action proposal is not in the tenant's per-workspace feed — "
         "it landed in the bare store the dashboard never reads"
+    )
+
+
+async def test_both_paths_assign_the_proposal_to_the_owner_not_the_workspace(
+    tmp_path: Path,
+) -> None:
+    """Workspace SCOPES the row; the owner is the ASSIGNEE. Both paths, same split.
+
+    Pre-fix the action path passed ``assignee=ws`` — the same value it already
+    passed as ``workspace_id``. The Tray's "assigned to me" filter matches an
+    operator identity, and a workspace id is not one, so a form-card submit was
+    invisible under that filter while an identical ingest event (which has always
+    assigned the owner) showed up. Two paths, one visitor, two routings.
+    """
+    from pocketpaw_ee.paw_bar.decision_loop import propose_customer_action
+
+    pp_store = PawBarStore(tmp_path / "paw_bar.db")
+    action_id = await propose_customer_action(
+        widget=_widget(),
+        workspace_id=WS_REAL,
+        customer_ref="cust-1",
+        verb="book_visit",
+        args={"name": "Asha"},
+        summary="name=Asha",
+        paw_bar_store=pp_store,
+    )
+    event_id = await propose_customer_decision(
+        widget=_widget(), event=_event(), paw_bar_store=pp_store
+    )
+    assert action_id is not None and event_id is not None
+
+    dashboard_store = stores.get_instinct_store(workspace_id=WS_REAL)
+    by_id = {a.id: a for a in await dashboard_store.pending(workspace_id=WS_REAL)}
+
+    assert by_id[action_id].assignee == OWNER, (
+        f"the gated-action proposal is assigned to {by_id[action_id].assignee!r}; "
+        "a workspace id matches no operator, so the Tray's assigned filter hides it"
+    )
+    assert by_id[action_id].assignee == by_id[event_id].assignee, (
+        "the two proposal paths route the same visitor to different assignees"
     )

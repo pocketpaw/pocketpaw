@@ -105,9 +105,11 @@ def inject_into_tree(root: Path, snippet: str) -> list[Path]:
     Walks the built static tree (the SvelteKit adapter output for ripple/svelte,
     the project root itself for html — the caller resolves which via
     ``engines.static_output_rel``), so a multi-page site gets a concierge on every
-    page rather than only its index. A page that is already embedded, unreadable, or
-    not decodable as UTF-8 is skipped with a log line instead of aborting the walk:
-    one odd file must not cost the other pages their bar.
+    page rather than only its index. A page that is unreadable, not decodable as
+    UTF-8, or unwritable is skipped with a log line instead of aborting the walk:
+    one odd file must not cost the other pages their bar. An ALREADY-embedded page
+    is skipped SILENTLY — that is the steady state on every re-publish, so logging
+    it would bury the real failures under a line per page per deploy.
     """
     changed: list[Path] = []
     if not root.is_dir():

@@ -1288,3 +1288,54 @@ disabled, no ingestor registered under the connector id — reports
 `status: "error"` with the reason in `errors` (HTTP 200, matching the
 background sweep's never-raise, per-source isolation contract). Re-runs are
 idempotent: objects upsert by `(source_connector, source_id)`.
+
+## Paw Bar — the site concierge and its owner inbox
+
+Every published Paw Site can carry a concierge: a per-site agent that answers
+visitors on the page. These are its endpoints. They split cleanly in two, and
+the split is the security model:
+
+- **Public** routes are called by the widget on the customer's site. The caller
+  is an anonymous visitor holding a world-visible embed key, so every one of
+  them runs the same fail-closed chain — unknown widget 404, rate limit 429,
+  bad/revoked key 401, disallowed origin or a key that doesn't own the widget
+  403 — and none of them expose owner-private data.
+- **Admin** routes are called by the site's owner from the dashboard. They are
+  workspace-scoped and gated on `paw_bar.read` (reads) or `paw_bar.manage`
+  (writes).
+
+### Public — the visitor surface
+
+| Route | What it does |
+|---|---|
+| `GET /paw-bar/widget.js` | The embed loader a published page includes. |
+| `GET /paw-bar/frame` | The concierge iframe document. Gated by a CSP `frame-ancestors` header built from the Site's `allowed_origins`; a disabled concierge returns a blank self-removing shell rather than an error page, because this body renders inside a visible iframe. |
+| `GET /paw-bar/spec/{widget_id}` | The widget's render spec. |
+| `POST /paw-bar/events/{widget_id}` | Ingest a widget event. |
+| `GET /paw-bar/events/{widget_id}/decision/{customer_ref}` | Poll the outcome of a gated action the visitor requested. |
+| `POST /paw-bar/chat` | Stream a concierge reply (SSE). When the owner has taken the conversation over this emits a single `human_replying` frame and dispatches no agent run at all. |
+| `POST /paw-bar/action` | Run a verb the widget spec declares. `auto` verbs touch only the visitor's own cart or a checkout link; `gated` verbs execute nothing and raise an Instinct proposal for a human. |
+| `GET /paw-bar/cart` | The visitor's own cart. |
+| `POST /paw-bar/decision-contact` | Leave an email so a decision reaches the visitor after they close the page. The address is stored on the decision row only — never in agent context, the KB, or transcripts. |
+| `GET /paw-bar/messages/{widget_id}/{customer_ref}` | Poll for owner and system messages once a human has joined. Returns `role`, `content`, `at` and `bot_paused` — never notes, tags, assignee or contact address. |
+| `GET /paw-bar/articles` | The site's own synced pages, for a self-serve reading list. |
+
+### Admin — the owner surface
+
+| Route | What it does |
+|---|---|
+| `GET /paw-bar/admin/site/{site_id}/overview` | Counts and the bound widget. |
+| `GET/PATCH /paw-bar/admin/site/{site_id}/settings` | The kill switch, greeting and transcript-retention toggle. |
+| `GET /paw-bar/admin/site/{site_id}/conversations` | The inbox. Supports `?state=open\|needs_human\|snoozed\|closed`, carries per-state `counts`, and each row joins its lifecycle state, unread count, tags and whether an action is pending. |
+| `GET /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | One conversation's transcript, interleaving visitor, assistant, owner and system turns by timestamp. |
+| `PATCH /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | Move state, snooze, tag, or append a private note. |
+| `POST /paw-bar/admin/site/{site_id}/conversations/{customer_ref}/reply` | Reply as the owner. Persists the turn, mutes the bot, clears unread, and reopens a closed or snoozed conversation. |
+| `GET /paw-bar/admin/agent/{agent_id}/conversations` | The same inbox scoped to an agent rather than a site — the union across every site that agent serves. |
+| `GET /paw-bar/admin/site/{site_id}/decisions` | Gated actions awaiting a human. |
+| `GET /paw-bar/admin/site/{site_id}/handoffs` | Conversations a visitor asked to escalate. |
+| `GET/POST /paw-bar/admin/site/{site_id}/knowledge` | What the concierge can answer from, and a resync. |
+| `GET /paw-bar/admin/site/{site_id}/preview-frame` | An owner-authed preview of the live bar. |
+
+Owner replies are stored in their own table rather than as chat runs, because
+the metering sweeper bills every terminal run and would otherwise charge the
+owner credits for typing their own sentence.

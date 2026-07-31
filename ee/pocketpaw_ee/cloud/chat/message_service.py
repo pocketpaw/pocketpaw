@@ -3,6 +3,17 @@
 Sole owner of writes to the ``Message`` Beanie document. Module-level
 ``async def`` API. The doc → domain mapping helpers (formerly in
 ``repositories.py``) live alongside the public API as private helpers.
+
+Updated 2026-07-31 (Paw Bar inbox, slice 0): a CONCIERGE turn now persists NO
+``Message`` at all. ``ContextType`` has no "concierge" value, so those turns
+used to fall through to the group branch and write
+``Message(context_type="group", group=<pocket_id>)`` — an orphan row no surface
+reads, keyed by a pocket id in a field that means "room id". Concierge
+transcripts derive from ``ChatRunDoc`` instead, so
+``persist_assistant_message_for_scope`` returns an unsaved doc for that kind and
+the caller keeps the id and timestamp it needs. Consequence for anything built
+later: a message-id-addressable feature (reactions, thumbs writeback) must key
+off the RUN doc for concierge, because that id has no row behind it.
 """
 
 from __future__ import annotations

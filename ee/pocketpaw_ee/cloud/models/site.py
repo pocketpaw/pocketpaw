@@ -4,6 +4,15 @@
 # harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
 # SaaS hostname lifecycle the Domains panel polls.
 #
+# Updated 2026-07-31 (provisioning brick): added ``provision_started_at`` — the
+# clock behind a BOUNDED single-flight guard. ``provision_status="provisioning"``
+# alone is a one-way door: a job that no worker ever consumed, or that died before
+# writing a terminal status, pinned the Site there and every later publish of that
+# pocket short-circuited to the in-progress no-op. Stamp the entry, and the
+# service can re-enqueue once the window lapses. Do NOT reuse ``updated_at`` for
+# this — the Site model has no such field, and reading one that isn't there makes
+# every row look stale and defeats the single-flight guard entirely.
+#
 # Created 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.2): new Site +
 # SiteDomain documents. Capture-hardening fields mirror
 # ``pocketpaw.sites_capture.SiteFormConfig`` so the public endpoint reads one
