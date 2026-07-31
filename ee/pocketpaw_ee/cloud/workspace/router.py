@@ -38,6 +38,7 @@ from pocketpaw_ee.cloud.pockets.dto import WorkspacePocketConnectorPermissionsOu
 from pocketpaw_ee.cloud.workspace import domains as domains_service
 from pocketpaw_ee.cloud.workspace import service as workspace_service
 from pocketpaw_ee.cloud.workspace.dto import (
+    ActionPermissionsOut,
     AddDomainRequest,
     BulkInviteRequest,
     BulkInviteResponse,
@@ -51,6 +52,7 @@ from pocketpaw_ee.cloud.workspace.dto import (
     RetentionOut,
     RoutePermissionsOut,
     SetApprovalLevelRequest,
+    SetMemberActionPermissionsRequest,
     SetMemberConnectorPermissionsRequest,
     SetMemberRoutePermissionsRequest,
     SetRetentionRequest,
@@ -286,7 +288,7 @@ async def get_route_permissions(
         (m.role for m in members if m.user_id == viewer_id),
         "member",
     )
-    if viewer_role not in ("owner", "admin"):
+    if viewer_role not in ("owner", "admin", "editor"):
         # Filter to only the viewer's own permissions
         filtered = {k: v for k, v in result.items() if k == viewer_id}
         return RoutePermissionsOut(permissions=filtered)
@@ -299,12 +301,13 @@ async def set_member_route_permissions(
     user_id: str,
     body: SetMemberRoutePermissionsRequest,
     ctx: RequestContext = Depends(request_context),
-    user: User = Depends(require_action("workspace.member.role_change")),
+    user: User = Depends(require_action("workspace.member.permissions")),
 ) -> dict:
     """Set which routes a specific member can access.
 
     An empty ``routes`` list grants full access (clears all restrictions).
-    Gated by the same ``workspace.member.role_change`` action as role changes.
+    Gated by ``workspace.member.permissions`` (editor+). Editors can manage
+    route access for members but cannot change workspace-level roles.
     """
     await workspace_service.set_member_route_permissions(
         ctx,
@@ -320,7 +323,7 @@ async def clear_member_route_permissions(
     workspace_id: str,
     user_id: str,
     ctx: RequestContext = Depends(request_context),
-    user: User = Depends(require_action("workspace.member.role_change")),
+    user: User = Depends(require_action("workspace.member.permissions")),
 ) -> Response:
     """Remove all route restrictions for a member (grants full access)."""
     await workspace_service.clear_member_route_permissions(ctx, workspace_id, user_id)
@@ -351,7 +354,7 @@ async def get_connector_permissions(
         (m.role for m in members if m.user_id == viewer_id),
         "member",
     )
-    if viewer_role not in ("owner", "admin"):
+    if viewer_role not in ("owner", "admin", "editor"):
         filtered = {k: v for k, v in result.items() if k == viewer_id}
         return ConnectorPermissionsOut(permissions=filtered)
     return ConnectorPermissionsOut(permissions=result)
@@ -363,12 +366,13 @@ async def set_member_connector_permissions(
     user_id: str,
     body: SetMemberConnectorPermissionsRequest,
     ctx: RequestContext = Depends(request_context),
-    user: User = Depends(require_action("workspace.member.role_change")),
+    user: User = Depends(require_action("workspace.member.permissions")),
 ) -> dict:
     """Set which connectors a specific member can access.
 
     An empty ``connectors`` list grants full access (clears all restrictions).
-    Gated by the same ``workspace.member.role_change`` action as role changes.
+    Gated by ``workspace.member.permissions`` (editor+). Editors can manage
+    connector access for members but cannot change workspace-level roles.
     """
     await workspace_service.set_member_connector_permissions(
         ctx,
@@ -384,10 +388,74 @@ async def clear_member_connector_permissions(
     workspace_id: str,
     user_id: str,
     ctx: RequestContext = Depends(request_context),
-    user: User = Depends(require_action("workspace.member.role_change")),
+    user: User = Depends(require_action("workspace.member.permissions")),
 ) -> Response:
     """Remove all connector restrictions for a member (grants full access)."""
     await workspace_service.clear_member_connector_permissions(ctx, workspace_id, user_id)
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Action Permissions (per-member granular overrides)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{workspace_id}/action-permissions", response_model=ActionPermissionsOut)
+async def get_action_permissions(
+    workspace_id: str,
+    ctx: RequestContext = Depends(request_context),
+    user: User = Depends(require_membership),
+) -> ActionPermissionsOut:
+    """Get the action-permissions override map for the workspace.
+
+    Returns a dict of user_id → list of action keys granted as overrides
+    beyond each member's base workspace role. Admin/editor can see everyone's
+    overrides; members can only see their own.
+    """
+    result = await workspace_service.get_action_permissions(ctx, workspace_id)
+    viewer_id = str(user.id)
+    members = await workspace_service.list_members(ctx, workspace_id)
+    viewer_role = next(
+        (m.role for m in members if m.user_id == viewer_id),
+        "member",
+    )
+    if viewer_role not in ("owner", "admin", "editor"):
+        filtered = {k: v for k, v in result.items() if k == viewer_id}
+        return ActionPermissionsOut(permissions=filtered)
+    return ActionPermissionsOut(permissions=result)
+
+
+@router.put("/{workspace_id}/action-permissions/{user_id}")
+async def set_member_action_permissions(
+    workspace_id: str,
+    user_id: str,
+    body: SetMemberActionPermissionsRequest,
+    ctx: RequestContext = Depends(request_context),
+    user: User = Depends(require_action("workspace.member.permissions")),
+) -> dict:
+    """Set granular action overrides for a member.
+
+    Only keys in ``OVERRIDABLE_ACTIONS`` are stored. An empty list clears
+    all overrides (back to role defaults). Gated at editor+.
+    """
+    await workspace_service.set_member_action_permissions(
+        ctx,
+        workspace_id,
+        user_id,
+        body.actions,
+    )
+    return {"ok": True}
+
+
+@router.delete("/{workspace_id}/action-permissions/{user_id}", status_code=204)
+async def clear_member_action_permissions(
+    workspace_id: str,
+    user_id: str,
+    ctx: RequestContext = Depends(request_context),
+    user: User = Depends(require_action("workspace.member.permissions")),
+) -> Response:
+    """Remove all action overrides for a member (back to role defaults)."""
+    await workspace_service.clear_member_action_permissions(ctx, workspace_id, user_id)
     return Response(status_code=204)
 
 

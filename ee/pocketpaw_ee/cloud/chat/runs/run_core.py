@@ -220,7 +220,15 @@ Changes:
   withhold-when-empty forward — including on the legacy ``resolved_profile is
   None`` path — so agent skills materialize even on non-entity / non-profile
   runs. The union still crosses into ``AgentPool.run`` as a plain
-  ``frozenset[str]`` (no EE symbol crosses into OSS). Per-agent MCP is DEFERRED.
+  ``frozenset[str]`` (no EE symbol crosses into OSS).
+- 2026-07-24 (CX-2, feat/code-agent-exclusive-tools) — per-agent MCP tool policy
+  (the M2 slice previously marked DEFERRED) is now LANDED. When the resolved
+  agent's config declares ``tool_mode="exclusive"``, ``_agent_tool_policy(instance)``
+  returns its declared ``tools`` and ``_drive_agent_loop`` sets
+  ``exclusive_mcp_tools=True`` + ``allow_mcp_tool_ids=<those tools>`` — driving the
+  CX-1 suppressible-grant cap so an exclusive agent (e.g. /code) gets EXACTLY its
+  declared MCP ids, OVERRIDING any surface allow-list. "additive" (the default)
+  is unchanged. The flag/allow-list cross into ``AgentPool.run`` as plain data.
 """
 
 from __future__ import annotations
@@ -678,7 +686,20 @@ _TITLE_PLACEHOLDER_LIMIT = 60
 
 
 def _truncate_for_title(message: str) -> str:
-    raw = (message or "").strip().replace("\n", " ").replace("\r", " ")
+    """One-line excerpt of the user's message, used as the placeholder title.
+
+    Strips any client context preamble first (2026-07-22). This placeholder is
+    written to Mongo and pushed over SSE *before* Haiku runs, so it is what the
+    user actually sees in the sidebar — titling the raw wire content named every
+    home-started chat "[Home page snapshot] Time of day: afternoon…". Shares the
+    strip helper with the Haiku path so both agree where the user's words start.
+    """
+    from pocketpaw.memory.titler import (  # type: ignore[import-untyped]
+        strip_context_preamble,
+    )
+
+    cleaned = strip_context_preamble(message or "")
+    raw = cleaned.strip().replace("\n", " ").replace("\r", " ")
     one_line = " ".join(raw.split())
     if len(one_line) > _TITLE_PLACEHOLDER_LIMIT:
         return one_line[:_TITLE_PLACEHOLDER_LIMIT].rstrip() + "…"
@@ -904,6 +925,35 @@ def _agent_skill_set(instance: Any) -> frozenset[str]:
     return direct | plugin_skills
 
 
+def _agent_tool_policy(instance: Any) -> tuple[bool, frozenset[str]]:
+    """Resolve the agent's EXCLUSIVE tool policy from its raw config (CX-2).
+
+    Returns ``(exclusive, tools)``:
+    - ``exclusive`` is ``True`` ONLY when the agent config's
+      ``tool_mode == "exclusive"``. An explicit signal — a non-empty ``tools``
+      list does NOT by itself make an agent exclusive.
+    - ``tools`` is the frozenset of the agent's declared MCP tool ids, returned
+      only on the exclusive path (empty otherwise). The caller uses it as the
+      run's ``allow_mcp_tool_ids`` — which, paired with the CX-1
+      ``exclusive_mcp_tools`` cap, suppresses the universal pocket/widget/atlas
+      grant and OVERRIDES any surface allow-list. Additive agents (the default)
+      return ``(False, frozenset())`` so the legacy grant-union path is untouched.
+
+    ``instance.config`` is the raw config dict on the pooled instance; guarded
+    for dict-or-object exactly like ``backend`` is read at the run seam.
+    """
+    config = getattr(instance, "config", None) or {}
+    if isinstance(config, dict):
+        mode = config.get("tool_mode", "additive")
+        tools = config.get("tools", []) or []
+    else:
+        mode = getattr(config, "tool_mode", "additive")
+        tools = getattr(config, "tools", []) or []
+    if mode != "exclusive":
+        return (False, frozenset())
+    return (True, frozenset(tools))
+
+
 async def _prewarm_session(ctx: ScopeContext) -> None:
     """Eagerly warm the agent's CLI subprocess for this run's session BEFORE the
     first model turn (feat/claude-sdk-prewarm).
@@ -965,6 +1015,15 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
             surface_sys_override = ctx.resolved_profile.system_message_override
             surface_skills = ctx.resolved_profile.skill_names or frozenset()
         surface_skills = surface_skills | _agent_skill_set(instance)
+        # CX-2 — mirror _drive_agent_loop's exclusive-tool resolution EXACTLY so
+        # the prewarmed client's options (and thus its cache key) MATCH turn 1's.
+        # An exclusive agent caps its MCP surface, which changes ``allowed_tools``
+        # (part of the client cache key); without mirroring it here the prewarm
+        # would warm an UNCAPPED client that turn 1 discards — a wasted warm.
+        # Additive agents (the default) leave both values unchanged.
+        prewarm_exclusive, prewarm_tools = _agent_tool_policy(instance)
+        if prewarm_exclusive:
+            surface_allow_mcp = prewarm_tools
 
         # Bind this run's tenancy for the warm-up so the prewarmed subprocess
         # connects with the SAME per-tenant cwd jail the first turn will resolve
@@ -995,6 +1054,7 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
                 allow_mcp_tool_ids=surface_allow_mcp,
                 system_message_override=surface_sys_override,
                 skill_names=surface_skills,
+                exclusive_mcp_tools=prewarm_exclusive,
             )
         finally:
             unbind_pawbar_run(pawbar_token)
@@ -1179,6 +1239,21 @@ async def _drive_agent_loop(
         )
         if surface_allow_mcp is not None:
             run_kwargs["allow_mcp_tool_ids"] = surface_allow_mcp
+        # CX-2 — per-agent EXCLUSIVE tool policy. When the RESOLVED agent declares
+        # ``tool_mode="exclusive"``, its OWN ``tools`` become the MCP allow-list and
+        # the CX-1 ``exclusive_mcp_tools`` cap fires: the universal grant
+        # (pocket/widget/atlas + the ALWAYS_ALLOWED escape) is suppressed and the
+        # agent's declared ids OVERRIDE any surface ``allow_mcp_tool_ids`` set just
+        # above — agent-exclusive wins over the surface. ``exclusive_mcp_tools``
+        # rides the SAME withhold-when-empty contract as ``model_override`` /
+        # ``skill_names``: the key is added ONLY on the exclusive branch, so the 7
+        # non-Claude backends never receive a kwarg their narrower signature
+        # rejects. Additive agents (the default) touch nothing → the run is
+        # byte-identical to today, grant path intact.
+        agent_exclusive, agent_tools = _agent_tool_policy(instance)
+        if agent_exclusive:
+            run_kwargs["exclusive_mcp_tools"] = True
+            run_kwargs["allow_mcp_tool_ids"] = agent_tools
         # Forward the override only when the entity actually set one — withholding
         # keeps the prompt assembly untouched on every other run.
         if surface_sys_override is not None:
@@ -1651,6 +1726,9 @@ async def execute_run(spec: RunSpec) -> None:
         user_id=spec.user_id,
         agent_id_hint=spec.agent_id,
         expected_workspace_id=spec.workspace_id,
+        # CX-3: on /code the resolver routes an unhinted turn to the dedicated
+        # code agent (exclusive file-tool policy). No-op on every other surface.
+        surface=spec.surface,
     )
     # Even with the spec fallback, a doc + spec that BOTH lack a usable workspace
     # must fail cleanly here — never attach an empty identity downstream (the

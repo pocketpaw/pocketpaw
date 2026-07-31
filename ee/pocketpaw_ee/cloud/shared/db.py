@@ -1,5 +1,14 @@
 """MongoDB connection and Beanie ODM initialization.
 
+2026-07-22 (fix/starter-project-collision): added
+``_drop_legacy_code_project_index`` and called it after ``init_beanie``, beside
+the invite-token reconcile and for the identical reason. ``CodeProject``'s
+registry key grew a ``registry_key`` column so two projects can be built from
+one starter template; the superseded four-column unique index
+``ws_user_provider_repo_unique`` would still reject that second row, and Beanie
+never drops an index the model stopped declaring. Without this the fix passes on
+mongomock and 500s in production.
+
 2026-07-15 (fix/workspace-vm-map-to-db): added ``migrate_workspace_vm_map_to_db``
 — a best-effort, one-time boot task that imports the captain's existing
 workspace→VM entries from the legacy local JSON file
@@ -89,6 +98,61 @@ async def _drop_legacy_invite_token_index(db) -> None:  # type: ignore[no-untype
         )
     except Exception:  # pragma: no cover - startup must not fail on drop
         logger.exception("Failed to drop legacy 'token_1' index on invites")
+
+
+async def _drop_legacy_code_project_index(db) -> None:  # type: ignore[no-untyped-def]
+    """Drop the superseded ``ws_user_provider_repo_unique`` index on ``code_projects``.
+
+    ``CodeProject`` now keys the registry on
+    (workspace_id, user_id, provider, repo, registry_key) — the extra column is
+    what lets two starter projects share one template id. The superseded
+    four-column index would still reject that second row, and Beanie only ever
+    *creates* the indexes a model declares, so it survives in every existing
+    deployment. Without this, the starter fix passes on mongomock and fails in
+    production with a ``DuplicateKeyError`` on the second create.
+
+    Idempotent and best-effort, exactly like the invite-token reconcile above:
+    only drops the precise legacy shape, and never raises into startup.
+    """
+    try:
+        coll = db["code_projects"]
+        info = await coll.index_information()
+    except Exception:  # pragma: no cover - startup must not fail on probe
+        logger.exception(
+            "Could not read code_projects index information; skipping legacy-index cleanup"
+        )
+        return
+
+    legacy = info.get("ws_user_provider_repo_unique")
+    if not legacy:
+        return
+
+    # Only touch the exact legacy shape: the four-column unique registry key,
+    # not some later index that happens to reuse the name.
+    is_legacy_shape = (
+        list(legacy.get("key", []))
+        == [
+            ("workspace_id", 1),
+            ("user_id", 1),
+            ("provider", 1),
+            ("repo", 1),
+        ]
+        and legacy.get("unique") is True
+    )
+    if not is_legacy_shape:
+        return
+
+    try:
+        await coll.drop_index("ws_user_provider_repo_unique")
+        logger.warning(
+            "Dropped superseded unique index 'ws_user_provider_repo_unique' on "
+            "code_projects — the registry key now includes registry_key; the old "
+            "index made a second project from the same starter collide."
+        )
+    except Exception:  # pragma: no cover - startup must not fail on drop
+        logger.exception(
+            "Failed to drop legacy 'ws_user_provider_repo_unique' index on code_projects"
+        )
 
 
 async def migrate_workspace_vm_map_to_db() -> None:
@@ -184,6 +248,7 @@ async def init_cloud_db(mongo_uri: str = "mongodb://localhost:27017/paw-enterpri
     # declares. The invite-token hashing rollout left a unique index on the
     # now-nullable `token` column that 500s every second invite.
     await _drop_legacy_invite_token_index(db)
+    await _drop_legacy_code_project_index(db)
 
     # One-time import of the legacy workspace→VM JSON map into Mongo. Runs after
     # init_beanie so the ``workspace_vms`` collection is live. Best-effort — the

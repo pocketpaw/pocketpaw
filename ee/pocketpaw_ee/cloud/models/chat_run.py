@@ -89,4 +89,14 @@ class ChatRunDoc(Document):
             IndexModel([("run_id", 1)], unique=True),
             IndexModel([("workspace", 1), ("client_message_id", 1)], unique=True),
             [("workspace", 1), ("context_type", 1), ("scope_id", 1), ("createdAt", -1)],
+            # HR-12a. The activity board filters `workspace + createdAt >= since`
+            # and sorts `-createdAt`, with NO context_type / scope_id. The
+            # compound index above cannot serve that query: its unbounded middle
+            # keys mean `createdAt` is neither a usable range bound nor able to
+            # supply the sort, so the planner walks every run the workspace has
+            # ever had, then filters and sorts in memory. On an endpoint polled
+            # every few seconds by every signed-in member, that is a full history
+            # scan per tick. This two-key index makes the window a real bound and
+            # the sort an index walk.
+            IndexModel([("workspace", 1), ("createdAt", -1)]),
         ]

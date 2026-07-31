@@ -7,9 +7,17 @@ Sole owner of writes to the ``Agent`` Beanie document. Module-level
 
 Public API:
 - ``create(ctx, workspace_id, body)``
-- ``get(agent_id)``
+- ``get(agent_id)`` — unguarded load (internal / privileged callers only)
+- ``get_for_viewer(agent_id, workspace_id, user_id)`` — visibility-gated read
+- ``can_read_agent(doc, workspace_id, user_id)`` /
+  ``can_use_agent(doc, workspace_id, user_id)`` — the canonical visibility
+  predicate (owner always; else same-workspace + ``workspace`` visibility; else
+  ``public``), mirroring the DM path in ``group_service.get_or_create_agent_dm``
+- ``ensure_can_read`` / ``ensure_can_use`` — raise ``NotFound`` when the caller
+  may not read / attach the agent (knowledge reads + group/pocket attach)
 - ``get_by_slug(workspace_id, slug)``
-- ``list_agents(workspace_id, query=None)``
+- ``list_agents(workspace_id, query=None, viewer_user_id=None)`` — pass
+  ``viewer_user_id`` on tenant reads to hide other users' ``private`` agents
 - ``update(ctx, agent_id, body)``
 - ``delete(ctx, agent_id)``
 - ``disable(ctx, agent_id)`` / ``enable(ctx, agent_id)`` — soft-disable / revoke
@@ -32,6 +40,33 @@ Updated 2026-07-02 (feat/aiam-agent-revoke, AW-4 follow-up): ``get_persona``
 now returns ``None`` for a soft-disabled agent (reusing the doc it already
 loads — no extra read), so ``agent_bridge``'s smart-relevance LLM probe never
 fires for an agent ``pool.get`` would refuse to run.
+
+Updated 2026-07-15 (feat/agent-scoped-discover-fields, ASG-1): ``discover``
+grew a ``scoped`` flag (default True) — the default viewer union now OMITS the
+``{"visibility": "public"}`` clause so a public agent from another owner can
+never leak into the scoped gallery. Also threaded the additive presentation
+fields (``welcome_message`` / ``conversation_starters`` / ``voice`` /
+``appearance`` on config, ``tags`` on the agent) through the doc↔domain mappers,
+``create`` and ``update`` so they persist and round-trip on the wire.
+Updated 2026-07-15 (fix/agent-visibility-enforcement, ASG-7): "private means
+private" is now enforced on READS. Added the canonical visibility predicate
+``can_read_agent`` / ``can_use_agent`` and the gated entry points
+``get_for_viewer`` / ``ensure_can_read`` / ``ensure_can_use``; ``list_agents``
+grew a ``viewer_user_id`` filter. The tenant HTTP router routes reads through
+these; the unguarded ``get`` / unfiltered ``list_agents`` stay for internal
+callers. Mutation guards (``require_agent_owner_or_admin``) are unchanged.
+Updated 2026-07-24 (CX-2, feat/code-agent-exclusive-tools): ``tool_mode`` is
+threaded through the doc↔spec mappers (``_config_to_domain`` / ``_config_to_doc``)
+and the config-dict update path (``_apply_update``) so an "exclusive" policy
+round-trips and survives an update. Defaults to "additive", so every existing
+agent maps byte-for-byte as before.
+Updated 2026-07-24 (CX-3, feat/code-agent-exclusive-tools): added
+``seed_code_agent`` / ``ensure_code_agent_all_workspaces`` — the dedicated
+``code`` slug agent for the ``/code`` surface. Its config is
+``tool_mode="exclusive"`` + ``tools=_CODE_FILE_TOOL_IDS`` (the four file tools)
+and its persona reuses ``CODE_SYSTEM_PROMPT``, so every run it does is capped to
+exactly those ids — no pocket/planner/widget grant. Idempotent, mirrors the
+default-agent seed + boot back-fill.
 """
 
 from __future__ import annotations
@@ -78,6 +113,7 @@ def _config_to_domain(c: _AgentConfigDoc) -> AgentConfigSpec:
         model=c.model,
         system_prompt=c.system_prompt,
         tools=tuple(c.tools),
+        tool_mode=c.tool_mode,
         trust_level=c.trust_level,
         temperature=c.temperature,
         max_tokens=c.max_tokens,
@@ -89,6 +125,10 @@ def _config_to_domain(c: _AgentConfigDoc) -> AgentConfigSpec:
         soul_archetype=c.soul_archetype,
         soul_values=tuple(c.soul_values),
         soul_ocean=tuple(c.soul_ocean.items()),
+        welcome_message=c.welcome_message,
+        conversation_starters=tuple(c.conversation_starters),
+        voice=dict(c.voice) if c.voice is not None else None,
+        appearance=dict(c.appearance),
     )
 
 
@@ -98,6 +138,7 @@ def _config_to_doc(c: AgentConfigSpec) -> _AgentConfigDoc:
         model=c.model,
         system_prompt=c.system_prompt,
         tools=list(c.tools),
+        tool_mode=c.tool_mode,
         trust_level=c.trust_level,
         temperature=c.temperature,
         max_tokens=c.max_tokens,
@@ -109,6 +150,10 @@ def _config_to_doc(c: AgentConfigSpec) -> _AgentConfigDoc:
         soul_archetype=c.soul_archetype,
         soul_values=list(c.soul_values),
         soul_ocean=dict(c.soul_ocean),
+        welcome_message=c.welcome_message,
+        conversation_starters=list(c.conversation_starters),
+        voice=dict(c.voice) if c.voice is not None else None,
+        appearance=dict(c.appearance),
     )
 
 
@@ -125,6 +170,7 @@ def _to_domain(doc: _AgentDoc) -> Agent:
         created_at=getattr(doc, "createdAt", None),  # type: ignore[arg-type]
         updated_at=getattr(doc, "updatedAt", None),  # type: ignore[arg-type]
         disabled=getattr(doc, "disabled", False),
+        tags=tuple(getattr(doc, "tags", ()) or ()),
     )
 
 
@@ -154,6 +200,7 @@ def _build_create_config(body: CreateAgentRequest) -> AgentConfigSpec:
         soul_enabled=body.soul_enabled,
         soul_persona=body.persona,
         soul_archetype=body.soul_archetype or f"The {body.name}",
+        welcome_message=body.welcome_message,
     )
     overrides: dict[str, Any] = {}
     if body.temperature is not None:
@@ -174,6 +221,12 @@ def _build_create_config(body: CreateAgentRequest) -> AgentConfigSpec:
         overrides["soul_values"] = tuple(body.soul_values)
     if body.soul_ocean is not None:
         overrides["soul_ocean"] = tuple(body.soul_ocean.items())
+    if body.conversation_starters is not None:
+        overrides["conversation_starters"] = tuple(body.conversation_starters)
+    if body.voice is not None:
+        overrides["voice"] = dict(body.voice)
+    if body.appearance is not None:
+        overrides["appearance"] = dict(body.appearance)
     return replace(base, **overrides) if overrides else base
 
 
@@ -186,6 +239,7 @@ def _apply_update(current: AgentConfigSpec, body: UpdateAgentRequest) -> AgentCo
             model=c.get("model", current.model),
             system_prompt=c.get("system_prompt", current.system_prompt),
             tools=tuple(c.get("tools", list(current.tools))),
+            tool_mode=c.get("tool_mode", current.tool_mode),
             trust_level=c.get("trust_level", current.trust_level),
             temperature=c.get("temperature", current.temperature),
             max_tokens=c.get("max_tokens", current.max_tokens),
@@ -201,6 +255,12 @@ def _apply_update(current: AgentConfigSpec, body: UpdateAgentRequest) -> AgentCo
                 if isinstance(c.get("soul_ocean", dict(current.soul_ocean)), dict)
                 else current.soul_ocean
             ),
+            welcome_message=c.get("welcome_message", current.welcome_message),
+            conversation_starters=tuple(
+                c.get("conversation_starters", list(current.conversation_starters))
+            ),
+            voice=c.get("voice", current.voice),
+            appearance=dict(c.get("appearance", dict(current.appearance))),
         )
 
     overrides: dict[str, Any] = {}
@@ -213,6 +273,7 @@ def _apply_update(current: AgentConfigSpec, body: UpdateAgentRequest) -> AgentCo
         ("trust_level", body.trust_level),
         ("soul_enabled", body.soul_enabled),
         ("soul_archetype", body.soul_archetype),
+        ("welcome_message", body.welcome_message),
     ]:
         if attr is not None:
             overrides[field] = attr
@@ -230,6 +291,12 @@ def _apply_update(current: AgentConfigSpec, body: UpdateAgentRequest) -> AgentCo
         overrides["soul_ocean"] = tuple(body.soul_ocean.items())
     if body.persona is not None:
         overrides["soul_persona"] = body.persona
+    if body.conversation_starters is not None:
+        overrides["conversation_starters"] = tuple(body.conversation_starters)
+    if body.voice is not None:
+        overrides["voice"] = dict(body.voice)
+    if body.appearance is not None:
+        overrides["appearance"] = dict(body.appearance)
 
     return replace(current, **overrides) if overrides else current
 
@@ -259,6 +326,7 @@ async def create(ctx: RequestContext, workspace_id: str, body: CreateAgentReques
         visibility=body.visibility,
         owner=ctx.user_id,
         config=_config_to_doc(config),
+        tags=list(body.tags) if body.tags is not None else [],
     )
     await doc.insert()
     agent = _to_domain(doc)
@@ -283,14 +351,85 @@ async def create(ctx: RequestContext, workspace_id: str, body: CreateAgentReques
     return agent
 
 
-async def get(agent_id: str) -> Agent:
+async def _load_doc_or_none(agent_id: str) -> _AgentDoc | None:
+    """Load an Agent doc by id, tolerating a malformed id (returns ``None``)."""
     try:
-        doc = await _AgentDoc.get(PydanticObjectId(agent_id))
+        return await _AgentDoc.get(PydanticObjectId(agent_id))
     except Exception:
-        doc = None
+        return None
+
+
+def can_read_agent(doc: _AgentDoc, workspace_id: str | None, user_id: str | None) -> bool:
+    """Return ``True`` if the viewer may READ this agent's config / knowledge.
+
+    Policy (the canonical visibility predicate — mirrors the DM path in
+    ``chat.group_service.get_or_create_agent_dm``): the owner always may; else a
+    same-workspace viewer may read a ``workspace``-visible agent; else anyone may
+    read a ``public`` agent. A ``private`` agent is readable only by its owner.
+    """
+    if user_id is not None and doc.owner == user_id:
+        return True
+    if doc.visibility == "workspace" and workspace_id is not None and doc.workspace == workspace_id:
+        return True
+    return doc.visibility == "public"
+
+
+def can_use_agent(doc: _AgentDoc, workspace_id: str | None, user_id: str | None) -> bool:
+    """Return ``True`` if the acting user may USE (attach / run) this agent.
+
+    Same policy as :func:`can_read_agent` — if you can read the agent you may
+    wire it into a group or pocket. Kept as a distinct name so attach-path call
+    sites read as a USE decision, not a READ decision.
+    """
+    return can_read_agent(doc, workspace_id, user_id)
+
+
+async def get(agent_id: str) -> Agent:
+    """Load an agent by id WITHOUT a visibility check.
+
+    Internal / privileged callers (run pool, planner, surface preambles that
+    apply their own workspace guard) use this. Tenant-facing HTTP reads must
+    use :func:`get_for_viewer` so another user's ``private`` agent stays hidden.
+    """
+    doc = await _load_doc_or_none(agent_id)
     if doc is None:
         raise NotFound("agent", agent_id)
     return _to_domain(doc)
+
+
+async def get_for_viewer(agent_id: str, workspace_id: str | None, user_id: str | None) -> Agent:
+    """Load an agent by id, enforcing visibility for ``user_id``.
+
+    Raises ``NotFound`` when the viewer may not read the agent — a private or
+    cross-workspace agent is indistinguishable from a missing one, so a leaked
+    id never confirms its existence.
+    """
+    doc = await _load_doc_or_none(agent_id)
+    if doc is None or not can_read_agent(doc, workspace_id, user_id):
+        raise NotFound("agent", agent_id)
+    return _to_domain(doc)
+
+
+async def ensure_can_read(agent_id: str, workspace_id: str | None, user_id: str | None) -> None:
+    """Raise ``NotFound`` unless ``user_id`` may READ the agent.
+
+    Used by the knowledge-read endpoints, which key on the ``agent:{id}`` kb
+    scope but must not serve a private agent's knowledge to a non-owner.
+    """
+    doc = await _load_doc_or_none(agent_id)
+    if doc is None or not can_read_agent(doc, workspace_id, user_id):
+        raise NotFound("agent", agent_id)
+
+
+async def ensure_can_use(agent_id: str, workspace_id: str | None, user_id: str | None) -> None:
+    """Raise ``NotFound`` unless ``user_id`` may USE (attach) the agent.
+
+    Used by the group + pocket attach paths so a group admin / pocket editor
+    cannot wire in another user's ``private`` agent.
+    """
+    doc = await _load_doc_or_none(agent_id)
+    if doc is None or not can_use_agent(doc, workspace_id, user_id):
+        raise NotFound("agent", agent_id)
 
 
 async def get_by_slug(workspace_id: str, slug: str) -> Agent:
@@ -303,8 +442,28 @@ async def get_by_slug(workspace_id: str, slug: str) -> Agent:
     return _to_domain(doc)
 
 
-async def list_agents(workspace_id: str, *, query: str | None = None) -> list[Agent]:
+async def list_agents(
+    workspace_id: str,
+    *,
+    query: str | None = None,
+    viewer_user_id: str | None = None,
+) -> list[Agent]:
+    """List a workspace's agents.
+
+    When ``viewer_user_id`` is supplied (tenant-facing reads), the result is
+    narrowed to the set that viewer may READ within the workspace: their own
+    agents plus any ``workspace``- or ``public``-visible agent — mirroring
+    :func:`can_read_agent` scoped to the workspace. Another user's ``private``
+    agents are excluded. Internal / privileged callers (planner, kb
+    aggregation) omit ``viewer_user_id`` and get every workspace agent.
+    """
     filters: dict[str, Any] = {"workspace": workspace_id}
+    if viewer_user_id is not None:
+        filters["$or"] = [
+            {"owner": viewer_user_id},
+            {"visibility": "workspace"},
+            {"visibility": "public"},
+        ]
     if query:
         filters["name"] = {"$regex": query, "$options": "i"}
     docs = await _AgentDoc.find(filters).to_list()
@@ -329,6 +488,8 @@ async def update(ctx: RequestContext, agent_id: str, body: UpdateAgentRequest) -
         doc.avatar = body.avatar
     if body.visibility is not None:
         doc.visibility = body.visibility
+    if body.tags is not None:
+        doc.tags = list(body.tags)
     if new_config != _config_to_domain(doc.config):
         doc.config = _config_to_doc(new_config)
     await doc.save()
@@ -343,6 +504,8 @@ async def update(ctx: RequestContext, agent_id: str, body: UpdateAgentRequest) -
         payload["avatar"] = doc.avatar
     if body.visibility is not None:
         payload["visibility"] = doc.visibility
+    if body.tags is not None:
+        payload["tags"] = doc.tags
     await emit(AgentUpdated(data=payload))
     return _to_domain(doc)
 
@@ -463,11 +626,18 @@ async def discover(
     elif body.visibility == "public":
         filters["visibility"] = "public"
     else:
-        filters["$or"] = [
+        # Default viewer union. When ``scoped`` (the gallery default) the
+        # ``{"visibility": "public"}`` clause is OMITTED so a public agent owned
+        # by another member can NEVER leak in — the result is strictly
+        # {owner==me} ∪ {visibility==workspace} within this workspace. Callers
+        # that pass ``scoped=False`` get the legacy cross-workspace public union.
+        union: list[dict[str, Any]] = [
             {"workspace": workspace_id, "owner": ctx.user_id},
             {"workspace": workspace_id, "visibility": "workspace"},
-            {"visibility": "public"},
         ]
+        if not body.scoped:
+            union.append({"visibility": "public"})
+        filters["$or"] = union
     if body.query:
         filters["name"] = {"$regex": body.query, "$options": "i"}
 
@@ -685,19 +855,117 @@ async def ensure_default_agent_all_workspaces() -> int:
     return seeded
 
 
+async def seed_code_agent(
+    workspace_id: str, owner_id: str
+) -> tuple[_AgentDoc, bool] | tuple[None, bool]:
+    """Create the dedicated ``code`` Agent for a workspace if missing (CX-3).
+
+    This is the backend-authoritative target for the ``/code`` surface. Unlike
+    the default ``pocketpaw`` agent, its config carries ``tool_mode="exclusive"``
+    and ``tools=<the four file tools>``, so the CX-1/CX-2 policy caps every run
+    it does to EXACTLY those ids — no pocket / planner / widget grant. That is
+    what makes "build an employee management app…" produce file-tool calls
+    against the user's project instead of a pocket.
+
+    The persona reuses ``CODE_SYSTEM_PROMPT`` (the CODE surface's own override)
+    verbatim so the agent identity and the surface prompt cannot drift, and the
+    tool ids come from ``_CODE_FILE_TOOL_IDS`` (the same constant the CODE
+    ``SurfaceProfile`` allows). It carries NO create-pocket skill: the CODE
+    surface deliberately ships none (see the long comment at
+    surface_registry.py:614), so ``skill_refs`` is empty.
+
+    Idempotent (find-by-slug short-circuit). Returns ``(agent, created)`` —
+    ``created`` is ``True`` only when this call inserted a new row. Returns
+    ``(None, False)`` if the insert raises (callers wrap in try/except).
+    """
+    # Local imports keep the surface package off this module's import graph and
+    # avoid any cycle; the constants are cheap module-level frozensets/strings.
+    from pocketpaw_ee.cloud.surface.surface_registry import _CODE_FILE_TOOL_IDS
+    from pocketpaw_ee.cloud.surface.system_prompts import CODE_SYSTEM_PROMPT
+
+    existing = await _AgentDoc.find_one(
+        _AgentDoc.workspace == workspace_id, _AgentDoc.slug == "code"
+    )
+    if existing is not None:
+        return existing, False
+
+    agent = _AgentDoc(
+        workspace=workspace_id,
+        name="Code",
+        slug="code",
+        avatar="",
+        owner=owner_id,
+        visibility="workspace",
+        config=_AgentConfigDoc(
+            system_prompt=CODE_SYSTEM_PROMPT,
+            tool_mode="exclusive",
+            tools=list(_CODE_FILE_TOOL_IDS),
+            # No create-pocket / widget skill — the CODE surface ships none.
+            skill_refs=[],
+            soul_persona="Code",
+        ),
+    )
+    await agent.insert()
+    logger.info(
+        "Dedicated 'code' agent seeded in workspace %s (id: %s)",
+        workspace_id,
+        agent.id,
+    )
+    await emit(
+        AgentCreated(
+            data={
+                "agent_id": str(agent.id),
+                "workspace_id": workspace_id,
+                "owner_id": owner_id,
+                "name": agent.name,
+                "slug": agent.slug,
+                "visibility": agent.visibility,
+            }
+        )
+    )
+    return agent, True
+
+
+async def ensure_code_agent_all_workspaces() -> int:
+    """Back-fill the dedicated ``code`` agent for every existing workspace.
+
+    Called on every boot beside ``ensure_default_agent_all_workspaces`` so the
+    ``/code`` target exists regardless of install age. Returns the number of
+    agents actually created this run.
+    """
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
+
+    seeded = 0
+    async for ws in _WorkspaceDoc.find_all():
+        try:
+            _, created = await seed_code_agent(str(ws.id), str(ws.owner))
+            if created:
+                seeded += 1
+        except Exception as exc:
+            logger.warning("Failed to back-fill code agent for ws=%s: %s", ws.id, exc)
+    return seeded
+
+
 __all__ = [
+    "can_read_agent",
+    "can_use_agent",
     "create",
     "delete",
     "discover",
+    "ensure_can_read",
+    "ensure_can_use",
+    "ensure_code_agent_all_workspaces",
     "ensure_default_agent_all_workspaces",
     "get",
     "get_by_slug",
+    "get_for_viewer",
     "get_persona",
     "get_scopes",
     "get_workspace",
     "is_owner_or_workspace_admin",
     "legacy_ctx",
     "list_agents",
+    "seed_code_agent",
     "seed_default_agent",
     "set_scopes",
     "suggest_for_mentions",
