@@ -27,7 +27,14 @@ Public API:
 - ``get_scopes(agent_id)``
 - ``set_scopes(agent_id, scopes)``
 - ``discover(ctx, workspace_id, body)``
+- ``is_visible_to_site_visitors(agent_id)`` — does a Paw Bar widget bind this
+  agent to a published site, i.e. do anonymous visitors reach it?
 - ``legacy_ctx(user_id, workspace_id)`` — helper for the router
+
+Updated 2026-07-30 (Paw Bar inbox D5): added ``is_visible_to_site_visitors``.
+A concierge run now reads its own ``agent:<id>`` knowledge scope, so knowledge
+attached to a site concierge is publishable by definition; the agent knowledge
+read carries this flag so the owner is told that before they attach.
 
 Updated 2026-07-02 (feat/aiam-agent-revoke, AW-4 follow-up): ``get_persona``
 now returns ``None`` for a soft-disabled agent (reusing the doc it already
@@ -711,6 +718,43 @@ async def get_workspace(agent_id: str) -> str | None:
         return None
     doc = await _AgentDoc.get(agent_oid)
     return doc.workspace if doc else None
+
+
+async def is_visible_to_site_visitors(agent_id: str) -> bool:
+    """True when this agent answers ANONYMOUS visitors on a published Paw Site.
+
+    An agent is visitor-facing when a paw-bar widget is bound to it — the same
+    binding ``paw_bar.agent_provisioning.ensure_site_agent`` writes, and the same
+    one ``concierge_chat`` resolves before it runs the agent for a stranger. The
+    check reads the binding, NOT the deterministic ``concierge-<site_id>`` slug,
+    so a hand-bound agent is recognised too.
+
+    Why this exists (Paw Bar inbox D5): a concierge run now reads its own
+    ``agent:<id>`` KB scope alongside the site pocket
+    (``chat.agent_service._kb_scopes_for_context``). That is what makes the
+    Knowledge tab useful for a site owner — and it also means **anything attached
+    to this agent is publishable by definition**. The knowledge read surfaces this
+    flag so the UI can say so BEFORE an owner drops a private price list onto a
+    public concierge.
+
+    Failure-soft and NOT an authorization gate — it labels a surface, it does not
+    guard one. A store that cannot be read yields ``False``, which is coherent:
+    if the paw-bar store is unreachable, no bar is serving visitors either.
+    """
+    if not agent_id:
+        return False
+    try:
+        workspace_id = await get_workspace(agent_id)
+        if not workspace_id:
+            return False
+        from pocketpaw_ee.paw_bar.agent_provisioning import widget_for_agent
+
+        return await widget_for_agent(agent_id, workspace_id) is not None
+    except Exception:  # noqa: BLE001 — a badge must never 500 the knowledge read
+        logger.warning(
+            "could not resolve site-visitor visibility for agent %s", agent_id, exc_info=True
+        )
+        return False
 
 
 async def get_persona(agent_id: str) -> str | None:

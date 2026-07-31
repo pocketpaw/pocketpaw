@@ -1,0 +1,401 @@
+---
+title: "Concierge Knowledge and Transcripts"
+description: "What a site's concierge knows, where that knowledge comes from, and what it records about the visitors it talks to."
+section: Core Concepts
+ogType: article
+keywords: ["concierge", "paw bar", "site knowledge", "kb sync", "visitor transcripts", "retention"]
+tags: ["paw-bar", "sites", "knowledge", "privacy"]
+---
+
+# Concierge Knowledge and Transcripts
+
+A Paw Bar concierge is an agent attached to a published site. It answers visitors'
+questions about that specific business, so two things decide whether it is any good:
+what it is allowed to know, and what it writes down about the people it talks to.
+
+## What a concierge is allowed to know
+
+A concierge run reads exactly **two** knowledge scopes:
+
+- `pocket:<pocket_id>` — the pocket its site was published from, where the page
+  sync writes.
+- `agent:<agent_id>` — whatever the owner attached to this site's concierge agent
+  directly, in the agent's own Knowledge tab.
+
+It reads neither the workspace-wide scope nor any member's private scope, and that
+line is where the security argument lives. Every site concierge is a **dedicated**
+agent, one per site, created for that site and never shared — so its `agent:` scope
+is one site's own material, put there by the owner for these visitors. The
+workspace scope is the opposite: every pocket, every other agent, every owner
+upload in the tenant. A concierge answers anonymous callers from the public
+internet, so handing it the tenant-wide scope would mean a stranger could reach the
+rest of the business by asking the right question. That scope stays out.
+
+The agent it runs is not the caller's choice either. It comes from the site's own
+widget binding, and the run is refused outright if that agent does not belong to
+the site's workspace, so no visitor can steer a concierge onto a sibling agent's
+knowledge.
+
+<Callout type="warning">
+**Anything you attach to a site concierge is publishable by definition.** The
+agent's Knowledge tab is a public surface once that agent fronts a site: a
+visitor can get any of it quoted back at them by asking a question it answers.
+Put the price list you would print on the site there. Do not put the internal one.
+
+Knowledge that must stay private belongs on a different agent — an internal agent
+with no site binding reads nothing to visitors, because no visitor ever runs it.
+</Callout>
+
+`GET /api/v1/agents/{agent_id}/knowledge` reports this per agent: it returns
+`visible_to_site_visitors` beside the article list, `true` when a Paw Bar widget
+binds that agent to a published site. It reads the real binding, so an agent bound
+by hand in the dashboard counts the same as an auto-provisioned one. The flag is a
+label, not a gate — it changes nothing about who may call the endpoint (still the
+agent's owner or a workspace admin) and nothing about what a visitor can reach. It
+exists so the owner is told before they attach something, rather than after a
+visitor quotes it.
+
+## Where the knowledge comes from
+
+The site's own pages are synced into the pocket scope automatically.
+
+The content is read from the **pocket**, not from the built artifact and not by
+fetching the live site. The pocket is durable, so a sync works long after a publish
+has finished; and reading it needs no network, so there is no server-side fetch of a
+customer-controlled hostname to harden against.
+
+Each authoring engine is read the way it stores content:
+
+| Engine | Source | What is extracted |
+|---|---|---|
+| `html` | the source map | page title, body copy, image alt text; scripts and styles dropped |
+| `svelte` | the source map | prose from the markup; script and style blocks and template expressions dropped |
+| `ripple` | the rippleSpec | copy from the spec, skipping structural keys; price-like numbers are rendered with their key so they stay searchable |
+
+Pages that extract to almost nothing (an empty layout, a redirect stub) are skipped
+rather than indexed, and a very large site is truncated rather than allowed to turn
+one publish into an unbounded run of article compilations.
+
+### When it runs
+
+- **On publish.** The site's content just changed, so what the concierge can quote
+  is stale. Runs in the background: the site goes live immediately and the
+  concierge catches up.
+- **On dedicated-agent provisioning.** This is the catch-up path for a site that was
+  published before it had a concierge.
+- **On demand**, via `POST /paw-bar/admin/site/{site_id}/knowledge/sync`. This one is
+  awaited and returns its counts, because an owner pressed a button and wants the
+  result. It gates on `paw_bar.manage` rather than the read action, since it is a
+  mutation that spends compute.
+
+A **preview** publish deliberately does not sync. A draft the owner has not approved
+must not become something the concierge quotes to visitors.
+
+`GET /paw-bar/admin/site/{site_id}/knowledge` reports how many articles the concierge
+can currently quote, when the last sync ran, and a status: empty for a clean sync,
+otherwise `never_synced`, `no_content`, `pocket_unavailable` or `sync_failed`.
+
+### Re-syncing is safe
+
+Article sources are deterministic, so re-ingesting a page updates that article rather
+than adding a second copy of it. The site records which articles it produced, and a
+later sync removes the ones it has stopped producing, which is how a renamed or
+deleted page stops being quotable.
+
+A sync never clears the scope. Owner-uploaded files live in the same pocket scope and
+must survive; only articles the sync is certain it wrote are ever removed.
+
+### What is not covered
+
+A concierge embedded on a site PocketPaw does not host has no content in its pocket,
+so it syncs zero documents and reports `no_content`. Grounding one of those means
+crawling the customer's own origin through the SSRF-hardened import crawler, and is
+not part of this path.
+
+## What the visitor sees as sources
+
+A reply can end with a short "Sources" list — up to three of the site's own pages,
+each a title and a public link. It is sent as a single `sources` event on the chat
+stream, just before the stream ends, and the same pages are browsable through a
+public articles listing (`GET /paw-bar/articles`, behind the same key, origin and
+rate gates as the chat; capped at twenty entries with a short snippet each).
+
+Attribution is approximate by design. The server re-runs a quick knowledge search
+of the visitor's question against the site's pocket scope and shows the synced pages
+that match — "what the knowledge base would ground this question on", not a verified
+trace of what the model actually quoted. Only pages the site sync itself produced
+can appear. Owner-uploaded files sharing the pocket scope, and anything attached to
+the agent's own scope, are never listed or linked: they have no public URL to point
+at, so a reply can be grounded in them without them showing up as a citation. When
+nothing matches, or the search fails, no sources are shown and the reply is
+unaffected.
+
+## What a concierge records
+
+The agent's replies have always been durable. The visitor's own messages are stored
+too, on the run document, which is what makes an owner's transcript a conversation
+rather than a monologue. A concierge visitor is anonymous and has no thread, so
+there is no message record for them anywhere else.
+
+This is personal data. A visitor types free text, so a stored line can carry a name,
+an email address, or an order number. Each site therefore has its own switch:
+
+- `concierge_store_transcripts` (default **on**) is readable and writable through
+  `GET`/`PATCH /paw-bar/admin/site/{site_id}/settings`.
+- With it **off**, the concierge keeps working and keeps storing its own replies.
+  Only the visitor's words are dropped, and transcripts for that site show the
+  assistant side alone. It also stops remembering across turns — see below.
+- The agent always receives the full message either way. The switch governs storage,
+  never the answer.
+- It is read on every message, so turning it off stops collection from the next
+  message onward. It does **not** retroactively purge lines already stored — that is
+  a delete operation, not a settings change.
+
+It is independent of the concierge kill switch in both directions: turning retention
+off does not silence the bar, and disabling the concierge does not reset retention.
+
+Stored visitor messages are length-capped, so a pasted wall of text cannot grow the
+run collection without bound.
+
+## What a concierge remembers
+
+Those stored turns are also the concierge's memory. A visitor can say their name in
+one message and be recognised in the next, because each turn replays that visitor's
+earlier turns back to the agent. Without it the concierge answers every message cold:
+it has no thread and no message records of its own to fall back on, unlike a
+signed-in chat.
+
+What comes back is scoped to one visitor on one site in one workspace. Another
+visitor of the same bar, the same visitor on a different site, and any other tenant
+are all separate conversations, and none of them can appear in a run that is not
+theirs.
+
+The replay is bounded three ways: a limited number of recent exchanges, a cap on any
+single line, and a total character budget. When the budget runs out the oldest
+exchanges drop first, so what the agent sees is the most recent stretch of the
+conversation rather than a patchy sample of it. This keeps the cost of a turn flat
+however long a visitor keeps talking.
+
+Memory follows retention. With `concierge_store_transcripts` **off** nothing the
+visitor says is written down, so there is nothing to remember and the concierge
+answers each message fresh. That is the switch working as intended: it is one
+decision about whether the site keeps a record of its visitors, not two.
+
+If the record cannot be read for any reason, the concierge answers without memory
+rather than failing the visitor's chat.
+
+## The conversation queue
+
+Those stored turns make a log. A log tells the owner what happened; it does not tell
+them what still needs them. Each conversation therefore carries a small state row —
+identified, like the runs themselves, by the site's widget and the visitor's handle.
+
+The row holds lifecycle and operator notes only: a state, whether the bot is paused,
+a snooze deadline, tags, private notes, a contact address, and an unread counter. No
+messages. The transcript stays derived from the run documents, so there is exactly
+one record of what was said and a separate one of how the owner is handling it.
+
+Four states, and one rule that matters more than the rest:
+
+| State | Meaning |
+|---|---|
+| `open` | live and in the default view |
+| `needs_human` | escalated — the visitor asked for a person, or the bot could not answer |
+| `snoozed` | hidden until a deadline the owner set |
+| `closed` | done |
+
+**A visitor's message re-opens their conversation.** Closed or snoozed, it comes
+back to `open` the moment they write again — a returning customer must land in the
+queue, not in an archive. The one exception is `needs_human`: that is already the
+top of the queue, so "re-opening" it would be a demotion.
+
+The row is created on a visitor's first message, and on the owner's first action on
+an older conversation. Nothing was backfilled when this shipped, and nothing needs
+to be: a conversation with no row still lists, reading as a plain open conversation.
+
+Snooze expiry is decided when the queue is read, not by a background sweep. A snooze
+that has passed shows up as open wherever the owner looks — the list, the filters,
+the counts — with nothing scheduled that could fail quietly overnight and leave a
+customer waiting. A snooze with no deadline is indefinite until the owner says
+otherwise.
+
+### Reading and filing the queue
+
+- `GET /paw-bar/admin/site/{site_id}/conversations` lists a site's conversations
+  newest first, each carrying its state, unread count, tags, and whether a decision
+  of theirs is waiting on the owner. `?state=` filters the page; the per-state counts
+  that come back are the totals for the whole site, so the filter chips stay stable
+  while one of them is active.
+- `PATCH /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` files one:
+  state, snooze, tags, a private note, or pausing the bot. A note appends rather than
+  replaces — an operator's running record of a customer is not something an edit
+  should quietly drop. It gates on `paw_bar.manage`, the write action, not the read.
+- `GET /paw-bar/admin/agent/{agent_id}/conversations` asks the same question of the
+  **agent**. A site concierge is an ordinary agent, and each site is one, so "this
+  site's conversations" and "this agent's visitor conversations" are the same list.
+  For an agent that fronts more than one site, they union, and each conversation
+  names the site it came from.
+
+Visitors are shown by the email they left, when they left one, and otherwise by a
+short stub of their anonymous handle. The email is still stored only where it was
+captured; the owner's list reads it there rather than keeping a second copy.
+
+## When a human takes over
+
+Typing is taking over. There is no separate button to press first, because the
+failure this is built to prevent is a bot and a person answering the same customer
+at the same time — and a button is a thing you can forget.
+
+`POST /paw-bar/admin/site/{site_id}/conversations/{customer_ref}/reply` sends the
+owner's line, and does everything else that has to happen with it: the reply is
+stored, the bot is muted, the conversation's unread counter clears, and a closed or
+snoozed thread comes back to `open`. An owner answering a customer is engagement;
+leaving that thread filed while a human types into it is how a conversation
+disappears mid-sentence. Like the PATCH, it gates on `paw_bar.manage`.
+
+An owner's reply does **not** go through the approval loop. Instinct gates actions
+the agent proposes, because a machine wants a side effect and a human should decide.
+A human typing a sentence already is the decision.
+
+### The bot stops talking
+
+While a conversation is paused, a visitor's message does not reach the agent at all.
+The check happens before any run is created, so there is no agent turn, nothing
+metered, and no tools in reach. What the visitor gets back is a distinct
+`human_replying` event on the chat stream saying a person is replying, followed by
+the normal end-of-stream event. It is never silence: an empty stream reads as a
+failure, and a muted bot must not look like a broken one.
+
+The visitor's message is still kept, and their conversation moves to `needs_human`.
+Someone typing to a paused bot is by definition waiting on a person, and the owner
+has to be able to read what they said while they were typing. Retention applies here
+exactly as it does elsewhere: with `concierge_store_transcripts` off, that line is
+not stored either. Muting is not a way around the site's own privacy switch.
+
+Because these lines have no run behind them — the owner's replies, the system's own
+notices, and any visitor message that arrived while the bot was muted — they are
+stored separately from the run documents and merged back into the transcript by
+timestamp. The transcript's roles are therefore `user`, `assistant`, `owner` and
+`system`, interleaved in the order they were said, so the owner can see when the
+human stepped in and what the bot had been saying until then.
+
+Keeping owner replies out of the run collection is deliberate. Runs are billed
+compute; a reply shaped as one would charge the owner credits for typing their own
+sentence and count as agent work that never happened.
+
+### The bot comes back
+
+A mute with no owner activity for four hours ends by itself, and the thread says so
+with a system line explaining that the assistant is answering again. The window is
+fixed for now, and the guard matters more than making it configurable: the common
+way this feature fails in practice is an owner who steps in, gets pulled away, and
+leaves the bar silent for every visitor after that.
+
+Like the snooze, the hand-back is decided when the row is read rather than by a
+background sweep, so the chat endpoint and the visitor's own poll always agree about
+whether a human is holding the conversation. Replying again restarts the clock.
+
+### How the reply reaches the visitor
+
+`GET /paw-bar/messages/{widget_id}/{customer_ref}` is the visitor side, polled by
+the bar on the page. It is public, behind the same key, origin and rate gates as the
+chat, and it is the narrowest read on this surface: what was said (`owner` or
+`system`, with a timestamp) and whether the bot is currently paused. Nothing else
+crosses. The private notes, the tags, the assignee, the captured email and the queue
+state are all owner-only, and the visitor's own stored lines are not echoed back
+either.
+
+`after` takes the timestamp of the last message the page rendered and returns only
+what came after it, so a poll never shows the same reply twice.
+
+## Reaching a human
+
+A concierge that cannot hand a visitor to a person is a wall with a friendly
+voice. Two paths lead out of it, and they write the same record.
+
+The visitor's own path is `POST /paw-bar/request-human`, behind the same key,
+origin and rate gates as the chat, carrying an optional note and an optional
+address to reach them on. It works in **every** state — while the bot is
+answering confidently, while a human already holds the thread, on a conversation
+nobody has escalated before. That is the point: asking for a person is not a
+fallback for when the bot fails, and it must not depend on the bot agreeing that
+it has failed.
+
+The agent's path is a tool, `pawbar_request_human`, present on every site
+concierge whether or not the owner declared any actions, alongside a prompt rule
+with no judgement left in it: a request to talk to a person is always honored,
+never deflected, never answered with an offer to try again — and once the tool
+returns, the concierge says plainly that a human has been notified and stops
+guessing. It is also the move when the same question has failed twice.
+
+The tool takes no other action. It escalates the conversation and notifies the
+business, and that is the whole of its authority — a public concierge cannot
+place an order, change data, or reach anything of the tenant's through it.
+
+Either path does the same four things:
+
+- the conversation moves to `needs_human`, so it sits at the top of the owner's
+  queue (and stays there — a later visitor message does not demote it);
+- a handoff record is stored, carrying the note, the address if one was left, and
+  a pointer back to the conversation;
+- an audit marker is written, which also feeds a small per-visitor cap so a
+  handoff button cannot be used to flood the owner;
+- the workspace owner is notified.
+
+The two are recorded independently on purpose. The queue and the handoffs list
+are separate surfaces, so if one write fails the request still reaches the owner
+through the other, and the visitor is only told nobody could be reached when
+neither landed.
+
+`GET /paw-bar/admin/site/{site_id}/handoffs` lists them for one site, newest
+first, each with the note, the contact, the conversation pointer and a timestamp.
+It is scoped to that site's widget, so a sibling site in the same workspace never
+appears in it, and the overview's `handoffs` count is the same read.
+
+## Notifications
+
+The owner is told about a conversation on three occasions, and no others:
+
+| Trigger | Kind |
+|---|---|
+| the first message of a new conversation | `paw_bar_conversation_new` |
+| a handoff — someone asked for a person | `paw_bar_needs_human` |
+| a visitor replying while the bot is paused | `paw_bar_visitor_reply` |
+
+Deliberately not every message. A bar that pinged on each turn would train the
+owner to ignore the badge, which costs them the two escalations that actually
+need them. The third exists because a visitor typing into a paused conversation
+is writing to the person who took it over, and that person is by definition not
+watching the bot's queue.
+
+These are ordinary in-app notifications, so they carry the same unread badge and
+the same external delivery (Slack, webhook) the workspace already configured.
+They go to the **workspace owner** in v1; fan-out to other members lands with
+assignment, not before.
+
+Notification is never load-bearing. If it fails — no owner resolves, the backend
+is down, a webhook times out — the visitor's turn is unaffected and the
+conversation is still in the queue where the owner will find it.
+
+## When the visitor leaves the page
+
+Some requests need a human decision, and humans take longer than a browser tab
+stays open. While a request is pending, the visitor can leave an email address
+(`POST /paw-bar/decision-contact`, guarded by the same key, origin and rate
+gates as the chat itself). When the owner approves or declines, the visitor is
+sent one email carrying exactly the reply the on-page poll would have shown —
+no more, no less — with a subject that names the site.
+
+The address is handled as narrowly as possible:
+
+- It is stored **only** on the pending decision rows it was left for. It never
+  enters the agent's context, the knowledge base, transcripts, or the proposal
+  the owner reviews, and no public endpoint ever returns it — the decision poll
+  response does not carry it.
+- One decision, one email. An approval that is re-delivered later (a retry, a
+  sweep) does not send again.
+- Email is best-effort on top of the poll, never instead of it. If no SMTP
+  transport is configured (`POCKETPAW_SMTP_HOST`, `POCKETPAW_SMTP_PORT`,
+  `POCKETPAW_SMTP_USER`, `POCKETPAW_SMTP_PASSWORD`, `POCKETPAW_SMTP_FROM`,
+  with STARTTLS on by default) or a send fails, the decision still lands on the
+  poll endpoint and the approve/reject flow is unaffected.

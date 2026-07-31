@@ -68,12 +68,19 @@
 # DBs, read logs/metrics) instead of building a dashboard — and every teardown
 # only files a proposal for human approval. SHIP carries no surface-specific
 # ``SurfaceMeta`` fields (the ship tools resolve tenancy from the chat session).
+# Changes: 2026-07-14 (Paw Bar concierge seam, T2) — added the ``CONCIERGE``
+# surface (/paw-bar — the public, origin-bound concierge widget). Its handler
+# (``handlers/concierge.build_preamble``) and its ripple-OFF, PUBLIC-SAFE profile
+# (``surface_registry._concierge_profile``: deny web + code/write/subagent tools,
+# lock the MCP surface) live beside the other rows. The run rides
+# ``chat.agent_service.ScopeKind.CONCIERGE``, which locks the KB read to the
+# Site's pocket.
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -109,6 +116,13 @@ class SurfaceKind(StrEnum):
     CODE = "code"  # /code — agent edits + runs code in the workspace
     BELT = "belt"  # /belt — the develop station (orient→develop→propose via gate)
     SHIP = "ship"  # /ship — the managed-deploy control plane (drive deploys via ship MCP verbs)
+    # A PUBLIC, anonymous Paw Bar concierge chat (T2) — a foreign site's embedded
+    # widget, answering visitors grounded in the Site's pocket ONLY. Its profile
+    # (``surface_registry._concierge_profile``) is ripple-OFF and PUBLIC-SAFE: it
+    # denies the web + code/write/subagent tools and locks the MCP surface, so a
+    # prompt-injected anonymous caller can't run code, exfiltrate, or mutate the
+    # tenant. The run rides ``ScopeKind.CONCIERGE`` (KB locked to pocket:<id>).
+    CONCIERGE = "concierge"  # /paw-bar — public, origin-bound concierge widget
     GENERIC = "generic"  # any unknown surface — agent still gets a usable preamble
 
 
@@ -190,6 +204,19 @@ class SurfaceMeta:
     storage_root: str | None = None
     is_cloud_storage: str | None = None
     workspace_vm: str | None = None
+    # Concierge action registry hint (C1). A CONCIERGE run whose Paw Bar widget
+    # declares actions carries the declarations here (a JSON-shaped list of
+    # {verb, policy, args, label}). ``concierge_chat`` stamps it from the widget
+    # spec; the concierge PROFILE reads the verbs to allow-list exactly this
+    # widget's per-verb tools, the PREAMBLE lists them, and ``run_core`` binds them
+    # onto the per-stream ContextVar the pawbar_actions MCP server builds from.
+    # Absent on every other surface — the concierge stays deny-all.
+    pawbar_actions: list[dict[str, Any]] | None = None
+    # Concierge catalog hint (C1). The widget's product catalog (capped, JSON of
+    # {id, name, price_cents, currency}) so the preamble can name real products
+    # and the agent emits pawbar-card fences with real ids. Only for the preamble;
+    # the tools re-load the live widget, so this never feeds an effect.
+    pawbar_catalog: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)

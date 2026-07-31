@@ -1,6 +1,46 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-07-31 (provisioning brick): the dynamic single-flight guard is now
+# BOUNDED. A job that was never consumed — no worker running — or that died
+# without writing a terminal status used to leave the Site in
+# ``provision_status="provisioning"`` forever, so every later publish of that
+# pocket returned the in-progress no-op: an unpublishable pocket, HTTP 200, and
+# no error anywhere to see. Sites stamp ``provision_started_at`` on entering the
+# state and ``_provisioning_is_stale`` re-enqueues past the window.
+#
+# Updated 2026-07-31 (first-publish concierge): ``_embed_concierge_bar`` no longer
+# guards provisioning on an existing Site doc. A FIRST publish reaches it before
+# that doc is inserted, so the old guard skipped provisioning entirely and the
+# page shipped bar-less with no log line — only a RE-publish grew a bar, which is
+# exactly why the earlier fix read as working when it was verified that way.
+#
+# Updated 2026-07-30 (feat/paw-bar-autoembed): a published site now GROWS its own
+# concierge. Until this, a site we generated with a concierge we auto-provisioned
+# went live with nothing on the page: the bar was embedded only by a snippet the
+# dashboard printed for a human to paste. ``_deploy_site_doc`` gains two steps,
+# both on the LIVE path only (a preview publish returns from ``publish`` before it
+# reaches either):
+#   * ``_embed_concierge_bar`` — between the build and the deploy, write the embed
+#     snippet into every built page (engine-aware root via ``static_output_rel``),
+#     but only for a site that has earned one: concierge on, an embed key, a
+#     paw-bar widget for the pocket, an agent bound to it. Idempotent (guarded on
+#     the snippet's marker attribute) and failure-soft — an injection problem logs
+#     and the site still deploys, because a site going live matters more than its
+#     bar. The snippet, the marker and the gates live in ``paw_bar/embed.py``.
+#   * ``_with_deployed_host`` — stamp the site's OWN deployed host onto
+#     ``allowed_origins`` (both the insert and the update branch).
+#     ``_default_allowed_origins`` seeds localhost only, so before this a visitor on
+#     the real deployed host was refused by the very origin gate the bar and the
+#     capture endpoint share. Additive, deduped, and never a wildcard or a
+#     user-supplied host — only the URL we just deployed to.
+#
+# Updated 2026-07-23 (feat/site-dedicated-agent): added the public
+# ``canonical_site_for_pocket(workspace_id, pocket_id)`` — a thin, tenant-scoped
+# wrapper over the private ``_canonical_site_doc`` so the paw-bar concierge
+# auto-provisioner resolves a pocket to its live Site through the SAME dedupe-aware
+# logic (never reaching into a private helper). Read-only; no write-path change.
+#
 # Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): ``publish`` /
 # ``_deploy_site_doc`` gain an OPTIONAL ``assets`` pass-through — the base64 binary
 # sideband ({path: base64}) an html IMPORT sends alongside its text ``source`` map.
@@ -63,6 +103,21 @@
 # armed artifact the native editor needs is produced by the pre-warm, NOT by shipping
 # the edit-bridge to public pages. The ``_store`` seam keeps "where the render comes
 # from" injectable so a later client-side-REPL compile wave can swap it cheaply.
+#
+# Updated 2026-07-14 (Paw Bar concierge seam, T1): added ``mint_foreign_site`` — a
+# minimal Site writer for a FOREIGN origin (a site we did NOT generate). It creates
+# a ``script_name=""`` / ``deployed=False`` Site that carries only the concierge
+# credential (a freshly minted ``signed_key`` + normalized ``allowed_origins`` +
+# ``scopes``); it is resolved by ``signed_key`` (via ``auth.site_keys.resolve_site_key``),
+# not by ``script_name``, so the empty script name is fine. Kept HERE, not in the
+# auth module, because this service is the sole owner of Site writes. Helper
+# ``_normalize_origin_hosts`` reduces caller-supplied origins to the bare hosts
+# ``origin_allowed`` matches on. Deliberately does NOT reuse ``_live_object_id`` (a
+# foreign concierge must not collide with a published site's stable per-pocket id).
+# Review follow-up (HIGH): ``mint_foreign_site`` now runs the pockets-service
+# ownership check (``pockets_service.get(pocket_id, owner)``) BEFORE inserting, the
+# same gate ``publish_pocket`` uses, so a caller cannot bind a concierge to another
+# workspace's pocket (which would leak that pocket's KB to the resolved context).
 #
 # Updated 2026-07-10 (HE-2 — canonical engine module): the engine content-selection
 # checks now route through ``sites.engines`` predicates instead of inline
@@ -1548,6 +1603,109 @@ async def create_draft_site(
     return doc
 
 
+def _normalize_origin_hosts(origins: list[str]) -> list[str]:
+    """Reduce a list of origins to the bare, lowercased HOSTS ``origin_allowed``
+    matches against (T1). ``origin_allowed`` strips scheme/port/path off the
+    INBOUND ``Origin`` header and then tests bare-host membership in the stored
+    list, so the stored list must itself be bare hosts — otherwise a caller who
+    passes ``https://brewco.com:443`` would store a value the runtime match can
+    never hit. Dedupes, preserves order, drops empties."""
+    hosts: list[str] = []
+    for origin in origins:
+        host = origin.strip().lower()
+        if "://" in host:
+            host = host.split("://", 1)[1]
+        host = host.split("/", 1)[0].split(":", 1)[0]
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+async def mint_foreign_site(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    owner: str,
+    allowed_origins: list[str],
+    name: str = "",
+    scopes: list[str] | None = None,
+) -> _SiteDoc:
+    """Mint a Site for a FOREIGN origin — one PocketPaw did not generate (T1).
+
+    A normal Site is created by ``publish`` for a pocket we render into a Worker;
+    its ``script_name`` is the deployed Worker id and it is looked up by that id.
+    A Paw Bar concierge instead embeds on a site the customer already owns (a
+    Squarespace page, a hand-rolled marketing site, …). There is no Worker to
+    deploy, so this mints a Site with ``script_name=""`` and ``deployed=False``
+    whose ONLY job is to carry the concierge credential: the world-visible
+    ``signed_key`` (minted here, same ``site_key_...`` format ``publish`` seeds),
+    the ``allowed_origins`` the embed is valid from, and the ``scopes`` a resolved
+    request may exercise. It is resolved not by ``script_name`` (empty) but by that
+    ``signed_key`` — ``auth.site_keys.resolve_site_key`` does the key→Site lookup —
+    so an empty ``script_name`` is not a problem.
+
+    Site writes are owned by this service (the sole Site writer), which is why the
+    mint lives here rather than in the auth module that reads the key back.
+
+    v1 mints a FRESH doc per call (fresh ObjectId, fresh key). It deliberately does
+    NOT reuse ``_live_object_id`` — that derives a stable per-(workspace, pocket)
+    id for a PUBLISHED site, and a foreign concierge for the same pocket must not
+    collide with (or overwrite) a real published Worker doc. Idempotent binding
+    management (one canonical concierge per pocket, rotate/rebind) is a follow-up
+    (the pilot-bind slice); this primitive just creates the credential row.
+
+    Args:
+        workspace_id: Owning tenant (the Site's ``workspace``).
+        pocket_id: The pocket the concierge is grounded in (drives the KB scope
+            ``pocket:<pocket_id>`` downstream).
+        owner: The acting user. Recorded as the Site's ``owner`` AND used as the
+            identity for the pocket ownership check below — so it must be a user
+            who can access ``pocket_id``, not an arbitrary label.
+        allowed_origins: Origins the embed is valid from; normalized to bare hosts.
+        name: Optional display name.
+        scopes: Optional override of what the key may do; defaults to the Site
+            model's concierge baseline when omitted.
+
+    Returns:
+        The inserted ``Site`` doc, carrying its freshly-minted ``signed_key`` so the
+        caller can hand the embed snippet back to the owner.
+
+    Raises:
+        Forbidden: ``pocket.access_denied`` when ``owner`` cannot access
+            ``pocket_id`` (via the pockets service ownership check).
+        NotFound: when ``pocket_id`` does not exist.
+    """
+    # Ownership gate — the SAME check every other pocket-touching path in this
+    # service runs (see ``publish_pocket`` → ``pockets_service.get``). Without it a
+    # caller could mint a concierge bound to ANOTHER workspace's pocket, and the
+    # resolved CONCIERGE context would then read that victim pocket's KB
+    # (``pocket:<pocket_id>``). Run it BEFORE minting the key / inserting the doc so
+    # a denied caller leaves no orphan Site behind. ``get`` raises
+    # Forbidden("pocket.access_denied") on cross-tenant access and NotFound when the
+    # pocket is missing; we only need it for the side-effect of that check.
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    await pockets_service.get(pocket_id, owner)
+
+    site = _SiteDoc(
+        workspace=workspace_id,
+        pocket_id=pocket_id,
+        owner=owner,
+        name=name,
+        script_name="",
+        deployed=False,
+        url="",
+        allowed_origins=_normalize_origin_hosts(allowed_origins),
+        signed_key=f"site_key_{secrets.token_urlsafe(24)}",
+    )
+    # Only override the model's default scope set when the caller asked to narrow
+    # it, so the default stays the single source of truth.
+    if scopes is not None:
+        site.scopes = scopes
+    await site.insert()
+    return site
+
+
 async def publish(
     *,
     workspace_id: str,
@@ -1866,6 +2024,23 @@ async def _deploy_site_doc(
         smoke=True,
     )
 
+    # Grow the concierge onto the built pages BEFORE they deploy, so the artifact
+    # that goes live already carries the bar. This is a LIVE-publish-only step: a
+    # preview returns from ``publish`` long before it reaches here, so a draft never
+    # gets an embedded bar pointed at the live key. Failure-soft inside.
+    await _embed_concierge_bar(
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        site_id=site_id,
+        signed_key=signed_key,
+        project_dir=build.project_dir,
+        engine=engine,
+        # A FIRST publish has no Site doc yet — it is inserted further down — so
+        # pass the two fields provisioning needs to stand one up in memory.
+        user_id=user_id,
+        site_name=site_name,
+    )
+
     # DS-2: a DYNAMIC site (pattern == "dynamic", or a spec carrying live
     # bindings) is backed by a per-tenant Cloudflare D1, so its deployed Worker
     # needs a D1 binding to reach that DB. Resolve the site's D1 id BEFORE deploy:
@@ -1989,8 +2164,10 @@ async def _deploy_site_doc(
             # Seed capture config so a lead lands with no manual Mongo edit: a default
             # mapping keyed on the form_type the generated endpoint sends, and the
             # local dev origins so the local smoke works. add_domain() appends the
-            # production hostname when a custom domain is connected.
-            allowed_origins=_default_allowed_origins(),
+            # production hostname when a custom domain is connected. The site's OWN
+            # deployed host goes on too — without it a visitor on the real page is
+            # refused by the origin gate the bar and the capture endpoint both run.
+            allowed_origins=_with_deployed_host(_default_allowed_origins(), url),
             event_mapping=_DEFAULT_EVENT_MAPPING,
         )
         await doc.insert()
@@ -2002,6 +2179,11 @@ async def _deploy_site_doc(
         doc.deployed = True
         doc.deployed_at = now
         doc.url = url
+        # The deploy may have moved (local → workers, or a new sites domain), so
+        # re-assert the site's own host on every publish. Idempotent and additive:
+        # a host already present is not duplicated, and a custom domain appended by
+        # ``add_domain`` is preserved (the list is only ever grown here).
+        doc.allowed_origins = _with_deployed_host(doc.allowed_origins, url)
         # charge-first: a live deploy clears any captured pending inputs — the site
         # is no longer pending payment, so the snapshot is no longer needed.
         doc.pending_deploy_inputs = {}
@@ -2013,7 +2195,193 @@ async def _deploy_site_doc(
         if is_dynamic:
             doc.d1_database_id = d1_database_id
         await doc.save()
+
+    # The site's content just changed, so the knowledge its concierge answers from
+    # is now stale. Re-sync in the background: ingest compiles articles and can be
+    # slow, and a publish must not wait on it — the site goes live immediately and
+    # the concierge catches up a moment later. A preview publish never reaches here
+    # (it returns earlier), so a draft never rewrites the live KB.
+    _schedule_site_knowledge_sync(doc)
     return doc
+
+
+async def _embed_concierge_bar(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    site_id: str,
+    signed_key: str,
+    project_dir: str,
+    engine: str,
+    user_id: str = "",
+    site_name: str = "",
+) -> None:
+    """Write the concierge embed snippet into the built pages, before they deploy.
+
+    A site we generated, with a concierge we auto-provisioned, used to ship with no
+    concierge on it: the bar was embedded ONLY by a snippet the dashboard printed
+    for a human to copy-paste, and nothing here ever wrote it. This is that missing
+    step. It runs between the build and the deploy, so the artifact that goes live
+    already carries the bar — no second deploy, no post-publish patch.
+
+    ``concierge_enabled`` is read off the site's EXISTING doc, defaulting to True
+    when there is none: this is a first publish, and the doc about to be inserted
+    below carries the model's ``concierge_enabled=True`` default, so reading the
+    absent doc as "on" is what makes a brand-new site behave like the one it is
+    about to become rather than silently skipping its own first bar.
+
+    FAILURE-SOFT, and that is the whole point of the try/except: this sits in the
+    middle of a live publish. A site going live matters more than its bar, so an
+    unreadable build tree, a store that will not answer, or anything else escaping
+    here logs and lets the publish continue to deploy.
+    """
+    try:
+        from pocketpaw_ee.paw_bar import embed
+        from pocketpaw_ee.sites.engines import static_output_rel
+
+        doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+        concierge_enabled = True if doc is None else bool(doc.concierge_enabled)
+
+        # Publish-time provisioning (the third trigger): an agent-created site
+        # published in the same conversation has passed through NEITHER
+        # widget-create NOR a concierge-enable transition, so it reaches this
+        # embed with no widget and no dedicated agent — and the four-gate
+        # snippet check below would silently skip the bar. Mint the widget +
+        # agent here so the first publish ships with its concierge. Idempotent
+        # and failure-soft inside; requires the site doc (draft flows have one).
+        if concierge_enabled:
+            from pocketpaw_ee.paw_bar.agent_provisioning import ensure_site_widget
+
+            # A FIRST publish reaches here BEFORE the Site doc is inserted, so
+            # ``doc`` is None and the old ``doc is not None`` guard skipped
+            # provisioning entirely: no widget, no dedicated agent, the
+            # four-gate snippet check returned "" and the page shipped bar-less
+            # — with no log line, because the empty snippet returns early. Only
+            # a SECOND publish (doc now present) grew a bar, which is exactly
+            # why this looked fixed. Stand up a transient doc for that first
+            # pass: ``ensure_site_widget``/``ensure_site_agent`` only read
+            # ``.workspace``/``.owner``/``.id``/``.name``/``.pocket_id`` off the
+            # object, never re-reading the DB, and the real insert below carries
+            # the same values.
+            provisioning_doc = doc
+            if provisioning_doc is None:
+                provisioning_doc = _SiteDoc(
+                    id=ObjectId(site_id),
+                    workspace=workspace_id,
+                    pocket_id=pocket_id,
+                    owner=user_id,
+                    name=site_name,
+                    signed_key=signed_key,
+                )
+            await ensure_site_widget(provisioning_doc, workspace_id)
+
+        snippet = await embed.concierge_snippet(
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            site_key=signed_key,
+            # The SAME base the generated capture endpoint posts leads to. Deriving
+            # the loader URL from it (instead of a CDN constant) is what makes a
+            # locally served site get a working localhost URL, and means there is
+            # only one env var to move when the deploy moves.
+            api_base=_capture_base(),
+            concierge_enabled=concierge_enabled,
+        )
+        if not snippet:
+            return
+
+        # HE-4: where the deployable pages live differs by engine — the SvelteKit
+        # adapter output for ripple/svelte, the project dir itself for html.
+        root = Path(project_dir, static_output_rel(engine))
+        changed = embed.inject_into_tree(root, snippet)
+        logger.info(
+            "sites: embedded the concierge bar into %d page(s) of site %s",
+            len(changed),
+            site_id,
+        )
+    except Exception:  # noqa: BLE001 — a site going live matters more than its bar
+        logger.warning(
+            "sites: could not embed the concierge bar for site %s — publishing without it",
+            site_id,
+            exc_info=True,
+        )
+
+
+def _with_deployed_host(allowed_origins: list[str], url: str) -> list[str]:
+    """Ensure a site's OWN deployed host is on its capture/concierge allowlist.
+
+    ``_default_allowed_origins`` seeds localhost only, so a site that deploys to a
+    real host had a bar its own visitors were refused by: ``resolve_site_key``'s
+    origin gate and the frame's ``frame-ancestors`` CSP both read this list, and
+    both fail closed. The host is derived from the URL WE just deployed to — never
+    from user input, never a wildcard — and appended only when missing, so a
+    re-publish does not grow the list and a connected custom domain (appended by
+    ``add_domain``) survives untouched.
+    """
+    host = _embed_deployed_host(url)
+    if not host:
+        return allowed_origins
+    hosts = _normalize_origin_hosts(allowed_origins)
+    if host not in hosts:
+        hosts.append(host)
+    return hosts
+
+
+def _embed_deployed_host(url: str) -> str:
+    """The bare host of a deployed URL. Thin indirection over ``embed.deployed_host``
+    so the host-shape rule lives with the rest of the embed logic and this module
+    keeps its lazy-import convention for reaching into paw_bar."""
+    from pocketpaw_ee.paw_bar.embed import deployed_host
+
+    return deployed_host(url)
+
+
+def _schedule_site_knowledge_sync(site: _SiteDoc) -> None:
+    """Fire the background site→pocket-KB sync. Non-async, never blocks, never
+    raises. Looked up through the module so tests can patch it, mirroring
+    ``_schedule_native_prewarm``.
+
+    The try/except is the point: this is called from the tail of a LIVE deploy, so
+    anything that escapes here would fail a publish of a site that is already
+    deployed and serving. A concierge with stale knowledge is a much smaller problem
+    than a publish that reports failure after succeeding.
+    """
+    try:
+        from pocketpaw_ee.sites.kb_ingest import schedule_site_knowledge_sync
+
+        schedule_site_knowledge_sync(site)
+    except Exception:  # noqa: BLE001 — never fail a live publish over a KB sync
+        logger.warning(
+            "sites.kb: could not schedule knowledge sync for site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
+
+
+# How long a Site may sit in ``provision_status="provisioning"`` before a new
+# publish stops treating it as in-flight. A real dynamic provision (D1 create,
+# migration, build, deploy) has been measured at ~5 minutes, so this is generous;
+# it exists purely so a job that was never consumed or died mid-flight cannot
+# brick the pocket permanently.
+_PROVISION_STALE_AFTER = timedelta(minutes=30)
+
+
+def _provisioning_is_stale(doc: Any) -> bool:
+    """True when a ``provisioning`` Site's last update is older than the window.
+
+    Missing/unreadable timestamps read as STALE: a doc we cannot date is far more
+    likely to be a leftover than a live job, and the failure modes are asymmetric
+    — a redundant enqueue costs one idempotent job, while a stuck guard costs the
+    pocket every future publish.
+    """
+    stamp = getattr(doc, "provision_started_at", None)
+    if stamp is None:
+        return True
+    try:
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=UTC)
+        return datetime.now(UTC) - stamp > _PROVISION_STALE_AFTER
+    except (AttributeError, TypeError, ValueError):
+        return True
 
 
 async def _provision_dynamic_site(
@@ -2057,9 +2425,28 @@ async def _provision_dynamic_site(
     # SINGLE-FLIGHT: a publish while the site is already provisioning must not enqueue
     # a second job — return the in-progress provisioning response as a no-op. (We do
     # not resolve the in-flight job id here; the caller can poll the site's status.)
+    #
+    # BOUNDED, because an unbounded guard is a trap. If the job is never consumed
+    # (no worker running) or dies without writing a terminal status, the doc stays
+    # "provisioning" forever and EVERY later publish of that pocket is silently a
+    # no-op — the pocket becomes permanently unpublishable with no error anywhere
+    # to see. Two sites on the rig were bricked exactly this way (2026-07-31).
+    # After the stale window we treat the previous attempt as lost and fall through
+    # to enqueue a fresh one: a genuinely in-flight job is far shorter than this,
+    # and the job is idempotent (the D1 id is persisted before the build and reused
+    # on retry).
     if doc is not None and doc.provision_status == "provisioning":
-        doc._provision_job_id = None
-        return doc
+        if _provisioning_is_stale(doc):
+            logger.warning(
+                "sites: site %s has been provisioning since %s — treating that job "
+                "as lost and re-enqueueing, rather than no-op'ing every publish "
+                "of this pocket forever",
+                doc.id,
+                getattr(doc, "provision_started_at", None),
+            )
+        else:
+            doc._provision_job_id = None
+            return doc
 
     # Ensure the canonical doc exists in ``provisioning`` state. leave ``deployed`` /
     # ``url`` for the job to finalize; seed the same identity/capture fields the static
@@ -2076,6 +2463,7 @@ async def _provision_dynamic_site(
             url="",
             signed_key=signed_key,
             provision_status="provisioning",
+            provision_started_at=datetime.now(UTC),
             builder_origin=builder_origin or "",
             allowed_origins=_default_allowed_origins(),
             event_mapping=_DEFAULT_EVENT_MAPPING,
@@ -2095,6 +2483,7 @@ async def _provision_dynamic_site(
         doc.deployed = False
         doc.url = ""
         doc.provision_status = "provisioning"
+        doc.provision_started_at = datetime.now(UTC)
         doc.pending_deploy_inputs = {}
         await doc.save()
 
@@ -2193,6 +2582,17 @@ async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | N
     # Prefer the newest doc that carries a real url (the freshest live build);
     # fall back to the newest doc overall when none has one.
     return next((d for d in docs if d.url), docs[0])
+
+
+async def canonical_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
+    """Public: the ONE canonical Site doc for (workspace, pocket_id), or None.
+
+    Thin, tenant-scoped wrapper over ``_canonical_site_doc`` so callers outside
+    this module (the paw-bar concierge auto-provisioner) resolve a pocket to its
+    live Site through the SAME dedupe-aware logic the rest of the sites stack uses,
+    without reaching into a private helper.
+    """
+    return await _canonical_site_doc(workspace_id, pocket_id)
 
 
 # ---------------------------------------------------------------------------
@@ -2310,6 +2710,10 @@ async def finalize_provisioned_site(site: _SiteDoc, *, url: str) -> None:
     site.deployed_at = datetime.now(UTC)
     site.url = url
     await site.save()
+    # A dynamic site stands up through this job rather than through
+    # ``_deploy_site_doc``, so it needs its own knowledge sync or its concierge
+    # would be the only one left knowing nothing about the business.
+    _schedule_site_knowledge_sync(site)
 
 
 async def mark_provision_failed(site: _SiteDoc) -> None:

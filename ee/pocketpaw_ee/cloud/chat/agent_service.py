@@ -9,6 +9,19 @@ handles *what the agent sees*:
 * ``load_history_for_scope`` rehydrates prior chat turns from Mongo so the
   agent carries context across backend restarts and pool evictions.
 
+Changes: 2026-07-14 (Paw Bar concierge seam, T2) — added ``ScopeKind.CONCIERGE``
+and ``_resolve_concierge``: a PUBLIC, anonymous Paw Bar concierge run resolves
+its ``ScopeContext`` from the server-authoritative spec (Site pocket + widget
+agent) WITHOUT the member-auth path — the caller authed at the HTTP edge with an
+origin-bound Site key. ``_kb_scopes_for_context`` locks a concierge run to
+``[pocket:<pocket_id>]`` alone (never ``agent:`` / ``workspace:`` / ``user:``) so
+a public caller can't reach a sibling pocket or the whole tenant KB (finding #2);
+``session_key_for`` folds the anonymous ``customer_ref`` into the key so visitors
+don't collide on the shared Site pocket; ``load_history_for_scope`` treats
+CONCIERGE like pocket/session (customer-isolated). ``_resolve_concierge``
+reconciles the pocket's workspace against the key's (cross-tenant guard) and
+verifies the widget's agent belongs to that workspace (``_agent_in_workspace``).
+
 Changes: 2026-05-22 — ``ScopeContext`` carries the anchored pocket's
 ``pocket_type``; ``build_behavior_instructions`` appends ``HOME_POCKET_PROMPT``
 when that type is ``"home"`` so the agent behaves correctly on the home page
@@ -174,6 +187,16 @@ cloud Mongo client is connected — so it hard-failed EVERY workspace-less run
 ``run_core.execute_run`` now wraps the run lifecycle in ``mark_cloud_chat_run``
 and the jail fails closed only when this marker is set; otherwise it falls back
 to ``settings.file_jail_path`` (pre-ART-2 behavior).
+
+Changes: 2026-07-30 (Paw Bar inbox D5) — ``_kb_scopes_for_context`` now grants a
+CONCIERGE run ``agent:<target_agent_id>`` ALONGSIDE ``pocket:<pocket_id>``.
+Before this, an owner who opened their site's concierge in ``/agents`` and
+attached knowledge to the AGENT got nothing on the site — only the site→pocket
+page sync reached the visitor, and the failure was silent. Each site concierge is
+a dedicated, bijective agent (``paw_bar.agent_provisioning.ensure_site_agent``),
+so its ``agent:`` scope is that one site's knowledge, not a cross-tenant pool.
+``workspace:`` and ``user:`` stay DROPPED — those are the tenant-wide and
+member-private tiers a public, anonymous visitor must never reach.
 
 Changes: 2026-07-22 (CD-1, feat/code-delegate-channel) — added
 ``has_sse_event_sink()`` beside ``push_sse_event``. Read-only introspection of
@@ -354,6 +377,29 @@ def current_pocket_id() -> str | None:
     return _active_pocket_id.get()
 
 
+# Per-stream Paw Bar action context (C1). Set by ``run_core`` for a CONCIERGE run
+# whose widget declares actions; read by the in-process ``pawbar_actions`` MCP
+# server to build ONE tool per declared verb and by each tool handler to resolve
+# which widget to run ``execute_action`` against. ``None`` (every non-concierge or
+# no-actions run) means the server builds NO tools — deny-all, exactly as before.
+# Shape: ``{"widget_id": str, "actions": [{"verb","policy","args","label"}, ...]}``.
+_active_pawbar_run: ContextVar[dict[str, Any] | None] = ContextVar("agent_pawbar_run", default=None)
+
+
+def bind_pawbar_run(run: dict[str, Any] | None) -> Token:
+    """Bind (or clear) the active stream's Paw Bar action context. Returns a
+    reset token — the caller resets it in a finally so it never leaks past a run."""
+    return _active_pawbar_run.set(run)
+
+
+def unbind_pawbar_run(token: Token) -> None:
+    _active_pawbar_run.reset(token)
+
+
+def current_pawbar_run() -> dict[str, Any] | None:
+    return _active_pawbar_run.get()
+
+
 def current_cloud_chat_run() -> bool:
     """True when the active context is a live cloud CHAT run dispatch.
 
@@ -513,6 +559,15 @@ class ScopeKind(StrEnum):
     GROUP = "group"
     POCKET = "pocket"
     SESSION = "session"
+    # A PUBLIC, anonymous Paw Bar concierge run (T2). The caller is not a
+    # workspace member — it authenticated at the HTTP edge with an origin-bound
+    # Site embed key (``auth.site_keys.resolve_site_key`` → a CONCIERGE
+    # ``RequestContext``). The run is bound to the Site's ``pocket_id`` and the
+    # widget's agent; ``_resolve_concierge`` builds this ctx WITHOUT the
+    # member-auth path, and ``_kb_scopes_for_context`` locks the KB read to
+    # ``pocket:<pocket_id>`` (never ``agent:`` / ``workspace:``) so a concierge
+    # can't reach a sibling pocket in the same workspace.
+    CONCIERGE = "concierge"
 
 
 class InvalidScope(ValueError):
@@ -1093,7 +1148,119 @@ async def resolve_scope_context(
         return await _resolve_session(
             scope_id, user_id, agent_id_hint, expected_workspace_id, surface
         )
+    if kind is ScopeKind.CONCIERGE:
+        # No ``surface`` here on purpose: that param exists so an unhinted turn on
+        # the CODE surface routes to the dedicated code agent (CX-3). A concierge
+        # run is never the code surface, and its agent is already server-resolved
+        # from the widget binding, so passing a client-supplied hint down this path
+        # could only redirect a PUBLIC run at a different agent.
+        return await _resolve_concierge(scope_id, user_id, agent_id_hint, expected_workspace_id)
     return await _resolve_group_like(kind, scope_id, user_id, agent_id_hint, expected_workspace_id)
+
+
+async def _resolve_concierge(
+    scope_id: str,
+    user_id: str,
+    agent_id_hint: str | None,
+    expected_workspace_id: str | None = None,
+) -> ScopeContext:
+    """Resolve a PUBLIC Paw Bar concierge run's ``ScopeContext`` (T2).
+
+    Unlike every other resolver here, the caller is NOT a workspace member — it
+    authenticated at the HTTP edge with an origin-bound Site embed key
+    (``resolve_site_key``), and the authority for this run is the RESOLVED Site
+    scope, never the caller. So this resolver deliberately does NOT run the
+    member-auth path (``_resolve_pocket``'s owner/team/shared check, the
+    participant list, the about-member block). It trusts the server-authoritative
+    spec fields the concierge router built AFTER a successful ``resolve_site_key``
+    + widget lookup:
+
+      * ``scope_id`` — the Site's ``pocket_id`` (from the resolved key). The run
+        is bound to THIS pocket; ``_kb_scopes_for_context`` locks the KB read to
+        ``pocket:<pocket_id>``.
+      * ``user_id`` — the anonymous, widget-minted ``customer_ref``. Used ONLY as
+        a session / rate-limit handle — never treated as an authenticated
+        principal. ``members`` is left EMPTY so no workspace participant is
+        exposed and the member-private ``user:`` KB scope can never fire.
+      * ``agent_id_hint`` — the widget's bound concierge agent.
+      * ``expected_workspace_id`` — the workspace off the resolved key.
+
+    Defense-in-depth (finding #2 — no sibling-pocket reach): the pocket is
+    re-loaded and its workspace RECONCILED against ``expected_workspace_id`` (a
+    non-empty doc workspace that disagrees raises ``Forbidden`` — the same
+    cross-tenant guard the member paths use), and the widget's agent is verified
+    to belong to that workspace so a mis-set ``agent_id`` can't run a sibling
+    workspace's agent under this Site's identity.
+
+    Raises:
+        NotFound: the pocket doesn't exist.
+        CloudError: no agent bound (``concierge.no_agent``), the agent is not in
+            the Site's workspace (``concierge.agent_forbidden``), or the pocket's
+            workspace disagrees with the resolved key (``Forbidden``).
+    """
+    pocket = await _get_pocket(scope_id)
+    if pocket is None:
+        raise NotFound("pocket", scope_id)
+
+    # Reconcile the pocket's workspace against the key's — a non-empty doc
+    # workspace that disagrees raises Forbidden (cross-tenant guard); an empty
+    # doc workspace falls back to the trusted key workspace.
+    workspace_id = _reconcile_workspace_id(
+        str(getattr(pocket, "workspace", "")), expected_workspace_id
+    )
+    if not workspace_id:
+        raise CloudError(400, "concierge.no_workspace", "Concierge run has no workspace")
+
+    target = (agent_id_hint or "").strip()
+    if not target:
+        raise CloudError(400, "concierge.no_agent", "Widget has no concierge agent")
+    # Bind the agent to the Site's workspace: the widget's agent_id is admin-set
+    # (T3) but never validated against the workspace at create time, so verify it
+    # here. A missing / cross-workspace agent is refused — a concierge must not
+    # run a sibling workspace's agent (persona / soul / tools) under this Site.
+    if not await _agent_in_workspace(target, workspace_id):
+        raise CloudError(403, "concierge.agent_forbidden", "Agent not in this workspace")
+
+    # Pocket orientation for grounding — sanitized, from the doc already fetched
+    # (no extra read). Lets the concierge answer "what is this site about?".
+    pocket_summary = _pocket_summary_data(pocket)
+
+    return ScopeContext(
+        kind=ScopeKind.CONCIERGE,
+        scope_id=scope_id,
+        workspace_id=workspace_id,
+        # The anonymous customer handle — a rate-limit / session key, NOT an
+        # authenticated principal (finding #2). members stays empty.
+        user_id=user_id,
+        members=[],
+        target_agent_id=target,
+        agent_ids_in_scope=[target],
+        pocket_id=scope_id,
+        pocket_type=getattr(pocket, "type", None),
+        pocket_summary=pocket_summary,
+    )
+
+
+async def _agent_in_workspace(agent_id: str, workspace_id: str) -> bool:
+    """True when ``agent_id`` names an Agent that belongs to ``workspace_id``.
+
+    Used by the concierge resolver to bind the widget's agent to the Site's
+    workspace. A bad id / missing agent / read error is treated as NOT in the
+    workspace (fail closed) — a public concierge must never run an agent we
+    can't prove belongs to its tenant.
+    """
+    if not agent_id or not workspace_id:
+        return False
+    try:
+        from beanie import PydanticObjectId
+
+        from pocketpaw_ee.cloud.models.agent import Agent
+
+        agent = await Agent.get(PydanticObjectId(agent_id))
+    except Exception:
+        logger.debug("concierge agent lookup failed for %s", agent_id, exc_info=True)
+        return False
+    return agent is not None and str(getattr(agent, "workspace", "")) == str(workspace_id)
 
 
 async def _resolve_session(
@@ -1974,7 +2141,45 @@ def _kb_scopes_for_context(ctx: ScopeContext) -> list[str]:
     agent context. Mirrors the OSS ``_resolve_kb_scopes`` priority; the gate
     is the cloud-side decision (the OSS resolver only honors the field it is
     handed).
+
+    CONCIERGE (T2 finding #2, widened by Paw Bar inbox D5): a PUBLIC, anonymous
+    concierge run reads exactly TWO scopes — ``pocket:<pocket_id>`` (the Site's
+    own pocket, where the page sync writes) and ``agent:<target_agent_id>`` (the
+    knowledge the owner attached to this site's concierge agent directly). Site
+    pocket first: it is the more specific answer to "what is this site about".
+
+    ``agent:`` is safe here and ``workspace:`` is not, and the difference is not
+    cosmetic:
+
+    * Each site concierge is a DEDICATED agent, bijective with its site
+      (``paw_bar.agent_provisioning.ensure_site_agent``; deterministic slug
+      ``concierge-<site_id>``, never a shared/universal agent). Its ``agent:``
+      scope therefore holds one site's knowledge — the owner put it there for
+      these visitors — and ``_resolve_concierge`` has already proven that agent
+      belongs to this Site's workspace (``_agent_in_workspace``) and that the
+      run's pocket reconciles to the same tenant. A sibling agent's scope is
+      unreachable: the id comes from the widget binding, never from the caller.
+    * ``workspace:`` is the TENANT-WIDE tier — every pocket, every agent, every
+      owner upload in the workspace. Handing that to an anonymous caller is the
+      "ask the right question, read the whole company" hole, so it stays dropped.
+    * ``user:`` is the member-private tier and can never fire here anyway
+      (``members`` is empty for a concierge), but it is dropped explicitly.
+
+    The consequence is a product rule, not just a code rule: anything attached to
+    a site concierge agent is PUBLISHABLE BY DEFINITION. The agent knowledge read
+    advertises that with ``visible_to_site_visitors`` (see
+    ``agents.service.is_visible_to_site_visitors``) so the owner is told before
+    they attach, not after a visitor quotes it back at them.
     """
+    if ctx.kind is ScopeKind.CONCIERGE:
+        # Public, site-scoped grounding: the Site's pocket + this site's own
+        # dedicated concierge agent. NEVER workspace:/user:.
+        concierge_scopes: list[str] = []
+        if ctx.pocket_id:
+            concierge_scopes.append(f"pocket:{ctx.pocket_id}")
+        if ctx.target_agent_id:
+            concierge_scopes.append(f"agent:{ctx.target_agent_id}")
+        return concierge_scopes
     scopes: list[str] = []
     seen: set[str] = set()
     for candidate in (
@@ -2200,7 +2405,15 @@ def session_key_for(ctx: ScopeContext) -> str:
     Mirrors the Mongo ``Message.session_key`` written by the router's
     persist helpers. Keeping the formula in one place lets history
     rehydration use the same key the persist path writes with.
+
+    CONCIERGE (T2): a public widget's ``scope_id`` is the SHARED Site pocket, so
+    the customer handle (``user_id`` = the anonymous ``customer_ref``) is folded
+    in to isolate one visitor's session/warm-client from another's — without it
+    every anonymous visitor of a widget would collide on one session key (and
+    one warm CLI subprocess), bleeding conversation state across visitors.
     """
+    if ctx.kind is ScopeKind.CONCIERGE:
+        return f"cloud:concierge:{ctx.scope_id}:{ctx.user_id}:{ctx.target_agent_id}"
     return f"cloud:{ctx.kind.value}:{ctx.scope_id}:{ctx.target_agent_id}"
 
 
@@ -2223,7 +2436,7 @@ async def load_history_for_scope(ctx: ScopeContext, *, limit: int = 50) -> list[
         return []
 
     try:
-        if ctx.kind in (ScopeKind.POCKET, ScopeKind.SESSION):
+        if ctx.kind in (ScopeKind.POCKET, ScopeKind.SESSION, ScopeKind.CONCIERGE):
             # Scope by workspace_id too (defense-in-depth). Pocket/session
             # ObjectIds are globally unique, so session_key alone never
             # collides in practice — but pinning the workspace makes tenant

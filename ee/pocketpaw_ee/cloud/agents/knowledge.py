@@ -1,4 +1,9 @@
 # knowledge.py — Agent knowledge service via the kb-go binary.
+# Updated: 2026-07-30 — Paw Bar reply sources. Added the scope-form read pair
+#   search_articles_for_scope / list_articles_for_scope (raw {id, title, summary}
+#   hit dicts, mirroring ingest_text_to_scope's "caller owns the scope shape"
+#   contract) so the public concierge router can attribute a reply to the synced
+#   site pages and list them, without importing this module's private ``_kb``.
 # Updated: 2026-07-03 — FL-11b "hide-from-AI purge". Added
 #   KnowledgeService.remove_article(scope, article_id) → `kb delete
 #   <article_id> --scope <scope>`, mirroring get_article. Resilient: logs and
@@ -205,6 +210,32 @@ class KnowledgeService:
         if isinstance(results, list):
             return [r.get("summary", r.get("title", "")) for r in results]
         return []
+
+    @staticmethod
+    async def search_articles_for_scope(scope: str, query: str, limit: int = 5) -> list[dict]:
+        """Raw search hits (``{id, title, summary, concepts}`` dicts) for any scope.
+
+        The scope-form sibling of :meth:`search` — callers that need the article
+        id and title (not a formatted context block) use this. Like the other
+        scope-form entry points, the scope string is the caller's to shape
+        (``pocket:{pid}``, ``workspace:{wid}``); kb-go validates it itself.
+        Raises on subprocess failure — callers that must be fail-soft (the public
+        concierge sources path) wrap it.
+        """
+        results = await asyncio.to_thread(
+            _kb, "search", query, "--scope", scope, "--limit", str(limit)
+        )
+        return results if isinstance(results, list) else []
+
+    @staticmethod
+    async def list_articles_for_scope(scope: str) -> list[dict]:
+        """List a scope's articles as raw ``{id, title, summary, ...}`` dicts.
+
+        Scope-form sibling of :meth:`list_articles`, same contract notes as
+        :meth:`search_articles_for_scope`.
+        """
+        result = await asyncio.to_thread(_kb, "list", "--scope", scope)
+        return result if isinstance(result, list) else []
 
     @staticmethod
     async def search_context(agent_id: str, query: str, limit: int = 3) -> str:
