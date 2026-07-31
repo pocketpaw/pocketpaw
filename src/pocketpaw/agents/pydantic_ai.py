@@ -122,14 +122,42 @@ surface's tool-REMOVAL controls, so swallowing them would have handed a
 restricted surface the full tool set and reported success. The other six
 non-Claude backends still carry the narrow signature and will crash the same way
 on that surface.
+
+Updated 2026-07-31 (d) — **deferred tool loading**, opt-in via
+``POCKETPAW_PYDANTIC_AI_DEFER_MCP_TOOLS``. The caching caveat above is what
+makes this worth doing: tool schemas do not cache, so an ungated surface pays
+for all 134 of them on every single request. Measured through the real
+``OpenAIChatModel`` this backend builds:
+
+===========  =================  ==============  ===============
+surface      tools on the wire  schema bytes    tokens/request
+===========  =================  ==============  ===============
+today                      134         121,950           30,487
+deferred                    38          23,520            5,880
+===========  =================  ==============  ===============
+
+pydantic-ai's own mechanism (``AbstractToolset.defer_loading`` plus the
+``ToolSearch`` capability): undeferred tools ride the wire as usual, deferred
+ones are dropped and reachable through a ``search_tools`` function. Chat
+Completions has no native tool-search surface, which is the path that actually
+drops them; on Anthropic or the OpenAI Responses API the provider drives
+discovery instead, and Responses currently rejects the pairing pydantic-ai
+sends (pydantic-ai#5938).
+
+``pocketpaw_tool_search`` replaces the built-in ranking, which counts every
+token equally wherever it lands and so answers "publish it" with five tools
+that merely mention publishing. See ``_defer_mcp_toolsets`` for the two
+boundaries this rides on — deferral happens AFTER surface gating, and only MCP
+tools defer.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
@@ -250,6 +278,116 @@ def _expand_tool_ids(tool_ids: frozenset[str]) -> frozenset[str]:
         out.add(_normalize_tool_id(raw))
         out |= _SURFACE_TOOL_EQUIVALENTS.get(raw, frozenset())
     return frozenset(out)
+
+
+# -- tool search (deferred loading) -----------------------------------------
+
+_TOOL_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+_TOOL_SEARCH_STOPWORDS = frozenset(
+    """a an the it its this that these those my me mine you your i we our us for
+    to of and or but on in at by with from as is are was were be been am do does
+    did please can could would should will just now then here there what which
+    who whom how why when where all any some more most other into up out over
+    under again once no not only own same so than too very""".split()
+)
+
+# Our tool names are engineering nouns; users type product nouns. Mapping the
+# second onto the first is the whole difference between the built-in algorithm
+# and this one on the queries that matter — "publish it" and "make me a
+# webpage" both miss upstream. Hand-tuned against the real 97-tool corpus, not
+# learned, so it is a list to extend when a surface adds vocabulary.
+_TOOL_SEARCH_SYNONYMS: dict[str, str] = {
+    "website": "site",
+    "webpage": "site",
+    "web": "site",
+    "page": "site",
+    "landing": "site",
+    "deploy": "publish",
+    "ship": "publish",
+    "live": "publish",
+    "launch": "publish",
+    "picture": "image",
+    "photo": "image",
+    "graphic": "image",
+    "chart": "widget",
+    "graph": "widget",
+    "card": "widget",
+    "integration": "connector",
+    "gmail": "connector",
+    "calendar": "connector",
+    "colour": "color",
+    "scheme": "palette",
+    "theme": "palette",
+    "brand": "palette",
+    "font": "typography",
+    "app": "pocket",
+    "workspace": "pocket",
+}
+
+
+def _tool_search_tokens(text: str) -> set[str]:
+    return set(_TOOL_TOKEN_RE.findall((text or "").lower()))
+
+
+def _tool_search_terms(queries: Sequence[str]) -> set[str]:
+    """Query tokens, minus stopwords, plus this product's synonyms."""
+    terms: set[str] = set()
+    for token in _tool_search_tokens(" ".join(queries)):
+        if token in _TOOL_SEARCH_STOPWORDS or len(token) < 3:
+            continue
+        terms.add(token)
+        synonym = _TOOL_SEARCH_SYNONYMS.get(token)
+        if synonym:
+            terms.add(synonym)
+    return terms
+
+
+def _tool_search_score(terms: set[str], name: str, description: str) -> int:
+    """Weight a NAME match above a description match.
+
+    The built-in algorithm counts one point per token wherever it lands, so
+    every tool whose description happens to mention publishing outranks the
+    tool actually called ``publish``. Measured: "publish it" does not surface
+    ``sites_manager_publish`` in the top five at all.
+    """
+    name_tokens = _tool_search_tokens(name)
+    description_tokens = _tool_search_tokens(description)
+    total = 0
+    for term in terms:
+        if term in name_tokens:
+            total += 3
+        elif any(len(n) >= 4 and (term in n or n in term) for n in name_tokens):
+            total += 2
+        elif term in description_tokens:
+            total += 1
+    return total
+
+
+def pocketpaw_tool_search(_ctx: Any, queries: Sequence[str], tools: Sequence[Any]) -> list[str]:
+    """Rank deferred tools for a search query. A ``ToolSearchFunc``.
+
+    Supplied to ``ToolSearch(strategy=...)`` in place of pydantic-ai's default
+    keyword-overlap algorithm, which scores 8/12 on realistic phrasings against
+    our corpus where this scores 11/12. The two failures it fixes are the ones
+    that matter most: "publish it" (stopwords outvote the tool name) and "make
+    me a webpage" (no product vocabulary, so it returns Daytona and Foresight
+    tools).
+    """
+    terms = _tool_search_terms(queries)
+    if not terms:
+        return []
+    scored: list[tuple[int, str]] = []
+    for tool_def in tools:
+        name = getattr(tool_def, "name", "")
+        score = _tool_search_score(terms, name, getattr(tool_def, "description", "") or "")
+        if score > 0:
+            scored.append((score, name))
+    # Name as the tiebreak so equal scores rank deterministically — the cached
+    # agent is shared across tenants and an unstable order is an unstable
+    # prompt.
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [name for _, name in scored]
 
 
 class _RunHandle:
@@ -766,8 +904,16 @@ class PydanticAIBackend:
           register. Wiring it with an empty list would add a capability that
           can never fire. Revisit when there is a real subagent to declare.
         """
+        # Built first and outside the harness gate: tool search belongs to
+        # pydantic-ai core, so turning the harness off must not silently drop
+        # our ranking function back to the built-in one.
+        capabilities: list = []
+        tool_search = self._build_tool_search_capability()
+        if tool_search is not None:
+            capabilities.append(tool_search)
+
         if not getattr(self.settings, "pydantic_ai_harness_enabled", True):
-            return []
+            return capabilities
         try:
             from pydantic_ai_harness.compaction import ClearToolResults, SlidingWindow
             from pydantic_ai_harness.overflowing_tool_output import (
@@ -779,10 +925,10 @@ class PydanticAIBackend:
             from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepPersistence
         except ImportError:
             logger.debug("pydantic-ai-harness not installed, running without capabilities")
-            return []
+            return capabilities
 
         limit = int(getattr(self.settings, "pydantic_ai_max_tool_output_chars", 0) or 0)
-        capabilities: list = [
+        capabilities += [
             SlidingWindow(max_messages=self.settings.pydantic_ai_compaction_max_messages),
             ClearToolResults(max_messages=self.settings.pydantic_ai_compaction_max_messages),
             Planning(),
@@ -947,6 +1093,60 @@ class PydanticAIBackend:
 
         return [ts.filtered(_keep) for ts in mcp_toolsets]
 
+    def _defer_mcp_toolsets(self, mcp_toolsets: list) -> list:
+        """Hide the MCP tools behind tool search instead of advertising them.
+
+        An ungated surface carries 134 tools, and their schemas are ~30,500
+        tokens of JSON on EVERY model request — measured against the real
+        corpus, and a cost paid in full because tool schemas do not
+        prompt-cache on our proxy (see the caching table in the module
+        docstring: that measurement covers the text prefix, not the tool
+        block). Deferring the 97 bridged ones puts 38 on the wire for ~5,900
+        tokens, and the model pulls what it needs by calling ``search_tools``.
+
+        Two deliberate boundaries:
+
+        * **After gating.** ``_gate_mcp_toolsets`` has already removed what the
+          surface denies, so a denied tool is never in the search corpus and no
+          query can reveal it. Being straight about how much this order carries:
+          a mutation probe reversing it left
+          ``test_a_denied_tool_cannot_be_discovered_by_searching_for_it``
+          GREEN, because ``filtered()`` wraps the deferred toolset and still
+          matches on name. So the order is the clearer arrangement rather than
+          the thing that makes the property hold, and the test pins the
+          property — denied tools stay undiscoverable — not the order.
+        * **MCP toolsets only.** The ~37 builtin function tools stay visible.
+          They are the small half of the bill and the half the agent reaches
+          for constantly; hiding them would buy little and cost a round trip
+          on almost every turn.
+
+        The cost is one extra model request per discovery. That is cheap at
+        these ratios — a two-call turn is ~61k tool tokens today against ~18k
+        deferred — but it is not free, and on a surface that already gates hard
+        (``/sites`` cuts 97 to 12) there is little left to save.
+        """
+        if not mcp_toolsets or not getattr(self.settings, "pydantic_ai_defer_mcp_tools", False):
+            return mcp_toolsets
+        return [ts.defer_loading() for ts in mcp_toolsets]
+
+    def _build_tool_search_capability(self) -> Any:
+        """The ``ToolSearch`` capability, carrying OUR ranking function.
+
+        pydantic-ai auto-injects a default ``ToolSearch`` into every agent, so
+        this is an override rather than an addition: naming the capability
+        explicitly is the supported way to replace its keyword-overlap
+        algorithm. Returns ``None`` when deferral is off, which leaves the
+        auto-injected default in place with an empty corpus and nothing to do.
+        """
+        if not getattr(self.settings, "pydantic_ai_defer_mcp_tools", False):
+            return None
+        try:
+            from pydantic_ai.capabilities import ToolSearch
+        except ImportError:  # pragma: no cover - pydantic-ai too old
+            logger.warning("pydantic-ai has no ToolSearch capability; deferral disabled")
+            return None
+        return ToolSearch(strategy=pocketpaw_tool_search)
+
     def _get_or_create_agent(
         self,
         model: Any,
@@ -1012,6 +1212,7 @@ class PydanticAIBackend:
         mcp_toolsets = self._gate_mcp_toolsets(
             mcp_toolsets, deny, allow_mcp_tool_ids, exclusive_mcp_tools
         )
+        mcp_toolsets = self._defer_mcp_toolsets(mcp_toolsets)
 
         # A belt-and-braces sweep, cheap and last. ``_build_custom_tools`` is
         # the real boundary, but ``attach_specialist_tools`` also writes into

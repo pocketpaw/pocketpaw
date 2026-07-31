@@ -51,7 +51,9 @@ pip install 'pocketpaw[pydantic-ai]'
 | `POCKETPAW_PYDANTIC_AI_MODEL` | `litellm:claude-sonnet-4-6` | Model in `provider:model` form |
 | `POCKETPAW_PYDANTIC_AI_PROVIDER` | `auto` | Provider when the model carries no prefix |
 | `POCKETPAW_PYDANTIC_AI_MAX_TURNS` | `100` | Max model requests per run (`0` = unlimited) |
+| `POCKETPAW_PYDANTIC_AI_TIMEOUT` | `3600` | Seconds to wait on the model (`0` = indefinitely) |
 | `POCKETPAW_PYDANTIC_AI_MCP_ENABLED` | `true` | Attach configured MCP servers |
+| `POCKETPAW_PYDANTIC_AI_DEFER_MCP_TOOLS` | `false` | Hide MCP tools behind tool search |
 | `POCKETPAW_PYDANTIC_AI_HARNESS_ENABLED` | `true` | Attach harness capabilities |
 | `POCKETPAW_PYDANTIC_AI_SKILLS_ENABLED` | `true` | Expose PocketPaw skills to the model |
 | `POCKETPAW_PYDANTIC_AI_COMPACTION_MAX_MESSAGES` | `200` | History size that triggers compaction |
@@ -119,6 +121,50 @@ run. MCP is additive to the tool surface, never load-bearing.
 ```bash
 export POCKETPAW_PYDANTIC_AI_MCP_ENABLED="false"   # drop MCP entirely
 ```
+
+## Tool search
+
+An ungated surface carries 136 tools, and their schemas are JSON that rides
+every model request. Measured against the real corpus through the model class
+this backend builds:
+
+| | Tools on the wire | Schema bytes | Tokens per request |
+|---|---|---|---|
+| Default | 136 | 123,883 | ~30,970 |
+| `DEFER_MCP_TOOLS=true` | 40 | 25,453 | ~6,363 |
+
+That cost is paid in full rather than amortised, because tool schemas do not
+prompt-cache the way a stable text prefix does (see [Prompt caching](#prompt-caching)).
+
+```bash
+export POCKETPAW_PYDANTIC_AI_DEFER_MCP_TOOLS="true"
+```
+
+With it on, the ~97 bridged MCP tools are hidden and the model reaches them by
+calling `search_tools` with a query. The ~37 builtin function tools stay
+visible: they are the smaller half of the bill and the half the agent uses
+constantly. Surface deny and allow sets are applied first, so a tool the
+surface withheld is not in the search corpus and no query can surface it.
+
+Two things to weigh before turning it on:
+
+- **One extra model request per discovery.** Cheap at these ratios — a two-call
+  turn is roughly 61k tool tokens by default against 18k deferred — but not
+  free.
+- **The model has to actually search.** A capable model treats `search_tools`
+  as an ordinary tool; a weaker one may answer without looking. The token
+  saving is measured, this is not, so it is off by default and worth an A/B on
+  your own model.
+
+There is little to gain on a surface that already gates hard. `/sites` cuts 97
+MCP tools to 12 through its deny and allow sets before any of this applies.
+
+Ranking uses PocketPaw's own function rather than pydantic-ai's built-in
+keyword overlap, which scores one point per token wherever it lands. On our
+corpus that answers "publish it" with five tools that merely mention publishing
+and never the tool named `publish`, and returns Daytona and Foresight tools for
+"make me a webpage". Against twelve realistic phrasings the built-in algorithm
+finds the right tool 8 times and ours 11.
 
 ## Harness capabilities
 
@@ -233,3 +279,11 @@ Rollback is the same setting — set it back to `deep_agents`.
 - Beta. The dependencies are pinned exactly; expect breaking changes on upgrade.
 - No local shell or filesystem tools (by design — see above).
 - Subagents not wired.
+- Tool search is verified on OpenAI-compatible chat completions, which is what
+  LiteLLM, OpenRouter and Ollama all speak here. Anthropic and the OpenAI
+  Responses API drive discovery provider-side instead, and Responses currently
+  rejects the pairing pydantic-ai sends
+  ([pydantic-ai#5938](https://github.com/pydantic/pydantic-ai/issues/5938)).
+- Deferred tools are rediscovered when a conversation's retained transcript is
+  gone (fresh process, evicted session), since discovery state lives in the
+  message history.

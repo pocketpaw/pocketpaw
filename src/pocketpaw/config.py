@@ -676,6 +676,21 @@ class Settings(BaseSettings):
             "tool surface entirely."
         ),
     )
+    pydantic_ai_defer_mcp_tools: bool = Field(
+        default=False,
+        description=(
+            "Hide the Pydantic AI backend's MCP tools behind tool search "
+            "instead of advertising every one of them on every model request. "
+            "An ungated surface carries 134 tools whose schemas are ~30,500 "
+            "tokens per request; deferring the 97 bridged ones leaves 38 on "
+            "the wire for ~5,900, and the model calls ``search_tools`` to pull "
+            "what it needs. Costs one extra model request per discovery, and "
+            "buys little on a surface that already gates hard. Off by default: "
+            "the token saving is measured, but whether a given model reliably "
+            "searches rather than giving up is a behaviour question that has "
+            "to be answered per model."
+        ),
+    )
     pydantic_ai_harness_enabled: bool = Field(
         default=True,
         description=(

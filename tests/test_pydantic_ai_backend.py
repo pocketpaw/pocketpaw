@@ -1528,3 +1528,291 @@ async def test_retention_is_bounded_on_both_axes():
     assert len(backend._session_messages) <= _MAX_TRACKED_SESSIONS
     assert "s0" not in backend._session_messages, "oldest session must evict first"
     assert f"s{_MAX_TRACKED_SESSIONS + 24}" in backend._session_messages
+
+
+# --------------------------------------------------------------------------
+# deferred tool loading
+#
+# Tool schemas do NOT prompt-cache on our proxy, so an ungated surface pays for
+# all 134 of them on every request - ~30,500 tokens. Deferring the bridged MCP
+# tools puts 38 on the wire and lets the model pull the rest back through
+# ``search_tools``.
+# --------------------------------------------------------------------------
+
+
+def _local_only(model):
+    """Strip native tool search from a model's profile.
+
+    Without this the tests LIE. ``FunctionModel``'s stock profile advertises
+    every native tool including ``ToolSearchTool``, and on that path
+    ``prepare_request`` KEEPS deferred tools on the wire for the provider to
+    hide server-side. A deferral test against a plain ``FunctionModel``
+    therefore measures nothing and reports a 0% saving - which is exactly what
+    the first measurement of this feature did. The models this backend really
+    builds for LiteLLM and OpenRouter are ``OpenAIChatModel`` on chat
+    completions, which has no native tool search, so the local drop path that
+    this restores IS the production path.
+    """
+    import dataclasses
+
+    from pydantic_ai.models import SUPPORTED_NATIVE_TOOLS
+    from pydantic_ai.native_tools._tool_search import ToolSearchTool
+
+    class _LocalOnly(type(model)):  # type: ignore[misc]
+        @property
+        def profile(self):
+            base = super().profile
+            current = base.get("supported_native_tools", SUPPORTED_NATIVE_TOOLS)
+            keep = frozenset(
+                t for t in (current or SUPPORTED_NATIVE_TOOLS) if t is not ToolSearchTool
+            )
+            if isinstance(base, dict):
+                return {**base, "supported_native_tools": keep}
+            return dataclasses.replace(base, supported_native_tools=keep)
+
+    model.__class__ = _LocalOnly
+    return model
+
+
+def _deferring_backend(model, **overrides) -> PydanticAIBackend:
+    return _backend_with_model(_local_only(model), pydantic_ai_defer_mcp_tools=True, **overrides)
+
+
+async def _deferred_surface(backend: PydanticAIBackend, **run_kwargs) -> set[str]:
+    """``_tool_surface``, but the capture model has no native tool search.
+
+    ``_tool_surface`` installs its own plain ``FunctionModel``, which throws
+    away whatever model the backend was built with — including the profile edit
+    that makes deferral observable at all.
+    """
+    seen: set[str] = set()
+
+    async def capture(messages: list[ModelMessage], info: AgentInfo):
+        seen.update(t.name for t in info.function_tools)
+        yield "ok"
+
+    model = _local_only(FunctionModel(stream_function=capture))
+    backend._build_model = lambda: model  # type: ignore[method-assign]
+    await _collect(backend, "hi", **run_kwargs)
+    return seen
+
+
+async def test_deferral_takes_the_mcp_tools_off_the_wire_and_leaves_the_builtins():
+    """The saving, and the boundary that makes it safe to take.
+
+    Builtin function tools stay visible: they are the small half of the bill
+    and the half the agent reaches for constantly.
+    """
+    backend = _deferring_backend(TestModel())
+    backend._mcp_tools = [_mcp_toolset("srv", "create_svelte_site", "publish", "edit_component")]
+    backend._custom_tools = _bridged("web_search")
+
+    names = await _deferred_surface(backend)
+    assert "search_tools" in names, "no discovery tool means the deferred ones are unreachable"
+    assert "web_search" in names, "builtin tools must NOT be deferred"
+    assert not [n for n in names if n.startswith("srv_")], sorted(names)
+
+
+async def test_deferral_off_leaves_the_surface_exactly_as_it_was():
+    backend = _backend_with_model(_local_only(TestModel()))
+    backend._mcp_tools = [_mcp_toolset("srv", "create_svelte_site", "publish")]
+
+    names = await _deferred_surface(backend)
+    assert "srv_publish" in names
+    assert "search_tools" not in names
+
+
+async def test_a_denied_tool_cannot_be_discovered_by_searching_for_it():
+    """The security property: search cannot re-open what a surface denied.
+
+    Deferral runs after gating, so the denied tool never enters the corpus.
+    Mutation-probed, and the probe is why this docstring does not claim more:
+    reversing that order leaves this test GREEN, because ``filtered()`` wraps
+    the deferred toolset and still matches on name. What is pinned here is the
+    property, not the ordering that currently implements it.
+    """
+    backend = _deferring_backend(TestModel())
+    backend._mcp_tools = [_mcp_toolset("pocketpaw_sites_manager", "create_landing_site", "publish")]
+
+    revealed: list[str] = []
+
+    async def script(messages, info: AgentInfo):
+        if len(messages) == 1:
+            yield {
+                0: DeltaToolCall(
+                    name="search_tools",
+                    json_args='{"queries": ["create landing site publish"]}',
+                    tool_call_id="s1",
+                )
+            }
+        else:
+            revealed.extend(t.name for t in info.function_tools)
+            yield "done"
+
+    backend._build_model = lambda: _local_only(FunctionModel(stream_function=script))
+    await _collect(
+        backend,
+        "make a landing page",
+        deny_mcp_tool_ids=frozenset({"mcp__pocketpaw_sites_manager__create_landing_site"}),
+    )
+
+    assert "pocketpaw_sites_manager_publish" in revealed, "search must still reveal what is allowed"
+    assert "pocketpaw_sites_manager_create_landing_site" not in revealed
+
+
+async def test_searching_makes_the_tool_callable_by_its_real_name():
+    """Hiding a tool is only worth anything if the model can get it back."""
+    backend = _deferring_backend(TestModel())
+    backend._mcp_tools = [_mcp_toolset("pocketpaw_sites_manager", "create_html_site", "publish")]
+
+    steps: list[set[str]] = []
+    called: list[str] = []
+
+    async def script(messages, info: AgentInfo):
+        steps.append({t.name for t in info.function_tools})
+        if len(steps) == 1:
+            yield {
+                0: DeltaToolCall(
+                    name="search_tools",
+                    json_args='{"queries": ["build me a website"]}',
+                    tool_call_id="s1",
+                )
+            }
+        elif len(steps) == 2:
+            yield {
+                0: DeltaToolCall(
+                    name="pocketpaw_sites_manager_create_html_site",
+                    json_args='{"q": "bakery"}',
+                    tool_call_id="c1",
+                )
+            }
+        else:
+            yield "done"
+
+    backend._build_model = lambda: _local_only(FunctionModel(stream_function=script))
+    events = await _collect(backend, "build me a website")
+    called = [
+        (ev.metadata or {}).get("name") for ev in events if ev.type in ("tool_use", "tool_result")
+    ]
+
+    assert "pocketpaw_sites_manager_create_html_site" in steps[1], sorted(steps[1])
+    assert "pocketpaw_sites_manager_create_html_site" in called, "the revealed tool never ran"
+
+
+def test_our_ranking_beats_token_overlap_on_the_queries_that_matter():
+    """Two real failures of pydantic-ai's built-in algorithm.
+
+    It scores one point per token wherever the token lands, so "publish it"
+    ranks every tool whose description mentions publishing above the tool
+    actually named ``publish``, and "make me a webpage" returns Daytona and
+    Foresight tools because our corpus never says "webpage".
+    """
+    from pydantic_ai.tools import ToolDefinition
+
+    from pocketpaw.agents.pydantic_ai import pocketpaw_tool_search
+
+    corpus = [
+        ToolDefinition(
+            name="pocketpaw_sites_manager_create_landing_site",
+            description="Create a landing site and publish it to a live URL.",
+            parameters_json_schema={},
+        ),
+        ToolDefinition(
+            name="pocketpaw_sites_manager_create_html_site",
+            description="Create a static HTML site, then publish it.",
+            parameters_json_schema={},
+        ),
+        ToolDefinition(
+            name="pocketpaw_sites_manager_publish",
+            description="Publish a draft to its live URL.",
+            parameters_json_schema={},
+        ),
+        ToolDefinition(
+            name="pocketpaw_foresight_list_runs",
+            description="List simulation runs, and publish a report of them.",
+            parameters_json_schema={},
+        ),
+    ]
+
+    ranked = pocketpaw_tool_search(None, ["publish it"], corpus)
+    assert ranked[0] == "pocketpaw_sites_manager_publish", ranked
+
+    webpage = pocketpaw_tool_search(None, ["make me a webpage"], corpus)
+    assert webpage, "no product vocabulary means no result at all"
+    assert webpage[0].startswith("pocketpaw_sites_manager_create"), webpage
+    assert "pocketpaw_foresight_list_runs" not in webpage
+
+    assert pocketpaw_tool_search(None, ["the it a"], corpus) == [], "stopwords must not match"
+
+
+def test_ranking_is_stable_for_equal_scores():
+    """One cached agent serves every tenant, and an unstable tool order is an
+    unstable prompt."""
+    from pydantic_ai.tools import ToolDefinition
+
+    from pocketpaw.agents.pydantic_ai import pocketpaw_tool_search
+
+    corpus = [
+        ToolDefinition(name=f"srv_publish_{i}", description="Publish.", parameters_json_schema={})
+        for i in "badc"
+    ]
+    assert pocketpaw_tool_search(None, ["publish"], corpus) == pocketpaw_tool_search(
+        None, ["publish"], list(reversed(corpus))
+    )
+
+
+async def test_the_backend_really_runs_our_ranking_not_the_built_in_one():
+    """Through the BACKEND, on a query only our algorithm can answer.
+
+    ``pocketpaw_tool_search`` being correct in isolation says nothing about
+    whether the agent uses it - pydantic-ai auto-injects its own ``ToolSearch``
+    into every agent, so dropping our capability leaves discovery working and
+    every other test here still green. The discriminator is a query with ZERO
+    token overlap against the corpus: the built-in algorithm returns nothing at
+    all for "webpage", and ours resolves it through the product vocabulary.
+    """
+    backend = _deferring_backend(TestModel())
+    backend._mcp_tools = [_mcp_toolset("srv", "create_html_site")]
+
+    revealed: list[str] = []
+
+    async def script(messages, info: AgentInfo):
+        if len(messages) == 1:
+            yield {
+                0: DeltaToolCall(
+                    name="search_tools",
+                    json_args='{"queries": ["build me a webpage"]}',
+                    tool_call_id="s1",
+                )
+            }
+        else:
+            revealed.extend(t.name for t in info.function_tools)
+            yield "done"
+
+    backend._build_model = lambda: _local_only(FunctionModel(stream_function=script))
+    await _collect(backend, "build me a webpage")
+
+    assert "srv_create_html_site" in revealed, (
+        "the built-in keyword algorithm scores 0 for 'webpage' against this "
+        "corpus, so a reveal here proves our strategy is the one wired in"
+    )
+
+
+def test_the_built_in_algorithm_really_does_fail_that_query():
+    """Pins the discriminator above.
+
+    If pydantic-ai ever adds stemming or synonyms, the test that proves our
+    strategy is wired stops proving anything - silently. This fails first, and
+    says why.
+    """
+    from pydantic_ai.tools import ToolDefinition
+    from pydantic_ai.toolsets._tool_search import keywords_search_fn
+
+    corpus = [
+        ToolDefinition(
+            name="srv_create_html_site",
+            description="The create_html_site tool.",
+            parameters_json_schema={},
+        )
+    ]
+    assert keywords_search_fn(None, ["build me a webpage"], corpus) == []
