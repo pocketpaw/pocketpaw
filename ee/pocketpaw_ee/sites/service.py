@@ -2343,6 +2343,33 @@ def _schedule_site_knowledge_sync(site: _SiteDoc) -> None:
         )
 
 
+# How long a Site may sit in ``provision_status="provisioning"`` before a new
+# publish stops treating it as in-flight. A real dynamic provision (D1 create,
+# migration, build, deploy) has been measured at ~5 minutes, so this is generous;
+# it exists purely so a job that was never consumed or died mid-flight cannot
+# brick the pocket permanently.
+_PROVISION_STALE_AFTER = timedelta(minutes=30)
+
+
+def _provisioning_is_stale(doc: Any) -> bool:
+    """True when a ``provisioning`` Site's last update is older than the window.
+
+    Missing/unreadable timestamps read as STALE: a doc we cannot date is far more
+    likely to be a leftover than a live job, and the failure modes are asymmetric
+    — a redundant enqueue costs one idempotent job, while a stuck guard costs the
+    pocket every future publish.
+    """
+    stamp = getattr(doc, "provision_started_at", None)
+    if stamp is None:
+        return True
+    try:
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=UTC)
+        return datetime.now(UTC) - stamp > _PROVISION_STALE_AFTER
+    except (AttributeError, TypeError, ValueError):
+        return True
+
+
 async def _provision_dynamic_site(
     *,
     workspace_id: str,
@@ -2384,9 +2411,28 @@ async def _provision_dynamic_site(
     # SINGLE-FLIGHT: a publish while the site is already provisioning must not enqueue
     # a second job — return the in-progress provisioning response as a no-op. (We do
     # not resolve the in-flight job id here; the caller can poll the site's status.)
+    #
+    # BOUNDED, because an unbounded guard is a trap. If the job is never consumed
+    # (no worker running) or dies without writing a terminal status, the doc stays
+    # "provisioning" forever and EVERY later publish of that pocket is silently a
+    # no-op — the pocket becomes permanently unpublishable with no error anywhere
+    # to see. Two sites on the rig were bricked exactly this way (2026-07-31).
+    # After the stale window we treat the previous attempt as lost and fall through
+    # to enqueue a fresh one: a genuinely in-flight job is far shorter than this,
+    # and the job is idempotent (the D1 id is persisted before the build and reused
+    # on retry).
     if doc is not None and doc.provision_status == "provisioning":
-        doc._provision_job_id = None
-        return doc
+        if _provisioning_is_stale(doc):
+            logger.warning(
+                "sites: site %s has been provisioning since %s — treating that job "
+                "as lost and re-enqueueing, rather than no-op'ing every publish "
+                "of this pocket forever",
+                doc.id,
+                getattr(doc, "provision_started_at", None),
+            )
+        else:
+            doc._provision_job_id = None
+            return doc
 
     # Ensure the canonical doc exists in ``provisioning`` state. leave ``deployed`` /
     # ``url`` for the job to finalize; seed the same identity/capture fields the static
@@ -2403,6 +2449,7 @@ async def _provision_dynamic_site(
             url="",
             signed_key=signed_key,
             provision_status="provisioning",
+            provision_started_at=datetime.now(UTC),
             builder_origin=builder_origin or "",
             allowed_origins=_default_allowed_origins(),
             event_mapping=_DEFAULT_EVENT_MAPPING,
@@ -2422,6 +2469,7 @@ async def _provision_dynamic_site(
         doc.deployed = False
         doc.url = ""
         doc.provision_status = "provisioning"
+        doc.provision_started_at = datetime.now(UTC)
         doc.pending_deploy_inputs = {}
         await doc.save()
 

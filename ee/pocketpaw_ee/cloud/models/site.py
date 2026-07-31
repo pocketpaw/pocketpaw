@@ -203,6 +203,15 @@ class Site(TimestampedDocument):
     # one; status becomes ``provisioned`` only after migrate + deploy succeed, and
     # ``failed`` on error. Defaults "none" for static sites and pre-DP0 rows.
     provision_status: str = "none"
+    # When the CURRENT provisioning attempt started (UTC). Exists so the
+    # single-flight guard can be bounded: a job that is never consumed or dies
+    # without writing a terminal status would otherwise leave the doc
+    # ``provisioning`` forever and make every later publish of the pocket a
+    # silent no-op — an unpublishable pocket with no error to see. None on
+    # static sites and pre-existing rows; a row with no stamp is treated as
+    # stale, which is the safe direction (a redundant enqueue costs one
+    # idempotent job, a stuck guard costs every future publish).
+    provision_started_at: datetime | None = None
     # BC-9: per-site annual plan (the Webflow model — each published site has its
     # OWN recurring annual plan on a tier, distinct from the workspace plan).
     # ``plan_tier`` is the site-plan catalog key (basic | pro | business — see
