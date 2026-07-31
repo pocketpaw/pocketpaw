@@ -2234,6 +2234,13 @@ async def approve_action(
     # fires a workspace-admin write (e.g. a member role change) after an
     # execute-time RBAC re-check, so the cross-workspace gate is mandatory here.
     _assert_admin_action_workspace(before, workspace_id)
+    # SHIP-4 — the same gate for a ``_ship_action``. This was MISSING: the assert
+    # ran only in bulk_approve / bulk_reject while THIS handler dispatches
+    # ``execute_approved_ship_action`` below, so an approver in workspace B could
+    # approve workspace A's parked teardown. The executor re-checks the PROPOSER's
+    # ``ship.manage`` in the blob's workspace, never the APPROVER's, so every
+    # executor guard passed and A's box (and every app on it) was destroyed.
+    _assert_ship_action_workspace(before, workspace_id)
 
     req = req or ApproveRequest()
     # SHOULD-FIX 1 — the audit actor is the authenticated identity, not
@@ -2773,6 +2780,13 @@ async def reject_action(
     # side. Asymmetric tenant scope is no tenant scope: a cross-workspace reject
     # must 403 before any mutation, exactly like the approve side.
     _assert_admin_action_workspace(before, workspace_id)
+    # SHIP-4 — and for a ``_ship_action``. Also missing here: without it a caller
+    # in workspace B could reject workspace A's parked teardown and drive it
+    # terminal. Because the box/app row keeps pointing at that now-dead
+    # ``pending_destroy_proposal_id``, A's own retry reuses the rejected id
+    # instead of filing a fresh proposal — the tenant is left unable to tear the
+    # resource down through the product at all.
+    _assert_ship_action_workspace(before, workspace_id)
 
     reason = req.reason if req else ""
     rejector_id = str(user.id)
