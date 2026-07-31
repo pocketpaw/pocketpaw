@@ -1099,6 +1099,13 @@ class CloudExternalActionsMcpProvider:
             # the other in-process servers.
             return None
 
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.external_actions import (
+            EXTERNAL_ACTIONS_TOOL_IDS,
+        )
+
+        return list(EXTERNAL_ACTIONS_TOOL_IDS)
+
 
 class CloudShipMcpProvider:
     """`pocketpaw.mcp_servers` — the /ship managed-deploy in-process server
@@ -1128,11 +1135,9 @@ class CloudShipMcpProvider:
             return None
 
     def tool_ids(self) -> list[str]:
-        from pocketpaw_ee.agent.mcp_servers.external_actions import (
-            EXTERNAL_ACTIONS_TOOL_IDS,
-        )
+        from pocketpaw_ee.agent.mcp_servers.ship import SHIP_TOOL_IDS
 
-        return list(EXTERNAL_ACTIONS_TOOL_IDS)
+        return list(SHIP_TOOL_IDS)
 
 
 class CloudWorkspaceAdminMcpProvider:
