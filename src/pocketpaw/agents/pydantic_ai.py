@@ -301,6 +301,11 @@ class PydanticAIBackend:
         # first runs would otherwise both see an empty cache and each spawn a
         # full set of subprocesses — the exact cost this guards against.
         self._mcp_lock = asyncio.Lock()
+        # One HTTP client for the instance, not one per run. ``_build_model``
+        # runs on every turn while ``_get_or_create_agent`` usually hands back a
+        # CACHED agent holding the previous model — so a client built here would
+        # be created and dropped each turn, leaking its connection pool.
+        self._http_client: Any = None
         self._policy = ToolPolicy(
             profile=settings.tool_profile,
             allow=settings.tools_allow,
@@ -391,16 +396,50 @@ class PydanticAIBackend:
         from pydantic_ai.providers.openai import OpenAIProvider
 
         base_url, api_key, model = self._resolve_openai_compatible(provider, model)
+        provider_kwargs: dict[str, Any] = {"base_url": base_url, "api_key": api_key}
+        http_client = self._get_http_client()
+        if http_client is not None:
+            provider_kwargs["http_client"] = http_client
         logger.info(
             "Pydantic AI: OpenAIChatModel(%r) via provider=%s base_url=%s",
             model,
             provider,
             base_url,
         )
-        return OpenAIChatModel(
-            model,
-            provider=OpenAIProvider(base_url=base_url, api_key=api_key),
-        )
+        return OpenAIChatModel(model, provider=OpenAIProvider(**provider_kwargs))
+
+    def _get_http_client(self) -> Any:
+        """The instance's shared HTTP client, built once.
+
+        Exists for one reason: the OpenAI SDK's default READ timeout is 600s,
+        and an agent turn is not bounded by ten minutes. A long tool chain, a
+        slow upstream or a reasoning model thinking between tokens trips it, and
+        the run dies mid-generation with everything already spent.
+
+        Note this is only OUR half. ``Upstream idle timeout exceeded`` comes
+        from the gateway in front of the model (LiteLLM / OpenRouter), which
+        enforces its own idle window and cannot be raised from here — if that
+        message survives this change, the limit is theirs, not ours.
+
+        ``connect`` stays short on purpose: a dead host should fail in seconds
+        rather than inherit the hour-long budget meant for a working one.
+        """
+        if self._http_client is not None:
+            return self._http_client
+        seconds = float(getattr(self.settings, "pydantic_ai_timeout", 0) or 0)
+        try:
+            import httpx
+
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(
+                    None if seconds <= 0 else seconds,
+                    connect=15.0,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not build HTTP client, using library defaults: %s", exc)
+            self._http_client = None
+        return self._http_client
 
     def _resolve_openai_compatible(self, provider: str, model: str) -> tuple[str | None, str, str]:
         """Return ``(base_url, api_key, model)`` for an OpenAI-compatible provider."""
@@ -1282,6 +1321,16 @@ class PydanticAIBackend:
                 logger.debug("MCP server shutdown error: %s", exc)
             finally:
                 self._mcp_tools = None
+
+        if self._http_client is not None:
+            client, self._http_client = self._http_client, None
+            try:
+                await client.aclose()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("HTTP client shutdown error: %s", exc)
+            # The cached agent holds a model bound to the client just closed.
+            self._cached_agent = None
+            self._cached_agent_key = None
 
     async def get_status(self) -> dict[str, Any]:
         provider, model = self._parse_provider_model()

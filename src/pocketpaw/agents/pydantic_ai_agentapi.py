@@ -103,6 +103,23 @@ def _latest_user_text(messages: list[ModelMessage]) -> str:
     return ""
 
 
+def _instructions(messages: list[ModelMessage]) -> str:
+    """The system prompt pydantic-ai is carrying for this request.
+
+    It rides on ``ModelRequest.instructions``, NOT as a ``SystemPromptPart`` —
+    scanning parts alone finds only the user prompt and silently drops the
+    persona, the surface's instructions and every skill directive. That is
+    exactly what happened until 2026-07-31: an agent asked to build a site
+    received a bare "build me a site" and did what a bare coding CLI does with
+    that, which is write an HTML file.
+    """
+    for message in reversed(messages):
+        text = getattr(message, "instructions", None)
+        if text:
+            return str(text)
+    return ""
+
+
 class AgentAPIError(RuntimeError):
     """Raised when the AgentAPI server cannot accept or complete a turn."""
 
@@ -114,6 +131,7 @@ class AgentAPIStreamedResponse(StreamedResponse):
     _model_name: str = ""
     _base_url: str = DEFAULT_BASE_URL
     _prompt: str = ""
+    _instructions: str = ""
     _timeout: float = 600.0
     _timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -134,7 +152,9 @@ class AgentAPIStreamedResponse(StreamedResponse):
         return self._timestamp
 
     async def _get_event_iterator(self) -> AsyncIterator[Any]:
-        async for delta in _stream_turn(self._base_url, self._prompt, self._timeout):
+        async for delta in _stream_turn(
+            self._base_url, self._prompt, self._timeout, self._instructions
+        ):
             for event in self._parts_manager.handle_text_delta(
                 vendor_part_id="agentapi", content=delta
             ):
@@ -185,7 +205,9 @@ class AgentAPIModel(Model):
         prompt = _latest_user_text(messages)
         chunks: list[str] = []
         async with self._lock:
-            async for delta in _stream_turn(self._base_url, prompt, self._timeout):
+            async for delta in _stream_turn(
+                self._base_url, prompt, self._timeout, _instructions(messages)
+            ):
                 chunks.append(delta)
         return ModelResponse(parts=[TextPart(content="".join(chunks))], model_name=self._model_name)
 
@@ -203,6 +225,7 @@ class AgentAPIModel(Model):
                 _model_name=self._model_name,
                 _base_url=self._base_url,
                 _prompt=_latest_user_text(messages),
+                _instructions=_instructions(messages),
                 _timeout=self._timeout,
             )
 
@@ -232,17 +255,29 @@ async def _post_when_ready(client: Any, prompt: str, attempts: int = 12) -> Any:
     )
 
 
-async def _stream_turn(base_url: str, prompt: str, timeout: float) -> AsyncIterator[str]:
-    """Submit one turn and yield cleaned text deltas until it completes."""
+async def _stream_turn(
+    base_url: str, prompt: str, timeout: float, instructions: str = ""
+) -> AsyncIterator[str]:
+    """Submit one turn and yield cleaned text deltas until it completes.
+
+    ``instructions`` is sent ONCE, folded into the first user message of a
+    conversation. AgentAPI is a PTY typing at a CLI — there is no system-prompt
+    channel — and the wrapped agent keeps its own context, so repeating it every
+    turn would burn tokens and read as the operator restating the rules.
+
+    "First" is decided from the SERVER's message log, not from our own state:
+    the model object is rebuilt per run and the agent cache may discard it, so
+    any in-process flag would resend the prompt at unpredictable moments.
+    """
     import httpx
 
     async with httpx.AsyncClient(base_url=base_url, timeout=timeout) as client:
         try:
             resp = await client.get("/messages")
             resp.raise_for_status()
-            baseline = max(
-                (int(m.get("id", -1)) for m in (resp.json().get("messages") or [])), default=-1
-            )
+            prior = resp.json().get("messages") or []
+            baseline = max((int(m.get("id", -1)) for m in prior), default=-1)
+            fresh_conversation = not any(m.get("role") == "user" for m in prior)
         except AgentAPIError:
             raise
         except Exception as exc:
@@ -257,8 +292,12 @@ async def _stream_turn(base_url: str, prompt: str, timeout: float) -> AsyncItera
 
         # Subscribe BEFORE posting: POST /message returns once the agent has
         # STARTED, so a stream opened afterwards can miss the first frames.
+        outbound = prompt
+        if instructions and fresh_conversation:
+            outbound = instructions + "\n\n---\n\n" + prompt
+
         async with client.stream("GET", "/events") as stream:
-            await _post_when_ready(client, prompt)
+            await _post_when_ready(client, outbound)
 
             kind: str | None = None
             async for line in stream.aiter_lines():

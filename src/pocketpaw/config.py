@@ -615,10 +615,11 @@ class Settings(BaseSettings):
         ),
     )
     agentapi_timeout: int = Field(
-        default=600,
+        default=3600,
         description=(
             "Seconds to wait on an AgentAPI turn. Generous by default because the "
-            "wrapped agent may run long tool chains of its own."
+            "wrapped agent runs its own tool chains and can work for a long time; "
+            "the previous 600s cut turns off mid-task."
         ),
     )
     # Pydantic AI Settings — in-process, dispatch-only agent backend.
@@ -641,6 +642,19 @@ class Settings(BaseSettings):
             "carries no ``provider:`` prefix. ``auto`` defers to ``llm_provider``, "
             "then to ``litellm``. One of: litellm, anthropic, openai, "
             "openai_compatible, openrouter, ollama."
+        ),
+    )
+    pydantic_ai_timeout: int = Field(
+        default=3600,
+        description=(
+            "Seconds the Pydantic AI backend waits on the model before giving "
+            "up (0 = wait indefinitely). Replaces the OpenAI client's 600s "
+            "default, which is not a sensible bound on an agent turn — a long "
+            "tool chain or a reasoning model thinking between tokens trips it "
+            "and the run dies mid-generation. The connect timeout stays short "
+            "regardless, so a dead host still fails fast. A gateway in front of "
+            "the model (LiteLLM / OpenRouter) enforces its own idle window that "
+            "this cannot raise."
         ),
     )
     pydantic_ai_max_turns: int = Field(

@@ -1346,3 +1346,58 @@ def test_a_401_from_a_direct_provider_is_left_alone():
     backend = PydanticAIBackend(_settings(pydantic_ai_model="anthropic:claude-haiku-4-5"))
     msg = backend._explain_error(RuntimeError("status_code: 401, authentication_error"))
     assert "UPSTREAM" not in msg
+
+
+# --------------------------------------------------------------------------
+# timeouts
+# --------------------------------------------------------------------------
+
+
+def test_the_model_client_outlives_the_openai_ten_minute_default():
+    """An agent turn is not bounded by ten minutes. The OpenAI SDK's default
+    read timeout is 600s, and a long tool chain or a reasoning model thinking
+    between tokens trips it — the run dies mid-generation with everything
+    already spent."""
+    backend = PydanticAIBackend(
+        _settings(
+            pydantic_ai_model="openrouter:some-model",
+            openrouter_api_key="k",
+            pydantic_ai_timeout=3600,
+        )
+    )
+    # Asserted on the BUILT MODEL, not on the helper. Checking the helper alone
+    # passes even when the client is never handed to the provider — a mutation
+    # probe removing exactly that line went undetected until this changed.
+    model = backend._build_model()
+
+    assert model.client._client is backend._get_http_client()
+    assert model.client.timeout.read == 3600
+    # Short on purpose: a dead host must not inherit the hour-long budget.
+    assert model.client.timeout.connect == 15.0
+
+
+def test_zero_means_wait_indefinitely():
+    backend = PydanticAIBackend(_settings(pydantic_ai_timeout=0))
+    assert backend._get_http_client().timeout.read is None
+
+
+def test_the_client_is_built_once_per_instance():
+    """``_build_model`` runs every turn while the agent cache usually returns
+    the PREVIOUS model, so a per-run client would leak its connection pool."""
+    backend = PydanticAIBackend(_settings())
+    assert backend._get_http_client() is backend._get_http_client()
+
+
+async def test_stop_closes_the_client_and_drops_the_agent_holding_it():
+    """A cached agent holds a model bound to the closed client; serving it again
+    would raise on the next request."""
+    backend = PydanticAIBackend(_settings())
+    client = backend._get_http_client()
+    backend._cached_agent = object()
+    backend._cached_agent_key = ("stale",)
+
+    await backend.stop()
+
+    assert client.is_closed
+    assert backend._http_client is None
+    assert backend._cached_agent is None

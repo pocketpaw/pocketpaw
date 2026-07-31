@@ -310,3 +310,66 @@ async def test_an_ungated_surface_still_runs_on_agentapi(monkeypatch):
     events = [e async for e in backend.run("hi")]
     assert not [e for e in events if e.type == "error"]
     assert "hello" in "".join(e.content for e in events if e.type == "message")
+
+
+# -- system prompt ----------------------------------------------------------
+
+
+async def test_the_system_prompt_reaches_the_wrapped_agent(monkeypatch):
+    """It rides on ``ModelRequest.instructions``, NOT as a ``SystemPromptPart``.
+
+    Scanning parts alone finds only the user prompt, so the persona, the
+    surface's instructions and every skill directive were silently dropped —
+    an agent told to build a site received a bare "build me a site" and did
+    what a bare coding CLI does with that, which is write an HTML file.
+    """
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+    client = _install(
+        monkeypatch,
+        _Client(
+            events=[
+                *_sse("status_change", {"status": "running"}),
+                *_frames("● ok"),
+                *_sse("status_change", {"status": "stable"}),
+            ]
+        ),
+    )
+    req = ModelRequest(parts=[UserPromptPart(content="build me a site")])
+    req.instructions = "ALWAYS call create_svelte_site. Never write files."
+
+    await AgentAPIModel("claude").request([req])
+
+    sent = client.posts[0]["content"]
+    assert "create_svelte_site" in sent, "the system prompt never reached the agent"
+    assert "build me a site" in sent
+
+
+async def test_the_system_prompt_is_not_resent_every_turn(monkeypatch):
+    """The wrapped agent keeps its own context. Resending a multi-kB prompt each
+    turn burns tokens and reads as the operator restating the rules mid-chat.
+
+    Freshness is judged from the SERVER's log, because the model object is
+    rebuilt per run — an in-process flag would resend at random moments.
+    """
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+    client = _install(
+        monkeypatch,
+        _Client(
+            messages=[
+                {"id": 0, "role": "agent", "content": "banner"},
+                {"id": 1, "role": "user", "content": "an earlier turn"},
+            ],
+            events=[
+                *_sse("status_change", {"status": "running"}),
+                *_frames("● ok", mid=3),
+                *_sse("status_change", {"status": "stable"}),
+            ],
+        ),
+    )
+    req = ModelRequest(parts=[UserPromptPart(content="and now this")])
+    req.instructions = "ALWAYS call create_svelte_site."
+
+    await AgentAPIModel("claude").request([req])
+    assert client.posts[0]["content"] == "and now this"
