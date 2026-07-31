@@ -47,16 +47,25 @@ async def _run(
     minutes_ago: int = 5,
     ended: bool = True,
     user_id: str = "u1",
+    anchor: datetime | None = None,
 ) -> str:
     """Insert one ChatRunDoc. Returns its run_id.
 
     Inserted directly (not through ``create_run``) so a test can express a
     terminal run in one line; the READ path under test is the real service.
+
+    ``anchor`` is the instant ``minutes_ago`` counts back from, defaulting to the
+    pinned ``NOW``. Service-level tests pass ``now=NOW`` into the service so the
+    pin holds on both sides. The ENDPOINT tests cannot — the route reads the real
+    clock — so they anchor to real time instead. Without that they were a time
+    bomb: seeded three days before the 24-hour ``RECENT_WINDOW`` they assert
+    against, they passed for exactly one day after the pinned date and have
+    failed every run since.
     """
     from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 
     rid = run_id or f"r-{workspace}-{agent_id}-{status}-{minutes_ago}-{user_id}"
-    created = NOW - timedelta(minutes=minutes_ago)
+    created = (anchor or NOW) - timedelta(minutes=minutes_ago)
     terminal = status not in ("queued", "running")
     doc = ChatRunDoc(
         run_id=rid,
@@ -256,8 +265,9 @@ async def test_team_board_shows_every_members_activity(mongo_db):  # noqa: ARG00
 
 
 async def test_service_never_returns_another_workspace(mongo_db):  # noqa: ARG001
-    await _run(workspace="w1", agent_id="mine", status="running")
-    await _run(workspace="w2", agent_id="theirs", status="running")
+    real_now = datetime.now(UTC).replace(microsecond=0)
+    await _run(workspace="w1", agent_id="mine", status="running", anchor=real_now)
+    await _run(workspace="w2", agent_id="theirs", status="running", anchor=real_now)
     await _run(workspace="w2", agent_id="theirs-too", status="failed", minutes_ago=1)
 
     w1 = await _build("w1")
@@ -332,7 +342,12 @@ def _client(app: FastAPI) -> AsyncClient:
 
 
 async def test_endpoint_returns_the_board(mongo_db):  # noqa: ARG001
-    await _run(workspace="w1", agent_id="a1", status="running", minutes_ago=2)
+    # Anchored to the REAL clock: the endpoint has no injectable ``now``, so a
+    # run pinned to a hardcoded date falls out of RECENT_WINDOW a day later.
+    # Microseconds are zeroed because Mongo stores millisecond precision, so a
+    # raw now() would not round-trip byte-for-byte through the response.
+    real_now = datetime.now(UTC).replace(microsecond=0)
+    await _run(workspace="w1", agent_id="a1", status="running", minutes_ago=2, anchor=real_now)
 
     async with _client(_build_app()) as client:
         resp = await client.get("/api/v1/agent-activity")
@@ -345,7 +360,7 @@ async def test_endpoint_returns_the_board(mongo_db):  # noqa: ARG001
             "agent_id": "a1",
             "status": "active",
             "active_runs": 1,
-            "last_active": (NOW - timedelta(minutes=2)).isoformat(),
+            "last_active": (real_now - timedelta(minutes=2)).isoformat(),
         }
     ]
 
@@ -356,8 +371,10 @@ async def test_endpoint_is_scoped_to_the_callers_workspace(mongo_db):  # noqa: A
     Membership is not the filter — the active workspace is. This is the test
     that would fail if the query ever stopped carrying the workspace.
     """
-    await _run(workspace="w1", agent_id="mine", status="running")
-    await _run(workspace="w2", agent_id="theirs", status="running")
+    # Real-clock anchored — the endpoint has no injectable ``now`` (see _run).
+    real_now = datetime.now(UTC).replace(microsecond=0)
+    await _run(workspace="w1", agent_id="mine", status="running", anchor=real_now)
+    await _run(workspace="w2", agent_id="theirs", status="running", anchor=real_now)
 
     app = _build_app(active_workspace="w1", memberships=["w1", "w2"])
     async with _client(app) as client:
