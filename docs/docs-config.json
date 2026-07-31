@@ -295,6 +295,11 @@
             "icon": "lucide:eye"
           },
           {
+            "label": "Concierge Knowledge",
+            "href": "/concepts/concierge-knowledge",
+            "icon": "lucide:book-open"
+          },
+          {
             "label": "Pocket Sources",
             "href": "/concepts/pocket-sources",
             "icon": "lucide:database"
