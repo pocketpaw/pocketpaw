@@ -204,12 +204,30 @@ async def _deploy_app_handler(args: dict) -> dict:
     app_id = str(args.get("app_id") or "")
     if not app_id:
         return _error_response("ship_deploy_app requires an `app_id`.")
+    from pocketpaw_ee.cloud.ship.domain import DestroyProposalView
+
     try:
         result = await service.deploy_app_or_propose(ws, user, app_id)
     except Exception as exc:  # noqa: BLE001
         return _view_error(exc, "deploy the app")
-    if isinstance(result, dict) and result.get("status") == "proposed":
-        return _success_response(result)
+    # A PROD app files a proposal instead of deploying. This used to test
+    # ``isinstance(result, dict)``, but the service returns
+    # ``DeployView | DestroyProposalView`` — both dataclasses, never a dict — so
+    # the branch was dead and a gated prod deploy fell through to ``result.id``
+    # and raised, breaking the one path the Instinct gate exists to serve.
+    if isinstance(result, DestroyProposalView):
+        return _success_response(
+            {
+                "status": "proposed",
+                "proposal_id": result.proposal_id,
+                "app_id": result.target_id,
+                "note": (
+                    "this app is PROD-flagged, so the deploy was NOT run — it is "
+                    "waiting for human approval in The Tray. Say it is awaiting "
+                    "approval; never report it as deployed."
+                ),
+            }
+        )
     return _success_response(
         {
             "deploy_id": result.id,
@@ -233,11 +251,13 @@ async def _add_domain_handler(args: dict) -> dict:
     try:
         body = AddDomainRequest(domain=str(args.get("domain") or ""))
         view = await service.add_domain(ws, user, app_id, body)
+        # The wire shape comes from the service's own mapper — DomainView has no
+        # ``url`` field, and reading one here crashed the tool AFTER the domain
+        # was routed and a real ACME certificate had been issued.
+        wire = service.domain_to_wire(view).model_dump()
     except Exception as exc:  # noqa: BLE001
         return _view_error(exc, "route the domain")
-    return _success_response(
-        {"domain": view.domain, "tls_enabled": view.tls_enabled, "url": view.url}
-    )
+    return _success_response(wire)
 
 
 async def _create_db_handler(args: dict) -> dict:
@@ -450,24 +470,21 @@ async def _request_destroy_handler(args: dict) -> dict:
     )
 
 
+# The agent renders the SAME wire shapes the REST surface serves, by calling the
+# service's own mappers. This module previously hand-rolled a second pair of
+# mappers, which drifted off the view field names (they read ``view.box_id`` /
+# ``view.app_id``; the views expose ``id``) and raised AttributeError on the
+# success path of four tools. One mapper per entity, owned by the service.
 def _box_wire(view: Any) -> dict[str, Any]:
-    return {
-        "id": view.box_id,
-        "provider": view.provider,
-        "ip": view.ip,
-        "status": view.status,
-        "price_monthly": view.price_monthly,
-    }
+    from pocketpaw_ee.cloud.ship import service as ship_service
+
+    return ship_service.box_to_wire(view).model_dump()
 
 
 def _app_wire(view: Any) -> dict[str, Any]:
-    return {
-        "id": view.app_id,
-        "name": view.name,
-        "box_id": view.box_id,
-        "status": view.status,
-        "urls": list(view.urls),
-    }
+    from pocketpaw_ee.cloud.ship import service as ship_service
+
+    return ship_service.app_to_wire(view).model_dump()
 
 
 def build_ship_server() -> tuple[str, Any] | None:
