@@ -3657,22 +3657,52 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     # The idle auto-resume runs FIRST so a mute that has aged out is already gone
     # before this turn is classified — one cheap conditional UPDATE that no-ops for
     # every conversation nobody has taken over (the overwhelming majority).
+    # TWO concerns, deliberately NOT sharing one try/except:
+    #
+    #   (a) reading whether a human has taken this conversation over. That is the
+    #       mute signal the gate below reads, and it is SECURITY-RELEVANT — a bot
+    #       talking over a human mid-reply is the single loudest complaint about
+    #       every product that shipped this feature.
+    #   (b) the bookkeeping write (auto-resume, unread++, last_visitor_at).
+    #       Losing it costs the owner a badge, nothing more.
+    #
+    # They used to share one block, so ANY failure in (b) — a busy database while
+    # the owner's own reply writes the same row, a malformed legacy row — threw
+    # away the already-successful read from (a), left ``conversation`` None, and
+    # the mute gate below fell through and dispatched a full agent run. The
+    # failure-soft intent was right for the write and wrong for the read.
     conversation = None
     is_new_conversation = False
+    mute_unreadable = False
     try:
-        await store.auto_resume_bot_if_idle(body.widget_id, body.customer_ref, ctx.workspace_id)
         # Read BEFORE the upsert so "is this the first time we've heard from this
         # person" is answered by the absence of a row, not inferred from counters
         # the owner's own reads reset. It is the notification trigger below.
-        is_new_conversation = (
-            await store.get_conversation(
-                body.widget_id, body.customer_ref, workspace_id=ctx.workspace_id
-            )
-            is None
+        conversation = await store.get_conversation(
+            body.widget_id, body.customer_ref, workspace_id=ctx.workspace_id
         )
-        conversation = await store.upsert_conversation_on_visitor_turn(
+        is_new_conversation = conversation is None
+    except Exception:
+        # We cannot prove a human is NOT handling this, so fail closed and treat
+        # it as muted. A visitor briefly told the team is replying is recoverable;
+        # a bot arguing with its own operator in front of a customer is not.
+        mute_unreadable = True
+        logger.exception(
+            "paw-bar: could not read conversation state for widget %s — failing "
+            "CLOSED (treating the bot as muted) rather than risk answering over "
+            "a human",
+            body.widget_id,
+        )
+
+    try:
+        await store.auto_resume_bot_if_idle(body.widget_id, body.customer_ref, ctx.workspace_id)
+        refreshed = await store.upsert_conversation_on_visitor_turn(
             body.widget_id, body.customer_ref, ctx.workspace_id
         )
+        # ADOPT the upsert's fresher row, but never let its failure clear what the
+        # read above established.
+        if refreshed is not None:
+            conversation = refreshed
     except Exception:
         logger.warning("conversation state upsert failed (non-fatal)", exc_info=True)
 
@@ -3708,7 +3738,9 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     #
     # It is told with a FRAME, never with silence: a clean-but-empty stream reads
     # as "No reply." in the glass app, so a muted bot would look like a broken one.
-    if conversation is not None and conversation.bot_paused:
+    # ``mute_unreadable`` is the fail-closed arm: the state read raised, so we
+    # cannot prove a human is not mid-reply and must not gamble a run on it.
+    if mute_unreadable or (conversation is not None and conversation.bot_paused):
         return await _human_replying_response(
             store,
             widget_id=body.widget_id,

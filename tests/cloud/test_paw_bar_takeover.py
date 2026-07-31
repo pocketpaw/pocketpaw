@@ -1182,3 +1182,67 @@ class TestAuthorCoercionAtTheModel:
 
         assert OwnerMessage(widget_id="w1", customer_ref="c1", author=None).author == ""
         assert ConversationNote(author=None).author == ""
+
+
+@pytest.mark.asyncio
+async def test_the_mute_fails_closed_when_the_state_read_raises(public, monkeypatch):
+    """A store failure must NOT un-mute a taken-over conversation.
+
+    Found in code review: the ``bot_paused`` read and the failure-soft
+    bookkeeping write shared one try/except, so any exception in the write —
+    a busy database while the owner's own reply touches the same row, a
+    malformed legacy row — discarded the successful read, left ``conversation``
+    None, and the gate fell through to dispatch a full agent run. The bot then
+    answered over the human mid-reply, which is the single failure this slice
+    exists to prevent.
+
+    Fail CLOSED: unreadable state is treated as muted.
+    """
+    c, store = public
+    await _site()
+    widget = await store.create_widget(_widget())
+    fake_exec = _stub_run_dispatch(monkeypatch, real_create_run=True)
+    await _paused_conversation(store, widget.id)
+    before = await _run_count()
+
+    async def _boom(*_a, **_kw):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(store, "get_conversation", _boom)
+
+    res = await c.post("/paw-bar/chat", json=_chat_payload(widget.id), headers={"Origin": _ORIGIN})
+
+    assert res.status_code == 200
+    body = res.text
+    assert "event: human_replying" in body, "an unreadable mute must fail CLOSED"
+    assert "event: chunk" not in body, "the bot answered over a human"
+    assert await _run_count() == before
+    assert fake_exec.submitted == [], "a run was dispatched despite an unreadable mute"
+
+
+@pytest.mark.asyncio
+async def test_a_failing_bookkeeping_write_does_not_unmute(public, monkeypatch):
+    """The narrower, likelier race: the READ succeeds and the upsert throws.
+
+    The upsert is genuinely failure-soft (losing it costs the owner a badge),
+    but it must never clear the paused state the read already established.
+    """
+    c, store = public
+    await _site()
+    widget = await store.create_widget(_widget())
+    fake_exec = _stub_run_dispatch(monkeypatch, real_create_run=True)
+    await _paused_conversation(store, widget.id)
+    before = await _run_count()
+
+    async def _boom(*_a, **_kw):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(store, "upsert_conversation_on_visitor_turn", _boom)
+
+    res = await c.post("/paw-bar/chat", json=_chat_payload(widget.id), headers={"Origin": _ORIGIN})
+
+    assert res.status_code == 200
+    assert "event: human_replying" in res.text
+    assert "event: chunk" not in res.text
+    assert await _run_count() == before
+    assert fake_exec.submitted == []
