@@ -3722,6 +3722,9 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
             body=body.message,
             widget_id=body.widget_id,
             customer_ref=body.customer_ref,
+            # Passed rather than left to the resolver: the widget is already in
+            # hand here, and this await sits inside the visitor's turn.
+            agent_id=str(getattr(widget, "agent_id", "") or ""),
         )
 
     # (7c) THE MUTE. A human is holding this conversation, so the bot does not
