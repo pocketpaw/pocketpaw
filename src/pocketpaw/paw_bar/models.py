@@ -1,4 +1,15 @@
 # ee/paw_bar/models.py — Pydantic models for the Paw Bar widget layer.
+# Updated: 2026-07-30 (owner inbox, slice 2 — type-to-takeover) — the OUT-OF-BAND
+#   thread vocabulary: ``OwnerMessageRole`` (owner | system | visitor) and
+#   ``OwnerMessage``, the rows of ``paw_bar_owner_messages``. These are the thread
+#   lines that have no ChatRunDoc: the owner's own replies, the system's
+#   explanations (the bot handing itself back), and a visitor line that arrived
+#   while the bot was muted and therefore never dispatched a run. They are NOT run
+#   docs on purpose — ``metering.sweeper.sweep_unbilled_runs`` bills every unbilled
+#   terminal run, so an owner reply shaped as one would charge the owner credits
+#   for typing their own sentence and count as agent compute that never happened.
+#   ``created_at`` is an ISO string in UTC (aware), matching ChatRunDoc.createdAt,
+#   so the transcript reader can merge both sources on one comparable clock.
 # Updated: 2026-07-30 (owner inbox, slice 1) — the conversation STATE vocabulary:
 #   ``ConversationState`` (open | needs_human | snoozed | closed),
 #   ``ConversationNote`` (an owner's private {author, text, at}) and
@@ -562,9 +573,70 @@ class Conversation(BaseModel):
     contact_email: str = ""
     last_visitor_at: str = ""
     last_owner_at: str = ""
+    # When the bot was muted (slice 2). Set whenever ``bot_paused`` flips on,
+    # cleared when it flips off. The idle auto-resume reads it, and the owner UI
+    # uses it to say when the bot hands itself back.
+    bot_paused_at: str = ""
     unread_for_owner: int = 0
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
+
+
+def _gen_owner_message_id() -> str:
+    """Fresh owner-message row id (``ppm_…``) — same reason as the conversation id."""
+    return _gen_id("ppm")
+
+
+class OwnerMessageRole(StrEnum):
+    """Who spoke a line that has no run doc behind it.
+
+    ``OWNER``   — a human on the site's team typed it. The line the visitor is
+                  waiting for; the whole point of the takeover.
+    ``SYSTEM``  — the product explaining itself in the thread ("the assistant is
+                  answering again"). Visitor-facing, but authored by nobody.
+    ``VISITOR`` — a visitor message that arrived while the bot was MUTED. It never
+                  became a ``ChatRunDoc`` because no run was dispatched (that is
+                  the entire point of muting), so without this row the owner's
+                  transcript would simply stop mid-conversation at the moment a
+                  human took over. Never returned by the public poll: the visitor
+                  already has their own words on screen, and echoing them back is
+                  how a public read starts leaking a thread.
+    """
+
+    OWNER = "owner"
+    SYSTEM = "system"
+    VISITOR = "visitor"
+
+
+class OwnerMessage(BaseModel):
+    """One thread line stored outside the run stream (owner inbox, slice 2).
+
+    The transcript is normally derived from ``ChatRunDoc`` — one run per visitor
+    turn, carrying both halves. These are the lines with no run: see
+    :class:`OwnerMessageRole`. Keyed by ``(widget_id, customer_ref)``, the same
+    identity as :class:`Conversation`, so the reader merges the two sources on one
+    key and one clock.
+
+    ``created_at`` is an ISO-8601 string in UTC (timezone-aware), deliberately NOT
+    a naive local stamp like the conversation row's: this value is sorted against
+    ``ChatRunDoc.createdAt`` (aware UTC) to interleave the thread, and it is
+    handed to clients. A naive local stamp would interleave wrongly by the host's
+    UTC offset on every machine that isn't set to UTC.
+
+    PII posture: ``content`` is free text an owner or a visitor typed, so treat it
+    as personal data — same class as ``ChatRunDoc.user_text``. ``author`` is the
+    owner's user id, and is owner-facing only: the public poll projects role +
+    content + timestamp and nothing else.
+    """
+
+    id: str = Field(default_factory=_gen_owner_message_id)
+    widget_id: str
+    customer_ref: str
+    workspace_id: str = ""
+    role: OwnerMessageRole = OwnerMessageRole.OWNER
+    content: str = ""
+    author: str = ""
+    created_at: str = ""
 
 
 # ---------------------------------------------------------------------------

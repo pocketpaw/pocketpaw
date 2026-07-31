@@ -207,6 +207,74 @@ Visitors are shown by the email they left, when they left one, and otherwise by 
 short stub of their anonymous handle. The email is still stored only where it was
 captured; the owner's list reads it there rather than keeping a second copy.
 
+## When a human takes over
+
+Typing is taking over. There is no separate button to press first, because the
+failure this is built to prevent is a bot and a person answering the same customer
+at the same time — and a button is a thing you can forget.
+
+`POST /paw-bar/admin/site/{site_id}/conversations/{customer_ref}/reply` sends the
+owner's line, and does everything else that has to happen with it: the reply is
+stored, the bot is muted, the conversation's unread counter clears, and a closed or
+snoozed thread comes back to `open`. An owner answering a customer is engagement;
+leaving that thread filed while a human types into it is how a conversation
+disappears mid-sentence. Like the PATCH, it gates on `paw_bar.manage`.
+
+An owner's reply does **not** go through the approval loop. Instinct gates actions
+the agent proposes, because a machine wants a side effect and a human should decide.
+A human typing a sentence already is the decision.
+
+### The bot stops talking
+
+While a conversation is paused, a visitor's message does not reach the agent at all.
+The check happens before any run is created, so there is no agent turn, nothing
+metered, and no tools in reach. What the visitor gets back is a distinct
+`human_replying` event on the chat stream saying a person is replying, followed by
+the normal end-of-stream event. It is never silence: an empty stream reads as a
+failure, and a muted bot must not look like a broken one.
+
+The visitor's message is still kept, and their conversation moves to `needs_human`.
+Someone typing to a paused bot is by definition waiting on a person, and the owner
+has to be able to read what they said while they were typing. Retention applies here
+exactly as it does elsewhere: with `concierge_store_transcripts` off, that line is
+not stored either. Muting is not a way around the site's own privacy switch.
+
+Because these lines have no run behind them — the owner's replies, the system's own
+notices, and any visitor message that arrived while the bot was muted — they are
+stored separately from the run documents and merged back into the transcript by
+timestamp. The transcript's roles are therefore `user`, `assistant`, `owner` and
+`system`, interleaved in the order they were said, so the owner can see when the
+human stepped in and what the bot had been saying until then.
+
+Keeping owner replies out of the run collection is deliberate. Runs are billed
+compute; a reply shaped as one would charge the owner credits for typing their own
+sentence and count as agent work that never happened.
+
+### The bot comes back
+
+A mute with no owner activity for four hours ends by itself, and the thread says so
+with a system line explaining that the assistant is answering again. The window is
+fixed for now, and the guard matters more than making it configurable: the common
+way this feature fails in practice is an owner who steps in, gets pulled away, and
+leaves the bar silent for every visitor after that.
+
+Like the snooze, the hand-back is decided when the row is read rather than by a
+background sweep, so the chat endpoint and the visitor's own poll always agree about
+whether a human is holding the conversation. Replying again restarts the clock.
+
+### How the reply reaches the visitor
+
+`GET /paw-bar/messages/{widget_id}/{customer_ref}` is the visitor side, polled by
+the bar on the page. It is public, behind the same key, origin and rate gates as the
+chat, and it is the narrowest read on this surface: what was said (`owner` or
+`system`, with a timestamp) and whether the bot is currently paused. Nothing else
+crosses. The private notes, the tags, the assignee, the captured email and the queue
+state are all owner-only, and the visitor's own stored lines are not echoed back
+either.
+
+`after` takes the timestamp of the last message the page rendered and returns only
+what came after it, so a poll never shows the same reply twice.
+
 ## When the visitor leaves the page
 
 Some requests need a human decision, and humans take longer than a browser tab

@@ -1,4 +1,35 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-30 (owner inbox, slice 2) — TYPE-TO-TAKEOVER. The owner types,
+#   the bot shuts up, and the visitor sees a human:
+#     + POST .../site/{id}/conversations/{customer_ref}/reply — {text} →
+#       {ok, message, conversation}. One call does all of it: persists an ``owner``
+#       line, mutes the bot (``bot_paused``, stamped so the idle clock starts),
+#       stamps ``last_owner_at``, clears the unread counter, and REOPENS a
+#       closed/snoozed thread. ``message`` is a TranscriptMessage (the shape the
+#       thread already renders); ``conversation`` is the same ConversationRow the
+#       PATCH echoes. Gated on ``paw_bar.manage``, workspace-scoped like its
+#       siblings. NOT a run: an owner reply never becomes a ChatRunDoc, so the
+#       metering sweeper can't bill the owner for typing.
+#     ~ POST /paw-bar/chat — the MUTE, checked BEFORE the run is created: when the
+#       conversation is paused, the visitor's line is kept (under the same
+#       retention toggle), the thread flips to ``needs_human``, and the response is
+#       exactly two SSE frames — ``human_replying`` {"message": …} then
+#       ``stream_end`` — with NO run dispatched, no metering, no tool surface.
+#       Never an empty stream: the glass app reads clean-but-empty as "No reply."
+#     + GET /paw-bar/messages/{widget_id}/{customer_ref}?signed_key=&after= — the
+#       visitor-side poll, PUBLIC, same ``_front_gate_for_key`` chain as articles
+#       (404 → 429 → 401 → 403) and the same ``_request_origin`` same-origin fix.
+#       Returns {messages:[{role,content,at}], bot_paused} and NOTHING else — no
+#       notes, tags, assignee, contact_email, or queue state ever cross to a
+#       visitor, and a visitor's own stored lines are not echoed back.
+#     ~ GET .../conversations/{customer_ref} — the transcript now MERGES two
+#       sources by timestamp: ChatRunDoc (user/assistant) and the new
+#       paw_bar_owner_messages rows (owner/system, plus muted-turn visitor lines
+#       presented as "user"). ``TranscriptMessage.role`` widens from
+#       user|assistant to user|assistant|owner|system — ADDITIVE.
+#   IDLE AUTO-RESUME (§10 Q2 — 4h, hard-coded): a mute with no owner activity for
+#   4h ends itself. Computed on READ in the store, so chat and the poll agree, and
+#   materialized by both with one system message explaining the hand-back.
 # Updated: 2026-07-30 (owner inbox, slice 1) — the concierge LOG becomes a QUEUE.
 #   A lifecycle row (``paw_bar_conversations``) is now upserted on every visitor
 #   turn from ``concierge_chat`` (failure-soft — inbox bookkeeping never costs a
@@ -318,7 +349,7 @@ import os
 import re
 import uuid
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -331,6 +362,7 @@ from pocketpaw.paw_bar.models import (
     MAX_PAYLOAD_BYTES,
     ConversationState,
     DecisionState,
+    OwnerMessageRole,
     PawBarEvent,
     PawBarEventMapping,
     PawBarSpec,
@@ -1507,6 +1539,30 @@ _MAX_CONVERSATION_TAGS = 20
 _MAX_TAG_CHARS = 40
 _MAX_NOTE_CHARS = 2000
 
+# Owner reply bounds (slice 2). The cap matches ``_STORED_USER_TEXT_CHARS`` on the
+# visitor's side of the same thread — both halves of a conversation get the same
+# room — and an over-long reply is REFUSED rather than silently truncated: the
+# owner is talking to a customer, and a sentence that ends mid-word without anyone
+# saying so is worse than an error they can act on.
+_MAX_OWNER_REPLY_CHARS = 4000
+
+# How many out-of-band lines one visitor poll returns (the most recent N,
+# presented oldest-first). A widget polls every few seconds, so it is never behind
+# by more than a handful; the cap exists so a thread that sat unpolled for a day
+# can't return an unbounded page.
+_OWNER_POLL_CAP = 50
+
+# The only roles a PUBLIC read may serve. The visitor's own muted line is stored
+# in the same table (it has no run doc) and is deliberately NOT in here: echoing a
+# visitor's words back to them is pointless, and a public read that serves stored
+# visitor content is one bug away from serving someone else's.
+_PUBLIC_MESSAGE_ROLES = ["owner", "system"]
+
+# What the widget is told when it sends into a muted bot. It is NOT an answer and
+# must never be rendered as one — the frame's own event name says so. Kept short
+# and specific: the visitor needs to know a person has this, not to read a policy.
+_HUMAN_REPLYING_MESSAGE = "Someone from the team is replying — hang tight."
+
 # How many of a visitor's ref characters survive into the fallback display name.
 # Enough to tell two visitors apart at a glance, short enough to read as a label.
 _DISPLAY_REF_CHARS = 6
@@ -1709,6 +1765,10 @@ class ConversationRow(BaseModel):
     display_name: str
     last_visitor_at: str
     last_owner_at: str
+    # When the human stepped in (slice 2). ``bot_paused`` is EFFECTIVE, so it goes
+    # false on its own once this ages past the idle window; this field is what lets
+    # the UI say "hands back at 14:20" instead of just "paused".
+    bot_paused_at: str = ""
     unread_for_owner: int
     created_at: str
     updated_at: str
@@ -1744,16 +1804,82 @@ class ConversationPatchResponse(BaseModel):
 class TranscriptMessage(BaseModel):
     """One message in a conversation transcript (D2 drill-in).
 
-    ``role`` is "user" or "assistant" per the frozen contract. Both roles are now
-    real: the agent reply comes from ``ChatRunDoc.partial_text`` and the visitor's
-    own line from ``ChatRunDoc.user_text``. A site whose owner turned
-    ``concierge_store_transcripts`` off stores no visitor lines, so its transcripts
-    are assistant-only — the same shape this DTO always had, just missing one role.
+    ``role`` is "user", "assistant", "owner" or "system". The first two come from
+    the run stream — the agent reply from ``ChatRunDoc.partial_text``, the
+    visitor's own line from ``ChatRunDoc.user_text``. The last two come from the
+    ``paw_bar_owner_messages`` table: a human on the team typing, and the product
+    explaining itself. A visitor line that arrived while the bot was muted has no
+    run doc, so it comes from that table too and is presented as "user" — the
+    thread cares who spoke, not which storage answered.
+
+    Widening from user|assistant is ADDITIVE: an existing consumer that only knows
+    the first two roles still renders every message it used to, in the same shape.
+
+    A site whose owner turned ``concierge_store_transcripts`` off stores no visitor
+    lines, so its transcripts are assistant-only (plus whatever the owner typed) —
+    the same shape this DTO always had, just missing a role.
+
+    There is deliberately NO message id: run-derived messages have none (they are
+    projections of a run doc, two per run), so an id here would exist for half the
+    thread. Anything that needs to address a message keys off the RUN.
     """
 
     role: str
     content: str
     created_at: str
+
+
+class ConversationReplyRequest(BaseModel):
+    """Body of POST .../conversations/{customer_ref}/reply — the owner's own turn."""
+
+    text: str
+
+
+class ConversationReplyResponse(BaseModel):
+    """What the composer gets back: the line it just sent + the row it changed.
+
+    ``message`` is a :class:`TranscriptMessage` on purpose — the exact shape the
+    thread is already rendering — so the composer appends the echo to the list it
+    has instead of refetching the transcript to see its own sentence.
+    ``conversation`` is the full row in the SAME shape the PATCH echoes, because
+    sending a reply moves state (the bot mutes, a closed thread reopens, the unread
+    badge clears) and the list row has to re-render.
+    """
+
+    ok: bool = True
+    message: TranscriptMessage
+    conversation: ConversationRow
+
+
+class VisitorMessage(BaseModel):
+    """One owner/system line as the VISITOR's widget sees it.
+
+    A deliberately narrow projection, and the narrowness is the point: this is the
+    only public read of a conversation. It carries what was said, who said it
+    (owner or system — never an operator's identity), and when. Everything the
+    owner side keeps on the same conversation — private notes, tags, assignee,
+    captured email, the queue state — is owner-only data that must never cross to
+    the visitor. ``at`` is an ISO-8601 UTC timestamp; a poller passes the last one
+    it saw back as ``after``.
+    """
+
+    role: str
+    content: str
+    at: str
+
+
+class VisitorMessagesResponse(BaseModel):
+    """GET /paw-bar/messages/{widget_id}/{customer_ref} payload.
+
+    ``bot_paused`` is the EFFECTIVE mute: true only while a human is actually
+    holding the conversation, and false again the moment the idle window lapses.
+    It is the one piece of conversation STATE a visitor is allowed to know, and
+    only because it is about them — it tells the widget whether to say "someone is
+    replying" or hand the composer back to the assistant.
+    """
+
+    messages: list[VisitorMessage] = Field(default_factory=list)
+    bot_paused: bool = False
 
 
 class ConversationTranscriptResponse(BaseModel):
@@ -1986,6 +2112,104 @@ async def patch_site_conversation(
     )
 
 
+@router.post(
+    "/paw-bar/admin/site/{site_id}/conversations/{customer_ref}/reply",
+    response_model=ConversationReplyResponse,
+)
+async def post_site_conversation_reply(
+    site_id: str,
+    customer_ref: str,
+    req: ConversationReplyRequest,
+    # Same gate-as-author-lookup as the PATCH: ``require_action`` hands back the
+    # caller once the role check passes, so the reply is attributed for free.
+    user: Any = Depends(_require_paw_bar_manage),
+    workspace_id: str = Depends(current_workspace_id),
+) -> ConversationReplyResponse:
+    """The owner types, and the bot stops talking. THE takeover.
+
+    Typing IS taking over — there is no separate "take over" button to forget to
+    press, because the failure this design refuses is a human and a bot answering
+    the same customer at the same time. So one call does all of it, in one place,
+    and no caller can do half:
+
+      * the reply is persisted as an ``owner`` line on the thread;
+      * ``bot_paused`` goes on (and the store stamps WHEN, which starts the
+        4h idle clock that eventually hands the conversation back);
+      * ``last_owner_at`` is now and ``unread_for_owner`` clears — the owner is
+        demonstrably reading this conversation, so it is no longer unread;
+      * a ``closed`` or ``snoozed`` thread REOPENS. An owner replying is
+        engagement; leaving it filed while a human answers it is how a
+        conversation disappears from the queue mid-sentence.
+
+    Auth and tenancy are the PATCH's, exactly: ``paw_bar.manage``, the Site loaded
+    workspace-scoped (cross-tenant → 404), then its widget — so the row written
+    always belongs to this tenant. A ``customer_ref`` with no concierge runs on
+    this site 404s, same rule and for the same reason: that is not a conversation,
+    it's a guess.
+
+    D4: an owner's chat reply does NOT go through Instinct. Instinct gates
+    agent-proposed ACTIONS, because a machine wants a side effect. A human typing
+    a sentence is already the human decision.
+
+    The reply is NOT dispatched as a run. It never touches ``ChatRunDoc``, so it
+    is never swept into billing (``metering.sweeper`` bills every unbilled terminal
+    run) and never counted as agent compute — the owner is not charged credits for
+    typing their own sentence.
+    """
+    if not _CUSTOMER_REF_RE.match(customer_ref or ""):
+        raise HTTPException(400, "invalid_customer_ref")
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(422, "empty_reply")
+    if len(text) > _MAX_OWNER_REPLY_CHARS:
+        raise HTTPException(422, "reply_too_long")
+
+    site, widget = await _resolve_site_and_widget(site_id, workspace_id)
+    if widget is None:
+        raise HTTPException(404, "conversation_not_found")
+
+    store = _store()
+    conversation = await store.get_conversation(widget.id, customer_ref, workspace_id=workspace_id)
+    if conversation is None:
+        runs = await _concierge_runs_for_visitor(
+            site.pocket_id, customer_ref, workspace_id, limit=1
+        )
+        if not runs:
+            raise HTTPException(404, "conversation_not_found")
+        conversation = await store.ensure_conversation(widget.id, customer_ref, workspace_id)
+
+    message = await store.add_owner_message(
+        widget.id,
+        customer_ref,
+        text,
+        role=OwnerMessageRole.OWNER,
+        author=getattr(user, "id", "") or "",
+        workspace_id=workspace_id,
+    )
+
+    fields: dict[str, Any] = {
+        "bot_paused": True,
+        "last_owner_at": datetime.now().isoformat(),
+        "unread_for_owner": 0,
+    }
+    if conversation.state in (ConversationState.CLOSED, ConversationState.SNOOZED):
+        fields["state"] = ConversationState.OPEN.value
+        # A reopened thread forgets its snooze deadline, the same way a visitor's
+        # return does — it is live again, not merely due back later.
+        fields["snooze_until"] = ""
+    updated = await store.update_conversation(
+        widget.id, customer_ref, workspace_id=workspace_id, **fields
+    )
+    conversation = updated or conversation
+
+    _pending, emails = await _decision_side_data(widget, [customer_ref])
+    return ConversationReplyResponse(
+        ok=True,
+        message=_owner_transcript_message(message),
+        conversation=_conversation_row(conversation, emails.get(customer_ref, "")),
+    )
+
+
 @router.get(
     "/paw-bar/admin/agent/{agent_id}/conversations",
     response_model=AgentConversationsResponse,
@@ -2098,8 +2322,9 @@ async def get_site_conversation_transcript(
     customer_ref). Capped at the most recent ``_TRANSCRIPT_CAP`` (200) turns,
     presented oldest-first. 404 when the ref has no concierge conversation here.
 
-    ROLE COVERAGE: both halves of the conversation are here — the visitor's line
-    from ``ChatRunDoc.user_text`` and the agent's from ``partial_text``. The
+    ROLE COVERAGE: all four roles are here — "user" and "assistant" from the run
+    stream, "owner" and "system" from the out-of-band table (slice 2), interleaved
+    strictly by timestamp so the thread shows exactly when a human stepped in. The
     visitor half is stored only while the site's ``concierge_store_transcripts``
     toggle is on (it is personal data, so the owner controls it); an owner who
     turns it off keeps getting assistant-only transcripts from that point on, and
@@ -2111,7 +2336,7 @@ async def get_site_conversation_transcript(
     # No concierge widget on this site → no conversation exists to read.
     if widget is None:
         raise HTTPException(404, "conversation_not_found")
-    messages = await _load_transcript(site.pocket_id, customer_ref, workspace_id)
+    messages = await _load_transcript(site.pocket_id, customer_ref, workspace_id, widget=widget)
     if messages is None:
         # No concierge run for this (pocket, customer_ref) — the ref has no
         # conversation on this site's widget.
@@ -2338,9 +2563,36 @@ def _conversation_row(conversation: Any, captured_email: str = "") -> Conversati
         display_name=_display_name(contact_email, conversation.customer_ref),
         last_visitor_at=conversation.last_visitor_at,
         last_owner_at=conversation.last_owner_at,
+        bot_paused_at=getattr(conversation, "bot_paused_at", "") or "",
         unread_for_owner=conversation.unread_for_owner,
         created_at=conversation.created_at.isoformat(),
         updated_at=conversation.updated_at.isoformat(),
+    )
+
+
+# How a stored out-of-band role reads in a TRANSCRIPT. Owner and system keep their
+# own names — the thread's whole point is that you can see when a human took over.
+# A visitor's muted line is presented as "user": it is the same person saying the
+# same kind of thing as every other visitor line, and only happens to live in a
+# different table because no run was dispatched for it.
+_TRANSCRIPT_ROLE_BY_STORED = {
+    OwnerMessageRole.OWNER.value: "owner",
+    OwnerMessageRole.SYSTEM.value: "system",
+    OwnerMessageRole.VISITOR.value: "user",
+}
+
+
+def _owner_transcript_message(message: Any) -> TranscriptMessage:
+    """Project one ``paw_bar_owner_messages`` row into the transcript's shape.
+
+    Shared by the reply echo and the transcript merge so the composer's optimistic
+    append and the refetched thread can't render the same sentence two ways.
+    """
+    stored = getattr(message.role, "value", str(message.role))
+    return TranscriptMessage(
+        role=_TRANSCRIPT_ROLE_BY_STORED.get(stored, "system"),
+        content=message.content,
+        created_at=message.created_at,
     )
 
 
@@ -2660,28 +2912,63 @@ async def _load_concierge_history(
         return []
 
 
+def _transcript_sort_key(created_at: str) -> datetime:
+    """One comparable instant for a transcript line, whatever wrote it.
+
+    The two sources keep time differently and the difference is load-bearing:
+    ``ChatRunDoc.createdAt`` is timezone-aware UTC, while an out-of-band line is an
+    ISO string this router's store wrote. Sorting the raw strings would interleave
+    the thread wrongly by the host's UTC offset on any machine not set to UTC — a
+    human's reply landing hours before the question it answers.
+
+    So every stamp is parsed, and a naive one is read as UTC (both writers mean
+    UTC; the store writes aware UTC deliberately). An unparseable or empty stamp
+    sorts FIRST, which is where a line nobody dated belongs: visible at the top of
+    the thread rather than silently dropped.
+    """
+    if created_at:
+        try:
+            moment = datetime.fromisoformat(created_at)
+        except ValueError:
+            return datetime.min.replace(tzinfo=UTC)
+        return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+    return datetime.min.replace(tzinfo=UTC)
+
+
 async def _load_transcript(
-    pocket_id: str, customer_ref: str, workspace_id: str
+    pocket_id: str,
+    customer_ref: str,
+    workspace_id: str,
+    widget: PawBarWidget | None = None,
 ) -> list[TranscriptMessage] | None:
-    """Build one visitor's concierge transcript, oldest-first (D2 drill-in).
+    """Build one visitor's full conversation, oldest-first (D2 drill-in + slice 2).
 
-    Fetches this (pocket, customer_ref)'s concierge ``ChatRunDoc`` runs (index-
-    backed, most-recent ``_TRANSCRIPT_CAP``), then presents them oldest-first. Each
-    run contributes up to TWO messages, in conversation order: the visitor's own
-    line (``user_text``) as "user", then the agent reply (``partial_text``) as
-    "assistant". Either can be missing and the other still renders — a site with
-    ``concierge_store_transcripts`` off has no user lines (assistant-only, exactly
-    the old shape), and a run that failed before producing text has no assistant
-    line. Both empty and the run contributes nothing.
+    TWO sources, merged into ONE timeline:
 
-    Returns ``None`` when the ref has NO concierge run here (the caller 404s) —
-    distinct from an empty list, which means runs exist but none carried any text.
+      * the concierge ``ChatRunDoc`` runs (index-backed, most-recent
+        ``_TRANSCRIPT_CAP``). Each run contributes up to two messages in
+        conversation order: the visitor's line (``user_text``) as "user", then the
+        agent reply (``partial_text``) as "assistant". Either can be missing and
+        the other still renders — a site with ``concierge_store_transcripts`` off
+        has no user lines (assistant-only, exactly the shape this endpoint has
+        always returned), and a run that failed before producing text has no
+        assistant line.
+      * the ``paw_bar_owner_messages`` rows — the lines with no run behind them:
+        the owner's own replies, the system's hand-back notices, and any visitor
+        message that arrived while the bot was muted.
+
+    Merged strictly by timestamp (see ``_transcript_sort_key``), because the whole
+    value of this view is seeing WHEN the human stepped in relative to what the
+    bot had been saying. The merge is best-effort on the out-of-band side: if that
+    store hiccups the run-derived transcript still renders, which is what it did
+    before this slice.
+
+    Returns ``None`` only when the ref has NOTHING here (the caller 404s) —
+    distinct from an empty list, which means rows exist but none carried text.
     """
     runs = await _concierge_runs_for_visitor(
         pocket_id, customer_ref, workspace_id, limit=_TRANSCRIPT_CAP
     )
-    if not runs:
-        return None
 
     messages: list[TranscriptMessage] = []
     for run in reversed(runs):  # oldest-first
@@ -2708,7 +2995,29 @@ async def _load_transcript(
                     created_at=answered.isoformat() if answered else "",
                 )
             )
-    return messages
+
+    out_of_band: list[Any] = []
+    if widget is not None:
+        try:
+            out_of_band = await _store().list_owner_messages(
+                widget.id,
+                customer_ref,
+                workspace_id=workspace_id,
+                limit=_TRANSCRIPT_CAP,
+            )
+        except Exception:  # noqa: BLE001 — the run-derived half must still render
+            logger.warning("owner message read failed for widget %s", widget.id, exc_info=True)
+    if not runs and not out_of_band:
+        return None
+    messages.extend(_owner_transcript_message(m) for m in out_of_band if m.content)
+
+    # Stable sort on the parsed instant: two lines stamped identically keep the
+    # order they were added, so a run's question still precedes its own answer.
+    messages.sort(key=lambda m: _transcript_sort_key(m.created_at))
+    # Keep the most recent window. The bound is what the run-derived read could
+    # already return on its own (two messages per capped run), so adding a second
+    # source widened the transcript's content, never its size.
+    return messages[-(_TRANSCRIPT_CAP * 2) :]
 
 
 async def _count_conversations(pocket_id: str, workspace_id: str) -> int:
@@ -3045,8 +3354,12 @@ def _article_page_url(article_id: str, base_url: str) -> str:
 async def _concierge_sources(pocket_id: str, message: str, site: Any) -> list[dict[str, str]]:
     """Sources for one concierge reply: synced site pages that match the message.
 
-    Searches the SAME ``pocket:<pocket_id>`` scope the concierge run reads (the
-    one scope ``_kb_scopes_for_context`` grants a CONCIERGE run), then keeps only
+    Searches the site's ``pocket:<pocket_id>`` scope — one of the two
+    ``_kb_scopes_for_context`` grants a CONCIERGE run (the other is
+    ``agent:<its own id>``; never ``workspace:`` or ``user:``). Only the pocket
+    scope is searched here, and deliberately: a "source" has to be a link the
+    visitor can open, and only the page sync's articles have a public URL. Then
+    keeps only
     hits whose article id is in ``Site.kb_article_ids`` — the articles the page
     sync wrote — so an owner-uploaded private file can never surface as a public
     "source". Entries need BOTH a non-empty title and url; deduped by url; capped
@@ -3102,6 +3415,70 @@ def _sse(event: str, data: dict[str, Any], *, entry_id: str | None = None) -> by
     private helper of the authed chat module."""
     head = f"id: {entry_id}\n" if entry_id else ""
     return f"{head}event: {event}\ndata: {json.dumps(data)}\n\n".encode()
+
+
+async def _human_replying_response(
+    store: Any,
+    *,
+    widget_id: str,
+    customer_ref: str,
+    workspace_id: str,
+    text: str,
+) -> StreamingResponse:
+    """The muted-bot answer: keep the visitor's line, escalate, say a human is on it.
+
+    Emits exactly TWO frames — ``human_replying`` carrying a short human-facing
+    line, then the terminal ``stream_end`` — over the same SSE media type as a real
+    turn, so the widget's existing stream reader needs no special casing beyond
+    knowing that this event is a non-answer rather than an answer. There is
+    deliberately no ``message.persisted`` head: that frame announces a run, and the
+    entire point of this path is that no run exists to announce.
+
+    Two writes happen BEFORE the response is returned — not inside the generator —
+    because a visitor who closes the tab mid-request would otherwise take their own
+    message with them: the body might never be consumed, and the owner would be
+    left answering a question nobody can see. Both are failure-soft (a visitor's
+    experience must not depend on the owner's bookkeeping succeeding):
+
+      * the visitor's line is stored as a ``visitor`` row — it has no run doc to
+        live on, and without it the owner's transcript would stop dead at the
+        moment they took over, which is precisely when they need to read it. Empty
+        when the site's transcript retention is off; the toggle governs this path
+        exactly as it governs the run path.
+      * the conversation flips to ``needs_human``. A visitor talking into a muted
+        bot is, by definition, waiting on a person.
+    """
+    try:
+        if text:
+            await store.add_owner_message(
+                widget_id,
+                customer_ref,
+                text,
+                role=OwnerMessageRole.VISITOR,
+                workspace_id=workspace_id,
+            )
+        await store.update_conversation(
+            widget_id,
+            customer_ref,
+            workspace_id=workspace_id,
+            state=ConversationState.NEEDS_HUMAN.value,
+        )
+    except Exception:  # noqa: BLE001 — the visitor still gets told a human is on it
+        logger.warning("paused-bot turn bookkeeping failed (non-fatal)", exc_info=True)
+
+    async def gen() -> AsyncIterator[bytes]:
+        yield _sse("human_replying", {"message": _HUMAN_REPLYING_MESSAGE})
+        yield _sse("stream_end", {"assistant_message_id": None, "cancelled": False})
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/paw-bar/chat")
@@ -3234,12 +3611,41 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     # FAILURE-SOFT, deliberately and non-negotiably: inbox bookkeeping is the
     # owner's convenience, and a hiccup writing it must never cost a visitor their
     # answer. Worst case the owner's queue is one message stale until the next turn.
+    #
+    # The idle auto-resume runs FIRST so a mute that has aged out is already gone
+    # before this turn is classified — one cheap conditional UPDATE that no-ops for
+    # every conversation nobody has taken over (the overwhelming majority).
+    conversation = None
     try:
-        await store.upsert_conversation_on_visitor_turn(
+        await store.auto_resume_bot_if_idle(body.widget_id, body.customer_ref, ctx.workspace_id)
+        conversation = await store.upsert_conversation_on_visitor_turn(
             body.widget_id, body.customer_ref, ctx.workspace_id
         )
     except Exception:
         logger.warning("conversation state upsert failed (non-fatal)", exc_info=True)
+
+    # (7c) THE MUTE. A human is holding this conversation, so the bot does not
+    # answer over them — double-answering is the single loudest complaint about
+    # every product that shipped this feature, and the reason takeover is worth
+    # building at all.
+    #
+    # This sits BEFORE the run is created, deliberately: no ChatRunDoc, so no
+    # metering, no run analytics, no tool surface, and nothing for the executor to
+    # dispatch. The visitor's line is still kept (under the SAME retention toggle
+    # the run path honours — this is not a back door around the owner's privacy
+    # choice), the conversation is escalated to ``needs_human`` because someone is
+    # now waiting on a person, and the widget is told what happened.
+    #
+    # It is told with a FRAME, never with silence: a clean-but-empty stream reads
+    # as "No reply." in the glass app, so a muted bot would look like a broken one.
+    if conversation is not None and conversation.bot_paused:
+        return await _human_replying_response(
+            store,
+            widget_id=body.widget_id,
+            customer_ref=body.customer_ref,
+            workspace_id=ctx.workspace_id,
+            text=body.message[:_STORED_USER_TEXT_CHARS] if site.concierge_store_transcripts else "",
+        )
 
     # (8) Dispatch a CONCIERGE run over the SAME machinery the authed chat uses.
     from pocketpaw_ee.cloud.chat.runs import service as run_service
@@ -3280,7 +3686,8 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
     # anonymous customer handle (session / rate-limit key, never a principal).
     # ``surface="concierge"`` makes execute_run resolve the CONCIERGE
     # SurfaceProfile (tool lockdown); ``context_type="concierge"`` makes it
-    # resolve the CONCIERGE scope (KB locked to pocket:<id>).
+    # resolve the CONCIERGE scope (KB locked to pocket:<id> + agent:<its own id>,
+    # never workspace: or user: — D5, #1821).
     #
     # ``persist_user_text`` is the visitor's own line, written onto the run doc so
     # the owner's transcript is a conversation rather than a monologue. The visitor
@@ -3672,6 +4079,115 @@ async def list_public_articles(
         if len(articles) >= _ARTICLES_MAX:
             break
     return ArticlesResponse(articles=articles)
+
+
+# ---------------------------------------------------------------------------
+# Visitor-side message poll (2026-07-30, owner inbox slice 2) — the other half
+# of takeover. The owner's reply is written on the dashboard; this is how it
+# reaches the person waiting on the page. Sibling of the decision poll, same
+# armor class as chat via the shared ``_front_gate_for_key``, and deliberately
+# the NARROWEST read on this router: a conversation carries private notes, tags,
+# an assignee, a captured email and a queue state, and none of them belong to
+# the visitor. What crosses is what was said to them, and whether a human is
+# holding the thread.
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/paw-bar/messages/{widget_id}/{customer_ref}",
+    response_model=VisitorMessagesResponse,
+)
+async def get_visitor_messages(
+    widget_id: str,
+    customer_ref: str,
+    request: Request,
+    signed_key: str = Query("", description="The public Site.signed_key"),
+    after: str = Query("", description="Only messages stamped strictly later"),
+) -> VisitorMessagesResponse:
+    """Poll for owner/system messages on this visitor's thread.
+
+    Gates are the SAME front-gate chain as chat, via ``_front_gate_for_key``:
+    malformed handle → 400, unknown widget → 404, rate limit → 429,
+    bad/unknown/revoked key → 401, disallowed origin or a widget∩key binding
+    mismatch → 403. ``_request_origin`` rather than the raw header, because a
+    same-origin GET from our own frame carries no Origin and the raw read made
+    exactly this kind of poll 403 on the live rig.
+
+    WHAT CROSSES, exhaustively: ``role`` (owner | system), ``content``, ``at``,
+    plus the thread's ``bot_paused``. Nothing else — not the private notes, not
+    the tags, not the assignee, not the captured email, not the queue state, not
+    even the visitor's own stored lines. This is the only public read of a
+    conversation, so its shape is the boundary.
+
+    ``after`` is a strict cursor (the last ``at`` the widget rendered), the page is
+    capped at ``_OWNER_POLL_CAP`` and comes back oldest-first. A malformed
+    ``after`` is IGNORED rather than refused, the same way the conversation list
+    treats a malformed cursor: a poll that hard-failed on a bad cursor would leave
+    the visitor staring at a thread that silently stopped updating.
+
+    The idle auto-resume is applied here too, so the poll and the chat endpoint can
+    never disagree about whether the bot is muted — the visitor learns the
+    assistant is back on the same tick the assistant starts answering again.
+    """
+    origin = _request_origin(request)
+    widget, ctx, _site = await _front_gate_for_key(
+        widget_id=widget_id,
+        signed_key=signed_key,
+        customer_ref=customer_ref,
+        origin=origin,
+        request=request,
+    )
+
+    store = _store()
+    try:
+        await store.auto_resume_bot_if_idle(widget.id, customer_ref, ctx.workspace_id)
+        conversation = await store.get_conversation(
+            widget.id, customer_ref, workspace_id=ctx.workspace_id
+        )
+        messages = await store.list_owner_messages(
+            widget.id,
+            customer_ref,
+            workspace_id=ctx.workspace_id,
+            after=_normalized_after(after),
+            roles=_PUBLIC_MESSAGE_ROLES,
+            limit=_OWNER_POLL_CAP,
+        )
+    except Exception:  # noqa: BLE001 — a poll that 500s stalls the visitor's thread
+        logger.warning("visitor message poll failed for widget %s", widget.id, exc_info=True)
+        return VisitorMessagesResponse(messages=[], bot_paused=False)
+
+    return VisitorMessagesResponse(
+        messages=[
+            VisitorMessage(role=m.role.value, content=m.content, at=m.created_at)
+            for m in messages
+            if m.content
+        ],
+        bot_paused=bool(conversation.bot_paused) if conversation is not None else False,
+    )
+
+
+def _normalized_after(after: str) -> str:
+    """Re-render a client ``after`` cursor in the format the rows are stored in.
+
+    The cursor is compared as a string in SQL, which only works while every value
+    shares one format. Rows are written by ``_utc_stamp`` (aware UTC), but a
+    browser round-tripping the value through ``Date.toISOString()`` hands back a
+    ``…Z`` spelling of the same instant — and ``'Z'`` sorts AFTER the ``'.'`` of a
+    fractional second, so the same moment would compare as later and the poll
+    would skip messages it should have delivered. Parse, convert to UTC, re-render.
+    An unparseable cursor yields "" (no filter) rather than an error: a bad cursor
+    should cost a duplicate render, never a stalled thread.
+    """
+    stamp = (after or "").strip()
+    if not stamp:
+        return ""
+    try:
+        moment = datetime.fromisoformat(stamp)
+    except ValueError:
+        return ""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC).isoformat()
 
 
 # ---------------------------------------------------------------------------

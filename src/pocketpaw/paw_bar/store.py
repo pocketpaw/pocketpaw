@@ -1,4 +1,20 @@
 # ee/paw_bar/store.py — Async SQLite store for Paw Bar widgets and events.
+# Updated: 2026-07-30 (owner inbox, slice 2 — type-to-takeover) — the lines that
+#   have no run doc get a home, and a muted bot gets a deadline:
+#   * new paw_bar_owner_messages table (sibling of paw_bar_conversations, same
+#     additive-migration + workspace-scoped conventions): owner replies, system
+#     explanations, and visitor lines that arrived while the bot was muted.
+#     add_owner_message writes one, list_owner_messages reads a thread oldest-first
+#     with a strict ``after`` cursor and a cap. Timestamps are ISO UTC (aware) so
+#     they sort against ChatRunDoc.createdAt on one clock.
+#   * paw_bar_conversations gains ``bot_paused_at`` (additive ALTER): when the mute
+#     started. update_conversation stamps it whenever bot_paused flips on and
+#     clears it when it flips off, so every writer gets the bookkeeping for free.
+#   * IDLE AUTO-RESUME, computed on READ like the snooze expiry: a mute whose last
+#     owner activity is older than BOT_PAUSE_IDLE_HOURS reads as un-paused
+#     everywhere (``_EFFECTIVE_BOT_PAUSED_SQL``), and auto_resume_bot_if_idle
+#     materializes it — one atomic UPDATE, then a single system message so the
+#     thread explains itself. No sweeper, so a forgotten mute always ends.
 # Updated: 2026-07-30 (owner inbox, slice 1) — new paw_bar_conversations table:
 #   the thin lifecycle row that turns the concierge log into a queue, keyed
 #   UNIQUE(widget_id, customer_ref). Mirrors the paw_bar_decisions conventions
@@ -95,7 +111,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -108,12 +124,15 @@ from pocketpaw.paw_bar.models import (
     ConversationState,
     DecisionState,
     DecisionStatus,
+    OwnerMessage,
+    OwnerMessageRole,
     PawBarCart,
     PawBarCartItem,
     PawBarEvent,
     PawBarSpec,
     PawBarWidget,
     _gen_conversation_id,
+    _gen_owner_message_id,
     _gen_token,
 )
 
@@ -235,10 +254,30 @@ CREATE TABLE IF NOT EXISTS paw_bar_conversations (
     contact_email TEXT DEFAULT '',
     last_visitor_at TEXT DEFAULT '',
     last_owner_at TEXT DEFAULT '',
+    bot_paused_at TEXT DEFAULT '',
     unread_for_owner INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (widget_id, customer_ref)
+);
+
+-- Owner inbox (slice 2): the thread lines that have NO run doc. A concierge turn
+-- is a ChatRunDoc and stays one; these are the three kinds of line a run can't
+-- express — the owner's own reply, a system explanation, and a visitor message
+-- that arrived while the bot was muted (no run was dispatched, by design). Kept
+-- out of the run collection deliberately: the metering sweeper bills every
+-- unbilled terminal run, so an owner reply shaped as one would charge the owner
+-- for typing. Same (widget_id, customer_ref) identity as the conversation row,
+-- so the transcript reader merges the two sources on one key.
+CREATE TABLE IF NOT EXISTS paw_bar_owner_messages (
+    id TEXT PRIMARY KEY,
+    widget_id TEXT NOT NULL,
+    customer_ref TEXT NOT NULL,
+    workspace_id TEXT DEFAULT '',
+    role TEXT DEFAULT 'owner',
+    content TEXT DEFAULT '',
+    author TEXT DEFAULT '',
+    created_at TEXT DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_pp_widgets_pocket ON paw_bar_widgets(pocket_id);
@@ -256,6 +295,8 @@ CREATE INDEX IF NOT EXISTS idx_pp_spec_revisions_widget
     ON paw_bar_spec_revisions(widget_id, revision DESC);
 CREATE INDEX IF NOT EXISTS idx_pp_conversations_state
     ON paw_bar_conversations(widget_id, state, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pp_owner_messages_thread
+    ON paw_bar_owner_messages(widget_id, customer_ref, created_at);
 """
 
 # The paw_bar_conversations columns, with the exact declaration each ALTER must
@@ -273,10 +314,50 @@ _CONVERSATION_COLUMNS: dict[str, str] = {
     "contact_email": "TEXT DEFAULT ''",
     "last_visitor_at": "TEXT DEFAULT ''",
     "last_owner_at": "TEXT DEFAULT ''",
+    "bot_paused_at": "TEXT DEFAULT ''",
     "unread_for_owner": "INTEGER DEFAULT 0",
     "created_at": "TEXT",
     "updated_at": "TEXT",
 }
+
+# The paw_bar_owner_messages columns, same contract as the conversation map above:
+# keep in lockstep with the CREATE TABLE, primary key excluded.
+_OWNER_MESSAGE_COLUMNS: dict[str, str] = {
+    "workspace_id": "TEXT DEFAULT ''",
+    "role": "TEXT DEFAULT 'owner'",
+    "content": "TEXT DEFAULT ''",
+    "author": "TEXT DEFAULT ''",
+    "created_at": "TEXT DEFAULT ''",
+}
+
+# How long a muted bot stays muted with no owner activity before it hands itself
+# back (§10 Q2 — 4h, hard-coded in v1). The guard is what matters, not the knob:
+# the failure mode it closes is an owner who takes over, gets pulled away, and
+# leaves the bot silently muted for every visitor after that — the single loudest
+# complaint about this feature in the products that shipped it first. Applied on
+# READ, so it holds even if nothing is running to notice.
+BOT_PAUSE_IDLE_HOURS = 4
+
+# What the thread says when the mute lapses. Written as a SYSTEM message so the
+# visitor (and the owner, later) can see why the voice changed back, instead of
+# the bot just resuming mid-conversation as if nothing happened.
+BOT_RESUME_SYSTEM_MESSAGE = "The team stepped away — the assistant is answering again."
+
+# Idle auto-resume, decided in SQL at READ time — the same discipline as the
+# snooze expiry above and for the same reason: no sweeper, nothing to fail
+# silently at 3am. A row reads as un-paused once the LATER of "when the mute
+# started" and "when the owner last did something" has aged past the window.
+# Both timestamps are naive local ISO (the whole conversation row is), so they
+# compare as strings against a locally-computed cutoff. A mute carrying NEITHER
+# timestamp never expires: that can only be a row paused by a writer that
+# predates this column, and inventing a deadline for it would hand a live
+# conversation back to the bot on the strength of a guess.
+_EFFECTIVE_BOT_PAUSED_SQL = (
+    "CASE WHEN bot_paused = 1"
+    " AND MAX(bot_paused_at, last_owner_at) != ''"
+    " AND MAX(bot_paused_at, last_owner_at) <= ?"
+    " THEN 0 ELSE bot_paused END"
+)
 
 # Snooze expiry, decided in SQL at READ time. A row is only really snoozed while
 # its ``snooze_until`` is still in the future; once that instant passes it reads
@@ -289,6 +370,35 @@ _EFFECTIVE_STATE_SQL = (
     "CASE WHEN state = 'snoozed' AND snooze_until != '' AND snooze_until <= ?"
     " THEN 'open' ELSE state END"
 )
+
+
+def _bot_pause_cutoff(now: str) -> str:
+    """The instant a mute must predate to have gone idle, as a comparable string.
+
+    Takes the same ``now`` stamp the effective-state CASE binds, so one read can
+    never evaluate the two rules against two different clocks. A malformed stamp
+    (which can only mean a caller passed something that wasn't
+    ``datetime.now().isoformat()``) yields an empty cutoff — and an empty cutoff
+    matches nothing, so the mute simply stays on. Failing towards "the human is
+    still here" is the only safe direction: the cost of a late hand-back is a
+    quiet bot, and the cost of an early one is the bot talking over a person.
+    """
+    try:
+        moment = datetime.fromisoformat(now)
+    except ValueError:
+        return ""
+    return (moment - timedelta(hours=BOT_PAUSE_IDLE_HOURS)).isoformat()
+
+
+def _utc_stamp() -> str:
+    """Now, as the aware-UTC ISO string the owner-message rows are written with.
+
+    Deliberately not the naive ``datetime.now()`` the conversation row uses: these
+    stamps are sorted against ``ChatRunDoc.createdAt`` (aware UTC) to interleave a
+    transcript, and they go out on the wire. A naive local stamp would interleave
+    wrongly by the host's UTC offset everywhere but a UTC-set machine.
+    """
+    return datetime.now(UTC).isoformat()
 
 
 def _decision_workspace_scope(workspace_id: str | None) -> tuple[str | None, list[Any]]:
@@ -404,6 +514,14 @@ class PawBarStore:
             for name, decl in _CONVERSATION_COLUMNS.items():
                 if name not in cols:
                     await db.execute(f"ALTER TABLE paw_bar_conversations ADD COLUMN {name} {decl}")
+        # paw_bar_owner_messages (owner inbox, slice 2) — same reasoning as the
+        # conversations block above: new table today, ALTER path ready for the
+        # first column that post-dates a deployed one.
+        if "paw_bar_owner_messages" in existing:
+            cols = await _columns("paw_bar_owner_messages")
+            for name, decl in _OWNER_MESSAGE_COLUMNS.items():
+                if name not in cols:
+                    await db.execute(f"ALTER TABLE paw_bar_owner_messages ADD COLUMN {name} {decl}")
 
     def _conn(self) -> aiosqlite.Connection:
         return aiosqlite.connect(self._db_path)
@@ -954,23 +1072,28 @@ class PawBarStore:
     def _conversation_select(
         where: str, params: list[Any], *, order: str = "", now: str | None = None
     ) -> tuple[str, list[Any]]:
-        """Build a conversation SELECT that carries the EFFECTIVE state.
+        """Build a conversation SELECT that carries the EFFECTIVE state + mute.
 
-        Every read goes through here so snooze expiry is applied in exactly one
-        place: the extra ``effective_state`` column is the ``_EFFECTIVE_STATE_SQL``
-        CASE, and ``_row_to_conversation`` presents it as the row's state. The CASE
-        parameter binds BEFORE the WHERE parameters because it sits in the select
-        list — hence the explicit assembly rather than string concatenation at the
-        call sites.
+        Every read goes through here so the two time-based rules are applied in
+        exactly one place each: ``effective_state`` is the ``_EFFECTIVE_STATE_SQL``
+        CASE (snooze expiry) and ``effective_bot_paused`` is the
+        ``_EFFECTIVE_BOT_PAUSED_SQL`` CASE (idle auto-resume).
+        ``_row_to_conversation`` presents both as the row's own values, so no
+        caller has to remember to re-apply either — and the owner's list, the
+        visitor's poll, and the chat endpoint can never disagree about whether the
+        bot is muted. The CASE parameters bind BEFORE the WHERE parameters because
+        they sit in the select list — hence the explicit assembly rather than
+        string concatenation at the call sites.
         """
         stamp = now or datetime.now().isoformat()
         sql = (
-            f"SELECT *, {_EFFECTIVE_STATE_SQL} AS effective_state"
+            f"SELECT *, {_EFFECTIVE_STATE_SQL} AS effective_state,"
+            f" {_EFFECTIVE_BOT_PAUSED_SQL} AS effective_bot_paused"
             f" FROM paw_bar_conversations WHERE {where}"
         )
         if order:
             sql += f" {order}"
-        return sql, [stamp, *params]
+        return sql, [stamp, _bot_pause_cutoff(stamp), *params]
 
     async def upsert_conversation_on_visitor_turn(
         self, widget_id: str, customer_ref: str, workspace_id: str = ""
@@ -1154,6 +1277,7 @@ class PawBarStore:
             "notes",
             "contact_email",
             "last_owner_at",
+            "bot_paused_at",
             "unread_for_owner",
         }
         assignments: list[str] = []
@@ -1162,6 +1286,15 @@ class PawBarStore:
         if note is not None:
             appended = [*existing.notes, _as_note(note)]
             fields["notes"] = [n.model_dump() for n in appended]
+        # The mute clock is bookkeeping, not a field a caller should have to
+        # remember: any writer that pauses the bot stamps WHEN, and any writer that
+        # un-pauses it clears the stamp. Done here rather than at the call sites
+        # because the idle auto-resume reads that timestamp, and a writer that
+        # forgot it would create a mute with no deadline — exactly the forgotten
+        # -muted-bot failure the window exists to prevent. An explicit
+        # ``bot_paused_at`` in the same call still wins (the restore path needs it).
+        if "bot_paused" in fields and "bot_paused_at" not in fields:
+            fields["bot_paused_at"] = datetime.now().isoformat() if fields["bot_paused"] else ""
         for key, val in fields.items():
             if key not in allowed:
                 continue
@@ -1225,6 +1358,162 @@ class PawBarStore:
                     if row[0] in counts:
                         counts[row[0]] = row[1]
         return counts
+
+    async def auto_resume_bot_if_idle(
+        self, widget_id: str, customer_ref: str, workspace_id: str | None = None
+    ) -> OwnerMessage | None:
+        """Hand a forgotten mute back to the bot. Returns the system message, once.
+
+        The WRITE half of the idle auto-resume whose read half lives in
+        ``_EFFECTIVE_BOT_PAUSED_SQL``. Reads already report an aged-out mute as
+        un-paused, so nothing depends on this running — it exists to make the
+        stored row agree with what every reader already sees, and to leave a line
+        in the thread saying why the voice changed back.
+
+        The flip is a SINGLE conditional UPDATE and the system message is written
+        only if that UPDATE actually changed a row, so two visitors polling at the
+        same instant produce exactly one hand-back message rather than two. Returns
+        ``None`` when there was nothing to resume — the overwhelmingly common case,
+        and the reason this is cheap enough to call on every visitor turn.
+        """
+        await self._ensure_schema()
+        now = datetime.now().isoformat()
+        cutoff = _bot_pause_cutoff(now)
+        if not cutoff:
+            return None
+        conditions = "widget_id = ? AND customer_ref = ? AND bot_paused = 1"
+        params: list[Any] = [now, widget_id, customer_ref]
+        ws_cond, ws_params = _conversation_workspace_scope(workspace_id)
+        if ws_cond:
+            conditions += f" AND {ws_cond}"
+            params.extend(ws_params)
+        params.append(cutoff)
+        async with self._conn() as db:
+            cursor = await db.execute(
+                "UPDATE paw_bar_conversations"
+                " SET bot_paused = 0, bot_paused_at = '', updated_at = ?"
+                f" WHERE {conditions}"
+                " AND MAX(bot_paused_at, last_owner_at) != ''"
+                " AND MAX(bot_paused_at, last_owner_at) <= ?",
+                params,
+            )
+            changed = cursor.rowcount
+            await db.commit()
+        if not changed:
+            return None
+        return await self.add_owner_message(
+            widget_id,
+            customer_ref,
+            BOT_RESUME_SYSTEM_MESSAGE,
+            role=OwnerMessageRole.SYSTEM,
+            workspace_id=workspace_id or "",
+        )
+
+    # ---------------- Owner / system messages (owner inbox, slice 2) ----------------
+    #
+    # The thread lines with no run doc behind them. Same (widget_id, customer_ref)
+    # identity as the conversation row, and the same tenancy posture: the caller
+    # has already resolved the widget workspace-scoped, and ``workspace_id`` is the
+    # second, independent guard.
+    # -------------------------------------------------------------------------
+
+    async def add_owner_message(
+        self,
+        widget_id: str,
+        customer_ref: str,
+        content: str,
+        *,
+        role: OwnerMessageRole | str = OwnerMessageRole.OWNER,
+        author: str = "",
+        workspace_id: str = "",
+    ) -> OwnerMessage:
+        """Append one line to a conversation's out-of-band thread.
+
+        Append-only by construction — there is no update or delete. A support
+        thread is a record of what was actually said, and the visitor has already
+        read it; a line that could be edited afterwards is not a transcript.
+        ``role`` is normalized through :class:`OwnerMessageRole`, so an unknown
+        value raises here rather than becoming a row no reader can classify.
+        """
+        await self._ensure_schema()
+        message = OwnerMessage(
+            id=_gen_owner_message_id(),
+            widget_id=widget_id,
+            customer_ref=customer_ref,
+            workspace_id=workspace_id,
+            role=OwnerMessageRole(role),
+            content=content,
+            author=author,
+            created_at=_utc_stamp(),
+        )
+        async with self._conn() as db:
+            await db.execute(
+                "INSERT INTO paw_bar_owner_messages"
+                " (id, widget_id, customer_ref, workspace_id, role, content, author, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    message.id,
+                    message.widget_id,
+                    message.customer_ref,
+                    message.workspace_id,
+                    message.role.value,
+                    message.content,
+                    message.author,
+                    message.created_at,
+                ),
+            )
+            await db.commit()
+        return message
+
+    async def list_owner_messages(
+        self,
+        widget_id: str,
+        customer_ref: str,
+        workspace_id: str | None = None,
+        after: str = "",
+        roles: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[OwnerMessage]:
+        """One thread's out-of-band lines, OLDEST-first.
+
+        ``after`` is a strict cursor: only lines stamped strictly LATER come back,
+        so a visitor's poll can pass the last ``at`` it rendered and never see a
+        message twice. It is compared as a string, which is exactly right because
+        every row is written with :func:`_utc_stamp` — one format, one timezone, so
+        lexical order IS chronological. ``roles`` restricts the read (the public
+        poll asks for owner + system only; a visitor's own muted line is never
+        served back to them).
+
+        The cap keeps the LATEST ``limit`` lines: a long-running thread's newest
+        messages are the ones a poll is missing. They are then reversed so the
+        result reads oldest-first like every other transcript in this codebase.
+        """
+        conditions = "widget_id = ? AND customer_ref = ?"
+        params: list[Any] = [widget_id, customer_ref]
+        ws_cond, ws_params = _conversation_workspace_scope(workspace_id)
+        if ws_cond:
+            conditions += f" AND {ws_cond}"
+            params.extend(ws_params)
+        if after:
+            conditions += " AND created_at > ?"
+            params.append(after)
+        if roles is not None:
+            if not roles:
+                return []
+            placeholders = ", ".join("?" for _ in roles)
+            conditions += f" AND role IN ({placeholders})"
+            params.extend(roles)
+        params.append(limit)
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM paw_bar_owner_messages"
+                f" WHERE {conditions} ORDER BY created_at DESC, id DESC LIMIT ?",
+                params,
+            ) as cur:
+                rows = [self._row_to_owner_message(row) async for row in cur]
+        return list(reversed(rows))
 
     # ---------------- Carts (C1 — visitor-scoped commerce state) ----------------
 
@@ -1356,18 +1645,24 @@ class PawBarStore:
         select computes), so callers never have to remember to re-apply snooze
         expiry. ``snooze_until`` is left as stored: an expired snooze reads as
         ``open`` but keeps the timestamp that says when it lapsed.
+        ``bot_paused`` gets the same treatment from ``effective_bot_paused`` — an
+        aged-out mute reads as un-paused while ``bot_paused_at`` keeps saying when
+        the human stepped in.
         """
         raw_tags = json.loads(row["tags"]) if row["tags"] else []
         raw_notes = json.loads(row["notes"]) if row["notes"] else []
         keys = row.keys()
         state = row["effective_state"] if "effective_state" in keys else row["state"]
+        paused = (
+            row["effective_bot_paused"] if "effective_bot_paused" in keys else row["bot_paused"]
+        )
         return Conversation(
             id=row["id"],
             widget_id=row["widget_id"],
             customer_ref=row["customer_ref"],
             workspace_id=row["workspace_id"] or "",
             state=ConversationState(state or ConversationState.OPEN.value),
-            bot_paused=bool(row["bot_paused"]),
+            bot_paused=bool(paused),
             snooze_until=row["snooze_until"] or "",
             assignee=row["assignee"] or "",
             tags=[str(t) for t in raw_tags],
@@ -1375,9 +1670,32 @@ class PawBarStore:
             contact_email=row["contact_email"] or "",
             last_visitor_at=row["last_visitor_at"] or "",
             last_owner_at=row["last_owner_at"] or "",
+            bot_paused_at=(row["bot_paused_at"] or "") if "bot_paused_at" in keys else "",
             unread_for_owner=row["unread_for_owner"] or 0,
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def _row_to_owner_message(self, row: Any) -> OwnerMessage:
+        """Rebuild an :class:`OwnerMessage` from a ``paw_bar_owner_messages`` row.
+
+        An unrecognized stored role degrades to SYSTEM rather than raising: a row
+        this reader can't classify is still a line somebody saw, and dropping the
+        whole thread over one is worse than showing it as an unattributed note.
+        """
+        try:
+            role = OwnerMessageRole(row["role"] or OwnerMessageRole.OWNER.value)
+        except ValueError:
+            role = OwnerMessageRole.SYSTEM
+        return OwnerMessage(
+            id=row["id"],
+            widget_id=row["widget_id"],
+            customer_ref=row["customer_ref"],
+            workspace_id=row["workspace_id"] or "",
+            role=role,
+            content=row["content"] or "",
+            author=row["author"] or "",
+            created_at=row["created_at"] or "",
         )
 
     def _row_to_decision(self, row: Any) -> DecisionStatus:
