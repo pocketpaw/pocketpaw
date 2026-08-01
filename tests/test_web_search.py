@@ -287,6 +287,7 @@ class TestLiteLLMSearchProvider:
         mock_settings.return_value = MagicMock(
             web_search_provider="litellm",
             litellm_api_base="https://gw.example.com/",
+            litellm_search_api_base=None,
             litellm_api_key="sk-proxy",
             litellm_search_tool_name="web_search",
         )
@@ -366,6 +367,7 @@ class TestLiteLLMSearchProvider:
         mock_settings.return_value = MagicMock(
             web_search_provider="litellm",
             litellm_api_base="",
+            litellm_search_api_base=None,
             litellm_api_key="sk-proxy",
             litellm_search_tool_name="web_search",
         )
@@ -376,3 +378,66 @@ class TestLiteLLMSearchProvider:
     async def test_unknown_provider_lists_litellm_as_an_option(self, mock_settings, tool):
         mock_settings.return_value = MagicMock(web_search_provider="bogus")
         assert "litellm" in await tool.execute(query="q")
+
+
+class TestSearchBaseUrlOverride:
+    """Search must survive a proxy being chained in front of the gateway."""
+
+    @staticmethod
+    def _client(resp):
+        client = AsyncMock()
+        client.post.return_value = resp
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        return client
+
+    @staticmethod
+    def _resp():
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {"results": [{"title": "T", "url": "u", "snippet": "s"}]}
+        return resp
+
+    @patch("pocketpaw.tools.builtin.web_search.get_settings")
+    async def test_search_can_bypass_a_proxy_that_only_handles_completions(
+        self, mock_settings, tool
+    ):
+        """The Headroom case, and the reason this override exists.
+
+        A compression proxy intercepts /v1/chat/completions, /v1/messages and
+        /v1/responses. It knows nothing about /v1/search. So a deployment that
+        repoints ``litellm_api_base`` at it keeps completions working and 404s
+        every web search — a break visible only in the tool.
+        """
+        mock_settings.return_value = MagicMock(
+            web_search_provider="litellm",
+            litellm_api_base="https://headroom.internal",  # completions detour
+            litellm_search_api_base="https://gw.example.com",  # real gateway
+            litellm_api_key="sk-proxy",
+            litellm_search_tool_name="web_search",
+        )
+
+        with patch("httpx.AsyncClient") as cls:
+            client = self._client(self._resp())
+            cls.return_value = client
+            await tool.execute(query="q")
+
+        assert client.post.call_args[0][0] == "https://gw.example.com/v1/search"
+
+    @patch("pocketpaw.tools.builtin.web_search.get_settings")
+    async def test_it_falls_back_to_the_shared_base_when_unset(self, mock_settings, tool):
+        """The override is opt-in; nothing changes for a normal deployment."""
+        mock_settings.return_value = MagicMock(
+            web_search_provider="litellm",
+            litellm_api_base="https://gw.example.com",
+            litellm_search_api_base=None,
+            litellm_api_key="sk-proxy",
+            litellm_search_tool_name="web_search",
+        )
+
+        with patch("httpx.AsyncClient") as cls:
+            client = self._client(self._resp())
+            cls.return_value = client
+            await tool.execute(query="q")
+
+        assert client.post.call_args[0][0] == "https://gw.example.com/v1/search"

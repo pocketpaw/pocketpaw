@@ -215,12 +215,22 @@ class WebSearchTool(BaseTool):
         distribute, no second egress path to allow, and the proxy keeps the
         usage accounting for search alongside completions.
         """
-        base = str(getattr(settings, "litellm_api_base", "") or "").rstrip("/")
+        # ``litellm_search_api_base`` wins when set. It exists for the case
+        # where something is chained in FRONT of the gateway: a compression or
+        # observability proxy intercepts /v1/chat/completions and friends and
+        # knows nothing about /v1/search, so a deployment that repoints
+        # ``litellm_api_base`` at it would 404 every search while completions
+        # kept working — a break that shows up only in the tool.
+        base = str(
+            getattr(settings, "litellm_search_api_base", None)
+            or getattr(settings, "litellm_api_base", "")
+            or ""
+        ).rstrip("/")
         key = getattr(settings, "litellm_api_key", None)
         if not base:
             return self._error(
-                "LiteLLM base URL not configured. "
-                "Set POCKETPAW_LITELLM_API_BASE or switch to 'tavily'/'brave'."
+                "LiteLLM base URL not configured. Set POCKETPAW_LITELLM_API_BASE "
+                "(or POCKETPAW_LITELLM_SEARCH_API_BASE) or switch to 'tavily'/'brave'."
             )
         tool_name = str(getattr(settings, "litellm_search_tool_name", "") or "web_search")
 
