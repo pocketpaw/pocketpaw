@@ -72,6 +72,27 @@ workspace's source→Fabric mappings, now with a "connector" source_kind that
 dispatches through the OSS FABRIC_INGESTORS registry — gcalendar first) and
 POST /fabric/ingest/run (run one mapping immediately; misconfiguration reports
 status="error" in the body, never a 5xx).
+
+Updated: 2026-08-01 (AM-6 desktop) — documented POST /auth/social/link/complete
+and the desktop link handoff. Worth knowing before touching it: a Tauri webview
+carries no cookie for our origin, so the callback cannot authenticate the
+acting user and does NOT attach on flow=desktop. It parks the identity behind
+a one-time code and the app redeems it under its bearer, where the account can
+actually be proved. Also records the /oauth-callback contract that separates a
+desktop LINK (link=) from a desktop SIGN-IN (xc=).
+
+Updated: 2026-08-01 (AM-2..AM-6, feat/auth-social-providers) — documented the
+Social Sign-In & Connected Accounts section: the four sign-in endpoints
+(providers / login / callback / exchange) and the three connected-accounts ones
+(GET identities, POST {provider}/link, DELETE identities/{provider}), the nine
+refusal codes the frontend maps to copy, and the security model — why a
+provider-VERIFIED email is the only join key on sign-in, and why the link path
+deliberately does not use email as a join key at all. Also records two things
+that are easy to get wrong and cost real time here: cloud routes authenticate
+at the route level, because the global AuthMiddleware does not gate /api/v1/,
+so a new cloud route needs its own guard; and localhost_auth_bypass defaults to
+TRUE, so verifying an auth change with curl from your own machine cannot tell
+you whether the guard is there.
 -->
 
 # Cloud REST API Reference
@@ -79,6 +100,11 @@ status="error" in the body, never a 5xx).
 This file documents cloud (`pocketpaw-ee`) REST endpoints that do not yet
 have a dedicated page under `docs/api/`. All cloud endpoints require a
 valid enterprise license and an authenticated workspace context.
+
+That second requirement is enforced **per route, not by the global
+middleware**, which does not gate `/api/v1/`. If you are adding or reviewing a
+cloud route, read "Cloud routes authenticate at the route level" in the Social
+Sign-In section below — the route's own guard is what carries it.
 
 ## Pockets — Backend Binding & Live Data Sources
 
@@ -1350,3 +1376,306 @@ disabled, no ingestor registered under the connector id — reports
 `status: "error"` with the reason in `errors` (HTTP 200, matching the
 background sweep's never-raise, per-source isolation contract). Re-runs are
 idempotent: objects upsert by `(source_connector, source_id)`.
+
+---
+
+## Social Sign-In & Connected Accounts
+
+Google and GitHub sign-in, plus the Settings surface where a signed-in user
+connects and disconnects those identities. Seven endpoints in two groups, and
+the groups differ in what authorises them — which is the thing to get right
+before changing any of this.
+
+### Cloud routes authenticate at the route level
+
+**Every cloud route needs its own guard.** The global `AuthMiddleware` does not
+gate `/api/v1/`: it builds `is_auth_optional` from
+`auth_optional_prefixes = ("/api/v1/",)` and skips its final 401 for every
+match, so that ee routes resolve identity through fastapi-users instead. The
+cascade still runs and still populates `request.state` — session cookies, API
+keys, `full_access` — so routes mounted at the shared prefix can read it; it
+simply is not the thing that rejects.
+
+So when you add a cloud route, a session dependency (or an explicit in-handler
+check) is **required**, not belt-and-braces. `tests/cloud/auth/test_route_auth_audit.py`
+asserts this across every mounted router and keeps an allowlist of the routes
+that are public by design, each with its reason.
+
+### Verifying an auth change locally proves nothing by default
+
+`POCKETPAW_LOCALHOST_AUTH_BYPASS` **defaults to true** and grants
+`request.state.full_access` to any caller whose address is loopback. On a dev
+box you therefore cannot tell "this endpoint requires auth" from "this endpoint
+let me in because I am on localhost" — a `curl` from your own machine succeeds
+either way.
+
+Set it to false before testing an auth change by hand:
+
+```bash
+export POCKETPAW_LOCALHOST_AUTH_BYPASS=false
+```
+
+Better, assert it in a test against the ASGI app with no session, the way
+`tests/cloud/sessions/test_runtime_route_auth.py` does. The bypass refuses a
+spoofed `X-Forwarded-For`, so a remote caller cannot claim loopback — the trap
+here is local verification, not a production hole.
+
+### Sign-in endpoints (no session — that is the point)
+
+| Endpoint | Notes |
+|---|---|
+| `GET /auth/social/providers` | `{providers: [...]}` — only providers whose credentials are set. An unconfigured provider is **absent**, not present-and-broken. |
+| `GET /auth/social/{provider}/login` | Begins consent, 302s to the provider. Takes `flow=web` or `flow=desktop`, and `next=<relative path>`. |
+| `GET /auth/social/callback` | The provider's redirect. Redeems the code, applies the policy, then signs in **or** links. |
+| `POST /auth/social/exchange` | `{xc}` traded for a bearer token. How a desktop client gets its FIRST token. Rate-limited per IP. |
+
+Unauthenticated by necessity: the caller has no session yet. The control is the
+single-use `state` from `auth/_oauth_state.py` — server-side, 32 bytes,
+GET-then-DEL, 600s TTL, namespaced per flow so an SSO state cannot be spent on
+the social callback. Server-side rather than a signed token deliberately: a
+self-verifying state token verifies for *anyone* who presents it, which is
+CVE-2025-68481 against fastapi-users.
+
+Failures **redirect rather than return JSON**, because these are reached by a
+full-page browser navigation and a JSON body would render as raw text in the
+address bar. A refusal goes to `<frontend>/?auth=signin&auth_error=<code>` —
+the dialog reopened with an explanation, because a refusal is a UI state and
+not an error page.
+
+The desktop branch redirects to `<frontend>/oauth-callback?xc=<code>` carrying
+a **one-time reference, never a token**: 60-second TTL, single-use. A token in
+a URL leaks through browser history, `Referer`, window titles and every proxy
+log on the path; a spent reference is worthless.
+
+`flow` and `next` are read from the state payload, never from the callback's
+query string — a callback URL is attacker-influenced by definition. `next` is
+re-validated server-side to a same-origin relative path (one leading slash, no
+backslash), so `//evil.com` and absolute URLs degrade to `/`.
+
+### Connected-accounts endpoints (session required)
+
+| Endpoint | Notes |
+|---|---|
+| `GET /auth/social/identities` | `{identities: [{provider, account_email, linked_at}]}`. `linked_at` is null for rows linked before that field existed. |
+| `POST /auth/social/{provider}/link` | Returns `{authorize_url}` — a URL, **not** a 302. Takes `flow=web` (default) or `flow=desktop`, and `next=<relative path>`. |
+| `POST /auth/social/link/complete` | Desktop only. `{code}` → `{provider, identities}`. See below. |
+| `DELETE /auth/social/identities/{provider}` | 204 on success. |
+
+All three take `current_active_user`, and the acting account comes from that
+dependency only. The provider name is the sole caller-chosen value, so no
+request shape acts on somebody else's credentials. **A link endpoint that took
+its target user from a body or path parameter would be an account-takeover
+primitive, not a settings page** — do not add one.
+
+`POST .../link` returns a URL rather than redirecting because Settings calls it
+with `fetch`, which follows a 302 opaquely: the request would succeed against
+the provider's HTML and the page would never move. The client assigns the URL
+to `window.location`. These three return JSON errors in the shared `CloudError`
+envelope, unlike the sign-in routes above, because they are XHR with a caller
+waiting on a response.
+
+The link flow reuses the sign-in callback. The two are told apart by a
+`link_user_id` pinned into the state at authorize time, and **the callback
+re-checks that id against the session cookie**. That check is load-bearing:
+state is a bearer secret, so without it a stolen link state lets an attacker
+complete the flow with their OWN provider account, attach it to the victim, and
+sign in as them afterwards.
+
+Web link outcomes redirect to `<frontend><next>?social_linked=<provider>` on
+success and `?social_error=<code>` on refusal — never to the sign-in dialog,
+which would prompt an already-signed-in user to sign in.
+
+### Linking on desktop finishes somewhere else entirely
+
+A desktop client is not "the web client in a window", and this is the one place
+that difference is load-bearing. It authenticates with a bearer held in
+localStorage, and the Tauri webview that completes consent carries **no cookie
+for this origin**. So the callback cannot authenticate anyone at all — and
+attaching on the strength of the state alone is exactly the theft the web
+branch's cookie check exists to prevent.
+
+The proof therefore moves to a request the app can actually authenticate. Pass
+`flow=desktop` when starting the link, and the callback attaches nothing:
+
+```
+1. POST /auth/social/{provider}/link?flow=desktop     (Authorization: Bearer …)
+   -> {"authorize_url": "https://github.com/login/oauth/authorize?…"}
+
+2. app opens a webview at authorize_url; user consents
+
+3. callback parks the identity and redirects the webview to:
+      <frontend>/oauth-callback?link=<code>&provider=<provider>
+   or on failure:
+      <frontend>/oauth-callback?link_error=<code>
+
+4. webview closes; app redeems the code:
+   POST /auth/social/link/complete   {"code": "<code>"}   (Authorization: Bearer …)
+   -> 200 {"provider": "github", "identities": [...]}
+   -> 4xx CloudError envelope, same auth.* codes as everywhere else
+```
+
+`link=` is what distinguishes this from a desktop **sign-in**, which uses `xc=`
+on the same `/oauth-callback` route. They are not interchangeable: one attaches
+an identity, the other mints a bearer, and they live in separate single-use
+namespaces so a code from one is refused by the other.
+
+Step 4 is where authorisation happens. The parked record names the account the
+link was started for, and `complete` compares it against `current_active_user`.
+**A stolen link code is worth nothing without that account's bearer**, which
+makes the desktop path stronger than the cookie check rather than a concession
+to it. The code is single-use with a 60-second TTL.
+
+The response carries the refreshed identity list because the window that
+started the flow has already closed; a follow-up refetch that failed would
+leave the panel stale with no way to explain itself.
+
+Policy refusals (`auth.identity_claimed`, `auth.sso_enforced`,
+`auth.unverified_link`) surface as JSON from step 4, which the panel renders
+inline. Only a provider or network failure still refuses at the callback, and
+it redirects to `/oauth-callback?link_error=…` so the webview closes rather
+than sitting on a page it cannot use.
+
+The desktop redirect ignores `next` — the webview's job is to close, and the
+Settings panel that opened it is still mounted in the main window. Not building
+a `next`-derived URL there also means the hostile-value problem cannot reach
+that redirect at all.
+
+An unknown `flow` is **refused** (`social.unknown_flow`, 422) rather than
+defaulted to `web`. A desktop client that silently got the web branch would
+consent successfully and then attach nothing, which reads as a frontend bug for
+as long as it takes someone to find this paragraph.
+
+### Refusal codes
+
+The frontend maps each of these to its own copy in
+`core/auth/social-errors.ts`, so renaming one silently degrades a specific
+message to a generic fallback.
+
+| Code | Means | Path |
+|---|---|---|
+| `auth.unverified_link` | The provider would not vouch for any email address. | Both |
+| `auth.sso_enforced` | The user's workspace mandates SSO. | Both |
+| `auth.identity_claimed` | That identity is already attached to a **different** account. | Link |
+| `auth.link_session_mismatch` | The callback's session is not the account that started the link. | Link |
+| `auth.last_credential` | Unlinking would leave the account with no way to sign in. 409. | Unlink |
+| `auth.not_linked` | No identity from that provider is attached. 404. | Unlink |
+| `social.invalid_state` | State unknown, already spent, expired, or from another flow. | Both |
+| `social.provider_not_configured` | No credentials for that provider on this server. 503. | Both |
+| `social.unknown_provider` | Not `google` or `github`. 422. | Both |
+| `social.unknown_flow` | `flow` was neither `web` nor `desktop`. 422. | Both |
+| `social.invalid_link_code` | A parked desktop link record could not be rebuilt. | Link |
+
+### The security model — read this before adding provider #3
+
+**On sign-in, a provider-verified email is the only join key.** The policy, in
+order:
+
+1. This `(provider, account_id)` is already linked → sign in.
+2. No verified email from the provider → **REFUSE**.
+3. Verified email matches an existing account → link, then sign in.
+4. Verified email, no existing account → create, link, sign in.
+
+Step 2 before step 3 is the whole defence. Matching an **unverified** address
+against an existing account is how an attacker attaches `victim@corp.com` to
+their own provider profile and walks into the victim's account. Not
+hypothetical — this is nOAuth (Entra's mutable, unverified `email` claim) and
+GHSA-6g38-8j4p-j3pr. So the rule every adapter must hold to: **compute
+`email_verified` from the provider's authoritative source, and never infer it
+from the mere presence of an address.** GitHub's `/user` payload carries an
+`email` field that is *not* proof of verification; the flag comes from
+`GET /user/emails`, which is why the `user:email` scope is required.
+
+Where a provider gives no verified address the adapter reports `email=None`
+rather than guessing, and the service turns that into a refusal, not a link.
+
+Step 1 sitting *before* step 2 is also deliberate. A returning user whose
+provider has since stopped vouching for their address — they removed it, or
+declined the scope on a re-consent — is still the same person, because that
+match was on the provider's immutable id. Verification only gates the step that
+BINDS an identity to an account it was not already bound to.
+
+**On linking, email is deliberately NOT a join key at all.** The session
+already establishes who the user is, so the identity's address is not needed to
+resolve an account and must not be used to. The link path looks up only
+`(provider, account_id)`:
+
+- already attached to the caller → no-op, because clicking "Connect" twice is
+  not an error and reporting one would put the panel in a failure state over a
+  state it already has;
+- attached to a **different** account → refuse `auth.identity_claimed`. Never
+  re-point it. That would hand over this account *and* silently strip a
+  credential from the account that legitimately holds it;
+- attached to nobody → attach.
+
+Unverified identities are still refused on the link path, but for a different
+reason than on sign-in: it preserves the invariant that **every row in
+`oauth_accounts` was established from a provider-verified identity**, which is
+exactly what makes step 1 above safe when it signs a returning user in on a
+link alone. Break the invariant here and step 1 loses its foundation.
+
+**Unlinking refuses to remove the last credential**, and the check is
+`_has_usable_password`, not `bool(hashed_password)`. Accounts created by the
+social path and by SSO JIT provisioning store an *unusable sentinel*
+(`!social-only-...`, `!sso-only-...`) rather than an empty string, because an
+empty hash can compare-equal in some verifiers. A truthiness check therefore
+reports "has a password" for precisely the users who have none, and would let
+them delete their only way in. The test is positive — pwdlib and passlib hashes
+are Modular Crypt Format and begin with `$` — so a sentinel added later needs
+no change here. It over-refuses an SSO member who could still reach their IdP;
+that is the intended direction, because a false refusal costs one password
+reset and a false allow is a permanent lockout support cannot undo.
+
+**Enforced SSO refuses both sign-in and linking.** A workspace paying for SSO
+is buying the guarantee that its members authenticate through the IdP, and
+consumer Google must not become the documented way around it. Linking is
+guarded even though a link is not itself a bypass — sign-in re-checks every
+time, so an identity attached under enforced SSO could not be spent — because
+it would be a bypass lying in wait if that check ever regressed, and it stores
+exactly the credential the org enabled the control to exclude. The check also
+runs at `begin_link`, so Settings shows an explainable error instead of a round
+trip through Google that ends in a redirect.
+
+Provider access tokens are never stored. Sign-in needs identity, not ongoing
+API access, and a token we never use is avoidable breach surface. Repository
+access is codeconnect's job.
+
+### Configuration
+
+| Variable | Purpose |
+|---|---|
+| `POCKETPAW_GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | Google sign-in. Unset hides the button. |
+| `POCKETPAW_GITHUB_OAUTH_CLIENT_ID` / `_SECRET` | GitHub sign-in. Unset hides the button. |
+| `POCKETPAW_PUBLIC_BASE_URL` | Backend origin; the callback URL is derived from it. Default `http://localhost:8888`. |
+| `POCKETPAW_SOCIAL_REDIRECT_URI` | Overrides the derived callback outright. Set it when the backend sits behind a proxy whose public origin it cannot infer. |
+| `POCKETPAW_FRONTEND_BASE_URL` | Where the SPA lives. Default `http://localhost:1420`. |
+
+Callback URL, registered with both providers:
+
+```
+<backend-origin>/api/v1/auth/social/callback
+```
+
+**GitHub needs an OAuth App, not a GitHub App.** They are different products
+with different consent screens and different token models, and picking the
+wrong one costs an hour before anything works. Create it under Settings →
+Developer settings → **OAuth Apps**. These credentials are also distinct from
+two other Google/GitHub credentials already in this codebase, and reusing
+either will not work:
+
+- `POCKETPAW_GITHUB_APP_*` — codeconnect's **GitHub App**, for repository
+  access via installation tokens. Sign-in uses its own OAuth App so the
+  account-creation consent screen asks for identity only, never repository
+  permissions.
+- `GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` (no `POCKETPAW_` prefix, OSS core) — the
+  Drive connector's per-install data integration.
+
+Scopes are requested at runtime and are identity-only: Google gets
+`openid email profile`, GitHub gets `read:user user:email`. `user:email` is not
+optional — without it `GET /user/emails` returns 403, no address can be treated
+as verified, and every GitHub sign-in refuses with `auth.unverified_link`.
+
+`POCKETPAW_FRONTEND_BASE_URL` matters more than it looks. Every redirect out of
+these routes is **absolute** against that origin, because a relative redirect
+resolves against the API origin — the same host only when both are served from
+one domain. In production they usually are; in local dev they are not, and a
+successfully signed-in user lands on the API root and sees nothing.
