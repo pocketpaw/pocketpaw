@@ -1,6 +1,18 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-08-02 (draft render): the PREVIEW deploy in ``publish`` is now
+# engine-aware, closing the half of HE-4 that was missed. HE-4 taught the LIVE
+# deploy that a built site's servable files live somewhere different per engine
+# (``engines.static_output_rel``) but only touched ``_deploy_site_doc``; the DRAFT
+# branch a few lines above kept calling ``deploy_local`` with no ``engine``, so an
+# html draft resolved a SvelteKit build dir it never emits. The failure was
+# invisible rather than loud, because ``deploy_local`` fails SOFT: with a prior
+# deploy on disk it re-served THAT, so every edit-then-reload showed the previous
+# page and nothing reported a problem. The live and draft halves of one function
+# must resolve the static root the same way — that is the whole point of routing
+# both through the shared predicate.
+#
 # Updated 2026-07-31 (provisioning brick): the dynamic single-flight guard is now
 # BOUNDED. A job that was never consumed — no worker running — or that died
 # without writing a terminal status used to leave the Site in
@@ -1856,8 +1868,40 @@ async def publish(
         # doc still carries the minted ObjectId in its ``id``/``script_name`` (it is
         # never persisted), but the served path + url use the stable preview id.
         preview_id = _preview_id(pocket_id)
-        deploy = _local_deploy or local_server.deploy_local
-        preview_url = deploy(preview_id, build.project_dir)
+        # HE-4 parity with the LIVE deploy below: WHERE the built draft's servable
+        # files sit is a per-engine fact (``static_output_rel``) — the SvelteKit
+        # adapter output for ripple/svelte, the project root for html — so the real
+        # deploy must be told the engine. Without it an html draft resolved
+        # ``.svelte-kit/cloudflare``, which an html build never emits, and
+        # ``deploy_local``'s fail-soft branch re-served the PRIOR deploy: the draft
+        # showed the previous page and nothing surfaced an error. The injected test
+        # seam stays 2-arg (a fake serves no real tree, so it ignores the engine),
+        # exactly as ``_deploy_site_doc`` splits it.
+        if _local_deploy is not None:
+            preview_url = _local_deploy(preview_id, build.project_dir)
+        else:
+            preview_url = local_server.deploy_local(
+                preview_id, build.project_dir, engine=engine
+            )
+        # SECOND, UNFIXED half of the draft-render bug — surfaced, not silenced.
+        # Unlike the live deploy below, this path has NO deploy-mode fork: it
+        # always serves from ``local_server``, which binds 127.0.0.1 inside THIS
+        # process. On a dev box that is also the operator's machine, so the draft
+        # frames fine and every local test passes. In a real deployment the browser
+        # is somewhere else entirely and the URL is unreachable — the draft renders
+        # broken in production for a reason no log ever mentioned. Giving the draft
+        # a reachable URL off-box means deploying a preview worker per pocket
+        # (cost, naming, teardown), which is a product call, not a bug fix. Until
+        # that call is made, say so loudly at the moment we hand back the address.
+        if not _local_mode() or _deploy_mode() not in (None, "local"):
+            logger.warning(
+                "sites: draft preview for pocket %s is served from this process's "
+                "loopback (%s) — a browser off this host CANNOT load it, so the "
+                "draft will render broken. The preview path has no workers/wfp "
+                "deploy target yet (the live path does).",
+                pocket_id,
+                preview_url,
+            )
         return _SiteDoc(
             id=ObjectId(site_id),
             workspace=workspace_id,
