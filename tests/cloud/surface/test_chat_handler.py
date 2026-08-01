@@ -26,7 +26,7 @@ async def test_chat_handler_emits_session_count() -> None:
         "pocketpaw_ee.cloud.sessions.service.list_for_user",
         new=AsyncMock(return_value=fake_rows),
     ):
-        preamble = await chat_handler.build_preamble("w1", "u1", SurfaceMeta())
+        preamble = (await chat_handler.build_preamble("w1", "u1", SurfaceMeta())).text
 
     assert '<surface kind="chat"' in preamble
     assert '<chat-snapshot sessions="3" />' in preamble
@@ -41,7 +41,7 @@ async def test_chat_handler_falls_back_when_lister_raises() -> None:
         "pocketpaw_ee.cloud.sessions.service.list_for_user",
         new=AsyncMock(side_effect=RuntimeError("db down")),
     ):
-        preamble = await chat_handler.build_preamble("w1", "u1", SurfaceMeta())
+        preamble = (await chat_handler.build_preamble("w1", "u1", SurfaceMeta())).text
 
     assert '<surface kind="chat"' in preamble
     assert "<chat-snapshot>(session count unavailable)</chat-snapshot>" in preamble

@@ -34,10 +34,17 @@
 # inherit the ~20k-char "default to ui-spec" ripple LAW and build a dashboard)
 # and scopes ``allow_mcp_tool_ids`` to the loom orientation tools + the gate
 # tool (see service.py).
+#
+# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
+# ``SurfacePreamble`` keyed on the route plus the repo binding
+# (``meta.repo`` / ``meta.base_branch``). Nothing mutable is read here, so
+# those three inputs ARE the preamble and the key is exact rather than a
+# digest — binding a different repo mid-session moves it, which is the point.
 
 from __future__ import annotations
 
-from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
+from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
+from pocketpaw_ee.cloud.surface.handlers._helpers import meta_key
 
 
 def _repo_binding(meta: SurfaceMeta) -> tuple[str, str]:
@@ -81,11 +88,17 @@ def _repo_binding(meta: SurfaceMeta) -> tuple[str, str]:
     return "", propose
 
 
-async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
-    """Render the /belt surface preamble — the develop station loop."""
+async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
+    """Render the /belt surface preamble — the develop station loop.
+
+    Reads NOTHING mutable: every varying byte comes from ``meta`` (the route
+    and the repo binding), and the rest is a fixed instruction block. So the
+    key names exactly those three inputs — exact, not approximate, and it moves
+    when the /belt page binds a different repo or branch mid-session.
+    """
     route = meta.route_path or "/belt"
     repo_binding, propose_instruction = _repo_binding(meta)
-    return (
+    text = (
         f'<surface kind="belt" route="{route}" />\n'
         f"{repo_binding}"
         "<belt-orientation>\n"
@@ -127,6 +140,10 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "The workspace is JAILED — stay inside the station worktree; do not reach "
         "outside it. Destructive shell operations are blocked.\n"
         "</belt-procedure>"
+    )
+    return SurfacePreamble(
+        text=text,
+        cache_key=meta_key("belt", route, meta.repo, meta.base_branch),
     )
 
 

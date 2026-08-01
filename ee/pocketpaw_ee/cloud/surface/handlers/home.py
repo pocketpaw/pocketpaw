@@ -10,15 +10,29 @@
 # All reads respect ``workspace_id`` (the pocket service enforces it
 # per the tenancy-on-every-read rule). Audit reads use the canonical
 # ``audit_service.agent_list_audit`` which also enforces tenancy.
+#
+# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
+# ``SurfacePreamble`` with a key in TWO parts, because this handler reads two
+# different kinds of thing. The home POCKET needs a key that sees past the
+# render, for the same reason the pocket handler does: only the first 12
+# widgets are listed, so pinning a 13th changes the pocket and not the text —
+# ``_build_widgets_block`` now carries a fingerprint of ALL the widgets out for
+# that half. (Not the pocket's ``updatedAt``, which looks like the right
+# revision and never moves — see ``_helpers.source_key``.) The rest of the
+# preamble — available tools, recent activity — has no source worth
+# fingerprinting separately, so it contributes a digest of what was rendered.
+# The key moves if either half does.
 
 from __future__ import annotations
 
 import logging
 
-from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
+from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import (
     composio_tool_names,
+    content_key,
     format_widget_line,
+    source_key,
     truncate_preamble,
 )
 
@@ -30,7 +44,7 @@ WIDGET_LIST_LIMIT = 12
 ACTIVITY_LIMIT = 5
 
 
-async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
+async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
     """Build the home-surface preamble — pinned widgets, snapshot, tools."""
     widgets_block = await _build_widgets_block(workspace_id, user_id)
     snapshot_line = _build_snapshot_line(widgets_block["widget_count"])
@@ -46,7 +60,21 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         parts.append(f"<available-data-tools>{tools_line}</available-data-tools>")
     if activity_block:
         parts.append(activity_block)
-    return truncate_preamble("\n".join(parts))
+    text = truncate_preamble("\n".join(parts))
+    # Both halves: a fingerprint of EVERY widget on the home pocket (catches a
+    # change past the 12-row cut, which the text cannot show) AND a digest of
+    # everything rendered (catches the tool line and the activity rows). The
+    # fingerprint is ``()`` when the pocket could not be loaded — the rendered
+    # digest still keys that case, and it differs from a loaded empty pocket
+    # because the two render different text.
+    return SurfacePreamble(
+        text=text,
+        cache_key=source_key(
+            "home",
+            *widgets_block.get("fingerprint", ()),
+            content_key("home", text),
+        ),
+    )
 
 
 async def _build_widgets_block(workspace_id: str, user_id: str) -> dict:
@@ -55,6 +83,11 @@ async def _build_widgets_block(workspace_id: str, user_id: str) -> dict:
     On failure (missing pocket, fetch error) we still return a usable
     block so the rest of the preamble keeps its shape — empty workspaces
     just see a zero-count tag.
+
+    Also carries a ``fingerprint`` of EVERY widget out for the preamble's cache
+    key — the rendered rows stop at ``WIDGET_LIST_LIMIT``, so the fingerprint is
+    the only thing that sees a change past the cut. Empty when there is no
+    pocket, or no widgets, to fingerprint.
     """
     try:
         from pocketpaw_ee.cloud.pockets import service as pockets_service
@@ -65,14 +98,21 @@ async def _build_widgets_block(workspace_id: str, user_id: str) -> dict:
         return {
             "text": '<pinned-widgets count="0">(home pocket unavailable)</pinned-widgets>',
             "widget_count": 0,
+            "fingerprint": (),
         }
 
     widgets = pocket.get("widgets", []) or []
+    fingerprint = tuple(
+        f"{w.get('_id')}|{w.get('name')}|{w.get('type')}|{1 if w.get('spec') else 0}"
+        for w in widgets
+        if isinstance(w, dict)
+    )
     total = len(widgets)
     if total == 0:
         return {
             "text": '<pinned-widgets count="0">(empty — no widgets pinned yet)</pinned-widgets>',
             "widget_count": 0,
+            "fingerprint": fingerprint,
         }
 
     # Use the helper to format each row — duck-typed against either dict
@@ -87,6 +127,7 @@ async def _build_widgets_block(workspace_id: str, user_id: str) -> dict:
     return {
         "text": f'<pinned-widgets count="{total}">\n{body}\n</pinned-widgets>',
         "widget_count": total,
+        "fingerprint": fingerprint,
     }
 
 

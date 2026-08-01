@@ -112,6 +112,7 @@ from typing import NamedTuple
 from pocketpaw_ee.cloud.surface.domain import (
     SurfaceKind,
     SurfaceMeta,
+    SurfacePreamble,
     SurfaceProfile,
 )
 from pocketpaw_ee.cloud.surface.handlers import (
@@ -150,8 +151,11 @@ from pocketpaw_ee.cloud.surface.handlers import (
 from pocketpaw_ee.cloud.surface.system_prompts import CODE_SYSTEM_PROMPT
 
 # The shape every handler module exports: an async preamble builder taking the
-# tenancy tuple + the validated client meta and returning the rendered block.
-BuildPreamble = Callable[[str, str, SurfaceMeta], Awaitable[str]]
+# tenancy tuple + the validated client meta and returning the rendered block
+# WITH the cache key that says what the handler read to render it (PA-2). The
+# key is part of the handler contract rather than something the dispatcher
+# derives, because only the handler knows what it read — see ``SurfacePreamble``.
+BuildPreamble = Callable[[str, str, SurfaceMeta], Awaitable[SurfacePreamble]]
 
 # A profile resolver: given the client meta, return the surface's behavioral
 # profile. Set on the rows whose profile depends on the lazily-loaded per-mode

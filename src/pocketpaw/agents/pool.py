@@ -3,6 +3,17 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Updated: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — ``run`` and ``prewarm``
+  accept ``surface_preamble: str`` + ``surface_cache_key: str | None``, the
+  surface the user is looking at and what the EE handler that built it says it
+  read. Both are plain data (no ``pocketpaw_ee`` symbol crosses), and they feed
+  the new ``surface`` layer, which sits between ``identity`` and the tail. The
+  preamble used to ride inside ``knowledge_context``, where it landed under the
+  "Your Knowledge Base" wrapper and contributed nothing to the digest — so
+  navigating from pocket A to pocket B produced the same digest as staying put.
+  ``prewarm`` takes them too, and for the usual reason: it must assemble the
+  prompt turn 1 will, or turn 1 evicts the client it warmed. Both default to the
+  no-surface answer, so the channel path and OSS local runs are unchanged.
 Updated: 2026-08-02 (PA-1, feat/prompt-assembler-seam) —
   ``_assemble_system_prompt`` no longer builds a string by appending blocks. It
   renders a LIST OF LAYERS through ``pocketpaw.prompt.assemble`` and returns an
@@ -133,7 +144,21 @@ logger = logging.getLogger(__name__)
 # The cloud path's prompt layers, in the order they are concatenated. The names
 # resolve through ``prompt_layer_registry``; the ORDER is this caller's, because
 # it is what makes the assembled text what a cloud agent expects to read.
-_SYSTEM_PROMPT_LAYERS = ("identity", "legacy_tail")
+#
+# ``surface`` sits between the two (PA-2): who the agent is, then where the user
+# is, then everything per-turn. That MOVES the preamble — it used to arrive
+# inside ``knowledge_context``, i.e. below the authoritative instructions and
+# inside the "Your Knowledge Base" wrapper that frames its content as reference
+# data. Two consequences worth knowing about:
+#   * the EE ``build_dynamic_context`` no longer prepends it, or it would render
+#     twice;
+#   * it now sits ABOVE ``ClaudeSDKBackend._VOLATILE_PROMPT_MARKERS``, so it
+#     participates in the warm-client cache key. That is the point rather than a
+#     side effect: a reused warm subprocess was keeping the preamble it launched
+#     with, so the agent's prompt described the pocket as it looked when the
+#     session started. It does mean a turn that changes the surface rebuilds the
+#     subprocess — the same trade the home-pocket backend summary already makes.
+_SYSTEM_PROMPT_LAYERS = ("identity", "surface", "legacy_tail")
 
 
 def _resolve_agent_model() -> Any:
@@ -343,6 +368,8 @@ class AgentPool:
         instructions: str,
         knowledge_context: str,
         system_message_override: str | None,
+        surface_preamble: str = "",
+        surface_cache_key: str | None = None,
     ) -> AssembledPrompt:
         """Assemble the agent's system prompt from its layers.
 
@@ -359,6 +386,10 @@ class AgentPool:
           ``system_prompt``), then the entity-rooms A1
           ``system_message_override``, which SWAPS that base and keeps the
           layers below. KEYED, on the agent rather than on the rendered text.
+        * ``surface`` — the surface the user is looking at, resolved in the EE
+          cloud layer and handed here as plain data. KEYED, on what the handler
+          that built the preamble says it read (``None``, i.e. no key, on every
+          path with no surface — OSS local runs, the channel adapters).
         * ``legacy_tail`` — the authoritative ``instructions``, the
           per-message soul recall and the knowledge wrapper, still one block.
           UNKEYED: it carries the per-message recall, so keying it would move
@@ -383,6 +414,8 @@ class AgentPool:
             instructions=instructions,
             knowledge_context=knowledge_context,
             system_message_override=system_message_override,
+            surface_preamble=surface_preamble,
+            surface_cache_key=surface_cache_key,
         )
         layers = [prompt_layer_registry.get(name) for name in _SYSTEM_PROMPT_LAYERS]
         return await assemble(layers, ctx)
@@ -399,6 +432,8 @@ class AgentPool:
         system_message_override: str | None = None,
         skill_names: frozenset[str] = frozenset(),
         exclusive_mcp_tools: bool = False,
+        surface_preamble: str = "",
+        surface_cache_key: str | None = None,
     ) -> None:
         """Eagerly warm the agent's CLI subprocess for ``session_key`` before its
         first turn, so the first ``run`` reuses it instead of paying the cold
@@ -450,6 +485,13 @@ class AgentPool:
                 instructions=instructions,
                 knowledge_context="",  # stripped from the cache-key prefix
                 system_message_override=system_message_override,
+                # PA-2: the surface preamble is NOT part of the stripped tail —
+                # it sits above the volatile markers now — so unlike ``message``
+                # and ``knowledge_context`` it cannot be passed empty here. The
+                # caller resolves the surface before firing this, and passing it
+                # is what keeps the prewarmed client's prefix equal to turn 1's.
+                surface_preamble=surface_preamble,
+                surface_cache_key=surface_cache_key,
             )
         except Exception:
             logger.debug("prewarm: prompt assembly failed for %s (skipped)", agent_id)
@@ -497,6 +539,8 @@ class AgentPool:
         on_client_built: Callable[[Any, str, Callable], None] | None = None,
         model_override: str | None = None,
         exclusive_mcp_tools: bool = False,
+        surface_preamble: str = "",
+        surface_cache_key: str | None = None,
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -555,6 +599,17 @@ class AgentPool:
         narrower signature and only the Claude SDK backend acts on it (where it wins
         over smart-routing / ``claude_sdk_model``). ``None`` = the unchanged path.
 
+        ``surface_preamble`` / ``surface_cache_key`` (PA-2) are the surface the
+        user is looking at: the rendered block (route, pocket snapshot, pinned
+        widgets, live lists) and what the EE handler that built it says it read.
+        They are NOT withhold-when-empty — they never reach a backend, they feed
+        the ``surface`` prompt layer here. The key is threaded rather than
+        derived from the text because the handler is the only thing that knows
+        what it read: the pocket preamble shows the first 12 of N widgets under
+        a 1500-char cap, so an edit to widget 13 changes the pocket and changes
+        no rendered byte. ``""`` / ``None`` (the default) is the no-surface
+        answer every non-cloud path gives, and leaves the layer keyless.
+
         ``exclusive_mcp_tools`` (CX-2) is the per-agent exclusive-tool signal. It
         rides the SAME withhold-when-empty contract: forwarded to the backend's
         ``run`` ONLY when ``True``, so the 6 non-Claude backends keep their narrower
@@ -590,6 +645,8 @@ class AgentPool:
             instructions=instructions,
             knowledge_context=knowledge_context,
             system_message_override=system_message_override,
+            surface_preamble=surface_preamble,
+            surface_cache_key=surface_cache_key,
         )
 
         # Mark this instance as actively running for the duration of the

@@ -45,7 +45,7 @@ async def test_knowledge_handler_lists_populated_scopes(
         _fake_list_scopes,
     )
 
-    preamble = await knowledge_handler.build_preamble(WORKSPACE, USER, SurfaceMeta())
+    preamble = (await knowledge_handler.build_preamble(WORKSPACE, USER, SurfaceMeta())).text
 
     assert '<surface kind="knowledge"' in preamble
     assert '<knowledge-scopes count="2"' in preamble
@@ -74,7 +74,7 @@ async def test_knowledge_handler_empty_workspace_renders_placeholder(
         _empty,
     )
 
-    preamble = await knowledge_handler.build_preamble(WORKSPACE, USER, SurfaceMeta())
+    preamble = (await knowledge_handler.build_preamble(WORKSPACE, USER, SurfaceMeta())).text
 
     assert '<surface kind="knowledge"' in preamble
     assert "(no scopes detected)" in preamble
@@ -110,7 +110,7 @@ async def test_knowledge_handler_cross_workspace_stamp_returns_empty(
         _foreign,
     )
 
-    preamble = await knowledge_handler.build_preamble(OTHER_WORKSPACE, USER, SurfaceMeta())
+    preamble = (await knowledge_handler.build_preamble(OTHER_WORKSPACE, USER, SurfaceMeta())).text
 
     assert "(no scopes detected)" in preamble
     assert leaked_pocket_scope not in preamble
@@ -134,7 +134,7 @@ async def test_knowledge_handler_isolates_service_exception(
         _boom,
     )
 
-    preamble = await knowledge_handler.build_preamble(WORKSPACE, USER, SurfaceMeta())
+    preamble = (await knowledge_handler.build_preamble(WORKSPACE, USER, SurfaceMeta())).text
 
     assert '<surface kind="knowledge"' in preamble
     assert "(no scopes detected)" in preamble

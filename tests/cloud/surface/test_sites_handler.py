@@ -117,7 +117,9 @@ USER = "u-sites"
 
 async def test_sites_handler_carries_orientation() -> None:
     """The preamble still orients: surface=sites, build a site (not a pocket)."""
-    preamble = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    preamble = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
 
     assert '<surface kind="sites"' in preamble
     # Talks about the deliverable as a site/page.
@@ -131,7 +133,9 @@ async def test_sites_handler_carries_orientation() -> None:
 async def test_sites_handler_create_mode_when_no_pocket_id() -> None:
     """The gallery / no-pocket_id case routes to the unified create flow — always
     the clarity gate first, never refine framing when there's no pocket."""
-    preamble = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    preamble = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
 
     lower = preamble.lower()
     # The unified create surface, tagged mode="create".
@@ -146,7 +150,9 @@ async def test_create_default_engine_is_html() -> None:
     """No engine hint → the DEFAULT create engine is html: the build step authors
     a static HTML/CSS bundle via `create_html_site`, NOT the ripple or svelte
     tracks."""
-    preamble = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    preamble = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
 
     assert 'engine="html"' in preamble
     assert "mcp__pocketpaw_sites_manager__create_html_site" in preamble
@@ -167,9 +173,11 @@ async def test_create_is_draft_first_publish_on_request() -> None:
     and offer to publish, and gates publish on an EXPLICIT go-live request — it no
     longer auto-publishes. The publish tool is still NAMED (the on-request path)."""
     for engine in (None, "svelte", "ripple"):
-        preamble = await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
-        )
+        preamble = (
+            await sites_handler.build_preamble(
+                WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
+            )
+        ).text
         lower = preamble.lower()
         # It frames the deliverable as a draft the user previews first.
         assert "draft" in lower
@@ -187,9 +195,11 @@ async def test_create_ripple_engine_uses_pocket_specialist_fallback() -> None:
     """engine="ripple" is the widget-spec track: it prefers the create-paw-site
     marketing brain, stamps `pattern="landing"`, and keeps the pocket-specialist
     MCP tool as the fallback."""
-    preamble = await sites_handler.build_preamble(
-        WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="ripple")
-    )
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="ripple")
+        )
+    ).text
 
     assert 'engine="ripple"' in preamble
     assert "pocketpaw-create-paw-site" in preamble
@@ -205,9 +215,11 @@ async def test_sites_handler_specifies_flat_lead_capture_form() -> None:
     static site captures leads: named fields (email) built FLAT, never a nested
     form widget. Checked on both the html default and the ripple track."""
     for engine in (None, "ripple"):
-        preamble = await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
-        )
+        preamble = (
+            await sites_handler.build_preamble(
+                WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
+            )
+        ).text
         lower = preamble.lower()
         # A lead-capture form is part of the marketing/landing build.
         assert "form" in lower
@@ -226,11 +238,13 @@ async def test_sites_handler_refine_mode_orients_to_existing_site() -> None:
     """When the meta carries a pocket_id, the surface is the per-site refine
     chat: the agent must REFINE the EXISTING published site, not create a new
     one and not treat it as a dashboard pocket."""
-    preamble = await sites_handler.build_preamble(
-        WORKSPACE,
-        USER,
-        SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
-    )
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE,
+            USER,
+            SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
+        )
+    ).text
 
     lower = preamble.lower()
     # Still the sites surface.
@@ -251,11 +265,13 @@ async def test_sites_handler_refine_mode_orients_to_existing_site() -> None:
 async def test_sites_handler_refine_mode_uses_edit_path() -> None:
     """Refine applies the change via the merge/edit path on the existing pocket,
     not the create path — so the published site is updated in place."""
-    preamble = await sites_handler.build_preamble(
-        WORKSPACE,
-        USER,
-        SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
-    )
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE,
+            USER,
+            SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
+        )
+    ).text
 
     # The edit/merge tool, not a fresh create.
     assert "mcp__pocketpaw_pocket_specialist__edit" in preamble
@@ -266,11 +282,13 @@ async def test_sites_handler_refine_mode_uses_edit_path() -> None:
 async def test_sites_handler_refine_mode_is_landing_aware() -> None:
     """The refine preamble carries the same landing structure + 5 SSR rules as
     the create brain, so an edit can't introduce a static-site trap."""
-    preamble = await sites_handler.build_preamble(
-        WORKSPACE,
-        USER,
-        SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
-    )
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE,
+            USER,
+            SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
+        )
+    ).text
 
     lower = preamble.lower()
     # Preserve the landing/conversion structure.
@@ -304,9 +322,11 @@ async def test_create_mode_engine_svelte_prefers_create_svelte_site_skill() -> N
     It prefers `pocketpaw-create-svelte-site`, points the MCP fallback at
     `create_svelte_site`, stamps engine="svelte", and forbids the ripple-spec
     machinery — while STILL carrying the shared clarity gate."""
-    preamble = await sites_handler.build_preamble(
-        WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="svelte")
-    )
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="svelte")
+        )
+    ).text
     lower = preamble.lower()
 
     # Still the sites surface, now tagged with the svelte engine + create mode.
@@ -335,13 +355,19 @@ async def test_create_mode_engine_svelte_prefers_create_svelte_site_skill() -> N
 async def test_create_engine_routing_diverges_by_engine() -> None:
     """The three engines fork ONLY on the build tool — html (default), svelte, and
     ripple each name their own create tool and never each other's."""
-    html = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
-    svelte = await sites_handler.build_preamble(
-        WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="svelte")
-    )
-    ripple = await sites_handler.build_preamble(
-        WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="ripple")
-    )
+    html = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
+    svelte = (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="svelte")
+        )
+    ).text
+    ripple = (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="ripple")
+        )
+    ).text
 
     # Each is a distinct preamble (the fork is real), all in create mode.
     assert html != svelte != ripple != html
@@ -383,7 +409,9 @@ async def test_engine_threads_through_meta_from_request() -> None:
 async def test_create_always_two_phase() -> None:
     """Every create meta returns the two-phase flow: an interview/clarity front
     (Phase 1) AND a design+build back (Phase 2) — no flag required."""
-    out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    out = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
     lower = out.lower()
 
     assert '<surface kind="sites"' in out
@@ -398,7 +426,9 @@ async def test_create_always_two_phase() -> None:
 async def test_create_names_design_and_asset_tools() -> None:
     """The create preamble names the design-system, stock, and custom-color tool
     ids so the agent themes the site and wires real assets."""
-    out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    out = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
 
     assert "mcp__pocketpaw_design_systems__list_design_systems" in out
     assert "mcp__pocketpaw_design_systems__get_design_system" in out
@@ -412,9 +442,11 @@ async def test_create_clarify_renders_ripple_widget_when_ripple_on() -> None:
     rendered as a COMPLETE UI: an `ask-user-questions` ripple widget (ui-spec
     block) whose completeActions emit chat.send — NOT the ask_user chip tool."""
     for engine in (None, "html", "ripple"):
-        out = await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
-        )
+        out = (
+            await sites_handler.build_preamble(
+                WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
+            )
+        ).text
         assert "ask-user-questions" in out
         assert "ui-spec" in out
         assert '"target": "chat.send"' in out
@@ -426,9 +458,11 @@ async def test_create_clarify_uses_ask_user_tool_on_svelte() -> None:
     """The svelte track has inline ripple OFF, so the clarity question falls back
     to the `ask_user` MCP chip tool (the agent can't render a ripple widget
     there)."""
-    out = await sites_handler.build_preamble(
-        WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="svelte")
-    )
+    out = (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="svelte")
+        )
+    ).text
     assert "mcp__pocketpaw_ask__ask_user" in out
     assert "ask-user-questions" not in out
 
@@ -438,7 +472,9 @@ async def test_create_embeds_design_system_inline() -> None:
     create preamble (not left to a model-driven skill invocation the agent may
     skip). A regression that drops the embed would silently return sites to
     generic AI output."""
-    out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    out = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
     # The governing block + load-bearing body markers from the skill file.
     assert '<design-system name="pocketpaw-design-taste">' in out
     assert "</design-system>" in out
@@ -453,7 +489,9 @@ async def test_create_decides_design_and_uses_taste_skill() -> None:
     """The create preamble tells the agent to DECIDE the look itself (infer via
     the pocketpaw-design-taste skill), NEVER ask the user for the theme, and
     never fabricate real-world facts."""
-    out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    out = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
     lower = out.lower()
     # Design is inferred via the taste skill, applied throughout the build.
     assert "pocketpaw-design-taste" in out
@@ -468,11 +506,13 @@ async def test_create_decides_design_and_uses_taste_skill() -> None:
 async def test_refine_states_ask_dont_assume_principle() -> None:
     """The refine preamble also tells the agent to ask (not guess) on ambiguous
     edits and never fabricate facts."""
-    out = await sites_handler.build_preamble(
-        WORKSPACE,
-        USER,
-        SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
-    )
+    out = (
+        await sites_handler.build_preamble(
+            WORKSPACE,
+            USER,
+            SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
+        )
+    ).text
     lower = out.lower()
     assert "ask, don't assume" in lower
     assert "fabricate" in lower
@@ -481,7 +521,9 @@ async def test_refine_states_ask_dont_assume_principle() -> None:
 async def test_create_has_just_build_it_escape_hatch() -> None:
     """The interview must always offer the 'just build it' out and cap at one
     round of questions so the flow never traps the user."""
-    out = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    out = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
     lower = out.lower()
 
     assert "just build it" in lower
@@ -492,11 +534,13 @@ async def test_create_has_just_build_it_escape_hatch() -> None:
 async def test_create_leaves_refine_untouched() -> None:
     """The unified create flow only governs the CREATE branch — a refine meta
     (pocket_id set) still returns the refine preamble, never the create flow."""
-    out = await sites_handler.build_preamble(
-        WORKSPACE,
-        USER,
-        SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
-    )
+    out = (
+        await sites_handler.build_preamble(
+            WORKSPACE,
+            USER,
+            SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
+        )
+    ).text
 
     assert 'mode="refine"' in out
     assert 'mode="create"' not in out
@@ -638,7 +682,7 @@ async def test_build_preamble_unchanged_for_create_path() -> None:
     A create meta (no pocket_id) still returns exactly `_create_preamble`'s
     output, proving the new helper is not silently wired into the flow."""
     meta = SurfaceMeta(route_path="/sites")
-    live = await sites_handler.build_preamble(WORKSPACE, USER, meta)
+    live = (await sites_handler.build_preamble(WORKSPACE, USER, meta)).text
 
     assert live == sites_handler._create_preamble(meta)
     # And it is NOT the brief-driven preamble.
@@ -649,7 +693,7 @@ async def test_build_preamble_unchanged_for_refine_path() -> None:
     """A refine meta (with pocket_id) still returns exactly `_refine_preamble`'s
     output — the additive brief helper does not touch the refine dispatch."""
     meta = SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc")
-    live = await sites_handler.build_preamble(WORKSPACE, USER, meta)
+    live = (await sites_handler.build_preamble(WORKSPACE, USER, meta)).text
 
     assert live == sites_handler._refine_preamble(meta)
     assert 'mode="frontend"' not in live
@@ -668,16 +712,18 @@ async def test_sites_handler_chat_mode_is_no_mutation_qa() -> None:
     """mode="chat" + pocket_id yields a Q&A preamble that ANSWERS questions about
     the existing site WITHOUT editing it: it must NOT instruct the edit tool, must
     NOT republish, and must NOT create a new pocket."""
-    preamble = await sites_handler.build_preamble(
-        WORKSPACE,
-        USER,
-        SurfaceMeta(
-            route_path="/sites/site-abc",
-            pocket_id=CHAT_POCKET,
-            site_id="site-abc",
-            mode="chat",
-        ),
-    )
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE,
+            USER,
+            SurfaceMeta(
+                route_path="/sites/site-abc",
+                pocket_id=CHAT_POCKET,
+                site_id="site-abc",
+                mode="chat",
+            ),
+        )
+    ).text
 
     lower = preamble.lower()
     # Still the sites surface, tagged as chat mode.
@@ -699,21 +745,25 @@ async def test_sites_handler_chat_mode_is_no_mutation_qa() -> None:
 async def test_sites_handler_build_mode_identical_to_refine() -> None:
     """mode="build" (and unset) + pocket_id is byte-for-byte the existing refine
     preamble — the Build side of the toggle is today's behavior, unchanged."""
-    unset = await sites_handler.build_preamble(
-        WORKSPACE,
-        USER,
-        SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
-    )
-    build = await sites_handler.build_preamble(
-        WORKSPACE,
-        USER,
-        SurfaceMeta(
-            route_path="/sites/site-abc",
-            pocket_id=REFINE_POCKET,
-            site_id="site-abc",
-            mode="build",
-        ),
-    )
+    unset = (
+        await sites_handler.build_preamble(
+            WORKSPACE,
+            USER,
+            SurfaceMeta(route_path="/sites/site-abc", pocket_id=REFINE_POCKET, site_id="site-abc"),
+        )
+    ).text
+    build = (
+        await sites_handler.build_preamble(
+            WORKSPACE,
+            USER,
+            SurfaceMeta(
+                route_path="/sites/site-abc",
+                pocket_id=REFINE_POCKET,
+                site_id="site-abc",
+                mode="build",
+            ),
+        )
+    ).text
 
     # The toggle's Build side is exactly the refine preamble; unset defaults to it.
     assert build == unset
@@ -725,12 +775,14 @@ async def test_sites_handler_build_mode_identical_to_refine() -> None:
 async def test_sites_handler_chat_mode_ignored_without_pocket_id() -> None:
     """mode="chat" with NO pocket_id is still the create surface — chat mode only
     applies to an existing site, so the gallery/create path is unaffected."""
-    chat_no_pocket = await sites_handler.build_preamble(
-        WORKSPACE, USER, SurfaceMeta(route_path="/sites", mode="chat")
-    )
-    plain_create = await sites_handler.build_preamble(
-        WORKSPACE, USER, SurfaceMeta(route_path="/sites")
-    )
+    chat_no_pocket = (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", mode="chat")
+        )
+    ).text
+    plain_create = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
 
     # No pocket to chat about → the create preamble is unchanged by mode.
     assert chat_no_pocket == plain_create

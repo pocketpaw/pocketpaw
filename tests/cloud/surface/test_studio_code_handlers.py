@@ -85,9 +85,9 @@ USER = "u-studiocode"
 async def test_studio_handler_carries_media_orientation() -> None:
     """The preamble orients to media generation on the studio surface — and must
     NOT frame the deliverable as a dashboard or a pocket."""
-    preamble = await studio_handler.build_preamble(
-        WORKSPACE, USER, SurfaceMeta(route_path="/studio")
-    )
+    preamble = (
+        await studio_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/studio"))
+    ).text
 
     assert '<surface kind="studio"' in preamble
     lower = preamble.lower()
@@ -104,9 +104,9 @@ async def test_studio_handler_carries_media_orientation() -> None:
 async def test_studio_handler_prefers_studio_skill_and_names_media_tools() -> None:
     """The procedure PREFERS the `studio` skill and names the media MCP tools as
     the fallback so the generate→gallery flow never breaks."""
-    preamble = await studio_handler.build_preamble(
-        WORKSPACE, USER, SurfaceMeta(route_path="/studio")
-    )
+    preamble = (
+        await studio_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/studio"))
+    ).text
 
     assert "prefer" in preamble.lower()
     assert "`studio`" in preamble or "studio skill" in preamble.lower()
@@ -118,9 +118,9 @@ async def test_studio_handler_prefers_studio_skill_and_names_media_tools() -> No
 async def test_studio_handler_relays_provider_errors() -> None:
     """The procedure tells the agent to relay provider/key errors plainly and
     never fake a generated asset."""
-    preamble = await studio_handler.build_preamble(
-        WORKSPACE, USER, SurfaceMeta(route_path="/studio")
-    )
+    preamble = (
+        await studio_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/studio"))
+    ).text
     lower = preamble.lower()
     assert "error" in lower
     assert "phantom" in lower or "never claim" in lower
@@ -165,7 +165,9 @@ _LEGACY_STORAGE_META = SurfaceMeta(
 async def test_code_handler_carries_coding_orientation() -> None:
     """The preamble orients to editing + running code on the code surface — and
     must NOT frame the deliverable as a dashboard or a pocket."""
-    preamble = await code_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/code"))
+    preamble = (
+        await code_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/code"))
+    ).text
 
     assert '<surface kind="code" ' in preamble
     lower = preamble.lower()
@@ -177,7 +179,9 @@ async def test_code_handler_carries_coding_orientation() -> None:
 
 async def test_code_handler_routes_all_work_through_the_file_tools() -> None:
     """The file tools are named as the ONLY route to the user's project."""
-    preamble = await code_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/code"))
+    preamble = (
+        await code_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/code"))
+    ).text
 
     for tool in ("readFile", "search", "listDir", "writeFile"):
         assert tool in preamble, f"the preamble must name the {tool} tool"
@@ -188,7 +192,9 @@ async def test_code_handler_routes_all_work_through_the_file_tools() -> None:
 async def test_code_handler_forbids_the_filesystem_builtins() -> None:
     """The procedure names the file/shell built-ins ONLY to forbid them — the
     agent has no filesystem on this surface."""
-    preamble = await code_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/code"))
+    preamble = (
+        await code_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/code"))
+    ).text
 
     for tool in ("Bash", "Read", "Write", "Edit", "Glob", "Grep"):
         assert tool in preamble, f"preamble should name the {tool} tool to forbid it"
@@ -201,7 +207,9 @@ async def test_code_handler_acts_immediately_on_a_selection() -> None:
     """An edit scoped to a selection the user already made is acted on at once —
     no re-reading the project first (the selection and its file are already in
     context, so a redundant round-trip is a wasted wait)."""
-    preamble = await code_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/code"))
+    preamble = (
+        await code_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/code"))
+    ).text
     lower = preamble.lower()
 
     assert "selection" in lower
@@ -212,7 +220,9 @@ async def test_code_handler_acts_immediately_on_a_selection() -> None:
 async def test_code_handler_names_no_daytona_tool() -> None:
     """The stale Daytona MCP tool names are gone — they point at a runtime that
     knows nothing of codeproject / CodeFileSession."""
-    preamble = await code_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/code"))
+    preamble = (
+        await code_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/code"))
+    ).text
     lower = preamble.lower()
 
     for tool in _STALE_DAYTONA_TOOLS:
@@ -228,7 +238,7 @@ async def test_code_handler_leaks_no_filesystem_path_even_from_legacy_meta() -> 
     to "your working directory is the workspace root", which is the BACKEND
     SERVER's filesystem, and the agent would edit it and report success."""
     for meta in (SurfaceMeta(route_path="/code"), _LEGACY_STORAGE_META):
-        preamble = await code_handler.build_preamble(WORKSPACE, USER, meta)
+        preamble = (await code_handler.build_preamble(WORKSPACE, USER, meta)).text
         lower = preamble.lower()
 
         assert "/srv/pocketpaw" not in lower
@@ -249,7 +259,9 @@ async def test_code_handler_reads_build_an_app_as_code() -> None:
     request whose every noun ("app", "components", "design") matches the
     create-pocket skill. So the prose has to claim those words for the front-end
     reading, not just forbid the outcome."""
-    preamble = await code_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/code"))
+    preamble = (
+        await code_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/code"))
+    ).text
     lower = preamble.lower()
 
     assert "component" in lower
@@ -261,7 +273,9 @@ async def test_code_handler_reads_build_an_app_as_code() -> None:
 async def test_code_handler_forbids_phantom_success() -> None:
     """The agent reports only what `code_mode` confirmed — a tool error is
     surfaced plainly, never dressed up as a completed change."""
-    preamble = await code_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/code"))
+    preamble = (
+        await code_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/code"))
+    ).text
     lower = preamble.lower()
 
     assert "error" in lower

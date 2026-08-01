@@ -5,6 +5,14 @@ Updated: 2026-08-02 (PA-1 review) — ``LayerOutput`` rejects an empty
   ``cache_key``. ``""`` read as "stable forever" while being exactly what an
   author types when they mean "nothing" — the one answer to this field's
   question that failed silently in the unsafe direction.
+Updated: 2026-08-02 (PA-2) — ``PromptContext`` carries the surface the user is
+  looking at: ``surface_preamble`` (the rendered block) and
+  ``surface_cache_key`` (what the EE handler that BUILT it says it read). Both
+  are plain data — a ``str`` and a ``str | None`` — because the producer lives
+  in ``pocketpaw_ee`` and the OSS core must never import it (the same shape
+  ``deny_mcp_tool_ids`` crosses on). Defaulted so every non-cloud caller (the
+  channel path, OSS local runs, ``prewarm`` before a surface is known) is
+  unchanged.
 
 The system prompt used to be one long string built by appending blocks in
 ``AgentPool._assemble_system_prompt``. That worked until three backends
@@ -76,6 +84,15 @@ class PromptContext:
     ``instance`` is the pool's ``AgentInstance`` and is typed ``Any`` on
     purpose: this package must not import ``pocketpaw.agents``, which imports
     it. The same opaque pass-through discipline as ``SessionHandle.session_store``.
+
+    ``surface_preamble`` / ``surface_cache_key`` (PA-2) are the surface the user
+    is looking at, resolved in the EE cloud layer and handed across as plain
+    data. The KEY comes with the text rather than being derived from it here
+    because only the handler that built the preamble knows what it read: a
+    pocket preamble lists the first 12 of N widgets under a 1500-char cap, so
+    editing widget 13 moves the pocket without moving a single rendered byte.
+    ``None`` (no surface, or a producer that would not claim stability) means
+    the layer keeps its text out of the digest.
     """
 
     instance: Any
@@ -84,6 +101,8 @@ class PromptContext:
     instructions: str
     knowledge_context: str
     system_message_override: str | None
+    surface_preamble: str = ""
+    surface_cache_key: str | None = None
 
 
 class PromptLayer(Protocol):

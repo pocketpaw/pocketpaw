@@ -1,6 +1,9 @@
 """Central registry for :class:`~pocketpaw.prompt.layer.PromptLayer` implementations.
 
 Created: 2026-08-02 (PA-1, feat/prompt-assembler-seam).
+Updated: 2026-08-02 (PA-2) — registers ``surface``. It holds no surface state
+  itself (every per-run input still arrives on ``PromptContext``), so the
+  process-wide instance stays safe to share across tenants.
 
 Follows the runtime's registry convention (workspace engineering charter,
 Pillar 3): ``register`` / ``get`` / ``list`` over a name-keyed dict, plus one
@@ -14,6 +17,7 @@ from __future__ import annotations
 from pocketpaw.prompt.identity import AgentIdentityLayer
 from pocketpaw.prompt.layer import PromptLayer
 from pocketpaw.prompt.passthrough import LegacyTailLayer
+from pocketpaw.prompt.surface import SurfaceContextLayer
 
 
 class PromptLayerRegistry:
@@ -39,4 +43,5 @@ prompt_layer_registry = PromptLayerRegistry()
 # them in (the cloud path's order lives in ``AgentPool``); the registry owns
 # WHICH implementation answers to a name.
 prompt_layer_registry.register(AgentIdentityLayer.name, AgentIdentityLayer())
+prompt_layer_registry.register(SurfaceContextLayer.name, SurfaceContextLayer())
 prompt_layer_registry.register(LegacyTailLayer.name, LegacyTailLayer())

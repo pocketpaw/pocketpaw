@@ -8,6 +8,22 @@
 #   2. When no surface_context is attached (older clients that don't
 #      send the new fields), the dynamic-context block keeps its
 #      legacy three-line shape — no regression for unmigrated callers.
+#
+# Rewritten: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — guarantee (1) is
+# GONE, deliberately, and this file now holds the opposite. The preamble is a
+# prompt LAYER now (``pocketpaw.prompt.surface``), assembled under the agent's
+# identity and above the per-turn material. "Lands first in the dynamic
+# context" never actually meant "the agent sees it first": the dynamic context
+# is wrapped in "## Your Knowledge Base" and appended at the BOTTOM of the
+# prompt, so the preamble was landing last, framed as reference data. It also
+# could not carry its cache key from in there, which is what the surface layer
+# is for.
+#
+# What is held here now: ``build_dynamic_context`` emits its three legacy tags
+# and NOTHING surface-shaped, for every ctx, so the preamble cannot be rendered
+# twice — once by the layer and once inside the knowledge wrapper. The
+# threading that replaces it is pinned in ``tests/cloud/runs/`` (into
+# ``pool.run``) and ``tests/test_prompt_surface_layer.py`` (into the prompt).
 
 from __future__ import annotations
 
@@ -37,8 +53,11 @@ def _scope_ctx(**overrides) -> ScopeContext:
     return ScopeContext(**base)
 
 
-async def test_build_dynamic_context_prepends_surface_preamble_when_present() -> None:
-    """Surface preamble lands before scope/participants/current-pocket tags."""
+async def test_build_dynamic_context_no_longer_carries_the_surface_preamble() -> None:
+    """The preamble rides its own prompt layer, so it must NOT also appear
+    here. Two copies in one prompt is the failure this guards: the layer would
+    render it high, the knowledge wrapper would repeat it at the bottom, and
+    nothing would look broken until someone read the assembled prompt."""
     surface = SurfaceContext(
         workspace_id="w1",
         user_id="u1",
@@ -47,20 +66,20 @@ async def test_build_dynamic_context_prepends_surface_preamble_when_present() ->
         preamble=(
             '<surface kind="home" route="/" />\n<pinned-widgets count="0">(empty)</pinned-widgets>'
         ),
+        preamble_cache_key="home:s:abc123",
     )
     ctx = _scope_ctx(surface_context=surface)
 
     rendered = build_dynamic_context(ctx)
-    lines = rendered.splitlines()
 
-    # Surface block comes first.
-    assert lines[0].startswith('<surface kind="home"')
-    # Pinned-widgets next, before scope.
-    assert "<pinned-widgets" in lines[1]
-    # Legacy scope/participants/current-pocket still follow.
-    assert any("<scope>pocket p1</scope>" in line for line in lines)
-    assert any("<participants>" in line for line in lines)
-    assert any('<current-pocket id="p1"' in line for line in lines)
+    assert "<surface" not in rendered
+    assert "<pinned-widgets" not in rendered
+    # The three legacy tags are untouched, in their original order.
+    assert rendered.splitlines() == [
+        "<scope>pocket p1</scope>",
+        "<participants>u1, agent-1</participants>",
+        '<current-pocket id="p1" />',
+    ]
 
 
 async def test_build_dynamic_context_falls_back_to_old_shape_when_surface_context_is_none() -> None:
@@ -78,24 +97,25 @@ async def test_build_dynamic_context_falls_back_to_old_shape_when_surface_contex
     assert '<current-pocket id="p1" />' in rendered
 
 
-async def test_build_dynamic_context_skips_empty_preamble() -> None:
-    """A surface_context with an empty preamble (handler fell back) is skipped.
+async def test_build_dynamic_context_renders_one_shape_for_every_ctx() -> None:
+    """A surface-stamped ctx and a bare one now produce the SAME block.
 
-    The empty-preamble path is the GENERIC fall-back the resolver uses
-    when validation fails or a handler raises. The dynamic-context
-    block must not emit an empty leading newline in that case.
+    Stated as its own test because it is the property that makes the layer
+    safe: whatever the surface is, this block no longer varies with it, so
+    there is exactly one place the preamble can come from.
     """
-    surface = SurfaceContext(
-        workspace_id="w1",
-        user_id="u1",
-        kind=SurfaceKind.GENERIC,
-        meta=SurfaceMeta(),
-        preamble="",
+    surfaced = build_dynamic_context(
+        _scope_ctx(
+            surface_context=SurfaceContext(
+                workspace_id="w1",
+                user_id="u1",
+                kind=SurfaceKind.GENERIC,
+                meta=SurfaceMeta(),
+                preamble='<surface kind="generic" route="/x" />',
+                preamble_cache_key="generic:/x",
+            )
+        )
     )
-    ctx = _scope_ctx(surface_context=surface)
+    bare = build_dynamic_context(_scope_ctx(surface_context=None))
 
-    rendered = build_dynamic_context(ctx)
-    lines = rendered.splitlines()
-
-    # First line must be the scope tag — no blank leader from a "" preamble.
-    assert lines[0].startswith("<scope>")
+    assert surfaced == bare
