@@ -81,6 +81,14 @@ threaded through the same three places for the same reason — both doc↔spec
 mappers and ``_apply_update``'s explicit field list. The stakes are higher than
 for ``sense_prefs``: erasing the mount list doesn't lose a provider preference,
 it silently WIDENS the agent's reach back to the full workspace sense surface.
+Updated 2026-08-02 (Sense Phase 2, SP2-5 — the config surface): both sense fields
+are now settable at CREATE (``_build_create_config``) and via an explicit
+``senses`` / ``sense_prefs`` on ``UpdateAgentRequest`` (the second branch of
+``_apply_update``), not only through a nested ``config`` dict. Create needed it
+because the create DTO has no ``config`` dict at all — before this, the only way
+to mount a sense on a new agent was a follow-up PATCH. The explicit update branch
+is the safer of the two paths for a caller that wants to set ONE field: it uses
+``dataclasses.replace``, so omission can't erase a neighbour.
 """
 
 from __future__ import annotations
@@ -245,6 +253,14 @@ def _build_create_config(body: CreateAgentRequest) -> AgentConfigSpec:
         overrides["voice"] = dict(body.voice)
     if body.appearance is not None:
         overrides["appearance"] = dict(body.appearance)
+    # SP2-5 — the sense fields at CREATE. There is no ``config`` dict on the
+    # create DTO, so without these two an agent could only be given senses by a
+    # second PATCH (or by writing the doc directly, which is what the SP2-3 tests
+    # had to do). Ids are already validated on the DTO.
+    if body.senses is not None:
+        overrides["senses"] = tuple(body.senses)
+    if body.sense_prefs is not None:
+        overrides["sense_prefs"] = tuple(body.sense_prefs.items())
     return replace(base, **overrides) if overrides else base
 
 
@@ -330,6 +346,13 @@ def _apply_update(current: AgentConfigSpec, body: UpdateAgentRequest) -> AgentCo
         overrides["voice"] = dict(body.voice)
     if body.appearance is not None:
         overrides["appearance"] = dict(body.appearance)
+    # SP2-5 — the explicit-field twin of the ``config``-dict branch above. This
+    # branch REPLACES only what it names (``replace`` on the current spec), so
+    # unlike that branch it cannot erase a field by omission.
+    if body.senses is not None:
+        overrides["senses"] = tuple(body.senses)
+    if body.sense_prefs is not None:
+        overrides["sense_prefs"] = tuple(body.sense_prefs.items())
 
     return replace(current, **overrides) if overrides else current
 

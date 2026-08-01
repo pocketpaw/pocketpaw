@@ -80,6 +80,13 @@ non-empty is EXCLUSIVE and anything else refuses with `sense.not_carried`) and
 `sense_prefs` (per-sense provider choice that outranks the stored
 pocket/workspace preference row but never widens reach). Both validate sense ids
 at write time; connector-name values stay unvalidated on purpose.
+
+Updated: 2026-08-02 (Sense Phase 2, SP2-5) — the same section now documents HOW
+to set and read those two fields, which until this slice it did not say: both are
+top-level fields on POST /agents and PATCH /agents/{id} (and PATCH still accepts
+them inside the nested `config` object), and both are returned under `config` on
+the agent reads. The 422-on-bogus-sense-id the section already promised is now
+actually a 422 on every path in, rather than a 500 from the nested-config one.
 -->
 
 # Cloud REST API Reference
@@ -829,8 +836,7 @@ A **Sense** is a provider-agnostic capability (`paw.email.v1` = email,
 `paw.code.v1` = repos/issues/PRs); the resolver binds it to whichever
 connector the tenant enabled. See [CONNECTORS.md](./CONNECTORS.md) for the
 Sense model and the `list_senses` / `sense_execute` agent tools. An agent's
-`config` carries two sense-shaped fields, set the same way `skill_refs` is —
-via `POST /agents` or `PATCH /agents/{id}` (nested `config` object):
+`config` carries two sense-shaped fields:
 
 | Field | Type | Meaning |
 |-------|------|---------|
@@ -838,6 +844,29 @@ via `POST /agents` or `PATCH /agents/{id}` (nested `config` object):
 | `sense_prefs` | `{sense_id: connector_name}` | Which provider this agent prefers per sense. |
 
 Both default to empty, so every existing agent behaves exactly as before.
+
+**Setting and reading them.** Both are accepted as top-level fields on
+`POST /agents` and `PATCH /agents/{id}`, and `PATCH` also accepts them inside
+the nested `config` object. Both are returned under `config` on
+`GET /agents/{id}` and `GET /agents`.
+
+Prefer the top-level form when you are changing one thing. The nested `config`
+form replaces the whole config object, so it is the one to use when you already
+hold a full config; the top-level form only touches the fields it names. On
+`PATCH`, omitting a field leaves it unchanged — sending `"senses": []` is a real
+value that clears the mount list back to "inherit".
+
+```jsonc
+POST /agents
+{
+  "name": "Mailer", "slug": "mailer",
+  "senses": ["paw.email.v1"],
+  "sense_prefs": {"paw.email.v1": "gmail"}
+}
+
+PATCH /agents/{id}
+{ "senses": ["paw.email.v1", "paw.calendar.v1"] }   // sense_prefs untouched
+```
 
 **`senses` is exclusive when set.** Empty means "inherit" — the agent reaches
 every sense that resolves for the workspace, which is the legacy behaviour. A

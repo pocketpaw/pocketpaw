@@ -15,6 +15,15 @@
 #   * Identity seeding: welcome_message/starters degrade gracefully because the
 #     ASG-1 identity fields are ABSENT on this branch (the created agent carries
 #     neither field); starters ride the frame config payload.
+#
+# Updated 2026-08-02 (Sense Phase 2, SP2-5): added TestSenseSeeding for
+# ``ensure_site_agent``'s ``senses`` / ``sense_prefs`` keywords — set on CREATE,
+# filled on a re-ensure only while the stored value is empty, per FIELD, and never
+# on an agent the site owner doesn't own. The clobber case is the one that matters:
+# provisioning re-runs on every publish, so an owner's hand-edited mount list has
+# to survive it. ``None`` (what every call site passes today) is pinned as a
+# no-behaviour-change path — the hook is deliberately inert, see the provisioning
+# module's header for why.
 
 from __future__ import annotations
 
@@ -677,3 +686,155 @@ class TestFirstPublishProvisioning:
         assert second.id == first.id
         widgets = await store.list_widgets(pocket_id=_POCKET, workspace_id=_WS, limit=10)
         assert len(widgets) == 1, "a second publish must not mint a sibling widget"
+
+
+# --------------------------------------------------------------------------- #
+# Sense seeding (SP2-5)
+# --------------------------------------------------------------------------- #
+
+
+@pytest_asyncio.fixture
+async def bare_store(tmp_path, mongo_db):
+    """A tmp paw-bar store patched in at the source, with no HTTP app.
+
+    ``ensure_site_agent``'s sense keywords are called directly here: no route
+    passes them yet (see the module header's "WHY THE HOOK IS INERT"), so there
+    is no request to fire.
+    """
+    from unittest.mock import patch
+
+    store = PawBarStore(tmp_path / "senses.db")
+    with patch("pocketpaw_ee.api.get_paw_bar_store", return_value=store):
+        yield store
+
+
+class TestSenseSeeding:
+    """``ensure_site_agent(senses=..., sense_prefs=...)`` — set on create, and on a
+    re-ensure only when the stored value is still empty."""
+
+    @pytest.mark.asyncio
+    async def test_create_carries_both_fields(self, bare_store) -> None:
+        from pocketpaw_ee.cloud.agents import service as agents_service
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        site = await _site()
+        widget = await bare_store.create_widget(_widget())
+
+        agent_id = await ap.ensure_site_agent(
+            site,
+            widget,
+            senses=["paw.email.v1"],
+            sense_prefs={"paw.email.v1": "gmail"},
+        )
+
+        assert agent_id
+        agent = await agents_service.get(agent_id)
+        assert agent.config.senses == ("paw.email.v1",)
+        assert agent.config.sense_prefs == (("paw.email.v1", "gmail"),)
+
+    @pytest.mark.asyncio
+    async def test_none_leaves_the_config_empty(self, bare_store) -> None:
+        """The default every call site uses today — byte-for-byte the old path."""
+        from pocketpaw_ee.cloud.agents import service as agents_service
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        site = await _site()
+        widget = await bare_store.create_widget(_widget())
+
+        agent_id = await ap.ensure_site_agent(site, widget)
+
+        agent = await agents_service.get(agent_id)
+        assert agent.config.senses == ()
+        assert agent.config.sense_prefs == ()
+
+    @pytest.mark.asyncio
+    async def test_reensure_fills_an_empty_mount_list(self, bare_store) -> None:
+        """The agent already exists and is already bound; a later ensure that DOES
+        carry senses still gets to pin them, because nothing is being overwritten."""
+        from pocketpaw_ee.cloud.agents import service as agents_service
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        site = await _site()
+        widget = await bare_store.create_widget(_widget())
+        agent_id = await ap.ensure_site_agent(site, widget)
+        bound = await bare_store.get_widget(widget.id, workspace_id=_WS)
+        assert bound.agent_id == agent_id
+
+        again = await ap.ensure_site_agent(site, bound, senses=["paw.email.v1"])
+
+        assert again == agent_id, "a re-ensure must not mint a second agent"
+        agent = await agents_service.get(agent_id)
+        assert agent.config.senses == ("paw.email.v1",)
+
+    @pytest.mark.asyncio
+    async def test_reensure_never_clobbers_an_owner_edit(self, bare_store) -> None:
+        """The rule that matters: ``ensure_site_agent`` re-runs on EVERY publish, so
+        an owner who narrowed their concierge by hand must not have it silently
+        reverted to whatever the provisioner wanted."""
+        from pocketpaw_ee.cloud.agents import service as agents_service
+        from pocketpaw_ee.cloud.agents.dto import UpdateAgentRequest
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        site = await _site()
+        widget = await bare_store.create_widget(_widget())
+        agent_id = await ap.ensure_site_agent(site, widget, senses=["paw.email.v1"])
+
+        # The owner edits it in the dashboard.
+        ctx = agents_service.legacy_ctx(_OWNER, _WS)
+        await agents_service.update(ctx, agent_id, UpdateAgentRequest(senses=["paw.code.v1"]))
+
+        bound = await bare_store.get_widget(widget.id, workspace_id=_WS)
+        again = await ap.ensure_site_agent(site, bound, senses=["paw.email.v1"])
+
+        assert again == agent_id
+        agent = await agents_service.get(agent_id)
+        assert agent.config.senses == ("paw.code.v1",), "the owner's edit must win"
+
+    @pytest.mark.asyncio
+    async def test_fields_are_seeded_independently(self, bare_store) -> None:
+        """Per FIELD, not all-or-nothing: an owner-set mount list keeps its value
+        while the still-empty pref is filled."""
+        from pocketpaw_ee.cloud.agents import service as agents_service
+        from pocketpaw_ee.cloud.agents.dto import UpdateAgentRequest
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        site = await _site()
+        widget = await bare_store.create_widget(_widget())
+        agent_id = await ap.ensure_site_agent(site, widget)
+
+        ctx = agents_service.legacy_ctx(_OWNER, _WS)
+        await agents_service.update(ctx, agent_id, UpdateAgentRequest(senses=["paw.code.v1"]))
+
+        bound = await bare_store.get_widget(widget.id, workspace_id=_WS)
+        await ap.ensure_site_agent(
+            site,
+            bound,
+            senses=["paw.email.v1"],
+            sense_prefs={"paw.code.v1": "gitlab"},
+        )
+
+        agent = await agents_service.get(agent_id)
+        assert agent.config.senses == ("paw.code.v1",)
+        assert agent.config.sense_prefs == (("paw.code.v1", "gitlab"),)
+
+    @pytest.mark.asyncio
+    async def test_a_foreign_owned_manual_bind_is_left_alone(self, bare_store) -> None:
+        """ "Manual binds are never overwritten" extended to config: a widget a human
+        pointed at somebody ELSE's agent is not reconfigured by this site's owner."""
+        from pocketpaw_ee.cloud.agents import service as agents_service
+        from pocketpaw_ee.cloud.agents.dto import CreateAgentRequest
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        site = await _site()
+        stranger_ctx = agents_service.legacy_ctx("user:stranger", _WS)
+        stranger = await agents_service.create(
+            stranger_ctx,
+            _WS,
+            CreateAgentRequest(name="Theirs", slug="theirs", soul_enabled=False),
+        )
+        widget = await bare_store.create_widget(_widget(agent_id=stranger.id))
+
+        bound_id = await ap.ensure_site_agent(site, widget, senses=["paw.email.v1"])
+
+        assert bound_id == stranger.id
+        assert (await agents_service.get(stranger.id)).config.senses == ()

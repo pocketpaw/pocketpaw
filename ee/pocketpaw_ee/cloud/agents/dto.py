@@ -15,6 +15,24 @@ excludes other members' public agents). ``CreateAgentRequest`` /
 (``welcome_message`` / ``conversation_starters`` / ``voice`` / ``appearance`` /
 ``tags``); ``agent_to_dict`` (+ ``_config_to_dict``) and ``AgentResponse`` now
 emit them on the wire.
+
+Updated: 2026-08-02 (Sense Phase 2, SP2-5 — the config surface) — the two sense
+fields SP2-2/SP2-3 put on the model become OPERABLE over HTTP. Three changes,
+each load-bearing:
+
+  * ``CreateAgentRequest`` / ``UpdateAgentRequest`` gained explicit ``senses`` /
+    ``sense_prefs`` fields, so they are settable at create (the nested ``config``
+    dict does not exist on create at all) and settable on update without having
+    to send a whole ``config`` object.
+  * ``_config_to_dict`` emits both, so ``GET /agents/{id}`` actually SHOWS what
+    an agent carries. Without this the fields were write-only — persisted,
+    honoured at run time, invisible to the owner who set them.
+  * Sense ids are validated HERE as well as at the Beanie boundary, on the
+    explicit fields AND inside the ``config`` dict. The schema validator alone
+    raises a pydantic ``ValidationError`` from deep inside the service, which the
+    ``CloudError`` handler does not catch — it surfaces as a 500. Validating at
+    the DTO makes a bogus id a 422 carrying the vocabulary's own message, which
+    is what ``docs/api-reference.md`` has always promised.
 """
 
 from __future__ import annotations
@@ -24,9 +42,46 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from pocketpaw.senses import validate_sense_id
 from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.agents.domain import Agent, AgentConfigSpec
 from pocketpaw_ee.cloud.agents.scope_rules import normalise_and_validate_scopes
+
+# ---------------------------------------------------------------------------
+# Sense-id validation at the wire boundary
+# ---------------------------------------------------------------------------
+
+
+def _check_sense_ids(sense_ids: Any) -> None:
+    """Validate every id in an iterable of sense ids (a list, or a dict's keys).
+
+    ``validate_sense_id`` raises ``SenseValidationError`` (a ``ValueError``), so
+    pydantic turns it into a field error and FastAPI answers 422 with the
+    vocabulary's own message ("unknown core sense id ... the paw.* namespace is
+    closed. Known core senses: [...]") rather than a bare "invalid".
+    """
+    for sense_id in sense_ids:
+        validate_sense_id(sense_id)
+
+
+def _validate_config_sense_fields(config: dict | None) -> dict | None:
+    """Validate the sense fields carried inside an update's nested ``config``.
+
+    The ``config``-dict branch of ``service._apply_update`` writes ``senses`` /
+    ``sense_prefs`` straight through, so without this the only validation left is
+    the Beanie one — a 500 instead of a 422. Non-list / non-dict values are left
+    alone: the service's own ``.get`` fallbacks and the Beanie schema decide those.
+    """
+    if config is None:
+        return config
+    senses = config.get("senses")
+    if isinstance(senses, list):
+        _check_sense_ids(senses)
+    prefs = config.get("sense_prefs")
+    if isinstance(prefs, dict):
+        _check_sense_ids(prefs)
+    return config
+
 
 # ---------------------------------------------------------------------------
 # Requests (preserved from schemas.py)
@@ -60,11 +115,31 @@ class CreateAgentRequest(BaseModel):
     voice: dict | None = None
     appearance: dict | None = None
     tags: list[str] | None = None
+    # Sense fields (SP2-5). ``None`` == "leave at the model default" (empty), so
+    # an old client that never sends them creates the same agent as before.
+    senses: list[str] | None = None
+    sense_prefs: dict[str, str] | None = None
 
     @field_validator("scopes")
     @classmethod
     def _clean_scopes(cls, v: list[str] | None) -> list[str] | None:
         return None if v is None else normalise_and_validate_scopes(v)
+
+    @field_validator("senses")
+    @classmethod
+    def _clean_senses(cls, v: list[str] | None) -> list[str] | None:
+        if v is not None:
+            _check_sense_ids(v)
+        return v
+
+    @field_validator("sense_prefs")
+    @classmethod
+    def _clean_sense_prefs(cls, v: dict[str, str] | None) -> dict[str, str] | None:
+        # KEYS only — a connector name is workspace state, not schema state
+        # (same rule as ``models.agent.AgentConfig``).
+        if v is not None:
+            _check_sense_ids(v)
+        return v
 
 
 class UpdateAgentRequest(BaseModel):
@@ -93,11 +168,35 @@ class UpdateAgentRequest(BaseModel):
     voice: dict | None = None
     appearance: dict | None = None
     tags: list[str] | None = None
+    # Sense fields (SP2-5) — ``None`` == "leave unchanged", like every other
+    # explicit field here. Settable this way OR inside ``config``; both branches
+    # of ``service._apply_update`` carry them.
+    senses: list[str] | None = None
+    sense_prefs: dict[str, str] | None = None
 
     @field_validator("scopes")
     @classmethod
     def _clean_scopes(cls, v: list[str] | None) -> list[str] | None:
         return None if v is None else normalise_and_validate_scopes(v)
+
+    @field_validator("senses")
+    @classmethod
+    def _clean_senses(cls, v: list[str] | None) -> list[str] | None:
+        if v is not None:
+            _check_sense_ids(v)
+        return v
+
+    @field_validator("sense_prefs")
+    @classmethod
+    def _clean_sense_prefs(cls, v: dict[str, str] | None) -> dict[str, str] | None:
+        if v is not None:
+            _check_sense_ids(v)
+        return v
+
+    @field_validator("config")
+    @classmethod
+    def _clean_config_senses(cls, v: dict | None) -> dict | None:
+        return _validate_config_sense_fields(v)
 
 
 class ScopeAssignmentRequest(BaseModel):
@@ -152,6 +251,11 @@ def _config_to_dict(cfg: AgentConfigSpec) -> dict[str, Any]:
         "conversation_starters": list(cfg.conversation_starters),
         "voice": cfg.voice,
         "appearance": dict(cfg.appearance),
+        # SP2-5 — read them back. Persisted + honoured at run time since SP2-2/3,
+        # but until they were emitted here the owner had no way to SEE what their
+        # agent carries, which makes an exclusive mount list unauditable.
+        "senses": list(cfg.senses),
+        "sense_prefs": dict(cfg.sense_prefs),
     }
 
 
