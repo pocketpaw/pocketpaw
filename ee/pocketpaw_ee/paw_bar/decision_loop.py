@@ -1,4 +1,23 @@
 # ee/paw_bar/decision_loop.py — Close the customer decision loop via Instinct.
+# Updated: 2026-08-01 (AL-2, paw-bar emitters) — ``deliver_customer_decision``
+#   now records the DELIVERED beat (``paw.action.delivered``) through
+#   ``paw_bar/ledger.py``. AL-1 gave the funnel its proposal and its approval;
+#   without this the board could show that a human said yes but never that the
+#   visitor got the answer — which is the only step the customer experiences.
+#   Three deliberate choices, each of which was a way to get this wrong:
+#     * ONLY on the DELIVERED path. A decline already lands AL-1's
+#       ``paw.action.rejected`` row, so emitting on both would count one refusal
+#       twice and quietly inflate the funnel's last stage.
+#     * The FILE is routed by the widget's real ``workspace_id`` — the same token
+#       ``propose_customer_decision`` routes the instinct.db by — while the row's
+#       in-row scope is the blob's workspace (the Action's own scope). This file
+#       has kept those two values apart since the H1 fix for exactly this reason:
+#       the blob's value falls back to the colon-qualified OWNER label, which the
+#       store factory rejects, and a rejected route inside a fail-soft emitter is
+#       a row that vanishes with nobody told. Approved row and delivered row now
+#       land in the same file AND the same bucket.
+#     * The widget lookup moved OUT of the email block so both consumers share
+#       one read; the email path is otherwise untouched.
 # Updated: 2026-07-31 (AL-1, agent ledger spine) — both propose paths now stamp
 #   ``actor_agent_id`` on the Action from the widget's bound agent, via the new
 #   ``resolve_widget_agent`` helper. Until now the only trace of WHICH agent
@@ -629,6 +648,41 @@ async def deliver_customer_decision(action: Any, *, declined: bool = False) -> N
             updated.customer_ref,
         )
 
+        # The widget is resolved ONCE here and reused by both blocks below. It
+        # was previously loaded inside the email block; the ledger emit needs the
+        # same object (for the agent binding and, load-bearingly, for the real
+        # ``workspace_id`` that routes the ledger FILE), and reading the same row
+        # twice on an approve click would be waste. Its own guard, so a widget
+        # that has since been deleted degrades to "no widget" for both consumers
+        # instead of breaking the delivery that already landed.
+        widget: Any = None
+        try:
+            widget = await store.get_widget(updated.widget_id)
+        except Exception:  # noqa: BLE001 — the decision is already delivered
+            logger.debug("widget lookup failed for %s", updated.widget_id, exc_info=True)
+
+        # AL-2 — the delivered beat. Only on the DELIVERED path: this kind means
+        # "the approved answer reached the person waiting for it", and a decline
+        # is already counted by AL-1's ``paw.action.rejected`` row, so emitting
+        # here too would put one refusal in the funnel twice. A delivery whose
+        # widget no longer resolves records NOTHING rather than guessing a file
+        # to route it into — the visitor still got their answer, and a row in the
+        # wrong tenant's ledger is worse than an absent one. Fail-soft by
+        # construction (see paw_bar/ledger.py) — never raises into the approve.
+        if state == DecisionState.DELIVERED and widget is not None:
+            from pocketpaw_ee.paw_bar import ledger
+
+            await ledger.emit_action_delivered(
+                action=action,
+                widget=widget,
+                customer_ref=updated.customer_ref,
+                # In-row scope = the blob's workspace, i.e. EXACTLY the scope the
+                # Instinct Action carries, so the delivered row lands in the same
+                # bucket as its own approved row and AL-4 can compare the two.
+                row_workspace_id=blob_workspace or "",
+                decided_by=decided_by,
+            )
+
         # Async half of the loop: the visitor left the page and parked an email
         # on the pending row (POST /paw-bar/decision-contact). Send them the
         # SAME customer-facing reply the poll returns — approved or declined —
@@ -639,7 +693,6 @@ async def deliver_customer_decision(action: Any, *, declined: bool = False) -> N
             try:
                 from pocketpaw_ee.paw_bar import mailer
 
-                widget = await store.get_widget(updated.widget_id)
                 site_name = str(getattr(widget, "name", "") or "") or "the site"
                 await mailer.send_decision_email(
                     updated.contact_email,

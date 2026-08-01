@@ -1,4 +1,23 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-08-01 (AL-2, paw-bar emitters) — three conversation write paths
+#   now record their agent-ledger beats through ``paw_bar/ledger.py`` (fail-soft,
+#   never raises, ~4 lines each):
+#     ~ POST /paw-bar/chat — ``paw.conversation.started``. Fired on every turn
+#       and deduped by the ledger on ``widget:customer`` rather than gated on the
+#       handler's ``is_new_conversation`` flag: that flag comes from a read this
+#       handler is explicitly allowed to lose (the fail-closed mute arm), and a
+#       "conversations started" count that drops those is worse than one absorbed
+#       insert per turn.
+#     ~ PATCH .../conversations/{ref} and POST .../conversations/{ref}/reply —
+#       both hand the BEFORE and AFTER rows to
+#       ``ledger.emit_conversation_transition``, which records
+#       ``paw.conversation.takeover`` when the mute goes on and
+#       ``paw.handoff.resolved`` when the thread leaves ``needs_human``. Read as
+#       a row diff, not from the request body, so the two endpoints cannot record
+#       the same transition differently and a no-op patch records nothing.
+#   All three route the ledger FILE by ``workspace_id`` / ``ctx.workspace_id`` —
+#   the authenticated tenant these handlers already scope every other store read
+#   by, and a store-path-safe token (the widget OWNER label is not).
 # Updated: 2026-07-31 (owner inbox, slice 3) — THE ESCAPE HATCH. A visitor can
 #   always reach a person, and the owner is told when it happens:
 #     + POST /paw-bar/request-human — {key, w, customer_ref, message?, contact?}
@@ -2123,10 +2142,27 @@ async def patch_site_conversation(
         conversation = await store.ensure_conversation(widget.id, customer_ref, workspace_id)
 
     if fields:
+        before = conversation
         updated = await store.update_conversation(
             widget.id, customer_ref, workspace_id=workspace_id, **fields
         )
         conversation = updated or conversation
+        # AL-2 — record whichever ledger beats this patch actually crossed
+        # (takeover if the mute went on, handoff.resolved if the thread left
+        # ``needs_human``). Read from the before/after ROWS rather than from
+        # ``fields``, so a no-op patch records nothing and a patch that crosses
+        # both records both. This is the ONLY path in the product that takes a
+        # conversation out of ``needs_human``, which is why the resolved half of
+        # the handoff vocabulary fires here rather than in handoff.py.
+        from pocketpaw_ee.paw_bar import ledger
+
+        await ledger.emit_conversation_transition(
+            widget=widget,
+            workspace_id=workspace_id,
+            customer_ref=customer_ref,
+            before=before,
+            after=updated,
+        )
     # Resolve the display email the same way the LIST does, so a client that
     # re-renders a row from this echo doesn't watch a named visitor turn back into
     # an anonymous handle.
@@ -2222,10 +2258,24 @@ async def post_site_conversation_reply(
         # A reopened thread forgets its snooze deadline, the same way a visitor's
         # return does — it is live again, not merely due back later.
         fields["snooze_until"] = ""
+    before = conversation
     updated = await store.update_conversation(
         widget.id, customer_ref, workspace_id=workspace_id, **fields
     )
     conversation = updated or conversation
+    # AL-2 — typing IS taking over, so this is where ``paw.conversation.takeover``
+    # is earned. Same before/after diff as the PATCH path, through the same
+    # helper, so the two ways an owner can mute the bot cannot record it
+    # differently. Never raises: an owner's reply must not depend on the ledger.
+    from pocketpaw_ee.paw_bar import ledger
+
+    await ledger.emit_conversation_transition(
+        widget=widget,
+        workspace_id=workspace_id,
+        customer_ref=customer_ref,
+        before=before,
+        after=updated,
+    )
 
     _pending, emails = await _decision_side_data(widget, [customer_ref])
     return ConversationReplyResponse(
@@ -3723,6 +3773,23 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
             widget_id=body.widget_id,
             customer_ref=body.customer_ref,
         )
+
+    # AL-2 — the conversation's first beat. Fired on EVERY turn and deduped by
+    # the ledger's UNIQUE(kind, ref) on ``widget:customer``, deliberately NOT
+    # gated on ``is_new_conversation`` above: that flag is derived from a read
+    # that is allowed to fail (the fail-closed mute arm), and a "started" count
+    # that silently drops the conversations whose state read hiccuped is worse
+    # than one extra absorbed insert per turn. Never raises (paw_bar/ledger.py).
+    from pocketpaw_ee.paw_bar import ledger
+
+    await ledger.emit_conversation_started(
+        widget=widget,
+        # ``ctx.workspace_id`` is the REAL tenant (the same token this handler
+        # scopes its conversation reads and its run dispatch by) — a store-path
+        # -safe value, unlike the widget owner label.
+        workspace_id=ctx.workspace_id,
+        customer_ref=body.customer_ref,
+    )
 
     # (7c) THE MUTE. A human is holding this conversation, so the bot does not
     # answer over them — double-answering is the single loudest complaint about

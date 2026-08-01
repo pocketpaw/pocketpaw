@@ -1,4 +1,8 @@
 # Agent ledger — the agent-keyed record of what an agent actually achieved.
+# Updated: 2026-08-01 (AL-2, paw-bar emitters) — re-exports the three new
+#   `paw.*` attribute names (widget id, visitor verb, handoff source,
+#   product id) so the
+#   paw-bar emitters keep importing every ledger name from ONE module.
 # Created: 2026-07-31 (AL-1, ledger spine) — the public surface of the module.
 #   Re-exports the row model, the closed `paw.*` kind vocabulary, the window
 #   helpers, and the store, so every consumer (the Instinct emitter, the paw-bar
@@ -20,10 +24,14 @@ from pocketpaw.agent_ledger.models import (
     ATTR_APPROVAL_AUTO,
     ATTR_CONVERSATION_ID,
     ATTR_DECISION_ACTOR,
+    ATTR_HANDOFF_SOURCE,
     ATTR_INSTINCT_EVENT,
     ATTR_OPERATION_NAME,
     ATTR_POCKET_ID,
+    ATTR_PRODUCT_ID,
     ATTR_SCOPE_TYPE,
+    ATTR_VISITOR_VERB,
+    ATTR_WIDGET_ID,
     CORE_KINDS,
     KIND_ACTION_APPROVED,
     KIND_ACTION_DELIVERED,
@@ -64,10 +72,14 @@ __all__ = [
     "ATTR_APPROVAL_AUTO",
     "ATTR_CONVERSATION_ID",
     "ATTR_DECISION_ACTOR",
+    "ATTR_HANDOFF_SOURCE",
     "ATTR_INSTINCT_EVENT",
     "ATTR_OPERATION_NAME",
     "ATTR_POCKET_ID",
+    "ATTR_PRODUCT_ID",
     "ATTR_SCOPE_TYPE",
+    "ATTR_VISITOR_VERB",
+    "ATTR_WIDGET_ID",
     "CORE_KINDS",
     "KIND_ACTION_APPROVED",
     "KIND_ACTION_DELIVERED",

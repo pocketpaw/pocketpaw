@@ -1,4 +1,13 @@
 # Agent ledger models — the row shape + the closed `paw.*` kind vocabulary.
+# Updated: 2026-08-01 (AL-2, paw-bar emitters) — added four `paw.*` attribute
+#   names the concierge funnel needs: ATTR_WIDGET_ID, ATTR_VISITOR_VERB,
+#   ATTR_HANDOFF_SOURCE and ATTR_PRODUCT_ID. Additive constants only; no kind, row field, or
+#   validator moved. They live here rather than as literals in the four AL-2
+#   emitters so the ATTRIBUTE vocabulary stays governed in one file exactly like
+#   the KIND vocabulary — the emitters otherwise each get to spell "which
+#   widget" differently, and a board cannot group by an attribute that has three
+#   names. No OTel GenAI convention covers any of the three, so all three take
+#   the `paw.` namespace that marks them as ours rather than portable.
 # Created: 2026-07-31 (AL-1, ledger spine) — "what did my agents do for me?" was
 #   un-askable because every surface recorded its own fragment in its own store
 #   with its own key, and half of them carried no agent_id at all. This module
@@ -284,6 +293,14 @@ ATTR_APPROVAL_AUTO = "paw.approval.auto"
 ATTR_DECISION_ACTOR = "paw.decision.actor"
 ATTR_POCKET_ID = "paw.pocket.id"
 ATTR_SCOPE_TYPE = "paw.scope.type"
+# AL-2 (paw-bar emitters). Kept HERE rather than as string literals in the
+# emitters for the same reason the kinds are: five surfaces inventing
+# ``paw.widget_id`` / ``paw.widget.id`` / ``widget`` for one concept is how an
+# attribute vocabulary stops being queryable.
+ATTR_WIDGET_ID = "paw.widget.id"
+ATTR_VISITOR_VERB = "paw.visitor.verb"
+ATTR_HANDOFF_SOURCE = "paw.handoff.source"
+ATTR_PRODUCT_ID = "paw.product.id"
 
 
 # ---------------------------------------------------------------------------
