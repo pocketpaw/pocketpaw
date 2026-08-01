@@ -9,15 +9,20 @@
 # (OSS, no EE import); what is held HERE is the half that only the EE side can
 # answer — whether the keys the handlers produce actually track what they read.
 #
-# The centre of the file is ``test_an_edit_past_the_widget_cut_still_moves_the_key``.
-# It is the test for the design decision this task turned on: the obvious key is
+# The design decision this task turned on: the obvious key is
 # ``f"{kind}:{meta.pocket_id}:{meta.intent}"``, computed centrally in the
 # dispatcher with zero handler changes — and it cannot see a pocket being
-# edited, because none of those three move when it is. Neither can a digest of
-# the rendered TEXT, once the edit lands past the 12-widget cut. Nor, it turns
-# out, can the pocket's ``updatedAt``, which never moves at all under beanie 2
-# (see the test's own docstring). Only a fingerprint of what the handler read
-# sees it, and only the handler has that.
+# edited, because none of those three move when it is. So the handler answers,
+# with a digest of what it rendered.
+#
+# The pair to read together is
+# ``test_an_edit_the_preamble_does_show_moves_the_key`` and
+# ``test_an_edit_the_preamble_cannot_show_holds_the_key_still``. They bound the
+# key from both sides on the same oversized pocket: it moves for a change the
+# agent can see, and holds for one it cannot. The second is a choice, not an
+# oversight — the prompt is byte-identical either way, and an invalidation on
+# the Claude SDK backend costs a reconnect, because the system prompt is bound
+# at ``connect``. Its docstring records the two keys rejected to get there.
 
 from __future__ import annotations
 
@@ -113,23 +118,30 @@ async def test_editing_a_pocket_moves_the_key() -> None:
     assert before.cache_key != after.cache_key
 
 
-async def test_an_edit_past_the_widget_cut_still_moves_the_key() -> None:
-    """SAME TEXT, DIFFERENT KEY — the case a text digest gets wrong.
+async def test_an_edit_the_preamble_cannot_show_holds_the_key_still() -> None:
+    """The deliberate limit of a rendered-text key, pinned so it stays deliberate.
 
     The pocket carries more widgets than the preamble lists, so editing one
     past the cut renders byte-for-byte identically: same count, same first 12
-    rows, same "+N more" tail. The pocket HAS changed, and a backend holding an
-    agent built from the old prompt is holding a stale description of it. The
-    handler fingerprints EVERY widget it read, not the twelve it printed, so
-    the key moves even though nothing rendered did.
+    rows, same "+N more" tail. The pocket changed and the key does not move.
 
-    This test is also what caught the first version of the key. That version
-    used the pocket's ``updatedAt`` — the natural revision, claimed by
-    ``TimestampedDocument`` and by the pocket service's own comments to be
-    bumped on every write. It is not: beanie 2's ``init_actions`` skips
-    ``_``-prefixed attributes, so the ``_set_updated`` hook is never registered
-    and the timestamp keeps its creation value for life. The key looked right
-    and reported every edit as "unchanged".
+    That is the intended answer, not a gap. The key exists to tell a caching
+    backend whether the prompt it holds is still the prompt we would send, and
+    here it is — identical bytes. On the Claude SDK backend the system prompt
+    is bound at ``connect``, so moving the key would cost a ~12s reconnect to
+    deliver text the agent already has. The key tracks the agent's VIEW of the
+    pocket, not the pocket.
+
+    Two rejected keys are recorded here because both look better than they are:
+
+    * the pocket's ``updatedAt`` — the natural revision, claimed by
+      ``TimestampedDocument`` and by the pocket service's own comments to be
+      bumped on every write. It is not: beanie 2's ``init_actions`` skips
+      ``_``-prefixed attributes, so the ``_set_updated`` hook is never
+      registered and the timestamp keeps its creation value for life. A key on
+      it reports every edit — visible or not — as "unchanged".
+    * a fingerprint of every widget read. Correct, and it moves HERE, which is
+      exactly the over-invalidation above: a reconnect for an identical prompt.
     """
     user_id = await _seed_user("cut@keys.test")
     pocket_id = await _pocket_with_widgets(user_id, "Deep", WIDGET_LIST_LIMIT + 2)
@@ -151,6 +163,28 @@ async def test_an_edit_past_the_widget_cut_still_moves_the_key() -> None:
         "the edit must be INVISIBLE in the render for this test to mean anything — "
         "if the handler's list limit changed, this test needs rewriting, not relaxing"
     )
+    assert before.cache_key == after.cache_key
+
+
+async def test_an_edit_the_preamble_does_show_moves_the_key() -> None:
+    """The paired half, on the SAME oversized pocket, so the test above cannot
+    be read as "this handler never notices edits". Rename a widget INSIDE the
+    rendered window and the key moves — same pocket, same widget count, same
+    everything except the one row the agent can see."""
+    user_id = await _seed_user("visible@keys.test")
+    pocket_id = await _pocket_with_widgets(user_id, "Deep", WIDGET_LIST_LIMIT + 2)
+
+    before = await _preamble(user_id, pocket_id)
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    first_widget_id = pocket["widgets"][0]["_id"]
+    await pockets_service.update_widget(
+        pocket_id, first_widget_id, user_id, _rename_request("Renamed in view")
+    )
+
+    after = await _preamble(user_id, pocket_id)
+
+    assert before.text != after.text
     assert before.cache_key != after.cache_key
 
 

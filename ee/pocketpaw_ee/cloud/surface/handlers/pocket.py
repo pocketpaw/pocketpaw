@@ -8,28 +8,35 @@
 # and backend summaries — so a pocket edited between two turns renders a
 # different preamble under an identical kind, id and intent. A key built from
 # those three would hold still and a backend caching on it would keep serving a
-# prompt describing a pocket that no longer looks like that.
+# prompt describing a pocket that no longer looks like that. Only the handler
+# is in a position to notice, so the handler answers.
 #
-# The key digests the pocket data this handler READ rather than the text it
-# rendered, and the difference is not academic: only the first 12 widgets and
-# the first 1500 chars survive into the text, so editing widget 13 (or anything
-# past the truncation) changes the pocket while the rendered bytes stay
-# identical. The fingerprint covers every widget, so it moves anyway.
+# The key is a digest of the text this handler RENDERED, not of the pocket it
+# read, and the distinction decides what a cache invalidation means. The
+# preamble carries a SUMMARY — the name, the widget count, the first 12
+# widgets, the node and backend summaries — so a pocket edit that touches none
+# of those produces a byte-identical preamble. Keying on the pocket would
+# invalidate there anyway, and on the Claude SDK backend an invalidation costs
+# a ~12s reconnect to hand the agent a prompt it already has. The rendered
+# digest moves exactly when the agent's view of the pocket moves, which is the
+# only time a cached prompt is actually stale.
 #
-# The pocket's ``updatedAt`` would have been the natural revision to key on —
-# it is what the first draft of this used, and what ``TimestampedDocument`` and
-# this service's own comments claim is bumped on every write. It is not. Under
-# beanie 2 the timestamp hooks are never registered (``init_actions`` skips
-# ``_``-prefixed attributes; the hooks are ``_set_created`` / ``_set_updated``),
-# so a pocket's ``updatedAt`` keeps its creation value for life. Keying on it
-# looked correct, passed review by inspection, and would have reported every
-# pocket edit as "unchanged" — the exact failure this seam exists to prevent,
-# invisible until a user reads a stale description of their own pocket. Proven
-# by ``test_an_edit_past_the_widget_cut_still_moves_the_key``, which fails
-# against the ``updatedAt`` version.
+# Two keys were tried and rejected on the way here, both worth recording:
+#
+#   * the pocket's ``updatedAt`` — the natural revision, and what
+#     ``TimestampedDocument`` plus this service's own comments claim is bumped
+#     on every write. It is NOT. Under beanie 2 the timestamp hooks are never
+#     registered (``init_actions`` skips ``_``-prefixed attributes; the hooks
+#     are ``_set_created`` / ``_set_updated``), so a pocket's ``updatedAt``
+#     keeps its creation value for life. A key on it looks correct, reviews
+#     clean, and reports every pocket edit as "unchanged".
+#   * a fingerprint of every widget read, which fixed that but went too far the
+#     other way: it invalidated on edits past the 12-widget cut that the
+#     preamble cannot show, buying a reconnect for a prompt that would come
+#     back identical.
 #
 # The two no-pocket paths (no id, unavailable) read nothing mutable, so their
-# keys are exact.
+# keys name their inputs exactly instead of digesting anything.
 #
 # Updated: 2026-05-24 — Added workspace_id tenancy guard. The downstream
 # ``pockets_service.get`` gates on owner / shared_with / visibility but
@@ -52,9 +59,9 @@ import logging
 
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import (
+    content_key,
     format_widget_line,
     meta_key,
-    source_key,
     truncate_preamble,
 )
 
@@ -112,40 +119,10 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         parts.append(f"<pocket-backend>{backend_summary}</pocket-backend>")
     text = truncate_preamble("\n".join(parts))
 
-    # Key on what was READ, not on what was rendered: the render shows 12 of N
-    # widgets under a 1500-char cap, and an edit past either cut is still an
-    # edit the agent's cached prompt would be wrong about.
-    return SurfacePreamble(
-        text=text,
-        cache_key=source_key(
-            "pocket",
-            pocket_id,
-            name,
-            len(widgets),
-            *_widget_fingerprints(widgets),
-            nodes_summary,
-            backend_summary,
-        ),
-    )
-
-
-def _widget_fingerprints(widgets: list) -> list[str]:
-    """One line per widget, covering exactly the fields the render reads.
-
-    EVERY widget, not the first twelve — this is the half of the key that sees
-    an edit the preamble is too short to show. The fields mirror
-    ``format_widget_line`` (name, type, and whether a spec subtree exists) plus
-    the id, so re-ordering or replacing a widget moves the key too. The spec is
-    reduced to present/absent rather than hashed: its full contents are not in
-    the preamble, so a change inside one does not make the preamble stale.
-    """
-    out: list[str] = []
-    for w in widgets:
-        if not isinstance(w, dict):  # pragma: no cover - wire dicts are dicts
-            out.append(str(w))
-            continue
-        out.append(f"{w.get('_id')}|{w.get('name')}|{w.get('type')}|{1 if w.get('spec') else 0}")
-    return out
+    # The rendered summary IS what the agent is told about this pocket, so it
+    # is what the key tracks. An edit the summary does not show leaves the key
+    # still — deliberately: re-rendering would produce these same bytes.
+    return SurfacePreamble(text=text, cache_key=content_key("pocket", text))
 
 
 async def _load_pocket(pocket_id: str, user_id: str, workspace_id: str) -> dict | None:

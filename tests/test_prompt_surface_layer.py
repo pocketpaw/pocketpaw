@@ -10,15 +10,17 @@
 #   2. Two turns on the SAME unchanged surface hold one digest. This is the
 #      half a careless fix to (1) destroys — key on anything per-turn and every
 #      turn rebuilds the agent, which is the cost PR #1842 refused to pay.
-#   3. Same text, different key must NOT collide. This is the seam's whole
-#      reason for existing: the pocket preamble lists 12 of N widgets under a
-#      1500-char cap, so a real edit can leave the rendered bytes identical.
-#      A digest that followed the TEXT would call that "unchanged".
+#   3. Same text, different key must NOT collide, and same key, different text
+#      must NOT move the digest. Together they pin that this layer hashes the
+#      KEY it was handed and never the text — which is what leaves each EE
+#      handler free to decide what its key tracks. (Today they all track the
+#      rendered text, having weighed it per handler; the layer must not bake
+#      that in, or the decision stops being theirs.)
 #
-# The mirror of (3) — same key, different text — is PA-1's
-# ``test_the_digest_is_not_a_hash_of_the_text``, at the assembler. Here it is
-# re-proven through the surface layer specifically, because that is the layer
-# where someone would be most tempted to hash the text and be done with it.
+# The second half is PA-1's ``test_the_digest_is_not_a_hash_of_the_text`` at
+# the assembler. It is re-proven through the surface layer specifically,
+# because that is the layer where someone would be most tempted to hash the
+# text here and drop the threading.
 
 from __future__ import annotations
 
@@ -144,12 +146,17 @@ async def test_two_turns_on_the_same_unchanged_pocket_hold_one_digest():
 # ---------------------------------------------------------------------------
 
 
-async def test_an_edit_the_preamble_cannot_show_still_moves_the_digest():
-    """The pocket preamble renders the first 12 of N widgets under a 1500-char
-    cap, so editing widget 13 changes the pocket and changes NO rendered byte.
-    The handler sees it (the pocket's ``updatedAt`` moved) and says so in the
-    key. Hash the text instead and this is the failure you ship: the digest
-    reports "unchanged" and a cached agent keeps describing the old pocket.
+async def test_two_preambles_with_one_text_and_two_keys_do_not_collide():
+    """The digest follows the KEY, so a handler that has something to say the
+    text does not show can say it — the mechanism is here whether or not a
+    given handler uses it.
+
+    None do today: every handler that reads mutable state keys on a digest of
+    what it rendered, because an invalidation costs a reconnect on the Claude
+    SDK backend and re-rendering identical bytes buys nothing. That is a choice
+    made per handler, and it is reversible precisely because the layer hashes
+    the key rather than the text. If this collapsed to a text hash, a handler
+    that later needs a finer key could not have one.
     """
     before = await _assemble(surface_preamble=_POCKET_A, surface_cache_key="pocket:A:rev1")
     after = await _assemble(surface_preamble=_POCKET_A, surface_cache_key="pocket:A:rev2")
@@ -192,6 +199,143 @@ async def test_an_unkeyed_preamble_is_rendered_but_kept_out_of_the_digest():
 
     assert _POCKET_A in keyless.text
     assert keyless.stable_digest == nothing.stable_digest
+
+
+# ---------------------------------------------------------------------------
+# The pool forwards the surface into the prompt it hands the backend
+# ---------------------------------------------------------------------------
+
+
+class _CapturingBackend:
+    """Captures what the pool actually hands a backend, on both entry points.
+
+    A real class, not a mock: the pool asks ``run``'s SIGNATURE whether the
+    backend takes the digest, and a MagicMock has no signature to read.
+    """
+
+    def __init__(self) -> None:
+        self.run_prompt: str | None = None
+        self.prewarm_prompt: str | None = None
+
+    async def run(self, message: str, *, system_prompt: str = "", **kwargs):  # noqa: ARG002
+        self.run_prompt = system_prompt
+        return
+        yield  # pragma: no cover — makes this an async generator
+
+    async def prewarm(self, *, session_key: str, system_prompt: str, **kwargs):  # noqa: ARG002
+        self.prewarm_prompt = system_prompt
+
+
+async def _pool_with(monkeypatch, backend) -> AgentPool:
+    instance = _instance()
+    instance.backend = backend
+    pool = AgentPool()
+
+    async def _fake_get(agent_id):  # noqa: ARG001
+        return instance
+
+    monkeypatch.setattr(pool, "get", _fake_get)
+    return pool
+
+
+async def test_the_pool_puts_the_preamble_in_the_prompt_it_runs(monkeypatch):
+    backend = _CapturingBackend()
+    pool = await _pool_with(monkeypatch, backend)
+
+    async for _ in pool.run(
+        "agent-1",
+        "hi",
+        "cloud:session:s1:agent-1",
+        surface_preamble=_POCKET_A,
+        surface_cache_key="pocket:A:rev1",
+    ):
+        pass
+
+    assert backend.run_prompt is not None
+    assert _POCKET_A in backend.run_prompt
+
+
+async def test_the_pool_puts_the_preamble_in_the_prompt_it_prewarms(monkeypatch):
+    """``prewarm`` builds the prompt turn 1 will see. If the surface stopped at
+    the pool's signature and never reached the assembly, the prewarmed client
+    would carry a prompt with no surface in it and turn 1 would evict it."""
+    backend = _CapturingBackend()
+    pool = await _pool_with(monkeypatch, backend)
+
+    await pool.prewarm(
+        "agent-1",
+        "cloud:session:s1:agent-1",
+        surface_preamble=_POCKET_A,
+        surface_cache_key="pocket:A:rev1",
+    )
+
+    assert backend.prewarm_prompt is not None
+    assert _POCKET_A in backend.prewarm_prompt
+
+
+# ---------------------------------------------------------------------------
+# Prewarm parity — the reason ``pool.prewarm`` takes the surface at all
+# ---------------------------------------------------------------------------
+
+
+async def test_prewarm_and_turn_one_hash_the_same_behaviour_prefix():
+    """``prewarm`` assembles with no message and no knowledge context, because
+    both are stripped from the Claude SDK's client cache key. The surface
+    preamble is NOT stripped — it now sits above the volatile markers — so
+    prewarm has to pass it, and this is the equality that says it does.
+
+    Without it the prewarmed client hashes differently from turn 1, and turn 1
+    evicts the client the prewarm just paid ~12s to build: a net loss over not
+    prewarming at all.
+    """
+    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+
+    instance = _instance()
+    prewarmed = await _assemble(
+        instance=instance,
+        message="",
+        knowledge_context="",
+        instructions="RIPPLE LAW: narrate before every tool call.",
+        surface_preamble=_POCKET_A,
+        surface_cache_key="pocket:A:rev1",
+    )
+    turn_one = await _assemble(
+        instance=instance,
+        message="add a chart",
+        knowledge_context="Acme Dental opens at 9am.",
+        instructions="RIPPLE LAW: narrate before every tool call.",
+        surface_preamble=_POCKET_A,
+        surface_cache_key="pocket:A:rev1",
+    )
+
+    assert prewarmed.text != turn_one.text, "the volatile tail must differ, or this proves nothing"
+    assert ClaudeSDKBackend._behavior_prefix(prewarmed.text) == ClaudeSDKBackend._behavior_prefix(
+        turn_one.text
+    )
+
+
+async def test_a_prewarm_that_skipped_the_surface_would_be_evicted():
+    """The negative that makes the test above load-bearing: pass the surface to
+    the run and not to the prewarm — what omitting the kwarg in ``run_core``
+    would do — and the prefixes diverge."""
+    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+
+    instance = _instance()
+    prewarmed_without = await _assemble(
+        instance=instance, message="", knowledge_context="", instructions="RIPPLE LAW."
+    )
+    turn_one = await _assemble(
+        instance=instance,
+        message="add a chart",
+        knowledge_context="Acme Dental opens at 9am.",
+        instructions="RIPPLE LAW.",
+        surface_preamble=_POCKET_A,
+        surface_cache_key="pocket:A:rev1",
+    )
+
+    assert ClaudeSDKBackend._behavior_prefix(prewarmed_without.text) != (
+        ClaudeSDKBackend._behavior_prefix(turn_one.text)
+    )
 
 
 async def test_the_layer_passes_the_key_through_untouched():

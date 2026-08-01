@@ -39,6 +39,7 @@ _KEY = "pocket:s:0123456789abcdef"
 class _CapturingPool:
     def __init__(self) -> None:
         self.run_kwargs: dict[str, Any] | None = None
+        self.prewarm_kwargs: dict[str, Any] | None = None
 
     async def get(self, _agent_id):
         return type("Inst", (), {"config": {"backend": "claude_agent_sdk"}})()
@@ -51,6 +52,9 @@ class _CapturingPool:
             yield  # pragma: no cover
 
         return _empty()
+
+    async def prewarm(self, *args, **kwargs):
+        self.prewarm_kwargs = kwargs
 
 
 def _ctx(surface_context: SurfaceContext | None) -> ScopeContext:
@@ -135,3 +139,30 @@ async def test_no_surface_context_threads_the_no_surface_answer(monkeypatch):
     assert pool.run_kwargs is not None
     assert pool.run_kwargs.get("surface_preamble") == ""
     assert pool.run_kwargs.get("surface_cache_key") is None
+
+
+async def test_prewarm_threads_the_same_surface_as_the_turn(monkeypatch):
+    """``_prewarm_session`` must resolve the SAME inputs the first turn will,
+    and since PA-2 the surface is one of them: the preamble sits above the
+    volatile markers the Claude SDK strips, so a prewarm without it hashes a
+    different prefix and turn 1 evicts the client it just built.
+
+    ``execute_run`` resolves ``ctx.surface_context`` before firing this task,
+    so there is a surface to pass — the parity itself is proven against
+    ``_behavior_prefix`` in ``tests/test_prompt_surface_layer.py``.
+    """
+    pool = _CapturingPool()
+    monkeypatch.setattr(run_core, "get_agent_pool", lambda: pool)
+    monkeypatch.setattr(run_core, "build_behavior_instructions", lambda *a, **k: "INSTR")
+    monkeypatch.setattr(run_core, "attach_agent_identity", lambda **k: None)
+    monkeypatch.setattr(run_core, "detach_agent_identity", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(run_core, "bind_pawbar_run", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(run_core, "unbind_pawbar_run", lambda *a, **k: None, raising=False)
+
+    await run_core._prewarm_session(_ctx(_surface(_PREAMBLE, _KEY)))
+
+    assert pool.prewarm_kwargs is not None, (
+        "prewarm never ran — check the smart-routing / backend guards, not the assertion"
+    )
+    assert pool.prewarm_kwargs.get("surface_preamble") == _PREAMBLE
+    assert pool.prewarm_kwargs.get("surface_cache_key") == _KEY

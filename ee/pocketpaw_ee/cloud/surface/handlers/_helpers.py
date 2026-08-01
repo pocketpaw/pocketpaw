@@ -7,20 +7,19 @@
 # audit-snapshot lines, etc.). Pulling these out keeps each handler
 # small (≤80 LOC) per the PR brief.
 #
-# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — added the three
+# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — added the two
 # cache-key builders every handler now needs to answer ``SurfacePreamble``'s
-# ``cache_key``: ``meta_key`` (identity parts — the surface kind plus whatever
-# the handler read off ``meta``), ``content_key`` (a digest of what the handler
-# actually rendered, for the handlers that read a LIST and render all of it
-# that matters) and ``source_key`` (a digest of the data that went IN, for the
-# handlers whose render is capped and so cannot show every change). All three
-# are prefixed with the surface kind so two surfaces that both render "nothing
-# to report" can never share a key — a collision there would let a navigation
-# between them go unnoticed by every backend keying on the digest.
+# ``cache_key``. The split is by what the handler READS, and there are only two
+# kinds: ``content_key`` (a digest of what was rendered) for every handler that
+# reads mutable state, and ``meta_key`` (name the inputs outright) for the ones
+# whose preamble is a pure function of ``meta``. Both are prefixed with the
+# surface kind so two surfaces that both render "nothing to report" can never
+# share a key — a collision there would let a navigation between them go
+# unnoticed by every backend keying on the digest.
 #
 # There is deliberately no "key on the document's ``updatedAt``" helper, which
-# would otherwise be the obvious strongest option: see ``source_key`` for why
-# that field cannot be trusted in this codebase today.
+# would otherwise be the obvious strongest option, and no "digest the source
+# data" one either: ``content_key`` documents why each was rejected.
 
 from __future__ import annotations
 
@@ -70,9 +69,10 @@ def meta_key(kind: str, *parts: Any) -> str:
     through ``str`` so a ``datetime`` revision needs no ceremony at the call
     site. The kind leads so no two surfaces can collide.
 
-    Prefer this over :func:`content_key` whenever a revision is available: it
-    moves even when the rendered text cannot, and the rendered text often
-    cannot — handlers cap their lists and ``truncate_preamble`` cuts the tail.
+    Use this ONLY where the preamble is a pure function of the parts named —
+    no I/O, nothing live read. Where anything mutable was read, the rendered
+    digest (:func:`content_key`) is the honest key, because ``meta`` cannot see
+    the data change underneath it.
     """
     rendered = [kind]
     for part in parts:
@@ -83,53 +83,45 @@ def meta_key(kind: str, *parts: Any) -> str:
 def content_key(kind: str, text: str) -> str:
     """Key a preamble on a digest of what the handler actually rendered.
 
-    The answer for handlers that read a LIST — files, agents, pockets, KB
-    scopes, work items — where there is no single revision to point at and
-    per-item revisions would cost more than the preamble itself. It cannot lie
-    in the dangerous direction: the digest cannot hold still while the text
-    moves. It CAN move for a cosmetic change, which costs a backend a rebuild
-    it did not strictly need, and it cannot see drift the render dropped
-    (anything past the list limit or the char cap) — but what the render
-    dropped is not in the prompt either, so no cached prompt is stale for it.
+    The answer for every handler that reads mutable state. It invalidates
+    exactly when the agent's view of that state changes and never otherwise,
+    which is the property that matters: an invalidation is not free — on the
+    Claude SDK backend the system prompt is bound at ``connect``, so a moved
+    key costs a ~12s reconnect — and re-rendering after an invisible change
+    would hand the agent the bytes it already had.
 
-    Use :func:`source_key` instead when the handler's render is CAPPED in a way
-    that hides real change from the reader — the pocket surface renders 12 of N
-    widgets, so its 13th widget can be edited without moving a rendered byte.
+    It cannot fail in the dangerous direction. The digest cannot hold still
+    while the text moves, so a stale prompt cannot go unnoticed. What it does
+    not see is change the render dropped (past a list limit, past the 1500-char
+    cap), and that is correct rather than a gap: what the render dropped is not
+    in the prompt, so no cached prompt is stale for it.
+
+    Hashing the PREAMBLE is safe in a way that hashing the whole prompt is not,
+    and the difference is worth stating because it looks like the thing this
+    package refuses to do. The prompt carries the per-message soul recall,
+    which changes every turn by construction, so a digest over it would churn
+    for reasons unrelated to meaning. The surface preamble is a function of
+    surface state alone — nothing in it is keyed on the user's message — so its
+    digest moves only on real change.
+
+    Two alternatives were tried and rejected while writing PA-2:
+
+    * a document's ``updatedAt``. The natural revision, claimed by
+      ``TimestampedDocument`` and by several services' comments to be bumped on
+      every write. It is NOT: beanie 2's ``init_actions`` skips ``_``-prefixed
+      attributes when it collects event hooks, and the hooks are named
+      ``_set_created`` / ``_set_updated``, so they have never been registered
+      and every cloud document's timestamps keep their construction values. A
+      key on it reviews clean and reports every edit as "unchanged". (That bug
+      is real and wider than this module — anything reading ``updatedAt`` is
+      affected — and belongs in its own fix.)
+    * a fingerprint of the source data. It fixes the above and over-corrects:
+      it invalidates on changes the preamble cannot show, paying a reconnect
+      for an identical prompt.
 
     Bounded to 16 hex chars, the same width the assembler's digest uses.
     """
     return f"{kind}:c:{hashlib.sha256(text.encode('utf-8', 'replace')).hexdigest()[:16]}"
-
-
-def source_key(kind: str, *parts: Any) -> str:
-    """Key a preamble on a digest of the SOURCE the handler read.
-
-    The strongest key available, and the one for handlers whose render is
-    capped: it digests the data that WENT IN rather than the text that came
-    out, so it sees the change a truncated render cannot show.
-
-    It exists because the obvious alternative does not work here. A document's
-    ``updatedAt`` would be the natural revision, and both the pocket service's
-    comments and ``TimestampedDocument`` say it is bumped on every write — but
-    it is NOT, and has not been since the beanie 2 upgrade: beanie's
-    ``init_actions`` skips every ``_``-prefixed attribute when it collects
-    event hooks, and the hooks are named ``_set_created`` / ``_set_updated``,
-    so they are never registered and the timestamps keep their construction
-    values forever. A key built on a field that never moves is precisely the
-    failure this whole seam exists to prevent, so the handlers digest what they
-    read instead. (The timestamp bug is real and wider than this module —
-    anything keying on ``updatedAt`` is affected — but fixing it belongs in its
-    own change, not in a prompt-layer task.)
-
-    Parts are stringified and separated with ``\\x1f`` so two different splits
-    of the same characters cannot collide, the same separator discipline the
-    prompt assembler's digest uses.
-    """
-    h = hashlib.sha256()
-    for part in parts:
-        h.update(str(part).encode("utf-8", "replace"))
-        h.update(b"\x1f")
-    return f"{kind}:s:{h.hexdigest()[:16]}"
 
 
 async def composio_tool_names(*, limit: int = 6) -> list[str]:
@@ -194,6 +186,5 @@ __all__ = [
     "content_key",
     "format_widget_line",
     "meta_key",
-    "source_key",
     "truncate_preamble",
 ]
