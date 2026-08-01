@@ -167,9 +167,7 @@ async def list_runtime_sessions(
     store = manager._store
 
     if hasattr(store, "_load_session_index_async"):
-        index = await store._load_session_index_async(
-            workspace_id=workspace_id, owner_id=user_id
-        )
+        index = await store._load_session_index_async(workspace_id=workspace_id, owner_id=user_id)
     elif hasattr(store, "_load_session_index"):
         # The file store is single-tenant by construction — it is the OSS /
         # dedicated-install backend, and a cloud deployment cannot reach this

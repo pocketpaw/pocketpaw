@@ -78,6 +78,7 @@ _STATE_NAMESPACE = "social"
 #: never read from the callback query string.
 _FLOWS = ("web", "desktop")
 
+
 class LinkRefused(Forbidden):
     """A refusal from the LINK branch specifically.
 
@@ -389,9 +390,7 @@ async def complete_callback(
                 "flow": "desktop",
                 "next": next_path,
             }
-        user = await _complete_link(
-            link_user_id, identity, session_user, next_path=next_path
-        )
+        user = await _complete_link(link_user_id, identity, session_user, next_path=next_path)
         return {
             "mode": "link",
             "user": user,
@@ -661,9 +660,7 @@ async def unlink_identity(user: _UserDoc, provider_name: str) -> None:
             "another account, before disconnecting this one.",
         )
 
-    user.oauth_accounts = [
-        a for a in (user.oauth_accounts or []) if a.oauth_name != provider_name
-    ]
+    user.oauth_accounts = [a for a in (user.oauth_accounts or []) if a.oauth_name != provider_name]
     await user.save()
     logger.info("social: unlinked %s from user %s", provider_name, user.id)
     await _audit(user, "auth.social.unlinked", provider_name)

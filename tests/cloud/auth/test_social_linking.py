@@ -225,9 +225,7 @@ def test_no_link_decision_ever_targets_an_account_other_than_the_caller():
     # this table will act on is the one that asked.
     for owner in (None, "u1", "u2"):
         for email in ("dev@corp.com", None):
-            d = decide_link(
-                identity=ident(email=email), owner_user_id=owner, acting_user_id="u1"
-            )
+            d = decide_link(identity=ident(email=email), owner_user_id=owner, acting_user_id="u1")
             assert d.user_id in (None, "u1"), (owner, email)
 
 
@@ -247,9 +245,7 @@ def test_enforced_sso_refuses_a_settings_link(action):
 
 
 def test_unlinking_one_of_two_identities_is_allowed_without_a_password():
-    d = decide_unlink(
-        provider="github", linked_providers=["github", "google"], has_password=False
-    )
+    d = decide_unlink(provider="github", linked_providers=["github", "google"], has_password=False)
     assert d.allowed is True
     assert d.reason is None
 

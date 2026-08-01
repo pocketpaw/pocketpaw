@@ -106,9 +106,7 @@ def _error_redirect(reason: str) -> RedirectResponse:
     scope needs the dialog back with an explanation, so that is where they go.
     """
     base = social_service.frontend_base_url()
-    return RedirectResponse(
-        url=f"{base}/?auth=signin&auth_error={quote(reason)}", status_code=302
-    )
+    return RedirectResponse(url=f"{base}/?auth=signin&auth_error={quote(reason)}", status_code=302)
 
 
 @router.get("/auth/social/providers", response_model=SocialProvidersResponse)
@@ -146,9 +144,7 @@ def _link_redirect(next_path: Any, **params: str) -> RedirectResponse:
     base = social_service.frontend_base_url()
     path = _safe_next(next_path)
     separator = "&" if "?" in path else "?"
-    return RedirectResponse(
-        url=f"{base}{path}{separator}{urlencode(params)}", status_code=302
-    )
+    return RedirectResponse(url=f"{base}{path}{separator}{urlencode(params)}", status_code=302)
 
 
 def _desktop_link_redirect(**params: str) -> RedirectResponse:
@@ -212,9 +208,7 @@ async def social_callback(
         # who it is, so the identity is parked and the app finishes the job
         # from POST /auth/social/link/complete under its bearer. The webview
         # recognises `link=` (the login branch uses `xc=`) and closes.
-        return _desktop_link_redirect(
-            link=result["link_code"], provider=result["provider"]
-        )
+        return _desktop_link_redirect(link=result["link_code"], provider=result["provider"])
 
     if result["mode"] == "link":
         # Web link. Already authenticated — no session to mint, nothing to set.
@@ -283,9 +277,7 @@ async def list_social_identities(
 ) -> SocialIdentitiesResponse:
     """Which provider identities are attached to the caller's own account."""
     rows = await social_service.list_identities(user)
-    return SocialIdentitiesResponse(
-        identities=[LinkedIdentity.model_validate(row) for row in rows]
-    )
+    return SocialIdentitiesResponse(identities=[LinkedIdentity.model_validate(row) for row in rows])
 
 
 @router.post("/auth/social/{provider}/link", response_model=SocialLinkStartResponse)

@@ -1088,9 +1088,7 @@ class TestSessionsFlow:
         # Headers added 2026-08-01, when this route joined the rest of the
         # router in requiring a session and session ownership. Guard coverage
         # lives in tests/cloud/sessions/test_runtime_route_auth.py.
-        r2 = await http.post(
-            f"/api/v1/sessions/{session_uuid}/touch", headers=ctx["headers"]
-        )
+        r2 = await http.post(f"/api/v1/sessions/{session_uuid}/touch", headers=ctx["headers"])
         assert r2.status_code == 204
 
     async def test_create_session_linked_to_pocket(self, http: AsyncClient):

@@ -191,9 +191,7 @@ async def test_a_signed_in_user_links_lists_and_unlinks(app, monkeypatch):
         state = await _start_link(client, next_path="/settings")
         _stub_exchange(
             monkeypatch,
-            SocialIdentity(
-                provider="github", account_id="gh-alice", email="alice@github.com"
-            ),
+            SocialIdentity(provider="github", account_id="gh-alice", email="alice@github.com"),
         )
         done = await _callback(client, state)
 
@@ -279,9 +277,7 @@ async def test_linking_an_identity_owned_by_another_user_is_REFUSED(app, monkeyp
     assert (await User.get(attacker.id)).oauth_accounts == []
 
 
-async def test_a_link_state_completed_by_a_DIFFERENT_session_attaches_nothing(
-    app, monkeypatch
-):
+async def test_a_link_state_completed_by_a_DIFFERENT_session_attaches_nothing(app, monkeypatch):
     # State is a bearer secret: whoever holds it wins. That is survivable for
     # sign-in, but for linking it would let a stolen state attach the thief's
     # identity to the victim's account. The session re-check is what stops it.
@@ -584,9 +580,7 @@ async def test_a_link_callback_never_mints_a_session(app, monkeypatch):
     assert "set-cookie" not in {k.lower() for k in done.headers.keys()}
 
 
-async def test_a_plain_sign_in_still_works_while_signed_in_as_someone_else(
-    app, monkeypatch
-):
+async def test_a_plain_sign_in_still_works_while_signed_in_as_someone_else(app, monkeypatch):
     # The sign-in branch must not be captured by the link branch just because
     # a session happens to be present — they are told apart by the state
     # payload, not by whether a cookie arrived.
@@ -653,9 +647,7 @@ async def test_a_hostile_next_on_a_link_does_not_leave_the_origin(app, monkeypat
         )
         done = await _callback(client, state)
 
-    assert done.headers["location"].startswith("http://localhost:1420/?"), done.headers[
-        "location"
-    ]
+    assert done.headers["location"].startswith("http://localhost:1420/?"), done.headers["location"]
     assert "evil.com" not in done.headers["location"]
 
 
@@ -823,9 +815,7 @@ async def test_completing_a_link_requires_a_session(app):
     # A code with no caller attached is worth nothing — which is what makes
     # parking it at the callback safe in the first place.
     async with _client(app) as anonymous:
-        resp = await anonymous.post(
-            "/api/v1/auth/social/link/complete", json={"code": "made-up"}
-        )
+        resp = await anonymous.post("/api/v1/auth/social/link/complete", json={"code": "made-up"})
     assert resp.status_code == 401
 
 
@@ -931,9 +921,7 @@ async def test_a_parked_link_code_cannot_be_spent_as_a_login_exchange_code(app, 
         )
         done = await _callback(client, state)
 
-        resp = await client.post(
-            "/api/v1/auth/social/exchange", json={"xc": _link_code(done)}
-        )
+        resp = await client.post("/api/v1/auth/social/exchange", json={"xc": _link_code(done)})
 
     assert resp.status_code == 403
 

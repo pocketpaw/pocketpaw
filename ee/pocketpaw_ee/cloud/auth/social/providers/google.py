@@ -134,9 +134,7 @@ class GoogleProvider:
         )
         id_token = tokens.get("id_token")
         if not id_token:
-            raise CloudError(
-                502, "social.google_no_id_token", "Google returned no id_token"
-            )
+            raise CloudError(502, "social.google_no_id_token", "Google returned no id_token")
 
         # Verifies RS256 signature, audience, issuer, expiry, and the nonce.
         claims = await oidc.parse_id_token(

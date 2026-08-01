@@ -276,9 +276,7 @@ async def test_a_returning_linked_account_signs_in_without_a_verified_email(env,
 
     # Second visit: the provider no longer vouches for any address (scope
     # declined on re-consent). They are still the same person.
-    _stub_exchange(
-        monkeypatch, SocialIdentity(provider="github", account_id="gh-ret", email=None)
-    )
+    _stub_exchange(monkeypatch, SocialIdentity(provider="github", account_id="gh-ret", email=None))
     state2 = await _begin(env)
     resp = await env.get(
         "/api/v1/auth/social/callback",
@@ -349,9 +347,7 @@ async def test_enforced_sso_refuses_social_sign_in(env, monkeypatch):
 async def test_sso_enforcement_check_fails_CLOSED(mongo_db, monkeypatch):  # noqa: ARG001
     user = await _seed_user("closed@acme.com")
     # A well-formed id, so the code reaches the query the stub blows up.
-    user.workspaces.append(
-        WorkspaceMembership(workspace=str(PydanticObjectId()), role="member")
-    )
+    user.workspaces.append(WorkspaceMembership(workspace=str(PydanticObjectId()), role="member"))
 
     def boom(*a, **k):  # noqa: ANN001, ARG001
         raise RuntimeError("mongo is down")
@@ -477,9 +473,7 @@ async def test_desktop_flow_redirects_with_a_code_and_NO_token(env, monkeypatch)
 
 async def _desktop_code(client, monkeypatch, email="desk2@acme.com", account="gh-d2") -> str:
     monkeypatch.setenv("POCKETPAW_FRONTEND_BASE_URL", "http://localhost:1420")
-    _stub_exchange(
-        monkeypatch, SocialIdentity(provider="github", account_id=account, email=email)
-    )
+    _stub_exchange(monkeypatch, SocialIdentity(provider="github", account_id=account, email=email))
     resp = await client.get(
         "/api/v1/auth/social/github/login",
         params={"flow": "desktop"},
@@ -583,9 +577,7 @@ async def test_success_redirects_to_the_FRONTEND_not_the_api(env, monkeypatch):
 async def test_a_refusal_reopens_the_dialog_instead_of_a_dead_route(env, monkeypatch):
     # /auth/error does not exist in the SPA - only forgot, reset, verify - so
     # the old target was a 404 on the wrong origin. A refusal is a UI state.
-    _stub_exchange(
-        monkeypatch, SocialIdentity(provider="github", account_id="gh-nope", email=None)
-    )
+    _stub_exchange(monkeypatch, SocialIdentity(provider="github", account_id="gh-nope", email=None))
     state = await _begin(env)
     done = await env.get(
         "/api/v1/auth/social/callback",
@@ -605,7 +597,5 @@ async def test_every_error_path_targets_the_frontend(env):
         {},  # missing code/state
         {"code": "c", "state": "forged"},
     ):
-        resp = await env.get(
-            "/api/v1/auth/social/callback", params=params, follow_redirects=False
-        )
+        resp = await env.get("/api/v1/auth/social/callback", params=params, follow_redirects=False)
         assert resp.headers["location"].startswith("http://localhost:1420/?auth=signin"), params
