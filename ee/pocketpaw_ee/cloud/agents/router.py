@@ -27,6 +27,24 @@ soft-disable / revoke-everywhere flow. Both carry the SAME owner/admin guard
 tenant-scope protection, so a cross-workspace / non-owner caller cannot revoke
 or restore an agent it doesn't own.
 
+Updated 2026-07-31 (AL-1, agent ledger spine): added
+``GET /agents/{id}/ledger?window=30d`` — the agent's own track record: counts by
+kind, the outcome ratio, attributed value, and the recent rows. It reads the
+per-workspace ``agent_ledger`` store and NOTHING else. That single-source rule is
+the whole point: the previous way to answer "what did this agent do for me" was
+to assemble numbers from paw_bar_events, the run docs, and Instinct by hand,
+which is exactly how a dashboard ends up disagreeing with the ledger it claims
+to summarize.
+
+Ops metrics (tokens, cost, latency, model mix) are deliberately NOT in this
+response. They live in the run docs / usage tracker, are read federated where
+they already are, and copying them into an analytics payload is the two-meters
+bug we have paid for once already.
+
+Carries the same visibility gate as the knowledge reads
+(``agents_service.ensure_can_read``): a track record is at least as revealing as
+the config that produced it, so another member cannot read a private agent's.
+
 Updated 2026-07-15 (fix/agent-visibility-enforcement, ASG-7): the READ endpoints
 now enforce agent visibility. ``GET /agents/{id}`` routes through
 ``agents_service.get_for_viewer`` (404 for another user's private agent);
@@ -464,3 +482,81 @@ async def set_agent_scope(
     """
     updated = await agents_service.set_scopes(agent_id, body.scopes)
     return ScopeAssignmentResponse(agent_id=agent_id, scopes=updated)
+
+
+# ---------------------------------------------------------------------------
+# Agent ledger — the track record (AL-1)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{agent_id}/ledger")
+async def get_agent_ledger(
+    agent_id: str,
+    window: str = Query(default="30d"),
+    limit: int = Query(default=50, ge=1, le=200),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """What this agent actually achieved, over ``window``.
+
+    ``window`` accepts ``24h`` / ``7d`` / ``30d`` / ``2w`` / ``all``. A window
+    that cannot be parsed is a 422 rather than a silent fallback to the default:
+    an analytics surface that quietly answers a different question than the one
+    asked is worse than one that refuses.
+
+    The response is assembled from ONE source (this workspace's agent ledger),
+    with each aggregate computed in SQL over the same filter, so the counts, the
+    outcome ratio, and the value total can never disagree with each other or
+    with the rows listed beneath them.
+    """
+    from pocketpaw.agent_ledger.models import WindowParseError, window_start
+    from pocketpaw.stores import get_agent_ledger_store
+
+    # Visibility gate: same guard as the knowledge reads — a private agent's
+    # record is not another member's to read.
+    await agents_service.ensure_can_read(agent_id, workspace_id, user_id)
+
+    try:
+        since = window_start(window)
+    except WindowParseError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    store = get_agent_ledger_store(workspace_id=workspace_id or None)
+    scope = {"agent_id": agent_id, "workspace_id": workspace_id or "", "since": since}
+    counts = await store.counts_by_kind(**scope)
+    outcomes = await store.counts_by_outcome(**scope)
+    value_by_currency = await store.value_by_currency(**scope)
+    recent = await store.query(**scope, limit=limit)
+
+    # Ratios are reported over the rows that actually carry a verdict, and the
+    # denominator ships with them. "60% solved" out of five is a different claim
+    # from "60% solved" out of five hundred, and a board that hides which one it
+    # means teaches its reader to over-trust it.
+    decided = sum(outcomes.values())
+    outcome_ratio = (
+        {status: round(count / decided, 4) for status, count in outcomes.items()} if decided else {}
+    )
+
+    # One currency → a headline total. More than one → no headline, because
+    # adding cents to pence produces a number that is wrong invisibly. The
+    # per-currency breakdown is always the authoritative field.
+    single_currency = next(iter(value_by_currency)) if len(value_by_currency) == 1 else ""
+
+    return {
+        "agent_id": agent_id,
+        "window": window,
+        "since": since,
+        "counts_by_kind": counts,
+        "total_events": sum(counts.values()),
+        "outcome": {
+            "counts": outcomes,
+            "decided": decided,
+            "ratio": outcome_ratio,
+        },
+        "value": {
+            "by_currency": value_by_currency,
+            "currency": single_currency,
+            "total_cents": value_by_currency.get(single_currency, 0) if single_currency else 0,
+        },
+        "recent": [row.model_dump() for row in recent],
+    }

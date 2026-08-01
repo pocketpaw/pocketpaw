@@ -1,5 +1,31 @@
 # Instinct store — async SQLite operations for the decision pipeline.
 # Created: 2026-03-28 — Action lifecycle + audit log.
+# Updated: 2026-07-31 (AL-1, agent ledger spine) — two additions, one column and
+#   one emit:
+#   * ``instinct_actions`` gains ``actor_agent_id TEXT DEFAULT ''`` (additive
+#     ALTER, same swallow-the-duplicate pattern as assignee / workspace_id /
+#     scope_type). ``propose`` stamps it; ``_row_to_action`` key-checks it back.
+#     Attribution has to be persisted at PROPOSE time because that is the only
+#     moment anyone still knows which agent asked — by approval time the request
+#     is just a row in a queue.
+#   * ``_update_status`` emits ONE agent-ledger row after its transaction
+#     commits. This is THE CHOKE POINT, chosen over the EE instinct router
+#     because every lifecycle write in the codebase funnels through here:
+#     approve / auto_approve / reject / bulk_approve / bulk_reject /
+#     mark_executed / mark_failed, called from the EE instinct router, the
+#     auto-triager, Mission Control's bulk bar, the cloud approvals service, the
+#     discovery orchestrator, and half a dozen executors. Emitting at the router
+#     would have missed most of those; emitting at each call site would BE the
+#     fragmentation this ledger exists to end. Because every agent kind proposes
+#     through this gate, belt stations and deep-work get ledger rows for free.
+#     The emit runs AFTER the commit and OUTSIDE the AuditChainError try block,
+#     and can never raise — see ``_emit_ledger``. A ledger failure must not cost
+#     anyone an approval. NOTE the deliberate asymmetry with the W2b audit
+#     ledger directly above it: the audit ledger is LOUD (a decision that cannot
+#     be audited must not succeed, because it is the legal trail), while the
+#     agent ledger is SILENT (it is analytics, and analytics is never worth
+#     failing a human's click over). Two ledgers, two failure postures, on
+#     purpose.
 # Updated: 2026-07-05 (fix/atlas-admin-security-hardening, FINDING B) — closed a
 #   TOCTOU double-flip in ``_update_status``. The ``require_status`` guard was a
 #   Python pre-check between ``get_action`` and the UPDATE, whose WHERE was
@@ -151,6 +177,12 @@ from typing import Any
 
 import aiosqlite
 
+from pocketpaw.agent_ledger.models import (
+    KIND_ACTION_APPROVED,
+    KIND_ACTION_OUTCOME,
+    KIND_ACTION_REJECTED,
+    LedgerActor,
+)
 from pocketpaw.instinct.correction import Correction, CorrectionPatch
 from pocketpaw.instinct.models import (
     Action,
@@ -161,11 +193,75 @@ from pocketpaw.instinct.models import (
     ActionTrigger,
     AuditCategory,
     AuditEntry,
+    OutcomeStatus,
     OutcomeVerdict,
 )
 from pocketpaw.instinct.trace import FabricObjectSnapshot, ReasoningTrace
 
 logger = logging.getLogger(__name__)
+
+# AL-1 — which lifecycle events become ledger rows, and what verdict (if any)
+# the event itself implies. ``None`` in the second slot means "read the verdict
+# off the action's own outcome".
+#
+# ``action_auto_approved`` maps to the SAME kind as a human approval: the funnel
+# question is "did this get through", and splitting the kind would make every
+# consumer sum two things to answer it. The machine-ness rides as an attribute
+# instead (see ``_emit_ledger``).
+#
+# ``action_failed`` is a real ``not_solved`` verdict, not a missing one: an
+# action that errored demonstrably did not solve the problem, and a board that
+# counts only successes is the kind of dashboard people stop trusting.
+#
+# ``action_proposed`` is absent on purpose — it is written by ``propose``, not by
+# ``_update_status``, and belongs to a later slice. Anything unmapped is skipped
+# rather than guessed at.
+_LEDGER_KIND_BY_EVENT: dict[str, tuple[str, str | None]] = {
+    "action_approved": (KIND_ACTION_APPROVED, None),
+    "action_auto_approved": (KIND_ACTION_APPROVED, None),
+    "action_rejected": (KIND_ACTION_REJECTED, None),
+    "action_executed": (KIND_ACTION_OUTCOME, None),
+    "action_failed": (KIND_ACTION_OUTCOME, OutcomeStatus.NOT_SOLVED.value),
+}
+
+# Lifecycle events whose decider is a machine, whatever string is in ``actor``.
+_MACHINE_EVENTS = frozenset({"action_auto_approved", "action_executed", "action_failed"})
+
+
+def _ledger_outcome(action: Action, event_verdict: str | None) -> str | None:
+    """The OutcomeStatus value for a ledger row, or None when there is no verdict.
+
+    An approval and a rejection carry no verdict — whether the thing worked is a
+    separate, later question (issue #1162's whole point: a completed action is an
+    *output*; whether it solved the problem is an *outcome*). Only the outcome
+    kinds resolve to a value here, and a legacy free-text outcome resolves to
+    ``unknown`` rather than being parsed for optimism.
+    """
+    if event_verdict is not None:
+        return event_verdict
+    if isinstance(action.outcome, OutcomeVerdict):
+        return action.outcome.status.value
+    return None
+
+
+def _ledger_actor(event: str, actor: str) -> str:
+    """Classify the decider as visitor / owner / agent / system.
+
+    The raw ``actor`` string is kept verbatim in ``attrs`` — this is the coarse
+    bucket the board groups by. Anything the system did to itself (auto-triage,
+    execution, failure) or that carries a ``system``/``agent`` prefix classifies
+    as such; everything else is a human operator, because the only other thing
+    that reaches this code path is a person clicking approve or reject.
+    """
+
+    if event in _MACHINE_EVENTS:
+        return LedgerActor.SYSTEM.value
+    raw = str(actor or "").strip().lower()
+    if raw.startswith("system"):
+        return LedgerActor.SYSTEM.value
+    if raw.startswith("agent"):
+        return LedgerActor.AGENT.value
+    return LedgerActor.OWNER.value
 
 
 def _serialize_outcome(outcome: str | OutcomeVerdict | None) -> str | None:
@@ -329,6 +425,11 @@ CREATE TABLE IF NOT EXISTS instinct_actions (
     -- Tenancy (W4a): the owning workspace. NULL = legacy/global row written
     -- before tenancy or by a non-cloud OSS caller; a scoped read still sees it.
     workspace_id TEXT,
+    -- Attribution (AL-1): the agent that PROPOSED this action, so the agent
+    -- ledger can key the approval to the worker that asked for it. '' means
+    -- unattributed, which stays legal forever — the proposer is not always
+    -- knowable, and refusing the proposal over it would be absurd.
+    actor_agent_id TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     executed_at TEXT
@@ -477,6 +578,17 @@ class InstinctStore:
                 await db.execute("ALTER TABLE instinct_actions ADD COLUMN scope_type TEXT")
             except aiosqlite.OperationalError:
                 pass
+            # Additive migration (AL-1): the proposing agent's id on a
+            # pre-existing actions table. Same swallow-the-duplicate pattern.
+            # Pre-existing rows keep '' (unattributed) — deliberately NOT
+            # backfilled from trigger.source, because a guessed attribution in
+            # an evidence table is worse than an honest blank.
+            try:
+                await db.execute(
+                    "ALTER TABLE instinct_actions ADD COLUMN actor_agent_id TEXT DEFAULT ''"
+                )
+            except aiosqlite.OperationalError:
+                pass
             # Tenancy indexes created only after the column is guaranteed to
             # exist — see _WORKSPACE_INDEX_SQL note above. Inside SCHEMA_SQL this
             # would fail on a pre-W4a DB. The scope index follows the same rule.
@@ -530,9 +642,18 @@ class InstinctStore:
         assignee: str | None = None,
         workspace_id: str | None = None,
         scope_type: str | None = None,
+        actor_agent_id: str = "",
     ) -> Action:
+        """Raise a proposal for a human to decide.
+
+        ``actor_agent_id`` (AL-1) names the agent doing the asking. It is
+        optional and defaults to "" so every existing caller is unaffected;
+        callers that know their agent should pass it, because propose time is
+        the last moment that knowledge exists in the request.
+        """
         action = Action(
             scope_type=scope_type,
+            actor_agent_id=str(actor_agent_id or ""),
             pocket_id=pocket_id,
             title=title,
             description=description,
@@ -551,8 +672,8 @@ class InstinctStore:
                 " (id, pocket_id, title, description,"
                 " category, status, priority, trigger,"
                 " recommendation, parameters, context, assignee, workspace_id,"
-                " scope_type)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " scope_type, actor_agent_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     action.id,
                     pocket_id,
@@ -568,6 +689,7 @@ class InstinctStore:
                     assignee,
                     workspace_id,
                     scope_type,
+                    action.actor_agent_id,
                 ),
             )
             await db.commit()
@@ -848,6 +970,10 @@ class InstinctStore:
             description=f"{event.replace('_', ' ').title()}: {action.title}{extra_desc}",
             context=audit_context or {},
         )
+        # Declared out here (not inside the `async with`) so the post-commit
+        # agent-ledger emit can route to the same tenant's ledger file the
+        # action itself belongs to.
+        workspace_id: str | None = None
         try:
             async with self._log_lock, self._conn() as db:
                 await db.execute("BEGIN")
@@ -868,7 +994,6 @@ class InstinctStore:
                 # audit row (approve / reject / execute / fail) is stamped with
                 # the same tenant the action belongs to. Done with a tiny direct
                 # read rather than widening the Action model.
-                workspace_id: str | None = None
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
                     "SELECT workspace_id FROM instinct_actions WHERE id = ?", (action_id,)
@@ -889,7 +1014,115 @@ class InstinctStore:
                 f"failed to append audit entry {entry.id} ({event}) to the "
                 f"tamper-evident ledger: {exc}"
             ) from exc
-        return await self.get_action(action_id)
+        updated = await self.get_action(action_id)
+        # AL-1 — the agent-ledger emit. Deliberately placed HERE: after the
+        # commit (so we only ever record something that actually happened) and
+        # after the reload (so the row carries the final outcome), and outside
+        # the try above so it can never be mistaken for an audit-chain failure.
+        if updated is not None:
+            await self._emit_ledger(updated, event=event, actor=actor, workspace_id=workspace_id)
+        return updated
+
+    async def _emit_ledger(
+        self,
+        action: Action,
+        *,
+        event: str,
+        actor: str,
+        workspace_id: str | None,
+    ) -> None:
+        """Record one lifecycle beat in the agent ledger. NEVER raises.
+
+        The fail-soft contract is the whole point and is not negotiable: this
+        function sits on the approval hot path, and an operator's click must not
+        fail because an analytics table was locked, missing, or misconfigured.
+        Every failure mode — a workspace that can't resolve a store
+        (``WorkspaceScopeRequired`` in cloud mode is a REAL possibility here for
+        a NULL-workspace action), a disk error, a vocabulary rejection — is
+        caught and logged at debug. Same posture as ``paw_bar/notify.py``.
+
+        The cost of that silence is that a broken emitter is INVISIBLE, which is
+        exactly why the design pairs it with a reconcile endpoint (AL-4)
+        comparing Instinct's own counts against the ledger's. Fail-soft plus a
+        drift alarm; fail-soft alone would be how you find out in a quarter.
+
+        Deliberately absent from the row: tokens, cost, latency. They live in
+        the run doc / usage tracker and are read federated. Two meters for one
+        number is a bug we have already paid for once.
+        """
+        try:
+            # The row vocabulary is a plain leaf module (no cycle) — imported
+            # here only to keep the whole emit inside one try, so even an import
+            # failure degrades to "no ledger row" instead of "no approval".
+            from pocketpaw.agent_ledger.models import (
+                ATTR_ACTION_CATEGORY,
+                ATTR_ACTION_ID,
+                ATTR_AGENT_ID,
+                ATTR_APPROVAL_AUTO,
+                ATTR_DECISION_ACTOR,
+                ATTR_INSTINCT_EVENT,
+                ATTR_POCKET_ID,
+                ATTR_SCOPE_TYPE,
+                LedgerRow,
+                surface_from_trigger,
+            )
+
+            # The store factory, on the other hand, MUST be lazy:
+            # pocketpaw.stores imports THIS module at module level, so a
+            # top-level import would be circular. Same trick the ``_log_lock``
+            # property uses for ``_store_locks``.
+            from pocketpaw.stores import get_agent_ledger_store
+
+            mapped = _LEDGER_KIND_BY_EVENT.get(event)
+            if mapped is None:
+                # Not every lifecycle event is a value beat — ``action_proposed``
+                # is emitted by ``propose`` (a different write path), and a
+                # future event should be added here consciously rather than
+                # landing under a guessed kind.
+                return
+            kind, outcome_for_event = mapped
+
+            attrs: dict[str, Any] = {
+                ATTR_ACTION_ID: action.id,
+                ATTR_ACTION_CATEGORY: action.category.value,
+                ATTR_INSTINCT_EVENT: event,
+                ATTR_DECISION_ACTOR: actor,
+                ATTR_POCKET_ID: action.pocket_id,
+            }
+            if action.actor_agent_id:
+                attrs[ATTR_AGENT_ID] = action.actor_agent_id
+            if action.scope_type:
+                attrs[ATTR_SCOPE_TYPE] = action.scope_type
+            if event == "action_auto_approved":
+                # Same KIND as a human approval — an approval is an approval —
+                # with the machine-ness as an attribute. That keeps the funnel
+                # count honest while still letting AL-5 draw the trust curve
+                # (autonomy rising) off one flag instead of two kinds.
+                attrs[ATTR_APPROVAL_AUTO] = True
+
+            row = LedgerRow(
+                agent_id=action.actor_agent_id or "",
+                workspace_id=workspace_id or "",
+                surface=surface_from_trigger(action.trigger.type, action.trigger.source),
+                kind=kind,
+                outcome=_ledger_outcome(action, outcome_for_event),
+                # ``ref`` is the action id, so UNIQUE(kind, ref) means one
+                # approved / rejected / outcome row per action no matter how
+                # many times a retry, a bulk replay, or the un-CAS'd reject path
+                # fires the same transition.
+                ref=action.id,
+                actor=_ledger_actor(event, actor),
+                attrs=attrs,
+            )
+            store = get_agent_ledger_store(workspace_id=(workspace_id or None))
+            await store.append(row)
+        except Exception:  # noqa: BLE001 — bookkeeping never breaks a decision
+            logger.debug(
+                "agent-ledger emit skipped for action %s (%s)",
+                getattr(action, "id", "<unknown>"),
+                event,
+                exc_info=True,
+            )
 
     async def get_action(self, action_id: str) -> Action | None:
         await self._ensure_schema()
@@ -1548,6 +1781,10 @@ class InstinctStore:
         # so a pre-migration row missing the column doesn't raise. NULL/absent
         # stays None (legacy pocket scope).
         scope_type = row["scope_type"] if "scope_type" in row.keys() else None
+        # AL-1 — the proposing agent. Key-checked like the two above so a row
+        # from a DB that has not run the ALTER yet reads as unattributed rather
+        # than raising IndexError on every list.
+        actor_agent_id = (row["actor_agent_id"] if "actor_agent_id" in row.keys() else "") or ""
         # The SQLite layer stamps created_at/updated_at as ISO strings.
         # Forward them on the rebuilt Action so consumers (outcome window
         # filters, age sorting) see real history instead of "now". Old
@@ -1557,6 +1794,7 @@ class InstinctStore:
         return Action(
             id=row["id"],
             scope_type=scope_type,
+            actor_agent_id=actor_agent_id,
             pocket_id=row["pocket_id"],
             title=row["title"],
             description=row["description"] or "",
