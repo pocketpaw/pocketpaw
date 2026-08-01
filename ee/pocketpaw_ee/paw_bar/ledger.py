@@ -408,6 +408,8 @@ async def emit_visitor_action(
     label the vocabulary already defines.
     """
     from pocketpaw.agent_ledger.models import (
+        ATTR_CART_CURRENCY,
+        ATTR_CART_VALUE_CENTS,
         ATTR_PRODUCT_ID,
         ATTR_VISITOR_VERB,
         KIND_VISITOR_ACTION,
@@ -428,11 +430,28 @@ async def emit_visitor_action(
     ref_parts = [conversation_id(widget_id, customer_ref), verb]
 
     if verb == "add_to_cart":
-        value_cents, currency, product_id = _catalog_value(spec, result or {})
+        # A cart add is INTENT, not attributed value, so its money rides in attrs
+        # and NOT in ``value_cents``. Both verbs emit ``paw.visitor.action``, so
+        # the kind cannot separate them, and ``value_by_currency`` sums every row
+        # carrying a value. Put both in the column and one $22 coffee added and
+        # then bought reports $44 attributed — the same money counted twice, on
+        # the owner's headline number, in the flattering direction. That is the
+        # two-meters bug this design exists to refuse, and the hardest version to
+        # notice because nothing looks broken.
+        # The cart's money is still recorded, as ``cart_value_cents`` in attrs, so
+        # a "value in flight" reading stays possible later without ever being
+        # mistaken for revenue.
+        cart_value, cart_currency, product_id = _catalog_value(spec, result or {})
+        if cart_value is not None:
+            attrs[ATTR_CART_VALUE_CENTS] = cart_value
+            if cart_currency:
+                attrs[ATTR_CART_CURRENCY] = cart_currency
         if product_id:
             ref_parts.append(product_id)
             attrs[ATTR_PRODUCT_ID] = product_id
     elif verb == "checkout" and cart:
+        # Checkout is the ONLY visitor beat that becomes ``value_cents``: money
+        # the owner can actually count.
         value_cents = int(cart.get("total_cents") or 0)
         currency = str(cart.get("currency") or "USD")
 

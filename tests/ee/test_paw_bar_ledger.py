@@ -49,6 +49,8 @@ from pocketpaw_ee.paw_bar.handoff import raise_handoff  # noqa: E402
 
 from pocketpaw.agent_ledger.models import (  # noqa: E402
     ATTR_AGENT_ID,
+    ATTR_CART_CURRENCY,
+    ATTR_CART_VALUE_CENTS,
     ATTR_CONVERSATION_ID,
     ATTR_HANDOFF_SOURCE,
     ATTR_PRODUCT_ID,
@@ -196,9 +198,12 @@ class TestVisitorAction:
         assert row.workspace_id == _WS
         assert row.surface == SURFACE_PAW_BAR
         assert row.actor == LedgerActor.VISITOR.value
-        # The catalog is the price of record.
-        assert row.value_cents == 350
-        assert row.currency == "USD"
+        # The catalog is the price of record — but a cart add is INTENT, so its
+        # money is in attrs and the value column stays empty. Only a checkout
+        # becomes attributed value; see test_the_same_money_is_never_attributed_twice.
+        assert row.value_cents is None
+        assert row.attrs[ATTR_CART_VALUE_CENTS] == 350
+        assert row.attrs[ATTR_CART_CURRENCY] == "USD"
         assert row.attrs[ATTR_VISITOR_VERB] == "add_to_cart"
         assert row.attrs[ATTR_PRODUCT_ID] == "espresso"
         assert row.attrs[ATTR_AGENT_ID] == _AGENT
@@ -209,14 +214,39 @@ class TestVisitorAction:
         # And the FILE was routed by the real workspace, not the owner label.
         assert rig.routes == [_WS]
 
-    async def test_value_is_the_catalog_price_times_the_quantity_added(self, rig) -> None:
-        """Three of a $3.50 item is $10.50 — the row says what THIS add was worth."""
+    async def test_a_cart_add_records_its_money_as_INTENT_not_as_value(self, rig) -> None:
+        """Three of a $3.50 item is $10.50 — in attrs, NOT in ``value_cents``.
+
+        A cart add is intent; only a checkout is money the owner can count. Both
+        verbs emit ``paw.visitor.action``, so no kind filter can separate them,
+        and ``value_by_currency`` sums every row carrying a value — see the
+        double-count test below for what putting both in the column would do.
+        """
         widget = await rig.pp.create_widget(_widget())
 
         await execute_action(widget, _WS, _REF, "add_to_cart", {"product_id": "espresso", "qty": 3})
 
         rows = await rig.ledger.query(kinds=[KIND_VISITOR_ACTION])
-        assert [r.value_cents for r in rows] == [1050]
+        assert [r.value_cents for r in rows] == [None]
+        assert rows[0].attrs[ATTR_CART_VALUE_CENTS] == 1050
+        assert rows[0].attrs[ATTR_CART_CURRENCY] == "USD"
+
+    async def test_the_same_money_is_never_attributed_twice(self, rig) -> None:
+        """One $22 coffee added and then bought is $22 attributed, not $44.
+
+        The regression this guards is the two-meters bug in its most dangerous
+        form: it inflates the owner's headline revenue number, in the flattering
+        direction, while nothing looks broken. Caught in review before either
+        slice merged — the emitters would have made it real the day they landed.
+        """
+        widget = await rig.pp.create_widget(_widget())
+
+        await execute_action(widget, _WS, _REF, "add_to_cart", {"product_id": "espresso", "qty": 2})
+        out = await execute_action(widget, _WS, _REF, "checkout", {})
+        assert out.ok
+
+        # 2 × 350 = 700, counted ONCE — at the checkout, not again at the add.
+        assert await rig.ledger.value_by_currency() == {"USD": 700}
 
     async def test_checkout_carries_the_cart_total(self, rig) -> None:
         widget = await rig.pp.create_widget(_widget())
@@ -246,7 +276,11 @@ class TestVisitorAction:
         await execute_action(widget, _WS, _REF, "add_to_cart", {"product_id": "beans"})
 
         rows = await rig.ledger.query(kinds=[KIND_VISITOR_ACTION])
-        assert sorted(r.value_cents for r in rows) == [350, 1800]
+        # Two rows, each carrying its own product's price as INTENT. The point of
+        # the product-in-the-ref is that the second add is not swallowed as a
+        # replay — and it would take its money down with it.
+        assert sorted(r.attrs[ATTR_CART_VALUE_CENTS] for r in rows) == [350, 1800]
+        assert [r.value_cents for r in rows] == [None, None]
 
     async def test_a_refused_action_records_nothing(self, rig) -> None:
         """Nothing happened, so nothing is on the board."""
@@ -539,9 +573,13 @@ class TestTheWholeFunnel:
             KIND_ACTION_DELIVERED: 1,
             KIND_HANDOFF_RAISED: 1,
         }
-        assert await rig.ledger.value_by_currency(agent_id=_AGENT, workspace_id=_WS) == {
-            "USD": 1800
-        }
+        # This visitor filled a cart and never bought, so NOTHING is attributed.
+        # An abandoned cart is not revenue, and a board that counted it would tell
+        # the owner they earned money they never received. The cart's £/$ is still
+        # on the row, as intent, in attrs.
+        assert await rig.ledger.value_by_currency(agent_id=_AGENT, workspace_id=_WS) == {}
+        cart_row = (await rig.ledger.query(kinds=[KIND_VISITOR_ACTION]))[0]
+        assert cart_row.attrs[ATTR_CART_VALUE_CENTS] == 1800
         rows = await rig.ledger.query(agent_id=_AGENT, workspace_id=_WS)
         assert all(r.surface == SURFACE_PAW_BAR for r in rows)
         assert not any(

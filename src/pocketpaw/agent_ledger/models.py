@@ -301,6 +301,13 @@ ATTR_WIDGET_ID = "paw.widget.id"
 ATTR_VISITOR_VERB = "paw.visitor.verb"
 ATTR_HANDOFF_SOURCE = "paw.handoff.source"
 ATTR_PRODUCT_ID = "paw.product.id"
+# A cart add's money lives HERE, never in the ``value_cents`` column. Both
+# add_to_cart and checkout emit ``paw.visitor.action``, so no kind filter can
+# separate them, and ``value_by_currency`` sums every row with a value — a $22
+# coffee added and then bought would report $44 attributed. Intent is recorded,
+# revenue is counted, and the two never share a column.
+ATTR_CART_VALUE_CENTS = "paw.cart.value_cents"
+ATTR_CART_CURRENCY = "paw.cart.currency"
 
 
 # ---------------------------------------------------------------------------
