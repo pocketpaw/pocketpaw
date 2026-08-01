@@ -28,6 +28,27 @@
 #   ``agent=None`` is byte-for-byte the pre-SP2-2 path. The context is PURE
 #   DATA on purpose: this module must never import the Beanie Agent document
 #   (OSS-EE boundary) — the MCP layer loads the agent and hands the values in.
+# Updated: 2026-08-02 (Sense Phase 2, SP2-3) — the MOUNT GATE. The carried
+#   ``senses`` tuple is now CONSUMED: an agent whose mount list is non-empty
+#   reaches EXACTLY those senses and nothing else (the ``tool_mode="exclusive"``
+#   rule applied to capabilities). An EMPTY mount list still inherits the whole
+#   workspace surface, so every pre-SP2-3 caller is unchanged.
+#   The gate is a pure predicate, ``is_sense_carried(sense_id, agent)``, applied
+#   BEFORE any candidate work — no registry build, no Beanie read, no preference
+#   lookup for a sense the agent doesn't carry. ``resolve_many`` skips
+#   non-carried ids for free (the batch's single enabled-connector read still
+#   happens once for whatever remains).
+#   RETURN SHAPE — the deliberate choice: ``resolve`` / ``resolve_many`` keep
+#   returning ``None`` for a non-carried sense, exactly as they do for "no
+#   provider". Their contract is ``ResolvedSense | None`` and every existing
+#   caller branches on ``is None``; a truthy-but-different sentinel would make
+#   an un-updated caller read ``.connector_name`` off a refusal, and a raise
+#   would turn a policy decision into an exception path through code that
+#   currently cannot fail. Callers that must tell the two APART ask the
+#   predicate — it is pure, free, and needs no I/O. ``execute_sense``, which
+#   already owns a structured envelope, does exactly that and returns the stable
+#   ``error="sense.not_carried"`` code (namespaced like its siblings
+#   ``sense.no_provider`` / ``sense.action_needs_approval``).
 
 from __future__ import annotations
 
@@ -53,8 +74,13 @@ class AgentSenseContext:
 
     ``prefs`` maps sense_id -> connector_name and outranks the stored
     pocket/workspace preference rows; a pref naming a connector that isn't a
-    candidate is skipped, not an error. ``senses`` is the agent's carried mount
-    list — CARRIED HERE BUT NOT CONSUMED YET; SP2-3 makes it the exclusive set.
+    candidate is skipped, not an error.
+
+    ``senses`` is the agent's MOUNT LIST. Empty (the default) inherits every
+    sense the workspace can fill; NON-EMPTY is EXCLUSIVE — the agent reaches
+    those senses and only those, and everything else refuses with
+    ``sense.not_carried`` before any candidate lookup. Prefs never widen this:
+    a pref for a sense outside the mount list is dead config.
     """
 
     agent_id: str
@@ -83,19 +109,57 @@ class SenseExecutionResult:
     """Envelope for ``execute_sense``.
 
     Structured (never an HTTP 500): ``ok`` is False with a stable ``error``
-    code for the two refusal paths — no provider for the sense, and the
-    read-first block on a non-auto action. On success ``data`` carries the
-    underlying ``ExecuteActionResponse`` and ``connector_name`` records which
-    provider ran.
+    code for the three refusal paths — the agent doesn't carry the sense
+    (SP2-3), no provider fills it for the workspace, and the read-first block
+    on a non-auto action. On success ``data`` carries the underlying
+    ``ExecuteActionResponse`` and ``connector_name`` records which provider ran.
+    Only the read-first refusal names a ``connector_name``; the other two are
+    refused before one is chosen.
     """
 
     ok: bool
     sense_id: str
     connector_name: str | None = None
     action: str | None = None
-    error: str | None = None  # stable code: "sense.no_provider" | "sense.action_needs_approval"
+    error: str | None = None  # stable code — one of the SENSE_* constants below
     message: str | None = None
     data: object = None
+
+
+# Stable, caller-facing refusal codes for ``SenseExecutionResult.error``.
+SENSE_NOT_CARRIED = "sense.not_carried"
+SENSE_NO_PROVIDER = "sense.no_provider"
+SENSE_ACTION_NEEDS_APPROVAL = "sense.action_needs_approval"
+
+
+def is_sense_carried(sense_id: str, agent: AgentSenseContext | None) -> bool:
+    """Does this agent carry ``sense_id``? — the whole mount rule, in one place.
+
+    True when there is no agent context (legacy / OSS callers), when the agent's
+    mount list is EMPTY (inherit the workspace's full surface), or when the sense
+    is named in it. False only for the exclusive case: a non-empty mount list
+    that doesn't include this sense.
+
+    Pure and I/O-free on purpose. It is the gate ``resolve`` / ``resolve_many``
+    apply BEFORE touching the registry, and the predicate callers use to tell a
+    ``None`` that means "not carried" from one that means "no provider" — the
+    two cases ``resolve``'s ``ResolvedSense | None`` contract cannot distinguish
+    on its own.
+    """
+    if agent is None or not agent.senses:
+        return True
+    return sense_id in agent.senses
+
+
+def _not_carried_message(sense_id: str, agent: AgentSenseContext) -> str:
+    """The refusal text for a non-carried sense — names what the agent DOES
+    carry so the model stops retrying the one it can't reach."""
+    carried = ", ".join(agent.senses)
+    return (
+        f"sense {sense_id!r} is not mounted on this agent ({SENSE_NOT_CARRIED}) — "
+        f"it carries: {carried}. Use one of those, or ask the workspace owner to "
+        "mount this capability on the agent."
+    )
 
 
 async def _disambiguate(
@@ -178,19 +242,30 @@ async def resolve(
     """Bind ``sense_id`` to the connector that fills it for this workspace.
 
     Returns ``None`` when no enabled connector can fill the sense (the caller
-    decides what to do — typically prompt-to-connect). Raises
-    ``SenseValidationError`` for an unknown ``paw.*`` id. Pass ``agent`` to let
-    the running agent's own provider pref outrank the stored preference rows;
-    ``agent=None`` is the unchanged pre-SP2-2 behaviour.
+    decides what to do — typically prompt-to-connect) AND when the agent doesn't
+    carry the sense (SP2-3); ``is_sense_carried`` tells the two apart without a
+    query. Raises ``SenseValidationError`` for an unknown ``paw.*`` id. Pass
+    ``agent`` to apply the mount gate and let the running agent's own provider
+    pref outrank the stored preference rows; ``agent=None`` is the unchanged
+    pre-SP2-2 behaviour.
     """
     validate_sense_id(sense_id)
+
+    # Mount gate (SP2-3) — refuse BEFORE any candidate work. An id the agent
+    # doesn't carry costs no registry build and no Beanie read.
+    if not is_sense_carried(sense_id, agent):
+        logger.info(
+            "sense not carried: agent=%s sense=%s mounted=%s",
+            agent.agent_id,  # type: ignore[union-attr] — non-None whenever the gate trips
+            sense_id,
+            agent.senses,  # type: ignore[union-attr]
+        )
+        return None
 
     registry = connectors_service._get_registry()  # noqa: SLF001 — reuse the EE singleton
     filler = ConnectorSenseFiller(registry)
     candidates = await filler.candidates(sense_id, workspace_id, pocket_id=pocket_id)
-    return await _disambiguate(
-        sense_id, candidates, workspace_id, pocket_id=pocket_id, agent=agent
-    )
+    return await _disambiguate(sense_id, candidates, workspace_id, pocket_id=pocket_id, agent=agent)
 
 
 async def resolve_many(
@@ -212,9 +287,20 @@ async def resolve_many(
     (validated up front, same as ``resolve``). Duplicate ids collapse to one
     key. The >1-candidate preference lookup still runs per ambiguous id — that
     branch is rare, so it stays as-is.
+
+    Mount gate (SP2-3): a sense the ``agent`` doesn't carry maps to ``None``
+    without ANY candidate work — the intersection is skipped, not just the
+    disambiguation. Every input id still appears in the result, so the caller's
+    key set is unchanged. ``is_sense_carried`` distinguishes those ``None``s
+    from the no-provider ones.
     """
     for sense_id in sense_ids:
         validate_sense_id(sense_id)
+
+    # Nothing in the batch is carried — skip the batch read too, not just the
+    # per-sense intersection.
+    if not any(is_sense_carried(sense_id, agent) for sense_id in sense_ids):
+        return dict.fromkeys(sense_ids)
 
     registry = connectors_service._get_registry()  # noqa: SLF001 — reuse the EE singleton
     filler = ConnectorSenseFiller(registry)
@@ -223,6 +309,9 @@ async def resolve_many(
 
     out: dict[str, ResolvedSense | None] = {}
     for sense_id in sense_ids:
+        if not is_sense_carried(sense_id, agent):
+            out[sense_id] = None
+            continue
         candidates = filler.candidates_from(sense_id, enabled_names)
         out[sense_id] = await _disambiguate(
             sense_id, candidates, workspace_id, pocket_id=pocket_id, agent=agent
@@ -258,6 +347,11 @@ async def execute_sense(
 ) -> SenseExecutionResult:
     """Resolve a sense, enforce the read-first gate, then delegate to execute.
 
+    0. MOUNT GATE (SP2-3) — if the agent carries a non-empty mount list and this
+       sense isn't in it, refuse with ``sense.not_carried`` before resolving.
+       This runs FIRST: an un-carried sense must refuse identically whether or
+       not the workspace happens to have a provider for it, so the refusal never
+       leaks which connectors the tenant enabled.
     1. ``resolve`` — if no provider, return a structured ``sense.no_provider``
        result (never raise a 500).
     2. READ-FIRST GATE — the action's ``trust_level`` on the resolved
@@ -271,13 +365,23 @@ async def execute_sense(
     the connector this execution runs against. The read-first gate is unchanged
     and applies to whichever connector wins.
     """
+    validate_sense_id(sense_id)
+    if not is_sense_carried(sense_id, agent):
+        return SenseExecutionResult(
+            ok=False,
+            sense_id=sense_id,
+            action=action,
+            error=SENSE_NOT_CARRIED,
+            message=_not_carried_message(sense_id, agent),  # type: ignore[arg-type]
+        )
+
     resolved = await resolve(sense_id, workspace_id, pocket_id=pocket_id, agent=agent)
     if resolved is None:
         return SenseExecutionResult(
             ok=False,
             sense_id=sense_id,
             action=action,
-            error="sense.no_provider",
+            error=SENSE_NO_PROVIDER,
             message=(
                 f"no enabled connector can fill {sense_id!r} for this workspace — "
                 "connect a provider for this sense and retry."
@@ -293,7 +397,7 @@ async def execute_sense(
             sense_id=sense_id,
             connector_name=connector_name,
             action=action,
-            error="sense.action_needs_approval",
+            error=SENSE_ACTION_NEEDS_APPROVAL,
             message=(
                 f"action {action!r} on {connector_name!r} needs approval "
                 f"(trust_level={trust!r}) — not executed in v1 (read-first)."
@@ -316,10 +420,14 @@ async def execute_sense(
 
 
 __all__ = [
+    "SENSE_ACTION_NEEDS_APPROVAL",
+    "SENSE_NOT_CARRIED",
+    "SENSE_NO_PROVIDER",
     "AgentSenseContext",
     "ResolvedSense",
     "SenseExecutionResult",
     "execute_sense",
+    "is_sense_carried",
     "resolve",
     "resolve_many",
 ]

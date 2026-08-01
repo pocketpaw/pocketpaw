@@ -72,6 +72,21 @@
 #   fails to load, → ``agent=None`` → the exact pre-SP2-2 resolution. The load is
 #   lazy inside the helper (same discipline as the other cloud imports here) so
 #   the module's import surface is unchanged.
+# Updated: 2026-08-02 (Sense Phase 2, SP2-3 — the sense MOUNT LIST) — the context
+#   now carries the agent's real ``config.senses``, and this surface enforces it.
+#   ``list_senses`` filters CORE_SENSES through ``resolver.is_sense_carried``
+#   BEFORE the batch resolve, so a non-carried sense never enters the query and
+#   never appears in the payload; the response carries ``carried_senses`` (empty
+#   when the agent inherits the full surface) and, when the list is non-empty,
+#   a note telling the model the listing is exhaustive so it stops retrying a
+#   sense it cannot reach. ``sense_execute`` needs no gate of its own —
+#   ``execute_sense`` refuses a non-carried sense with the structured
+#   ``sense.not_carried`` code before resolving, and the existing
+#   ``if not result.ok`` branch relays that message. An EMPTY mount list is
+#   today's surface exactly, so every pre-SP2-3 agent is unchanged.
+#   ``getattr(config, "senses", ())`` stays defensive on purpose: the helper
+#   must degrade to "inherit everything" for any config shape that predates the
+#   field rather than raising inside a tool call.
 """Agent-side MCP surface for executing a chat's reachable connectors.
 
 Tools registered:
@@ -198,8 +213,8 @@ async def _agent_sense_context() -> Any | None:
     config = agent.config
     return AgentSenseContext(
         agent_id=agent_id,
-        # The carried mount list lands in SP2-3; until then the field doesn't
-        # exist on the config and the context carries an empty tuple.
+        # The mount list (SP2-3). Empty here means "inherit the workspace's whole
+        # sense surface" — the resolver's gate reads it exactly that way.
         senses=tuple(getattr(config, "senses", ()) or ()),
         prefs=dict(getattr(config, "sense_prefs", ()) or ()),
     )
@@ -606,20 +621,27 @@ async def _list_senses_handler(args: dict) -> dict:  # noqa: ARG001 — no args
         )
 
     from pocketpaw.senses import CORE_SENSES
-    from pocketpaw_ee.cloud.senses.resolver import resolve_many
+    from pocketpaw_ee.cloud.senses.resolver import is_sense_carried, resolve_many
 
-    # One enabled-connector read for all CORE_SENSES (was one query per sense).
     agent_ctx = await _agent_sense_context()
+    # MOUNT LIST (SP2-3): an agent that carries senses sees EXACTLY those. The
+    # filter runs here as well as in the resolver so a non-carried sense costs
+    # nothing at all — it never enters the batch. ``is_sense_carried`` is the
+    # same predicate the resolver gates on, so the two can't drift apart.
+    listable = [s for s in CORE_SENSES if is_sense_carried(s.id, agent_ctx)]
+    carried = list(agent_ctx.senses) if agent_ctx is not None else []
+
+    # One enabled-connector read for the whole batch (was one query per sense).
     try:
         resolved_map = await resolve_many(
-            [s.id for s in CORE_SENSES], workspace_id, pocket_id=pocket_id, agent=agent_ctx
+            [s.id for s in listable], workspace_id, pocket_id=pocket_id, agent=agent_ctx
         )
     except Exception as exc:  # noqa: BLE001 — never let one sense break the list
         logger.warning("list_senses: resolve_many failed", exc_info=True)
         return _error_response(f"list_senses failed: {exc}")
 
     senses_out: list[dict[str, Any]] = []
-    for sense in CORE_SENSES:
+    for sense in listable:
         resolved = resolved_map.get(sense.id)
         if resolved is None:
             # No enabled connector fills this sense for the workspace — skip it
@@ -637,28 +659,47 @@ async def _list_senses_handler(args: dict) -> dict:  # noqa: ARG001 — no args
         )
 
     if not senses_out:
+        message = (
+            "No capabilities (Senses) are available here yet — no enabled "
+            "connector fills any core sense for this workspace. Connect a "
+            "provider (email, calendar, code, etc.) to use senses."
+        )
+        if carried:
+            message = (
+                "This agent carries " + ", ".join(carried) + ", but no enabled "
+                "connector fills any of them for this workspace. Connect a "
+                "provider for one of those capabilities — senses outside that "
+                "list are not available to this agent at all."
+            )
         return _success_response(
             {
                 "pocket_id": pocket_id,
                 "senses": [],
-                "message": (
-                    "No capabilities (Senses) are available here yet — no enabled "
-                    "connector fills any core sense for this workspace. Connect a "
-                    "provider (email, calendar, code, etc.) to use senses."
-                ),
+                "carried_senses": carried,
+                "message": message,
             }
+        )
+
+    note = (
+        "Call sense_execute(sense, action, params) to run a READ action "
+        "against a capability without naming the connector. If a sense is "
+        "ambiguous, the resolver picked the first candidate — the user can "
+        "set a preference to disambiguate. Write actions are blocked in v1."
+    )
+    if carried:
+        note += (
+            " This agent carries a fixed set of senses — the list above is ALL of "
+            "them. Any other sense is refused; don't retry one that isn't listed."
         )
 
     return _success_response(
         {
             "pocket_id": pocket_id,
             "senses": senses_out,
-            "note": (
-                "Call sense_execute(sense, action, params) to run a READ action "
-                "against a capability without naming the connector. If a sense is "
-                "ambiguous, the resolver picked the first candidate — the user can "
-                "set a preference to disambiguate. Write actions are blocked in v1."
-            ),
+            # Present (possibly empty) on every response so a caller can tell an
+            # agent with a mount list from one that inherits the full surface.
+            "carried_senses": carried,
+            "note": note,
         }
     )
 
@@ -889,8 +930,11 @@ def build_connectors_context_server() -> tuple[str, Any] | None:
             "read (auto-trust) actions run; WRITE actions (create/send/modify/"
             "delete) are refused with a 'needs approval' message and are NEVER "
             "executed. If no connector fills the sense for this workspace you get "
-            "a clear 'no provider' error. Always call list_senses first to see "
-            "which senses resolve and pick a valid action."
+            "a clear 'no provider' error. Some agents carry a fixed set of "
+            "senses — a sense outside that set is refused as 'not mounted on "
+            "this agent'; don't retry it, use one list_senses returned. Always "
+            "call list_senses first to see which senses resolve and pick a "
+            "valid action."
         ),
         {
             "type": "object",
