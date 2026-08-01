@@ -39,6 +39,17 @@
 #   connector service's ``execute`` spied — which also proves the
 #   ``sense.not_carried`` gate short-circuits ahead of every I/O path, since the
 #   test needs no Mongo at all.
+# Updated: 2026-08-02 (Sense Phase 2, SP2-4) — new ``TestPocketlessSenseSurface``
+#   is a REGRESSION LOCK, not new behavior: it pins that the sense tools are
+#   POCKET-OPTIONAL (a DM / group run with ``pocket_id=None`` lists and executes
+#   the workspace-tier surface, and the null pocket reaches the resolver as
+#   ``None``), that a mount list still scopes such a run, and that
+#   ``workspace_id`` is the ONE hard requirement. Re-adding a "no pocket" guard
+#   to either handler — the shape that existed before the 2026-06-12
+#   workspace-scope reach — now fails these tests loudly instead of silently
+#   disarming every DM-driven and concierge-driven agent. Where that surface is
+#   EXPOSED is a separate concern tested in
+#   ``tests/cloud/runs/test_run_core_concierge_senses.py``.
 """MCP server registration + handler tests for connector execution."""
 
 from __future__ import annotations
@@ -1196,3 +1207,138 @@ class TestSenseMountList:
 
         assert not out.get("is_error")
         assert mock_exec.await_args.kwargs["agent"].senses == ("paw.email.v1",)
+
+
+class TestPocketlessSenseSurface:
+    """SP2-4 regression lock — the SENSE tools are POCKET-OPTIONAL.
+
+    A run with no pocket bound (a DM / group thread) resolves the WORKSPACE-tier
+    sense surface: ``senses.filler`` ignores ``pocket_id`` entirely and
+    ``execute_sense`` takes ``pocket_id=None`` natively. Nothing here is new
+    behavior — these tests exist so that re-adding a "no pocket" guard to either
+    handler FAILS LOUDLY instead of silently taking the hands off every
+    DM-driven and concierge-driven agent. The only identity these tools require
+    is ``workspace_id``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_pocketless_list_senses_resolves_workspace_tier(self) -> None:
+        """No pocket AND no agent bound: still lists, with pocket_id=None reaching
+        the resolver (workspace-tier candidates), not a refusal."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+        from pocketpaw_ee.cloud.senses.resolver import ResolvedSense
+
+        seen: dict[str, object] = {}
+
+        async def fake_resolve_many(sense_ids, workspace_id, *, pocket_id=None, agent=None):
+            seen["pocket_id"] = pocket_id
+            seen["agent"] = agent
+            return {
+                sid: (
+                    ResolvedSense(
+                        sense_id="paw.email.v1",
+                        connector_name="gmail",
+                        ambiguous=False,
+                        candidates=["gmail"],
+                    )
+                    if sid == "paw.email.v1"
+                    else None
+                )
+                for sid in sense_ids
+            }
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", None)
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.senses.resolver.resolve_many",
+                new=AsyncMock(side_effect=fake_resolve_many),
+            ),
+        ):
+            out = await connectors_mcp._list_senses_handler({})
+
+        assert not out.get("is_error"), "pocket-less list_senses must NOT refuse"
+        body = _decode_payload(out)
+        assert [s["sense"] for s in body["senses"]] == ["paw.email.v1"]
+        assert body["pocket_id"] is None
+        # The null pocket reached the resolver as None — a workspace-tier read.
+        assert seen["pocket_id"] is None
+        assert seen["agent"] is None
+
+    @pytest.mark.asyncio
+    async def test_pocketless_sense_execute_runs(self) -> None:
+        """The execute half of the same property: a pocket-less run executes,
+        delegating with pocket_id=None."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+        from pocketpaw_ee.cloud.connectors.dto import ExecuteActionResponse
+        from pocketpaw_ee.cloud.senses.resolver import SenseExecutionResult
+
+        mock_exec = AsyncMock(
+            return_value=SenseExecutionResult(
+                ok=True,
+                sense_id="paw.email.v1",
+                connector_name="gmail",
+                action="gmail_search",
+                data=ExecuteActionResponse(success=True, data=[{"id": "m1"}]),
+            )
+        )
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", None)
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch("pocketpaw_ee.cloud.senses.resolver.execute_sense", new=mock_exec),
+        ):
+            out = await connectors_mcp._sense_execute_handler(
+                {"sense": "paw.email.v1", "action": "gmail_search"}
+            )
+
+        assert not out.get("is_error"), "pocket-less sense_execute must NOT refuse"
+        assert _decode_payload(out)["executed"] is True
+        assert mock_exec.await_args.kwargs["pocket_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_pocketless_mounted_agent_keeps_the_mount_gate(self) -> None:
+        """Pocket-less does NOT mean unbounded: an agent carrying a mount list
+        still lists exactly its carried senses. Pocket-optional and
+        capability-scoped are independent properties."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        mock_resolve = AsyncMock(return_value={})
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", None)
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            _patch_running_agent("ag_1"),
+            patch(
+                "pocketpaw_ee.cloud.agents.service.get",
+                new=AsyncMock(return_value=_StubMountedAgent(senses=("paw.email.v1",))),
+            ),
+            patch("pocketpaw_ee.cloud.senses.resolver.resolve_many", new=mock_resolve),
+        ):
+            out = await connectors_mcp._list_senses_handler({})
+
+        assert not out.get("is_error")
+        assert mock_resolve.await_args.args[0] == ["paw.email.v1"]
+        assert mock_resolve.await_args.kwargs["pocket_id"] is None
+        assert _decode_payload(out)["carried_senses"] == ["paw.email.v1"]
+
+    @pytest.mark.asyncio
+    async def test_workspace_is_the_only_hard_requirement(self) -> None:
+        """The one identity these tools DO require. Pocket may be absent; a
+        workspace may not (it is the tenant boundary)."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        ws_patch, user_patch, pocket_patch = _patch_identity(None, "u_1", None)
+        with ws_patch, user_patch, pocket_patch:
+            listed = await connectors_mcp._list_senses_handler({})
+            executed = await connectors_mcp._sense_execute_handler(
+                {"sense": "paw.email.v1", "action": "gmail_search"}
+            )
+
+        for out in (listed, executed):
+            assert out.get("is_error") is True
+            assert "no active workspace" in out["content"][0]["text"]

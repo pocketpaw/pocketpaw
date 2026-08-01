@@ -87,6 +87,27 @@
 #   ``getattr(config, "senses", ())`` stays defensive on purpose: the helper
 #   must degrade to "inherit everything" for any config shape that predates the
 #   field rather than raising inside a tool call.
+# Updated: 2026-08-02 (Sense Phase 2, SP2-4) — NO behavior change here; this note
+#   LOCKS IN a property that is easy to break by accident. The SENSE tools are
+#   POCKET-OPTIONAL, and have been since the 2026-06-12 workspace-scope reach
+#   above: a run with NO pocket bound (a DM / group thread, ``pocket_id=None``)
+#   resolves the WORKSPACE-tier sense surface and both LISTS and EXECUTES it.
+#   That is structural, not incidental — ``cloud.senses.filler`` ignores
+#   ``pocket_id`` entirely (any enabled connector in the workspace fills a
+#   sense) and ``execute_sense`` takes ``pocket_id=None`` natively. Do NOT
+#   re-add a "no pocket" guard to ``_list_senses_handler`` /
+#   ``_sense_execute_handler``: it would silently take the hands off every
+#   DM-driven and concierge-driven agent. The ONLY identity these two tools
+#   require is ``workspace_id`` (the tenant boundary); a pocket is a narrowing
+#   hint, never a precondition. Pinned by ``TestPocketlessSenseSurface`` in
+#   ``tests/ee/agent/test_connectors_mcp_server/test_mcp_tool.py``.
+#   The RAW connector tools are deliberately different and stay unchanged:
+#   ``connector_execute`` resolves credentials per scope, so an unanchored run
+#   reaches workspace-scoped connectors only — a pocket-bound connector stays
+#   room-private. Separately, whether a sense surface is EXPOSED on a given
+#   surface is a different question from whether it RESOLVES: the public
+#   concierge surface grants these two tool ids only to an agent carrying a
+#   non-empty mount list (``chat.runs.run_core._concierge_sense_policy``).
 """Agent-side MCP surface for executing a chat's reachable connectors.
 
 Tools registered:
