@@ -777,6 +777,39 @@ class Settings(BaseSettings):
             "that is the escape hatch for one that turns out not to."
         ),
     )
+    pydantic_ai_defer_skills: bool = Field(
+        default=False,
+        description=(
+            "Hide the Pydantic AI backend's skills catalog behind the agent's "
+            "``load_capability`` tool instead of listing every skill's name and "
+            "description in the system prompt. Measured against the proxy, the "
+            "19 bundled skills are 18,717 chars (~4,679 tokens) of the system "
+            "prompt; deferring drops that to 751 chars (~187), and a trivial "
+            "turn from 6.3s to 2.9s. "
+            "OFF BY DEFAULT, AND CURRENTLY BROKEN ON DEEPSEEK. Turning it on "
+            "makes a skill-using turn die with a 400 from the provider — "
+            "``The reasoning_content in the thinking mode must be passed back "
+            "to the API`` — immediately after the ``load_capability`` call. "
+            "Reproduced 2026-08-01 on deepseek-v4-flash AND deepseek-v4-pro: "
+            "4 of 4 deferred runs of 'build me a landing page' failed after "
+            "exactly one tool call, against 4 of 4 passing with this off. "
+            "``pydantic_ai_thinking=off`` does NOT avoid it. The traceback goes "
+            "through ``pydantic_ai/models/_continuation.py``, so the "
+            "deferred-capability continuation appears to rebuild the request "
+            "without echoing the reasoning field DeepSeek requires — an "
+            "upstream problem, not a setting we can tune. "
+            "Note this is NOT the same trade as ``pydantic_ai_defer_mcp_tools`` "
+            "even once that is fixed: the skills catalog rides in the system "
+            "prompt, which DOES prompt-cache on the proxy, so only a cold turn "
+            "or a cache miss pays for it. And a model that never calls "
+            "``load_capability`` loses every skill — skills are how pocket "
+            "creation, Paw Sites and Foresight know their own procedures, so "
+            "failing to load one degrades the product rather than just costing "
+            "a round trip. Worth turning on for a non-DeepSeek model where "
+            "cold-turn latency matters more than skill reliability; verify "
+            "a skill-using turn end to end before trusting it."
+        ),
+    )
     pydantic_ai_harness_enabled: bool = Field(
         default=True,
         description=(

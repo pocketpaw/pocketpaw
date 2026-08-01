@@ -838,6 +838,67 @@ def test_skill_names_is_part_of_the_agent_cache_key(monkeypatch):
     assert wide is not narrow, "cached agent reused across different skill subsets"
 
 
+def test_skills_are_listed_in_the_prompt_unless_deferral_is_asked_for(monkeypatch):
+    """Default stays eager: the catalog is in the system prompt.
+
+    Pinned because deferral is measurably cheaper and it would be easy to flip
+    on that basis alone — but it is broken on DeepSeek (see the setting's own
+    description), so the default moving is a decision, never a drift.
+    """
+    pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
+
+    _fake_skills(monkeypatch, "alpha")
+
+    assert Settings.model_fields["pydantic_ai_defer_skills"].default is False
+    cap = PydanticAIBackend(_settings())._build_skills_capability()
+    assert cap.defer_loading is False
+    assert cap.id is None
+
+
+def test_deferred_skills_carry_an_id_and_a_description(monkeypatch):
+    """Both are load-bearing, and neither is checked by anything else.
+
+    ``id`` is REQUIRED by ``SkillsCapability`` once ``defer_loading`` is set,
+    and it is the name the model passes to ``load_capability``.
+
+    The description matters more than it looks. Left unset the library
+    synthesises ``'Provides specialized skills: ' + names``, and our names
+    ("pocketpaw-create-paw-site", "foresight-create-sim") do not tell a model
+    that "build me a landing page" is one of these. A deferred capability
+    nobody loads is worse than no deferral at all: the skills are still built,
+    still cost a round trip to find, and never reach the model.
+    """
+    pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
+
+    _fake_skills(monkeypatch, "alpha")
+
+    cap = PydanticAIBackend(_settings(pydantic_ai_defer_skills=True))._build_skills_capability()
+
+    assert cap.defer_loading is True
+    assert cap.id, "defer_loading without an id is a construction error upstream"
+    described = cap.get_description() or ""
+    assert "pocket" in described.lower() and "site" in described.lower(), described
+    assert described != "Provides specialized skills: alpha.", "left on the library default"
+
+
+def test_deferral_does_not_change_which_skills_are_offered(monkeypatch):
+    """Deferral moves the catalog; it must not silently narrow it.
+
+    Same skills, same excluded tools — only where the catalog lives changes.
+    """
+    pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
+
+    _fake_skills(monkeypatch, "alpha", "beta")
+
+    eager = PydanticAIBackend(_settings())._build_skills_capability()
+    deferred = PydanticAIBackend(
+        _settings(pydantic_ai_defer_skills=True)
+    )._build_skills_capability()
+
+    assert {s.name for s in eager.skills} == {s.name for s in deferred.skills}
+    assert set(eager.exclude_tools) == set(deferred.exclude_tools)
+
+
 def test_skills_disabled_returns_none():
     assert (
         PydanticAIBackend(_settings(pydantic_ai_skills_enabled=False))._build_skills_capability()

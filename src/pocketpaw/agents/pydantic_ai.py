@@ -208,6 +208,12 @@ _OPENAI_COMPATIBLE = frozenset({"litellm", "openai", "openai_compatible", "openr
 # (see below), because it was never really about pocket sessions.
 _POCKET_SCOPE_SENTINEL = "<pocket-scope>"
 
+# The name the model uses to pull the skills catalog when
+# ``pydantic_ai_defer_skills`` is on. ``SkillsCapability`` requires an id once
+# ``defer_loading`` is set, and it appears in the model's ``load_capability``
+# call, so it is stable and readable rather than generated per run.
+_SKILLS_CAPABILITY_ID = "pocketpaw-skills"
+
 # Bounds on the per-session transcript cache (see ``_session_messages``).
 # ``logfire.configure`` is process-global and one backend instance exists per
 # agent, so the capability builder would otherwise reconfigure it per agent.
@@ -1230,11 +1236,45 @@ class PydanticAIBackend:
         if not skills:
             return None
 
-        logger.info("Pydantic AI: exposing %d PocketPaw skills", len(skills))
+        defer = bool(getattr(self.settings, "pydantic_ai_defer_skills", False))
+        logger.info(
+            "Pydantic AI: exposing %d PocketPaw skills%s",
+            len(skills),
+            " (deferred behind load_capability)" if defer else "",
+        )
+        if not defer:
+            return SkillsCapability(
+                skills=skills,
+                exclude_tools={"run_skill_script", "read_skill_resource"},
+                validate=False,
+            )
+
+        # Deferred: the catalog leaves the system prompt and the model pulls it
+        # with ``load_capability`` first. ``id`` is REQUIRED once
+        # ``defer_loading`` is set, and it is what the model names to load this,
+        # so it is a stable string rather than anything per-run.
+        #
+        # The description is written rather than left to the library's default.
+        # That default is ``'Provides specialized skills: ' + ', '.join(names)``,
+        # and our names alone ("pocketpaw-create-paw-site",
+        # "foresight-create-sim") do not tell a model that a request to build a
+        # landing page is one of these. A deferred capability nobody loads is
+        # strictly worse than no deferral: the skills are still built, still
+        # cost the round trip to discover, and never reach the model.
         return SkillsCapability(
             skills=skills,
             exclude_tools={"run_skill_script", "read_skill_resource"},
             validate=False,
+            id=_SKILLS_CAPABILITY_ID,
+            defer_loading=True,
+            description=(
+                "PocketPaw's own skills. Load this before building or editing "
+                "anything the product owns — pockets, dashboards, Paw Sites "
+                "(landing, dynamic, Svelte), Foresight scenarios, connector "
+                "workflows (Gmail, GitHub) and design/taste guidance. Each "
+                "skill carries the step-by-step procedure and the exact tools "
+                "for that job, so load this first rather than improvising one."
+            ),
         )
 
     @staticmethod
