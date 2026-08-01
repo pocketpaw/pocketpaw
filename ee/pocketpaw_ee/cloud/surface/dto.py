@@ -26,6 +26,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -75,6 +77,14 @@ class SurfaceMetaRequest(BaseModel):
     storage_root: str | None = None
     is_cloud_storage: str | None = None
     workspace_vm: str | None = None
+    # Concierge action registry hint (C1) — mirror SurfaceMeta. Set server-side by
+    # ``concierge_chat`` from the widget spec (never by an untrusted client on the
+    # public path), so the concierge run allow-lists + surfaces exactly this
+    # widget's declared verbs. A JSON list of {verb, policy, args, label}.
+    pawbar_actions: list[dict[str, Any]] | None = None
+    # Concierge catalog hint (C1) — mirror SurfaceMeta. Set server-side from the
+    # widget spec (capped) so the preamble can name real products.
+    pawbar_catalog: list[dict[str, Any]] | None = None
 
 
 class SurfaceRequest(BaseModel):

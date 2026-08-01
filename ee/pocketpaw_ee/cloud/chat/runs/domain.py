@@ -24,7 +24,16 @@ Changes: 2026-07-28 (HR-12a, feat/cockpit-agent-activity) — added
 ``chat.runs.service`` (EE Rule 1: Beanie only from service.py), so a consumer
 outside this entity — ``ee.cloud.agent_activity``, which answers "which of my
 agents are working right now" — reads runs as these Beanie-free value objects
-rather than importing the document class."""
+rather than importing the document class.
+
+Changes: 2026-07-26 (concierge transcripts) — ``RunSpec`` grows
+``persist_user_text``: the user's message text to WRITE DOWN on the run doc, as
+opposed to ``content``, which is what the agent is asked. Every authed surface
+leaves it "" because it already persisted the user turn as its own Message row;
+the CONCIERGE surface sets it (when the site's retention toggle allows) because
+its anonymous visitor has no Message row, so the run doc is the only place the
+visitor half of a transcript can live. A bare ``str``, so it pickles like the
+rest."""
 
 from __future__ import annotations
 
@@ -48,6 +57,11 @@ class RunSpec(BaseModel):
     client_message_id: str
     user_message_id: str
     content: str
+    # The user's message text to PERSIST on the run doc (``ChatRunDoc.user_text``).
+    # Distinct from ``content``: content is what the agent is asked, this is what we
+    # choose to write down. "" on every authed surface (they persist a Message row
+    # instead); set by the concierge surface when the site allows it.
+    persist_user_text: str = ""
     history: list[dict[str, str]]
     intent: str | None
     attachments: list[dict[str, Any]] = []

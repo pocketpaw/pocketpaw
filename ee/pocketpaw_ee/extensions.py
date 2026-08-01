@@ -675,6 +675,33 @@ class CloudPocketMcpProvider:
         return list(POCKET_TOOL_IDS)
 
 
+class CloudPawBarActionsMcpProvider:
+    """`pocketpaw.mcp_servers` — the Paw Bar per-verb action tools (C1).
+
+    Builds nothing on a normal run: ``build_pawbar_actions_server`` returns None
+    unless the active context is a CONCIERGE run bound to a widget
+    (``current_pawbar_run()`` set by ``run_core``), so on every other surface this
+    provider is a no-op and the tool set is empty. ``tool_ids`` mirrors the same
+    per-run context so the SDK allowlist only ever gains the current widget's
+    verbs — which the ``_concierge_profile`` allow-list then keeps past the
+    concierge lockdown.
+
+    Since the escape hatch (slice 3) that context also exists for a concierge
+    widget that declares NO actions, because every site concierge carries the
+    built-in ``pawbar_request_human`` tool. That tool raises a handoff and does
+    nothing else, so the surface stays zero-authority."""
+
+    def build_server(self) -> tuple[str, Any] | None:
+        from pocketpaw_ee.agent.mcp_servers.pawbar import build_pawbar_actions_server
+
+        return build_pawbar_actions_server()
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.pawbar import pawbar_tool_ids
+
+        return list(pawbar_tool_ids())
+
+
 class CloudDecisionsMcpProvider:
     """`pocketpaw.mcp_servers` — the decision-graph in-process server.
 

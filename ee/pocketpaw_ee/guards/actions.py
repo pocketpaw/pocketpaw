@@ -3,6 +3,19 @@
 # machine-readable `code` emitted on denial. Tests iterate ACTIONS to
 # guarantee every guarded operation is covered.
 #
+# Updated: 2026-07-26 (site knowledge sync) — added ``paw_bar.manage`` (ADMIN) for
+# the owner-triggered site→pocket-KB sync. Same role as ``paw_bar.read`` but its
+# own action: the sync is a mutation that spends compute (ingest compiles
+# articles), and a write should not ride a read gate that could later be widened.
+#
+# Updated: 2026-07-16 (D2 concierge dashboard reads) — added ``paw_bar.read``
+# (ADMIN) so the per-site Concierge dashboard reads (ee.pocketpaw_ee.paw_bar
+# .router: overview / conversations / decisions / handoffs) gate on the caller's
+# workspace ROLE instead of the coarse ``require_scope("admin")`` (which admits
+# any authenticated dashboard user). ADMIN, mirroring ``audit.read``: a site's
+# concierge conversations, decisions, and handoffs carry visitor PII and owner
+# decision context, so they must not be visible to every workspace member.
+#
 # Updated: 2026-07-11 (feat/external-alerting-c2c3) — registered
 # ``automations.read`` (MEMBER) and ``automations.manage`` (ADMIN) for the
 # always-on automation status surface (ee.cloud.automations_status.router): view
@@ -154,10 +167,15 @@ ACTIONS: dict[str, ActionRule] = {
     "workspace.invite": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     "workspace.member.remove": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     "workspace.member.role_change": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Member-permission management (route + connector access). EDITOR is the
+    # minimum: editors can assign routes, connectors, and channel/group
+    # memberships to members but cannot change workspace-level roles or
+    # remove members (those stay ADMIN-gated).
+    "workspace.member.permissions": ActionRule(WorkspaceRole.EDITOR, "workspace.insufficient_role"),
     # Group (chat)
     "group.view": ActionRule(GroupRole.VIEW, "group.not_member"),
     "group.create": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
-    "channel.create": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    "channel.create": ActionRule(WorkspaceRole.EDITOR, "workspace.insufficient_role"),
     "group.post": ActionRule(GroupRole.MEMBER, "group.view_only"),
     "group.admin": ActionRule(GroupRole.ADMIN, "group.not_admin"),
     "group.delete": ActionRule(GroupRole.OWNER, "group.not_owner"),
@@ -174,8 +192,8 @@ ACTIONS: dict[str, ActionRule] = {
     # Agent
     "agent.run": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "agent.create": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
-    "agent.edit": ActionRule(WorkspaceRole.ADMIN, "agent.not_owner"),
-    "agent.delete": ActionRule(WorkspaceRole.ADMIN, "agent.not_owner"),
+    "agent.edit": ActionRule(WorkspaceRole.EDITOR, "agent.not_owner"),
+    "agent.delete": ActionRule(WorkspaceRole.EDITOR, "agent.not_owner"),
     # Session
     "session.read_own": ActionRule(WorkspaceRole.MEMBER, "session.not_owner"),
     "session.read_any": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
@@ -268,6 +286,18 @@ ACTIONS: dict[str, ActionRule] = {
     # pocket produced), with no credentials or decision payloads — any
     # workspace member may view it, mirroring instinct.read.
     "outcomes.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    # Paw Bar concierge dashboard — the per-site owner aggregation reads
+    # (ee.pocketpaw_ee.paw_bar.router: overview / conversations / decisions /
+    # handoffs, D2). ADMIN, mirroring audit.read (NOT the MEMBER bar of
+    # outcomes.read): a site's visitor conversations, decisions, and handoffs
+    # carry visitor PII and owner decision context, so the surface is owner/admin
+    # only and must not be visible to every workspace member.
+    "paw_bar.read": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Paw Bar concierge dashboard — the owner WRITE surface (today: the
+    # site→pocket-KB knowledge sync). ADMIN like the read, but its own action
+    # because it is a mutation that also spends compute (ingest compiles articles),
+    # so it must not inherit a read gate. Mirrors belt.read / belt.manage.
+    "paw_bar.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Belt console — the develop-station read + repo-admin surface
     # (ee.cloud.belt.router, feat/belt-console-backend SC-1). read is MEMBER so
     # any team member can list discoverable repos + their own station runs.

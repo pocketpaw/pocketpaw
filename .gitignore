@@ -94,3 +94,6 @@ output.txt
 !/deploy/paw-sites/.gitkeep
 /deploy/ripple/*
 !/deploy/ripple/.gitkeep
+
+# Load-test artifacts (scripts/loadtest)
+out/

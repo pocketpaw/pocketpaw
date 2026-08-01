@@ -2082,9 +2082,101 @@ async def clear_member_connector_permissions(
     )
 
 
+# ---------------------------------------------------------------------------
+# Action Permissions (per-member granular overrides)
+# ---------------------------------------------------------------------------
+
+
+async def get_action_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+) -> dict[str, list[str]]:
+    """Return the full action-permissions map for the workspace.
+
+    Returns a dict of user_id → list of action keys granted as overrides
+    beyond the member's base workspace role.
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+    return dict(doc.action_permissions or {})
+
+
+async def set_member_action_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+    user_id: str,
+    actions: list[str],
+) -> None:
+    """Set granular action overrides for a single member.
+
+    Only keys in ``OVERRIDABLE_ACTIONS`` are stored — others are silently
+    dropped. An empty ``actions`` list clears all overrides.
+    """
+    from pocketpaw_ee.cloud.workspace.dto import OVERRIDABLE_ACTIONS
+
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+
+    # Filter to only valid override keys
+    clean = [a for a in actions if a in OVERRIDABLE_ACTIONS]
+
+    perms = dict(doc.action_permissions or {})
+    if clean:
+        perms[user_id] = clean
+    else:
+        perms.pop(user_id, None)
+
+    await _WorkspaceDoc.find_one({"_id": doc.id}).update(
+        {"$set": {"action_permissions": perms}},
+    )
+
+    logger.info(
+        "action_permissions.set",
+        extra={"workspace_id": workspace_id, "user_id": user_id, "actions": clean},
+    )
+
+
+async def clear_member_action_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+    user_id: str,
+) -> None:
+    """Remove all action overrides for a member (back to role defaults)."""
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+
+    perms = dict(doc.action_permissions or {})
+    perms.pop(user_id, None)
+
+    await _WorkspaceDoc.find_one({"_id": doc.id}).update(
+        {"$set": {"action_permissions": perms}},
+    )
+
+    logger.info(
+        "action_permissions.clear",
+        extra={"workspace_id": workspace_id, "user_id": user_id},
+    )
+
+
+async def get_member_action_overrides(
+    workspace_id: str,
+    user_id: str,
+) -> list[str]:
+    """Return the set of action keys explicitly overridden for a user."""
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        return []
+    perms: dict[str, list[str]] = dict(doc.action_permissions or {})
+    return perms.get(user_id, [])
+
+
 __all__ = [
     "accept_invite",
     "bulk_create_invites",
+    "clear_member_action_permissions",
     "clear_member_connector_permissions",
     "clear_member_route_permissions",
     "create",
@@ -2092,8 +2184,10 @@ __all__ = [
     "decline_invite",
     "delete",
     "get",
+    "get_action_permissions",
     "get_connector_permissions",
     "get_delete_preview",
+    "get_member_action_overrides",
     "get_route_permissions",
     "get_workspace_plan",
     "legacy_ctx",
@@ -2109,6 +2203,7 @@ __all__ = [
     "resend_invite",
     "revoke_invite",
     "seed_default_workspace",
+    "set_member_action_permissions",
     "set_member_connector_permissions",
     "set_member_route_permissions",
     "set_instinct_approval_level",

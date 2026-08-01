@@ -329,7 +329,7 @@ async def test_per_site_active_webhook_updates_site_not_workspace(mongo_db, monk
     from pocketpaw_ee.sites import local_server
 
     monkeypatch.setattr(
-        local_server, "deploy_local", lambda site_id, project_dir: f"http://local/{site_id}/"
+        local_server, "deploy_local", lambda site_id, project_dir, **kw: f"http://local/{site_id}/"
     )
 
     ws = await _make_workspace(plan="pro")
