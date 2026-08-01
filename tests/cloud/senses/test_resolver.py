@@ -10,6 +10,15 @@
 # all-resolve, partial-None, ambiguity preserved, and a query-count assertion
 # that the enabled-connector READ runs exactly ONCE for N senses (spying on
 # ConnectorSenseFiller.enabled_connector_names).
+# Updated: 2026-08-02 (Sense Phase 2, SP2-2) — coverage for the AGENT tier:
+# an ``AgentSenseContext`` pref beats both the workspace and the pocket
+# preference row; a pref for another sense doesn't leak; a pref naming a
+# NON-candidate is skipped (one INFO log) and falls through to the stored
+# preference (or to the ambiguous deterministic pick when there is none); a pref
+# can't conjure a provider where none is enabled; ``agent=None`` and the omitted
+# keyword resolve identically to the legacy path; ``resolve_many`` and
+# ``execute_sense`` honour the pref (execute runs against the PREFERRED
+# connector); and the carried ``senses`` mount list does NOT gate yet (SP2-3).
 
 from __future__ import annotations
 
@@ -281,3 +290,175 @@ async def test_execute_sense_delegates_with_preferred_provider(monkeypatch) -> N
     assert result.connector_name == "github"
     spy.assert_awaited_once()
     assert spy.await_args.args[1] == "github"
+
+
+# ---------------------------------------------------------------------------
+# Agent tier (SP2-2) — the running agent's own pref outranks the stored rows
+# ---------------------------------------------------------------------------
+
+
+def _agent(prefs: dict[str, str], agent_id: str = "ag-1") -> resolver.AgentSenseContext:
+    return resolver.AgentSenseContext(agent_id=agent_id, prefs=prefs)
+
+
+async def test_agent_pref_beats_workspace_preference_row() -> None:
+    await _enable("github")
+    await _enable("gitlab")
+    await preference.set_preference(WS, "paw.code.v1", "github")
+
+    result = await resolver.resolve("paw.code.v1", WS, agent=_agent({"paw.code.v1": "gitlab"}))
+
+    assert result is not None
+    assert result.connector_name == "gitlab"
+    assert result.ambiguous is False
+    assert result.candidates == ["github", "gitlab"]
+
+
+async def test_agent_pref_beats_pocket_preference_row() -> None:
+    # The pocket row is the narrowest stored scope — the agent still outranks it.
+    await _enable("github")
+    await _enable("gitlab")
+    await preference.set_preference(WS, "paw.code.v1", "github", pocket_id="pk1")
+
+    result = await resolver.resolve(
+        "paw.code.v1", WS, pocket_id="pk1", agent=_agent({"paw.code.v1": "gitlab"})
+    )
+
+    assert result is not None
+    assert result.connector_name == "gitlab"
+    assert result.ambiguous is False
+
+
+async def test_agent_pref_for_other_sense_does_not_leak() -> None:
+    # A pref keyed to a DIFFERENT sense must not steer this one.
+    await _enable("github")
+    await _enable("gitlab")
+    await preference.set_preference(WS, "paw.code.v1", "github")
+
+    result = await resolver.resolve("paw.code.v1", WS, agent=_agent({"paw.email.v1": "gitlab"}))
+
+    assert result is not None
+    assert result.connector_name == "github"  # the stored row still decides
+
+
+async def test_agent_pref_not_a_candidate_falls_through_to_stored_preference(caplog) -> None:
+    # A pref naming a provider that isn't a candidate (never enabled, disabled,
+    # typo) is SKIPPED — one log line, then the stored preference decides.
+    await _enable("github")
+    await _enable("gitlab")
+    await preference.set_preference(WS, "paw.code.v1", "gitlab")
+
+    with caplog.at_level("INFO", logger="pocketpaw_ee.cloud.senses.resolver"):
+        result = await resolver.resolve(
+            "paw.code.v1", WS, agent=_agent({"paw.code.v1": "bitbucket"})
+        )
+
+    assert result is not None
+    assert result.connector_name == "gitlab"  # stored preference, not the agent's
+    assert result.ambiguous is False
+    skips = [r for r in caplog.records if "agent sense pref skipped" in r.message]
+    assert len(skips) == 1
+
+
+async def test_agent_pref_not_a_candidate_and_no_stored_pref_is_ambiguous() -> None:
+    await _enable("github")
+    await _enable("gitlab")
+
+    result = await resolver.resolve("paw.code.v1", WS, agent=_agent({"paw.code.v1": "bitbucket"}))
+
+    assert result is not None
+    assert result.connector_name == "github"  # deterministic sorted-first
+    assert result.ambiguous is True
+
+
+async def test_agent_pref_with_single_candidate_is_a_no_op() -> None:
+    # One candidate: preferring it changes nothing, and preferring something
+    # else must not strand the sense.
+    await _enable("gmail")
+
+    preferred = await resolver.resolve("paw.email.v1", WS, agent=_agent({"paw.email.v1": "gmail"}))
+    assert preferred is not None
+    assert preferred.connector_name == "gmail"
+    assert preferred.ambiguous is False
+
+    bogus = await resolver.resolve("paw.email.v1", WS, agent=_agent({"paw.email.v1": "outlook"}))
+    assert bogus is not None
+    assert bogus.connector_name == "gmail"
+
+
+async def test_agent_pref_cannot_conjure_a_provider() -> None:
+    # No enabled connector fills the sense — an agent pref does NOT create one.
+    result = await resolver.resolve("paw.code.v1", WS, agent=_agent({"paw.code.v1": "gitlab"}))
+    assert result is None
+
+
+async def test_agent_none_matches_legacy_resolution() -> None:
+    await _enable("github")
+    await _enable("gitlab")
+    await preference.set_preference(WS, "paw.code.v1", "github")
+
+    explicit_none = await resolver.resolve("paw.code.v1", WS, agent=None)
+    omitted = await resolver.resolve("paw.code.v1", WS)
+
+    assert explicit_none == omitted
+    assert omitted is not None
+    assert omitted.connector_name == "github"
+
+
+async def test_resolve_many_honours_agent_prefs() -> None:
+    await _enable("gmail")
+    await _enable("github")
+    await _enable("gitlab")
+    await preference.set_preference(WS, "paw.code.v1", "github")
+
+    out = await resolver.resolve_many(
+        ["paw.email.v1", "paw.code.v1"], WS, agent=_agent({"paw.code.v1": "gitlab"})
+    )
+
+    assert out["paw.code.v1"].connector_name == "gitlab"
+    assert out["paw.code.v1"].ambiguous is False
+    # The unpreferred sense resolves exactly as before.
+    assert out["paw.email.v1"].connector_name == "gmail"
+
+
+async def test_resolve_many_matches_resolve_per_sense_with_agent() -> None:
+    await _enable("github")
+    await _enable("gitlab")
+    agent = _agent({"paw.code.v1": "gitlab"})
+
+    batch = await resolver.resolve_many(["paw.code.v1"], WS, agent=agent)
+    single = await resolver.resolve("paw.code.v1", WS, agent=agent)
+
+    assert batch["paw.code.v1"] == single
+
+
+async def test_execute_sense_runs_against_the_agent_preferred_connector(monkeypatch) -> None:
+    """End-to-end: the agent's pref decides which connector actually executes."""
+    await _enable("github")
+    await _enable("gitlab")
+    await preference.set_preference(WS, "paw.code.v1", "github")
+    spy = AsyncMock(return_value=ExecuteActionResponse(success=True, data=[]))
+    monkeypatch.setattr(connectors_service, "execute", spy)
+
+    # list_issues is trust_level=auto on BOTH providers, so the assertion is
+    # about WHICH connector ran, not about the action existing on one of them.
+    result = await resolver.execute_sense(
+        "paw.code.v1", "list_issues", {}, WS, agent=_agent({"paw.code.v1": "gitlab"})
+    )
+
+    assert result.ok is True
+    assert result.connector_name == "gitlab"
+    spy.assert_awaited_once()
+    assert spy.await_args.args[1] == "gitlab"
+
+
+async def test_agent_context_carries_but_does_not_gate_on_senses() -> None:
+    """SP2-2 CARRIES the mount list; gating on it is SP2-3. A sense that is NOT
+    in the agent's ``senses`` still resolves today."""
+    await _enable("gmail")
+    ctx = resolver.AgentSenseContext(agent_id="ag-1", senses=("paw.code.v1",), prefs={})
+
+    result = await resolver.resolve("paw.email.v1", WS, agent=ctx)
+
+    assert result is not None
+    assert result.connector_name == "gmail"
