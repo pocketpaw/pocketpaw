@@ -881,10 +881,16 @@ def test_step_persistence_store_is_in_memory():
 
 
 def test_harness_can_be_disabled():
-    """Escape hatch: the dependency is pre-1.0 in cadence and pinned exactly."""
-    assert (
-        PydanticAIBackend(_settings(pydantic_ai_harness_enabled=False))._build_capabilities() == []
-    )
+    """Escape hatch: the dependency is pre-1.0 in cadence and pinned exactly.
+
+    Asserts no HARNESS capability survives rather than an empty list.
+    ``ToolSearch`` does not come from the harness — it is the deferral
+    override, on by default — so an empty list would tie this escape hatch to
+    an unrelated setting.
+    """
+    caps = PydanticAIBackend(_settings(pydantic_ai_harness_enabled=False))._build_capabilities()
+
+    assert not [c for c in caps if type(c).__module__.startswith("pydantic_ai_harness")], caps
 
 
 async def test_planning_capability_engages_on_a_real_run():
@@ -1626,12 +1632,44 @@ async def test_deferral_takes_the_mcp_tools_off_the_wire_and_leaves_the_builtins
 
 
 async def test_deferral_off_leaves_the_surface_exactly_as_it_was():
-    backend = _backend_with_model(_local_only(TestModel()))
+    """The escape hatch. Explicit ``False`` — deferral is the default now.
+
+    Kept because turning it off is the documented recovery for a model that
+    will not search, and a recovery path nobody exercises is not a recovery
+    path.
+    """
+    backend = _backend_with_model(_local_only(TestModel()), pydantic_ai_defer_mcp_tools=False)
     backend._mcp_tools = [_mcp_toolset("srv", "create_svelte_site", "publish")]
 
     names = await _deferred_surface(backend)
     assert "srv_publish" in names
     assert "search_tools" not in names
+
+
+def test_mcp_tools_are_deferred_without_anyone_asking(monkeypatch):
+    """The shipped default, read straight off the field.
+
+    Every other deferral test opts in through ``_deferring_backend``, so all of
+    them stayed green the whole time the default sent 32,225 tokens of schema
+    on every request. This one pins the default itself.
+
+    Read off ``model_fields`` rather than by constructing ``Settings``, because
+    a constructed one is NOT hermetic: ``security/url_validators.py`` calls
+    ``load_dotenv()`` at import time, so the developer's own ``.env`` is in
+    ``os.environ`` by the time any test builds settings. A behavioural version
+    of this test passed against ``default=False`` on the machine where the
+    change was written, purely because that machine had the flag set locally —
+    which is exactly the failure this test exists to catch.
+    """
+    assert Settings.model_fields["pydantic_ai_defer_mcp_tools"].default is True
+
+    # And the constructed value agrees once the local environment is out of the
+    # way — the field default is what a clean deployment actually gets.
+    monkeypatch.delenv("POCKETPAW_PYDANTIC_AI_DEFER_MCP_TOOLS", raising=False)
+    assert (
+        Settings(pydantic_ai_model="litellm:test-model", _env_file=None).pydantic_ai_defer_mcp_tools
+        is True
+    )
 
 
 async def test_a_denied_tool_cannot_be_discovered_by_searching_for_it():
