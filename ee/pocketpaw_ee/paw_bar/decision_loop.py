@@ -1,4 +1,16 @@
 # ee/paw_bar/decision_loop.py — Close the customer decision loop via Instinct.
+# Updated: 2026-07-31 (AL-1, agent ledger spine) — both propose paths now stamp
+#   ``actor_agent_id`` on the Action from the widget's bound agent, via the new
+#   ``resolve_widget_agent`` helper. Until now the only trace of WHICH agent
+#   raised a paw-bar proposal was the ``paw_bar:<widget_id>`` trigger string:
+#   readable by a person, not joinable by a query. The ledger emitter keys every
+#   approval on the Action's ``actor_agent_id``, so an unstamped proposal would
+#   land in the unattributed bucket and the concierge's own value board would
+#   show nothing. The binding already existed on the widget (``widget.agent_id``,
+#   set by agent_provisioning) — all that was missing was carrying it across.
+#   The helper is fail-soft in the ``notify.py`` shape: a widget with no agent,
+#   or a duck-typed object without the attribute, yields "" and the proposal is
+#   raised exactly as before.
 # Updated: 2026-07-30 (async decision delivery) — deliver_customer_decision now
 #   closes the loop for a visitor who LEFT the page: if the flipped row carries
 #   a ``contact_email`` (attached via POST /paw-bar/decision-contact while the
@@ -147,6 +159,24 @@ def resolve_workspace_id(widget: Any) -> str:
     real ``workspace_id`` only — an owner label is never a store-path token.
     """
     return str(getattr(widget, "workspace_id", "") or "") or str(getattr(widget, "owner", "") or "")
+
+
+def resolve_widget_agent(widget: Any) -> str:
+    """The agent id bound to a Paw Bar widget, or "" when there isn't one (AL-1).
+
+    A site concierge IS a normal agent: ``agent_provisioning`` binds one and
+    stamps ``widget.agent_id``, which is the same key the agent-scoped inbox and
+    the notification deep-link already resolve by. This reads that binding so a
+    proposal can carry its proposer into the ledger.
+
+    Fail-soft by construction — ``getattr`` with a default, coerced through
+    ``str``. An unbound widget, a legacy widget written before the column, or a
+    duck-typed stand-in in a test all return "", and "" is a legal
+    ``actor_agent_id``: the proposal still gets raised, the approval still gets
+    recorded, and the row simply counts as unattributed. Attribution is worth
+    having, never worth failing a customer's request over.
+    """
+    return str(getattr(widget, "agent_id", "") or "")
 
 
 def _summarize_payload(payload: dict[str, Any]) -> str:
@@ -309,6 +339,12 @@ async def propose_customer_decision(
             # customer relationship), NOT the workspace — The Tray filters by
             # assignee to show an operator only the items they own.
             assignee=owner or None,
+            # AL-1 — the AGENT that raised this, so the approval lands on that
+            # concierge's ledger. Distinct from ``assignee`` (the human who
+            # decides) and from ``workspace_id`` (the tenant): three identities,
+            # three jobs, and conflating any two of them is what made the
+            # concierge funnel un-queryable in the first place.
+            actor_agent_id=resolve_widget_agent(widget),
         )
 
         # Park the PENDING decision row so the customer surface has something to
@@ -463,6 +499,11 @@ async def propose_customer_action(
             # owner; the two must agree, or the same visitor raises two
             # differently-routed proposals depending on which path caught them.
             assignee=str(getattr(widget, "owner", "") or "") or None,
+            # AL-1 — same attribution as the event path above. The two paths must
+            # agree here for the same reason they must agree on the assignee: one
+            # visitor should not produce two differently-attributed proposals
+            # depending on which entry point caught them.
+            actor_agent_id=resolve_widget_agent(widget),
         )
         decision = DecisionStatus(
             widget_id=widget_id,
@@ -627,5 +668,6 @@ __all__ = [
     "deliver_customer_decision",
     "propose_customer_action",
     "propose_customer_decision",
+    "resolve_widget_agent",
     "resolve_workspace_id",
 ]

@@ -93,7 +93,11 @@ _ALLOWLIST_REL: frozenset[str] = frozenset(
 )
 
 # Store class names whose direct construction is forbidden outside the allowlist.
-_FORBIDDEN_NAMES: frozenset[str] = frozenset(["FabricStore", "InstinctStore"])
+# ``AgentLedgerStore`` joined the list on 2026-07-31 (AL-1) the moment it became
+# the third workspace-keyed kind: it inherits the same per-workspace routing,
+# path-traversal allowlist, fail-closed scope check, and bounded LRU from the
+# factory, and a direct construction would silently drop every one of them.
+_FORBIDDEN_NAMES: frozenset[str] = frozenset(["AgentLedgerStore", "FabricStore", "InstinctStore"])
 
 # ---------------------------------------------------------------------------
 # Core checker (reusable — called by both the real-tree test and the self-test)
