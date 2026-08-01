@@ -23,6 +23,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import aiosqlite
 import pytest
 
@@ -190,6 +192,47 @@ def test_bad_windows_raise_instead_of_falling_back(window):
     """A misread window must be a refusal, never a silently different answer."""
     with pytest.raises(WindowParseError):
         parse_window(window)
+
+
+@pytest.mark.parametrize("window", ["99999999999d", "1000000000d", "999999999999w", "99999999999h"])
+def test_absurd_windows_are_a_refusal_not_a_server_error(window):
+    """An over-large window must be WindowParseError (422), never OverflowError (500).
+
+    Regression, found in review: the max-window check ran AFTER the timedelta was
+    built, and timedelta raises OverflowError — not ValueError — past C-int range
+    or its own 999999999-day cap. OverflowError is not a WindowParseError, so it
+    sailed through the router's 422 handler and surfaced as a 500. Verified live
+    before the fix: '9999d' → 422 but '99999999999d' → 500. The parametrize above
+    stopped one order of magnitude short of the bug, which is why this gets its
+    own case rather than another entry in that list.
+    """
+    with pytest.raises(WindowParseError):
+        parse_window(window)
+
+
+def test_the_ledger_is_routed_beside_the_store_that_emitted_it(tmp_path):
+    """Route by the sibling PATH, never by re-resolving an in-row workspace value.
+
+    Regression, found in review: the emitter passed the action's in-row
+    ``workspace_id`` back through the store factory. That column is not
+    guaranteed to be a store-path token — the paw-bar decision loop deliberately
+    lets it fall back to the widget OWNER label (colon-qualified) for in-row scope
+    only. Feeding that to the factory either raises inside the path allowlist
+    (swallowed by the emitter's fail-soft guard, so the row vanishes silently) or
+    writes into a directory keyed by a user id no reader opens. Either way the
+    primary producer under-counts and nothing says so.
+    """
+    from pocketpaw.stores import get_agent_ledger_store_beside
+
+    instinct_db = tmp_path / "workspaces" / "wreal01" / "instinct.db"
+    instinct_db.parent.mkdir(parents=True)
+
+    store = get_agent_ledger_store_beside(instinct_db)
+
+    assert Path(store._db_path).parent == instinct_db.parent
+    assert Path(store._db_path).name == "agent_ledger.db"
+    # A str path must resolve identically — the emitter holds ``self._db_path``.
+    assert get_agent_ledger_store_beside(str(instinct_db))._db_path == store._db_path
 
 
 # --------------------------------------------------------------------------- #

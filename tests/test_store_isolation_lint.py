@@ -1,12 +1,22 @@
 # tests/test_store_isolation_lint.py
 # Created: 2026-06-26 (ISO-4 — store-isolation lint guard)
 #
+# Updated: 2026-07-31 (AL-1, agent ledger) — the guard now also covers
+# AgentLedgerStore. It earned its place immediately: the ledger emitter's first
+# cut constructed AgentLedgerStore(...) directly inside instinct/store.py to
+# route the file beside the instinct.db, and this test caught it. The fix was
+# NOT an allowlist entry — it was moving that path-derived construction into
+# pocketpaw.stores as get_agent_ledger_store_beside(), so the seam holds and the
+# emitter still avoids re-resolving an in-row workspace value that may be an
+# owner label. A guard that gets exempted the first time it fires is not a guard.
+#
 # AST-based regression guard: ensures no code in src/pocketpaw/ or
-# ee/pocketpaw_ee/ directly constructs FabricStore(...) or
-# InstinctStore(...) outside the approved factory seam.
+# ee/pocketpaw_ee/ directly constructs FabricStore(...), InstinctStore(...) or
+# AgentLedgerStore(...) outside the approved factory seam.
 #
 # WORKSPACE RULE: all store access MUST go through the factories in
-# pocketpaw.stores — get_fabric_store() and get_instinct_store(). Direct
+# pocketpaw.stores — get_fabric_store(), get_instinct_store(),
+# get_agent_ledger_store() and get_agent_ledger_store_beside(). Direct
 # construction bypasses workspace resolution, the fail-closed scope check,
 # the bounded LRU cache, and the StoreProvider seam, silently re-opening a
 # shared store that breaks per-tenant physical isolation (ISO-1 / ISO-2).
