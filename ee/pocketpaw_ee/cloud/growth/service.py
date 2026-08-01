@@ -104,6 +104,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 from datetime import UTC, datetime
@@ -681,7 +682,20 @@ async def prospect_facets(
     # cannot be awaited under mongomock-motor (the reference_mongomock_quirks
     # caveat — aggregation CURSORS, not aggregation itself). The driver's own
     # cursor round-trips $facet with nested $match/$group there and in Mongo.
-    rows = await _ProspectDoc.get_pymongo_collection().aggregate(pipeline).to_list(None)
+    # ``aggregate()`` hands back DIFFERENT things in the two environments this
+    # code runs in, and the difference is invisible until production:
+    #   * under mongomock-motor (the tests) it returns a LATENT CURSOR, which
+    #     cannot be awaited — ``TypeError: object AsyncIOMotorLatentCommandCursor
+    #     can't be used in 'await' expression``;
+    #   * under the real motor driver it returns a COROUTINE, which must be
+    #     awaited before it has a ``.to_list`` at all — ``AttributeError:
+    #     'coroutine' object has no attribute 'to_list'``.
+    # Writing for either one alone gives a green suite and a hard 500 on the live
+    # prospects surface (the facet chips fetch on mount), which is exactly what
+    # this endpoint was doing. Normalise instead of picking a side.
+    maybe_cursor = _ProspectDoc.get_pymongo_collection().aggregate(pipeline)
+    cursor = await maybe_cursor if inspect.isawaitable(maybe_cursor) else maybe_cursor
+    rows = await cursor.to_list(None)
     raw: dict[str, Any] = rows[0] if rows else {}
 
     counted: dict[str, dict[str, int]] = {}
