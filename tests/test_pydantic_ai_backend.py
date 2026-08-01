@@ -22,6 +22,7 @@ no provider key and no network are required.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -2128,3 +2129,214 @@ async def test_a_surface_that_named_its_tools_is_not_deferred():
     names = await _deferred_surface(backend, allow_mcp_tool_ids=frozenset({"mcp__srv__publish"}))
     assert "srv_publish" in names, "a narrowed surface should see its tools directly"
     assert "search_tools" not in names
+
+
+# --------------------------------------------------------------------------
+# model controls — reasoning effort and per-step model selection
+# --------------------------------------------------------------------------
+
+
+def _caps(backend) -> dict:
+    """Capability instances by class name, as the agent would receive them."""
+    return {type(c).__name__: c for c in backend._build_capabilities()}
+
+
+def test_thinking_is_absent_by_default():
+    """``default`` must leave the setting off the request entirely.
+
+    Not the same as ``off``: absent inherits whatever the provider does, while
+    ``off`` actively disables thinking on a model that would otherwise use it.
+    Collapsing the two would silently turn reasoning off for everyone on upgrade.
+    """
+    assert "Thinking" not in _caps(PydanticAIBackend(_settings()))
+
+
+@pytest.mark.parametrize(
+    ("setting", "expected"),
+    [("off", False), ("low", "low"), ("high", "high"), ("xhigh", "xhigh")],
+)
+def test_thinking_effort_reaches_the_model_settings(setting, expected):
+    backend = PydanticAIBackend(_settings(pydantic_ai_thinking=setting))
+    cap = _caps(backend)["Thinking"]
+    assert cap.effort == expected
+    # Through the capability's own contract, not just its field: this is what
+    # actually lands on the request.
+    assert cap.get_model_settings()["thinking"] == expected
+
+
+def test_an_unknown_thinking_value_is_ignored_not_guessed():
+    """A typo must not silently pick an effort level for the operator."""
+    assert "Thinking" not in _caps(PydanticAIBackend(_settings(pydantic_ai_thinking="hihg")))
+
+
+def test_model_selection_is_off_unless_a_model_and_a_threshold_are_set():
+    """Half a configuration is not a configuration. A fast model with no
+    threshold would never fire; a threshold with no model has nothing to
+    downshift to."""
+    for overrides in (
+        {},
+        {"pydantic_ai_fast_model": "litellm:cheap"},
+        {"pydantic_ai_fast_model_after_step": 3},
+        {"pydantic_ai_fast_model_after_tokens": 50_000},
+    ):
+        assert "SelectModel" not in _caps(PydanticAIBackend(_settings(**overrides))), overrides
+
+
+def test_the_run_downshifts_on_the_step_threshold():
+    backend = PydanticAIBackend(
+        _settings(pydantic_ai_fast_model="litellm:cheap", pydantic_ai_fast_model_after_step=3)
+    )
+    select = _caps(backend)["SelectModel"].selector
+
+    class _Ctx:
+        def __init__(self, step):
+            self.run_step = step
+            self.usage = SimpleNamespace(input_tokens=0)
+            self.model = "MAIN"
+
+    assert select(_Ctx(1)) == "MAIN"
+    assert select(_Ctx(2)) == "MAIN"
+    assert getattr(select(_Ctx(3)), "model_name", None) == "cheap", "step 3 must downshift"
+    assert getattr(select(_Ctx(9)), "model_name", None) == "cheap"
+
+
+def test_the_run_downshifts_on_the_token_ceiling():
+    """A cost ceiling, independent of how many steps it took to get there."""
+    backend = PydanticAIBackend(
+        _settings(
+            pydantic_ai_fast_model="litellm:cheap", pydantic_ai_fast_model_after_tokens=50_000
+        )
+    )
+    select = _caps(backend)["SelectModel"].selector
+
+    class _Ctx:
+        def __init__(self, used):
+            self.run_step = 1
+            self.usage = SimpleNamespace(input_tokens=used)
+            self.model = "MAIN"
+
+    assert select(_Ctx(49_999)) == "MAIN"
+    assert getattr(select(_Ctx(50_000)), "model_name", None) == "cheap"
+
+
+def test_the_fast_model_shares_the_instance_http_client():
+    """The selector builds a second model, which is exactly the shape that
+    leaked a connection pool per turn on the anthropic branch."""
+    backend = PydanticAIBackend(
+        _settings(pydantic_ai_fast_model="litellm:cheap", pydantic_ai_fast_model_after_step=2)
+    )
+    _caps(backend)  # builds the fast model
+    main = backend._build_model()
+    fast = backend._build_model("litellm:cheap")
+    assert main._provider.client._client is fast._provider.client._client
+
+
+async def test_native_web_tools_are_off_by_default():
+    backend = _backend_with_model(TestModel())
+    backend._custom_tools = _bridged("web_search", "url_extract", "research")
+    names = await _tool_surface(backend)
+    assert {"web_search", "url_extract"} <= names
+    caps = {type(c).__name__ for c in backend._build_capabilities()}
+    assert not caps & {"WebSearch", "WebFetch"}
+
+
+async def test_the_bridged_web_tool_becomes_the_local_fallback_not_a_duplicate():
+    """The model must never be offered two tools for one job.
+
+    ``WebSearch(local=...)`` puts our tool on the wire itself when the provider
+    has no native web search, so leaving it in the plain tool list as well is
+    how the surface grows a duplicate pair — this backend already carries four.
+    """
+    backend = _backend_with_model(TestModel(), pydantic_ai_native_web_tools=True)
+    backend._custom_tools = _bridged("web_search", "url_extract", "research")
+
+    caps = {type(c).__name__: c for c in backend._build_capabilities()}
+    assert "WebSearch" in caps and "WebFetch" in caps
+    assert getattr(caps["WebSearch"].local, "name", "") == "web_search", (
+        "our own tool must be the fallback, not pydantic-ai's DuckDuckGo one"
+    )
+
+    names = await _tool_surface(backend)
+    assert "web_search" not in names, "superseded tool still on the plain tool list"
+    assert "url_extract" not in names
+    assert "research" in names, "research has no native equivalent and must survive"
+
+
+def test_a_withheld_web_tool_is_not_granted_back_by_the_native_capability():
+    """A surface that removed ``web_search`` must not get it re-granted
+    provider-side. Registering the native tool with no local fallback would do
+    exactly that."""
+    backend = PydanticAIBackend(_settings(pydantic_ai_native_web_tools=True))
+    backend._custom_tools = _bridged("url_extract")  # web_search deliberately absent
+
+    caps = {type(c).__name__ for c in backend._build_capabilities()}
+    assert "WebFetch" in caps
+    assert "WebSearch" not in caps
+
+
+def test_instrumentation_is_off_by_default_and_configures_logfire_once():
+    """One backend instance exists per agent, so a per-instance
+    ``logfire.configure`` would reconfigure the process on every agent built."""
+    import pocketpaw.agents.pydantic_ai as mod
+
+    assert "Instrumentation" not in {
+        type(c).__name__ for c in PydanticAIBackend(_settings())._build_capabilities()
+    }
+
+    calls: list = []
+    original_flag = mod._LOGFIRE_CONFIGURED
+    mod._LOGFIRE_CONFIGURED = False
+    import sys
+
+    fake = SimpleNamespace(configure=lambda **kw: calls.append(kw))
+    saved, sys.modules["logfire"] = sys.modules.get("logfire"), fake
+    try:
+        for _ in range(3):
+            caps = {
+                type(c).__name__
+                for c in PydanticAIBackend(
+                    _settings(pydantic_ai_instrumentation=True)
+                )._build_capabilities()
+            }
+            assert "Instrumentation" in caps
+    finally:
+        if saved is not None:
+            sys.modules["logfire"] = saved
+        else:
+            sys.modules.pop("logfire", None)
+        mod._LOGFIRE_CONFIGURED = original_flag
+
+    assert len(calls) == 1, f"logfire configured {len(calls)} times across 3 backends"
+    assert calls[0]["send_to_logfire"] == "if-token-present", (
+        "must be safe to enable without a Logfire account"
+    )
+
+
+def test_a_broken_logfire_does_not_break_the_run():
+    """Observability is never load-bearing."""
+    import sys
+
+    import pocketpaw.agents.pydantic_ai as mod
+
+    def _boom(**kw):
+        raise RuntimeError("no exporter")
+
+    original_flag = mod._LOGFIRE_CONFIGURED
+    mod._LOGFIRE_CONFIGURED = False
+    saved = sys.modules.get("logfire")
+    sys.modules["logfire"] = SimpleNamespace(configure=_boom)
+    try:
+        caps = {
+            type(c).__name__
+            for c in PydanticAIBackend(
+                _settings(pydantic_ai_instrumentation=True)
+            )._build_capabilities()
+        }
+    finally:
+        if saved is not None:
+            sys.modules["logfire"] = saved
+        else:
+            sys.modules.pop("logfire", None)
+        mod._LOGFIRE_CONFIGURED = original_flag
+
+    assert "Instrumentation" in caps, "a dead exporter must not drop instrumentation"
