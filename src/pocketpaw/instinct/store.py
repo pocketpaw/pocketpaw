@@ -1051,9 +1051,16 @@ class InstinctStore:
         number is a bug we have already paid for once.
         """
         try:
-            # The row vocabulary is a plain leaf module (no cycle) — imported
-            # here only to keep the whole emit inside one try, so even an import
-            # failure degrades to "no ledger row" instead of "no approval".
+            # Re-imported inside the guard so a monkeypatched module is picked up
+            # at call time. Note what this does NOT buy: the same names are
+            # imported at MODULE level (see the top of this file), so a broken
+            # vocabulary module fails the import of pocketpaw.instinct.store
+            # itself, long before this guard runs. An earlier version of this
+            # comment claimed the guard covered import failure too. It does not,
+            # and pretending otherwise is worse than the gap — the fail-soft
+            # promise here covers the STORE (locked, full, misconfigured, or
+            # workspace-unresolvable), which is the failure that actually happens
+            # in production.
             from pocketpaw.agent_ledger.models import (
                 ATTR_ACTION_CATEGORY,
                 ATTR_ACTION_ID,
@@ -1067,11 +1074,10 @@ class InstinctStore:
                 surface_from_trigger,
             )
 
-            # The store factory, on the other hand, MUST be lazy:
-            # pocketpaw.stores imports THIS module at module level, so a
-            # top-level import would be circular. Same trick the ``_log_lock``
-            # property uses for ``_store_locks``.
-            from pocketpaw.stores import get_agent_ledger_store
+            # The ledger store class MUST be imported lazily: pocketpaw.stores
+            # imports THIS module at module level, so a top-level import would
+            # be circular. Same trick the ``_log_lock`` property uses for
+            # ``_store_locks``.
 
             mapped = _LEDGER_KIND_BY_EVENT.get(event)
             if mapped is None:
@@ -1114,7 +1120,15 @@ class InstinctStore:
                 actor=_ledger_actor(event, actor),
                 attrs=attrs,
             )
-            store = get_agent_ledger_store(workspace_id=(workspace_id or None))
+            # Route the ledger file BESIDE this instinct.db rather than
+            # re-resolving the in-row ``workspace_id`` through the factory: that
+            # column is not guaranteed to be a store-path token. See
+            # ``get_agent_ledger_store_beside`` for the full reasoning — it lives
+            # in stores.py so this stays inside the ISO-4 store-isolation seam
+            # instead of being the one direct construction that erodes it.
+            from pocketpaw.stores import get_agent_ledger_store_beside
+
+            store = get_agent_ledger_store_beside(self._db_path)
             await store.append(row)
         except Exception:  # noqa: BLE001 — bookkeeping never breaks a decision
             logger.debug(

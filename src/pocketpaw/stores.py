@@ -516,6 +516,36 @@ def get_agent_ledger_store(*, workspace_id: str | None = None) -> AgentLedgerSto
     return _get_workspace_store(_AGENT_LEDGER_KIND, workspace_id)
 
 
+def get_agent_ledger_store_beside(sibling_db_path: str | Path) -> AgentLedgerStore:
+    """Return the AgentLedgerStore living NEXT TO an already-resolved store file.
+
+    For emitters that hold an open store but no trustworthy workspace TOKEN.
+
+    The Instinct emitter is the case this exists for. It runs inside
+    ``InstinctStore``, which knows only its own ``db_path`` — and the workspace
+    value nearest to hand there is the action's IN-ROW ``workspace_id``, which is
+    not guaranteed to be a store-path token. The paw-bar decision loop
+    deliberately keeps two different values apart (see its module header): a real
+    workspace for file routing, and ``resolve_workspace_id``, which falls back to
+    the widget OWNER label for in-row scope only. Feeding that owner label to
+    :func:`get_agent_ledger_store` either raises inside ``_safe_workspace_dir``
+    (swallowed by the emitter's guard → the row silently vanishes) or writes into
+    a directory keyed by a user id that no reader ever opens. Either way the
+    primary producer under-counts in silence.
+
+    Whoever opened the sibling store already resolved the workspace correctly, so
+    the directory is the answer — no second resolution, no second chance to get it
+    wrong. Kept HERE rather than at the call site on purpose: ``stores.py`` is the
+    approved seam, so this stays inside the ISO-4 store-isolation guard instead of
+    becoming the one direct construction that erodes it.
+
+    Deliberately NOT cached: the caller already holds a long-lived store, these
+    objects are thin path wrappers, and keying an LRU by path would be a second
+    cache that can disagree with the workspace-keyed one.
+    """
+    return AgentLedgerStore(Path(sibling_db_path).with_name(f"{_AGENT_LEDGER_KIND.name}.db"))
+
+
 # ---------------------------------------------------------------------------
 # Paw Bar — plain process-wide singleton (NOT workspace-isolated yet)
 # ---------------------------------------------------------------------------

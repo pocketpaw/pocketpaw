@@ -341,6 +341,11 @@ _WINDOW_PATTERN = re.compile(r"^(\d+)([dhw])$")
 
 _WINDOW_UNITS: dict[str, str] = {"h": "hours", "d": "days", "w": "weeks"}
 
+# How many of each unit fit in a day — used to bound the raw AMOUNT before any
+# timedelta is constructed. Kept beside _WINDOW_UNITS so a new unit can't be
+# added to one table and forgotten in the other.
+_WINDOW_UNIT_PER_DAY: dict[str, float] = {"h": 24, "d": 1, "w": 1 / 7}
+
 # Refuse an absurd window rather than letting it become an unbounded scan under
 # a friendly-looking query string. A year of an append-only ledger is already
 # past the point where the rollup (deferred, additive) is the right answer.
@@ -378,6 +383,15 @@ def parse_window(window: str) -> timedelta | None:
     amount = int(match.group(1))
     if amount <= 0:
         raise WindowParseError(f"window must be positive, got {window!r}")
+    # Bound the AMOUNT before building the timedelta, not after. ``timedelta``
+    # raises OverflowError — not ValueError — once the value exceeds C-int range
+    # or its own 999999999-day cap, and OverflowError is not a WindowParseError,
+    # so it escaped the router's 422 handler and surfaced as a 500. A caller
+    # typing '99999999999d' got a server error where the contract promises a
+    # rejected input. Comparing in the unit's own terms keeps the check ahead of
+    # every construction path.
+    if amount > _MAX_WINDOW_DAYS * _WINDOW_UNIT_PER_DAY[match.group(2)]:
+        raise WindowParseError(f"window {window!r} exceeds the {_MAX_WINDOW_DAYS}-day maximum")
     delta = timedelta(**{_WINDOW_UNITS[match.group(2)]: amount})
     if delta > timedelta(days=_MAX_WINDOW_DAYS):
         raise WindowParseError(f"window {window!r} exceeds the {_MAX_WINDOW_DAYS}-day maximum")
