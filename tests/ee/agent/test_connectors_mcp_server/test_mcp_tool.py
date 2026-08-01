@@ -19,6 +19,15 @@
 #   trust) actions PROPOSE without ever calling execute inline, connectors not
 #   bound to the pocket are rejected, and a missing pocket / workspace
 #   ContextVar (called off-stream) yields a clear error.
+# Updated: 2026-08-02 (Sense Phase 2, SP2-2 — agent-tier provider preference) —
+#   the two sense handlers now build an ``AgentSenseContext`` from the running
+#   agent (``current_agent_id`` → ``agents.service.get``) and pass it to the
+#   resolver as ``agent=``. New coverage: the context reaches ``resolve_many`` /
+#   ``execute_sense`` carrying the agent's ``sense_prefs``; no bound agent id
+#   passes ``agent=None``; and an agent that fails to load DEGRADES to
+#   ``agent=None`` rather than failing the tool call. ``_patch_identity`` leaves
+#   ``current_agent_id`` alone (it returns None off-stream), so every pre-SP2-2
+#   test here exercises the unchanged ``agent=None`` path.
 """MCP server registration + handler tests for connector execution."""
 
 from __future__ import annotations
@@ -592,7 +601,7 @@ class TestSenseTools:
         from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
         from pocketpaw_ee.cloud.senses.resolver import ResolvedSense
 
-        async def fake_resolve_many(sense_ids, workspace_id, *, pocket_id=None):
+        async def fake_resolve_many(sense_ids, workspace_id, *, pocket_id=None, agent=None):
             return {
                 sid: (
                     ResolvedSense(
@@ -808,3 +817,138 @@ class TestSenseTools:
 
         assert out.get("is_error") is True
         assert "unknown sense" in out["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# Agent tier (SP2-2) — the running agent's prefs reach the resolver
+# ---------------------------------------------------------------------------
+
+
+class _StubConfig:
+    """Just the config surface ``_agent_sense_context`` reads."""
+
+    def __init__(self, sense_prefs: tuple[tuple[str, str], ...]) -> None:
+        self.sense_prefs = sense_prefs
+
+
+class _StubAgent:
+    def __init__(self, sense_prefs: tuple[tuple[str, str], ...]) -> None:
+        self.config = _StubConfig(sense_prefs)
+
+
+def _patch_running_agent(agent_id: str | None):
+    """Patch the agent-id ContextVar SP2-1 binds."""
+    return patch(
+        "pocketpaw_ee.cloud.chat.agent_service.current_agent_id",
+        return_value=agent_id,
+    )
+
+
+class TestAgentSensePrefs:
+    @pytest.mark.asyncio
+    async def test_list_senses_passes_agent_context_to_resolver(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        mock_resolve = AsyncMock(return_value={})
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            _patch_running_agent("ag_1"),
+            patch(
+                "pocketpaw_ee.cloud.agents.service.get",
+                new=AsyncMock(return_value=_StubAgent((("paw.code.v1", "gitlab"),))),
+            ),
+            patch("pocketpaw_ee.cloud.senses.resolver.resolve_many", new=mock_resolve),
+        ):
+            await connectors_mcp._list_senses_handler({})
+
+        agent_ctx = mock_resolve.await_args.kwargs["agent"]
+        assert agent_ctx is not None
+        assert agent_ctx.agent_id == "ag_1"
+        assert agent_ctx.prefs == {"paw.code.v1": "gitlab"}
+        # The mount list lands in SP2-3 — carried empty for now.
+        assert agent_ctx.senses == ()
+
+    @pytest.mark.asyncio
+    async def test_sense_execute_passes_agent_context_to_resolver(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+        from pocketpaw_ee.cloud.connectors.dto import ExecuteActionResponse
+        from pocketpaw_ee.cloud.senses.resolver import SenseExecutionResult
+
+        mock_exec = AsyncMock(
+            return_value=SenseExecutionResult(
+                ok=True,
+                sense_id="paw.code.v1",
+                connector_name="gitlab",
+                action="list_issues",
+                data=ExecuteActionResponse(success=True, data=[]),
+            )
+        )
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            _patch_running_agent("ag_1"),
+            patch(
+                "pocketpaw_ee.cloud.agents.service.get",
+                new=AsyncMock(return_value=_StubAgent((("paw.code.v1", "gitlab"),))),
+            ),
+            patch("pocketpaw_ee.cloud.senses.resolver.execute_sense", new=mock_exec),
+        ):
+            out = await connectors_mcp._sense_execute_handler(
+                {"sense": "paw.code.v1", "action": "list_issues"}
+            )
+
+        assert not out.get("is_error")
+        agent_ctx = mock_exec.await_args.kwargs["agent"]
+        assert agent_ctx.agent_id == "ag_1"
+        assert agent_ctx.prefs == {"paw.code.v1": "gitlab"}
+
+    @pytest.mark.asyncio
+    async def test_no_bound_agent_resolves_with_agent_none(self) -> None:
+        """Legacy / OSS callers have no agent id bound — the resolver is called
+        exactly as it was before SP2-2, and the agent is never loaded."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        mock_resolve = AsyncMock(return_value={})
+        mock_get = AsyncMock()
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            _patch_running_agent(None),
+            patch("pocketpaw_ee.cloud.agents.service.get", new=mock_get),
+            patch("pocketpaw_ee.cloud.senses.resolver.resolve_many", new=mock_resolve),
+        ):
+            await connectors_mcp._list_senses_handler({})
+
+        assert mock_resolve.await_args.kwargs["agent"] is None
+        mock_get.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unloadable_agent_degrades_to_no_prefs(self) -> None:
+        """A pref is a convenience, never a gate: if the agent can't be loaded
+        the tool still resolves, just without the agent tier."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        mock_resolve = AsyncMock(return_value={})
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            _patch_running_agent("ag_gone"),
+            patch(
+                "pocketpaw_ee.cloud.agents.service.get",
+                new=AsyncMock(side_effect=RuntimeError("agent not found")),
+            ),
+            patch("pocketpaw_ee.cloud.senses.resolver.resolve_many", new=mock_resolve),
+        ):
+            out = await connectors_mcp._list_senses_handler({})
+
+        assert not out.get("is_error")
+        assert mock_resolve.await_args.kwargs["agent"] is None

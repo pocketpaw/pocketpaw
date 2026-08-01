@@ -59,6 +59,19 @@
 #   chokepoint contracts stay 0-broken. (``propose.py`` itself statically imports
 #   no Beanie document class — it lazy-imports ``pocketpaw.stores`` /
 #   ``pocketpaw.instinct.models`` internally.)
+# Updated: 2026-08-02 (Sense Phase 2, SP2-2 — agent-tier provider preference) —
+#   the two SENSE tools now resolve through the RUNNING AGENT. New
+#   ``_agent_sense_context()`` reads ``agent_service.current_agent_id()`` (the
+#   ContextVar SP2-1 bound), loads that agent through ``cloud.agents.service.get``
+#   — the module that OWNS the Beanie read, so no document class is imported
+#   here — and hands the resolver a pure-data ``AgentSenseContext``
+#   (agent_id + sense_prefs; the ``senses`` mount list stays empty until SP2-3
+#   adds the field). ``list_senses`` and ``sense_execute`` pass it as ``agent=``,
+#   so an agent that prefers gitlab for ``paw.code.v1`` gets gitlab even when the
+#   workspace preference row says github. No bound agent id, or an agent that
+#   fails to load, → ``agent=None`` → the exact pre-SP2-2 resolution. The load is
+#   lazy inside the helper (same discipline as the other cloud imports here) so
+#   the module's import surface is unchanged.
 """Agent-side MCP surface for executing a chat's reachable connectors.
 
 Tools registered:
@@ -149,6 +162,47 @@ def _identity() -> tuple[str | None, str | None, str | None]:
         return current_workspace_id(), current_user_id(), current_pocket_id()
     except Exception:  # noqa: BLE001 — agent_service import only fails off-stream
         return None, None, None
+
+
+async def _agent_sense_context() -> Any | None:
+    """Build the ``AgentSenseContext`` for the agent driving this turn (SP2-2).
+
+    Reads the agent id SP2-1 bound to the stream, then loads the agent through
+    ``cloud.agents.service`` — the module that owns the Beanie read — so neither
+    this module nor the resolver imports the Agent document class.
+
+    Returns ``None`` (meaning "resolve exactly as before") when no agent id is
+    bound (legacy / OSS callers, off-stream unit tests) or when the agent can't
+    be loaded. A provider preference is a convenience, never a gate: failing to
+    read it must degrade the resolution, not break the tool call.
+    """
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import current_agent_id
+
+        agent_id = current_agent_id()
+    except Exception:  # noqa: BLE001 — agent_service import only fails off-stream
+        return None
+
+    if not agent_id:
+        return None
+
+    try:
+        from pocketpaw_ee.cloud.agents import service as agents_service
+        from pocketpaw_ee.cloud.senses.resolver import AgentSenseContext
+
+        agent = await agents_service.get(agent_id)
+    except Exception:  # noqa: BLE001 — a missing/unreadable agent just means no prefs
+        logger.info("sense tools: agent %s not loadable — resolving without prefs", agent_id)
+        return None
+
+    config = agent.config
+    return AgentSenseContext(
+        agent_id=agent_id,
+        # The carried mount list lands in SP2-3; until then the field doesn't
+        # exist on the config and the context carries an empty tuple.
+        senses=tuple(getattr(config, "senses", ()) or ()),
+        prefs=dict(getattr(config, "sense_prefs", ()) or ()),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -555,9 +609,10 @@ async def _list_senses_handler(args: dict) -> dict:  # noqa: ARG001 — no args
     from pocketpaw_ee.cloud.senses.resolver import resolve_many
 
     # One enabled-connector read for all CORE_SENSES (was one query per sense).
+    agent_ctx = await _agent_sense_context()
     try:
         resolved_map = await resolve_many(
-            [s.id for s in CORE_SENSES], workspace_id, pocket_id=pocket_id
+            [s.id for s in CORE_SENSES], workspace_id, pocket_id=pocket_id, agent=agent_ctx
         )
     except Exception as exc:  # noqa: BLE001 — never let one sense break the list
         logger.warning("list_senses: resolve_many failed", exc_info=True)
@@ -633,6 +688,7 @@ async def _sense_execute_handler(args: dict) -> dict:
     from pocketpaw.senses import SenseValidationError
     from pocketpaw_ee.cloud.senses.resolver import execute_sense
 
+    agent_ctx = await _agent_sense_context()
     try:
         result = await execute_sense(
             sense,
@@ -641,6 +697,7 @@ async def _sense_execute_handler(args: dict) -> dict:
             workspace_id,
             pocket_id=pocket_id,
             user_id=user_id,
+            agent=agent_ctx,
         )
     except SenseValidationError as exc:
         _audit_connector_execute(

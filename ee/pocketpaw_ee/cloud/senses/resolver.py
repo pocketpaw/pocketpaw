@@ -14,9 +14,25 @@
 #   senses) and runs the pure intersection + shared disambiguation per id —
 #   replacing the per-sense ``resolve`` loops in ``_check_template_needs`` and
 #   the list_senses MCP handler. Behaviour is identical, just fewer queries.
+# Updated: 2026-08-02 (Sense Phase 2, SP2-2) — the resolver now accepts an
+#   AGENT tier above the stored preference rows. New ``AgentSenseContext``
+#   (agent_id + carried mount list + per-sense provider prefs) threads as an
+#   optional ``agent=`` keyword through ``resolve`` / ``resolve_many`` /
+#   ``execute_sense`` / ``_disambiguate``. Disambiguation order is now: agent
+#   pref (when it names a real candidate) -> the stored pocket-then-workspace
+#   preference row -> deterministic first + ``ambiguous``. An agent pref naming
+#   a NON-candidate (provider disabled, typo, another tenant's connector) is
+#   skipped with one INFO log and falls through — never an error, so a stale
+#   pref degrades to the old behaviour instead of breaking the sense. The
+#   ``senses`` mount list is CARRIED but NOT consumed yet (SP2-3 gates on it).
+#   ``agent=None`` is byte-for-byte the pre-SP2-2 path. The context is PURE
+#   DATA on purpose: this module must never import the Beanie Agent document
+#   (OSS-EE boundary) — the MCP layer loads the agent and hands the values in.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from pocketpaw.senses import validate_sense_id
@@ -24,6 +40,26 @@ from pocketpaw_ee.cloud.connectors import service as connectors_service
 from pocketpaw_ee.cloud.connectors.dto import ExecuteActionRequest
 from pocketpaw_ee.cloud.senses import preference
 from pocketpaw_ee.cloud.senses.filler import ConnectorSenseFiller
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AgentSenseContext:
+    """The sense-relevant slice of the Agent driving the current run.
+
+    Pure data — the caller (the MCP layer) loads the Agent and hands the values
+    across, so the resolver never imports a Beanie document.
+
+    ``prefs`` maps sense_id -> connector_name and outranks the stored
+    pocket/workspace preference rows; a pref naming a connector that isn't a
+    candidate is skipped, not an error. ``senses`` is the agent's carried mount
+    list — CARRIED HERE BUT NOT CONSUMED YET; SP2-3 makes it the exclusive set.
+    """
+
+    agent_id: str
+    senses: tuple[str, ...] = ()
+    prefs: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -68,17 +104,42 @@ async def _disambiguate(
     workspace_id: str,
     *,
     pocket_id: str | None = None,
+    agent: AgentSenseContext | None = None,
 ) -> ResolvedSense | None:
     """Pick the connector from a sorted candidate set — the ONE rule both
     ``resolve`` and ``resolve_many`` use.
 
-    0 candidates -> ``None`` (caller prompts-to-connect); 1 -> that connector;
-    >1 -> the stored preference if it's among candidates, else the deterministic
-    sorted-first with ``ambiguous=True``. The per-sense preference lookup only
-    runs on the rare >1 branch.
+    0 candidates -> ``None`` (caller prompts-to-connect). Otherwise, in order:
+    the running AGENT's own pref for this sense (SP2-2) when it names one of the
+    candidates; then a single candidate short-circuits; then the stored
+    pocket/workspace preference; else the deterministic sorted-first with
+    ``ambiguous=True``.
+
+    An agent pref that is NOT among the candidates is skipped with one INFO log
+    and falls through to the stored preference — a disabled or misnamed provider
+    degrades to the pre-agent behaviour instead of failing the sense. The stored
+    preference lookup still only runs on the rare >1 branch.
     """
     if not candidates:
         return None
+
+    # Agent tier — the running agent's own choice outranks the stored rows.
+    agent_pref = agent.prefs.get(sense_id) if agent is not None else None
+    if agent_pref is not None:
+        if agent_pref in candidates:
+            return ResolvedSense(
+                sense_id=sense_id,
+                connector_name=agent_pref,
+                ambiguous=False,
+                candidates=candidates,
+            )
+        logger.info(
+            "agent sense pref skipped: agent=%s sense=%s pref=%s not in candidates=%s",
+            agent.agent_id,
+            sense_id,
+            agent_pref,
+            candidates,
+        )
 
     if len(candidates) == 1:
         return ResolvedSense(
@@ -112,19 +173,24 @@ async def resolve(
     workspace_id: str,
     *,
     pocket_id: str | None = None,
+    agent: AgentSenseContext | None = None,
 ) -> ResolvedSense | None:
     """Bind ``sense_id`` to the connector that fills it for this workspace.
 
     Returns ``None`` when no enabled connector can fill the sense (the caller
     decides what to do — typically prompt-to-connect). Raises
-    ``SenseValidationError`` for an unknown ``paw.*`` id.
+    ``SenseValidationError`` for an unknown ``paw.*`` id. Pass ``agent`` to let
+    the running agent's own provider pref outrank the stored preference rows;
+    ``agent=None`` is the unchanged pre-SP2-2 behaviour.
     """
     validate_sense_id(sense_id)
 
     registry = connectors_service._get_registry()  # noqa: SLF001 — reuse the EE singleton
     filler = ConnectorSenseFiller(registry)
     candidates = await filler.candidates(sense_id, workspace_id, pocket_id=pocket_id)
-    return await _disambiguate(sense_id, candidates, workspace_id, pocket_id=pocket_id)
+    return await _disambiguate(
+        sense_id, candidates, workspace_id, pocket_id=pocket_id, agent=agent
+    )
 
 
 async def resolve_many(
@@ -132,6 +198,7 @@ async def resolve_many(
     workspace_id: str,
     *,
     pocket_id: str | None = None,
+    agent: AgentSenseContext | None = None,
 ) -> dict[str, ResolvedSense | None]:
     """Resolve many senses with ONE enabled-connector read.
 
@@ -157,7 +224,9 @@ async def resolve_many(
     out: dict[str, ResolvedSense | None] = {}
     for sense_id in sense_ids:
         candidates = filler.candidates_from(sense_id, enabled_names)
-        out[sense_id] = await _disambiguate(sense_id, candidates, workspace_id, pocket_id=pocket_id)
+        out[sense_id] = await _disambiguate(
+            sense_id, candidates, workspace_id, pocket_id=pocket_id, agent=agent
+        )
     return out
 
 
@@ -185,6 +254,7 @@ async def execute_sense(
     *,
     pocket_id: str | None = None,
     user_id: str | None = None,
+    agent: AgentSenseContext | None = None,
 ) -> SenseExecutionResult:
     """Resolve a sense, enforce the read-first gate, then delegate to execute.
 
@@ -196,8 +266,12 @@ async def execute_sense(
        ``sense.action_needs_approval`` and ``connectors_service.execute`` is
        NEVER called.
     3. Delegate to the existing execute path with the resolved connector.
+
+    ``agent`` (SP2-2) rides into step 1 so the agent's own provider pref picks
+    the connector this execution runs against. The read-first gate is unchanged
+    and applies to whichever connector wins.
     """
-    resolved = await resolve(sense_id, workspace_id, pocket_id=pocket_id)
+    resolved = await resolve(sense_id, workspace_id, pocket_id=pocket_id, agent=agent)
     if resolved is None:
         return SenseExecutionResult(
             ok=False,
@@ -241,4 +315,11 @@ async def execute_sense(
     )
 
 
-__all__ = ["ResolvedSense", "SenseExecutionResult", "execute_sense", "resolve", "resolve_many"]
+__all__ = [
+    "AgentSenseContext",
+    "ResolvedSense",
+    "SenseExecutionResult",
+    "execute_sense",
+    "resolve",
+    "resolve_many",
+]

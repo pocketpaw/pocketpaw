@@ -22,6 +22,13 @@ Updated: 2026-07-24 (CX-2, feat/code-agent-exclusive-tools) — added
 Beanie ``AgentConfig.tool_mode``. An ``"exclusive"`` agent's ``tools`` become the
 run's MCP allow-list and suppress the universal pocket/widget/atlas grant
 (CX-1); ``"additive"`` (the default) is the unchanged legacy grant-union.
+Updated: 2026-08-02 (Sense Phase 2, SP2-2 — agent-tier provider preference) —
+added ``AgentConfigSpec.sense_prefs``, the frozen-friendly mirror of the Beanie
+``AgentConfig.sense_prefs`` dict (sense_id -> connector_name), carried as a tuple
+of pairs like ``soul_ocean``. It mirrors here rather than living doc-only because
+``service.update`` round-trips doc -> domain -> doc: a field missing from the
+domain spec is silently ERASED the next time any other config field changes.
+Sense-id validation stays at the Beanie boundary — this module is pure data.
 """
 
 from __future__ import annotations
@@ -59,6 +66,9 @@ class AgentConfigSpec:
     conversation_starters: tuple[str, ...] = ()  # frozen-friendly list
     voice: dict | None = None
     appearance: dict = field(default_factory=dict)
+    # Agent-tier provider preference (SP2-2). Frozen-friendly dict, same shape
+    # as ``soul_ocean``: sense_id -> connector_name.
+    sense_prefs: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)

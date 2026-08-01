@@ -67,6 +67,15 @@ Updated 2026-07-24 (CX-3, feat/code-agent-exclusive-tools): added
 and its persona reuses ``CODE_SYSTEM_PROMPT``, so every run it does is capped to
 exactly those ids — no pocket/planner/widget grant. Idempotent, mirrors the
 default-agent seed + boot back-fill.
+Updated 2026-08-02 (Sense Phase 2, SP2-2 — agent-tier provider preference):
+``sense_prefs`` is threaded through the doc↔spec mappers, so an agent's per-sense
+provider choice round-trips and — the load-bearing part — SURVIVES an unrelated
+config update. ``update`` rewrites the whole config sub-doc from the domain spec
+whenever any field changes, and its ``body.config``-dict branch rebuilds that
+spec from an explicit field list — so BOTH the mappers and ``_apply_update`` have
+to name the field or it is erased on the next unrelated edit.
+The MCP sense surface reads the prefs off this service's ``get(agent_id)``, which
+keeps ``cloud.senses.resolver`` free of any Beanie Agent import.
 """
 
 from __future__ import annotations
@@ -129,6 +138,7 @@ def _config_to_domain(c: _AgentConfigDoc) -> AgentConfigSpec:
         conversation_starters=tuple(c.conversation_starters),
         voice=dict(c.voice) if c.voice is not None else None,
         appearance=dict(c.appearance),
+        sense_prefs=tuple(c.sense_prefs.items()),
     )
 
 
@@ -154,6 +164,7 @@ def _config_to_doc(c: AgentConfigSpec) -> _AgentConfigDoc:
         conversation_starters=list(c.conversation_starters),
         voice=dict(c.voice) if c.voice is not None else None,
         appearance=dict(c.appearance),
+        sense_prefs=dict(c.sense_prefs),
     )
 
 
@@ -261,6 +272,16 @@ def _apply_update(current: AgentConfigSpec, body: UpdateAgentRequest) -> AgentCo
             ),
             voice=c.get("voice", current.voice),
             appearance=dict(c.get("appearance", dict(current.appearance))),
+            # SP2-2 — carried forward like soul_ocean. This branch rebuilds the
+            # spec from an explicit field list, so anything omitted here is
+            # ERASED on the next config edit. Key validation stays at the Beanie
+            # boundary (``_config_to_doc`` -> ``AgentConfig``), so an update
+            # carrying a bogus sense id still fails loudly.
+            sense_prefs=tuple(
+                c.get("sense_prefs", dict(current.sense_prefs)).items()
+                if isinstance(c.get("sense_prefs", dict(current.sense_prefs)), dict)
+                else current.sense_prefs
+            ),
         )
 
     overrides: dict[str, Any] = {}

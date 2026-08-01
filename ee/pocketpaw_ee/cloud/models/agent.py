@@ -25,14 +25,25 @@
 # run's MCP allow-list and suppresses the universal grant (CX-1); "additive"
 # (default) is the unchanged legacy grant-union, so existing agents persist and
 # behave exactly as before.
+# Updated 2026-08-02 (Sense Phase 2, SP2-2 — agent-tier provider preference):
+# added ``AgentConfig.sense_prefs: dict[str, str]`` (sense_id -> connector_name).
+# An agent carries its OWN provider choice per sense, and that choice outranks
+# the stored pocket/workspace preference rows at resolve time (see
+# ``cloud.senses.resolver._disambiguate``). KEYS are validated at the schema
+# boundary via ``pocketpaw.senses.validate_sense_id`` — an unknown or malformed
+# sense id fails loudly on write. VALUES (connector names) are deliberately NOT
+# validated here: a pref naming a connector that isn't currently a candidate for
+# the workspace is skipped at resolve time, never an error, so the pref survives
+# its provider being temporarily disabled. Defaulted → zero migration.
 
 """Agent configuration document."""
 
 from __future__ import annotations
 
 from beanie import Indexed
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from pocketpaw.senses import validate_sense_id
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
 
@@ -77,6 +88,24 @@ class AgentConfig(BaseModel):
     conversation_starters: list[str] = Field(default_factory=list)
     voice: dict | None = None
     appearance: dict = Field(default_factory=dict)
+    # Agent-tier provider preference (SP2-2): sense_id -> connector_name. Wins
+    # over the stored pocket/workspace preference rows when the resolver has
+    # more than one candidate. Keys are validated below; values are not.
+    sense_prefs: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("sense_prefs")
+    @classmethod
+    def _validate_sense_pref_keys(cls, value: dict[str, str]) -> dict[str, str]:
+        """Reject an unknown / malformed sense id at the schema boundary.
+
+        ``validate_sense_id`` raises ``SenseValidationError`` (a ``ValueError``),
+        which pydantic surfaces as a ``ValidationError`` — so a bad key can never
+        be persisted. Connector-name values stay unvalidated on purpose: the
+        candidate set is workspace state, not schema state.
+        """
+        for sense_id in value:
+            validate_sense_id(sense_id)
+        return value
 
 
 class Agent(TimestampedDocument):
