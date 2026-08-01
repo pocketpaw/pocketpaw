@@ -571,8 +571,13 @@ async def test_a_raising_ledger_store_does_not_break_the_approval(isolated_store
         async def append(self, row):  # noqa: ARG002
             raise RuntimeError("ledger disk is on fire")
 
+    # Patch the seam the emitter ACTUALLY calls. This test was briefly vacuous:
+    # it patched ``get_agent_ledger_store`` while the emitter had moved to
+    # ``get_agent_ledger_store_beside``, so the exploding store was never
+    # constructed and the guard was never exercised. It still passed — which is
+    # the whole problem with a fail-soft test that only asserts the happy half.
     monkeypatch.setattr(
-        stores, "get_agent_ledger_store", lambda **_kw: _ExplodingStore(), raising=True
+        stores, "get_agent_ledger_store_beside", lambda _p: _ExplodingStore(), raising=True
     )
 
     approved = await instinct.approve(action.id, approver="user:maya")
@@ -580,6 +585,12 @@ async def test_a_raising_ledger_store_does_not_break_the_approval(isolated_store
     assert approved.status == ActionStatus.APPROVED
     # The audit trail — which IS allowed to be loud — is untouched.
     assert any(e.event == "action_approved" for e in await instinct.query_audit(limit=50))
+    # And the NEGATIVE half, which is what stops this test rotting again: the
+    # exploding store must actually have been reached, so NO row can exist. If a
+    # future refactor moves the seam again, this assertion fails loudly instead
+    # of passing quietly.
+    ledger = stores.get_agent_ledger_store(workspace_id="ws1")
+    assert await ledger.query(agent_id="agent-1") == []
 
 
 @pytest.mark.asyncio
@@ -595,11 +606,16 @@ async def test_an_unresolvable_ledger_store_does_not_break_the_approval(
     instinct = stores.get_instinct_store(workspace_id="ws1")
     action = await _propose(instinct, workspace_id=None)
 
-    def _boom(**_kw):
+    def _boom(_p):
         raise stores.WorkspaceScopeRequired("no workspace resolved")
 
-    monkeypatch.setattr(stores, "get_agent_ledger_store", _boom, raising=True)
+    # Same seam correction as the sibling test above — patch what the emitter
+    # calls, not what it used to call.
+    monkeypatch.setattr(stores, "get_agent_ledger_store_beside", _boom, raising=True)
 
     approved = await instinct.approve(action.id)
     assert approved is not None
     assert approved.status == ActionStatus.APPROVED
+    # The negative half: the raise must actually have happened, so no row landed.
+    ledger = stores.get_agent_ledger_store(workspace_id="ws1")
+    assert await ledger.query(agent_id="agent-1") == []
