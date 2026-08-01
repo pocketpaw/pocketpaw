@@ -124,14 +124,14 @@ export POCKETPAW_PYDANTIC_AI_MCP_ENABLED="false"   # drop MCP entirely
 
 ## Tool search
 
-An ungated surface carries 136 tools, and their schemas are JSON that rides
+An ungated surface carries 131 tools, and their schemas are JSON that rides
 every model request. Measured against the real corpus through the model class
 this backend builds:
 
 | | Tools on the wire | Schema bytes | Tokens per request |
 |---|---|---|---|
-| Default | 136 | 123,883 | ~30,970 |
-| `DEFER_MCP_TOOLS=true` | 40 | 25,453 | ~6,363 |
+| Default | 131 | 121,750 | ~30,437 |
+| `DEFER_MCP_TOOLS=true` | 35 | 23,320 | ~5,830 |
 
 That cost is paid in full rather than amortised, because tool schemas do not
 prompt-cache the way a stable text prefix does (see [Prompt caching](#prompt-caching)).
@@ -141,7 +141,7 @@ export POCKETPAW_PYDANTIC_AI_DEFER_MCP_TOOLS="true"
 ```
 
 With it on, the ~97 bridged MCP tools are hidden and the model reaches them by
-calling `search_tools` with a query. The ~37 builtin function tools stay
+calling `search_tools` with a query. The ~32 builtin function tools stay
 visible: they are the smaller half of the bill and the half the agent uses
 constantly. Surface deny and allow sets are applied first, so a tool the
 surface withheld is not in the search corpus and no query can surface it.
@@ -156,8 +156,9 @@ Two things to weigh before turning it on:
   saving is measured, this is not, so it is off by default and worth an A/B on
   your own model.
 
-There is little to gain on a surface that already gates hard. `/sites` cuts 97
-MCP tools to 12 through its deny and allow sets before any of this applies.
+A surface that has already named its tools is skipped outright: with an allow
+set or an exclusive turn there is little left to save, and the discovery round
+trip would be pure cost. `/sites` cuts 97 MCP tools to 12 that way.
 
 Ranking uses PocketPaw's own function rather than pydantic-ai's built-in
 keyword overlap, which scores one point per token wherever it lands. On our

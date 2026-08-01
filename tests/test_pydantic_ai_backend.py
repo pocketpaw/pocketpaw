@@ -1816,3 +1816,285 @@ def test_the_built_in_algorithm_really_does_fail_that_query():
         )
     ]
     assert keywords_search_fn(None, ["build me a webpage"], corpus) == []
+
+
+# --------------------------------------------------------------------------
+# branch review 2026-08-01 — four findings, each reproduced before it was fixed
+# --------------------------------------------------------------------------
+
+
+def test_the_anthropic_provider_reuses_the_instance_http_client():
+    """A model is built EVERY turn while the agent cache hands back the old one,
+    so a provider that owns its client leaks one connection pool per turn.
+
+    Measured before the fix: three turns, three ``httpx.AsyncClient``s, none
+    closed, and ``stop()`` closed none of them either. The OpenAI-compatible
+    branch already shared ``_get_http_client``; this one did not, which also
+    meant it silently ignored ``pydantic_ai_timeout`` and kept the SDK's 600s
+    read deadline the setting exists to replace.
+    """
+    backend = PydanticAIBackend(
+        _settings(
+            pydantic_ai_model="anthropic:claude-sonnet-4-6",
+            anthropic_api_key="sk-ant-test",
+            pydantic_ai_timeout=3600,
+        )
+    )
+    clients = {id(backend._build_model()._provider.client._client) for _ in range(3)}
+    assert len(clients) == 1, "a fresh HTTP client per turn is a leaked connection pool"
+
+    inner = backend._build_model()._provider.client._client
+    assert inner.timeout.read == 3600.0, f"timeout setting not honoured: {inner.timeout}"
+    assert inner.timeout.connect == 15.0, "connect must stay short so a dead host fails fast"
+
+
+def test_a_tool_that_reaches_the_host_is_never_offered():
+    """Dispatch-only covers reading the host, not just writing to it.
+
+    ``_LOCAL_MACHINE_TOOLS`` caught shell and filesystem but left three classes
+    of host access on the table, on a backend where ONE process serves every
+    tenant:
+
+    * ``discord_cli`` spawns ``discli`` as a SUBPROCESS on the server, using the
+      operator's credentials.
+    * ``error_log`` reads ``~/.pocketpaw/health/errors.jsonl`` — process-global,
+      append-only, with tracebacks, and scoped to no workspace.
+    * ``system_info`` reports host CPU/RAM/disk and the top processes by name
+      and pid; ``config_doctor`` / ``health_check`` report operator config.
+    """
+    backend = PydanticAIBackend(_settings())
+    offered = {getattr(t, "name", "") for t in backend._build_custom_tools()}
+
+    for tool in ("discord_cli", "error_log", "system_info", "config_doctor", "health_check"):
+        assert tool not in offered, f"{tool} reaches the host and every tenant shares it"
+
+
+async def test_an_unclassified_tool_is_withheld_not_granted():
+    """The fail-closed property itself, which the classification test cannot
+    show: with every shipped tool classified, swapping the allowlist back for a
+    denylist changes NOTHING observable. Only a tool nobody has classified
+    tells the two apart."""
+    import pocketpaw.agents.pydantic_ai as mod
+
+    backend = PydanticAIBackend(_settings())
+    real = mod.build_pydantic_ai_tools if hasattr(mod, "build_pydantic_ai_tools") else None
+    assert real is None, "import moved; update this monkeypatch"
+
+    from pocketpaw.agents import tool_bridge
+
+    original = tool_bridge.build_pydantic_ai_tools
+    tool_bridge.build_pydantic_ai_tools = lambda *a, **k: [
+        *original(*a, **k),
+        *_bridged("brand_new_tool_nobody_classified"),
+    ]
+    try:
+        names = {getattr(t, "name", "") for t in backend._build_custom_tools()}
+    finally:
+        tool_bridge.build_pydantic_ai_tools = original
+
+    assert "brand_new_tool_nobody_classified" not in names, (
+        "an unclassified tool reached a tenant — the filter is a denylist again"
+    )
+    assert "web_search" in names, "the allowlist must still pass reviewed tools"
+
+
+def test_every_bridged_tool_is_classified():
+    """The withhold list must fail CLOSED.
+
+    A denylist grants anything added later by default, which is the wrong
+    direction for a boundary whose whole argument is that one process serves
+    every tenant. Every bridged tool is now either reviewed as tenant-safe or
+    withheld, and an unclassified one is withheld AND fails here — so adding a
+    tool forces the decision instead of quietly making it.
+    """
+    from pocketpaw.agents.pydantic_ai import _TENANT_SAFE_TOOLS, _WITHHELD_TOOLS
+    from pocketpaw.agents.tool_bridge import build_pydantic_ai_tools
+    from pocketpaw.tools.policy import ToolPolicy
+
+    every = {
+        getattr(t, "name", "")
+        for t in build_pydantic_ai_tools(_settings(), policy=ToolPolicy(profile="full"))
+    }
+    unclassified = every - _TENANT_SAFE_TOOLS - _WITHHELD_TOOLS
+    assert not unclassified, (
+        f"classify these in pydantic_ai.py before they reach a tenant: {sorted(unclassified)}"
+    )
+    assert not (_TENANT_SAFE_TOOLS & _WITHHELD_TOOLS), "a tool cannot be both"
+
+
+async def test_an_in_process_mcp_result_is_scanned_and_capped():
+    """The two bridges must treat results the same way.
+
+    Bridged function tools run their output through ``_scan_tool_output``
+    (prompt-injection sanitise + output budget) and the per-tool character cap.
+    The in-process MCP bridge returned raw text — for 97 of 134 tools, including
+    ``connector_execute``, which returns data from EXTERNAL systems. That is the
+    hostile-content case the scanner was written for.
+    """
+    import mcp.types as mcp_types
+    from mcp.server.lowlevel import Server
+
+    from pocketpaw.agents.tool_bridge import build_inprocess_mcp_toolsets
+
+    server = Server("srv")
+    payload = "A" * 50_000
+
+    @server.list_tools()
+    async def _list():
+        return [mcp_types.Tool(name="fetch", description="Fetch a page.", inputSchema={})]
+
+    @server.call_tool()
+    async def _call(name: str, arguments: dict):
+        return [mcp_types.TextContent(type="text", text=payload)]
+
+    class _Provider:
+        def build_server(self):
+            return ("srv", {"instance": server})
+
+    import pocketpaw._registry as registry
+
+    original = registry.providers
+    registry.providers = lambda group: [_Provider()]
+    try:
+        toolsets = await build_inprocess_mcp_toolsets(
+            settings=_settings(pydantic_ai_max_tool_output_chars=1000)
+        )
+        tool = next(iter(toolsets[0].wrapped.tools.values()))
+        out = await tool.function()
+    finally:
+        registry.providers = original
+
+    # Assert the PER-BACKEND cap specifically. ``_scan_tool_output`` applies its
+    # own ``tool_output_char_cap`` (12k by default), which is enough to satisfy
+    # "shorter than the payload" and "says truncated" all by itself — a mutation
+    # probe disabling this branch left a looser version of this test green.
+    assert f"limit {1000}" in out, "the pydantic_ai per-tool cap did not run"
+    assert len(out) < 2000, f"capped to the wrong ceiling: {len(out)} chars"
+
+
+async def test_an_in_process_mcp_result_goes_through_the_injection_scanner():
+    """Pins the SCANNER specifically.
+
+    The cap and the scan are two different protections in one line of code, and
+    the cap alone would keep the sibling test green with ``_scan_tool_output``
+    deleted — a mutation probe showed exactly that. Connector tools return data
+    from external systems, so the scan is the half that matters most here.
+    """
+    import mcp.types as mcp_types
+    from mcp.server.lowlevel import Server
+
+    from pocketpaw.agents import tool_bridge
+
+    server = Server("srv")
+
+    @server.list_tools()
+    async def _list():
+        return [mcp_types.Tool(name="fetch", description="Fetch a page.", inputSchema={})]
+
+    @server.call_tool()
+    async def _call(name: str, arguments: dict):
+        return [mcp_types.TextContent(type="text", text="hostile page content")]
+
+    class _Provider:
+        def build_server(self):
+            return ("srv", {"instance": server})
+
+    import pocketpaw._registry as registry
+
+    seen: list[str] = []
+
+    def _spy(result: str, tool_name: str) -> str:
+        seen.append(tool_name)
+        return "[sanitised]"
+
+    original_providers, original_scan = registry.providers, tool_bridge._scan_tool_output
+    registry.providers = lambda group: [_Provider()]
+    tool_bridge._scan_tool_output = _spy
+    try:
+        toolsets = await tool_bridge.build_inprocess_mcp_toolsets(settings=_settings())
+        tool = next(iter(toolsets[0].wrapped.tools.values()))
+        out = await tool.function()
+    finally:
+        registry.providers = original_providers
+        tool_bridge._scan_tool_output = original_scan
+
+    assert seen == ["fetch"], "the MCP result never reached the scanner"
+    assert out == "[sanitised]", "the scanner ran but its result was discarded"
+
+
+def test_the_agent_cache_key_does_not_rely_on_object_identity():
+    """``id(list)`` is reused after garbage collection.
+
+    Safe only because every mutation happens to clear the cache too. A version
+    counter says what is actually meant and survives a refactor that forgets.
+    """
+    backend = PydanticAIBackend(_settings())
+    backend._build_custom_tools()
+    first = backend._tools_version
+    backend.attach_specialist_tools([])
+    assert backend._tools_version != first, "a tool-surface mutation must bump the version"
+
+    # And that the KEY actually reads it — keeping the counter while leaving
+    # ``id()`` in the key would pass the assertion above and fix nothing.
+    import inspect
+
+    src = inspect.getsource(PydanticAIBackend._get_or_create_agent)
+    assert "self._tools_version," in src
+    assert "id(self._custom_tools)" not in src
+
+
+def test_an_injected_policy_shapes_this_backend_s_tool_surface():
+    """``AgentPool._build`` injected a policy into ClaudeSDKBackend ALONE, so a
+    cloud agent that switched to this backend silently ran under the
+    process-wide policy (default profile ``full``) instead of its own."""
+    from pocketpaw.tools.policy import ToolPolicy
+
+    backend = PydanticAIBackend(_settings(), policy=ToolPolicy(profile="full", deny=["web_search"]))
+    names = {getattr(t, "name", "") for t in backend._build_custom_tools()}
+    assert "web_search" not in names
+    assert names, "the deny must narrow the surface, not empty it"
+
+
+async def test_an_opt_in_mcp_server_is_reachable_through_an_injected_policy():
+    """The gate in ``build_inprocess_mcp_toolsets`` was dead in production.
+
+    ``mcp_servers_allow`` was populated at exactly one call site, inside the
+    ClaudeSDKBackend branch, so ``is_mcp_server_explicitly_allowed`` could never
+    be True here and an agent configured with ``tools: ["pocketpaw_planner"]``
+    got nothing.
+    """
+    from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy
+
+    opt_in = next(iter(OPT_IN_MCP_SERVERS))
+    backend = PydanticAIBackend(
+        _settings(), policy=ToolPolicy(mcp_servers_allow=frozenset({opt_in}))
+    )
+    assert backend.get_tool_policy().is_mcp_server_explicitly_allowed(opt_in)
+
+
+def test_the_pool_branches_on_the_signature_not_on_one_class():
+    """Otherwise every backend added after ClaudeSDKBackend inherits the gap."""
+    import inspect
+
+    from pocketpaw.agents.pool import AgentPool, _accepts_policy
+    from pocketpaw.agents.registry import get_backend_class
+
+    assert _accepts_policy(get_backend_class("pydantic_ai"))
+    assert _accepts_policy(get_backend_class("claude_agent_sdk"))
+    assert not _accepts_policy(get_backend_class("deep_agents"))
+
+    src = inspect.getsource(AgentPool._build)
+    assert "_accepts_policy" in src, "the pool must ask, not hardcode a class"
+
+
+async def test_a_surface_that_named_its_tools_is_not_deferred():
+    """Deferral trades a round trip for context, which is only a trade worth
+    making when there is context to save. A surface with an allow set has
+    already cut the corpus (``/sites`` goes 97 to 12), so hiding what remains
+    behind a search buys nothing and risks an agent that never looks."""
+    backend = _deferring_backend(TestModel())
+    backend._mcp_tools = [_mcp_toolset("srv", "create_svelte_site", "publish")]
+
+    names = await _deferred_surface(backend, allow_mcp_tool_ids=frozenset({"mcp__srv__publish"}))
+    assert "srv_publish" in names, "a narrowed surface should see its tools directly"
+    assert "search_tools" not in names

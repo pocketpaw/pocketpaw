@@ -751,7 +751,9 @@ def get_tool_instructions_compact(settings: Any, backend: str = "opencode") -> s
 # ---------------------------------------------------------------------------
 
 
-async def build_inprocess_mcp_toolsets(policy: ToolPolicy | None = None) -> list:
+async def build_inprocess_mcp_toolsets(
+    policy: ToolPolicy | None = None, settings: Any = None
+) -> list:
     """Bridge PocketPaw's IN-PROCESS MCP servers into pydantic-ai toolsets.
 
     Added 2026-07-31. These are the sites / pocket / connectors / media / …
@@ -820,7 +822,7 @@ async def build_inprocess_mcp_toolsets(policy: ToolPolicy | None = None) -> list
             continue
 
         try:
-            tools = await _bridge_inprocess_server(name, instance, mcp_types)
+            tools = await _bridge_inprocess_server(name, instance, mcp_types, settings)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not bridge in-process MCP server '%s': %s", name, exc)
             continue
@@ -831,7 +833,9 @@ async def build_inprocess_mcp_toolsets(policy: ToolPolicy | None = None) -> list
     return toolsets
 
 
-async def _bridge_inprocess_server(name: str, instance: Any, mcp_types: Any) -> list:
+async def _bridge_inprocess_server(
+    name: str, instance: Any, mcp_types: Any, settings: Any = None
+) -> list:
     """Enumerate one in-process MCP server's tools as pydantic-ai ``Tool``s."""
     from pydantic_ai.tools import Tool
 
@@ -845,7 +849,7 @@ async def _bridge_inprocess_server(name: str, instance: Any, mcp_types: Any) -> 
     for spec in getattr(listed.root, "tools", None) or []:
         tools.append(
             Tool.from_schema(
-                _make_inprocess_caller(spec.name, call_handler, mcp_types),
+                _make_inprocess_caller(spec.name, call_handler, mcp_types, settings),
                 name=spec.name,
                 description=spec.description or spec.name,
                 # The server's OWN schema, passed through untouched. Synthesizing
@@ -858,12 +862,21 @@ async def _bridge_inprocess_server(name: str, instance: Any, mcp_types: Any) -> 
     return tools
 
 
-def _make_inprocess_caller(tool_name: str, call_handler: Any, mcp_types: Any):
+def _make_inprocess_caller(tool_name: str, call_handler: Any, mcp_types: Any, settings: Any = None):
     """Build the coroutine that invokes one in-process MCP tool.
 
     A factory rather than a closure written inline in the loop: the latter
     captures the loop variable, so every tool ends up calling the last one.
+
+    The result goes through the SAME post-processing as a bridged function tool
+    (``_scan_tool_output`` plus the per-tool character cap). It did not until
+    2026-08-01, which meant 97 of the backend's 134 tools skipped the
+    prompt-injection scan and the output budget — including
+    ``connector_execute`` and ``sense_execute``, which return data from
+    EXTERNAL systems and are exactly the hostile-content case the scanner
+    exists for.
     """
+    limit = int(getattr(settings, "pydantic_ai_max_tool_output_chars", 0) or 0)
 
     async def _call(**kwargs: Any) -> str:
         # Drop unset optionals — MCP handlers check presence, and an explicit
@@ -883,7 +896,18 @@ def _make_inprocess_caller(tool_name: str, call_handler: Any, mcp_types: Any):
             # Returned, not raised: the model can read the reason and correct
             # its arguments. Raising would burn a retry on an error it never saw.
             return text or f"Error: {tool_name} failed."
-        return text
+
+        scanned = _scan_tool_output(text, tool_name)
+        if limit and len(scanned) > limit:
+            # Announced, never silent — see the same cap in
+            # ``_make_pydantic_ai_tool`` for why a quiet truncation on a tool
+            # asked for complete content is how the /code fabrication bug began.
+            return (
+                f"{scanned[:limit]}\n\n[truncated: {tool_name} returned "
+                f"{len(scanned)} chars, limit {limit}. This output is INCOMPLETE — "
+                f"narrow the request rather than inferring the remainder.]"
+            )
+        return scanned
 
     _call.__name__ = tool_name
     return _call

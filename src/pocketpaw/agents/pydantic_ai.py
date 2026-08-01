@@ -126,14 +126,14 @@ on that surface.
 Updated 2026-07-31 (d) — **deferred tool loading**, opt-in via
 ``POCKETPAW_PYDANTIC_AI_DEFER_MCP_TOOLS``. The caching caveat above is what
 makes this worth doing: tool schemas do not cache, so an ungated surface pays
-for all 134 of them on every single request. Measured through the real
-``OpenAIChatModel`` this backend builds:
+for every one of them on every single request. Measured on an ungated surface,
+through the real ``OpenAIChatModel`` this backend builds:
 
 ===========  =================  ==============  ===============
 surface      tools on the wire  schema bytes    tokens/request
 ===========  =================  ==============  ===============
-today                      134         121,950           30,487
-deferred                    38          23,520            5,880
+today                      131         121,750           30,437
+deferred                    35          23,320            5,830
 ===========  =================  ==============  ===============
 
 pydantic-ai's own mechanism (``AbstractToolset.defer_loading`` plus the
@@ -149,6 +149,36 @@ token equally wherever it lands and so answers "publish it" with five tools
 that merely mention publishing. See ``_defer_mcp_toolsets`` for the two
 boundaries this rides on — deferral happens AFTER surface gating, and only MCP
 tools defer.
+
+Updated 2026-08-01 (e) — **branch review**. Five things the sections above
+claimed but did not deliver:
+
+1. **Dispatch-only now fails closed.** ``_LOCAL_MACHINE_TOOLS`` was a denylist,
+   so it covered what its author thought of and granted the rest. It missed
+   ``discord_cli``, which spawns ``discli`` as a SUBPROCESS under the operator's
+   credentials, and the whole class of tools that READ the shared process:
+   ``error_log`` (process-global, tracebacks, scoped to no workspace),
+   ``system_info`` (host CPU/RAM/disk and top processes by pid),
+   ``config_doctor``, ``health_check``. The surface is built from
+   ``_TENANT_SAFE_TOOLS`` now; anything unclassified is withheld and logged.
+2. **The per-agent tool policy reaches this backend.** ``AgentPool._build``
+   injected one into ``ClaudeSDKBackend`` alone, so a cloud agent that switched
+   here silently ran under the process-wide policy — default profile ``full`` —
+   and its ``mcp_servers_allow`` opt-ins were unreachable, which made the
+   ``OPT_IN_MCP_SERVERS`` branch in the bridge dead code. The pool asks the
+   signature now, so this is fixed for every backend at once.
+3. **The ``anthropic`` provider shares the instance HTTP client.** ``_build_model``
+   runs every turn while the agent cache returns the previous model, so a
+   provider that builds its own client leaked one connection pool per turn
+   (measured: 3 turns, 3 clients, none closed, ``stop()`` closed none). It also
+   meant that branch ignored ``pydantic_ai_timeout`` and kept the 600s read
+   deadline the setting exists to replace.
+4. **In-process MCP results are scanned and capped** like bridged function
+   tools. 97 of the tools skipped ``_scan_tool_output`` entirely, including the
+   connector tools, which return data from external systems.
+5. Smaller: the agent cache key uses ``_tools_version`` rather than
+   ``id(_custom_tools)``, and deferral is skipped on a surface that already
+   named its tools.
 """
 
 from __future__ import annotations
@@ -214,6 +244,79 @@ _LOCAL_MACHINE_TOOLS = frozenset(
         "open_in_explorer",
         "delegate_claude_code",
         "create_skill",
+        # Spawns ``discli`` as a SUBPROCESS on this server, under the
+        # OPERATOR's Discord credentials. Same argument as ``shell``; it was
+        # missed because its name reads like an API client.
+        "discord_cli",
+    }
+)
+
+# Tools that READ this process or this host. The dispatch-only argument covers
+# them for the same reason it covers ``read_file`` — one process serves every
+# tenant — but the first pass only caught tools that WRITE or EXECUTE, so these
+# stayed on every surface:
+#
+# * ``error_log`` reads ``~/.pocketpaw/health/errors.jsonl``, which is
+#   process-global, append-only, carries tracebacks, and is scoped to no
+#   workspace. One tenant asking "what went wrong?" reads every other tenant's
+#   failures.
+# * ``system_info`` reports host CPU / RAM / disk / network and the top
+#   processes BY NAME AND PID.
+# * ``config_doctor`` and ``health_check`` report the operator's configuration
+#   and startup checks.
+#
+# None of them are per-tenant data, so none of them belong to a tenant's agent.
+_HOST_STATE_TOOLS = frozenset({"error_log", "system_info", "config_doctor", "health_check"})
+
+_WITHHELD_TOOLS = _LOCAL_MACHINE_TOOLS | _HOST_STATE_TOOLS
+
+# Reviewed as safe for an agent on a SHARED process: external services, or
+# PocketPaw state already scoped to the caller's tenant.
+#
+# This list is what makes the boundary fail CLOSED. A denylist grants anything
+# added later by default, which is backwards for a security constraint — and
+# not hypothetical: ``discord_cli`` sat in the granted set through a whole
+# review because nobody had reason to look at it again. An unclassified tool is
+# now WITHHELD and logged, and ``test_every_bridged_tool_is_classified`` fails
+# until someone decides which side it belongs on.
+_TENANT_SAFE_TOOLS = frozenset(
+    {
+        # pockets / widgets — tenant-scoped
+        "add_widget",
+        "remove_widget",
+        "create_pocket",
+        "start_flow",
+        "run_step_pipeline",
+        # memory + sessions — scoped by the caller's own session key
+        "remember",
+        "recall",
+        "forget",
+        "clear_session",
+        "delete_session",
+        "list_sessions",
+        "new_session",
+        "rename_session",
+        "switch_session",
+        # connectors — the tenant's own integrations
+        "connector_actions",
+        "connector_connect",
+        "connector_execute",
+        "connector_list",
+        # outbound services and media
+        "currency",
+        "deliver_artifact",
+        "delegate_to_a2a_agent",
+        "image_generate",
+        "ocr",
+        "research",
+        "search_stock_images",
+        "speech_to_text",
+        "text_to_speech",
+        "translate",
+        "url_extract",
+        "weather",
+        "web_search",
+        "wiki",
     }
 )
 
@@ -444,10 +547,15 @@ class PydanticAIBackend:
             beta=True,
         )
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, policy: ToolPolicy | None = None) -> None:
         self.settings = settings
         self._sdk_available = False
         self._custom_tools: list | None = None
+        # Bumped on every mutation of the tool surface. Was ``id(_custom_tools)``
+        # in the agent cache key, which is correct only by accident: CPython
+        # reuses an address once the old list is collected, so the key could
+        # collide across a rebuild. A counter says what is meant.
+        self._tools_version = 0
         self._mcp_tools: list | None = None
         # Holds every MCP server open for this instance's lifetime so the
         # refcount never returns to zero. Unwound in ``stop()``.
@@ -476,7 +584,13 @@ class PydanticAIBackend:
         # keeps a trailing window, so a long-lived instance cannot grow without
         # limit. Losing an entry degrades to the text history, never to an error.
         self._session_messages: OrderedDict[str, list] = OrderedDict()
-        self._policy = ToolPolicy(
+        # An injected policy is the PER-AGENT one. ``AgentPool._build`` used to
+        # hand it to ClaudeSDKBackend alone, so a cloud agent that switched to
+        # this backend silently ran under the process-wide policy — default
+        # profile ``full``, no narrowing — and its ``mcp_servers_allow`` opt-ins
+        # (``pocketpaw_planner``) could never be honoured, because that set has
+        # no other way in.
+        self._policy = policy or ToolPolicy(
             profile=settings.tool_profile,
             allow=settings.tools_allow,
             deny=settings.tools_deny,
@@ -495,6 +609,7 @@ class PydanticAIBackend:
     def set_tool_policy(self, policy: ToolPolicy) -> None:
         self._policy = policy
         self._custom_tools = None
+        self._tools_version += 1
         self._mcp_tools = None
         self._cached_agent = None
         self._cached_agent_key = None
@@ -551,9 +666,21 @@ class PydanticAIBackend:
             from pydantic_ai.models.anthropic import AnthropicModel
             from pydantic_ai.providers.anthropic import AnthropicProvider
 
+            # ``http_client`` for the same reason as the OpenAI branch below:
+            # ``_build_model`` runs EVERY turn while the agent cache hands back
+            # the previous model, so a provider that builds its own client
+            # leaks one connection pool per turn (measured: 3 turns, 3 clients,
+            # none closed, and ``stop()`` closed none of them). Sharing it also
+            # applies ``pydantic_ai_timeout``, which this branch otherwise
+            # ignored — it kept the SDK's 600s read deadline that setting exists
+            # to replace.
+            provider_kwargs: dict[str, Any] = {"api_key": self.settings.anthropic_api_key or ""}
+            anthropic_http_client = self._get_http_client()
+            if anthropic_http_client is not None:
+                provider_kwargs["http_client"] = anthropic_http_client
             return AnthropicModel(
                 model or "claude-sonnet-4-6",
-                provider=AnthropicProvider(api_key=self.settings.anthropic_api_key or ""),
+                provider=AnthropicProvider(**provider_kwargs),
             )
 
         if provider not in _OPENAI_COMPATIBLE:
@@ -683,16 +810,33 @@ class PydanticAIBackend:
             bridged = build_pydantic_ai_tools(
                 self.settings, backend="pydantic_ai", policy=self._policy
             )
-            # Dropped HERE, at the only place the bridged surface is built, so
+            # Filtered HERE, at the only place the bridged surface is built, so
             # no later code path can reintroduce them — a caller cannot forget
             # to pass a flag and a surface cannot grant them back.
+            #
+            # An ALLOWLIST, so the boundary fails closed: a tool nobody has
+            # classified is withheld rather than handed to every tenant.
             self._custom_tools = [
-                t for t in bridged if getattr(t, "name", "") not in _LOCAL_MACHINE_TOOLS
+                t for t in bridged if getattr(t, "name", "") in _TENANT_SAFE_TOOLS
             ]
+            unclassified = sorted(
+                name
+                for t in bridged
+                if (name := getattr(t, "name", "")) not in _TENANT_SAFE_TOOLS
+                and name not in _WITHHELD_TOOLS
+            )
+            if unclassified:
+                # Loud: silence here is the failure mode. The tool is already
+                # withheld by the line above; this is how someone finds out.
+                logger.warning(
+                    "Dispatch-only: withholding UNCLASSIFIED tool(s) %s — add each to "
+                    "_TENANT_SAFE_TOOLS or _WITHHELD_TOOLS in agents/pydantic_ai.py",
+                    unclassified,
+                )
             dropped = len(bridged) - len(self._custom_tools)
             if dropped:
                 logger.info(
-                    "Dispatch-only: withheld %d local-machine tool(s); %d tools offered",
+                    "Dispatch-only: withheld %d tool(s); %d offered",
                     dropped,
                     len(self._custom_tools),
                 )
@@ -832,7 +976,7 @@ class PydanticAIBackend:
         try:
             from pocketpaw.agents.tool_bridge import build_inprocess_mcp_toolsets
 
-            servers = servers + await build_inprocess_mcp_toolsets(self._policy)
+            servers = servers + await build_inprocess_mcp_toolsets(self._policy, self.settings)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not bridge in-process MCP servers: %s", exc)
 
@@ -857,6 +1001,7 @@ class PydanticAIBackend:
         if self._custom_tools is None:
             self._custom_tools = []
         self._custom_tools.extend(tools)
+        self._tools_version += 1
         self._mcp_tools = []
         self._cached_agent = None
         self._cached_agent_key = None
@@ -1093,7 +1238,13 @@ class PydanticAIBackend:
 
         return [ts.filtered(_keep) for ts in mcp_toolsets]
 
-    def _defer_mcp_toolsets(self, mcp_toolsets: list) -> list:
+    def _defer_mcp_toolsets(
+        self,
+        mcp_toolsets: list,
+        *,
+        allow_mcp_tool_ids: frozenset[str] | None = None,
+        exclusive_mcp_tools: bool = False,
+    ) -> list:
         """Hide the MCP tools behind tool search instead of advertising them.
 
         An ungated surface carries 134 tools, and their schemas are ~30,500
@@ -1126,6 +1277,12 @@ class PydanticAIBackend:
         (``/sites`` cuts 97 to 12) there is little left to save.
         """
         if not mcp_toolsets or not getattr(self.settings, "pydantic_ai_defer_mcp_tools", False):
+            return mcp_toolsets
+        # A surface that already named its tools has nothing to save and
+        # something to lose: hiding three tools behind a search still costs the
+        # discovery round trip, and a dedicated agent that fails to search finds
+        # nothing at all. ``/sites`` cuts 97 MCP tools to 12 this way.
+        if exclusive_mcp_tools or allow_mcp_tool_ids is not None:
             return mcp_toolsets
         return [ts.defer_loading() for ts in mcp_toolsets]
 
@@ -1181,7 +1338,7 @@ class PydanticAIBackend:
             self.settings.pydantic_ai_model,
             is_pocket_session,
             len(mcp_toolsets),
-            id(self._custom_tools),
+            self._tools_version,
             len(tools),
             # In the key, not just a constructor argument: the skill subset
             # shapes the agent's capabilities, so an entity with a narrower set
@@ -1212,14 +1369,23 @@ class PydanticAIBackend:
         mcp_toolsets = self._gate_mcp_toolsets(
             mcp_toolsets, deny, allow_mcp_tool_ids, exclusive_mcp_tools
         )
-        mcp_toolsets = self._defer_mcp_toolsets(mcp_toolsets)
+        mcp_toolsets = self._defer_mcp_toolsets(
+            mcp_toolsets,
+            allow_mcp_tool_ids=allow_mcp_tool_ids,
+            exclusive_mcp_tools=exclusive_mcp_tools,
+        )
 
         # A belt-and-braces sweep, cheap and last. ``_build_custom_tools`` is
         # the real boundary, but ``attach_specialist_tools`` also writes into
         # ``_custom_tools`` and takes whatever a caller hands it — this is what
         # makes the guarantee hold for the tools THIS AGENT gets, whatever the
         # source.
-        tools = [t for t in tools if getattr(t, "name", "") not in _LOCAL_MACHINE_TOOLS]
+        #
+        # A DENYLIST here on purpose, where the builder uses an allowlist:
+        # specialist-internal tools are legitimately not in ``_TENANT_SAFE_TOOLS``
+        # (they are private to one specialist run), so screening them against it
+        # would strip the very tools the caller just attached.
+        tools = [t for t in tools if getattr(t, "name", "") not in _WITHHELD_TOOLS]
 
         agent = Agent(
             model,
