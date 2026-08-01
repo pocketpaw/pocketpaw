@@ -1,6 +1,12 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-08-01 (Sense Phase 2, SP2-1) — both ``attach_agent_identity`` binds (the
+  ``_prewarm_session`` warm-up and the ``_drive_agent_loop`` run seam) now pass
+  ``agent_id=ctx.target_agent_id``, the agent ``pool.get`` / ``pool.run`` /
+  ``pool.prewarm`` already drive. In-process MCP tools read it back via
+  ``agent_service.current_agent_id()`` to resolve the RUNNING agent's own
+  configuration. Identity-affecting behavior is otherwise unchanged.
 - 2026-07-15 (fix/paw-bar-concierge-soul-policy) — ``_persist_and_complete``
   now gates the ``pool.observe`` soul-learning call: a Paw Bar concierge run
   (session_key prefix ``cloud:concierge:``) SKIPS it so anonymous, untrusted
@@ -1040,6 +1046,9 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
             user_id=ctx.user_id,
             session_mongo_id=session_mongo_id,
             pocket_id=ctx.pocket_id,
+            # SP2-1 — the same agent ``pool.prewarm`` warms below, so a tool that
+            # resolves the running agent's own config during the warm sees turn 1's.
+            agent_id=ctx.target_agent_id,
         )
         # C1 — bind the concierge action context so the warm subprocess builds the
         # same pawbar_actions tool set turn 1 will resolve (None for every other run).
@@ -1143,6 +1152,10 @@ async def _drive_agent_loop(
         # chats (and session chats whose Session.pocket is set). ``None`` for
         # plain DM/group threads — the connector tools then say "no pocket".
         pocket_id=ctx.pocket_id,
+        # SP2-1 — the agent this run drives (``pool.get`` / ``pool.run`` use the
+        # same id), so an in-process MCP tool can resolve the RUNNING agent's own
+        # configuration instead of guessing from the scope.
+        agent_id=ctx.target_agent_id,
     )
     # C1 — bind this run's concierge action context (None for every non-concierge
     # or no-actions run). The pawbar_actions MCP server + tool handlers read it;

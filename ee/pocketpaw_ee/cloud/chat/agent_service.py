@@ -9,6 +9,18 @@ handles *what the agent sees*:
 * ``load_history_for_scope`` rehydrates prior chat turns from Mongo so the
   agent carries context across backend restarts and pool evictions.
 
+Changes: 2026-08-01 (Sense Phase 2, SP2-1 — agent identity at the MCP layer) —
+the per-stream identity now carries the RUNNING agent's id. New
+``_active_agent_id`` ContextVar beside ``_active_workspace_id`` /
+``_active_user_id`` / ``_active_session_mongo_id`` / ``_active_pocket_id``, a
+``current_agent_id()`` accessor mirroring the other ``current_*`` readers, and a
+keyword-only ``agent_id`` on ``attach_agent_identity`` bound as a SIXTH token
+(appended, so the ISO-3 OSS-workspace token keeps its fifth slot);
+``detach_agent_identity`` resets it in the same call. Any in-process MCP tool
+can now ask which agent is driving this turn without a request scope — the
+plumbing later agent-carried-sense slices consume. ``agent_id`` defaults to
+``None`` and the empty-workspace/user validation is untouched, so every existing
+caller is byte-for-byte unchanged.
 Changes: 2026-07-14 (Paw Bar concierge seam, T2) — added ``ScopeKind.CONCIERGE``
 and ``_resolve_concierge``: a PUBLIC, anonymous Paw Bar concierge run resolves
 its ``ScopeContext`` from the server-authoritative spec (Site pocket + widget
@@ -283,6 +295,14 @@ _active_session_mongo_id: ContextVar[str | None] = ContextVar(
 # can resolve which room they're in without a request scope. ``None`` when the
 # chat isn't bound to a pocket (a plain DM / group thread).
 _active_pocket_id: ContextVar[str | None] = ContextVar("agent_pocket_id", default=None)
+# The id of the Agent driving THIS turn (``ScopeContext.target_agent_id`` on the
+# SSE chat path, the dispatched agent on the group/DM bridge). Bound alongside
+# workspace / user / pocket so an in-process MCP tool can answer "which agent is
+# running me" without a request scope — the plumbing agent-carried senses read to
+# resolve the running agent's own configuration. ``None`` on any path with no
+# single unambiguous agent (and for every caller that doesn't pass one), which is
+# byte-for-byte the pre-existing behavior.
+_active_agent_id: ContextVar[str | None] = ContextVar("agent_agent_id", default=None)
 
 # Marks the active async context as a live cloud CHAT run — the dispatch path
 # that is REQUIRED to bind workspace identity (``run_core.execute_run`` sets it
@@ -307,13 +327,17 @@ def attach_agent_identity(
     user_id: str,
     session_mongo_id: str | None = None,
     pocket_id: str | None = None,
-) -> tuple[Token, Token, Token, Token, Token]:
-    """Bind workspace / user / session / pocket identity for the active
+    agent_id: str | None = None,
+) -> tuple[Token, Token, Token, Token, Token, Token]:
+    """Bind workspace / user / session / pocket / agent identity for the active
     stream's MCP tools. ``session_mongo_id`` is the ``Session._id`` the chat
     is streaming through — used by ``create_pocket`` to link the active
     session to the freshly-created pocket. ``pocket_id`` is the room the chat
     is anchored to (when any) — read by the connector-execution MCP server to
     scope ``list_connector_actions`` / ``connector_execute`` to this pocket.
+    ``agent_id`` is the agent driving this turn — read by tools that resolve
+    the RUNNING agent's own configuration (agent-carried senses). It is
+    OPTIONAL: omitting it binds ``None``, which is exactly today's behavior.
 
     Defense-in-depth (fix/worker-trusts-spec-workspace): REJECT an empty
     ``workspace_id`` / ``user_id`` instead of binding ``""`` to the contextvar.
@@ -335,7 +359,9 @@ def attach_agent_identity(
     scope); this bridges the agent path that doesn't. The OSS token is returned
     as a FIFTH tuple element — callers treat the tuple opaquely (only
     ``detach_agent_identity`` unpacks it), so the wider shape is invisible to
-    them. ``detach`` resets it."""
+    them. ``detach`` resets it. The agent token is appended as a SIXTH element
+    for the same reason: the ISO-3 element keeps its position, so nothing that
+    reasons about the fifth slot has to move."""
     if not workspace_id or not user_id:
         raise ValueError(
             "attach_agent_identity requires a non-empty workspace_id and user_id "
@@ -348,17 +374,19 @@ def attach_agent_identity(
         _active_pocket_id.set(pocket_id),
         # ISO-3: bridge the EE per-stream workspace onto the OSS store ContextVar.
         _oss_current_workspace.set(workspace_id),
+        _active_agent_id.set(agent_id),
     )
 
 
-def detach_agent_identity(tokens: tuple[Token, Token, Token, Token, Token]) -> None:
-    ws_token, user_token, session_token, pocket_token, oss_ws_token = tokens
+def detach_agent_identity(tokens: tuple[Token, Token, Token, Token, Token, Token]) -> None:
+    ws_token, user_token, session_token, pocket_token, oss_ws_token, agent_token = tokens
     _active_workspace_id.reset(ws_token)
     _active_user_id.reset(user_token)
     _active_session_mongo_id.reset(session_token)
     _active_pocket_id.reset(pocket_token)
     # ISO-3: clear the OSS store ContextVar bridged in attach_agent_identity.
     _oss_current_workspace.reset(oss_ws_token)
+    _active_agent_id.reset(agent_token)
 
 
 def current_workspace_id() -> str | None:
@@ -375,6 +403,12 @@ def current_session_mongo_id() -> str | None:
 
 def current_pocket_id() -> str | None:
     return _active_pocket_id.get()
+
+
+def current_agent_id() -> str | None:
+    """The Agent driving the active run, or ``None`` when the caller didn't
+    bind one (legacy callers, or a dispatch path with no single agent)."""
+    return _active_agent_id.get()
 
 
 # Per-stream Paw Bar action context (C1). Set by ``run_core`` for a CONCIERGE run
