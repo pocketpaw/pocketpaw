@@ -116,6 +116,7 @@ from pocketpaw_ee.cloud._core.context import RequestContext
 from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import PlanGapResolved, PlanGenerated
+from pocketpaw_ee.cloud.agents.defaults import CLOUD_DEFAULT_AGENT_BACKEND
 from pocketpaw_ee.cloud.models.planner import PlanSession as _PlanSessionDoc
 from pocketpaw_ee.cloud.models.planner import PlanSessionAgentGap as _PlanSessionAgentGapDoc
 from pocketpaw_ee.cloud.planner.domain import AgentGap, PlanSession, PlanSessionSummary
@@ -1485,7 +1486,7 @@ async def _ensure_agent(workspace_id: str, spec_name: str) -> str | None:
                 name=spec_name,
                 slug=slug,
                 description=f"Auto-created for planner spec: {spec_name}",
-                backend="claude_agent_sdk",
+                backend=CLOUD_DEFAULT_AGENT_BACKEND,
             ),
         )
         logger.info("_ensure_agent: created agent %s for %s", str(created.id), spec_name)

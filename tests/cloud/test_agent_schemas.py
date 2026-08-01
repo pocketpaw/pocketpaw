@@ -8,6 +8,7 @@ new ScopeAssignmentRequest / ScopeAssignmentResponse envelopes.
 from __future__ import annotations
 
 import pytest
+from pocketpaw_ee.cloud.agents.defaults import CLOUD_DEFAULT_AGENT_BACKEND
 from pocketpaw_ee.cloud.agents.dto import (
     AgentResponse,
     CreateAgentRequest,
@@ -21,7 +22,10 @@ from pydantic import ValidationError as PydanticValidationError
 
 def test_create_agent_required_fields():
     req = CreateAgentRequest(name="My Agent", slug="my-agent")
-    assert req.name == "My Agent" and req.backend == "claude_agent_sdk"
+    # Against the constant, not a literal: this assertion broke when the cloud
+    # default moved to pydantic_ai, which is the third time a default change has
+    # had to chase copies of itself through the tests.
+    assert req.name == "My Agent" and req.backend == CLOUD_DEFAULT_AGENT_BACKEND
 
 
 def test_create_agent_with_backend():
@@ -33,7 +37,7 @@ def test_create_agent_defaults():
     req = CreateAgentRequest(name="Test", slug="test")
     assert req.avatar == ""
     assert req.visibility == "private"
-    assert req.backend == "claude_agent_sdk"
+    assert req.backend == CLOUD_DEFAULT_AGENT_BACKEND
     assert req.model == ""
 
 

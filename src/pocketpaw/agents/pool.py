@@ -689,6 +689,13 @@ class AgentPool:
 
         # Clone settings and override with agent config
         settings = Settings.load()
+        # The literal stays ``claude_agent_sdk`` on purpose, and is NOT the
+        # cloud default (``pocketpaw_ee.cloud.agents.defaults``, which OSS core
+        # cannot import anyway). ``AgentConfig`` carries a default, so
+        # ``model_dump`` always includes the key and this fallback only fires
+        # for a document written before the field existed — which is to say a
+        # document from when ``claude_agent_sdk`` WAS the default. Answering
+        # with today's default would silently re-home the oldest agents.
         settings.agent_backend = config.get("backend", "claude_agent_sdk")
 
         # Map the per-agent model onto the Settings field the chosen backend
