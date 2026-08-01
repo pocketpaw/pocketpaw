@@ -3,6 +3,22 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Updated: 2026-08-02 (PA-1, feat/prompt-assembler-seam) —
+  ``_assemble_system_prompt`` no longer builds a string by appending blocks. It
+  renders a LIST OF LAYERS through ``pocketpaw.prompt.assemble`` and returns an
+  ``AssembledPrompt``: the same text (byte-identical), plus a ``stable_digest``
+  over the layers that declared themselves cacheable. One layer is real so far —
+  the agent identity block (soul/persona + the A1 ``system_message_override``),
+  keyed on the agent's id, its document revision, which branch produced it and
+  the override. Everything below it (the authoritative ``instructions``, the
+  per-message soul recall, the knowledge wrapper) rides one unkeyed passthrough
+  layer until it is split up.
+  The digest is forwarded to ``backend.run`` as ``system_prompt_digest`` for any
+  backend whose ``run`` declares the parameter (asked of the signature, like
+  ``_accepts_policy`` — a backend opts in by accepting it, not by being listed
+  here). ``pydantic_ai`` folds it into its agent cache key. This is the shape
+  fix behind PR #1842: an agent cached with a prompt baked in but keyed on
+  everything EXCEPT the prompt served session B what session A was told.
 Updated: 2026-07-24 (CX-2, feat/code-agent-exclusive-tools) — ``run`` and
   ``prewarm`` accept ``exclusive_mcp_tools: bool = False`` and forward it to the
   backend ONLY when True (same withhold-when-empty idiom as ``model_override`` /
@@ -96,6 +112,7 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import cache
 from typing import TYPE_CHECKING, Any
 
 from pocketpaw.agents.errors import (
@@ -103,6 +120,7 @@ from pocketpaw.agents.errors import (
     AgentDisabled,
     AgentNotFound,
 )
+from pocketpaw.prompt import AssembledPrompt, PromptContext, assemble, prompt_layer_registry
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -111,6 +129,11 @@ if TYPE_CHECKING:
     from pocketpaw.soul import SoulManager
 
 logger = logging.getLogger(__name__)
+
+# The cloud path's prompt layers, in the order they are concatenated. The names
+# resolve through ``prompt_layer_registry``; the ORDER is this caller's, because
+# it is what makes the assembled text what a cloud agent expects to read.
+_SYSTEM_PROMPT_LAYERS = ("identity", "legacy_tail")
 
 
 def _resolve_agent_model() -> Any:
@@ -163,6 +186,32 @@ def _accepts_policy(backend_cls: type) -> bool:
 
     try:
         return "policy" in inspect.signature(backend_cls.__init__).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
+@cache
+def _accepts_prompt_digest(backend_cls: type) -> bool:
+    """Does this backend's ``run`` take a ``system_prompt_digest`` keyword?
+
+    The digest (PA-1) is non-empty on every run, so the withhold-when-empty
+    idiom the other per-run kwargs use cannot gate it — passing it to a backend
+    with the narrower signature would raise TypeError. Asking the signature is
+    the same answer ``_accepts_policy`` gives: a backend opts in by accepting
+    the argument, and the backends that have not been ported yet are untouched.
+    ``**kwargs`` does NOT count — a backend that swallows the digest silently
+    would look ported without keying on anything.
+
+    Cached because this runs once per turn, and a backend class's signature
+    cannot change at runtime.
+    """
+    import inspect
+
+    run = getattr(backend_cls, "run", None)
+    if run is None:  # pragma: no cover - not a backend
+        return False
+    try:
+        return "system_prompt_digest" in inspect.signature(run).parameters
     except (TypeError, ValueError):  # pragma: no cover - exotic callables
         return False
 
@@ -294,9 +343,26 @@ class AgentPool:
         instructions: str,
         knowledge_context: str,
         system_message_override: str | None,
-    ) -> str | None:
-        """Build the agent's system prompt from soul/persona + override +
-        instructions + per-message soul recall + knowledge wrapper.
+    ) -> AssembledPrompt:
+        """Assemble the agent's system prompt from its layers.
+
+        Returns the text AND a ``stable_digest`` over the layers that declared
+        a cache key. The digest is what a backend caching an agent object folds
+        into its own key: without it, an agent built on turn N with turn N's
+        prompt baked in is handed back on turn N+1 to a different session (the
+        bug PR #1842 fixed per-backend).
+
+        The layers, in order:
+
+        * ``identity`` — soul/persona identity (bootstrap ``identity`` + its
+          ``# Key Knowledge``, falling back to the config persona /
+          ``system_prompt``), then the entity-rooms A1
+          ``system_message_override``, which SWAPS that base and keeps the
+          layers below. KEYED, on the agent rather than on the rendered text.
+        * ``legacy_tail`` — the authoritative ``instructions``, the
+          per-message soul recall and the knowledge wrapper, still one block.
+          UNKEYED: it carries the per-message recall, so keying it would move
+          the digest every turn and destroy the cache it exists to protect.
 
         Factored out of ``run`` (feat/claude-sdk-prewarm) so ``prewarm`` builds
         the IDENTICAL prompt the first real turn will. The Claude SDK warm-client
@@ -306,84 +372,20 @@ class AgentPool:
         is stripped before hashing, so a prewarm that passes ``message=""`` /
         ``knowledge_context=""`` still hashes to the SAME prefix as the run that
         passes the real values — which is exactly what makes the prewarmed client
-        reused rather than evicted on turn 1.
+        reused rather than evicted on turn 1. That contract is unchanged: the
+        layers render the same text in the same order, and ``prewarm`` passes
+        ``assembled.text`` where it used to pass the string.
         """
-        # Build system prompt via soul bootstrap if available
-        system_prompt = None
-        if instance.soul_manager and instance.soul_manager.bootstrap_provider:
-            try:
-                ctx = await instance.soul_manager.bootstrap_provider.get_context()
-                system_prompt = ctx.identity
-                # Append soul-level knowledge (semantic memories, bond info, etc.)
-                # into the identity block so the agent carries persistent context.
-                if ctx.knowledge:
-                    knowledge_lines = "\n".join(f"- {k}" for k in ctx.knowledge)
-                    system_prompt = f"{system_prompt}\n\n# Key Knowledge\n{knowledge_lines}"
-            except Exception:
-                logger.warning("Failed to build soul prompt for agent %s", agent_id)
-
-        # Fall back to config system_prompt or persona
-        if not system_prompt:
-            persona = instance.config.get("soul_persona", "")
-            extra = instance.config.get("system_prompt", "")
-            system_prompt = f"{persona}\n\n{extra}".strip() if persona or extra else ""
-
-        # Per-entity system-message override (entity-rooms A1): SWAP the base,
-        # KEEP the layers. Everything assembled ABOVE this point is the base
-        # persona/soul identity — exactly what the override replaces. The
-        # downstream layers (authoritative ``instructions`` incl. the ripple LAW,
-        # the soul-memory recall, the knowledge wrapper) are appended BELOW, so
-        # they still ride on top of the override. ``None`` leaves the base
-        # untouched (legacy path). Applied here so a backend never needs to know
-        # the override exists — it rides the existing ``system_prompt`` channel.
-        if system_message_override is not None:
-            system_prompt = system_message_override
-
-        # Authoritative behavior rules — injected BEFORE the knowledge
-        # wrapper so the model reads them as instructions, not reference.
-        if instructions:
-            system_prompt = f"{system_prompt}\n\n{instructions}" if system_prompt else instructions
-
-        # Query-specific soul memory recall — inject relevant past interactions
-        # so the agent can reference cross-session memories. This complements
-        # the general semantic facts already injected by SoulBootstrapProvider.
-        # Skipped on an empty message (e.g. prewarm) — and stripped from the
-        # cache key's behavioral prefix regardless, so it never affects reuse.
-        if instance.soul_manager and instance.soul_manager.soul and message.strip():
-            try:
-                soul_ctx = await instance.soul_manager.soul.context_for(
-                    message,
-                    max_memories=5,
-                    include_state=False,
-                    include_self_model=False,
-                )
-                if soul_ctx:
-                    memory_block = (
-                        "## Relevant Past Memories\n"
-                        "Below are memories from previous conversations that "
-                        "are relevant to the current question. Use them to "
-                        "provide continuity and a personalized response.\n\n"
-                        f"{soul_ctx}"
-                    )
-                    if system_prompt:
-                        system_prompt = f"{system_prompt}\n\n{memory_block}"
-                    else:
-                        system_prompt = memory_block
-            except Exception:
-                logger.debug("Soul context_for() failed for agent %s", agent_id)
-
-        # Inject knowledge context directly into system prompt
-        if knowledge_context:
-            system_prompt = (
-                f"{system_prompt}\n\n"
-                "## Your Knowledge Base\n"
-                "Use the following information from your knowledge base to answer questions. "
-                "Always reference this data when relevant instead of "
-                "making things up or using tools to search.\n\n"
-                f"{knowledge_context}"
-            )
-
-        return system_prompt
+        ctx = PromptContext(
+            instance=instance,
+            agent_id=agent_id,
+            message=message,
+            instructions=instructions,
+            knowledge_context=knowledge_context,
+            system_message_override=system_message_override,
+        )
+        layers = [prompt_layer_registry.get(name) for name in _SYSTEM_PROMPT_LAYERS]
+        return await assemble(layers, ctx)
 
     async def prewarm(
         self,
@@ -441,7 +443,7 @@ class AgentPool:
         effective_skills = skill_names | own_skills
 
         try:
-            system_prompt = await self._assemble_system_prompt(
+            assembled = await self._assemble_system_prompt(
                 instance,
                 agent_id=agent_id,
                 message="",  # no turn yet — the volatile tail is stripped anyway
@@ -455,9 +457,12 @@ class AgentPool:
 
         # The backend's prewarm swallows ALL of its own errors, so this is
         # already safe; the outer guards above cover instance/prompt failures.
+        # ``.text`` and nothing else: the prewarmed client must hash to the same
+        # behavioral prefix turn 1 will produce, and only the Claude SDK backend
+        # has a client to prewarm — it computes its own prefix digest.
         prewarm_kwargs: dict[str, Any] = {
             "session_key": session_key,
-            "system_prompt": system_prompt,
+            "system_prompt": assembled.text,
         }
         if deny_mcp_tool_ids:
             prewarm_kwargs["deny_mcp_tool_ids"] = deny_mcp_tool_ids
@@ -578,7 +583,7 @@ class AgentPool:
         # so ``prewarm`` builds the SAME prompt this run will — the warm-client
         # cache key hashes the prompt's stable behavioral prefix, so a divergent
         # prefix would make the first turn evict the prewarmed client).
-        system_prompt = await self._assemble_system_prompt(
+        assembled = await self._assemble_system_prompt(
             instance,
             agent_id=agent_id,
             message=message,
@@ -605,10 +610,18 @@ class AgentPool:
             # (which always runs on the Claude SDK backend), so this never
             # withholds a needed deny from a backend that would honor it.
             run_kwargs: dict[str, Any] = {
-                "system_prompt": system_prompt,
+                "system_prompt": assembled.text,
                 "history": history,
                 "session_key": session_key,
             }
+            # The prompt's stable digest (PA-1). NOT withhold-when-empty — it is
+            # non-empty on every run — so the gate is the backend's SIGNATURE,
+            # the same question ``_accepts_policy`` asks: a backend receives it
+            # by declaring the parameter, not by being named in a list here.
+            # ``pydantic_ai`` folds it into its agent cache key so a cached
+            # agent can never outlive the identity it was built for.
+            if _accepts_prompt_digest(type(instance.backend)):
+                run_kwargs["system_prompt_digest"] = assembled.stable_digest
             if deny_mcp_tool_ids:
                 run_kwargs["deny_mcp_tool_ids"] = deny_mcp_tool_ids
             # Same withhold-when-empty rule as the deny set: only the Claude SDK

@@ -902,6 +902,28 @@ async def test_the_cached_agent_carries_no_prompt_of_its_own():
     )
 
 
+async def test_the_prompt_digest_is_part_of_the_agent_cache_key():
+    """PA-1 — the assembler's ``stable_digest`` reaches this cache key.
+
+    Defence in depth, not the mechanism: correctness here still comes from the
+    agent holding no instructions (the test above). The digest is what makes the
+    key able to SEE the prompt at all — a key that could not is what let three
+    backends cache one session's prompt for the next.
+
+    Cheap to key on precisely because it is a digest of the prompt's LAYERS and
+    not of its text: the per-message soul recall is an unkeyed layer, so it does
+    not move the digest and does not cost a rebuild.
+    """
+    backend = _backend_with_model(TestModel())
+
+    a1 = backend._get_or_create_agent(TestModel(), "PROMPT", [], system_prompt_digest="ident-a")
+    a2 = backend._get_or_create_agent(TestModel(), "PROMPT", [], system_prompt_digest="ident-a")
+    a3 = backend._get_or_create_agent(TestModel(), "PROMPT", [], system_prompt_digest="ident-b")
+
+    assert a1 is a2, "one identity, one agent"
+    assert a1 is not a3, "a changed identity must not be served the cached agent"
+
+
 def test_the_skills_catalog_is_deferred_by_default(monkeypatch):
     """Read off the field, not off a constructed ``Settings``.
 
