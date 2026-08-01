@@ -170,6 +170,10 @@ async def main() -> None:
         results.append(await run_arm(label, overrides, cases))
 
     print("\n" + "=" * 78)
+    if any(r.total and len(r.errors) == r.total for r in results):
+        print("NO RESULT — every case in an arm errored, so these are not")
+        print("scores. The model was unreachable. Check the proxy's /health")
+        print("before reading anything into the table below.")
     for r in results:
         print(r.row())
     print("=" * 78)
