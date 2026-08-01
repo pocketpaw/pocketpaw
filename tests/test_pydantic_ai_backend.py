@@ -124,17 +124,28 @@ def test_model_routing_entry_exists():
 
 
 @pytest.mark.parametrize(
-    ("model_setting", "provider_setting", "expected"),
+    ("model_setting", "provider_setting", "llm_provider", "expected"),
     [
-        ("litellm:claude-sonnet-4-6", "auto", ("litellm", "claude-sonnet-4-6")),
-        ("anthropic:claude-haiku-4-5", "auto", ("anthropic", "claude-haiku-4-5")),
-        ("gpt-5.2", "openai", ("openai", "gpt-5.2")),
-        ("some-model", "auto", ("litellm", "some-model")),
+        ("litellm:claude-sonnet-4-6", "auto", "auto", ("litellm", "claude-sonnet-4-6")),
+        ("anthropic:claude-haiku-4-5", "auto", "auto", ("anthropic", "claude-haiku-4-5")),
+        ("gpt-5.2", "openai", "auto", ("openai", "gpt-5.2")),
+        # The fallback chain, one step at a time. ``llm_provider`` is pinned on
+        # every case because it is the middle link: leaving it to the
+        # environment made the last case assert ``litellm`` locally and
+        # ``ollama`` in CI, which sets ``POCKETPAW_LLM_PROVIDER=ollama``. The
+        # test passed on the author's machine for the whole life of the branch.
+        ("some-model", "auto", "auto", ("litellm", "some-model")),
+        ("some-model", "auto", "ollama", ("ollama", "some-model")),
+        ("some-model", "openrouter", "ollama", ("openrouter", "some-model")),
     ],
 )
-def test_parse_provider_model(model_setting, provider_setting, expected):
+def test_parse_provider_model(model_setting, provider_setting, llm_provider, expected):
     backend = PydanticAIBackend(
-        _settings(pydantic_ai_model=model_setting, pydantic_ai_provider=provider_setting)
+        _settings(
+            pydantic_ai_model=model_setting,
+            pydantic_ai_provider=provider_setting,
+            llm_provider=llm_provider,
+        )
     )
     assert backend._parse_provider_model() == expected
 
@@ -1914,6 +1925,25 @@ def test_every_bridged_tool_is_classified():
     every = {
         getattr(t, "name", "")
         for t in build_pydantic_ai_tools(_settings(), policy=ToolPolicy(profile="full"))
+    }
+    # A live build only shows what THIS machine's configuration produces, and
+    # the conditional sources are exactly where an allowlist goes wrong. Two of
+    # them, both learned the hard way: the Composio-overlapping tools exist only
+    # when Composio is NOT configured (so a developer with a key never sees
+    # them, and CI does), and the soul tools exist only when a soul is active.
+    from pocketpaw.agents.tool_bridge import _COMPOSIO_OVERLAPPING_TOOL_NAMES
+
+    every |= set(_COMPOSIO_OVERLAPPING_TOOL_NAMES)
+    every |= {
+        "soul_context",
+        "soul_core_memory",
+        "soul_edit_core",
+        "soul_evaluate",
+        "soul_forget",
+        "soul_recall",
+        "soul_reload",
+        "soul_remember",
+        "soul_status",
     }
     unclassified = every - _TENANT_SAFE_TOOLS - _WITHHELD_TOOLS
     assert not unclassified, (

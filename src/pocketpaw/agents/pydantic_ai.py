@@ -317,6 +317,51 @@ _TENANT_SAFE_TOOLS = frozenset(
         "weather",
         "web_search",
         "wiki",
+        # Present only when Composio is NOT configured — with it on,
+        # ``_COMPOSIO_OVERLAPPING_TOOL_NAMES`` drops them so each integration
+        # has exactly one path. They are the tenant's own OAuth-scoped
+        # integrations, same class as ``connector_*``. Missing them is how the
+        # first version of this allowlist would have silently removed Gmail,
+        # Calendar, Drive, Docs, Reddit and Spotify from every deployment that
+        # does not run Composio: they never appeared on the machine the list
+        # was written on. CI caught it.
+        "calendar_create",
+        "calendar_list",
+        "calendar_prep",
+        "docs_create",
+        "docs_read",
+        "docs_search",
+        "drive_download",
+        "drive_list",
+        "drive_share",
+        "drive_upload",
+        "gmail_batch_modify",
+        "gmail_create_label",
+        "gmail_list_labels",
+        "gmail_modify",
+        "gmail_read",
+        "gmail_search",
+        "gmail_send",
+        "gmail_trash",
+        "reddit_read",
+        "reddit_search",
+        "reddit_trending",
+        "spotify_now_playing",
+        "spotify_playback",
+        "spotify_playlist",
+        "spotify_search",
+        # Present only when a soul is active, and they REPLACE
+        # ``remember`` / ``recall`` / ``forget`` when they appear. The soul
+        # belongs to the agent, so its memory is the tenant's.
+        "soul_context",
+        "soul_core_memory",
+        "soul_edit_core",
+        "soul_evaluate",
+        "soul_forget",
+        "soul_recall",
+        "soul_reload",
+        "soul_remember",
+        "soul_status",
     }
 )
 
