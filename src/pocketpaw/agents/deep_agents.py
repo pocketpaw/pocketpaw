@@ -22,8 +22,19 @@ Updated 2026-06-26 (integration/model-catalog-v2, MCG-11):
     counts (``_accumulate_cache_usage``) and emits a ``token_usage`` AgentEvent
     (via ``report_savings``) before ``done``, so the margin is measurable on this
     backend (mirrors the claude_sdk hook).
+
+Updated 2026-08-01 (fix/agent-system-prompt-per-run): the compiled-graph cache
+key carries a digest of ``instructions``. ``system_prompt`` is baked into the
+graph at compile time, and ``AgentPool`` keeps ONE instance per agent across
+every session and surface, so the key's silence about prompt text meant turn N+1
+ran turn N's system prompt — which is how a brand-new chat greeted the user with
+the site they had just built in a different session. Recompiles cost ~14 ms
+(measured), and prompt caching is unaffected: the marker is applied to the
+request the graph sends, not to the graph. See the same note in
+``pydantic_ai.py`` for why that backend fixes it per-run instead.
 """
 
+import hashlib
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -766,8 +777,22 @@ class DeepAgentsBackend:
         # Invalidate cache if any input that shapes the compiled graph changed.
         # is_pocket_session is part of the key so flipping between pocket and
         # non-pocket sessions in the same backend recompiles the agent.
+        #
+        # The prompt DIGEST is in the key because ``instructions`` is baked into
+        # the compiled graph below (``kwargs["system_prompt"]``) while
+        # ``AgentPool`` keeps ONE instance per agent across every session. Without
+        # it, turn N+1 was served the graph compiled for turn N — carrying turn
+        # N's surface preamble, ``<current-pocket>`` tag and soul-memory recall.
+        # That is how a brand-new chat opened by offering to continue the last
+        # session's work. ``pydantic_ai`` solves this by passing instructions
+        # per-run; ``create_deep_agent`` takes ``str | SystemMessage`` only, so
+        # here the fix is to recompile. Measured 2026-08-01: ~14 ms per compile,
+        # against an LLM turn of seconds — the prompt tail varies per message
+        # (``pool._assemble_system_prompt`` appends a recall keyed on the user's
+        # text), so budget for a rebuild most turns.
         model_key = (
             self.settings.deep_agents_model,
+            hashlib.sha256((instructions or "").encode("utf-8", "replace")).hexdigest(),
             tuple(skills),
             tuple(memory),
             is_pocket_session,
