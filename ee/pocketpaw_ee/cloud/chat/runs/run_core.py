@@ -235,6 +235,25 @@ Changes:
   CX-1 suppressible-grant cap so an exclusive agent (e.g. /code) gets EXACTLY its
   declared MCP ids, OVERRIDING any surface allow-list. "additive" (the default)
   is unchanged. The flag/allow-list cross into ``AgentPool.run`` as plain data.
+- 2026-08-02 (Sense Phase 2, SP2-4 — concierge surface opt-in for carried senses)
+  — ``_concierge_sense_policy(ctx, instance, deny, allow_mcp)`` is the ONE seam
+  that can give a public site concierge hands. On a ``ScopeKind.CONCIERGE`` run
+  it reads the running agent's SP2-3 mount list (``config.senses``) and either
+  UNIONS the two sense tool ids into the surface allow-list (mount non-empty) or
+  adds them to the DENY set (mount empty). Deny — rather than mere absence from
+  the allow-list — is the load-bearing half: the backend subtracts deny from the
+  final tool list before any grant re-adds anything, so "empty = inherit the
+  workspace sense surface" is UNREACHABLE on this public surface, including for
+  an ``exclusive`` agent that declared the ids itself. Called from BOTH profile
+  consumers (``_drive_agent_loop`` and the ``_prewarm_session`` mirror) at the
+  same point in the sequence, before the CX-2 branch, so agent-exclusive keeps
+  its allow-list precedence and the prewarmed client's cache key still matches
+  turn 1's. Every non-concierge run returns the inputs unchanged — DM / pocket /
+  session runs are byte-for-byte untouched. The chosen seam is deliberate: the
+  registry's ``_concierge_profile`` is a documented PURE, no-I/O sync lookup and
+  its ``SurfaceMeta`` is CLIENT-supplied, so a mount list read there would be
+  both an I/O violation and forgeable by an anonymous caller; here the config
+  comes from the server-side pooled agent doc and ``ctx.kind`` is server-resolved.
 """
 
 from __future__ import annotations
@@ -960,6 +979,81 @@ def _agent_tool_policy(instance: Any) -> tuple[bool, frozenset[str]]:
     return (True, frozenset(tools))
 
 
+def _concierge_sense_policy(
+    ctx: ScopeContext,
+    instance: Any,
+    deny: frozenset[str],
+    allow_mcp: frozenset[str] | None,
+) -> tuple[frozenset[str], frozenset[str] | None]:
+    """SP2-4 — the CONCIERGE surface's FAIL-CLOSED opt-in for carried senses.
+
+    The concierge (``/paw-bar``) is a PUBLIC, anonymous, prompt-injectable
+    surface, so ``surface_registry._concierge_allow_mcp`` locks its MCP surface
+    to (almost) nothing and the ``pocketpaw_connectors`` server — which owns
+    ``list_senses`` / ``sense_execute`` — is in NEITHER the always-allowed set
+    nor any grant. A site concierge therefore has no hands at all today.
+
+    This is the single seam that opens them, and only for an agent whose owner
+    explicitly MOUNTED senses on it (SP2-3's ``config.senses``):
+
+      * mount list NON-EMPTY → the two sense tool ids are unioned into the
+        surface allow-list, so they survive the concierge lockdown.
+      * mount list EMPTY → the two ids are added to the DENY set. Denial (not
+        merely "absence from the allow-list") is what makes the SP2-3
+        "empty = inherit the workspace surface" rule UNREACHABLE here: deny is
+        subtracted from the final tool list BEFORE any allow-grant re-adds
+        anything (``claude_sdk``), so no other path — the universal grant, an
+        always-allowed server, or an ``exclusive`` agent's own declared ids —
+        can put a sense tool back on a public surface. An unmounted concierge
+        never sees the tenant's sense surface.
+
+    Why this satisfies the intent of the lockdown warning at
+    ``surface_registry.py`` (the RESIDUAL GAP note: "a concierge pocket must
+    therefore have NO connectors bound"): that warning is about the RAW
+    connector surface, whose tool ids are dynamic/per-workspace and so cannot be
+    enumerated in a static deny set. It stays true and unchanged — the raw
+    ``list_connector_actions`` / ``connector_execute`` tools are NOT granted
+    here. What this opens is the narrow SENSE surface, which is enumerable (two
+    static ids), opt-in per agent, capability-scoped by the mount list, and
+    read-only: ``execute_sense`` runs ``trust_level == "auto"`` actions ONLY and
+    proposes nothing, so a prompt-injected visitor cannot reach a write.
+
+    Two independent gates must agree for a visitor to actually reach a sense:
+    THIS one (tool VISIBILITY, read from the pooled config) and the resolver's
+    mount gate in ``execute_sense`` (EXECUTION, which re-reads the agent doc
+    fresh on every call). A mount list edited mid-run can therefore only ever
+    fail closed at execution time, never open.
+
+    Non-concierge runs return the inputs unchanged, so DM / pocket / every other
+    surface is byte-for-byte untouched (``senses`` keeps its documented
+    empty=inherit semantics off this surface).
+    """
+    if ctx.kind is not ScopeKind.CONCIERGE:
+        return deny, allow_mcp
+
+    # Lazy import: keeps the MCP server package off this module's import graph,
+    # the same discipline the connector/instinct imports use elsewhere here.
+    from pocketpaw_ee.agent.mcp_servers.connectors import (
+        LIST_SENSES_TOOL_ID,
+        SENSE_EXECUTE_TOOL_ID,
+    )
+
+    sense_tool_ids = frozenset({LIST_SENSES_TOOL_ID, SENSE_EXECUTE_TOOL_ID})
+    config = getattr(instance, "config", None) or {}
+    if isinstance(config, dict):
+        carried = config.get("senses", []) or []
+    else:
+        carried = getattr(config, "senses", []) or []
+
+    if not carried:
+        return deny | sense_tool_ids, allow_mcp
+    # ``allow_mcp is None`` means the surface set NO restriction — unioning would
+    # invent one and strip every other tool. Leave it alone; the tools already flow.
+    if allow_mcp is None:
+        return deny, allow_mcp
+    return deny, allow_mcp | sense_tool_ids
+
+
 async def _prewarm_session(ctx: ScopeContext) -> None:
     """Eagerly warm the agent's CLI subprocess for this run's session BEFORE the
     first model turn (feat/claude-sdk-prewarm).
@@ -1021,6 +1115,13 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
             surface_sys_override = ctx.resolved_profile.system_message_override
             surface_skills = ctx.resolved_profile.skill_names or frozenset()
         surface_skills = surface_skills | _agent_skill_set(instance)
+        # SP2-4 — mirror _drive_agent_loop's concierge sense policy at the SAME
+        # point in the sequence (before the CX-2 mirror below), so the prewarmed
+        # client's allowed_tools — and therefore its cache key — match turn 1's.
+        # Without this a mounted concierge would warm a client turn 1 discards.
+        surface_deny, surface_allow_mcp = _concierge_sense_policy(
+            ctx, instance, surface_deny, surface_allow_mcp
+        )
         # CX-2 — mirror _drive_agent_loop's exclusive-tool resolution EXACTLY so
         # the prewarmed client's options (and thus its cache key) MATCH turn 1's.
         # An exclusive agent caps its MCP surface, which changes ``allowed_tools``
@@ -1243,6 +1344,14 @@ async def _drive_agent_loop(
         # including the legacy ``resolved_profile is None`` path (no entity / no
         # profile). Still a plain ``frozenset[str]`` crossing into the OSS pool.
         surface_skills = surface_skills | _agent_skill_set(instance)
+        # SP2-4 — the concierge surface's fail-closed sense opt-in. Applied
+        # BEFORE the CX-2 exclusive branch below so agent-exclusive still WINS on
+        # the allow-list (CX-2's precedence is unchanged), while the DENY half
+        # survives every path — that asymmetry is what makes an unmounted
+        # concierge unable to reach the sense tools at all. No-op off /paw-bar.
+        surface_deny, surface_allow_mcp = _concierge_sense_policy(
+            ctx, instance, surface_deny, surface_allow_mcp
+        )
         run_kwargs: dict[str, Any] = dict(
             history=history,
             knowledge_context=knowledge_context,

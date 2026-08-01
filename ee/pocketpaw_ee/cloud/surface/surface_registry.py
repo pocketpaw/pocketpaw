@@ -517,6 +517,18 @@ def _belt_profile(_meta: SurfaceMeta) -> SurfaceProfile:
 # reach them. A concierge pocket must therefore have NO connectors bound until
 # the OSS backend grows a true "public/untrusted" lockdown mode (drop the
 # universal grants). Tracked as the T2 follow-up.
+# SP2-4 (2026-08-02) — the RAW connector surface described above is unchanged and
+# still stripped here. What DID open is the narrow SENSE surface
+# (``list_senses`` / ``sense_execute``), and NOT from this module: that grant is
+# conditional on the running agent's mount list, which this resolver cannot see
+# (it is a pure, no-I/O sync lookup over CLIENT-supplied ``SurfaceMeta``, so a
+# read here would be both an I/O violation and forgeable by an anonymous
+# caller). It lives at the run seam instead —
+# ``chat.runs.run_core._concierge_sense_policy`` — which grants the two ids only
+# when the site agent carries a NON-EMPTY ``config.senses`` and DENIES them
+# outright when it does not, so an unmounted concierge can never inherit the
+# workspace sense surface. Unlike the composio ids, the sense ids are static and
+# enumerable, which is what makes a fail-closed deny expressible for them at all.
 _CONCIERGE_DENY: frozenset[str] = frozenset(
     {
         # Web (the explicit T2 requirement).
