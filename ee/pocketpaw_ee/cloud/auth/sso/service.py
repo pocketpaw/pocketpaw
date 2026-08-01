@@ -4,13 +4,16 @@ State storage uses the shared Redis client (one-shot consume: GET then
 DEL) with a 10-minute TTL. The state key payload pins ``workspace_id``
 + optional PKCE ``code_verifier`` so the callback rebinds to the right
 workspace + verifier without trusting any query-string value.
+
+2026-07-29 (AM-1): the state machinery moved to ``auth/_oauth_state.py`` so the
+consumer social flow (Google / GitHub) reuses it instead of growing a second,
+subtly different copy. Behaviour here is unchanged — same ``sso_state:`` key
+prefix, same 600s TTL, same ``sso.invalid_state`` error code — so existing
+states in flight across a deploy still redeem.
 """
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import json
 import logging
 import os
 import secrets
@@ -21,9 +24,9 @@ from urllib.parse import urlencode
 import httpx
 from beanie import PydanticObjectId
 
-from pocketpaw_ee.cloud._core import redis_client
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
 from pocketpaw_ee.cloud.audit import service as audit_service
+from pocketpaw_ee.cloud.auth import _oauth_state
 from pocketpaw_ee.cloud.auth.sso import crypto, oidc
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.models.user import WorkspaceMembership as _Membership
@@ -32,12 +35,9 @@ from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
 
 logger = logging.getLogger(__name__)
 
-_STATE_TTL_SECONDS = 600
-_STATE_KEY_PREFIX = "sso_state:"
-
-
-def _state_key(state: str) -> str:
-    return f"{_STATE_KEY_PREFIX}{state}"
+#: Namespace for the shared state store. Produces the historical
+#: ``sso_state:<state>`` Redis key and the ``sso.invalid_state`` error code.
+_STATE_NAMESPACE = "sso"
 
 
 def _resolve_issuer(provider: str, issuer: str | None) -> str:
@@ -62,11 +62,9 @@ def _frontend_root() -> str:
     return os.environ.get("POCKETPAW_FRONTEND_BASE_URL", "/").rstrip("/") or "/"
 
 
-def _pkce_pair() -> tuple[str, str]:
-    verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii").rstrip("=")
-    digest = hashlib.sha256(verifier.encode("ascii")).digest()
-    challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-    return verifier, challenge
+#: Re-exported for callers/tests that referenced the private helper here before
+#: it moved to the shared module in AM-1.
+_pkce_pair = _oauth_state.pkce_pair
 
 
 # ---------------------------------------------------------------------------
@@ -175,15 +173,13 @@ async def begin_login(workspace_slug: str) -> str:
         "scopes", ["openid", "email", "profile"]
     )
 
-    state = secrets.token_urlsafe(32)
-    verifier, challenge = _pkce_pair()
-    nonce = secrets.token_urlsafe(32)
+    verifier, challenge = _oauth_state.pkce_pair()
+    nonce = _oauth_state.new_nonce()
 
-    payload = json.dumps(
-        {"workspace_id": str(workspace.id), "code_verifier": verifier, "nonce": nonce}
+    state = await _oauth_state.issue(
+        _STATE_NAMESPACE,
+        {"workspace_id": str(workspace.id), "code_verifier": verifier, "nonce": nonce},
     )
-    redis = redis_client.get_redis()
-    await redis.setex(_state_key(state), _STATE_TTL_SECONDS, payload)
 
     params = {
         "response_type": "code",
@@ -199,16 +195,7 @@ async def begin_login(workspace_slug: str) -> str:
 
 
 async def _consume_state(state: str) -> dict[str, Any]:
-    redis = redis_client.get_redis()
-    key = _state_key(state)
-    raw = await redis.get(key)
-    if raw is None:
-        raise Forbidden("sso.invalid_state", "SSO state is missing or expired")
-    await redis.delete(key)
-    try:
-        return json.loads(raw)
-    except (TypeError, ValueError) as exc:
-        raise Forbidden("sso.invalid_state", "SSO state payload is malformed") from exc
+    return await _oauth_state.consume(_STATE_NAMESPACE, state)
 
 
 def _email_domain(email: str) -> str:
