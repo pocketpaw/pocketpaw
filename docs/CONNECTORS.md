@@ -1,5 +1,10 @@
 <!--
   Connectors documentation.
+  Updated: 2026-08-02 (Sense Phase 2, SP2-3) — the Senses section now points at
+  the per-agent sense config (the `senses` mount list, exclusive when set, and
+  the `sense_prefs` provider choice). The field-level reference lives in
+  docs/api-reference.md → "Agents — Per-agent senses"; this file keeps the
+  concept and the agent tool surface.
   Updated: 2026-07-02 (AW-3 egress default-close) — clarified the "Development
   against localhost" section: the egress guard rejects internal/metadata IPs BY
   DEFAULT; POCKETPAW_ALLOW_INTERNAL_URLS opens the escape ONLY when set to an
@@ -617,6 +622,15 @@ sense_execute("paw.email.v1", "gmail_search",
 sense_execute("paw.email.v1", "gmail_send", {...})
   → refused: "needs approval … not executed in v1 (read-first)."
 ```
+
+**Per-agent senses.** By default an agent reaches every sense that resolves for
+its workspace. An agent can instead carry a **mount list** (`config.senses`) —
+then it lists exactly those senses and any other one is refused with
+`sense.not_carried`, before the resolver looks up a connector. A second field,
+`config.sense_prefs`, picks which provider that agent prefers per sense (it
+outranks the workspace preference row but never widens reach). Both are
+documented in
+[api-reference.md → Agents — Per-agent senses](./api-reference.md#agents--per-agent-senses-senses--sense_prefs).
 
 ## Using with Existing Integrations
 

@@ -72,6 +72,14 @@ workspace's source→Fabric mappings, now with a "connector" source_kind that
 dispatches through the OSS FABRIC_INGESTORS registry — gcalendar first) and
 POST /fabric/ingest/run (run one mapping immediately; misconfiguration reports
 status="error" in the body, never a 5xx).
+
+Updated: 2026-08-02 (Sense Phase 2, SP2-2 + SP2-3) — documented the two
+sense-shaped agent config fields in the new "Agents — Per-agent senses" section:
+`senses` (the mount list — empty inherits the workspace's whole sense surface,
+non-empty is EXCLUSIVE and anything else refuses with `sense.not_carried`) and
+`sense_prefs` (per-sense provider choice that outranks the stored
+pocket/workspace preference row but never widens reach). Both validate sense ids
+at write time; connector-name values stay unvalidated on purpose.
 -->
 
 # Cloud REST API Reference
@@ -814,6 +822,61 @@ missing / unreadable registry degrades to no plugin skills (it never fails
 the run). The agent set is UNIONed with any surface/entity skill subset, so
 both apply together. Per-agent MCP servers are **not** part of this — that
 is a separate, deferred slice.
+
+## Agents — Per-agent senses (`senses` + `sense_prefs`)
+
+A **Sense** is a provider-agnostic capability (`paw.email.v1` = email,
+`paw.code.v1` = repos/issues/PRs); the resolver binds it to whichever
+connector the tenant enabled. See [CONNECTORS.md](./CONNECTORS.md) for the
+Sense model and the `list_senses` / `sense_execute` agent tools. An agent's
+`config` carries two sense-shaped fields, set the same way `skill_refs` is —
+via `POST /agents` or `PATCH /agents/{id}` (nested `config` object):
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `senses` | `string[]` | The **mount list** — the capabilities this agent carries. |
+| `sense_prefs` | `{sense_id: connector_name}` | Which provider this agent prefers per sense. |
+
+Both default to empty, so every existing agent behaves exactly as before.
+
+**`senses` is exclusive when set.** Empty means "inherit" — the agent reaches
+every sense that resolves for the workspace, which is the legacy behaviour. A
+**non-empty** list is the agent's entire sense surface: `list_senses` returns
+only those, and `sense_execute` on anything else is refused with the stable
+code `sense.not_carried` before the resolver looks up a single connector. The
+refusal is identical whether or not the tenant has a provider for that sense,
+so it leaks nothing about the workspace. This is the same semantics as
+`tool_mode: "exclusive"`, applied to capabilities instead of tools — with no
+separate mode flag, because nothing ever persisted a non-empty `senses` under
+additive semantics.
+
+**`sense_prefs` picks a provider, it never widens reach.** When more than one
+enabled connector fills a sense, the agent's pref outranks the stored
+pocket/workspace preference row. Keys are validated as sense ids at write
+time; connector-name **values** are not, because whether a connector is a
+candidate is workspace state that changes under the agent — a pref naming a
+non-candidate is skipped at resolve time (one log line) and falls through to
+the stored preference rather than failing the sense. A pref for a sense
+outside `senses` is dead config: the mount gate refuses first.
+
+Entries in `senses` and keys in `sense_prefs` are both validated as sense ids
+on write, so an unknown or malformed id (`paw.telepathy.v1`, `not an id`)
+fails with a `422` rather than silently costing the agent a capability.
+Vendor-extension ids outside the closed `paw.*` set are accepted.
+
+```jsonc
+PATCH /agents/{id}
+{
+  "config": {
+    "senses": ["paw.email.v1", "paw.calendar.v1"],   // carries exactly these
+    "sense_prefs": {"paw.email.v1": "gmail"}          // …and prefers gmail for email
+  }
+}
+```
+
+That agent lists email and calendar, uses Gmail for email when several mail
+connectors are enabled, and is refused `paw.code.v1` even in a workspace with
+GitHub connected.
 
 ## Pockets — Catalog-as-Allowlist Ingest Gate
 

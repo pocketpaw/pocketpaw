@@ -76,6 +76,11 @@ spec from an explicit field list — so BOTH the mappers and ``_apply_update`` h
 to name the field or it is erased on the next unrelated edit.
 The MCP sense surface reads the prefs off this service's ``get(agent_id)``, which
 keeps ``cloud.senses.resolver`` free of any Beanie Agent import.
+Updated 2026-08-02 (Sense Phase 2, SP2-3 — the sense mount list): ``senses`` is
+threaded through the same three places for the same reason — both doc↔spec
+mappers and ``_apply_update``'s explicit field list. The stakes are higher than
+for ``sense_prefs``: erasing the mount list doesn't lose a provider preference,
+it silently WIDENS the agent's reach back to the full workspace sense surface.
 """
 
 from __future__ import annotations
@@ -138,6 +143,7 @@ def _config_to_domain(c: _AgentConfigDoc) -> AgentConfigSpec:
         conversation_starters=tuple(c.conversation_starters),
         voice=dict(c.voice) if c.voice is not None else None,
         appearance=dict(c.appearance),
+        senses=tuple(c.senses),
         sense_prefs=tuple(c.sense_prefs.items()),
     )
 
@@ -164,6 +170,7 @@ def _config_to_doc(c: AgentConfigSpec) -> _AgentConfigDoc:
         conversation_starters=list(c.conversation_starters),
         voice=dict(c.voice) if c.voice is not None else None,
         appearance=dict(c.appearance),
+        senses=list(c.senses),
         sense_prefs=dict(c.sense_prefs),
     )
 
@@ -272,6 +279,11 @@ def _apply_update(current: AgentConfigSpec, body: UpdateAgentRequest) -> AgentCo
             ),
             voice=c.get("voice", current.voice),
             appearance=dict(c.get("appearance", dict(current.appearance))),
+            # SP2-3 — the mount list, carried forward like ``tools``. Same
+            # erasure trap as ``sense_prefs`` below: omit it here and an agent
+            # loses every carried sense (i.e. silently re-inherits the whole
+            # workspace surface) the next time anyone edits an unrelated field.
+            senses=tuple(c.get("senses", list(current.senses))),
             # SP2-2 — carried forward like soul_ocean. This branch rebuilds the
             # spec from an explicit field list, so anything omitted here is
             # ERASED on the next config edit. Key validation stays at the Beanie

@@ -35,6 +35,36 @@
 # validated here: a pref naming a connector that isn't currently a candidate for
 # the workspace is skipped at resolve time, never an error, so the pref survives
 # its provider being temporarily disabled. Defaulted → zero migration.
+# Updated 2026-08-02 (Sense Phase 2, SP2-3 — the sense MOUNT LIST): added
+# ``AgentConfig.senses: list[str]``, the set of Senses this agent carries.
+# Entries are validated as sense ids the same way ``sense_prefs`` keys are, so a
+# bogus id fails on write. Empty (the default) = inherit the workspace's whole
+# resolvable surface, i.e. today's behaviour; NON-EMPTY = EXCLUSIVE — the agent
+# lists only those senses and any other sense is refused with the structured
+# ``sense.not_carried`` code BEFORE any candidate lookup
+# (``cloud.senses.resolver``). Defaulted → zero migration.
+#
+# THE AGENT-CARRIED TIERS — one rule, documented once, here. An agent carries
+# three capability sets, and their empty-vs-set semantics differ ON PURPOSE:
+#
+#   * ``tools`` + ``tool_mode`` — the MCP tool surface. ``tools`` alone never
+#     narrows anything; the MODE decides. "additive" (default) UNIONs ``tools``
+#     with the universal grant; "exclusive" caps the run to exactly ``tools``.
+#     Two fields because a non-empty tool list has always meant "also grant
+#     these", and CX-2 could not retroactively make that exclusive.
+#   * ``skill_refs`` + ``plugins`` — the skill set. Purely ADDITIVE, no mode:
+#     these fold into (never replace) the surface/entity skill set on every run.
+#     There is no exclusive skill mode because a skill is context, not reach.
+#   * ``senses`` — the Sense mount list. EXCLUSIVE-WHEN-SET, no separate mode
+#     field: empty = inherit everything, non-empty = exactly these. It needs no
+#     ``sense_mode`` twin because the field is new — nothing persisted a
+#     non-empty ``senses`` under additive semantics, so "set = exclusive" is
+#     unambiguous from day one. Semantically it is ``tool_mode="exclusive"``
+#     applied to capabilities: a structural reach boundary, not a preference.
+#
+# ``sense_prefs`` is NOT a tier — it is a tie-break WITHIN the reach the mount
+# list allows. Prefs never widen: a pref for a sense the agent doesn't carry is
+# dead config, because the mount gate refuses that sense before the pref is read.
 
 """Agent configuration document."""
 
@@ -88,9 +118,14 @@ class AgentConfig(BaseModel):
     conversation_starters: list[str] = Field(default_factory=list)
     voice: dict | None = None
     appearance: dict = Field(default_factory=dict)
+    # Sense mount list (SP2-3): the capabilities this agent CARRIES. Empty =
+    # inherit the workspace's whole resolvable surface (legacy). Non-empty =
+    # EXCLUSIVE: every other sense is refused with ``sense.not_carried``.
+    senses: list[str] = Field(default_factory=list)
     # Agent-tier provider preference (SP2-2): sense_id -> connector_name. Wins
     # over the stored pocket/workspace preference rows when the resolver has
-    # more than one candidate. Keys are validated below; values are not.
+    # more than one candidate. Keys are validated below; values are not. A pref
+    # for a sense outside ``senses`` never fires — the mount gate refuses first.
     sense_prefs: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("sense_prefs")
@@ -102,6 +137,18 @@ class AgentConfig(BaseModel):
         which pydantic surfaces as a ``ValidationError`` — so a bad key can never
         be persisted. Connector-name values stay unvalidated on purpose: the
         candidate set is workspace state, not schema state.
+        """
+        for sense_id in value:
+            validate_sense_id(sense_id)
+        return value
+
+    @field_validator("senses")
+    @classmethod
+    def _validate_mounted_sense_ids(cls, value: list[str]) -> list[str]:
+        """Same schema-boundary rule as ``sense_prefs`` keys, for the mount list.
+
+        A typo'd id here is worse than a typo'd pref: it silently costs the agent
+        a capability rather than a provider choice, so it fails on write.
         """
         for sense_id in value:
             validate_sense_id(sense_id)

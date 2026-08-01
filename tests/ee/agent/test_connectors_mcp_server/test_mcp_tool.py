@@ -28,6 +28,17 @@
 #   ``agent=None`` rather than failing the tool call. ``_patch_identity`` leaves
 #   ``current_agent_id`` alone (it returns None off-stream), so every pre-SP2-2
 #   test here exercises the unchanged ``agent=None`` path.
+# Updated: 2026-08-02 (Sense Phase 2, SP2-3 — the sense MOUNT LIST) — new
+#   ``TestSenseMountList``: the context now carries the agent's real
+#   ``config.senses``; ``list_senses`` batches ONLY carried ids (asserted on the
+#   list handed to ``resolve_many``), reports only the carried set even when the
+#   resolver answers for more, publishes ``carried_senses`` plus a "this is ALL
+#   of them" note, and names the carried senses in its empty-result message; an
+#   EMPTY mount list still batches every CORE sense (today's surface). The
+#   ``sense_execute`` refusal test runs the REAL ``execute_sense`` with the
+#   connector service's ``execute`` spied — which also proves the
+#   ``sense.not_carried`` gate short-circuits ahead of every I/O path, since the
+#   test needs no Mongo at all.
 """MCP server registration + handler tests for connector execution."""
 
 from __future__ import annotations
@@ -952,3 +963,236 @@ class TestAgentSensePrefs:
 
         assert not out.get("is_error")
         assert mock_resolve.await_args.kwargs["agent"] is None
+
+
+# ---------------------------------------------------------------------------
+# Mount list (SP2-3) — list_senses is filtered, sense_execute refuses outside it
+# ---------------------------------------------------------------------------
+
+
+class _StubMountedConfig:
+    """The config surface ``_agent_sense_context`` reads, with a mount list."""
+
+    def __init__(
+        self,
+        senses: tuple[str, ...] = (),
+        sense_prefs: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        self.senses = senses
+        self.sense_prefs = sense_prefs
+
+
+class _StubMountedAgent:
+    def __init__(
+        self,
+        senses: tuple[str, ...] = (),
+        sense_prefs: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        self.config = _StubMountedConfig(senses, sense_prefs)
+
+
+class TestSenseMountList:
+    @pytest.mark.asyncio
+    async def test_context_carries_the_agents_mount_list(self) -> None:
+        """The placeholder is gone — the context now carries config.senses."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        mock_resolve = AsyncMock(return_value={})
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            _patch_running_agent("ag_1"),
+            patch(
+                "pocketpaw_ee.cloud.agents.service.get",
+                new=AsyncMock(return_value=_StubMountedAgent(senses=("paw.email.v1",))),
+            ),
+            patch("pocketpaw_ee.cloud.senses.resolver.resolve_many", new=mock_resolve),
+        ):
+            await connectors_mcp._list_senses_handler({})
+
+        agent_ctx = mock_resolve.await_args.kwargs["agent"]
+        assert agent_ctx.senses == ("paw.email.v1",)
+
+    @pytest.mark.asyncio
+    async def test_list_senses_only_batches_carried_senses(self) -> None:
+        """A non-carried sense never even enters the resolve_many batch."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        mock_resolve = AsyncMock(return_value={})
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            _patch_running_agent("ag_1"),
+            patch(
+                "pocketpaw_ee.cloud.agents.service.get",
+                new=AsyncMock(return_value=_StubMountedAgent(senses=("paw.email.v1",))),
+            ),
+            patch("pocketpaw_ee.cloud.senses.resolver.resolve_many", new=mock_resolve),
+        ):
+            await connectors_mcp._list_senses_handler({})
+
+        assert mock_resolve.await_args.args[0] == ["paw.email.v1"]
+
+    @pytest.mark.asyncio
+    async def test_list_senses_reports_only_the_carried_set(self) -> None:
+        """Even if the resolver answered for a sense outside the mount list, the
+        payload carries only what the agent mounts."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+        from pocketpaw_ee.cloud.senses.resolver import ResolvedSense
+
+        async def fake_resolve_many(sense_ids, workspace_id, *, pocket_id=None, agent=None):
+            # Answer for BOTH, including the un-mounted one.
+            return {
+                sid: ResolvedSense(
+                    sense_id=sid,
+                    connector_name="gmail" if sid == "paw.email.v1" else "github",
+                    candidates=["gmail"],
+                )
+                for sid in ["paw.email.v1", "paw.code.v1"]
+            }
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            _patch_running_agent("ag_1"),
+            patch(
+                "pocketpaw_ee.cloud.agents.service.get",
+                new=AsyncMock(return_value=_StubMountedAgent(senses=("paw.email.v1",))),
+            ),
+            patch(
+                "pocketpaw_ee.cloud.senses.resolver.resolve_many",
+                new=AsyncMock(side_effect=fake_resolve_many),
+            ),
+        ):
+            out = await connectors_mcp._list_senses_handler({})
+
+        body = _decode_payload(out)
+        assert [s["sense"] for s in body["senses"]] == ["paw.email.v1"]
+        assert body["carried_senses"] == ["paw.email.v1"]
+        # The model is told the listing is exhaustive so it stops retrying.
+        assert "ALL of them" in body["note"]
+
+    @pytest.mark.asyncio
+    async def test_empty_mount_list_lists_the_whole_surface(self) -> None:
+        """Today's behaviour, unchanged: no mount list = every CORE sense is a
+        candidate for listing, and ``carried_senses`` is empty."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        from pocketpaw.senses import CORE_SENSES
+
+        mock_resolve = AsyncMock(return_value={})
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            _patch_running_agent("ag_1"),
+            patch(
+                "pocketpaw_ee.cloud.agents.service.get",
+                new=AsyncMock(return_value=_StubMountedAgent(senses=())),
+            ),
+            patch("pocketpaw_ee.cloud.senses.resolver.resolve_many", new=mock_resolve),
+        ):
+            out = await connectors_mcp._list_senses_handler({})
+
+        assert mock_resolve.await_args.args[0] == [s.id for s in CORE_SENSES]
+        assert _decode_payload(out)["carried_senses"] == []
+
+    @pytest.mark.asyncio
+    async def test_empty_list_message_names_the_carried_senses(self) -> None:
+        """Nothing resolves, but the agent DOES carry senses — the message says
+        which, instead of the generic 'connect any provider' line."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            _patch_running_agent("ag_1"),
+            patch(
+                "pocketpaw_ee.cloud.agents.service.get",
+                new=AsyncMock(return_value=_StubMountedAgent(senses=("paw.email.v1",))),
+            ),
+            patch(
+                "pocketpaw_ee.cloud.senses.resolver.resolve_many",
+                new=AsyncMock(return_value={"paw.email.v1": None}),
+            ),
+        ):
+            out = await connectors_mcp._list_senses_handler({})
+
+        body = _decode_payload(out)
+        assert body["senses"] == []
+        assert "paw.email.v1" in body["message"]
+        assert body["carried_senses"] == ["paw.email.v1"]
+
+    @pytest.mark.asyncio
+    async def test_sense_execute_outside_the_mount_list_is_refused(self) -> None:
+        """No gate of its own: the real ``execute_sense`` refuses the un-carried
+        sense structurally, and the handler relays it as an MCP error carrying
+        the ``sense.not_carried`` code."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+        from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+        execute_spy = AsyncMock()
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            _patch_running_agent("ag_1"),
+            patch(
+                "pocketpaw_ee.cloud.agents.service.get",
+                new=AsyncMock(return_value=_StubMountedAgent(senses=("paw.code.v1",))),
+            ),
+            patch.object(connectors_service, "execute", execute_spy),
+        ):
+            out = await connectors_mcp._sense_execute_handler(
+                {"sense": "paw.email.v1", "action": "gmail_search"}
+            )
+
+        assert out.get("is_error") is True
+        text = out["content"][0]["text"]
+        assert "sense.not_carried" in text
+        assert "paw.code.v1" in text  # tells the agent what it CAN reach
+        execute_spy.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sense_execute_inside_the_mount_list_passes_through(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+        from pocketpaw_ee.cloud.connectors.dto import ExecuteActionResponse
+        from pocketpaw_ee.cloud.senses.resolver import SenseExecutionResult
+
+        mock_exec = AsyncMock(
+            return_value=SenseExecutionResult(
+                ok=True,
+                sense_id="paw.email.v1",
+                connector_name="gmail",
+                action="gmail_search",
+                data=ExecuteActionResponse(success=True, data=[]),
+            )
+        )
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            _patch_running_agent("ag_1"),
+            patch(
+                "pocketpaw_ee.cloud.agents.service.get",
+                new=AsyncMock(return_value=_StubMountedAgent(senses=("paw.email.v1",))),
+            ),
+            patch("pocketpaw_ee.cloud.senses.resolver.execute_sense", new=mock_exec),
+        ):
+            out = await connectors_mcp._sense_execute_handler(
+                {"sense": "paw.email.v1", "action": "gmail_search"}
+            )
+
+        assert not out.get("is_error")
+        assert mock_exec.await_args.kwargs["agent"].senses == ("paw.email.v1",)

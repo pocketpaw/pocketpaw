@@ -19,6 +19,19 @@
 # keyword resolve identically to the legacy path; ``resolve_many`` and
 # ``execute_sense`` honour the pref (execute runs against the PREFERRED
 # connector); and the carried ``senses`` mount list does NOT gate yet (SP2-3).
+# Updated: 2026-08-02 (Sense Phase 2, SP2-3) — the mount list now GATES, so the
+# old "carries but doesn't gate" test is INVERTED (that was SP2-2's explicit
+# hand-off marker, not a behaviour we kept). New coverage: a carried sense
+# resolves normally; a non-carried one refuses even though a provider IS enabled
+# (and does zero candidate work — the filler is monkeypatched to explode);
+# ``is_sense_carried`` tells that None apart from a no-provider None; an EMPTY
+# mount list is byte-identical to ``agent=None`` / the legacy call; the gate runs
+# BEFORE the agent pref, so a pref for an unmounted sense is dead config;
+# ``resolve_many`` skips non-carried ids (keeping every input id as a key) and
+# skips even the shared enabled-connector READ when nothing is carried; and
+# ``execute_sense`` returns the structured ``sense.not_carried`` refusal without
+# ever reaching ``connectors_service.execute`` — identically whether or not the
+# workspace has a provider, so the refusal leaks no tenant state.
 
 from __future__ import annotations
 
@@ -452,13 +465,186 @@ async def test_execute_sense_runs_against_the_agent_preferred_connector(monkeypa
     assert spy.await_args.args[1] == "gitlab"
 
 
-async def test_agent_context_carries_but_does_not_gate_on_senses() -> None:
-    """SP2-2 CARRIES the mount list; gating on it is SP2-3. A sense that is NOT
-    in the agent's ``senses`` still resolves today."""
-    await _enable("gmail")
-    ctx = resolver.AgentSenseContext(agent_id="ag-1", senses=("paw.code.v1",), prefs={})
+# ---------------------------------------------------------------------------
+# Mount list (SP2-3) — a non-empty ``senses`` tuple is EXCLUSIVE
+# ---------------------------------------------------------------------------
 
-    result = await resolver.resolve("paw.email.v1", WS, agent=ctx)
+
+def _mounted(
+    senses: tuple[str, ...],
+    prefs: dict[str, str] | None = None,
+    agent_id: str = "ag-1",
+) -> resolver.AgentSenseContext:
+    return resolver.AgentSenseContext(agent_id=agent_id, senses=senses, prefs=prefs or {})
+
+
+async def test_carried_sense_resolves_normally() -> None:
+    await _enable("gmail")
+
+    result = await resolver.resolve("paw.email.v1", WS, agent=_mounted(("paw.email.v1",)))
 
     assert result is not None
     assert result.connector_name == "gmail"
+    assert result.ambiguous is False
+
+
+async def test_non_carried_sense_refuses_even_with_a_provider_enabled() -> None:
+    """The inversion of SP2-2's carry-but-don't-gate test. gmail IS enabled and
+    DOES fill paw.email.v1 — the agent still can't reach it, because its mount
+    list says paw.code.v1 and nothing else."""
+    await _enable("gmail")
+
+    result = await resolver.resolve("paw.email.v1", WS, agent=_mounted(("paw.code.v1",)))
+
+    assert result is None
+    # …and it's distinguishable from "no provider" without another query.
+    ctx = _mounted(("paw.code.v1",))
+    assert resolver.is_sense_carried("paw.email.v1", ctx) is False
+    assert resolver.is_sense_carried("paw.code.v1", ctx) is True
+
+
+async def test_non_carried_sense_does_no_candidate_work(monkeypatch) -> None:
+    """The gate runs BEFORE the registry / Beanie work — a sense the agent
+    doesn't carry costs nothing to refuse."""
+    await _enable("gmail")
+
+    def _boom(self, *a, **kw):  # pragma: no cover - must not run
+        raise AssertionError("candidate lookup ran for a non-carried sense")
+
+    monkeypatch.setattr(filler_mod.ConnectorSenseFiller, "candidates", _boom)
+
+    assert await resolver.resolve("paw.email.v1", WS, agent=_mounted(("paw.code.v1",))) is None
+
+
+async def test_empty_mount_list_is_the_legacy_full_surface() -> None:
+    """Empty == inherit. Identical to ``agent=None`` and to the no-agent call."""
+    await _enable("gmail")
+    empty = resolver.AgentSenseContext(agent_id="ag-1", senses=(), prefs={})
+
+    mounted_empty = await resolver.resolve("paw.email.v1", WS, agent=empty)
+    with_none = await resolver.resolve("paw.email.v1", WS, agent=None)
+    legacy = await resolver.resolve("paw.email.v1", WS)
+
+    assert mounted_empty == with_none == legacy
+    assert mounted_empty is not None
+    assert resolver.is_sense_carried("paw.code.v1", empty) is True
+
+
+async def test_mount_list_gates_before_the_agent_pref() -> None:
+    """A pref for a sense the agent doesn't carry is dead config — the mount
+    gate refuses before the pref is ever read."""
+    await _enable("github")
+    await _enable("gitlab")
+
+    result = await resolver.resolve(
+        "paw.code.v1", WS, agent=_mounted(("paw.email.v1",), {"paw.code.v1": "gitlab"})
+    )
+
+    assert result is None
+
+
+async def test_resolve_many_skips_non_carried_senses() -> None:
+    await _enable("gmail")
+    await _enable("github")
+
+    out = await resolver.resolve_many(
+        ["paw.email.v1", "paw.code.v1"], WS, agent=_mounted(("paw.email.v1",))
+    )
+
+    # Every input id is still a key — only the value changes.
+    assert set(out) == {"paw.email.v1", "paw.code.v1"}
+    assert out["paw.email.v1"] is not None
+    assert out["paw.email.v1"].connector_name == "gmail"
+    assert out["paw.code.v1"] is None
+
+
+async def test_resolve_many_does_no_candidate_work_for_non_carried(monkeypatch) -> None:
+    """The batch skips the intersection per non-carried id, and skips the shared
+    enabled-connector READ entirely when nothing in the batch is carried."""
+    await _enable("gmail")
+    await _enable("github")
+
+    reads = {"n": 0}
+    real_read = filler_mod.ConnectorSenseFiller.enabled_connector_names
+
+    async def _counting(self, workspace_id, *, pocket_id=None):
+        reads["n"] += 1
+        return await real_read(self, workspace_id, pocket_id=pocket_id)
+
+    def _boom(self, sense_id, enabled_names):  # pragma: no cover - must not run
+        raise AssertionError(f"intersection ran for non-carried sense {sense_id}")
+
+    monkeypatch.setattr(filler_mod.ConnectorSenseFiller, "enabled_connector_names", _counting)
+    monkeypatch.setattr(filler_mod.ConnectorSenseFiller, "candidates_from", _boom)
+
+    out = await resolver.resolve_many(
+        ["paw.email.v1", "paw.code.v1"], WS, agent=_mounted(("paw.payments.v1",))
+    )
+
+    assert out == {"paw.email.v1": None, "paw.code.v1": None}
+    assert reads["n"] == 0
+
+
+async def test_resolve_many_empty_mount_list_matches_legacy() -> None:
+    await _enable("gmail")
+    await _enable("github")
+    ids = ["paw.email.v1", "paw.code.v1", "paw.payments.v1"]
+
+    mounted_empty = await resolver.resolve_many(ids, WS, agent=_mounted(()))
+    legacy = await resolver.resolve_many(ids, WS)
+
+    assert mounted_empty == legacy
+
+
+async def test_execute_sense_refuses_a_non_carried_sense(monkeypatch) -> None:
+    """The structured refusal: ok=False with the stable ``sense.not_carried``
+    code, and ``connectors_service.execute`` is NEVER reached."""
+    await _enable("gmail")
+    spy = AsyncMock(return_value=ExecuteActionResponse(success=True, data=[]))
+    monkeypatch.setattr(connectors_service, "execute", spy)
+
+    result = await resolver.execute_sense(
+        "paw.email.v1", "gmail_search", {}, WS, agent=_mounted(("paw.code.v1",))
+    )
+
+    assert result.ok is False
+    assert result.error == resolver.SENSE_NOT_CARRIED == "sense.not_carried"
+    assert result.connector_name is None
+    assert "not mounted on this agent" in (result.message or "")
+    # The refusal names what the agent DOES carry, so the model can re-aim.
+    assert "paw.code.v1" in (result.message or "")
+    spy.assert_not_awaited()
+
+
+async def test_execute_sense_not_carried_refuses_the_same_without_a_provider() -> None:
+    """The refusal must not leak whether the tenant enabled a provider: an agent
+    that doesn't carry the sense gets ``sense.not_carried`` either way."""
+    # Nothing enabled for this workspace at all.
+    result = await resolver.execute_sense(
+        "paw.email.v1", "gmail_search", {}, WS, agent=_mounted(("paw.code.v1",))
+    )
+
+    assert result.error == resolver.SENSE_NOT_CARRIED
+
+
+async def test_execute_sense_runs_a_carried_sense(monkeypatch) -> None:
+    await _enable("gmail")
+    spy = AsyncMock(return_value=ExecuteActionResponse(success=True, data=[]))
+    monkeypatch.setattr(connectors_service, "execute", spy)
+
+    result = await resolver.execute_sense(
+        "paw.email.v1", "gmail_search", {}, WS, agent=_mounted(("paw.email.v1",))
+    )
+
+    assert result.ok is True
+    assert result.connector_name == "gmail"
+    spy.assert_awaited_once()
+
+
+async def test_execute_sense_validates_an_unknown_id_before_the_gate() -> None:
+    """The mount gate doesn't swallow a bogus id — validation runs first, so a
+    typo raises instead of silently reporting "not carried"."""
+    with pytest.raises(SenseValidationError):
+        await resolver.execute_sense(
+            "paw.telepathy.v1", "do_thing", {}, WS, agent=_mounted(("paw.email.v1",))
+        )
