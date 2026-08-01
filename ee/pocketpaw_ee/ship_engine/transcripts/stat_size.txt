@@ -1,0 +1,5 @@
+# transcript: `stat -c%s /var/backups/demo-db.dump` — the dump's byte size.
+EXIT: 0
+--- stdout ---
+4194304
+--- stderr ---

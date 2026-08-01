@@ -1,5 +1,11 @@
 """arq worker entry point for Tier 2 run execution.
 
+Updated: 2026-07-22 (SHIP-3, feat/ship-3-cloud-entity) — registered the /ship
+deploy job ``deploy_app_job`` into ``WorkerSettings.functions``, wrapped the same
+way as ``provision_box_job``: its own long timeout (a deploy pulls an image and
+swaps containers) and ``max_tries=1`` (the job records the attempt ``failed``
+instead of raising, so an arq retry would only re-run a known-bad deploy).
+
 Updated: 2026-06-22 (feat/jobs-custom-job-entrypoints) — ``_startup`` now also
 calls ``load_entrypoint_jobs()`` right after ``register_builtins()`` so the
 worker registers WORKSPACE-CUSTOM jobs (declared under the ``pocketpaw.jobs``
@@ -71,6 +77,8 @@ from pocketpaw_ee.cloud.jobs.domain import job_timeout_seconds
 from pocketpaw_ee.cloud.jobs.worker import execute_workspace_job
 from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
 from pocketpaw_ee.cloud.shared.db import close_cloud_db, init_cloud_db
+from pocketpaw_ee.cloud.ship.deploy_job import deploy_app_job
+from pocketpaw_ee.cloud.ship.job import provision_box_job
 
 logger = logging.getLogger(__name__)
 
@@ -235,11 +243,38 @@ _workspace_job_fn = func(
     max_tries=1,
 )
 
+# The /ship box-provisioning job (SHIP-2) rides the same worker with its OWN
+# timeout: provisioning is a poll-and-probe loop that can run for minutes while
+# a fresh box boots and Dokku installs, so it must not be clipped by the
+# chat-run timeout. The enqueue name is pinned to match ``ship/enqueue.py``.
+# max_tries=1: the job never raises for an operational failure (it records the
+# box ``degraded`` and returns), and its create step is idempotent on the stored
+# server_id, so arq-level retries are neither needed nor wanted.
+_ship_provision_fn = func(
+    provision_box_job,
+    name="provision_box_job",
+    timeout=job_timeout_seconds(),
+    max_tries=1,
+)
+
+
+# The /ship deploy job (SHIP-3) rides the same worker, wrapped like the
+# provisioning job: its own long timeout (a deploy pulls an image and swaps
+# containers, well past the chat-run budget) and max_tries=1 — the job records
+# the attempt ``failed`` rather than raising, so an arq retry would only re-run
+# a known-bad deploy. The enqueue name is pinned to match ``ship/enqueue.py``.
+_ship_deploy_fn = func(
+    deploy_app_job,
+    name="deploy_app_job",
+    timeout=job_timeout_seconds(),
+    max_tries=1,
+)
+
 
 class WorkerSettings:
     """arq worker configuration. Loaded by ``arq <dotted-path>``."""
 
-    functions = [execute_run_job, _workspace_job_fn]
+    functions = [execute_run_job, _workspace_job_fn, _ship_provision_fn, _ship_deploy_fn]
     on_startup = _startup
     on_shutdown = _shutdown
     # Crash policy: no auto-retry. A failed run is left as ``failed``/``interrupted``

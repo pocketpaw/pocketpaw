@@ -1,0 +1,5 @@
+# transcript: `dokku --force apps:destroy demo`.
+EXIT: 0
+--- stdout ---
+-----> Destroying demo (including all add-ons)
+--- stderr ---
