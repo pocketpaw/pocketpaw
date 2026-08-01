@@ -57,6 +57,8 @@ id. ``GET /agents/{id}/scope`` was already owner-gated and is unchanged.
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
 from fastapi import File as FastAPIFile
 from starlette.responses import Response
@@ -559,4 +561,127 @@ async def get_agent_ledger(
             "total_cents": value_by_currency.get(single_currency, 0) if single_currency else 0,
         },
         "recent": [row.model_dump() for row in recent],
+    }
+
+
+# How many approved actions the reconcile scan reads before it stops. A cap is
+# required — the comparison is a full scan by nature — and the response NAMES it
+# rather than silently truncating, because a capped count that looks like a total
+# would report false drift and train an owner to ignore the alarm.
+_RECONCILE_SCAN_CAP = 2000
+
+
+def _action_stamp(action: Any) -> str:
+    """When an action's APPROVAL happened, as an ISO-UTC string.
+
+    ``approved_at`` rather than ``created_at``: the ledger row is written at the
+    moment of the click, so comparing against creation time would count an action
+    proposed last month and approved today as outside a 7-day window while its
+    ledger row sits inside it — reporting drift that does not exist. Falls back to
+    creation only when the field is missing (a legacy row), and to the epoch when
+    neither parses, which puts an undatable action inside every window rather than
+    silently outside them all.
+    """
+    from datetime import UTC, datetime
+
+    stamp = getattr(action, "approved_at", None) or getattr(action, "created_at", None)
+    if not isinstance(stamp, datetime):
+        return datetime.min.replace(tzinfo=UTC).isoformat()
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    return stamp.astimezone(UTC).isoformat()
+
+
+@router.get("/analytics/reconcile")
+async def reconcile_agent_ledger(
+    window: str = Query(default="30d"),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    """Does the ledger agree with the systems it claims to mirror? (AL-4)
+
+    Every emitter in this design is FAIL-SOFT: a ledger failure is swallowed so
+    it can never cost an operator their approve click, a visitor their answer, or
+    a workspace its billing. The price of that promise is silence — a broken
+    emitter looks exactly like a quiet week. This endpoint is how the promise is
+    paid back, and it is the reason fail-soft was an acceptable trade at all.
+
+    It compares the ledger against the system that holds the same facts
+    independently:
+
+    * ``approved`` — Instinct's own approved actions vs ``paw.action.approved``
+      rows. Instinct is authoritative: it is where a human actually clicked.
+    * ``delivered`` — the approvals carrying a customer reply (the paw-bar
+      decisions that reach a visitor) vs ``paw.action.delivered`` rows.
+
+    ``delta = source - ledger``. POSITIVE means the ledger is BEHIND: an emitter
+    is failing silently, and ``behind`` names which check. NEGATIVE means the
+    ledger holds rows the source cannot account for — a duplicate or a mis-keyed
+    write, which is a different and worse bug — so it is reported rather than
+    clamped to zero.
+
+    Workspace-scoped with no ``agent_id`` filter on purpose: an emitter that
+    breaks breaks for every agent at once, and a per-agent question would require
+    the owner to already suspect which one.
+    """
+    from pocketpaw.agent_ledger.models import (
+        KIND_ACTION_APPROVED,
+        KIND_ACTION_DELIVERED,
+        WindowParseError,
+        window_start,
+    )
+    from pocketpaw.instinct.models import ActionStatus
+    from pocketpaw.stores import get_agent_ledger_store, get_instinct_store
+    from pocketpaw_ee.paw_bar.decision_loop import CUSTOMER_REPLY_KEY
+
+    try:
+        since = window_start(window)
+    except WindowParseError as exc:
+        # Same refusal as the ledger read above: a 422, never a silent fallback to
+        # the default window. This must also catch an OVER-LARGE window —
+        # ``timedelta`` raises OverflowError rather than ValueError past its own
+        # cap, which escaped this handler as a 500 until ``parse_window`` started
+        # bounding the amount before constructing one.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    ws = workspace_id or ""
+    ledger = get_agent_ledger_store(workspace_id=workspace_id or None)
+    instinct = get_instinct_store(workspace_id=workspace_id or None)
+
+    counts = await ledger.counts_by_kind(workspace_id=ws, since=since)
+
+    # The source side. ``list_actions`` is the read the dashboard's own feeds use,
+    # so this compares against what an operator would actually see rather than
+    # against a private query shape only this endpoint knows.
+    approved = await instinct.list_actions(
+        status=ActionStatus.APPROVED,
+        workspace_id=workspace_id or None,
+        limit=_RECONCILE_SCAN_CAP,
+    )
+    in_window = [a for a in approved if since is None or _action_stamp(a) >= since]
+    # A delivered row exists only where the approval carried a customer reply.
+    # Comparing EVERY approval against deliveries would report a permanent,
+    # meaningless deficit for every non-paw-bar agent in the workspace — an alarm
+    # that is always ringing is an alarm nobody hears.
+    delivered_source = sum(1 for a in in_window if CUSTOMER_REPLY_KEY in (a.parameters or {}))
+
+    checks: dict[str, dict[str, Any]] = {
+        "approved": {"source": len(in_window), "ledger": counts.get(KIND_ACTION_APPROVED, 0)},
+        "delivered": {"source": delivered_source, "ledger": counts.get(KIND_ACTION_DELIVERED, 0)},
+    }
+    for name, pair in checks.items():
+        pair["delta"] = pair["source"] - pair["ledger"]
+        pair["behind"] = name if pair["delta"] > 0 else ""
+
+    drifting = [name for name, pair in checks.items() if pair["delta"] != 0]
+
+    return {
+        "window": window,
+        "since": since,
+        "workspace_id": ws,
+        "checks": checks,
+        # The one field a caller can act on without reading the rest.
+        "healthy": not drifting,
+        "drifting": drifting,
+        "scanned_cap": _RECONCILE_SCAN_CAP,
+        "capped": len(approved) >= _RECONCILE_SCAN_CAP,
     }
