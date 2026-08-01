@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -291,6 +291,56 @@ class AgentLedgerStore:
                 params,
             ) as cur:
                 return {row[0]: row[1] async for row in cur}
+
+    async def activity_by_day(
+        self,
+        *,
+        agent_id: str | None = None,
+        workspace_id: str | None = None,
+        since: str | None = None,
+        kinds: list[str] | tuple[str, ...] | None = None,
+        surface: str | None = None,
+        days: int = 30,
+    ) -> list[dict[str, Any]]:
+        """``[{day, count}]`` per UTC day, oldest first, WITH THE GAPS FILLED.
+
+        The zero days are the point. A series built only from days that have rows
+        draws a continuous line straight across a silent week and turns the x-axis
+        into "days when something happened" — which is not time. It reads as
+        steady activity when the truth is a gap. Every day in the window gets a
+        point, so a quiet stretch looks quiet.
+
+        Bucketed by ``substr(ts, 1, 10)``: ``ts`` is always ISO-8601 UTC (the row
+        model normalizes it), so the first ten characters are the calendar day —
+        no parsing a month of timestamps in Python to find out.
+
+        ``days`` bounds the returned series independently of ``since``, so a
+        caller asking for "all" cannot accidentally request a line with ten
+        thousand points in it.
+        """
+        where, params = self._filters(
+            agent_id=agent_id,
+            workspace_id=workspace_id,
+            since=since,
+            kinds=kinds,
+            surface=surface,
+        )
+        await self._ensure_schema()
+        async with self._conn() as db:
+            async with db.execute(
+                f"SELECT substr(ts, 1, 10) AS day, COUNT(*) FROM agent_ledger_events"
+                f" {where} GROUP BY day ORDER BY day",
+                params,
+            ) as cur:
+                counted = {row[0]: int(row[1]) async for row in cur}
+
+        span = max(1, min(int(days or 1), 366))
+        today = datetime.now(UTC).date()
+        series: list[dict[str, Any]] = []
+        for offset in range(span - 1, -1, -1):
+            day = (today - timedelta(days=offset)).isoformat()
+            series.append({"day": day, "count": counted.get(day, 0)})
+        return series
 
     async def counts_by_outcome(
         self,

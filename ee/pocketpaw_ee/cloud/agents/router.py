@@ -529,6 +529,13 @@ async def get_agent_ledger(
     outcomes = await store.counts_by_outcome(**scope)
     value_by_currency = await store.value_by_currency(**scope)
     recent = await store.query(**scope, limit=limit)
+    # Day-bucketed activity for the trend line, aggregated over the SAME filter as
+    # every other number in this payload — so the shape of the line can never
+    # disagree with the totals printed above it. A chart drawn from a different
+    # read than its own headline is the two-meters bug in a nicer hat.
+    # The store fills gaps with zeros: a series of only the days that had rows
+    # draws a straight line across a silent week and calls it activity.
+    series = await store.activity_by_day(**scope, days=_series_days(window))
 
     # Ratios are reported over the rows that actually carry a verdict, and the
     # denominator ships with them. "60% solved" out of five is a different claim
@@ -561,7 +568,24 @@ async def get_agent_ledger(
             "total_cents": value_by_currency.get(single_currency, 0) if single_currency else 0,
         },
         "recent": [row.model_dump() for row in recent],
+        # Oldest-first [{day, count}] for the trend line. Named ``series`` rather
+        # than ``sparkline`` because the shape is the data's business, not the
+        # chart's.
+        "series": series,
     }
+
+
+def _series_days(window: str) -> int:
+    """How many daily points the trend line should carry for ``window``.
+
+    Not simply "the window in days": a 24h window has ONE day-bucket, which is a
+    dot rather than a line, so it gets a week of context around today instead of
+    a chart that cannot show change. And ``all`` is capped at 90 — an unbounded
+    line is unreadable long before it is expensive, and the honest answer to "show
+    me two years" is a rollup, which v1 deliberately does not have yet.
+    """
+    key = (window or "").strip().lower()
+    return {"24h": 7, "7d": 7, "2w": 14, "30d": 30}.get(key, 90 if key == "all" else 30)
 
 
 # How many approved actions the reconcile scan reads before it stops. A cap is
