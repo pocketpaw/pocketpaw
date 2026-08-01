@@ -19,9 +19,22 @@
 #      must NOT churn it — a digest that moved every turn would be correct and
 #      would also destroy the agent cache, which is exactly the trade-off
 #      ``pydantic_ai``'s 2026-08-01 (f) note refused.
+#
+# Updated: 2026-08-02 (PA-1 review) — three gaps found in review, each now held:
+#   * the ENTITY discriminator on its own. The session-A/session-B test varies
+#     the override and the identity branch together, so each masked the other and
+#     collapsing the override digest to a constant survived every test. The
+#     override is the only part of the identity key that can change while a
+#     cached agent is alive, so it is pinned alone.
+#   * the two claims ``_digest`` makes in its own comments — the layer name is in
+#     the hash, and the field/record separators keep ``("ab","c")`` from hashing
+#     like ``("a","bc")``.
+#   * the render guard: a raising layer degrades to a dropped layer with a
+#     failure key instead of failing the turn, and cancellation still propagates.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -247,6 +260,30 @@ async def test_the_same_identity_over_two_messages_keeps_one_digest():
     assert turn_1.stable_digest == turn_2.stable_digest
 
 
+async def test_two_entities_on_one_agent_key_apart():
+    """The discriminator that actually varies against a LIVE cache.
+
+    ``agent_id`` is fixed per instance and ``revision`` cannot change within the
+    cache's lifetime — the pool tears the instance down when the document moves.
+    The override is the ONLY component of the identity key that changes while a
+    cached agent is alive, and one agent serving two entity rooms is #1842's
+    scenario on the surface this seam was built for.
+
+    Held on the override ALONE: same agent, same revision, both taking the
+    override branch, differing only in the override string. The broader
+    session-A/session-B test varies the override and the fallback branch
+    together, so each masks the other.
+    """
+    instance = _instance(persona="BASE PERSONA", updated_at=_STAMP)
+
+    dental = await _assemble(instance, system_message_override="You are Acme Dental's assistant.")
+    bakery = await _assemble(instance, system_message_override="You are Rye Bakery's assistant.")
+
+    assert dental.stable_digest != bakery.stable_digest, (
+        "two entity rooms on one agent must not share a cached agent"
+    )
+
+
 async def test_a_changed_agent_revision_changes_the_digest():
     """An edited agent doc is a different identity, even at the same ``agent_id``."""
     before = await _assemble(_instance(persona="BASE PERSONA", updated_at=_STAMP))
@@ -281,9 +318,9 @@ async def test_a_knowledge_only_prompt_no_longer_opens_with_a_blank_line():
     assert assembled.text.startswith("## Your Knowledge Base")
 
 
-async def test_nothing_is_dropped_yet():
-    """``dropped`` exists so PA-5's consumers can be written now; it stays empty
-    until the budget layer lands."""
+async def test_a_healthy_turn_drops_nothing():
+    """``dropped`` is for layers that failed or were cut for budget. A normal
+    turn reports an empty list, not a truncation nobody asked about."""
     assembled = await _assemble(_instance(persona="BASE PERSONA", updated_at=_STAMP))
     assert assembled.dropped == []
 
@@ -294,7 +331,14 @@ async def test_nothing_is_dropped_yet():
 
 
 class _DigestBackend:
-    """A backend that has been ported: it declares the parameter."""
+    """A backend that has been ported: it declares the parameter.
+
+    A real class on purpose. ``_accepts_prompt_digest`` reads the signature of
+    ``run``, and a ``MagicMock`` has no signature to read — it answers False and
+    reads as UNPORTED, silently. Worth knowing before PA-6 ports four more
+    backends: a mock-based test of the forwarding will pass while proving the
+    opposite of what it says.
+    """
 
     def __init__(self) -> None:
         self.last_kwargs: dict = {}
@@ -332,12 +376,21 @@ async def _run_against(monkeypatch, backend):
     return instance
 
 
-async def test_the_digest_reaches_a_backend_that_declares_it(monkeypatch):
+async def test_the_digest_is_forwarded_to_a_backend_that_declares_it(monkeypatch):
+    """What this pins is the FORWARDING — that the kwarg arrives at all, and
+    carries the digest rather than an empty default.
+
+    The value comparison recomputes ``expected`` through the same seam, so it
+    cannot catch a wrong digest; only a missing or empty one. That is the half
+    worth having here — whether the digest itself is right is what the assembler
+    tests above are for.
+    """
     backend = _DigestBackend()
     instance = await _run_against(monkeypatch, backend)
 
     expected = await _assemble(instance, message="hi")
     assert backend.last_kwargs["system_prompt_digest"] == expected.stable_digest
+    assert backend.last_kwargs["system_prompt_digest"], "an empty digest is not forwarding"
 
 
 async def test_the_digest_is_withheld_from_a_backend_that_does_not(monkeypatch):
@@ -428,6 +481,32 @@ async def test_an_empty_layer_leaves_no_blank_gap():
     assert assembled.text == "ALPHA\n\nBETA"
 
 
+async def test_the_layer_name_is_part_of_the_digest():
+    """Pins the claim ``_digest`` makes: two layers cannot swap keys unnoticed.
+
+    Same keys, same order, different layers holding them — that is a different
+    prompt, so it must be a different digest.
+    """
+    a = await assemble(
+        [_StubLayer("identity", "X", "k1"), _StubLayer("surface", "Y", "k2")], _ctx()
+    )
+    b = await assemble(
+        [_StubLayer("surface", "X", "k1"), _StubLayer("identity", "Y", "k2")], _ctx()
+    )
+    assert a.stable_digest != b.stable_digest
+
+
+async def test_the_key_fields_cannot_run_together():
+    """Pins the other claim: ``("ab", "c")`` must not hash like ``("a", "bc")``.
+
+    Without the field/record separators the digest is a plain concatenation and
+    these two collide — two different sets of layers, one identity.
+    """
+    ab_c = await assemble([_StubLayer("ab", "X", "c")], _ctx())
+    a_bc = await assemble([_StubLayer("a", "X", "bc")], _ctx())
+    assert ab_c.stable_digest != a_bc.stable_digest
+
+
 async def test_layer_order_is_part_of_the_digest():
     """Swapping two layers produces a different prompt, so it must produce a
     different key — a digest over an unordered set would call them identical."""
@@ -436,6 +515,105 @@ async def test_layer_order_is_part_of_the_digest():
     assert (await assemble([one, two], _ctx())).stable_digest != (
         await assemble([two, one], _ctx())
     ).stable_digest
+
+
+# ---------------------------------------------------------------------------
+# A raising layer degrades; it does not fail the turn
+# ---------------------------------------------------------------------------
+
+
+class _RaisingLayer:
+    """PA-2's surface layer fans out to two dozen handlers doing I/O. This is
+    what one of them looks like on a bad day."""
+
+    name = "surface"
+    priority = 50
+
+    def __init__(self, exc: BaseException | None = None) -> None:
+        self._exc = exc or RuntimeError("handler blew up")
+
+    async def render(self, ctx: PromptContext) -> LayerOutput:  # noqa: ARG002
+        raise self._exc
+
+
+async def test_a_raising_layer_does_not_fail_the_turn():
+    """``AgentPool.run`` calls the seam outside any try and before it marks the
+    instance busy, so a propagating layer takes the whole turn with it."""
+    assembled = await assemble(
+        [
+            _StubLayer("identity", "WHO I AM", "identity:v1"),
+            _RaisingLayer(),
+            _StubLayer("tail", "THE REST", None),
+        ],
+        _ctx(),
+    )
+    assert assembled.text == "WHO I AM\n\nTHE REST"
+
+
+async def test_a_raising_layer_says_so_in_dropped():
+    assembled = await assemble([_RaisingLayer()], _ctx())
+    assert [d.name for d in assembled.dropped] == ["surface"]
+    assert "RuntimeError" in assembled.dropped[0].reason
+
+
+async def test_a_failed_layer_is_not_invisible_to_the_digest():
+    """The rule, at the case that motivates it: a layer dropped from ``text``
+    must never be dropped from the digest.
+
+    Compared against the layer being ABSENT, not against an empty prompt — a
+    failure that contributed no key at all still differs from a working layer
+    (one key versus none), so that comparison passes either way and proves
+    nothing. What must not collide is "the surface layer failed" with "there was
+    no surface layer": same text, and a backend keying on the digest would serve
+    one turn's prompt to the other.
+    """
+    identity = _StubLayer("identity", "WHO I AM", "identity:v1")
+
+    failed = await assemble([identity, _RaisingLayer()], _ctx())
+    absent = await assemble([identity], _ctx())
+
+    assert failed.text == absent.text, "the fixture must isolate the digest"
+    assert failed.stable_digest != absent.stable_digest
+
+
+async def test_a_failed_layer_keys_apart_from_a_working_one():
+    """The other half: a failure is its own identity, not the rendered one."""
+    identity = _StubLayer("identity", "WHO I AM", "identity:v1")
+
+    working = await assemble(
+        [identity, _StubLayer("surface", "SURFACE RULES", "surface:v1")], _ctx()
+    )
+    failed = await assemble([identity, _RaisingLayer()], _ctx())
+
+    assert working.stable_digest != failed.stable_digest
+
+
+async def test_two_failures_of_one_layer_agree():
+    """Both produce a prompt with nothing from that layer in it, so both should
+    hash alike — the failure key is deliberately not per-exception."""
+    identity = _StubLayer("identity", "WHO I AM", "identity:v1")
+
+    first = await assemble([identity, _RaisingLayer(RuntimeError("timeout"))], _ctx())
+    second = await assemble([identity, _RaisingLayer(ValueError("bad json"))], _ctx())
+
+    assert first.stable_digest == second.stable_digest
+
+
+async def test_a_cancelled_run_is_not_swallowed():
+    """Cancellation is the caller tearing the turn down, not a layer failing.
+    Degrading it would turn a cancelled turn into a silently truncated prompt."""
+    with pytest.raises(asyncio.CancelledError):
+        await assemble([_RaisingLayer(asyncio.CancelledError())], _ctx())
+
+
+async def test_an_empty_cache_key_is_refused():
+    """``""`` reads as "stable forever" and is also what someone types when they
+    mean "nothing" — the one answer that fails silently in the unsafe direction,
+    on a field whose entire job is to force the question."""
+    with pytest.raises(ValueError, match="non-empty string or None"):
+        LayerOutput(text="X", cache_key="")
+
+    LayerOutput(text="X", cache_key=None)  # the way to say volatile
 
 
 # ---------------------------------------------------------------------------

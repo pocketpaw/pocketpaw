@@ -21,6 +21,12 @@
 # assertion. The svelte-create mode is the only /sites mode that omits ripple, so
 # pinning to it keeps the guard meaningful (a ripple-dropping surface change
 # forces a warm-client rebuild).
+# Modified: 2026-08-02 (PA-1 review, feat/prompt-assembler-seam) — added the
+# leading-block guards at the end of this file. The volatile markers were matched
+# on their literal leading blank line, so a block that OPENS the prompt was not
+# recognised and the whole volatile block keyed the warm subprocess. Every test
+# above prefixes its prompt with ``persona\n\n``, which is why none of them saw
+# it; the new ones start the block at position 0.
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -467,3 +473,77 @@ def test_sites_surface_behavior_prefix_changes_key():
         "cache keys so switching surfaces mid-session rebuilds the warm client "
         "with surface-correct instructions"
     )
+
+
+# ---------------------------------------------------------------------------
+# Added 2026-08-02 (PA-1 review, feat/prompt-assembler-seam): the volatile
+# markers must match at a BLOCK BOUNDARY, not only after a literal "\n\n".
+#
+# The markers are stored with their leading blank line, and the cut is a plain
+# ``find``. That held only because the legacy string assembly appended the
+# knowledge wrapper unconditionally, so the block ALWAYS carried a "\n\n" even
+# when nothing preceded it. The prompt assembler joins layers instead, so a
+# block that is FIRST starts at index 0 with no leading newlines, the marker
+# does not match, and the whole volatile block stays inside the prefix that
+# keys the warm subprocess — rebuilt every turn, prewarm evicted on turn 1.
+#
+# Reachable today: an agent with no soul and no persona/system_prompt renders
+# an empty identity, and several EE call sites pass knowledge_context with no
+# instructions. It survives PA-3/PA-4/PA-8 too: once these blocks are their own
+# layers, the assembler's join means their text NEVER carries a leading "\n\n".
+#
+# Every other test in this file prefixes its prompt with ``persona\n\n``, which
+# is exactly why none of them caught it. These start the block at position 0.
+
+
+def test_a_leading_kb_block_is_still_volatile():
+    """Two turns whose ONLY difference is the KB snippet must share a prefix.
+
+    This is the whole point of the warm-client key: per-turn retrieval must not
+    cost a subprocess. With the block at position 0 the marker did not match, so
+    the entire block — snippet and all — was the prefix, and the two turns keyed
+    apart.
+    """
+    turn1 = "## Your Knowledge Base\nUse the following...\n\nturn-1 snippet"
+    turn2 = "## Your Knowledge Base\nUse the following...\n\nturn-2 snippet"
+
+    assert ClaudeSDKBackend._behavior_prefix(turn1) == ClaudeSDKBackend._behavior_prefix(turn2)
+    assert ClaudeSDKBackend._client_cache_key(
+        _opts(turn1), session_key="s1"
+    ) == ClaudeSDKBackend._client_cache_key(_opts(turn2), session_key="s1")
+
+
+def test_a_leading_memory_block_is_still_volatile():
+    """The same for the soul-recall block, which PA-3 makes a layer of its own."""
+    turn1 = "## Relevant Past Memories\nBelow are memories...\n\nrecalled for turn 1"
+    turn2 = "## Relevant Past Memories\nBelow are memories...\n\nrecalled for turn 2"
+
+    assert ClaudeSDKBackend._behavior_prefix(turn1) == ClaudeSDKBackend._behavior_prefix(turn2)
+
+
+def test_prewarm_and_turn_one_agree_when_the_kb_block_leads():
+    """The prewarm contract, at the shape that broke it.
+
+    ``AgentPool.prewarm`` assembles with ``knowledge_context=""`` so its prompt
+    has no KB block at all; turn 1 assembles the same identity WITH one. Both
+    must reduce to the same behavioral prefix or turn 1 evicts the client the
+    prewarm just paid ~12s to build — what pool.py itself calls a net loss.
+    """
+    prewarmed = ""
+    turn1 = "## Your Knowledge Base\nUse the following...\n\nAcme Dental opens at 9am."
+
+    assert ClaudeSDKBackend._behavior_prefix(prewarmed) == ClaudeSDKBackend._behavior_prefix(turn1)
+
+
+def test_a_leading_block_does_not_swallow_a_real_behavioral_change():
+    """The cut must stay a CUT — boundary-aware, not marker-blind.
+
+    A prompt that opens with an identity and carries the KB block later still
+    keys on that identity, so a persona change rebuilds the client. Without this
+    the fix above could be "return empty prefix" and both tests would pass.
+    """
+    a = f"PERSONA A\n\n{_KB_HEADER}\nsnippet"
+    b = f"PERSONA B\n\n{_KB_HEADER}\nsnippet"
+
+    assert ClaudeSDKBackend._behavior_prefix(a) == "PERSONA A"
+    assert ClaudeSDKBackend._behavior_prefix(a) != ClaudeSDKBackend._behavior_prefix(b)

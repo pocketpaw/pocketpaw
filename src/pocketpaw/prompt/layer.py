@@ -1,6 +1,10 @@
 """Prompt layers — the unit the system prompt is assembled from.
 
 Created: 2026-08-02 (PA-1, feat/prompt-assembler-seam).
+Updated: 2026-08-02 (PA-1 review) — ``LayerOutput`` rejects an empty
+  ``cache_key``. ``""`` read as "stable forever" while being exactly what an
+  author types when they mean "nothing" — the one answer to this field's
+  question that failed silently in the unsafe direction.
 
 The system prompt used to be one long string built by appending blocks in
 ``AgentPool._assemble_system_prompt``. That worked until three backends
@@ -40,10 +44,23 @@ class LayerOutput:
     An empty ``text`` still contributes its key: a layer that renders to
     nothing under one identity and to something under another is a change the
     digest must see.
+
+    An empty ``cache_key`` is REJECTED. ``""`` currently reads as "stable
+    forever" — the strongest claim a layer can make — and it is also what
+    someone types when they mean "nothing". Of the answers to a question this
+    field exists to force, it is the only one that fails silently in the unsafe
+    direction, so it fails loudly instead. ``None`` is how you say volatile.
     """
 
     text: str
     cache_key: str | None
+
+    def __post_init__(self) -> None:
+        if self.cache_key == "":
+            raise ValueError(
+                "cache_key must be a non-empty string or None; "
+                "None is how a layer declares itself volatile"
+            )
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,16 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-08-02 (PA-1 review, feat/prompt-assembler-seam) — ``_behavior_prefix``
+  matches its volatile markers at a BLOCK BOUNDARY instead of on the literal
+  ``"\\n\\n…"`` alone: a block that OPENS the prompt carries no separator, so the
+  old ``find`` missed it and the whole volatile block stayed in the warm-client
+  key — subprocess rebuilt every turn, prewarm evicted on turn 1. It only ever
+  worked because the legacy string assembly emitted that separator even with
+  nothing before it; the prompt assembler joins layers, and PA-3/PA-4/PA-8 give
+  these blocks their own layers, where the join means their text never carries a
+  leading blank line. The cut is still a cut: a marker mid-prompt without its
+  blank line is content, not a header, and a real persona/instructions change
+  still rebuilds.
 Updated: 2026-07-24 (CX-1, feat/code-agent-cx1) — ``_build_options`` / ``run`` /
   ``prewarm`` grow an ``exclusive_mcp_tools: bool = False`` keyword. When True, the
   MCP scoping block CAPS the tool surface to ``allow_mcp_tool_ids`` alone — no
@@ -1252,6 +1263,17 @@ class ClaudeSDKBackend(BaseAgentBackend):
     # every turn would needlessly tear down and rebuild the subprocess. The
     # behavioral prefix BEFORE these markers carries the home-pocket backend
     # summary, which is exactly the mutable state we want the key to track.
+    # Stored WITH the leading blank line, and matched at a block BOUNDARY: the
+    # separator is present when something precedes the block and absent when the
+    # block opens the prompt, and both are the same block. Matching the literal
+    # alone was correct only while the legacy string assembly appended the
+    # knowledge wrapper unconditionally — it always emitted the "\n\n" even with
+    # nothing before it. The prompt assembler (``pocketpaw.prompt``) joins layers
+    # instead, so a block that is FIRST starts at index 0 with no separator at
+    # all; a marker-blind ``find`` misses it and the whole volatile block lands
+    # in the key, rebuilding the warm subprocess every turn. That is not a
+    # transitional quirk: PA-3/PA-4/PA-8 give these blocks their own layers,
+    # where the join means their text NEVER carries a leading "\n\n".
     _VOLATILE_PROMPT_MARKERS = (
         "\n\n## Your Knowledge Base",
         "\n\n## Relevant Past Memories",
@@ -1359,11 +1381,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
            recalled memories increment every turn but carry no behavioral
            instructions.
         2. The volatile per-turn TAIL (KB block, soul-memory recall, injected
-           history) is cut at the earliest ``_VOLATILE_PROMPT_MARKERS`` marker.
+           history) is cut at the earliest ``_VOLATILE_PROMPT_MARKERS`` marker,
+           matched at a block boundary — after the separator, or at index 0 when
+           the block opens the prompt and there is no separator to find.
 
         A REAL behavioral change (different persona/identity, override, or
         ``instructions``) still lands in the retained text, so it changes the
-        digest and forces a warm-client rebuild. On Windows the SDK may pass
+        digest and forces a warm-client rebuild. The boundary rule keeps that
+        true: a marker mid-prompt without its blank line is content, not a
+        section header, and is left alone. On Windows the SDK may pass
         ``system_prompt`` as a ``{type: "file", path: ...}`` dict — there is no
         inline text to key on, so fall back to the path (stable per connect).
         """
@@ -1374,6 +1400,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
         system_prompt = cls._strip_soul_knowledge_block(system_prompt)
         cut = len(system_prompt)
         for marker in cls._VOLATILE_PROMPT_MARKERS:
+            # The block opens the prompt: nothing precedes it, so the separator
+            # the marker carries was never emitted. Everything is volatile.
+            if system_prompt.startswith(marker.lstrip("\n")):
+                return ""
             idx = system_prompt.find(marker)
             if idx != -1:
                 cut = min(cut, idx)
