@@ -949,16 +949,32 @@ async def set_title(session_id: str, title: str) -> bool:
     return True
 
 
-async def touch(session_id: str) -> None:
-    """Update lastActivity and increment messageCount.
+async def touch(session_id: str, user_id: str) -> None:
+    """Update lastActivity and increment messageCount, for the OWNER only.
 
-    Called by chat persistence bridges on the hot path; kept on Beanie.
+    ``user_id`` is required rather than optional (2026-08-01), so that an
+    unscoped write cannot be reintroduced simply by leaving the argument out.
+    The ownership check matters as much as the identity: this writes to the
+    document and emits a ``SessionUpdated`` naming its owner onto that owner's
+    realtime feed, neither of which belongs to a caller who cannot read it.
+
+    Callers that already hold the doc use ``touch_doc``, which is the path the
+    memory store's write hook takes — it has established ownership by having
+    loaded the doc through an owned lookup, so it is unaffected.
     """
     doc = await _SessionDoc.find_one(_SessionDoc.sessionId == session_id)
     if not doc and session_id.startswith("websocket_"):
         doc = await _SessionDoc.find_one(_SessionDoc.sessionId == session_id[10:])
     if not doc:
         return
+    if doc.owner != user_id:
+        # Deliberately the same shape as ``_fetch_owned``. Note the asymmetry
+        # with the missing-session case above, which returns quietly: a caller
+        # probing ids learns "exists and is not yours" here. That is already
+        # true of every other per-session route (GET / PATCH / DELETE all raise
+        # Forbidden on a live session they don't own), so staying silent here
+        # would not close an oracle, only make this one route inconsistent.
+        raise Forbidden("session.not_owner", "Not the session owner")
     doc.lastActivity = datetime.now(UTC)
     doc.messageCount += 1
     await doc.save()
