@@ -414,6 +414,71 @@ _SURFACE_TOOL_EQUIVALENTS: dict[str, frozenset[str]] = {
 }
 
 
+# Model-name substrings whose providers REJECT a request when an assistant
+# message comes back without the reasoning field they produced. DeepSeek and
+# Moonshot are the two that emit ``reasoning_content`` (see the field list in
+# ``pydantic_ai/models/openai.py::_process_thinking``).
+_REASONING_ECHO_REQUIRED = ("deepseek", "moonshot", "kimi")
+
+
+def _reasoning_echo_model_class(model_name: str) -> type | None:
+    """An ``OpenAIChatModel`` that never omits ``reasoning_content``, or ``None``.
+
+    DeepSeek in thinking mode 400s the WHOLE request if any assistant message
+    in the history lacks ``reasoning_content``::
+
+        The `reasoning_content` in the thinking mode must be passed back to the API.
+
+    pydantic-ai writes that field only when the ``ModelResponse`` carries a
+    ``ThinkingPart``, so any assistant turn produced without one — most
+    reliably the continuation after a deferred capability's
+    ``load_capability`` — poisons every following request in the run.
+
+    The fix is the empty string, and that is not a guess. Replaying one captured
+    failing request against the proxy four ways:
+
+    ====================================================  ======
+    variant                                               status
+    ====================================================  ======
+    as captured                                              400
+    ``reasoning_content`` stripped from every message        400
+    empty ``reasoning_content`` where missing                200
+    placeholder text where missing                           200
+    ====================================================  ======
+
+    Note the second row: leaving the field off entirely does NOT work, so this
+    cannot be fixed by suppressing thinking. ``pydantic_ai_thinking=off`` was
+    tried and the run still 400s.
+
+    Applied by model name rather than to every OpenAI-compatible model, because
+    an unknown ``reasoning_content`` on a provider that does not expect one is a
+    new failure mode in exchange for nothing. Returns ``None`` for models that
+    do not need it, and the caller falls back to the stock class.
+    """
+    name = (model_name or "").lower()
+    if not any(tag in name for tag in _REASONING_ECHO_REQUIRED):
+        return None
+    try:
+        from pydantic_ai.models.openai import OpenAIChatModel
+    except ImportError:  # pragma: no cover - pydantic-ai always present here
+        return None
+
+    class _ReasoningEchoChatModel(OpenAIChatModel):
+        """``_map_model_response`` is pydantic-ai's documented subclass hook."""
+
+        def _map_model_response(self, message: Any) -> Any:
+            param = super()._map_model_response(message)
+            if (
+                param is not None
+                and param.get("role") == "assistant"
+                and "reasoning_content" not in param
+            ):
+                param["reasoning_content"] = ""
+            return param
+
+    return _ReasoningEchoChatModel
+
+
 _AGENTAPI_GATED_SURFACE = (
     "This surface controls which tools the agent may use, and the `agentapi` "
     "model cannot honour that.\n\n"
@@ -764,7 +829,8 @@ class PydanticAIBackend:
             provider,
             base_url,
         )
-        return OpenAIChatModel(model, provider=OpenAIProvider(**provider_kwargs))
+        cls = _reasoning_echo_model_class(model) or OpenAIChatModel
+        return cls(model, provider=OpenAIProvider(**provider_kwargs))
 
     def _get_http_client(self) -> Any:
         """The instance's shared HTTP client, built once.
