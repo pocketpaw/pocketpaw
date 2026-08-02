@@ -27,6 +27,7 @@ class NotificationOut(BaseModel):
     source_type: str | None = None
     source_pocket_id: str | None = None
     source_room_id: str | None = None
+    source_agent_id: str | None = None
     read: bool
     created_at: str | None
     actor_id: str | None = None
@@ -45,6 +46,7 @@ def notification_to_dto(n: Notification) -> NotificationOut:
         source_type=n.source.type if n.source else None,
         source_pocket_id=n.source.pocket_id if n.source else None,
         source_room_id=n.source.room_id if n.source else None,
+        source_agent_id=n.source.agent_id if n.source else None,
         read=n.read,
         created_at=iso_utc(n.created_at),
         actor_id=n.actor_id,
