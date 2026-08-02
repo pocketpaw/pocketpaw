@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import aiosqlite
@@ -36,6 +37,7 @@ from pocketpaw.agent_ledger.models import (
     KIND_ACTION_APPROVED,
     KIND_ACTION_OUTCOME,
     KIND_ACTION_REJECTED,
+    KIND_RUN_COMPLETED,
     KIND_VISITOR_ACTION,
     SURFACE_BELT,
     SURFACE_CHAT,
@@ -616,6 +618,84 @@ async def test_an_unresolvable_ledger_store_does_not_break_the_approval(
     approved = await instinct.approve(action.id)
     assert approved is not None
     assert approved.status == ActionStatus.APPROVED
+
     # The negative half: the raise must actually have happened, so no row landed.
     ledger = stores.get_agent_ledger_store(workspace_id="ws1")
     assert await ledger.query(agent_id="agent-1") == []
+
+
+# --------------------------------------------------------------------------- #
+# activity_by_day — the trend line's data
+# --------------------------------------------------------------------------- #
+
+
+async def test_the_series_fills_silent_days_with_zeros(isolated_stores):
+    """A day with no rows is a POINT AT ZERO, never a missing point.
+
+    This is the whole correctness argument for the trend line. A series built
+    only from days that have rows draws a straight line across a silent week and
+    turns the x-axis into "days when something happened" — which is not time. It
+    reads as steady activity when the truth is a gap.
+    """
+    store = stores.get_agent_ledger_store(workspace_id="ws1")
+    today = datetime.now(UTC)
+    for offset in (0, 4):  # two days of activity inside a 7-day window
+        await store.append(
+            LedgerRow(
+                agent_id="agent-1",
+                workspace_id="ws1",
+                surface="chat",
+                kind=KIND_RUN_COMPLETED,
+                ref=f"r{offset}",
+                actor="system",
+                ts=(today - timedelta(days=offset)).isoformat(),
+            )
+        )
+
+    series = await store.activity_by_day(agent_id="agent-1", workspace_id="ws1", days=7)
+
+    assert len(series) == 7, "every day in the window gets a point, not just the busy ones"
+    assert sum(p["count"] for p in series) == 2
+    assert [p["count"] for p in series].count(0) == 5
+
+
+async def test_the_series_runs_oldest_first(isolated_stores):
+    """Chart order. Reversed, the line reads as the exact opposite trend."""
+    store = stores.get_agent_ledger_store(workspace_id="ws1")
+    series = await store.activity_by_day(workspace_id="ws1", days=5)
+    days = [p["day"] for p in series]
+    assert days == sorted(days)
+    assert days[-1] == datetime.now(UTC).date().isoformat(), "last point is today"
+
+
+async def test_the_series_is_workspace_scoped(isolated_stores):
+    """Another tenant's rows never enter this line."""
+    for ws in ("ws1", "ws2"):
+        store = stores.get_agent_ledger_store(workspace_id=ws)
+        await store.append(
+            LedgerRow(
+                agent_id="agent-1",
+                workspace_id=ws,
+                surface="chat",
+                kind=KIND_RUN_COMPLETED,
+                ref=f"run-{ws}",
+                actor="system",
+                ts=datetime.now(UTC).isoformat(),
+            )
+        )
+    series = await stores.get_agent_ledger_store(workspace_id="ws1").activity_by_day(
+        workspace_id="ws1", days=3
+    )
+    assert sum(p["count"] for p in series) == 1
+
+
+@pytest.mark.parametrize("requested,expected", [(0, 1), (-5, 1), (10_000, 366)])
+async def test_the_series_length_is_bounded(isolated_stores, requested, expected):
+    """``days`` is clamped, so no caller can ask for a line with 10k points.
+
+    An unbounded series is unreadable long before it is expensive, and "show me
+    two years" is a rollup question, which v1 deliberately does not answer yet.
+    """
+    store = stores.get_agent_ledger_store(workspace_id="ws1")
+    series = await store.activity_by_day(workspace_id="ws1", days=requested)
+    assert len(series) == expected
