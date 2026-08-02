@@ -1,4 +1,19 @@
 # ee/paw_bar/handoff.py — the human-handoff PRODUCER (owner inbox, slice 3).
+# Updated: 2026-08-01 (AL-2, paw-bar emitters) — ``raise_handoff`` now records
+#   ``paw.handoff.raised`` in the agent ledger (via paw_bar/ledger.py), so "how
+#   often does this concierge hand people to me, and is that falling?" is a
+#   query instead of a reconstruction from Fabric objects. Recorded AFTER the
+#   both-surfaces-failed arm, so a 503 is not counted as an ask that reached
+#   anyone, and keyed on the Fabric handoff id so a record and its ledger row
+#   share one identity.
+#   WHERE THE OTHER HALF LIVES: ``paw.handoff.resolved`` is NOT emitted here,
+#   because nothing in the product resolves a handoff through this module — a
+#   handoff ends when the owner moves the conversation OUT of ``needs_human``,
+#   which happens in the inbox PATCH endpoint. That transition is where the
+#   resolved beat fires (``ledger.emit_conversation_transition``). Putting an
+#   uncalled ``resolve_handoff`` here would have looked tidier and recorded
+#   nothing. Both kinds are defined and documented together in
+#   ``paw_bar/ledger.py`` so the pair cannot drift.
 # Created: 2026-07-31 (owner inbox, slice 3 — the escape hatch) — ``GET
 #   /paw-bar/admin/site/{id}/handoffs`` has read ``_paw_handoffs`` Fabric objects
 #   since D2 and has always returned ``[]``, because nothing ever wrote one. This
@@ -276,6 +291,22 @@ async def raise_handoff(
         source,
         escalated,
         handoff_id or "-",
+    )
+
+    # AL-2 — the handoff RAISED beat, recorded only once we know a human will
+    # actually see this (the both-surfaces-failed arm returned above). Fail-soft
+    # by construction; a visitor's escape hatch never depends on bookkeeping.
+    from pocketpaw_ee.paw_bar import ledger
+
+    await ledger.emit_handoff_raised(
+        widget=widget,
+        # The authenticated tenant — the SAME value ``_write_handoff_object``
+        # routes the Fabric store by. It is a store-path-safe token, unlike the
+        # widget owner label, so it can route the ledger file too.
+        workspace_id=workspace_id,
+        customer_ref=customer_ref,
+        handoff_id=handoff_id,
+        source=source,
     )
 
     from pocketpaw_ee.paw_bar.notify import NOTIFY_NEEDS_HUMAN, notify_workspace_owner
