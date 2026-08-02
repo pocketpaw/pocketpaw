@@ -294,19 +294,60 @@ async def test_the_behaviour_prefix_keeps_the_stable_blocks_and_drops_both_volat
     assert "## Your Knowledge Base" not in prefix
 
 
-async def test_the_surface_still_sits_inside_the_behaviour_prefix():
-    """PA-2's property, re-proven with the recall extracted: the surface preamble
-    must stay ABOVE the volatile region, or navigating between pockets stops
-    invalidating the warm client."""
+_SURFACE = '<current-pocket id="A" widgets="2" />'
+
+
+async def test_the_full_prompt_keeps_every_stable_block_in_the_behaviour_prefix():
+    """The whole prompt at once — identity, surface, instructions, AND both
+    volatile blocks — because that is the shape a real cloud turn has and the
+    one the warm-client key is computed over.
+
+    Asserted as an EQUALITY, not a containment: the prefix is exactly the three
+    stable blocks, so this catches the cut landing too early (a stable block
+    lost, and every warm client invalidated) as well as too late (a volatile
+    block hashed, and every turn rebuilding). Containment would catch neither.
+
+    It also re-proves PA-2's property with the recall extracted: the surface
+    preamble stays ABOVE the volatile region, or navigating between pockets
+    stops invalidating the warm client.
+    """
     assembled = await _assemble(
         instance=_instance(soul=_FakeSoul()),
         message="what time do you open?",
         instructions="RIPPLE LAW: narrate.",
         knowledge_context="Acme Dental opens at 9am.",
-        surface_preamble='<current-pocket id="A" widgets="2" />',
+        surface_preamble=_SURFACE,
         surface_cache_key="pocket:A:rev1",
     )
-    assert '<current-pocket id="A" widgets="2" />' in ClaudeSDKBackend._behavior_prefix(
+
+    assert "## Your Knowledge Base" in assembled.text, "the fixture must carry BOTH volatile blocks"
+    assert "## Relevant Past Memories" in assembled.text
+    assert (
+        ClaudeSDKBackend._behavior_prefix(assembled.text)
+        == f"WHO I AM\n\n{_SURFACE}\n\nRIPPLE LAW: narrate."
+    )
+
+
+async def test_the_full_prompts_behaviour_prefix_is_what_the_legacy_order_produced():
+    """The same full prompt, cut both ways. This is the assertion that says the
+    reorder did not move a single live session's warm-client key: the legacy
+    byte order and the shipped one reduce to identical bytes."""
+    assembled = await _assemble(
+        instance=_instance(soul=_FakeSoul()),
+        message="what time do you open?",
+        instructions="RIPPLE LAW: narrate.",
+        knowledge_context="Acme Dental opens at 9am.",
+        surface_preamble=_SURFACE,
+        surface_cache_key="pocket:A:rev1",
+    )
+    head, _, tail = assembled.text.partition("\n\n## Your Knowledge Base")
+    knowledge_block, _, recall_block = f"## Your Knowledge Base{tail}".partition(
+        "\n\n## Relevant Past Memories"
+    )
+    legacy_order = f"{head}\n\n## Relevant Past Memories{recall_block}\n\n{knowledge_block}"
+
+    assert legacy_order != assembled.text, "the reconstruction must actually differ"
+    assert ClaudeSDKBackend._behavior_prefix(legacy_order) == ClaudeSDKBackend._behavior_prefix(
         assembled.text
     )
 
