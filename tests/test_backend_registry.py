@@ -18,6 +18,7 @@ class TestListBackends:
         assert "openai_agents" in backends
         assert "google_adk" in backends
         assert "opencode" in backends
+        assert "antigravity" in backends
 
     def test_does_not_include_legacy(self):
         backends = list_backends()

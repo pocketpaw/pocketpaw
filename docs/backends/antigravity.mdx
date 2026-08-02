@@ -1,0 +1,85 @@
+---
+title: "Google Antigravity: Async Gemini Agent SDK"
+description: "The Antigravity backend wraps Google's google-antigravity SDK — an async, batteries-included Gemini agent with plain-callable tools and stdio MCP servers. Streams text token-by-token and reuses your Gemini API key."
+section: Agent Backends
+ogType: article
+keywords: ["google antigravity", "gemini", "agent sdk", "mcp", "google ai"]
+tags: ["backends", "google"]
+---
+
+# Google Antigravity: Async Gemini Agent SDK
+
+The Antigravity backend wraps Google's **Antigravity SDK** (`google-antigravity` package). It runs a batteries-included async agent on Gemini models — the SDK handles binary discovery, tool wiring, hook registration, and policy defaults for you.
+
+## Overview
+
+- **Status**: Beta
+- **Provider support**: Google (Gemini models)
+- **Built-in tools**: view_file, edit_file, run_command
+- **MCP support**: Yes (stdio servers via `McpStdioServer`)
+- **Streaming**: Token-by-token text streaming
+
+## Configuration
+
+```bash
+export POCKETPAW_AGENT_BACKEND="antigravity"
+export POCKETPAW_ANTIGRAVITY_API_KEY="..."
+```
+
+The SDK authenticates via `GEMINI_API_KEY`. PocketPaw resolves the key from `antigravity_api_key` first, then falls back to `gemini_api_key`, then `google_api_key` — so a key already set up for Google ADK is reused automatically with no extra setup.
+
+### Backend-Specific Settings
+
+| Setting | Env Variable | Default | Description |
+|---------|-------------|---------|-------------|
+| `antigravity_model` | `POCKETPAW_ANTIGRAVITY_MODEL` | `gemini-3-pro-preview` | Gemini model to use |
+| `antigravity_max_turns` | `POCKETPAW_ANTIGRAVITY_MAX_TURNS` | `100` | Max tool-use turns per query (0 = unlimited) |
+| `antigravity_api_key` | `POCKETPAW_ANTIGRAVITY_API_KEY` | (falls back) | Gemini API key; falls back to `gemini_api_key`, then `google_api_key` |
+
+## Built-in Tools
+
+| Tool | Policy Mapping |
+|------|---------------|
+| `view_file` | `filesystem` |
+| `edit_file` | `filesystem` |
+| `run_command` | `shell` |
+
+PocketPaw's own tools are passed to the SDK as plain Python callables via the `build_antigravity_function_tools()` bridge in `tool_bridge.py`. The SDK introspects each function's name, docstring, and type annotations to build the tool schema.
+
+## MCP Integration
+
+Configured MCP servers are passed to the agent as `McpStdioServer` instances. Only **stdio** servers are wired today; SSE/HTTP servers are skipped. MCP tools obey the same tool policy as every other tool, and a server blocked by policy is dropped before launch.
+
+## How It Works
+
+1. PocketPaw builds a `LocalAgentConfig` with the system prompt, tools, and MCP servers, and creates an async `Agent`
+2. The message is sent via `await agent.chat(...)`, which returns a `ChatResponse`
+3. Text streams back token-by-token (`async for token in response`) as `AgentEvent` objects
+4. Conversation history is threaded into the system instructions for multi-turn context
+5. Token usage is reported from the response's `usage_metadata`
+
+## Installation
+
+```bash
+pip install pocketpaw[antigravity]
+```
+
+This installs `google-antigravity` as an optional dependency.
+
+<Callout type="info">
+  **Shares a key with Google ADK:** Both backends run on Gemini and read the same Google/Gemini key. If you already configured Google ADK, Antigravity works without re-entering anything.
+</Callout>
+
+## Related
+
+<CardGroup>
+  <Card title="Google ADK" icon="lucide:hexagon" href="/backends/google-adk">
+    Google's Agent Development Kit — another Gemini backend, with native search and code execution tools.
+  </Card>
+  <Card title="Claude Agent SDK" icon="lucide:sparkles" href="/backends/claude-sdk">
+    The recommended backend with native tools and MCP integration.
+  </Card>
+  <Card title="All Agent Backends" icon="lucide:layers" href="/backends">
+    Compare every backend side by side with capability badges.
+  </Card>
+</CardGroup>

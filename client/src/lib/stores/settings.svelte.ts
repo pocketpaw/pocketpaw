@@ -14,6 +14,7 @@ class SettingsStore {
       case "claude_agent_sdk": return s.claude_sdk_model ?? s.anthropic_model ?? "";
       case "openai_agents": return s.openai_agents_model ?? s.openai_model ?? "";
       case "google_adk": return s.google_adk_model ?? s.gemini_model ?? "";
+      case "antigravity": return s.antigravity_model ?? s.gemini_model ?? "";
       case "codex_cli": return s.codex_cli_model ?? "";
       case "copilot_sdk": return s.copilot_sdk_model ?? "";
       case "opencode": return s.opencode_model ?? "";

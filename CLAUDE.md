@@ -163,6 +163,7 @@ The processing pipeline lives in `agents/loop.py` and `agents/router.py`:
    - `opencode` — External server-based backend via REST API. Lives in `agents/opencode.py`.
    - `copilot_sdk` — GitHub Copilot SDK with multi-provider support. Lives in `agents/copilot_sdk.py`.
    - `deep_agents` — LangChain Deep Agents with LangGraph runtime, built-in planning/subagent tools, and multi-provider support. Lives in `agents/deep_agents.py`.
+   - `antigravity` — Google Antigravity SDK (`google-antigravity`), an async batteries-included Gemini agent with plain-callable tools and stdio MCP servers. Auths via `GEMINI_API_KEY` (resolved from `antigravity_api_key` → `gemini_api_key` → `google_api_key`). Lives in `agents/antigravity.py`.
 3. All backends implement the `AgentBackend` protocol (`agents/backend.py`) and yield standardized `AgentEvent` objects with `type`, `content`, and `metadata`
 4. Legacy backend names (`pocketpaw_native`, `open_interpreter`, `claude_code`, `gemini_cli`) are mapped to active backends via `_LEGACY_BACKENDS` in the registry
 
