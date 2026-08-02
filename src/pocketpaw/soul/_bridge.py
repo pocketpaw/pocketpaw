@@ -49,10 +49,21 @@ logger = logging.getLogger(__name__)
 # all 8 turns and moves only when somebody edits the soul.
 #
 # This is a DENYLIST on purpose, and the direction matters. Anything the list
-# does not name stays in the key, so a soul-protocol release that adds a section
-# is keyed by default: the failure mode is an extra rebuild, never a stale
-# prompt. An allowlist would fail the other way, which is the bug this whole
-# package exists to close.
+# does not name stays in the key, so a soul-protocol release that ADDS a section
+# is keyed by default: for additions the failure mode is an extra rebuild, not a
+# stale prompt. An allowlist would fail the other way, which is the bug this
+# whole package exists to close.
+#
+# The residual hazard is the other case, and it is worth naming rather than
+# leaving implied: a section ALREADY on this list whose MEANING changes — if
+# soul-protocol ever renders something behavioural under ``## Current State`` —
+# is excised from the key and does produce a stale prompt. Nothing here detects
+# that; only re-measuring against the shipping version does. The exposure is
+# bounded today because ``ClaudeSDKBackend._behavior_prefix`` still hashes both
+# sections independently, so a soul-enabled claude_sdk agent rebuilds anyway.
+# PA-6 deletes that prefix, which REMOVES the second line of defence and leaves
+# this list alone with the question — see the pin in
+# ``tests/test_prompt_identity_soul_key.py``.
 _VOLATILE_IDENTITY_SECTIONS = frozenset({"## Current State", "## Self-Understanding"})
 
 

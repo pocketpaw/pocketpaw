@@ -542,8 +542,20 @@ async def test_the_prefix_still_carries_the_two_sections_the_key_ignores():
     because moving them is a byte change this task is not allowed to make. So
     the claude_sdk warm client still rebuilds when they drift — measured at 7/8
     substantive turns — while a backend keying on `stable_digest` does not.
-    PA-6 removes `_behavior_prefix` and closes the gap; until then the two
-    disagree, and it is better to say so here than to let PA-6 discover it.
+
+    PA-6 removes `_behavior_prefix`, and READ THE DIRECTION BEFORE CALLING THAT
+    A WIN. It closes the gap toward MORE cache reuse: content the prefix
+    currently re-hashes every turn stops forcing a rebuild. That is only an
+    improvement if the digest is RIGHT about what is stable, and the digest's
+    stability rests entirely on `_VOLATILE_IDENTITY_SECTIONS` being a complete
+    and correct denylist. That list was measured, but its completeness against
+    FUTURE soul-protocol releases is assumed, not verified — the denylist is
+    built to fail toward an extra rebuild precisely because nobody has proven
+    it. If PA-6 deletes the prefix and a section is misclassified, the failure
+    is no longer a wasted rebuild, it is a stale prompt served from a warm
+    client. So PA-6 inherits the caveat with the claim: before deleting the
+    prefix, re-run the drift measurement against the soul-protocol version
+    shipping at that time rather than trusting this list.
     """
     prefix = ClaudeSDKBackend._behavior_prefix(await _full_prompt("abc123"))
 
