@@ -43,6 +43,12 @@ delivered-artifact collector around ``pool.run`` and drains it into a
 so a group/DM agent that delivers a file persists the structured signal too.
 This path has no run-transport SSE stream, so it emits no ``artifact`` event —
 that applies only to the streaming ``run_core`` path.
+Updated 2026-08-01 (Sense Phase 2, SP2-1): ``_run_agent_response`` passes
+``agent_id`` to ``attach_agent_identity`` as well as ``user_id``. This function is
+dispatched once PER responding agent — ``_dispatch_agent_responses`` fans a
+multi-agent room out into one call apiece — so the agent driving the run is
+unambiguous here even though the room isn't. In-process MCP tools read it back
+via ``agent_service.current_agent_id()``.
 """
 
 from __future__ import annotations
@@ -551,7 +557,12 @@ async def _run_agent_response(
     # it, so every ContextVar-scoped tool returned "requires workspace context
     # (call from a cloud chat session)". ``user_id`` is the agent itself — it is
     # the actor on this path, matching the cloud MCP tests' setup.
-    identity_tokens = attach_agent_identity(workspace_id=workspace_id, user_id=agent_id)
+    # SP2-1 — ``agent_id`` is BOTH the actor (``user_id``, as above) and the agent
+    # driving this run. This function is dispatched once per responding agent, so
+    # even a multi-agent room binds one unambiguous agent per call.
+    identity_tokens = attach_agent_identity(
+        workspace_id=workspace_id, user_id=agent_id, agent_id=agent_id
+    )
     # ART-1: bind a per-run collector so a ``deliver_artifact`` call on THIS
     # (group/DM) path lands a ``{type:"artifact", meta}`` attachment on the agent
     # message. This path has no run-transport SSE stream, so it persists the

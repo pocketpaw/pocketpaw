@@ -1,6 +1,29 @@
 # ee/pocketpaw_ee/paw_bar/agent_provisioning.py — auto-provision a DEDICATED
 # concierge agent per Paw Site.
 #
+# Updated 2026-08-02 (Sense Phase 2, SP2-5): ``ensure_site_agent`` gained the
+# keyword-only ``senses`` / ``sense_prefs``. Supplied, they pin the site's
+# concierge to a fixed capability set — written on CREATE, and on a RE-ensure
+# only when the stored value is still empty, so an owner's hand-edit survives
+# every later publish (``_seed_senses`` holds that rule and the reasoning).
+# ``None`` — what EVERY call site passes today — is byte-for-byte the old path.
+#
+# WHY THE HOOK IS INERT: the obvious thing to pass is "the sense for this site's
+# own API", and no such sense id exists. A Sense is filled by a CONNECTOR that
+# declares it (``connectors/<name>.yaml`` -> ``senses:``, indexed by
+# ``pocketpaw.senses.vocabulary.connectors_for_sense``), and a Paw Site's API is
+# not a connector — there is no site YAML under ``connectors/``, and the closed
+# core vocabulary (``CORE_SENSES``: email / calendar / code / payments / db /
+# docs) has no site-shaped member. Minting one would need a real connector def
+# behind it, which is the connector-distribution wave, not this slice.
+#
+# Even with an id in hand, a mounted sense would not reach a visitor yet: the
+# concierge chat endpoint refuses fail-closed (409 ``concierge_pocket_has_
+# connectors``) whenever the pocket's agent can reach ANY connector — see the
+# lockdown guard in ``paw_bar/router.py`` and its ``TODO(GA-blocker)``. So the
+# order is: GA lockdown mode -> a site connector that declares a sense -> pass it
+# here. The keywords exist now so that last step is one call-site edit.
+#
 # Updated 2026-07-30 (Paw Bar inbox D5): added ``widget_for_agent(agent_id,
 # workspace_id)`` — the REVERSE of the bind ``ensure_site_agent`` writes. D5 lets a
 # concierge run read its own ``agent:<id>`` knowledge scope, which makes "is this
@@ -181,11 +204,87 @@ async def _seed_connectors(agent: Any, site: Any) -> None:
     auto-binding). Intentionally a no-op today — the concierge is public and runs
     fail-closed with NO connectors until the untrusted/public claude_sdk lockdown
     mode ships (see ``concierge_chat``'s connector-lockdown guard). Present so the
-    provision path has one obvious place to wire connectors when that lands."""
+    provision path has one obvious place to wire connectors when that lands.
+
+    NOTE (SP2-5, the "is a site-API sense derivable?" question): no. A Sense is
+    filled by a CONNECTOR that declares it (``connectors/*.yaml`` -> ``senses:``),
+    and a Paw Site's own API is not a connector — nothing under ``connectors/``
+    represents it, and the core vocabulary
+    (``pocketpaw.senses.vocabulary.CORE_SENSES``: email / calendar / code /
+    payments / db / docs) has no site-shaped entry. So there is no id to pass, and
+    ``ensure_site_agent``'s sense keywords stay unpassed by every call site — see
+    the header for the full answer."""
     return None
 
 
-async def ensure_site_agent(site: Any, widget: Any) -> str | None:
+async def _seed_senses(
+    agent: Any,
+    owner_id: str,
+    workspace_id: str,
+    senses: list[str] | None,
+    sense_prefs: dict[str, str] | None,
+) -> None:
+    """Pin sense config onto an EXISTING concierge agent, never clobbering intent.
+
+    The re-ensure rule, in full: a field is written ONLY when the caller supplied
+    it AND the stored value is empty. Per field, not all-or-nothing — an agent
+    whose owner set ``senses`` by hand but left ``sense_prefs`` empty still gets
+    the provisioned pref. ``ensure_site_agent`` runs on three triggers and re-runs
+    on every publish, so anything else would mean an owner's hand-tuned mount list
+    silently reverting to the provisioned one the next time they hit publish.
+
+    Only touches an agent the SITE OWNER owns. A widget a human bound by hand to
+    someone else's agent is left completely alone — the module's existing
+    "manual binds are never overwritten" contract, extended to config.
+
+    Failure-soft like the rest of provisioning: a failed seed logs and leaves the
+    bind intact rather than un-provisioning a site.
+    """
+    if senses is None and sense_prefs is None:
+        return
+
+    from pocketpaw_ee.cloud.agents import service as agents_service
+    from pocketpaw_ee.cloud.agents.dto import UpdateAgentRequest
+
+    if str(getattr(agent, "owner", "")) != str(owner_id):
+        logger.debug(
+            "paw-bar concierge: agent %s is not owned by site owner %s; leaving sense config alone",
+            getattr(agent, "id", "?"),
+            owner_id,
+        )
+        return
+
+    config = getattr(agent, "config", None)
+    patch: dict[str, Any] = {}
+    if senses and not getattr(config, "senses", ()):
+        patch["senses"] = list(senses)
+    if sense_prefs and not getattr(config, "sense_prefs", ()):
+        patch["sense_prefs"] = dict(sense_prefs)
+    if not patch:
+        return
+
+    try:
+        await agents_service.update(
+            agents_service.legacy_ctx(owner_id, workspace_id),
+            agent.id,
+            UpdateAgentRequest(**patch),
+        )
+    except Exception:  # noqa: BLE001 — a sense seed is never a gate on a bind
+        logger.warning(
+            "paw-bar concierge: could not seed sense config %s onto agent %s",
+            sorted(patch),
+            getattr(agent, "id", "?"),
+            exc_info=True,
+        )
+
+
+async def ensure_site_agent(
+    site: Any,
+    widget: Any,
+    *,
+    senses: list[str] | None = None,
+    sense_prefs: dict[str, str] | None = None,
+) -> str | None:
     """Idempotently ensure ``widget`` is bound to a dedicated agent for ``site``.
 
     Returns the bound agent id, or ``None`` when provisioning could not complete
@@ -195,6 +294,15 @@ async def ensure_site_agent(site: Any, widget: Any) -> str | None:
     created in the SITE's workspace, owned by the site owner, and bound to the
     widget through the store — mirroring how the agents service derives ownership,
     never cross-tenant.
+
+    ``senses`` / ``sense_prefs`` (SP2-5) pin the site's concierge to a fixed set of
+    capabilities. A non-empty mount list is EXCLUSIVE — it is also what makes the
+    concierge sense surface reachable at all (SP2-4 grants the sense tools only to
+    an agent whose mount list is non-empty). Both are written on CREATE, and on a
+    RE-ensure only when the stored value is still empty, so an owner who edited
+    their concierge's senses in the dashboard keeps that edit through every later
+    publish. ``None`` (the default, and what every call site passes today) means no
+    behaviour change whatsoever — see ``_seed_senses`` and the module header.
     """
     from pocketpaw_ee.cloud._core.errors import ConflictError, NotFound
     from pocketpaw_ee.cloud.agents import service as agents_service
@@ -207,9 +315,9 @@ async def ensure_site_agent(site: Any, widget: Any) -> str | None:
     # (1) Respect an existing LIVE bind — a manual agent_id is never replaced.
     existing_id = getattr(widget, "agent_id", "") or ""
     if existing_id:
+        bound = None
         try:
-            await agents_service.get(existing_id)
-            return existing_id
+            bound = await agents_service.get(existing_id)
         except NotFound:
             # Stale bind (agent deleted) — fall through and re-provision.
             logger.info(
@@ -217,6 +325,9 @@ async def ensure_site_agent(site: Any, widget: Any) -> str | None:
                 widget.id,
                 existing_id,
             )
+        if bound is not None:
+            await _seed_senses(bound, owner_id, workspace_id, senses, sense_prefs)
+            return existing_id
 
     # (2) Resolve-or-create the dedicated agent. The slug is deterministic on the
     # site id, so a create that races or retries after a failed bind RESOLVES the
@@ -238,6 +349,10 @@ async def ensure_site_agent(site: Any, widget: Any) -> str | None:
             persona=concierge_persona(site.name),
             soul_archetype=_CONCIERGE_ARCHETYPE,
             # soul_enabled defaults True — the concierge carries a soul.
+            # SP2-5: the mount list lands at CREATE, so a brand-new concierge is
+            # sense-capable on its first run rather than after a follow-up PATCH.
+            senses=list(senses) if senses is not None else None,
+            sense_prefs=dict(sense_prefs) if sense_prefs is not None else None,
         )
         _seed_tags(body, site_id)
         _seed_identity(body, site, widget)
@@ -246,6 +361,10 @@ async def ensure_site_agent(site: Any, widget: Any) -> str | None:
         except ConflictError:
             # Lost a create race on the deterministic slug — adopt the winner.
             agent = await agents_service.get_by_slug(workspace_id, slug)
+            await _seed_senses(agent, owner_id, workspace_id, senses, sense_prefs)
+    else:
+        # Re-ensure on an agent that already exists under the deterministic slug.
+        await _seed_senses(agent, owner_id, workspace_id, senses, sense_prefs)
 
     # Connector seam (no-op today).
     await _seed_connectors(agent, site)
@@ -323,6 +442,9 @@ async def provision_widget_on_create(widget: Any, workspace_id: str) -> Any:
         site = await _canonical_site_for_pocket(workspace_id, widget.pocket_id)
         if site is None:
             return widget  # no site for this pocket — a plain widget, not a concierge
+        # No senses passed: there is no site-API sense id to pass yet, and the
+        # concierge connector lockdown would refuse anyway. See the header's
+        # "WHY THE HOOK IS INERT" — same at the other two triggers below.
         await ensure_site_agent(site, widget)
         refreshed = await _store().get_widget(widget.id, workspace_id=workspace_id)
         return refreshed or widget
@@ -398,6 +520,7 @@ async def ensure_site_widget(site: Any, workspace_id: str) -> Any | None:
         existing = await site_widget(site.pocket_id, workspace_id)
         if existing is not None:
             if not getattr(existing, "agent_id", ""):
+                # No senses — see the header's "WHY THE HOOK IS INERT".
                 await ensure_site_agent(site, existing)
                 refreshed = await _store().get_widget(existing.id, workspace_id=workspace_id)
                 return refreshed or existing
@@ -446,6 +569,7 @@ async def provision_on_concierge_enable(site: Any, workspace_id: str) -> None:
         widget = await site_widget(site.pocket_id, workspace_id)
         if widget is None or getattr(widget, "agent_id", ""):
             return
+        # No senses — see the header's "WHY THE HOOK IS INERT".
         await ensure_site_agent(site, widget)
     except Exception:  # noqa: BLE001 — provisioning must never 500 the settings PATCH
         logger.warning(
