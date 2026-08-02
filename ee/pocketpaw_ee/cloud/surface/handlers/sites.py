@@ -113,6 +113,22 @@
 # THE SAME TURN only when the user's request already asked to go live ("publish",
 # "make it live", "ship it"). The publish tool is still NAMED (the on-request path),
 # so nothing regresses for an explicit publish. Refine/chat branches untouched.
+#
+# Updated: 2026-08-02 (fix/concierge-tools-for-site-agent) — EVERY preamble in this
+# module now carries `_CONCIERGE_NOTE`. The reported bug was that an agent building
+# a site "sometimes does not know about concierge at all"; the cause was not a
+# tool-access gate but a total awareness blackout — "concierge" appeared zero times
+# in this file, zero times in the sites MCP tool descriptions, and zero times in the
+# bundled skills, so the only channel through which the agent could learn a site
+# ships with one was model sampling. That is what made it intermittent. The block is
+# unconditional: it is appended by `_create_preamble` (all three engines),
+# `_refine_preamble`, `_chat_preamble`, and `_frontend_preamble`, so no engine, mode,
+# flag, or lazily-loaded tool-id import can gate it off. It states what the concierge
+# is, that PUBLISHING (not drafting) provisions it, that it answers visitors from the
+# site's own synced knowledge, and that it can always reach a human — and it names NO
+# tool, because widget catalog/actions are owner-authored and configuring them from
+# chat is a real gap, not a capability to imply. See `_CONCIERGE_NOTE` for the
+# per-claim code citations.
 
 from __future__ import annotations
 
@@ -121,6 +137,69 @@ from typing import Any
 
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
 from pocketpaw_ee.sites_crew.models import DesignBrief
+
+# --- The concierge block (fix/concierge-tools-for-site-agent) -----------------
+#
+# THE BUG: "the agent building sites sometimes does not know about concierge at
+# all." It was not a tool-access gate — it was a total AWARENESS blackout. Before
+# this constant, the string "concierge" appeared ZERO times in every preamble in
+# this module, ZERO times in the sites MCP tool descriptions
+# (``agent/mcp_servers/sites.py`` + ``sites_create.py``), and ZERO times anywhere
+# in ``src/pocketpaw/bundled_skills/``. The publish tool's own result payload
+# (``sites.py::_publish_handler``) returns only ``{ok, site:{id, pocket_id, name,
+# url, deployed}}``, so not even a successful publish told the agent a bar had
+# just been grown onto the pages it deployed.
+#
+# With no source at all, whether the agent brought up the concierge was decided
+# by model sampling and by whatever the user happened to type. That is the whole
+# explanation for "sometimes": the gate was in the sampler, not in the code. One
+# always-present block replaces a coin flip with a fact.
+#
+# Every claim below is pinned to a code path, because a preamble that oversells
+# trades a blind agent for a confidently wrong one:
+#   * embedded on every published page — ``sites/service.py::_embed_concierge_bar``
+#     injects the snippet into the built tree between build and deploy;
+#   * provisioned at PUBLISH, not at draft — that same function is reached only on
+#     a live publish (a preview returns from ``publish_pocket`` well before it),
+#     and it funnels into ``paw_bar/agent_provisioning.py::ensure_site_widget`` →
+#     ``ensure_site_agent``, the third of the three provisioning triggers;
+#   * on by default — ``Site.concierge_enabled`` defaults True, and the embed
+#     reads an absent doc as enabled so a FIRST publish still gets its bar;
+#   * grounded in the site's own content — ``sites/kb_ingest.py``'s sync is
+#     scheduled at publish and at bind, so the concierge answers from the pages;
+#   * always able to fetch a human — ``agent/mcp_servers/pawbar.py`` registers the
+#     built-in ``pawbar_request_human`` on EVERY concierge run bound to a widget,
+#     declared actions or not.
+#
+# And the honest LIMIT, which is the reason this block names no tool: widget
+# ``catalog`` and ``actions`` are owner-authored only. No agent tool declares
+# them, on this surface or any other, so the block routes the user to the
+# dashboard instead of promising something that would hard-error. The word
+# "republish" is deliberately absent — the chat-mode preamble is a no-mutation
+# surface and its test forbids that string.
+_CONCIERGE_NOTE = (
+    "<site-concierge>\n"
+    "Every Paw Site we publish ships with a CONCIERGE: a Paw Bar chat widget "
+    "embedded on the live page, backed by a dedicated agent that belongs to that "
+    "one site. You do not build it and you do not wire it up — it is provisioned "
+    "automatically the moment the site goes live (publishing is what creates it, "
+    "so a draft does not have one yet), and it is ON by default for every site.\n"
+    "What it does for the business: it answers their VISITORS' questions about "
+    "the site, grounded in the site's own published content, which is synced into "
+    "its knowledge automatically. Every concierge can also hand a conversation to "
+    "a real person when a visitor asks for one.\n"
+    "KNOW THIS AND SAY IT when it is relevant — when the user asks what happens "
+    "after publishing, asks about chat / support / lead handling / answering "
+    "visitors, or is deciding whether to go live. It is a real part of the "
+    "deliverable, so never tell a user their site has no chat or no way to "
+    "capture a visitor's question.\n"
+    "WHAT YOU CANNOT DO: the greeting, the product catalog, and the concierge's "
+    "actions are owner-authored — the user sets them from the site's settings in "
+    "the dashboard. You have no tool for any of that, so point them at the "
+    "dashboard rather than offering to configure it from chat, and never claim you "
+    "changed a concierge setting.\n"
+    "</site-concierge>"
+)
 
 
 @functools.lru_cache(maxsize=1)
@@ -421,6 +500,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "at the in-app Preview, don't invent a live link.\n"
         "- Keep the 'site' / 'page' vocabulary throughout; never say 'pocket'.\n"
         "</sites-procedure>\n"
+        f"{_CONCIERGE_NOTE}\n"
         f"{_design_taste_system()}"
     )
 
@@ -486,7 +566,8 @@ def _refine_preamble(meta: SurfaceMeta) -> str:
         "`parallax`, or `spotlight` (they need client JS and hide content on a "
         'static page). Keep `type="site"` + `pattern="landing"` on the pocket. '
         "Keep talking 'site' / 'page', never 'pocket'.\n"
-        "</sites-procedure>"
+        "</sites-procedure>\n"
+        f"{_CONCIERGE_NOTE}"
     )
 
 
@@ -657,7 +738,8 @@ def _frontend_preamble(meta: SurfaceMeta, brief: DesignBrief) -> str:
         "After it publishes, relay any publish error — never claim a phantom "
         "publish — and SHOW the live `url` plus a link to /sites. Keep talking "
         "'site' / 'page', never 'pocket'.\n"
-        "</sites-procedure>"
+        "</sites-procedure>\n"
+        f"{_CONCIERGE_NOTE}"
     )
 
 
@@ -695,7 +777,8 @@ def _chat_preamble(meta: SurfaceMeta) -> str:
         "site. If the user actually wants a CHANGE applied, tell them to switch "
         "the toggle to BUILD — in Chat mode you only answer questions and never "
         "touch the live page. Keep talking 'site' / 'page', never 'pocket'.\n"
-        "</sites-procedure>"
+        "</sites-procedure>\n"
+        f"{_CONCIERGE_NOTE}"
     )
 
 

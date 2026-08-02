@@ -7,6 +7,11 @@ Extracted from dashboard.py — contains:
 - ``shutdown_event()`` — tears down all services
 
 Changes:
+- 2026-08-01: ``startup_event`` installs the asyncio accept-noise filter
+  (``pocketpaw.asyncio_noise``) as its first act, so the Windows proactor
+  stops logging a full traceback every time a client aborts a connection
+  mid-accept. Covers both server modes — ``dashboard.py`` and
+  ``api/serve.py`` share this lifespan. (fix/asyncio-accept-noise)
 - 2026-07-12: removed the ``bundled_kb`` (ripple-recipes) boot-time mirror.
   The hand-authored ripple pattern recipes biased the agent toward fixed
   layouts; design breadth now comes from live design references, not a
@@ -32,6 +37,7 @@ import logging
 from datetime import UTC
 
 import pocketpaw.dashboard_state as _state
+from pocketpaw.asyncio_noise import install_accept_noise_filter
 from pocketpaw.bus import get_message_bus
 from pocketpaw.config import Settings
 from pocketpaw.daemon import get_daemon
@@ -182,6 +188,10 @@ async def startup_event(
         Callable for starting a channel adapter. Injected from dashboard.py
         to avoid circular import with dashboard_channels.
     """
+    # Silence the Windows proactor's aborted-accept tracebacks before any
+    # socket work starts. Real errors still reach the default handler.
+    install_accept_noise_filter()
+
     # Start Message Bus Integration
     bus = get_message_bus()
     await ws_adapter.start(bus)
