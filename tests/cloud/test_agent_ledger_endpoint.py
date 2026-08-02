@@ -222,3 +222,127 @@ async def test_the_visibility_gate_runs_before_any_read(client, monkeypatch):
     res = await c.get(f"/agents/{_AGENT}/ledger")
     assert res.status_code in (403, 404, 500)
     assert "secret" not in res.text
+
+
+# --------------------------------------------------------------------------- #
+# AL-4 — the reconcile drift alarm
+#
+# Every emitter in this design is fail-soft, so a broken one is SILENT: it looks
+# exactly like a quiet week. This endpoint is what makes fail-soft an acceptable
+# trade rather than a slow leak, which means the tests that matter here are the
+# ones proving the alarm actually FIRES — a reconcile that always says "healthy"
+# is worse than none, because it is trusted.
+# --------------------------------------------------------------------------- #
+
+
+async def _approve_one(*, ref: str, customer_reply: bool = False) -> str:
+    """Approve one real Instinct action in _WS. Returns its id.
+
+    Goes through the real store rather than a fake so the comparison is against
+    the same rows the dashboard's own feeds read — a reconcile validated against
+    a stub proves the stub agrees with itself.
+    """
+    from pocketpaw.instinct.models import ActionCategory, ActionTrigger
+
+    instinct = stores.get_instinct_store(workspace_id=_WS)
+    params = {"_customer_reply": {"widget_id": "w1"}} if customer_reply else {}
+    action = await instinct.propose(
+        pocket_id="pocket-1",
+        title=f"ask {ref}",
+        description="",
+        recommendation="ok",
+        trigger=ActionTrigger(type="connector", source="paw_bar:w1", reason="test"),
+        category=ActionCategory.EXTERNAL,
+        parameters=params,
+        workspace_id=_WS,
+    )
+    await instinct.approve(action.id, approver="user:maya")
+    return action.id
+
+
+@pytest.mark.asyncio
+async def test_reconcile_is_healthy_when_every_emitter_kept_up(client):
+    """The baseline: sources and ledger agree, so nothing is drifting."""
+    c, ledger = client
+    act = await _approve_one(ref="r1")
+    # AL-1's emitter already wrote the approved row through the real path; the
+    # delivered row is AL-2's, emitted on a different path, so write it here.
+    await ledger.append(_row(ref=act, kind=KIND_ACTION_APPROVED))
+
+    res = await c.get("/agents/analytics/reconcile?window=30d")
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["checks"]["approved"]["source"] == 1
+    assert body["checks"]["approved"]["ledger"] == 1
+    assert body["checks"]["approved"]["delta"] == 0
+    assert body["healthy"] is True
+    assert body["drifting"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_silently_failing_emitter_shows_up_as_drift_and_is_NAMED(client):
+    """The alarm's whole reason to exist.
+
+    An approval happened and no ledger row followed — exactly what a broken
+    fail-soft emitter looks like from the outside. The response must not merely
+    say "unhealthy": it must name WHICH source is behind, or the owner is left
+    diffing two systems by hand.
+    """
+    c, ledger = client
+
+    # Simulate the failure FAITHFULLY: break the emitter's store seam so the
+    # approvals happen and no rows follow. Deleting rows after the fact would
+    # test the same arithmetic while proving nothing about the real path — this
+    # is the actual shape of a silently-failing fail-soft emitter.
+    class _ExplodingStore:
+        async def append(self, row):  # noqa: ARG002
+            raise RuntimeError("ledger disk is on fire")
+
+    original = stores.get_agent_ledger_store_beside
+    stores.get_agent_ledger_store_beside = lambda _p: _ExplodingStore()  # type: ignore[assignment]
+    try:
+        await _approve_one(ref="r1")
+        await _approve_one(ref="r2")
+    finally:
+        stores.get_agent_ledger_store_beside = original  # type: ignore[assignment]
+
+    assert await ledger.query(kinds=[KIND_ACTION_APPROVED]) == [], (
+        "the emitter still wrote — this test is not simulating the failure"
+    )
+
+    res = await c.get("/agents/analytics/reconcile?window=30d")
+
+    body = res.json()
+    assert body["checks"]["approved"]["source"] == 2
+    assert body["checks"]["approved"]["delta"] > 0, "drift was not detected"
+    assert body["checks"]["approved"]["behind"] == "approved", "the alarm did not name the source"
+    assert body["healthy"] is False
+    assert "approved" in body["drifting"]
+
+
+@pytest.mark.asyncio
+async def test_delivered_only_counts_approvals_that_carry_a_customer_reply(client):
+    """An always-ringing alarm is an alarm nobody hears.
+
+    Only paw-bar decisions produce a delivered row. Comparing EVERY approval
+    against deliveries would report a permanent deficit for every ordinary agent
+    in the workspace and train the owner to ignore the endpoint.
+    """
+    c, _ledger = client
+    await _approve_one(ref="plain")  # an ordinary approval — no delivery expected
+    await _approve_one(ref="bar", customer_reply=True)
+
+    body = (await c.get("/agents/analytics/reconcile?window=30d")).json()
+
+    assert body["checks"]["approved"]["source"] == 2
+    assert body["checks"]["delivered"]["source"] == 1, "a non-paw-bar approval was counted"
+
+
+@pytest.mark.asyncio
+async def test_a_hostile_window_is_a_refusal_not_a_server_error(client):
+    """422, never 500 — including the over-large case that once escaped as one."""
+    c, _ledger = client
+    for window in ("nonsense", "0d", "99999999999d"):
+        res = await c.get(f"/agents/analytics/reconcile?window={window}")
+        assert res.status_code == 422, f"{window} → {res.status_code}"
