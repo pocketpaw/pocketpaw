@@ -1032,3 +1032,97 @@ class TestNoteAuthorCoercion:
 
         assert fields["note"]["author"] == author
         assert isinstance(fields["note"]["author"], str)
+
+
+# ── In-thread approvals (2026-07-31) — pending_actions ride the transcript ────
+# The dashboard's thread has had the approval card since slices 2+4 with two
+# wire sources (transcript pending_actions preferred, decisions-filtered-by-ref
+# fallback) and the backend served NEITHER: a real approval sat behind the
+# "approve it from Decisions" notice. These pin both halves of the fix.
+
+
+@pytest.mark.asyncio
+async def test_transcript_carries_this_visitors_pending_decisions(client):
+    """A PENDING decision rides the transcript — scoped to THIS visitor only.
+
+    The wrong-scoping failure mode is concrete: a card from somebody else's
+    conversation gets an owner approving a stranger's booking into the wrong
+    thread. So the OTHER visitor's pending row must be absent, not just the
+    settled ones.
+    """
+    c, store = client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    await _mk_run()
+
+    mine = await _mk_decision(store, widget.id, event_type="paw_bar_action:book_visit")
+    await _mk_decision(store, widget.id, customer_ref="cust-somebody-else")
+    await _mk_decision(store, widget.id, state=DecisionState.DELIVERED)
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/conversations/{_REF}")
+    assert res.status_code == 200, res.text
+    body = res.json()
+
+    actions = body["pending_actions"]
+    assert [a["id"] for a in actions] == [mine.instinct_action_id], (
+        "pending_actions must be exactly this visitor's still-pending rows — "
+        "no other visitor, no settled decision"
+    )
+    assert actions[0]["customer_ref"] == _REF
+    assert actions[0]["status"] == "pending"
+    assert actions[0]["verb_or_kind"]
+
+
+@pytest.mark.asyncio
+async def test_transcript_carries_bot_paused(client):
+    """The mute flag arrives with the same read that renders the timeline."""
+    c, store = client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    await _mk_run()
+    await store.upsert_conversation_on_visitor_turn(widget.id, _REF, "ws-1")
+    await store.update_conversation(
+        widget.id,
+        _REF,
+        workspace_id="ws-1",
+        bot_paused=True,
+        last_owner_at=datetime.now().isoformat(),
+    )
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/conversations/{_REF}")
+    assert res.status_code == 200, res.text
+    assert res.json()["bot_paused"] is True
+
+
+@pytest.mark.asyncio
+async def test_transcript_survives_a_broken_decisions_read(client, monkeypatch):
+    """Cards degrade; the transcript never 500s over its garnish."""
+    c, store = client
+    site = await _site()
+    await store.create_widget(_widget())
+    await _mk_run()
+
+    async def _boom(*a: Any, **k: Any):
+        raise RuntimeError("decisions store down")
+
+    monkeypatch.setattr(store, "list_decisions_for_widget", _boom)
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/conversations/{_REF}")
+    assert res.status_code == 200, res.text
+    assert res.json()["pending_actions"] == []
+    assert res.json()["messages"], "the transcript itself must still be served"
+
+
+@pytest.mark.asyncio
+async def test_decisions_list_carries_customer_ref(client):
+    """The fallback source: without customer_ref on each item the thread cannot
+    attribute a card to the open conversation and must refuse to guess."""
+    c, store = client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    await _mk_decision(store, widget.id)
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/decisions")
+    assert res.status_code == 200, res.text
+    items = res.json()["items"]
+    assert items and items[0]["customer_ref"] == _REF
