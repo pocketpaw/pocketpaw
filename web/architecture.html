@@ -1,0 +1,299 @@
+<!--
+  pocketpaw-architecture.html — public one-page tech/architecture overview,
+  created 2026-08-02 as a linkable artifact for accelerator applications
+  (SPC F26 first). Same visual system as founder-video-slides.html: ink/bone/
+  amber, Fraunces + IBM Plex Mono. Content: positioning line, the five-layer
+  stack diagram (built-here vs rented), kernel glossary, verb rail, the
+  compounding claim, and proof links (live published site + the full 8-repo
+  list: 5 public linked with a star badge, 3 private shown unlinked and marked
+  "private · open for diligence"), and a team section (three members with
+  GitHub avatars/links pulled from github.com/<user>.png). Self-contained
+  except Google Fonts + GitHub avatar images. No private data — safe to host
+  publicly.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pocketpaw — architecture</title>
+<meta name="description" content="One OS for small business: every capability is a verb on a shared kernel. Hand-built stack, open-source core.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,340;9..144,520;9..144,640&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#111015; --paper:#F2EEE6; --dim:#8D8A83; --amber:#E39A4C;
+    --line:#2A2830; --panel:#17161C;
+    --serif:"Fraunces", Georgia, serif;
+    --mono:"IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    background:var(--ink); color:var(--paper); font-family:var(--serif); font-weight:340;
+    -webkit-font-smoothing:antialiased; line-height:1.5;
+  }
+  .wrap{max-width:880px; margin:0 auto; padding:9vh 24px 12vh}
+  section{margin-top:9vh}
+  .eyebrow{
+    font-family:var(--mono); font-size:13px; font-weight:500; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--amber); margin-bottom:2.2vh;
+  }
+  h1{font-size:clamp(34px,5.5vw,58px); line-height:1.06; font-weight:520; letter-spacing:-.015em}
+  h1 em{font-style:italic; font-weight:640; color:var(--amber)}
+  h2{font-size:clamp(24px,3vw,34px); font-weight:520; margin-bottom:2.5vh}
+  p.lead{margin-top:2.5vh; font-size:clamp(17px,2vw,21px); color:var(--dim); max-width:56ch}
+  p.lead strong{color:var(--paper); font-weight:520}
+  a{color:var(--amber); text-decoration:none; border-bottom:1px solid #4a3d2b}
+  a:hover{border-bottom-color:var(--amber)}
+  a:focus-visible{outline:2px solid var(--amber); outline-offset:3px; border-radius:2px}
+
+  /* stack diagram */
+  .own,.rentgrp{position:relative; padding-right:56px}
+  .band{
+    display:flex; justify-content:space-between; align-items:baseline; gap:24px;
+    padding:20px 22px; border:1px solid var(--line); background:var(--panel); margin-top:-1px;
+  }
+  .own .band:first-child{border-radius:10px 10px 0 0; margin-top:0}
+  .lname{
+    font-family:var(--mono); font-size:12px; font-weight:500; letter-spacing:.14em;
+    text-transform:uppercase; color:var(--dim); flex-shrink:0;
+  }
+  .rside{display:flex; flex-direction:column; align-items:flex-end; gap:5px; text-align:right}
+  .litems{font-family:var(--mono); font-size:clamp(13px,1.8vw,16px); color:var(--paper)}
+  .repos{font-family:var(--mono); font-size:11px; color:#5F5C64}
+  .repos::before{content:"⎇ "; color:#47444d}
+  .band.core{background:#201A12; padding:26px 22px}
+  .band.core .lname{color:var(--amber)}
+  .band.core .litems{color:var(--amber)}
+  .rentgrp .band{border-style:dashed; background:transparent; border-radius:0 0 10px 10px}
+  .rentgrp .litems{color:var(--dim)}
+  .gtag{
+    position:absolute; right:14px; top:50%; writing-mode:vertical-rl; transform:translateY(-50%);
+    font-family:var(--mono); font-size:11px; font-weight:500; letter-spacing:.22em; text-transform:uppercase;
+  }
+  .own .gtag{color:var(--amber)} .rentgrp .gtag{color:var(--dim)}
+
+  /* kernel glossary */
+  .kernel{display:grid; grid-template-columns:auto 1fr; gap:14px 32px; align-items:baseline}
+  .kernel .k{font-family:var(--mono); font-weight:500; color:var(--amber); font-size:clamp(15px,1.9vw,19px)}
+  .kernel .v{font-size:clamp(15px,1.9vw,19px)}
+  .kernel .v span{color:var(--dim)}
+
+  /* verbs */
+  .rail{display:flex; gap:10px; flex-wrap:wrap; font-family:var(--mono); font-size:clamp(13px,1.7vw,16px)}
+  .verb{padding:.5em .9em; border:1px solid var(--line); border-radius:8px; background:var(--panel)}
+  .verb.hot{border-color:var(--amber); color:var(--amber)}
+  .rail .more{color:var(--dim); align-self:center}
+
+  /* proof */
+  .proof{display:grid; gap:14px}
+  .proof .row{
+    display:flex; justify-content:space-between; gap:20px; align-items:baseline;
+    padding:16px 20px; border:1px solid var(--line); border-radius:10px; background:var(--panel);
+    flex-wrap:wrap;
+  }
+  .proof .what{font-size:clamp(15px,1.9vw,18px)}
+  .proof .stat{font-family:var(--mono); font-size:13px; color:var(--dim)}
+  .repolist{display:grid; gap:8px; margin-top:14px}
+  .repolist .rrow{
+    display:flex; justify-content:space-between; gap:16px; align-items:baseline;
+    padding:10px 20px; border:1px solid var(--line); border-radius:8px; flex-wrap:wrap;
+  }
+  .repolist .rname{font-family:var(--mono); font-size:clamp(13px,1.6vw,15px)}
+  .repolist .rwhat{font-size:clamp(13px,1.6vw,15px); color:var(--dim)}
+  .badge{
+    font-family:var(--mono); font-size:11px; letter-spacing:.1em; text-transform:uppercase;
+    padding:.25em .7em; border-radius:99px; white-space:nowrap;
+  }
+  .badge.pub{color:var(--amber); border:1px solid #4a3d2b}
+  .badge.priv{color:var(--dim); border:1px dashed var(--line)}
+  .rrow.priv .rname{color:var(--dim)}
+
+  /* team */
+  .team{display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+  .member{
+    display:flex; gap:16px; align-items:center;
+    padding:16px 18px; border:1px solid var(--line); border-radius:10px; background:var(--panel);
+  }
+  .member img{width:52px; height:52px; border-radius:50%; border:1px solid var(--line)}
+  .member .who{display:flex; flex-direction:column; gap:3px}
+  .member .nm{font-size:clamp(15px,1.9vw,18px); font-weight:520}
+  .member .role{font-family:var(--mono); font-size:12px; color:var(--dim)}
+  .member .gh{font-family:var(--mono); font-size:12px}
+
+  footer{margin-top:11vh; font-family:var(--mono); font-size:13px; color:var(--dim)}
+  @media (max-width:640px){ .own,.rentgrp{padding-right:40px} .band{flex-direction:column; align-items:flex-start} .rside{align-items:flex-start; text-align:left} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">Pocketpaw · technical overview</div>
+    <h1>One place where a business and its AI staff <em>work</em>.</h1>
+    <p class="lead">A small business buying AI today ends up with a pile of subscriptions that don't share a memory. Pocketpaw is one operating system where each capability is a <strong>verb on a shared kernel</strong>: /sites builds the storefront and staffs it with a concierge, /growth finds customers for the same business without being re-briefed. One memory, one set of agents, one approval gate.</p>
+  </header>
+
+  <section>
+    <h2>The stack</h2>
+    <div class="own">
+      <div class="band">
+        <span class="lname">surfaces</span>
+        <span class="rside">
+          <span class="litems">owner console · site concierge · published sites</span>
+          <span class="repos">paw-enterprise · paw-bar</span>
+        </span>
+      </div>
+      <div class="band">
+        <span class="lname">verbs</span>
+        <span class="rside">
+          <span class="litems">/sites · /growth · /chat · /code · /foresight …</span>
+          <span class="repos">pocketpaw</span>
+        </span>
+      </div>
+      <div class="band core">
+        <span class="lname">kernel</span>
+        <span class="rside">
+          <span class="litems">soul · fabric · ripple · instinct · kb · journal</span>
+          <span class="repos">pocketpaw · soul-protocol · ripple · kb-go</span>
+        </span>
+      </div>
+      <div class="band">
+        <span class="lname">engines</span>
+        <span class="rside">
+          <span class="litems">site generator → edge · model gateway · soul protocol</span>
+          <span class="repos">paw-sites · omnigate</span>
+        </span>
+      </div>
+      <span class="gtag">built here</span>
+    </div>
+    <div class="rentgrp">
+      <div class="band">
+        <span class="lname">models</span>
+        <span class="rside"><span class="litems">Claude · Gemini · OpenAI · local</span></span>
+      </div>
+      <span class="gtag">rented</span>
+    </div>
+    <p class="lead">Eight hand-built repos. The only rented layer is the model, swappable behind our own gateway — backend-agnostic by design, self-hostable by default.</p>
+  </section>
+
+  <section>
+    <h2>The kernel</h2>
+    <div class="kernel">
+      <span class="k">soul</span>     <span class="v">memory <span>— agents remember, portably; an open protocol, not a vendor table</span></span>
+      <span class="k">fabric</span>   <span class="v">a typed ontology of the business itself <span>— the customer's data model, not ours</span></span>
+      <span class="k">ripple</span>   <span class="v">generative UI <span>— agent output validated against a closed verb set, mechanically</span></span>
+      <span class="k">instinct</span> <span class="v">the approval gate <span>— nothing irreversible happens without the owner's yes</span></span>
+      <span class="k">kb</span>       <span class="v">knowledge <span>— everything the business knows, compiled and searchable</span></span>
+      <span class="k">journal</span>  <span class="v">the event spine <span>— every action recorded, auditable</span></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Verbs compound</h2>
+    <div class="rail">
+      <span class="verb hot">/sites</span><span class="verb hot">/growth</span>
+      <span class="verb">/chat</span><span class="verb">/agents</span><span class="verb">/knowledge</span>
+      <span class="verb">/studio</span><span class="verb">/code</span><span class="verb">/foresight</span>
+      <span class="more">…</span>
+    </div>
+    <p class="lead">The kernel took three years. A new verb now takes weeks, because it's assembly, not construction: /foresight (population-scale decision simulation) shipped on existing primitives; the agent that builds a site is the same one that staffs it and sells for it. These layers compose into any verb we can imagine.</p>
+  </section>
+
+  <section>
+    <h2>Proof</h2>
+    <div class="proof">
+      <div class="row">
+        <span class="what"><a href="https://paw-site-eb11294be1c1347d1499a4dd.pawsites.workers.dev">a live published site</a> — built from one sentence, staffed by its concierge</span>
+        <span class="stat">real Austin business · edge-deployed</span>
+      </div>
+      <div class="row">
+        <span class="what"><a href="https://pocketpaw.xyz">pocketpaw.xyz</a> — the project home</span>
+        <span class="stat">open source</span>
+      </div>
+    </div>
+
+    <h2 style="margin-top:7vh">The repos</h2>
+    <div class="repolist">
+      <div class="rrow">
+        <span class="rname"><a href="https://github.com/pocketpaw/pocketpaw">github.com/pocketpaw/pocketpaw</a></span>
+        <span class="rwhat">the core — kernel + verbs</span>
+        <span class="badge pub">public · 876★ / 326 forks</span>
+      </div>
+      <div class="rrow">
+        <span class="rname"><a href="https://github.com/qbtrix/soul-protocol">github.com/qbtrix/soul-protocol</a></span>
+        <span class="rwhat">portable AI memory — spec + reference implementation</span>
+        <span class="badge pub">public</span>
+      </div>
+      <div class="rrow">
+        <span class="rname"><a href="https://github.com/qbtrix/ripple-iui">github.com/qbtrix/ripple-iui</a></span>
+        <span class="rwhat">generative UI runtime + widget catalog</span>
+        <span class="badge pub">public</span>
+      </div>
+      <div class="rrow">
+        <span class="rname"><a href="https://github.com/qbtrix/kb-go">github.com/qbtrix/kb-go</a></span>
+        <span class="rwhat">knowledge engine — LLM-compiled, BM25 search</span>
+        <span class="badge pub">public</span>
+      </div>
+      <div class="rrow">
+        <span class="rname"><a href="https://github.com/qbtrix/paw-bar">github.com/qbtrix/paw-bar</a></span>
+        <span class="rwhat">the site concierge widget</span>
+        <span class="badge pub">public</span>
+      </div>
+      <div class="rrow priv">
+        <span class="rname">github.com/qbtrix/paw-enterprise</span>
+        <span class="rwhat">owner console</span>
+        <span class="badge priv">private · open for diligence</span>
+      </div>
+      <div class="rrow priv">
+        <span class="rname">github.com/qbtrix/paw-sites</span>
+        <span class="rwhat">site generator + edge publish pipeline</span>
+        <span class="badge priv">private · open for diligence</span>
+      </div>
+      <div class="rrow priv">
+        <span class="rname">github.com/qbtrix/inference-gateway</span>
+        <span class="rwhat">omnigate — the model gateway</span>
+        <span class="badge priv">private · open for diligence</span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Team</h2>
+    <div class="team">
+      <div class="member">
+        <img src="https://github.com/prakashUXtech.png?size=104" alt="Prakash">
+        <span class="who">
+          <span class="nm">Prakash</span>
+          <span class="role">founder · design + engineering · wrote the kernel</span>
+          <span class="gh"><a href="https://github.com/prakashUXtech">github.com/prakashUXtech</a></span>
+        </span>
+      </div>
+      <div class="member">
+        <img src="https://github.com/DevRohit06.png?size=104" alt="Rohit">
+        <span class="who">
+          <span class="nm">Rohit</span>
+          <span class="role">engineer, trained in-house · top contributor on core</span>
+          <span class="gh"><a href="https://github.com/DevRohit06">github.com/DevRohit06</a></span>
+        </span>
+      </div>
+      <div class="member">
+        <img src="https://github.com/AMRITESH240304.png?size=104" alt="Amritesh">
+        <span class="who">
+          <span class="nm">Amritesh</span>
+          <span class="role">engineer, trained in-house</span>
+          <span class="gh"><a href="https://github.com/AMRITESH240304">github.com/AMRITESH240304</a></span>
+        </span>
+      </div>
+    </div>
+    <p class="lead">Plus a dozen community contributors on the open-source core.</p>
+  </section>
+
+  <footer>
+    Prakash · Bhubaneswar, India · funded by my own consulting work
+  </footer>
+
+</div>
+</body>
+</html>
