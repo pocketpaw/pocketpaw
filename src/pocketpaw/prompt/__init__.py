@@ -5,6 +5,9 @@ Updated: 2026-08-02 (PA-2) — exports :class:`SurfaceContextLayer`, the surface
   the user is looking at. Its text and its key both arrive from the EE resolver
   as plain data; see the module docstring for why the key cannot be computed
   from the text here.
+Updated: 2026-08-02 (PA-3) — exports :class:`RetrievalLayer`, the per-message
+  soul recall. It is the first layer that exists to ANSWER ``cache_key`` with
+  ``None``, and it renders LAST: stable first, volatile last.
 
 The public surface for anyone writing a prompt layer or consuming an assembled
 prompt. Start at :class:`LayerOutput` — its ``cache_key`` field is what makes
@@ -17,6 +20,7 @@ from pocketpaw.prompt.identity import AgentIdentityLayer
 from pocketpaw.prompt.layer import LayerOutput, PromptContext, PromptLayer
 from pocketpaw.prompt.passthrough import LegacyTailLayer
 from pocketpaw.prompt.registry import PromptLayerRegistry, prompt_layer_registry
+from pocketpaw.prompt.retrieval import RetrievalLayer
 from pocketpaw.prompt.surface import SurfaceContextLayer
 
 __all__ = [
@@ -28,6 +32,7 @@ __all__ = [
     "PromptContext",
     "PromptLayer",
     "PromptLayerRegistry",
+    "RetrievalLayer",
     "SurfaceContextLayer",
     "assemble",
     "prompt_layer_registry",

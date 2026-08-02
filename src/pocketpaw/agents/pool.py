@@ -3,6 +3,13 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Updated: 2026-08-02 (PA-3, feat/prompt-assembler-seam) — the per-message soul
+  recall left ``legacy_tail`` for its own ``retrieval`` layer, which DECLARES
+  itself volatile (``cache_key=None``) rather than being inferred as volatile by
+  ``ClaudeSDKBackend._behavior_prefix``'s string surgery two modules away. It
+  renders LAST, so the assembled bytes moved from ``instructions → recall →
+  knowledge`` to ``instructions → knowledge → recall``; see the comment on
+  ``_SYSTEM_PROMPT_LAYERS`` for why that is free and where it is pinned.
 Updated: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — ``run`` and ``prewarm``
   accept ``surface_preamble: str`` + ``surface_cache_key: str | None``, the
   surface the user is looking at and what the EE handler that built it says it
@@ -158,7 +165,19 @@ logger = logging.getLogger(__name__)
 #     with, so the agent's prompt described the pocket as it looked when the
 #     session started. It does mean a turn that changes the surface rebuilds the
 #     subprocess — the same trade the home-pocket backend summary already makes.
-_SYSTEM_PROMPT_LAYERS = ("identity", "surface", "legacy_tail")
+#
+# ``retrieval`` renders LAST (PA-3): stable first, volatile last. Extracting the
+# per-message soul recall out of ``legacy_tail`` MOVED it — the bytes used to run
+# ``instructions → recall → knowledge`` and now run ``instructions → knowledge →
+# recall`` — because the tail still holds ``instructions`` and splitting those
+# out is PA-4's slice. The move is deliberate and cost nothing measurable: both
+# trailing blocks are per-message volatile, so their relative order cannot affect
+# prompt caching, ``_behavior_prefix`` cuts at the earliest volatile marker and
+# both orders open that region at the same offset (pinned in
+# ``tests/test_prompt_retrieval_layer.py``), and the end of the prompt is the
+# best-attended position — which memories retrieved for THIS question earn over
+# a knowledge-base dump.
+_SYSTEM_PROMPT_LAYERS = ("identity", "surface", "legacy_tail", "retrieval")
 
 
 def _resolve_agent_model() -> Any:
@@ -390,22 +409,28 @@ class AgentPool:
           cloud layer and handed here as plain data. KEYED, on what the handler
           that built the preamble says it read (``None``, i.e. no key, on every
           path with no surface — OSS local runs, the channel adapters).
-        * ``legacy_tail`` — the authoritative ``instructions``, the
-          per-message soul recall and the knowledge wrapper, still one block.
-          UNKEYED: it carries the per-message recall, so keying it would move
-          the digest every turn and destroy the cache it exists to protect.
+        * ``legacy_tail`` — the authoritative ``instructions`` and the knowledge
+          wrapper, still one block. UNKEYED: the wrapper's content is a
+          per-message KB retrieval, so keying the pair would move the digest
+          every turn and destroy the cache it exists to protect. PA-4 splits
+          ``instructions`` out, which is what lets them take a real key.
+        * ``retrieval`` — the per-message soul recall, keyed on nothing because
+          it is keyed on the user's message. UNKEYED, and unlike the tail that
+          is its PURPOSE rather than a limitation: it is the layer that makes
+          "declares itself volatile" a thing a layer can do.
 
         Factored out of ``run`` (feat/claude-sdk-prewarm) so ``prewarm`` builds
         the IDENTICAL prompt the first real turn will. The Claude SDK warm-client
         cache key hashes the prompt's STABLE behavioral prefix (soul/persona +
-        override + ``instructions``); the volatile tail this also appends
-        (``## Relevant Past Memories`` soul recall, ``## Your Knowledge Base``)
-        is stripped before hashing, so a prewarm that passes ``message=""`` /
-        ``knowledge_context=""`` still hashes to the SAME prefix as the run that
-        passes the real values — which is exactly what makes the prewarmed client
-        reused rather than evicted on turn 1. That contract is unchanged: the
-        layers render the same text in the same order, and ``prewarm`` passes
-        ``assembled.text`` where it used to pass the string.
+        override + surface + ``instructions``); the volatile tail this also
+        appends (``## Your Knowledge Base``, then the ``## Relevant Past
+        Memories`` soul recall) is stripped before hashing, so a prewarm that
+        passes ``message=""`` / ``knowledge_context=""`` still hashes to the SAME
+        prefix as the run that passes the real values — which is exactly what
+        makes the prewarmed client reused rather than evicted on turn 1. That
+        contract survives PA-3's reorder: the cut takes the EARLIEST volatile
+        marker, and swapping two blocks that are both below it does not move
+        where the volatile region begins.
         """
         ctx = PromptContext(
             instance=instance,

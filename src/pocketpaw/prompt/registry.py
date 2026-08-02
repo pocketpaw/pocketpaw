@@ -4,6 +4,9 @@ Created: 2026-08-02 (PA-1, feat/prompt-assembler-seam).
 Updated: 2026-08-02 (PA-2) — registers ``surface``. It holds no surface state
   itself (every per-run input still arrives on ``PromptContext``), so the
   process-wide instance stays safe to share across tenants.
+Updated: 2026-08-02 (PA-3) — registers ``retrieval``, the per-message soul
+  recall extracted from ``legacy_tail``. Stateless for the same reason: it
+  reaches the soul through ``ctx.instance``, never through a field of its own.
 
 Follows the runtime's registry convention (workspace engineering charter,
 Pillar 3): ``register`` / ``get`` / ``list`` over a name-keyed dict, plus one
@@ -17,6 +20,7 @@ from __future__ import annotations
 from pocketpaw.prompt.identity import AgentIdentityLayer
 from pocketpaw.prompt.layer import PromptLayer
 from pocketpaw.prompt.passthrough import LegacyTailLayer
+from pocketpaw.prompt.retrieval import RetrievalLayer
 from pocketpaw.prompt.surface import SurfaceContextLayer
 
 
@@ -45,3 +49,4 @@ prompt_layer_registry = PromptLayerRegistry()
 prompt_layer_registry.register(AgentIdentityLayer.name, AgentIdentityLayer())
 prompt_layer_registry.register(SurfaceContextLayer.name, SurfaceContextLayer())
 prompt_layer_registry.register(LegacyTailLayer.name, LegacyTailLayer())
+prompt_layer_registry.register(RetrievalLayer.name, RetrievalLayer())

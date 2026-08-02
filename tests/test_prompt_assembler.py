@@ -13,7 +13,10 @@
 #      ``AgentPool._assemble_system_prompt`` produced BEFORE the refactor. The
 #      constants below were captured by running the fixtures in this file
 #      against the pre-refactor implementation (commit 1948e335), so they are
-#      an anchor to real shipped behaviour, not to the new code.
+#      an anchor to real shipped behaviour, not to the new code. PA-3 moved one
+#      block inside it — see the note on ``_GOLDEN_SOUL_PATH``, which now holds
+#      BOTH orders and a test asserting that block's position is the only
+#      difference between them.
 #   3. The digest covers the KEYED layers only. The unkeyed passthrough (the
 #      instructions block, the per-message soul recall, the knowledge wrapper)
 #      must NOT churn it — a digest that moved every turn would be correct and
@@ -31,6 +34,16 @@
 #     like ``("a","bc")``.
 #   * the render guard: a raising layer degrades to a dropped layer with a
 #     failure key instead of failing the turn, and cancellation still propagates.
+#
+# Updated: 2026-08-02 (PA-3) — the per-message soul recall became its own
+# ``retrieval`` layer and now renders LAST, so the golden's recall block moved
+# from between ``instructions`` and the knowledge wrapper to after both. The
+# pre-PA-3 bytes are kept verbatim as ``_PRE_PA3_SOUL_PATH`` and
+# ``test_the_only_byte_move_since_the_refactor_is_the_recall_block`` asserts the
+# new golden is the old one with exactly that block relocated — so this file
+# still says what changed, rather than a regenerated constant saying nothing.
+# The reasoning for the move, and the proof it left the Claude SDK warm-client
+# prefix untouched, live in tests/test_prompt_retrieval_layer.py.
 
 from __future__ import annotations
 
@@ -129,22 +142,17 @@ _STAMP = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
 # The golden — byte-identical to the pre-refactor prompt
 # ---------------------------------------------------------------------------
 
-_GOLDEN_SOUL_PATH = (
-    "You are Paw, a helpful companion.\n"
-    "\n"
-    "# Key Knowledge\n"
-    "- [semantic] the user drinks tea\n"
-    "- Bond level: 42.0/100\n"
-    "\n"
-    "RIPPLE LAW: narrate before every tool call.\n"
-    "\n"
+# The recall block, named once so the move below is stated rather than implied.
+_RECALL_BLOCK = (
     "## Relevant Past Memories\n"
     "Below are memories from previous conversations that are relevant to the "
     "current question. Use them to provide continuity and a personalized "
     "response.\n"
     "\n"
-    "- talked about tea yesterday (asked: what time do you open?)\n"
-    "\n"
+    "- talked about tea yesterday (asked: what time do you open?)"
+)
+
+_KNOWLEDGE_BLOCK = (
     "## Your Knowledge Base\n"
     "Use the following information from your knowledge base to answer questions. "
     "Always reference this data when relevant instead of making things up or "
@@ -152,6 +160,27 @@ _GOLDEN_SOUL_PATH = (
     "\n"
     "Acme Dental opens at 9am."
 )
+
+_IDENTITY_AND_INSTRUCTIONS = (
+    "You are Paw, a helpful companion.\n"
+    "\n"
+    "# Key Knowledge\n"
+    "- [semantic] the user drinks tea\n"
+    "- Bond level: 42.0/100\n"
+    "\n"
+    "RIPPLE LAW: narrate before every tool call."
+)
+
+# What shipped from PR #1842 through commit f58b20fe: recall BETWEEN the
+# authoritative instructions and the knowledge wrapper, because all three lived
+# in one ``legacy_tail`` block in that order.
+_PRE_PA3_SOUL_PATH = f"{_IDENTITY_AND_INSTRUCTIONS}\n\n{_RECALL_BLOCK}\n\n{_KNOWLEDGE_BLOCK}"
+
+# What ships now (PA-3). Recall is its own layer and renders LAST — stable
+# first, volatile last — so it trades places with the knowledge wrapper. The
+# alternative was splitting ``instructions`` out of ``legacy_tail`` to keep the
+# legacy byte order, which is PA-4's slice; doing it here would blur two.
+_GOLDEN_SOUL_PATH = f"{_IDENTITY_AND_INSTRUCTIONS}\n\n{_KNOWLEDGE_BLOCK}\n\n{_RECALL_BLOCK}"
 
 _GOLDEN_OVERRIDE_PATH = (
     "You are the Acme Dental booking assistant.\n"
@@ -167,12 +196,31 @@ _GOLDEN_OVERRIDE_PATH = (
 )
 
 
+async def test_the_only_byte_move_since_the_refactor_is_the_recall_block():
+    """States PA-3's change as a transformation instead of a new constant.
+
+    The safety net this file exists to be is worth only as much as the account
+    it gives of what moved. So: the current golden is the pre-PA-3 golden with
+    the recall block cut from where it was and appended at the end — nothing
+    added, nothing dropped, nothing reworded. If a future change makes this
+    assertion fail, the golden moved for a second reason and that reason needs
+    writing down too.
+    """
+    assert f"\n\n{_RECALL_BLOCK}\n\n" in _PRE_PA3_SOUL_PATH
+    assert _GOLDEN_SOUL_PATH == (
+        _PRE_PA3_SOUL_PATH.replace(f"{_RECALL_BLOCK}\n\n", "") + f"\n\n{_RECALL_BLOCK}"
+    )
+
+
 async def test_the_assembled_text_is_byte_identical_to_the_pre_refactor_prompt():
     """The safety net for the whole layer migration.
 
     Every step of the legacy assembly is exercised: soul identity, the
     ``# Key Knowledge`` block, the authoritative instructions, the per-message
     soul recall, and the knowledge-base wrapper.
+
+    Byte-identical to the pre-refactor prompt except for one deliberate move,
+    which the test above states exactly: PA-3 sends the recall block to the end.
     """
     assembled = await _assemble(
         _instance(

@@ -76,8 +76,16 @@ async def _assemble(**kwargs) -> AssembledPrompt:
 async def test_the_surface_layer_is_assembled_between_identity_and_the_tail():
     """Order is behaviour, not decoration: above the tail is what puts the
     preamble outside the "Your Knowledge Base" framing it used to arrive in,
-    and outside the volatile region the Claude SDK strips from its client key."""
-    assert _SYSTEM_PROMPT_LAYERS == ("identity", "surface", "legacy_tail")
+    and outside the volatile region the Claude SDK strips from its client key.
+
+    ``retrieval`` joined the end of the tuple in PA-3 (the per-message soul
+    recall, extracted from ``legacy_tail`` and rendered last). It changes
+    nothing this test holds: the surface still sits second, still above every
+    volatile block. What the surface's own position must survive is pinned
+    below, and again against the recall in
+    ``tests/test_prompt_retrieval_layer.py``.
+    """
+    assert _SYSTEM_PROMPT_LAYERS == ("identity", "surface", "legacy_tail", "retrieval")
 
     assembled = await _assemble(
         instructions="RIPPLE LAW: narrate before every tool call.",
