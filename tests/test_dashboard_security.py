@@ -790,3 +790,44 @@ class TestFullAccessApiLimiterExemption:
             assert resp is not None
             assert resp.status_code == 429
             mock_auth_limiter.check.assert_called_once_with("127.0.0.1")
+
+
+class TestPawbarAppExempt:
+    """The public concierge iframe loads pawbar.js/css from /pawbar-app with no
+    session — the mount must pass the auth middleware anonymously, like /static."""
+
+    def _request(self, path):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        req = MagicMock()
+        req.method = "GET"
+        req.url.path = path
+        req.client.host = "203.0.113.7"
+        req.headers = {}
+        req.cookies = {}
+        req.query_params = {}
+        # Real (attribute-less) state: a MagicMock here fabricates a truthy
+        # ``full_access`` and short-circuits the cascade to valid.
+        req.state = SimpleNamespace()
+        return req
+
+    @pytest.mark.asyncio
+    async def test_pawbar_app_assets_pass_anonymously(self):
+        from unittest.mock import patch
+
+        from pocketpaw.dashboard_auth import _auth_dispatch
+
+        with patch("pocketpaw.dashboard_auth.get_access_token", return_value="tok"):
+            result = await _auth_dispatch(self._request("/pawbar-app/pawbar.js"))
+        assert result is None  # allowed through, no 401
+
+    @pytest.mark.asyncio
+    async def test_unrelated_root_path_still_rejected(self):
+        from unittest.mock import patch
+
+        from pocketpaw.dashboard_auth import _auth_dispatch
+
+        with patch("pocketpaw.dashboard_auth.get_access_token", return_value="tok"):
+            result = await _auth_dispatch(self._request("/pawbar-secrets/x.js"))
+        assert result is not None  # control: prefix must not over-match
