@@ -82,6 +82,18 @@
 # go-live request instead of auto-publishing off a plain "create a site". Asserts the
 # draft/preview framing + the explicit-go-live gate across all engines, and that the
 # publish tool is still named (the on-request path) so an explicit publish is unbroken.
+#
+# Updated: 2026-08-02 (fix/concierge-tools-for-site-agent) — added the concierge
+# awareness block at the bottom. The reported bug ("the agent building sites
+# sometimes does not know about concierge at all") was failure mode (2) AWARENESS
+# and it was TOTAL: "concierge" appeared zero times in every /sites preamble, zero
+# times in the sites MCP tool descriptions, and zero times in the bundled skills,
+# so whether the agent mentioned one was decided by model sampling alone. The new
+# tests are parametrized across all FIVE dispatched (engine, mode) combinations —
+# determinism is the fix, so spot-checking one mode would not prove it — and they
+# also pin the block's two honest limits: it must not claim a draft already has a
+# concierge (provisioning is live-publish-only) and must not name a configuration
+# tool that does not exist (catalog/actions are owner-authored only).
 
 from __future__ import annotations
 
@@ -737,3 +749,132 @@ async def test_mode_threads_through_meta_from_request() -> None:
     # Default preserves current (build) behavior when the client omits it.
     default_meta = _meta_from_request(SurfaceMetaRequest(route_path="/sites"))
     assert default_meta.mode == "build"
+
+
+# --- Concierge awareness (fix/concierge-tools-for-site-agent) -----------------
+#
+# THE BUG: an agent building a site "sometimes does not know about concierge at
+# all". Diagnosis was failure mode (2) AWARENESS, and it was total: before this
+# fix the string "concierge" appeared ZERO times in every /sites preamble
+# (create/refine/chat/frontend), ZERO times in the sites MCP tool descriptions
+# (`agent/mcp_servers/sites.py`, `sites_create.py`), and ZERO times anywhere in
+# `src/pocketpaw/bundled_skills/`. Nothing in the code path ever stated a
+# concierge exists, so whether the agent mentioned one was decided purely by
+# model sampling — which is exactly what "sometimes" looks like from outside.
+#
+# These tests make the awareness DETERMINISTIC: every live /sites mode, on every
+# engine, must carry the concierge block. They also pin the two honest LIMITS of
+# that block, because an over-promising preamble would trade a blind agent for a
+# lying one:
+#   * it must NOT claim a create/draft already has a concierge (provisioning is
+#     live-publish-only — `sites/service.py::_embed_concierge_bar` runs after the
+#     build, and a preview returns from `publish` long before it);
+#   * it must NOT claim the agent can configure the concierge's catalog/actions
+#     (owner-authored only — no agent tool declares them; the known gap).
+
+_CONCIERGE_MODES: list[tuple[str, SurfaceMeta]] = [
+    ("create/html", SurfaceMeta(route_path="/sites")),
+    ("create/svelte", SurfaceMeta(route_path="/sites", engine="svelte")),
+    ("create/ripple", SurfaceMeta(route_path="/sites", engine="ripple")),
+    (
+        "refine",
+        SurfaceMeta(route_path="/sites/site-abc", pocket_id="pkt-c", mode="build"),
+    ),
+    (
+        "chat",
+        SurfaceMeta(route_path="/sites/site-abc", pocket_id="pkt-c", mode="chat"),
+    ),
+]
+
+
+@pytest.mark.parametrize("label,meta", _CONCIERGE_MODES, ids=[m[0] for m in _CONCIERGE_MODES])
+async def test_every_sites_mode_knows_the_concierge_exists(label: str, meta: SurfaceMeta) -> None:
+    """DETERMINISM: the concierge block is present in EVERY live /sites mode.
+
+    Not "usually" and not on one engine — the reported bug was intermittent
+    precisely because no mode carried it, so this is parametrized across all
+    five dispatched (engine, mode) combinations rather than spot-checking one.
+    """
+    preamble = await sites_handler.build_preamble(WORKSPACE, USER, meta)
+    lower = preamble.lower()
+
+    assert "concierge" in lower, f"{label}: preamble never mentions the concierge"
+    # Named as the thing the visitor actually sees on the page.
+    assert "paw bar" in lower or "paw-bar" in lower, f"{label}: the bar is not named"
+    # It must say the concierge answers the SITE's visitors, not the builder.
+    assert "visitor" in lower, f"{label}: no visitor framing"
+
+
+@pytest.mark.parametrize("label,meta", _CONCIERGE_MODES, ids=[m[0] for m in _CONCIERGE_MODES])
+async def test_concierge_block_never_promises_a_configuration_tool(
+    label: str, meta: SurfaceMeta
+) -> None:
+    """The block must not invent authority the agent does not have.
+
+    Widget `catalog` and `actions` are owner-authored only — no agent tool
+    declares them — so the preamble has to route the user to the dashboard
+    instead of naming a tool that would hard-error.
+    """
+    preamble = await sites_handler.build_preamble(WORKSPACE, USER, meta)
+    lower = preamble.lower()
+
+    # No fabricated tool ids for concierge configuration.
+    for phantom in (
+        "mcp__pocketpaw_sites_manager__configure_concierge",
+        "mcp__pawbar_actions__",
+        "set_concierge",
+        "configure_concierge",
+    ):
+        assert phantom not in lower, f"{label}: preamble names a non-existent tool {phantom!r}"
+    # It points at where the owner really configures it.
+    assert "dashboard" in lower, f"{label}: no pointer to the owner-facing surface"
+
+
+async def test_create_ties_the_concierge_to_publish_not_to_the_draft() -> None:
+    """A DRAFT has no concierge — provisioning is live-publish-only.
+
+    `sites/service.py::_embed_concierge_bar` (and the `ensure_site_widget`
+    trigger inside it) runs between the build and the deploy of a LIVE publish;
+    a preview returns from `publish_pocket` long before it. Since the create
+    flow is draft-first, an agent that told the user "your site has a concierge"
+    right after a create would be wrong. The create block must tie the concierge
+    to publishing.
+    """
+    for engine in (None, "svelte", "ripple"):
+        meta = SurfaceMeta(route_path="/sites", engine=engine)
+        preamble = await sites_handler.build_preamble(WORKSPACE, USER, meta)
+        lower = preamble.lower()
+        # The concierge arrives WITH the publish, not with the draft.
+        assert "publish" in lower
+        concierge_at = lower.index("concierge")
+        window = lower[concierge_at : concierge_at + 700]
+        assert "publish" in window, (
+            f"engine={engine}: the concierge block does not tie provisioning to publish"
+        )
+
+
+async def test_concierge_awareness_does_not_depend_on_the_mcp_tool_id_import() -> None:
+    """Awareness must survive the degraded profile path.
+
+    `surface_registry._load_mcp_tool_ids` degrades to all-`None` (no MCP
+    restriction) when the EE agent-layer import fails, and it MEMOIZES that
+    result for the life of the process. Preamble knowledge must not be coupled
+    to that cache, or a poisoned memo would take the concierge block with it.
+    """
+    import pocketpaw_ee.cloud.surface.surface_registry as registry
+
+    original = registry._MCP_TOOL_IDS_CACHE
+    try:
+        registry._MCP_TOOL_IDS_CACHE = registry._McpToolIds(
+            loaded=False,
+            foresight_allow=None,
+            sites_allow=None,
+            studio_allow=None,
+            belt_allow=None,
+        )
+        preamble = await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites")
+        )
+        assert "concierge" in preamble.lower()
+    finally:
+        registry._MCP_TOOL_IDS_CACHE = original
