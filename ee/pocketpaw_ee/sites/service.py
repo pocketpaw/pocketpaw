@@ -1880,9 +1880,7 @@ async def publish(
         if _local_deploy is not None:
             preview_url = _local_deploy(preview_id, build.project_dir)
         else:
-            preview_url = local_server.deploy_local(
-                preview_id, build.project_dir, engine=engine
-            )
+            preview_url = local_server.deploy_local(preview_id, build.project_dir, engine=engine)
         # SECOND, UNFIXED half of the draft-render bug — surfaced, not silenced.
         # Unlike the live deploy below, this path has NO deploy-mode fork: it
         # always serves from ``local_server``, which binds 127.0.0.1 inside THIS
