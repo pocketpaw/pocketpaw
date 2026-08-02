@@ -1,4 +1,15 @@
 # ee/paw_bar/router.py — HTTP surface for the Paw Bar widget layer.
+# Updated: 2026-07-31 (in-thread approvals) — the admin transcript now carries
+#   ``pending_actions`` (this visitor's still-PENDING decisions, mapped to the
+#   same DecisionItem shape the decisions tab serves) and ``bot_paused``, and
+#   DecisionItem gains ``customer_ref``. The dashboard's ConversationThread has
+#   had the approval card since slices 2+4, with TWO wire sources — transcript
+#   ``pending_actions`` preferred, decisions-list-filtered-by-ref as fallback —
+#   and this deployment served NEITHER, so a real approval sat behind the
+#   "approve it from Decisions" notice (found live 2026-07-31). Both new reads
+#   are failure-soft: a broken decisions read costs the thread its cards, never
+#   the transcript. Settled decisions stay absent from pending_actions on
+#   purpose — the card list is a to-do, not a log.
 # Updated: 2026-07-31 (owner inbox, slice 3) — THE ESCAPE HATCH. A visitor can
 #   always reach a person, and the owner is told when it happens:
 #     + POST /paw-bar/request-human — {key, w, customer_ref, message?, contact?}
@@ -1911,6 +1922,17 @@ class ConversationTranscriptResponse(BaseModel):
     customer_ref: str
     messages: list[TranscriptMessage] = Field(default_factory=list)
     count: int
+    # The Instinct proposals parked in THIS conversation, still waiting on a
+    # human (slice 4 — the in-thread approval card). The dashboard's thread
+    # prefers this over the site-wide decisions fallback because it is already
+    # scoped to one visitor: with neither source, the UI can only show the
+    # "approve it from Decisions" notice a real approval sat behind (found live
+    # 2026-07-31). Settled decisions are deliberately absent — an approved
+    # booking is history, and the card list is a to-do, not a log.
+    pending_actions: list[DecisionItem] = Field(default_factory=list)
+    # The conversation row's mute flag, so the thread's takeover banner state
+    # arrives with the SAME read that renders the timeline.
+    bot_paused: bool | None = None
 
 
 class DecisionItem(BaseModel):
@@ -1919,6 +1941,12 @@ class DecisionItem(BaseModel):
     summary: str
     status: str
     created_at: str
+    # Which visitor raised it. The site-wide decisions list serves EVERY
+    # visitor, so without this the thread's fallback source cannot attribute a
+    # card to the open conversation and must refuse to guess (a stranger's
+    # booking approved into the wrong thread is the failure mode). "" on a
+    # legacy row.
+    customer_ref: str = ""
 
 
 class DecisionsResponse(BaseModel):
@@ -2366,8 +2394,48 @@ async def get_site_conversation_transcript(
         # No concierge run for this (pocket, customer_ref) — the ref has no
         # conversation on this site's widget.
         raise HTTPException(404, "conversation_not_found")
+
+    # Slice 4: the approvals parked in THIS conversation ride with the thread.
+    # Filtered in-handler off the same widget-scoped read the decisions tab
+    # uses (widget_id is the cross-site isolation seam), narrowed to this
+    # visitor + still-pending. Failure-soft: a broken decisions read costs the
+    # thread its cards, never the transcript.
+    pending: list[DecisionItem] = []
+    try:
+        from pocketpaw.paw_bar.models import DecisionState
+
+        decisions = await _store().list_decisions_for_widget(widget.id, limit=200)
+        pending = [
+            DecisionItem(
+                id=d.instinct_action_id or d.id,
+                verb_or_kind=_decision_verb_or_kind(d.event_type),
+                summary=_decision_summary(d),
+                status=d.state.value,
+                created_at=d.created_at.isoformat(),
+                customer_ref=d.customer_ref,
+            )
+            for d in decisions
+            if d.customer_ref == customer_ref and d.state == DecisionState.PENDING
+        ]
+    except Exception:  # noqa: BLE001 — cards degrade, the transcript never 500s
+        logger.warning("transcript pending_actions read failed (non-fatal)", exc_info=True)
+
+    bot_paused: bool | None = None
+    try:
+        conversation = await _store().get_conversation(
+            widget.id, customer_ref, workspace_id=workspace_id
+        )
+        if conversation is not None:
+            bot_paused = bool(conversation.bot_paused)
+    except Exception:  # noqa: BLE001 — same degrade rule
+        logger.warning("transcript conversation read failed (non-fatal)", exc_info=True)
+
     return ConversationTranscriptResponse(
-        customer_ref=customer_ref, messages=messages, count=len(messages)
+        customer_ref=customer_ref,
+        messages=messages,
+        count=len(messages),
+        pending_actions=pending,
+        bot_paused=bot_paused,
     )
 
 
@@ -2402,6 +2470,7 @@ async def get_site_decisions(
             summary=_decision_summary(d),
             status=d.state.value,
             created_at=d.created_at.isoformat(),
+            customer_ref=d.customer_ref,
         )
         for d in decisions
     ]
@@ -3722,6 +3791,9 @@ async def concierge_chat(body: ConciergeChatRequest, request: Request) -> Stream
             body=body.message,
             widget_id=body.widget_id,
             customer_ref=body.customer_ref,
+            # Passed rather than left to the resolver: the widget is already in
+            # hand here, and this await sits inside the visitor's turn.
+            agent_id=str(getattr(widget, "agent_id", "") or ""),
         )
 
     # (7c) THE MUTE. A human is holding this conversation, so the bot does not

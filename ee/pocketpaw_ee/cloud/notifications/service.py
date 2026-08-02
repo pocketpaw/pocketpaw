@@ -63,7 +63,11 @@ def _source_to_domain(
     if src is None:
         return None
     return NotificationSource(
-        type=src.type, id=src.id, pocket_id=src.pocket_id, room_id=src.room_id
+        type=src.type,
+        id=src.id,
+        pocket_id=src.pocket_id,
+        room_id=src.room_id,
+        agent_id=getattr(src, "agent_id", None),
     )
 
 
@@ -76,7 +80,11 @@ def _source_to_doc(
     if isinstance(src, _NotificationSourceDoc):
         return src
     return _NotificationSourceDoc(
-        type=src.type, id=src.id, pocket_id=src.pocket_id, room_id=src.room_id
+        type=src.type,
+        id=src.id,
+        pocket_id=src.pocket_id,
+        room_id=src.room_id,
+        agent_id=getattr(src, "agent_id", None),
     )
 
 
