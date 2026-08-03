@@ -777,6 +777,34 @@ class Settings(BaseSettings):
             "that is the escape hatch for one that turns out not to."
         ),
     )
+    pydantic_ai_defer_skills: bool = Field(
+        default=True,
+        description=(
+            "Hide the Pydantic AI backend's skills catalog behind the agent's "
+            "``load_capability`` tool instead of listing every skill's name and "
+            "description in the system prompt. Measured against the proxy, the "
+            "19 bundled skills are 18,717 chars (~4,679 tokens) of the system "
+            "prompt; deferring drops that to 751 chars (~187), and a trivial "
+            "turn from 6.3s to 2.9s. "
+            "This depends on the ``reasoning_content`` echo fix in "
+            "``agents/pydantic_ai.py`` (``_reasoning_echo_model_class``) and "
+            "must not be enabled without it. Deferral is what reliably produces "
+            "an assistant turn with no thinking part — the continuation after "
+            "``load_capability`` — and DeepSeek 400s the whole request when one "
+            "comes back without ``reasoning_content``. Before that fix this "
+            "setting failed 4 of 4 landing-page runs on both v4-flash and "
+            "v4-pro, dying after exactly one tool call; after it, 4 of 4 pass "
+            "(7 to 28 tool calls each). "
+            "Worth knowing the saving is smaller than "
+            "``pydantic_ai_defer_mcp_tools``: tool schemas never prompt-cache "
+            "on the proxy, while this catalog rides in the system prompt, which "
+            "does — so mainly a cold turn or a cache miss pays for it. The "
+            "downside is also sharper. A model that never calls "
+            "``load_capability`` loses every skill, and skills are how pocket "
+            "creation, Paw Sites and Foresight know their own procedures. Set "
+            "false if a model turns out not to load them."
+        ),
+    )
     pydantic_ai_harness_enabled: bool = Field(
         default=True,
         description=(

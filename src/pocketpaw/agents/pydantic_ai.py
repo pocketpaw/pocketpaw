@@ -208,6 +208,12 @@ _OPENAI_COMPATIBLE = frozenset({"litellm", "openai", "openai_compatible", "openr
 # (see below), because it was never really about pocket sessions.
 _POCKET_SCOPE_SENTINEL = "<pocket-scope>"
 
+# The name the model uses to pull the skills catalog when
+# ``pydantic_ai_defer_skills`` is on. ``SkillsCapability`` requires an id once
+# ``defer_loading`` is set, and it appears in the model's ``load_capability``
+# call, so it is stable and readable rather than generated per run.
+_SKILLS_CAPABILITY_ID = "pocketpaw-skills"
+
 # Bounds on the per-session transcript cache (see ``_session_messages``).
 # ``logfire.configure`` is process-global and one backend instance exists per
 # agent, so the capability builder would otherwise reconfigure it per agent.
@@ -406,6 +412,71 @@ _SURFACE_TOOL_EQUIVALENTS: dict[str, frozenset[str]] = {
     # family; this is the REMOTE one, a network call to an external agent.
     "Agent": frozenset({"delegate_to_a2a_agent"}),
 }
+
+
+# Model-name substrings whose providers REJECT a request when an assistant
+# message comes back without the reasoning field they produced. DeepSeek and
+# Moonshot are the two that emit ``reasoning_content`` (see the field list in
+# ``pydantic_ai/models/openai.py::_process_thinking``).
+_REASONING_ECHO_REQUIRED = ("deepseek", "moonshot", "kimi")
+
+
+def _reasoning_echo_model_class(model_name: str) -> type | None:
+    """An ``OpenAIChatModel`` that never omits ``reasoning_content``, or ``None``.
+
+    DeepSeek in thinking mode 400s the WHOLE request if any assistant message
+    in the history lacks ``reasoning_content``::
+
+        The `reasoning_content` in the thinking mode must be passed back to the API.
+
+    pydantic-ai writes that field only when the ``ModelResponse`` carries a
+    ``ThinkingPart``, so any assistant turn produced without one — most
+    reliably the continuation after a deferred capability's
+    ``load_capability`` — poisons every following request in the run.
+
+    The fix is the empty string, and that is not a guess. Replaying one captured
+    failing request against the proxy four ways:
+
+    ====================================================  ======
+    variant                                               status
+    ====================================================  ======
+    as captured                                              400
+    ``reasoning_content`` stripped from every message        400
+    empty ``reasoning_content`` where missing                200
+    placeholder text where missing                           200
+    ====================================================  ======
+
+    Note the second row: leaving the field off entirely does NOT work, so this
+    cannot be fixed by suppressing thinking. ``pydantic_ai_thinking=off`` was
+    tried and the run still 400s.
+
+    Applied by model name rather than to every OpenAI-compatible model, because
+    an unknown ``reasoning_content`` on a provider that does not expect one is a
+    new failure mode in exchange for nothing. Returns ``None`` for models that
+    do not need it, and the caller falls back to the stock class.
+    """
+    name = (model_name or "").lower()
+    if not any(tag in name for tag in _REASONING_ECHO_REQUIRED):
+        return None
+    try:
+        from pydantic_ai.models.openai import OpenAIChatModel
+    except ImportError:  # pragma: no cover - pydantic-ai always present here
+        return None
+
+    class _ReasoningEchoChatModel(OpenAIChatModel):
+        """``_map_model_response`` is pydantic-ai's documented subclass hook."""
+
+        def _map_model_response(self, message: Any) -> Any:
+            param = super()._map_model_response(message)
+            if (
+                param is not None
+                and param.get("role") == "assistant"
+                and "reasoning_content" not in param
+            ):
+                param["reasoning_content"] = ""
+            return param
+
+    return _ReasoningEchoChatModel
 
 
 _AGENTAPI_GATED_SURFACE = (
@@ -758,7 +829,8 @@ class PydanticAIBackend:
             provider,
             base_url,
         )
-        return OpenAIChatModel(model, provider=OpenAIProvider(**provider_kwargs))
+        cls = _reasoning_echo_model_class(model) or OpenAIChatModel
+        return cls(model, provider=OpenAIProvider(**provider_kwargs))
 
     def _get_http_client(self) -> Any:
         """The instance's shared HTTP client, built once.
@@ -1230,11 +1302,45 @@ class PydanticAIBackend:
         if not skills:
             return None
 
-        logger.info("Pydantic AI: exposing %d PocketPaw skills", len(skills))
+        defer = bool(getattr(self.settings, "pydantic_ai_defer_skills", False))
+        logger.info(
+            "Pydantic AI: exposing %d PocketPaw skills%s",
+            len(skills),
+            " (deferred behind load_capability)" if defer else "",
+        )
+        if not defer:
+            return SkillsCapability(
+                skills=skills,
+                exclude_tools={"run_skill_script", "read_skill_resource"},
+                validate=False,
+            )
+
+        # Deferred: the catalog leaves the system prompt and the model pulls it
+        # with ``load_capability`` first. ``id`` is REQUIRED once
+        # ``defer_loading`` is set, and it is what the model names to load this,
+        # so it is a stable string rather than anything per-run.
+        #
+        # The description is written rather than left to the library's default.
+        # That default is ``'Provides specialized skills: ' + ', '.join(names)``,
+        # and our names alone ("pocketpaw-create-paw-site",
+        # "foresight-create-sim") do not tell a model that a request to build a
+        # landing page is one of these. A deferred capability nobody loads is
+        # strictly worse than no deferral: the skills are still built, still
+        # cost the round trip to discover, and never reach the model.
         return SkillsCapability(
             skills=skills,
             exclude_tools={"run_skill_script", "read_skill_resource"},
             validate=False,
+            id=_SKILLS_CAPABILITY_ID,
+            defer_loading=True,
+            description=(
+                "PocketPaw's own skills. Load this before building or editing "
+                "anything the product owns — pockets, dashboards, Paw Sites "
+                "(landing, dynamic, Svelte), Foresight scenarios, connector "
+                "workflows (Gmail, GitHub) and design/taste guidance. Each "
+                "skill carries the step-by-step procedure and the exact tools "
+                "for that job, so load this first rather than improvising one."
+            ),
         )
 
     @staticmethod

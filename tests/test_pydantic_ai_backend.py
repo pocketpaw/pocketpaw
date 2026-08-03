@@ -838,6 +838,153 @@ def test_skill_names_is_part_of_the_agent_cache_key(monkeypatch):
     assert wide is not narrow, "cached agent reused across different skill subsets"
 
 
+def test_the_skills_catalog_is_deferred_by_default(monkeypatch):
+    """Read off the field, not off a constructed ``Settings``.
+
+    Same reason as ``test_mcp_tools_are_deferred_without_anyone_asking``:
+    ``load_dotenv()`` at import puts the developer's ``.env`` in ``os.environ``
+    before any test builds settings, so a constructed value proves nothing
+    about what ships.
+    """
+    pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
+
+    _fake_skills(monkeypatch, "alpha")
+
+    assert Settings.model_fields["pydantic_ai_defer_skills"].default is True
+    cap = PydanticAIBackend(_settings(pydantic_ai_defer_skills=True))._build_skills_capability()
+    assert cap.defer_loading is True
+
+
+def test_the_eager_catalog_is_still_reachable(monkeypatch):
+    """The escape hatch, for a model that will not call ``load_capability``."""
+    pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
+
+    _fake_skills(monkeypatch, "alpha")
+
+    cap = PydanticAIBackend(_settings(pydantic_ai_defer_skills=False))._build_skills_capability()
+    assert cap.defer_loading is False
+    assert cap.id is None
+
+
+def test_deferred_skills_carry_an_id_and_a_description(monkeypatch):
+    """Both are load-bearing, and neither is checked by anything else.
+
+    ``id`` is REQUIRED by ``SkillsCapability`` once ``defer_loading`` is set,
+    and it is the name the model passes to ``load_capability``.
+
+    The description matters more than it looks. Left unset the library
+    synthesises ``'Provides specialized skills: ' + names``, and our names
+    ("pocketpaw-create-paw-site", "foresight-create-sim") do not tell a model
+    that "build me a landing page" is one of these. A deferred capability
+    nobody loads is worse than no deferral at all: the skills are still built,
+    still cost a round trip to find, and never reach the model.
+    """
+    pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
+
+    _fake_skills(monkeypatch, "alpha")
+
+    cap = PydanticAIBackend(_settings(pydantic_ai_defer_skills=True))._build_skills_capability()
+
+    assert cap.defer_loading is True
+    assert cap.id, "defer_loading without an id is a construction error upstream"
+    described = cap.get_description() or ""
+    assert "pocket" in described.lower() and "site" in described.lower(), described
+    assert described != "Provides specialized skills: alpha.", "left on the library default"
+
+
+def test_deferral_does_not_change_which_skills_are_offered(monkeypatch):
+    """Deferral moves the catalog; it must not silently narrow it.
+
+    Same skills, same excluded tools — only where the catalog lives changes.
+    """
+    pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
+
+    _fake_skills(monkeypatch, "alpha", "beta")
+
+    eager = PydanticAIBackend(_settings())._build_skills_capability()
+    deferred = PydanticAIBackend(
+        _settings(pydantic_ai_defer_skills=True)
+    )._build_skills_capability()
+
+    assert {s.name for s in eager.skills} == {s.name for s in deferred.skills}
+    assert set(eager.exclude_tools) == set(deferred.exclude_tools)
+
+
+def _reasoning_model(name: str):
+    """Instantiate the reasoning-echo subclass for *name*, or return None."""
+    from pydantic_ai.providers.openai import OpenAIProvider
+
+    from pocketpaw.agents.pydantic_ai import _reasoning_echo_model_class
+
+    cls = _reasoning_echo_model_class(name)
+    if cls is None:
+        return None
+    return cls(name, provider=OpenAIProvider(base_url="http://localhost:4000/v1", api_key="sk-t"))
+
+
+def test_reasoning_echo_applies_only_to_providers_that_demand_it():
+    """An unknown ``reasoning_content`` elsewhere buys nothing and risks a 400."""
+    from pocketpaw.agents.pydantic_ai import _reasoning_echo_model_class
+
+    assert _reasoning_echo_model_class("deepseek/deepseek-v4-flash") is not None
+    assert _reasoning_echo_model_class("deepseek-v4-pro") is not None
+    assert _reasoning_echo_model_class("moonshot-v1-8k") is not None
+    assert _reasoning_echo_model_class("gpt-4o") is None
+    assert _reasoning_echo_model_class("claude-sonnet-4-6") is None
+    assert _reasoning_echo_model_class("") is None
+
+
+def test_an_assistant_turn_without_thinking_still_carries_reasoning_content():
+    """The actual bug. DeepSeek 400s the whole request without this field.
+
+    A turn with no ``ThinkingPart`` is what pydantic-ai produces for the
+    continuation after ``load_capability``, and stock ``OpenAIChatModel`` omits
+    ``reasoning_content`` for it. Replaying a captured failing request proved
+    the empty string is enough and that omitting the field is NOT (see
+    ``_reasoning_echo_model_class``).
+    """
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+
+    model = _reasoning_model("deepseek/deepseek-v4-flash")
+    assert model is not None
+
+    param = model._map_model_response(
+        ModelResponse(parts=[ToolCallPart(tool_name="search_tools", args={}, tool_call_id="c1")])
+    )
+    assert param is not None
+    assert param["reasoning_content"] == "", param
+
+
+def test_real_thinking_is_not_overwritten_by_the_echo_shim():
+    """The shim fills a gap; it must never clobber the model's own reasoning.
+
+    ``provider_name`` has to match the model's ``system`` or pydantic-ai routes
+    the thinking into ``<think>`` tags in the content instead of the
+    ``reasoning_content`` field (``_map_response_thinking_part``, 'auto' mode) —
+    which is how a real DeepSeek response arrives, and the only shape where
+    this test is asking the right question.
+    """
+    from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
+
+    model = _reasoning_model("deepseek/deepseek-v4-flash")
+    assert model is not None
+
+    param = model._map_model_response(
+        ModelResponse(
+            parts=[
+                ThinkingPart(
+                    id="reasoning_content",
+                    content="the real chain of thought",
+                    provider_name=model.system,
+                ),
+                TextPart(content="hello"),
+            ]
+        )
+    )
+    assert param is not None
+    assert param["reasoning_content"] == "the real chain of thought", param
+
+
 def test_skills_disabled_returns_none():
     assert (
         PydanticAIBackend(_settings(pydantic_ai_skills_enabled=False))._build_skills_capability()
