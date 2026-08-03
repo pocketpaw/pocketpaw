@@ -27,6 +27,13 @@ compiled graph — built with the first turn's system prompt — served every
 session on that instance forever. A new chat therefore opened already knowing
 the previous session's surface, open pocket and recalled memories. Same fix as
 the parent backend; ``pydantic_ai`` solves it per-run instead.
+
+Change (2026-08-03, PA-6 / feat/prompt-assembler-seam): that digest is now the
+assembler's ``stable_digest`` when the caller has one, and the text hash only
+when it does not. The parent's ``_prompt_identity`` owns both and the reasoning;
+this file keeps its own ``_get_or_create_agent`` because the key here is a
+different shape — no skills, no memory, no pocket flag, since
+``create_react_agent`` takes none of them.
 """
 
 from __future__ import annotations
@@ -39,6 +46,7 @@ from pocketpaw.agents.deep_agents import (
     DeepAgentsBackend,
     _patch_litellm_message_serializer,
     _patch_openai_message_serializer,
+    _prompt_identity,
 )
 
 logger = logging.getLogger(__name__)
@@ -124,13 +132,16 @@ class LangchainReactBackend(DeepAgentsBackend):
         )
 
     def _get_or_create_agent(
-        self, model: Any, instructions: str, mcp_tools: list | None = None
+        self,
+        model: Any,
+        instructions: str,
+        mcp_tools: list | None = None,
+        *,
+        system_prompt_digest: str = "",
     ) -> Any:
-        import hashlib
-
         from langgraph.prebuilt import create_react_agent
 
-        # The prompt digest is in the key for the same reason as the parent's
+        # The prompt identity is in the key for the same reason as the parent's
         # (see ``DeepAgentsBackend._get_or_create_agent``): ``instructions`` is
         # baked into the compiled graph as ``prompt=`` while ``AgentPool`` keeps
         # ONE instance per agent across every session, so a key that ignores the
@@ -139,7 +150,7 @@ class LangchainReactBackend(DeepAgentsBackend):
         # never rebuilt for anything else either.
         model_key = (
             self.settings.deep_agents_model,
-            hashlib.sha256((instructions or "").encode("utf-8", "replace")).hexdigest(),
+            _prompt_identity(instructions, system_prompt_digest),
         )
         if self._cached_agent is not None and self._cached_model_key == model_key:
             return self._cached_agent

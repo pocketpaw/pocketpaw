@@ -32,6 +32,21 @@ the site they had just built in a different session. Recompiles cost ~14 ms
 (measured), and prompt caching is unaffected: the marker is applied to the
 request the graph sends, not to the graph. See the same note in
 ``pydantic_ai.py`` for why that backend fixes it per-run instead.
+
+Updated 2026-08-03 (PA-6, feat/prompt-assembler-seam): ``run`` takes
+``system_prompt_digest`` and the graph key prefers it over the text hash above.
+The text hash fixed the leak and paid for it with the cache — measured over 8
+ordinary turns on a live soul, ``sha256(instructions)`` produced 8 distinct keys,
+so the graph recompiled on EVERY turn. The assembler's ``stable_digest`` hashes
+the layers that declared themselves cacheable rather than the rendered text, and
+over the same 8 turns produced ONE key. Same correctness, no per-turn recompile.
+
+The text hash SURVIVES as the fallback for a caller that has no digest, and that
+is not tidiness — ``AgentLoop`` (Telegram / Discord / Slack / CLI) builds its
+prompt in ``AgentContextBuilder``, not in the assembler, until PA-7. Dropping the
+hash outright would give those callers a key that cannot see the prompt at all,
+which is #1842 restored on every channel. The two are prefixed so a digest and a
+text hash can never collide.
 """
 
 import hashlib
@@ -54,6 +69,30 @@ _LANGCHAIN_PROVIDER_MAP: dict[str, str] = {
     "openai_compatible": "openai",
     "openrouter": "openai",
 }
+
+
+def _prompt_identity(instructions: str, system_prompt_digest: str) -> str:
+    """The cache-key slot that answers "whose prompt is this".
+
+    Two sources, and the prefix keeps them apart. ``d:`` is the assembler's
+    ``stable_digest`` — a hash over the prompt LAYERS that declared themselves
+    cacheable, so the per-message soul recall (an unkeyed layer) does not move it
+    and a warm graph survives an ordinary turn. ``t:`` is #1842's hash of the
+    rendered text, kept for callers that do not build their prompt through the
+    assembler yet: ``AgentLoop``'s channel path until PA-7 ports it, and any OSS
+    embedder calling ``run`` directly.
+
+    Prefixed rather than concatenated because the two are different CLAIMS about
+    the same 16-64 hex chars — "these layers are the same" versus "these bytes
+    are the same" — and a caller that switched between them mid-life must be
+    treated as a changed prompt, not silently matched.
+
+    Measured 2026-08-03 over 8 ordinary turns on a live soul: ``t:`` produced 8
+    distinct keys (recompile every turn), ``d:`` produced 1.
+    """
+    if system_prompt_digest:
+        return f"d:{system_prompt_digest}"
+    return "t:" + hashlib.sha256((instructions or "").encode("utf-8", "replace")).hexdigest()
 
 
 _LITELLM_PATCHED = False
@@ -762,7 +801,12 @@ class DeepAgentsBackend:
         return init_chat_model(model_id, **kwargs)
 
     def _get_or_create_agent(
-        self, model: Any, instructions: str, mcp_tools: list | None = None
+        self,
+        model: Any,
+        instructions: str,
+        mcp_tools: list | None = None,
+        *,
+        system_prompt_digest: str = "",
     ) -> Any:
         """Cache the compiled LangGraph agent to avoid recompilation on every call."""
         from deepagents import create_deep_agent
@@ -778,7 +822,7 @@ class DeepAgentsBackend:
         # is_pocket_session is part of the key so flipping between pocket and
         # non-pocket sessions in the same backend recompiles the agent.
         #
-        # The prompt DIGEST is in the key because ``instructions`` is baked into
+        # The prompt identity is in the key because ``instructions`` is baked into
         # the compiled graph below (``kwargs["system_prompt"]``) while
         # ``AgentPool`` keeps ONE instance per agent across every session. Without
         # it, turn N+1 was served the graph compiled for turn N — carrying turn
@@ -786,13 +830,25 @@ class DeepAgentsBackend:
         # That is how a brand-new chat opened by offering to continue the last
         # session's work. ``pydantic_ai`` solves this by passing instructions
         # per-run; ``create_deep_agent`` takes ``str | SystemMessage`` only, so
-        # here the fix is to recompile. Measured 2026-08-01: ~14 ms per compile,
-        # against an LLM turn of seconds — the prompt tail varies per message
-        # (``pool._assemble_system_prompt`` appends a recall keyed on the user's
-        # text), so budget for a rebuild most turns.
+        # here the fix is to recompile.
+        #
+        # PA-6 changed WHAT that identity is, not whether there is one — see
+        # ``_prompt_identity``. #1842 hashed the rendered text, which recompiled
+        # on every turn (8 distinct keys over 8 measured turns) because the recall
+        # is keyed on the user's message. ``stable_digest`` hashes the layers that
+        # claimed to be cacheable and held at 1 key over the same 8 turns.
+        #
+        # THE CONSEQUENCE WORTH STATING: a reused graph keeps the prompt it was
+        # compiled with, so a turn that only changed the per-message recall now
+        # runs against the PREVIOUS turn's recall block. That is the trade PA-3
+        # made when it declared retrieval unkeyed, and it is the trade
+        # ``claude_sdk``'s warm client has always made (its volatile markers cut
+        # the same block out of the same decision). What a reused graph can never
+        # carry is a different agent, surface, override or instruction set —
+        # those are keyed layers, and they move the digest.
         model_key = (
             self.settings.deep_agents_model,
-            hashlib.sha256((instructions or "").encode("utf-8", "replace")).hexdigest(),
+            _prompt_identity(instructions, system_prompt_digest),
             tuple(skills),
             tuple(memory),
             is_pocket_session,
@@ -909,7 +965,18 @@ class DeepAgentsBackend:
         system_prompt: str | None = None,
         history: list[dict] | None = None,
         session_key: str | None = None,
+        system_prompt_digest: str = "",
     ) -> AsyncIterator[AgentEvent]:
+        """Stream a turn through the compiled Deep Agents graph.
+
+        ``system_prompt_digest`` (PA-6) is the assembler's ``stable_digest``. It
+        is DECLARED rather than swallowed by ``**kwargs`` on purpose:
+        ``AgentPool._accepts_prompt_digest`` inspects this signature to decide
+        whether to pass it, and a backend that accepted it silently would look
+        ported while keying on nothing. Empty means the caller does not build its
+        prompt through the assembler (the channel path until PA-7), and the graph
+        key falls back to hashing the prompt text — see ``_prompt_identity``.
+        """
         if not self._sdk_available:
             yield AgentEvent(
                 type="error",
@@ -932,7 +999,12 @@ class DeepAgentsBackend:
 
             # Load MCP tools from configured servers (async, cached after first call)
             mcp_tools = await self._build_mcp_tools()
-            agent = self._get_or_create_agent(model, instructions, mcp_tools=mcp_tools)
+            agent = self._get_or_create_agent(
+                model,
+                instructions,
+                mcp_tools=mcp_tools,
+                system_prompt_digest=system_prompt_digest,
+            )
 
             # Build messages list: history + current message
             messages: list[dict[str, str]] = []
