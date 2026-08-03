@@ -823,8 +823,14 @@ class AgentPool:
             # non-empty on every run — so the gate is the backend's SIGNATURE,
             # the same question ``_accepts_policy`` asks: a backend receives it
             # by declaring the parameter, not by being named in a list here.
-            # ``pydantic_ai`` folds it into its agent cache key so a cached
-            # agent can never outlive the identity it was built for.
+            # As of PA-6 all four prompt-caching backends declare it and it is the
+            # SOURCE of their cache keys rather than defence in depth:
+            # ``pydantic_ai`` folds it into its agent key, ``deep_agents`` and
+            # ``langchain_react`` into the compiled-graph key, and ``claude_sdk``
+            # into the warm-client key in place of its behavioural prefix. A
+            # backend that stops declaring it does not fail — it silently falls
+            # back to hashing the prompt TEXT, which is #1842's trade (correct,
+            # and a rebuild almost every turn).
             if _accepts_prompt_digest(type(instance.backend)):
                 run_kwargs["system_prompt_digest"] = assembled.stable_digest
             if deny_mcp_tool_ids:
