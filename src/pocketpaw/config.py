@@ -1444,7 +1444,45 @@ class Settings(BaseSettings):
 
     # Web Search
     web_search_provider: str = Field(
-        default="tavily", description="Web search provider: 'tavily' or 'brave'"
+        default="tavily",
+        description=(
+            "Web search provider: 'tavily', 'brave', 'parallel', or 'litellm'. "
+            "'litellm' routes through the LiteLLM proxy's Search API "
+            "(``POST {litellm_api_base}/v1/search``) instead of calling a "
+            "vendor directly, so it reuses the proxy credentials already "
+            "configured and inherits whatever search tools the operator "
+            "registered there — no second key to distribute, and the proxy "
+            "keeps the usage accounting. Pick which registered tool with "
+            "``litellm_search_tool_name``; list them with "
+            "``GET {litellm_api_base}/v1/search/tools``."
+        ),
+    )
+    litellm_search_api_base: str | None = Field(
+        default=None,
+        description=(
+            "Base URL for the search API when "
+            "``web_search_provider='litellm'``. Defaults to "
+            "``litellm_api_base``, which is right until something is chained in "
+            "front of the gateway. A compression or observability proxy "
+            "(Headroom, for one) intercepts ``/v1/chat/completions``, "
+            "``/v1/messages`` and ``/v1/responses`` and knows nothing about "
+            "``/v1/search`` — so pointing ``litellm_api_base`` at it moves the "
+            "model traffic and 404s every web search. Set this to the real "
+            "gateway to send search straight there while completions take the "
+            "detour."
+        ),
+    )
+    litellm_search_tool_name: str = Field(
+        default="web_search",
+        description=(
+            "Which search tool to call when ``web_search_provider='litellm'``. "
+            "These names are defined by whoever configured the proxy, not by a "
+            "convention — on the reference gateway they are 'web_search' "
+            "(provider parallel_ai) and 'tinyfish_web_Search' (provider "
+            "tinyfish). ``GET {litellm_api_base}/v1/search/tools`` lists what a "
+            "given proxy actually has; a name that is not registered fails with "
+            "``Search tool '<name>' not found in router.search_tools``."
+        ),
     )
     tavily_api_key: str | None = Field(default=None, description="Tavily search API key")
     brave_search_api_key: str | None = Field(default=None, description="Brave Search API key")
