@@ -213,6 +213,41 @@ recall does, and keying on it costs no rebuilds. Adding it here is defence in
 depth: three backends independently cached a prompt behind a key that could not
 see one, and a key that cannot see the prompt is what made that possible in the
 first place.
+
+Updated 2026-08-03 (PA-6, feat/prompt-assembler-seam) — **the persona cannot be
+moved back to the front, and here is the measurement, so nobody spends the
+afternoon rediscovering it.** The 2026-08-01 (f) note above moved our
+instructions from the agent-level bucket to the per-run one, which is right and
+stays. It also handed the FRONT of every prompt to the capabilities, because
+pydantic-ai composes literals in a fixed order — agent-level, then capability,
+then per-run (``Agent._get_instructions``) — and joins them with a newline.
+Measured on the shipped default config: 240 characters of the Planning
+capability's ``write_plan`` blurb, with the persona starting at char 241. The
+start of a prompt is one of its two best-attended positions and a tool blurb is
+the wrong thing to spend it on, so PA-6 tried to reclaim it. It does not work:
+
+* A CALLABLE at agent level does not help. Literals are joined first and function
+  results appended after ALL of them, so a ContextVar-reading instruction
+  function moves the persona later rather than earlier.
+* ``Agent.override(instructions=...)`` is the only supported hook that writes the
+  whole list, and it REPLACES capability contributions (its own docstring says
+  so). Re-supplying ``agent._cap_instructions`` looks like it closes that, and it
+  does not: that list is built at CONSTRUCTION, while some capability
+  instructions are contributed at RUN time. The deferred-capability catalog is
+  one — it is assembled from what the message history says is already loaded, so
+  it cannot exist before the run. Measured: with ``pydantic_ai_skills_enabled``
+  False the wire prompt is 296 chars either way and nothing is lost; with it TRUE
+  (the shipped default) it is 769 chars un-reordered and 296 reordered — the
+  reorder eats the ``load_capability`` pointer and the whole skills catalog.
+  ``pydantic_ai_defer_mcp_tools`` is not the trigger; the skills capability's
+  deferral is.
+
+So the ordering stands as #1842 left it, and the cost is bounded and known: 240
+characters, ahead of a prompt that runs to tens of thousands. Reopen this only
+with a pydantic-ai that can place a per-run string ahead of capability
+instructions WITHOUT replacing the ones it resolves per run —
+``test_capability_instructions_are_still_contributed_at_run_time`` in
+tests/test_prompt_backend_digest.py is the tripwire for that day.
 """
 
 from __future__ import annotations

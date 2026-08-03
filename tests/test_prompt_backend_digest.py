@@ -437,3 +437,65 @@ async def test_the_pool_sends_the_digest_to_both_entry_points(monkeypatch):
     assert seen["prewarm"] == seen["run"], (
         "prewarm and turn 1 keyed on different digests — the prewarmed client is evicted"
     )
+
+
+# ---------------------------------------------------------------------------
+# 5 — the ordering half of PA-6, which could not be done
+# ---------------------------------------------------------------------------
+
+
+async def test_capability_instructions_are_still_contributed_at_run_time():
+    """Why the persona still does not open the pydantic_ai prompt.
+
+    PA-6 was filed with "reclaim identity-first ordering": #1842 moved our
+    instructions from pydantic-ai's agent-level bucket to its per-run one, and
+    since literals compose agent-level → capability → per-run, that handed the
+    front of every prompt to the capabilities. Measured on the shipped config:
+    240 chars of the Planning capability's `write_plan` blurb, persona at 241.
+
+    `Agent.override(instructions=...)` is the only supported hook that writes the
+    whole list, and it REPLACES capability contributions. Re-supplying
+    `agent._cap_instructions` looks like it closes that hole. It does not: that
+    list is built at CONSTRUCTION, and the deferred-capability catalog is
+    assembled at RUN time from what the message history says is already loaded —
+    so an override drops it. Measured with `pydantic_ai_skills_enabled` True (the
+    default): 769 chars un-reordered, 296 reordered, with `load_capability` and
+    the whole skills catalog among the 473 lost.
+
+    This test pins the FACT that made the reorder unsafe rather than the reorder
+    itself, so it is the tripwire for the day it stops being true: if a future
+    pydantic-ai contributes every capability instruction at construction, this
+    fails, and the ordering work becomes possible again. Read the failure as
+    "go and check whether the override is safe now", not as a bug.
+    """
+    seen: list[str | None] = []
+
+    from pydantic_ai.messages import ModelMessage
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):  # noqa: ARG001
+        seen.append(messages[-1].instructions)
+        yield "ok"
+
+    backend = PydanticAIBackend(Settings(pydantic_ai_skills_enabled=True))
+    backend._build_model = lambda: FunctionModel(stream_function=stream_fn)  # type: ignore[method-assign]
+    backend._mcp_tools = []
+
+    async for _ in backend.run("hi", system_prompt="You are Paw.", session_key="s1"):
+        pass
+
+    wire = seen[0] or ""
+    agent = backend._cached_agent
+    at_construction = "\n".join(
+        c for c in getattr(agent, "_cap_instructions", ()) if isinstance(c, str)
+    )
+
+    assert "load_capability" in wire, (
+        "the deferred-capability catalog no longer reaches the wire at all — "
+        "that is a bigger problem than the ordering this test is about"
+    )
+    assert "load_capability" not in at_construction, (
+        "capability instructions are now complete at construction — "
+        "re-check whether Agent.override can reorder them safely (see the module "
+        "docstring's 2026-08-03 note); the reorder was abandoned because it could not"
+    )
