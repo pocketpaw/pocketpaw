@@ -31,6 +31,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -437,3 +438,180 @@ async def test_the_pool_sends_the_digest_to_both_entry_points(monkeypatch):
     assert seen["prewarm"] == seen["run"], (
         "prewarm and turn 1 keyed on different digests — the prewarmed client is evicted"
     )
+
+
+# ---------------------------------------------------------------------------
+# 5 — identity first, on the pydantic_ai path
+# ---------------------------------------------------------------------------
+#
+# #1842 moved this backend's instructions from the agent-level bucket to the
+# per-run one. pydantic-ai composes literals in a FIXED order — agent-level,
+# capability, per-run — so the move also handed the FRONT of every prompt to the
+# capabilities. Measured 2026-08-03 on the shipped default config: 240 chars of
+# the Planning capability's `write_plan` blurb, persona starting at char 241.
+
+
+def _pydantic_backend(seen: list[str | None], **overrides):
+    """A backend whose model records the instructions that reached the wire.
+
+    Asserted at the MODEL boundary and not on the Agent, for the same reason
+    #1842's own regression test gives: the composition happens inside
+    pydantic-ai, so anything read off our side is a restatement of our own code.
+    """
+    from pydantic_ai.messages import ModelMessage
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):  # noqa: ARG001
+        seen.append(messages[-1].instructions)
+        yield "ok"
+
+    overrides.setdefault("pydantic_ai_skills_enabled", False)
+    backend = PydanticAIBackend(Settings(**overrides))
+    backend._build_model = lambda: FunctionModel(stream_function=stream_fn)  # type: ignore[method-assign]
+    backend._mcp_tools = []
+    backend._custom_tools = []
+    return backend
+
+
+# A realistic cloud turn: the soul identity block, then the surface, then the
+# authoritative instructions — the order `AgentPool._SYSTEM_PROMPT_LAYERS` emits.
+_CLOUD_TURN = (
+    "You are Paw.\nArchetype: The Helpful Assistant\n\n"
+    "## Current State\nMood: satisfied | Energy: 84% | Focus: high\n\n"
+    "# Key Knowledge\n- Bond level: 54.1/100\n- Memories: 18\n\n"
+    "## Current Surface\nThe user is looking at the pocket 'Q3 Planning'.\n\n"
+    "## THE LAW\nNever fabricate a tool result."
+)
+
+
+async def test_the_persona_opens_a_realistic_cloud_turn():
+    """PA-6's ordering half, proven where it is observable.
+
+    The wire prompt must START with who the agent is. The capability blurb still
+    has to be in there — this is a reorder, not a removal — so both halves are
+    asserted, and the second is what stops a "fix" that simply drops it.
+
+    The `capability_text` guard is not decoration: with the harness off there is
+    nothing in front of the persona to reclaim, and this test would then pass
+    while proving nothing about ordering.
+
+    THE MUTATION THAT BREAKS THIS: return `contextlib.nullcontext()`
+    unconditionally from `_identity_first` — i.e. revert to #1842's ordering.
+    Run: the prompt opened with `You have a planning tool` and the
+    `startswith` assertion failed.
+    """
+    seen: list[str | None] = []
+    backend = _pydantic_backend(seen)
+    async for _ in backend.run("hi", system_prompt=_CLOUD_TURN, session_key="s1"):
+        pass
+
+    wire = seen[0] or ""
+    capability_text = wire.replace(_CLOUD_TURN, "").strip()
+    assert capability_text, (
+        "no capability instructions in this config — the ordering claim is vacuous here"
+    )
+    assert wire.startswith("You are Paw."), (
+        f"the prompt still opens with something else: {wire[:80]!r}"
+    )
+    assert "write_plan" in wire, "the reorder dropped the capability's instructions"
+
+
+async def test_the_reorder_moves_bytes_and_changes_nothing_else():
+    """The claim that makes the move safe: same content, one different order.
+
+    `Agent.override` REPLACES capability contributions rather than merging with
+    them (its own docstring says so), so re-supplying them is where this could
+    silently lose an instruction. Compared as line multisets against the
+    un-reordered composition, which is the comparison a "dropped one line"
+    regression fails and a pure reorder passes.
+
+    THE MUTATION THAT BREAKS THIS: override with `[instructions]` alone —
+    the shape that looks right and drops every capability instruction. Run: the
+    sorted-line comparison failed with `write_plan` missing from one side.
+    """
+    seen_ordered: list[str | None] = []
+    ordered = _pydantic_backend(seen_ordered)
+    async for _ in ordered.run("hi", system_prompt=_CLOUD_TURN, session_key="s1"):
+        pass
+
+    seen_plain: list[str | None] = []
+    plain = _pydantic_backend(seen_plain)
+    plain._identity_first = lambda agent, instructions: __import__(  # type: ignore[assignment]
+        "contextlib"
+    ).nullcontext()
+    async for _ in plain.run("hi", system_prompt=_CLOUD_TURN, session_key="s1"):
+        pass
+
+    reordered, original = seen_ordered[0] or "", seen_plain[0] or ""
+    assert reordered != original, "nothing moved — the fixture has no capability text"
+    assert sorted(reordered.split("\n")) == sorted(original.split("\n")), (
+        "the reorder added or dropped a line; it is only allowed to move them"
+    )
+
+
+async def test_two_concurrent_turns_do_not_wear_each_others_persona():
+    """The hazard the mechanism introduces, and the reason it is still safe.
+
+    `override` writes a ContextVar on the SHARED agent, and one `AgentPool`
+    instance drives every session. If that leaked, a run would be given another
+    tenant's persona — a worse bug than the ordering it fixes. It does not,
+    because each turn runs in its own asyncio task and a task copies the context
+    at creation.
+
+    THE MUTATION THAT BREAKS THIS: none available in our code — the isolation is
+    `contextvars`'. So this is a CHARACTERISATION test of the library: it fails
+    if a future pydantic-ai moves the override off a ContextVar, which is exactly
+    when we would need to know.
+    """
+    import asyncio
+
+    seen: list[str | None] = []
+    backend = _pydantic_backend(seen)
+    persona_a = "You are Paw.\n\n## THE LAW\nNever fabricate."
+    persona_b = "You are the front desk.\n\n## THE LAW\nOpening hours only."
+
+    async def one(prompt: str, session: str):
+        async for _ in backend.run("hi", system_prompt=prompt, session_key=session):
+            pass
+
+    await asyncio.gather(one(persona_a, "sa"), one(persona_b, "sb"))
+
+    assert len(seen) == 2
+    assert sorted((s or "").split("\n")[0] for s in seen) == [
+        "You are Paw.",
+        "You are the front desk.",
+    ]
+
+
+async def test_a_callable_capability_instruction_declines_the_reorder():
+    """Half a reorder is worse than none, so this refuses to do half.
+
+    A capability may contribute a CALLABLE instead of a literal. pydantic-ai
+    renders every literal first and appends function results after all of them,
+    so such an instruction lands after the persona no matter what we do — and
+    putting it into the override list would carry it while losing the ordering
+    guarantee we came for. The answer is to decline and keep #1842's ordering,
+    which is content-complete and merely worse-ordered.
+
+    THE MUTATION THAT BREAKS THIS: drop the `isinstance(c, str)` guard so a
+    callable is passed straight into the override list. Run: `_identity_first`
+    returned an override context instead of a nullcontext.
+    """
+    from types import SimpleNamespace
+
+    def _dynamic(ctx):  # pragma: no cover - never called
+        return "computed"
+
+    literal_only = SimpleNamespace(_cap_instructions=["a literal"], override=lambda **kw: kw)
+    mixed = SimpleNamespace(_cap_instructions=["a literal", _dynamic], override=lambda **kw: kw)
+    none_at_all = SimpleNamespace(_cap_instructions=[], override=lambda **kw: kw)
+
+    assert PydanticAIBackend._identity_first(literal_only, "PERSONA") == {
+        "instructions": ["PERSONA", "a literal"]
+    }
+    assert isinstance(
+        PydanticAIBackend._identity_first(mixed, "PERSONA"), contextlib.nullcontext
+    ), "a callable capability instruction must decline the reorder, not ride in it"
+    assert isinstance(
+        PydanticAIBackend._identity_first(none_at_all, "PERSONA"), contextlib.nullcontext
+    ), "nothing to reorder must cost no override at all"

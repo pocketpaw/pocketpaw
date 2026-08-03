@@ -213,11 +213,27 @@ recall does, and keying on it costs no rebuilds. Adding it here is defence in
 depth: three backends independently cached a prompt behind a key that could not
 see one, and a key that cannot see the prompt is what made that possible in the
 first place.
+
+Updated 2026-08-03 (PA-6, feat/prompt-assembler-seam) — **the persona opens the
+prompt again.** The 2026-08-01 (f) note above moved our instructions from the
+agent-level bucket to the per-run one, which is right and stays. What went
+unnoticed is that pydantic-ai composes those buckets in a FIXED order —
+agent-level, then capability-contributed, then per-run — so the move also handed
+the front of every prompt to whatever the capabilities had to say. Measured on
+the shipped default config: 240 characters of the Planning capability's
+``write_plan`` blurb, with the persona starting at char 241. The start of a
+prompt is one of its two best-attended positions, and a tool blurb is the wrong
+thing to spend it on. ``_identity_first`` reorders the same content — nothing
+added, nothing dropped — and declines rather than half-doing it when a
+capability contributes a callable. **This MOVES BYTES on the pydantic_ai path**,
+deliberately, which is unlike PA-4 and PA-5; the two backends that bake a prompt
+into a cached object are untouched by it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 from collections import OrderedDict
@@ -1965,6 +1981,9 @@ class PydanticAIBackend:
                 # Per-RUN, not per-agent. The cached agent is built with no
                 # instructions at all, so this is the only system prompt on the
                 # wire — and it is THIS turn's. See ``_get_or_create_agent``.
+                # IGNORED while the identity-first override below is active, and
+                # kept anyway: it is what carries the prompt when the override is
+                # declined, so the two paths differ in ORDER and never in content.
             }
             max_turns = self.settings.pydantic_ai_max_turns
             if max_turns and max_turns > 0:
@@ -1972,16 +1991,17 @@ class PydanticAIBackend:
 
                 kwargs["usage_limits"] = UsageLimits(request_limit=max_turns)
 
-            async with agent.run_stream_events(message, **kwargs) as stream:
-                async for event in stream:
-                    if handle.stopped:
-                        break
-                    # Retain BEFORE mapping: a run that ends on the terminal
-                    # result event must still leave its transcript behind, and
-                    # ``_map_event`` returns nothing for a usage-less result.
-                    self._retain_run_transcript(session_key, event)
-                    for agent_event in self._map_event(event, announced):
-                        yield agent_event
+            with self._identity_first(agent, instructions):
+                async with agent.run_stream_events(message, **kwargs) as stream:
+                    async for event in stream:
+                        if handle.stopped:
+                            break
+                        # Retain BEFORE mapping: a run that ends on the terminal
+                        # result event must still leave its transcript behind, and
+                        # ``_map_event`` returns nothing for a usage-less result.
+                        self._retain_run_transcript(session_key, event)
+                        for agent_event in self._map_event(event, announced):
+                            yield agent_event
 
         except asyncio.CancelledError:
             # Caller cancelled this run specifically — the correct per-run
@@ -1996,6 +2016,56 @@ class PydanticAIBackend:
             self._active.discard(handle)
 
         yield AgentEvent(type="done", content="")
+
+    @staticmethod
+    def _identity_first(agent: Any, instructions: str) -> Any:
+        """Put the persona back at the FRONT of the system prompt (PA-6).
+
+        pydantic-ai composes a run's instruction literals in one order and one
+        order only — agent-level, then capability-contributed, then per-run
+        (``Agent._get_instructions``) — and joins them with a newline. #1842
+        moved our prompt from the first bucket to the third, for a good reason:
+        the agent is cached per instance and a prompt baked in at construction is
+        one session's prompt served to the next. The side effect was that
+        whatever the CAPABILITIES say now opens the prompt. Measured 2026-08-03
+        on the shipped default config: 240 characters of the Planning
+        capability's ``write_plan`` blurb, and the persona starting at char 241.
+
+        That is the weakest position on the U-curve for the one block that
+        should own the strongest. The prompt's start and end are what a model
+        attends to; the start belongs to who the agent IS, not to how one tool
+        is called. So this reorders it back.
+
+        THE MECHANISM, because it is the only one 2.18 offers and it has a
+        catch. A callable at agent level does NOT work: literals are joined
+        first and function results appended after ALL of them, so a
+        ContextVar-reading instruction function moves the persona later, not
+        earlier. ``Agent.override(instructions=...)`` is the one supported hook
+        that writes the whole list — and its own docstring says it REPLACES
+        capability contributions, so this re-supplies them explicitly. Same
+        content, one different order; nothing is added and nothing is dropped.
+
+        WHEN IT DECLINES, and why declining is right. If a capability
+        contributes a CALLABLE rather than a literal, this returns a no-op
+        context and the run keeps #1842's ordering. Two reasons, and the second
+        is the real one: a callable renders after every literal no matter what
+        this does, so "identity first" would be a half-claim; and putting a
+        callable into the override list would work while dropping the ordering
+        guarantee we came for. A partial reorder that silently loses a
+        capability's instructions is worse than no reorder.
+
+        CONCURRENCY: ``override`` writes a ``ContextVar`` on the SHARED agent,
+        and one ``AgentPool`` instance serves every session. That is safe
+        because each turn runs in its own asyncio task and a task copies the
+        context at creation — verified with two concurrent runs on one agent,
+        each of which saw only its own persona. What it does NOT survive is one
+        task driving two of these generators in lockstep, which nothing does
+        today; ``asyncio.gather`` makes tasks.
+        """
+        caps = getattr(agent, "_cap_instructions", None)
+        if not caps or not all(isinstance(c, str) for c in caps):
+            return contextlib.nullcontext()
+        return agent.override(instructions=[instructions, *caps])
 
     def _explain_error(self, exc: Exception) -> str:
         """Turn a provider error into something that names the actual problem.

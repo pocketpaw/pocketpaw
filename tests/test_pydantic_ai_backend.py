@@ -873,9 +873,13 @@ async def test_a_new_session_does_not_inherit_the_previous_prompt():
     )
 
     assert len(seen) == 2
-    # Capability instructions (the planning tool) legitimately ride in front of
-    # the per-run prompt, so this is containment rather than equality — the
-    # property under test is WHOSE turn prompt is on the wire.
+    # Capability instructions (the planning tool) legitimately ride ALONGSIDE the
+    # per-run prompt, so this is containment rather than equality — the property
+    # under test is WHOSE turn prompt is on the wire, not where it sits.
+    # This comment used to say "in front of", and PA-6 moved them BEHIND the
+    # persona (`PydanticAIBackend._identity_first`) — the assertions are
+    # position-blind and did not change, which is the point of writing them that
+    # way. `test_the_persona_opens_a_realistic_cloud_turn` owns the position.
     assert "(no pocket open)" in (seen[1] or "")
     assert "Acme Dental" not in (seen[1] or ""), (
         "the new session ran with the previous session's system prompt"
