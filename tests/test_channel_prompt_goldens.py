@@ -26,6 +26,14 @@
 # are deliberately NOT stubbed: their contents are part of the shipped prompt,
 # and the goldens are the thing that notices if the cutover stops finding them.
 #
+# Updated: 2026-08-03 (PA-7a, after the cutover) — all six golden files are
+# byte-identical through the move to ``pocketpaw.prompt.assemble``; not one was
+# regenerated. Exactly one assertion in this file changed:
+# ``test_a_critical_block_over_budget_is_truncated_today`` became
+# ``test_a_critical_block_over_budget_is_emitted_whole``, which is PA-7a's one
+# intended divergence and is argued at length in
+# ``tests/test_channel_prompt_layers.py``.
+#
 # REGENERATING. Set ``PAW_WRITE_CHANNEL_GOLDENS=1`` and run this file; every
 # golden is rewritten from the current implementation. That is a loud, explicit,
 # opt-in action on purpose. A regenerated golden must land in its OWN commit
@@ -354,21 +362,29 @@ async def test_a_tight_budget_drops_the_low_and_medium_blocks():
         assert marker not in prompt, f"{marker!r} survived a budget that cannot hold it"
 
 
-async def test_a_critical_block_over_budget_is_truncated_today():
-    """TODAY a CRITICAL block over budget is CUT TO ``remaining``.
+async def test_a_critical_block_over_budget_is_emitted_whole():
+    """PA-7a's ONE intended behaviour change, in the file that pinned the old one.
 
-    This pins the CURRENT behaviour so the cutover's one intended divergence is
-    visible as a deliberate edit to this file rather than as a silent drift.
-    PA-7a replaces it with the opposite assertion — a CRITICAL layer is emitted
-    WHOLE and the budget overruns — in its own commit, because a budget-sized
-    cut is the one cut that breaks a cache key (``Priority``'s docstring).
+    This test used to read ``test_a_critical_block_over_budget_is_truncated_today``
+    and assert ``prompt == identity[:budget]`` — ``_assemble_with_budget`` cut a
+    CRITICAL block to ``remaining``. It was written that way deliberately, before
+    the cutover, so this change had to be made by editing an assertion rather
+    than by drifting past one.
 
-    MUTATION: remove the ``if priority == _Priority.CRITICAL`` branch from
-    ``_assemble_with_budget``. The identity block vanishes entirely and the
-    length assertion fails.
+    The reasoning is in
+    ``tests/test_channel_prompt_layers.py::test_a_critical_block_over_budget_is_emitted_whole_not_cut_to_fit``
+    — in one line, a cut sized from ``remaining`` depends on what the block's
+    siblings rendered, so one cache key would name two different prompts. What
+    is asserted HERE is the consequence for a real channel turn: the prompt can
+    now exceed ``budget_chars``, and by exactly the identity block.
+
+    No golden FILE moved for this. All six are byte-identical across the
+    cutover; this is the only assertion in the suite that changed.
+
+    MUTATION: restore the truncation in ``_fit_to_budget``. Fails.
     """
     identity = (await _StubBootstrap().get_context()).to_system_prompt()
     prompt = await _full_prompt(Channel.CLI, budget_chars=len(identity) - 100)
 
-    assert prompt == identity[: len(identity) - 100]
-    assert len(prompt) == len(identity) - 100
+    assert prompt == identity
+    assert len(prompt) > len(identity) - 100

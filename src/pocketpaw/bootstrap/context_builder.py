@@ -1,6 +1,25 @@
 """
 Builder for assembling the full agent context.
 Created: 2026-02-02
+Updated: 2026-08-03 (PA-7a, feat/prompt-assembler-channel) — THIS MODULE NO
+LONGER ASSEMBLES ANYTHING. ``build_system_prompt`` resolves the fifteen
+``channel.*`` layers from ``pocketpaw.prompt.registry`` and calls
+``pocketpaw.prompt.assemble``; ``_assemble_with_budget``, ``_Priority`` and
+``_INJECTION_CAPS`` are deleted. The runtime had two prompt assemblers with two
+sets of rules for caps and budgets — the cloud path moved to the layered one in
+PR #1851 and this is the channel half following it. The block bodies moved into
+``pocketpaw.prompt.channel``; the caps moved onto each layer's ``max_chars``
+unchanged, including the two blocks (``pocket_context``, ``current_pocket``)
+that ``_INJECTION_CAPS`` never had an entry for and which are therefore still
+uncapped. What STAYS here is the ``asyncio.gather``: the bootstrap, memory and
+kb fetches run concurrently and their results are handed to the layers as plain
+data, because ``assemble`` renders sequentially and three self-fetching layers
+would pay their sum where the gather pays their max. One intended behaviour
+change: a CRITICAL block that overruns the budget is now emitted WHOLE rather
+than cut to ``remaining`` — a budget-sized cut is sized from what the block's
+SIBLINGS rendered, so one cache key would name two different texts (see
+``prompt.layer.Priority``). The assembled digest is available and DISCARDED;
+nothing on the channel path caches an agent on it yet.
 Updated: 2026-07-02 (feat/atlas-surface, AT-3) — new always-on "Paw OS
 primer" block (#8b, ``atlas_primer``): a compact OS-identity paragraph, the
 primitive one-liners generated at build time from the atlas store (never
@@ -63,15 +82,15 @@ Updated: 2026-02-10 - Channel-aware format hints
 from __future__ import annotations
 
 import asyncio
-import enum
 import logging
 from dataclasses import dataclass
 
 from pocketpaw.bootstrap.default_provider import DefaultBootstrapProvider
 from pocketpaw.bootstrap.protocol import BootstrapProviderProtocol
 from pocketpaw.bus.events import Channel
-from pocketpaw.bus.format import CHANNEL_FORMAT_HINTS
 from pocketpaw.memory.manager import MemoryManager, get_memory_manager
+from pocketpaw.prompt import PromptContext, assemble, prompt_layer_registry
+from pocketpaw.prompt.channel import CHANNEL_PROMPT_LAYERS, ChannelInputs
 
 logger = logging.getLogger(__name__)
 
@@ -137,32 +156,16 @@ def _resolve_kb_scopes(ctx: KbContext | None, settings) -> list[str]:
     return scopes
 
 
-class _Priority(enum.IntEnum):
-    """Injection block priority — lower value = higher priority."""
-
-    CRITICAL = 0  # Always include, truncate only as last resort
-    HIGH = 1  # Include if budget allows, truncate to cap
-    MEDIUM = 2  # Include if budget allows, skip if tight
-    LOW = 3  # First to drop when budget is exceeded
-
-
-# Default character caps per injection block (None = no cap, use remaining budget)
-_INJECTION_CAPS: dict[str, int | None] = {
-    "identity": None,  # Critical — never capped
-    "instructions": None,  # Critical — never capped
-    "memory_context": 4000,
-    "kb_context": 3000,
-    "sender_block": 500,
-    "channel_hints": 500,
-    "channel_instructions": 1000,
-    "session_key": 200,
-    "file_context": 2000,
-    "health_state": 300,
-    "skills_list": 2000,
-    "atlas_primer": 2000,  # ~500 tokens hard ceiling for the Paw OS primer
-    "agents_md": 3000,
-    "gws_instructions": 1000,
-}
+# ``_Priority`` and ``_INJECTION_CAPS`` lived here until PA-7a. The drop order
+# is now ``pocketpaw.prompt.layer.Priority`` — one enum for the whole runtime,
+# with the same members and the same values, so nothing had to be translated.
+# The caps are now each layer's ``max_chars`` in ``pocketpaw.prompt.channel``,
+# with the numbers carried across unchanged. Two things the old table got wrong
+# were carried across too rather than fixed, because PA-9 is the task with the
+# measurements: it capped ``instructions``, a block this path never produced,
+# and it had no entry at all for ``pocket_context`` or ``current_pocket``, which
+# are therefore uncapped — ``current_pocket`` ``json.dumps`` a widget summary
+# into the prompt with no bound.
 
 _DEFAULT_BUDGET_CHARS = 32_000
 
@@ -174,10 +177,13 @@ class AgentContextBuilder:
     2. Dynamic Memory (MemoryManager)
     3. Current State (e.g., date/time, active tasks)
 
-    Uses a priority-based budget system to prevent unbounded prompt growth.
-    Each injection block has a priority (_Priority) and optional per-block cap
-    (_INJECTION_CAPS). When the total exceeds budget_chars, lower-priority
-    blocks are dropped first while CRITICAL blocks are truncated as a last resort.
+    Since PA-7a it does not do the assembling. It resolves the inputs — running
+    the three independent fetches concurrently — hands them to the
+    ``channel.*`` layers as a :class:`~pocketpaw.prompt.channel.inputs.ChannelInputs`,
+    and lets :func:`pocketpaw.prompt.assemble` apply the per-layer caps and the
+    budget. Lower-priority layers are dropped whole when the budget is tight;
+    a CRITICAL one is emitted whole and the budget overruns, because a
+    budget-sized cut cannot be reconciled with a cache key.
     """
 
     def __init__(
@@ -235,11 +241,22 @@ class AgentContextBuilder:
                 legacy all-skills advertisement — every non-entity run is
                 unchanged.
         """
-        blocks: list[tuple[str, _Priority, str]] = []
-
         # 1. Load static identity, memory context, and kb context concurrently
         # (independent I/O — identity is a function call, memory hits disk/vector db,
         # kb shells out to a subprocess). asyncio.gather keeps the critical path fast.
+        #
+        # THIS STAYS HERE RATHER THAN MOVING INTO THREE LAYERS, and it is the one
+        # structural decision PA-7a made that is not "move the block". ``assemble``
+        # renders layers in a sequential ``for`` loop, so a memory layer and a kb
+        # layer each awaiting their own fetch would cost their SUM on every channel
+        # turn where this gather costs their MAX — and the kb one spawns a
+        # subprocess. Making ``assemble`` render concurrently would fix it too, and
+        # was rejected: it changes the CLOUD path's execution model to solve a
+        # channel-path problem, and no cloud layer has been audited for
+        # order-independence. So the fetches stay batched here and their results
+        # cross as plain data, which is the discipline ``surface_preamble`` and
+        # ``atlas_primer`` already use. Pinned by
+        # ``tests/test_channel_prompt_layers.py::test_the_three_io_fetches_still_run_concurrently``.
         if include_memory:
             if user_query:
                 memory_coro = self.memory.get_semantic_context(user_query, sender_id=sender_id)
@@ -257,351 +274,64 @@ class AgentContextBuilder:
             )
             memory_context = ""
 
-        base_prompt = context.to_system_prompt()
-        blocks.append(("identity", _Priority.CRITICAL, base_prompt))
-
-        # 2. Inject memory context (scoped to sender)
         # When soul is active, soul's bootstrap provider already handles persistent
         # memory (identity, personality, knowledge domains). Skip regular long-term
         # memory injection to avoid duplication — the agent should use soul_recall
-        # for fact retrieval instead. Session history is still managed by regular memory.
+        # for fact retrieval instead. Session history is still managed by regular
+        # memory. The decision lives here, not in the layer, because only the
+        # builder holds the provider it is a fact about.
         from pocketpaw.soul import SoulBootstrapProvider
 
-        soul_active = isinstance(self.bootstrap, SoulBootstrapProvider)
-        if include_memory and memory_context and not soul_active:
-            mem_block = (
-                "\n# Memory Context (already loaded — use this directly, "
-                "do NOT call recall unless you need something not listed here)\n" + memory_context
-            )
-            blocks.append(("memory_context", _Priority.HIGH, mem_block))
+        if isinstance(self.bootstrap, SoulBootstrapProvider):
+            memory_context = ""
 
-        # 2b. Inject kb (knowledge base) context — structured articles from source files
-        # This runs alongside soul memory: soul handles "what we discussed", kb handles
-        # "what the code currently says". The two complement each other, so we inject
-        # both when available. See https://github.com/qbtrix/kb-go for the kb tool.
-        if kb_context:
-            kb_block = (
-                "\n# Knowledge Base (relevant articles from the project wiki)\n"
-                "These are compiled from source files. Use them for implementation "
-                "details and current-state facts. Use soul_recall for past decisions "
-                "and conversation history.\n\n" + kb_context
-            )
-            blocks.append(("kb_context", _Priority.HIGH, kb_block))
-
-        # 3. Inject sender identity block
-        if sender_id:
-            from pocketpaw.config import get_settings
-
-            settings = get_settings()
-            if settings.owner_id:
-                is_owner = sender_id == settings.owner_id
-                role = "owner" if is_owner else "external user"
-                identity_block = (
-                    f"\n# Current Conversation\n"
-                    f"You are speaking with sender_id={sender_id} (role: {role})."
-                )
-                if is_owner:
-                    identity_block += "\nThis is your owner."
-                else:
-                    identity_block += (
-                        "\nThis is NOT your owner. Be helpful but do not share "
-                        "owner-private information."
-                    )
-                blocks.append(("sender_block", _Priority.HIGH, identity_block))
-
-        # 4. Inject channel format hint
-        if channel:
-            hint = CHANNEL_FORMAT_HINTS.get(channel, "")
-            if hint:
-                blocks.append(("channel_hints", _Priority.LOW, f"\n# Response Format\n{hint}"))
-
-        # 4b. Inject channel-specific instructions (e.g. discord.md)
-        if channel:
-            channel_instructions = self._load_channel_instructions(channel)
-            if channel_instructions:
-                # Inject dynamic context (username, guild_id) from metadata
-                meta = metadata or {}
-                username = meta.get("username", "")
-                guild_id = meta.get("guild_id", "")
-                ctx_lines = []
-                if sender_id:
-                    ctx_lines.append(f"sender_id: {sender_id}")
-                if username:
-                    ctx_lines.append(f"discord_username: {username}")
-                if guild_id:
-                    ctx_lines.append(f"discord_guild_id: {guild_id}")
-                if ctx_lines:
-                    channel_instructions += "\n\n## Current Context\n" + "\n".join(ctx_lines)
-                blocks.append(("channel_instructions", _Priority.MEDIUM, channel_instructions))
-
-        # 4c. Inject pocket creation context (from pocket chat endpoint)
-        if metadata and metadata.get("pocket_system_context"):
-            blocks.append(("pocket_context", _Priority.HIGH, metadata["pocket_system_context"]))
-
-        # 4d. Inject current pocket info so the AI knows what pocket is open.
-        # The full pocket document is NOT embedded here — that would blow the
-        # Windows CLI arg limit for large rippleSpec.ui trees. The agent
-        # retrieves it on demand via the `mcp__pocketpaw_pocket__get_pocket`
-        # tool (the EE in-process pocketpaw_pocket MCP server).
-        if metadata and metadata.get("pocket_context"):
-            import json
-
-            pc = metadata["pocket_context"]
-            pocket_id = pc.get("id", "unknown")
-            widget_summary = pc.get("widgets", [])
-            pocket_tag = (
-                f"\n<current-pocket>\n"
-                f"id: {pocket_id}\n"
-                f"name: {pc.get('name', 'Untitled')}\n"
-                f"widgets_summary: {json.dumps(widget_summary)}\n"
-                f"\n"
-                f"SCOPE — read this carefully before doing anything:\n"
-                f'In this conversation, "pocket" / "this pocket" / "the\n'
-                f'pocket" always means THIS workspace dashboard\n'
-                f"(id ``{pocket_id}``) — a MongoDB document the user is\n"
-                f"viewing on screen. It is NOT the PocketPaw application,\n"
-                f"NOT the source tree on disk, NOT any file under\n"
-                f'``D:\\paw`` or ``backend/`` or ``ee/cloud/``. "Edit the\n'
-                f'pocket", "add a widget", "more widgets" all refer to\n'
-                f"this document — operate on it through the\n"
-                f"``mcp__pocketpaw_pocket__*`` tools ONLY. Do NOT use\n"
-                f"shell, file_edit, grep, or web_search for pocket\n"
-                f"operations — they cannot read or write the document.\n"
-                f"\n"
-                f"NOTE: `widgets_summary` is a shallow hint (names + types)\n"
-                f"and is OFTEN EMPTY for UISpec-tree pockets — absence here\n"
-                f"does NOT mean the pocket is empty. The real content lives\n"
-                f"in rippleSpec.ui.\n"
-                f"\n"
-                f"BEFORE answering any question about this pocket's contents,\n"
-                f"widgets, layout, data, or configuration, you MUST first call:\n"
-                f"  tool: mcp__pocketpaw_pocket__get_pocket\n"
-                f'  args: {{"pocket_id": "{pocket_id}"}}\n'
-                f"That returns the full document (rippleSpec, widgets,\n"
-                f"metadata, visibility). Base your answer on that, not on\n"
-                f"the summary above.\n"
-                f"</current-pocket>\n"
-            )
-            blocks.append(("current_pocket", _Priority.HIGH, pocket_tag))
-
-        # 5. Inject session key for session management tools
-        if session_key:
-            session_block = (
-                f"\n# Session Management\n"
-                f"Current session_key: {session_key}\n"
-                f"Pass this value to any session tool (new_session, list_sessions, "
-                f"switch_session, clear_session, rename_session, delete_session)."
-            )
-            blocks.append(("session_key", _Priority.MEDIUM, session_block))
-
-        # 6. Inject file context from desktop client
-        if file_context:
-            import re
-
-            def _sanitize_path(p: str) -> str:
-                """Strip non-path characters to prevent prompt injection."""
-                return re.sub(r"[^\w\s\-./\\:~]", "", p).strip()
-
-            fc_parts = []
-            if file_context.get("current_dir"):
-                fc_parts.append(f"Working directory: {_sanitize_path(file_context['current_dir'])}")
-            if file_context.get("open_file"):
-                fc_parts.append(f"Open file: {_sanitize_path(file_context['open_file'])}")
-            if file_context.get("selected_files"):
-                safe_files = [_sanitize_path(f) for f in file_context["selected_files"]]
-                fc_parts.append(f"Selected files: {', '.join(safe_files)}")
-            if fc_parts:
-                blocks.append(
-                    (
-                        "file_context",
-                        _Priority.MEDIUM,
-                        "\n# File Context\n" + "\n".join(fc_parts),
-                    )
-                )
-
-        # 7. Inject health state (only when degraded/unhealthy — saves context window)
-        try:
-            from pocketpaw.health import get_health_engine
-
-            health_block = get_health_engine().get_health_prompt_section()
-            if health_block:
-                blocks.append(("health_state", _Priority.LOW, health_block))
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Health engine failure (non-fatal, skipping health block): %s", exc)
-
-        # 8. Inject available skills so the agent knows what exists
-        try:
-            from pocketpaw.skills import get_skill_loader
-
-            loader = get_skill_loader()
-            skills = loader.get_all()
-            # entity-rooms A2: when the entity pins a non-empty skill subset,
-            # advertise ONLY those skills (the non-SDK equivalent of the SDK's
-            # per-run materialized plugin). Empty / None → legacy all-skills
-            # behavior, so every non-entity run is unchanged.
-            if skill_names:
-                skills = {n: s for n, s in skills.items() if n in skill_names}
-            if skills:
-                skill_lines = []
-                for s in skills.values():
-                    invocable = " (user-invocable)" if s.user_invocable else ""
-                    skill_lines.append(f"- **{s.name}**: {s.description}{invocable}")
-                search_dirs = ", ".join(str(p) for p in loader.paths)
-                skills_block = (
-                    "\n# Available Skills\n"
-                    "The following skills have been created and are available. "
-                    "Do NOT recreate them or forget they exist.\n"
-                    + "\n".join(skill_lines)
-                    + f"\n\nSkills directories: {search_dirs}"
-                )
-                blocks.append(("skills_list", _Priority.MEDIUM, skills_block))
-        except Exception as exc:
-            logger.debug("Skill injection skipped: %s", exc)
-
-        # 8b. Inject the Paw OS primer (atlas) — OS identity, the primitive
-        # one-liners (generated from the atlas store so they can't drift from
-        # the seed), and the atlas_search / surface-route instructions. Same
-        # MEDIUM priority as the skills block; an atlas failure never breaks
-        # prompt building.
-        try:
-            primer = self._build_atlas_primer()
-            if primer:
-                blocks.append(("atlas_primer", _Priority.MEDIUM, primer))
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Atlas primer skipped (non-fatal): %s", exc)
-
-        # 9. Inject AGENTS.md constraints from the target repo
-        if agents_md_dir:
-            try:
-                from pocketpaw.agents_md import AgentsMdLoader
-
-                agents_md = AgentsMdLoader().find_and_load(agents_md_dir)
-                if agents_md:
-                    blocks.append(("agents_md", _Priority.MEDIUM, agents_md.constraints_block))
-            except Exception:
-                pass  # AGENTS.md failure never breaks prompt building
-
-        # 10. Inject GWS CLI guidance when google-workspace MCP server is active
-        try:
-            gws_block = self._load_gws_instructions()
-            if gws_block:
-                blocks.append(("gws_instructions", _Priority.MEDIUM, gws_block))
-        except Exception:
-            pass  # GWS injection failure never breaks prompt building
-
-        return self._assemble_with_budget(blocks, budget_chars=budget_chars)
-
-    @staticmethod
-    def _assemble_with_budget(
-        blocks: list[tuple[str, _Priority, str]],
-        budget_chars: int = _DEFAULT_BUDGET_CHARS,
-    ) -> str:
-        """Assemble system prompt blocks respecting a character budget.
-
-        Blocks are processed in priority order (CRITICAL first).
-        Each block is capped by _INJECTION_CAPS if defined.
-        Lower-priority blocks are skipped when budget is exceeded.
-        """
-        # Sort by priority (CRITICAL=0 first), preserving insertion order for ties
-        sorted_blocks = sorted(blocks, key=lambda b: b[1])
-        result_parts: list[str] = []
-        remaining = budget_chars
-
-        for name, priority, content in sorted_blocks:
-            if not content or not content.strip():
-                continue
-
-            # Apply per-block cap
-            cap = _INJECTION_CAPS.get(name)
-            if cap and len(content) > cap:
-                content = content[:cap] + "\n[...truncated]"
-
-            # Check budget
-            if len(content) > remaining:
-                if priority == _Priority.CRITICAL:
-                    # Critical blocks get truncated to fit
-                    content = content[:remaining]
-                    logger.warning(
-                        "Truncated CRITICAL block '%s' to %d chars (budget exhausted)",
-                        name,
-                        remaining,
-                    )
-                else:
-                    logger.info(
-                        "Skipped block '%s' (%d chars, priority %s) — budget exhausted"
-                        " (%d remaining)",
-                        name,
-                        len(content),
-                        priority.name,
-                        remaining,
-                    )
-                    continue
-
-            result_parts.append(content)
-            remaining -= len(content)
-
-        return "\n\n".join(result_parts)
+        ctx = PromptContext(
+            # No ``AgentInstance`` on this path and none faked: the pool's
+            # instance is a cloud concept, and every field the channel layers
+            # read arrives on ``channel_inputs`` instead. The cloud-only fields
+            # take their no-content defaults, so a cloud layer that ever appears
+            # in a channel list renders nothing rather than reading a stub.
+            instance=None,
+            agent_id="",
+            message=user_query or "",
+            instructions="",
+            knowledge_context="",
+            system_message_override=None,
+            channel_inputs=ChannelInputs(
+                identity=context.to_system_prompt(),
+                identity_cache_key=getattr(context, "identity_cache_key", None),
+                memory_context=memory_context,
+                kb_context=kb_context,
+                channel=channel,
+                sender_id=sender_id,
+                session_key=session_key,
+                file_context=file_context,
+                metadata=metadata,
+                agents_md_dir=agents_md_dir,
+                skill_names=skill_names,
+            ),
+        )
+        layers = [prompt_layer_registry.get(name) for name in CHANNEL_PROMPT_LAYERS]
+        assembled = await assemble(layers, ctx, budget_chars=budget_chars)
+        # ``assembled.stable_digest`` is deliberately dropped. Nothing on the
+        # channel path caches an agent object with the prompt baked in, so there
+        # is nothing to fold it into yet; the layers answer ``cache_key``
+        # honestly anyway so the digest is correct the day one does.
+        return assembled.text
 
     @staticmethod
     def _build_atlas_primer() -> str:
-        """Build the compact always-on "Paw OS primer" block (AT-3).
+        """Delegate to the atlas layer's builder (moved there in PA-7a).
 
-        Three parts, ~500 tokens hard ceiling (enforced twice: the seed keeps
-        each line short, and ``_INJECTION_CAPS['atlas_primer']`` caps the
-        rendered block at 2000 chars):
-
-        1. One-paragraph OS identity ("you run inside paw-os ...").
-        2. One line per primitive — name + gist, generated at build time from
-           the atlas store so a seed edit can never drift from the prompt.
-           Prefer the entry's authored ``gist`` (a complete, self-contained
-           one-liner that ends on a full clause). Only when a primitive has no
-           ``gist`` fall back to a clause-aware truncation of ``summary`` — cut
-           at the last full word before the cap so a line never dangles
-           mid-phrase (the old fixed-108-char cut dropped load-bearing words
-           like Belt's "Instinct gate" and Branch's "review/merge/publish").
-        3. The standing instruction: ``atlas_search`` before guessing about
-           OS capabilities, and include the ``surface`` route when pointing
-           a user somewhere.
-
-        Returns "" when the store has no primitives. Raises on store load
-        failure — the caller wraps this in try/except (same pattern as the
-        skills block) so prompt building never breaks.
+        The body moved to ``pocketpaw.prompt.channel.environment`` so it renders
+        inside a layer and under the assembler's render guard, which is what
+        replaced this block's ``try/except``. The name stays because
+        ``tests/atlas/test_primer_block.py`` drives the seed's content through
+        it, and that content is worth keeping under test at a stable name.
         """
-        from pocketpaw.atlas.store import get_atlas_store
+        from pocketpaw.prompt.channel.environment import build_atlas_primer
 
-        primitives = [e for e in get_atlas_store().entries if e.kind == "primitive"]
-        if not primitives:
-            return ""
-
-        lines: list[str] = []
-        for entry in primitives:
-            gist = (entry.gist or "").strip().rstrip(".")
-            if not gist:
-                # No authored gist — fall back to the summary's first clause,
-                # cut clause-aware at the last full word before the cap so the
-                # line still ends cleanly rather than mid-phrase.
-                gist = entry.summary.split(";")[0].strip().rstrip(".")
-                if len(gist) > 110:
-                    gist = gist[:108].rsplit(" ", 1)[0]
-                    if gist.count("(") > gist.count(")"):
-                        gist = gist[: gist.rindex("(")]
-                    gist = gist.rstrip(" ,.:;(") + "…"
-            suffix = "" if gist.endswith("…") else "."
-            lines.append(f"- {entry.name}: {gist}{suffix}")
-
-        return (
-            "\n# Paw OS Primer\n"
-            "You run inside paw-os, an agentic workspace OS. Its primitives "
-            "carry paw-specific meanings (a Pocket is a workspace app, not "
-            "clothing), and users see results on frontend surfaces — routes "
-            "like /sites.\n\n"
-            "OS primitives:\n" + "\n".join(lines) + "\n\n"
-            "Before guessing whether the OS can do something or which "
-            "primitive fits, call atlas_search with your intent, then "
-            "atlas_describe on the best id. When an action has a home "
-            "surface, tell the user where to see it by route (e.g. "
-            '"see it at /sites") — entries carry it in their `surface` field.'
-        )
+        return build_atlas_primer()
 
     @staticmethod
     async def _get_kb_context(
@@ -868,39 +598,3 @@ class AgentContextBuilder:
             elif title:
                 parts.append(f"- {title}")
         return "\n".join(parts)
-
-    @staticmethod
-    def _load_channel_instructions(channel: Channel) -> str:
-        """Load channel-specific instruction file (e.g. discord.md)."""
-        from pathlib import Path
-
-        _channel_files = {
-            Channel.DISCORD: "discord.md",
-        }
-        filename = _channel_files.get(channel)
-        if not filename:
-            return ""
-        path = Path(__file__).parent / filename
-        if not path.exists():
-            return ""
-        try:
-            return path.read_text(encoding="utf-8").strip()
-        except Exception:
-            return ""
-
-    @staticmethod
-    def _load_gws_instructions() -> str:
-        """Load GWS CLI guidance if the google-workspace MCP server is active."""
-        from pathlib import Path
-
-        from pocketpaw.mcp.config import load_mcp_config
-
-        configs = load_mcp_config()
-        gws_active = any(c.name == "google-workspace" and c.enabled for c in configs)
-        if not gws_active:
-            return ""
-
-        path = Path(__file__).parent / "gws.md"
-        if not path.exists():
-            return ""
-        return path.read_text(encoding="utf-8").strip()

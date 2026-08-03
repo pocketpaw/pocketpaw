@@ -1,163 +1,217 @@
 """
 Tests for context window budget tracking in AgentContextBuilder.
 Created: 2026-04-01 - Priority-based injection with per-block character caps.
+Updated: 2026-08-03 (PA-7a, feat/prompt-assembler-channel) - the subject moved.
+``_assemble_with_budget``, ``_Priority`` and ``_INJECTION_CAPS`` are deleted;
+the channel path assembles through ``pocketpaw.prompt.assemble`` over the
+fifteen ``channel.*`` layers, each carrying its own ``max_chars`` and
+``Priority``. The budget MECHANICS are therefore tested once, generically, in
+``tests/test_prompt_budget.py``. What is left here is the thing only this file
+can check: that every cap and every priority came across the cutover with the
+number it had, and that the two blocks the old table had NO entry for are still
+uncapped rather than quietly given one.
+
+The behavioural tests below drive the REQUEST layers only
+(``tests/test_channel_prompt_goldens.py`` covers the full fifteen against real
+bytes). Request layers read nothing but their ``ChannelInputs``, so these stay
+hermetic without stubbing the machine.
 """
 
 from __future__ import annotations
 
 from pocketpaw.bootstrap.context_builder import (
     _DEFAULT_BUDGET_CHARS,
-    _INJECTION_CAPS,
     AgentContextBuilder,
-    _Priority,
 )
+from pocketpaw.prompt import Priority, PromptContext, assemble, prompt_layer_registry
+from pocketpaw.prompt.channel import CHANNEL_PROMPT_LAYERS, ChannelInputs
+
+# The table as ``_INJECTION_CAPS`` held it the moment before PA-7a deleted it,
+# transcribed here so the assertion below compares the layers against the OLD
+# numbers rather than against themselves. ``None`` means uncapped.
+#
+# Two things in it are not what a reader would guess, and both are inherited
+# rather than chosen:
+#   * ``pocket_context`` and ``current_pocket`` were MISSING from the table, so
+#     ``_INJECTION_CAPS.get(name)`` returned ``None`` and they went into the
+#     prompt at whatever length the caller produced. ``current_pocket``
+#     ``json.dumps`` a widget summary in with no bound.
+#   * the table also capped ``instructions``, a block this path never appended.
+#     There is no ``channel.instructions`` layer and the entry has no successor.
+# PA-9 owns cap arithmetic; PA-7a's job was to move the numbers, not judge them.
+_OLD_INJECTION_CAPS: dict[str, int | None] = {
+    "channel.identity": None,
+    "channel.memory_context": 4000,
+    "channel.kb_context": 3000,
+    "channel.sender_block": 500,
+    "channel.channel_hints": 500,
+    "channel.channel_instructions": 1000,
+    "channel.session_key": 200,
+    "channel.file_context": 2000,
+    "channel.health_state": 300,
+    "channel.skills_list": 2000,
+    "channel.atlas_primer": 2000,
+    "channel.agents_md": 3000,
+    "channel.gws_instructions": 1000,
+    "channel.pocket_context": None,
+    "channel.current_pocket": None,
+}
+
+# The priority each block was appended with, same source, same moment.
+_OLD_PRIORITIES: dict[str, Priority] = {
+    "channel.identity": Priority.CRITICAL,
+    "channel.memory_context": Priority.HIGH,
+    "channel.kb_context": Priority.HIGH,
+    "channel.sender_block": Priority.HIGH,
+    "channel.pocket_context": Priority.HIGH,
+    "channel.current_pocket": Priority.HIGH,
+    "channel.channel_instructions": Priority.MEDIUM,
+    "channel.session_key": Priority.MEDIUM,
+    "channel.file_context": Priority.MEDIUM,
+    "channel.skills_list": Priority.MEDIUM,
+    "channel.atlas_primer": Priority.MEDIUM,
+    "channel.agents_md": Priority.MEDIUM,
+    "channel.gws_instructions": Priority.MEDIUM,
+    "channel.channel_hints": Priority.LOW,
+    "channel.health_state": Priority.LOW,
+}
+
+def _ctx(**channel_inputs) -> PromptContext:
+    return PromptContext(
+        instance=None,
+        agent_id="",
+        message="",
+        instructions="",
+        knowledge_context="",
+        system_message_override=None,
+        channel_inputs=ChannelInputs(**channel_inputs),
+    )
 
 
-class TestAssembleWithBudget:
-    """Unit tests for _assemble_with_budget — the budget-aware block assembler."""
+def _layers(*names):
+    return [prompt_layer_registry.get(name) for name in names]
 
-    def test_all_blocks_fit_within_budget(self):
-        """Small blocks should all be included when they fit comfortably."""
-        blocks = [
-            ("identity", _Priority.CRITICAL, "I am PocketPaw."),
-            ("memory_context", _Priority.HIGH, "User likes coffee."),
-            ("channel_hints", _Priority.LOW, "Keep it short."),
+
+class TestChannelLayerBudget:
+    """The caps, the priorities, and the budget behaviour they drive."""
+
+    async def test_every_cap_came_across_with_the_number_it_had(self):
+        """Each layer's ``max_chars`` is its old ``_INJECTION_CAPS`` entry.
+
+        MUTATION: change any ``max_chars`` in ``prompt/channel/request.py`` or
+        ``prompt/channel/environment.py``. The offending name is named.
+        """
+        actual = {name: prompt_layer_registry.get(name).max_chars for name in CHANNEL_PROMPT_LAYERS}
+        assert actual == _OLD_INJECTION_CAPS
+
+    async def test_the_two_uncapped_blocks_are_still_uncapped(self):
+        """``pocket_context`` and ``current_pocket`` never had a cap entry.
+
+        Called out separately from the table above because "``None`` because the
+        old table said ``None``" and "``None`` because the old table had no row"
+        are different facts, and only the second is a gap PA-9 should look at.
+
+        MUTATION: give ``ChannelCurrentPocketLayer`` a ``max_chars``. Fails —
+        and would also move bytes on any live pocket big enough to hit it.
+        """
+        assert prompt_layer_registry.get("channel.pocket_context").max_chars is None
+        assert prompt_layer_registry.get("channel.current_pocket").max_chars is None
+
+    async def test_the_dead_instructions_cap_has_no_successor(self):
+        """``_INJECTION_CAPS['instructions']`` capped a block this path never built.
+
+        MUTATION: register a ``channel.instructions`` layer. Fails, and it
+        should — the cloud path's ``instructions`` layer is a different block
+        with a different producer, and a channel twin would put the EE behaviour
+        stack into channel prompts.
+        """
+        assert "channel.instructions" not in CHANNEL_PROMPT_LAYERS
+        assert "channel.instructions" not in prompt_layer_registry.list()
+
+    async def test_every_priority_came_across_with_the_rank_it_had(self):
+        """Each layer's ``priority`` is the one its block was appended with.
+
+        MUTATION: flip ``ChannelFormatHintLayer.priority`` to MEDIUM. Fails
+        here, and the emission-order test in
+        ``tests/test_channel_prompt_layers.py`` fails too — the two together are
+        what make a priority change impossible to land by accident.
+        """
+        actual = {name: prompt_layer_registry.get(name).priority for name in CHANNEL_PROMPT_LAYERS}
+        assert actual == _OLD_PRIORITIES
+
+    async def test_all_blocks_fit_within_a_generous_budget(self):
+        """Small blocks are all included when they fit comfortably."""
+        assembled = await assemble(
+            _layers("channel.identity", "channel.memory_context", "channel.session_key"),
+            _ctx(identity="I am PocketPaw.", memory_context="User likes coffee.", session_key="s"),
+            budget_chars=10_000,
+        )
+        assert "I am PocketPaw." in assembled.text
+        assert "User likes coffee." in assembled.text
+        assert "Current session_key: s" in assembled.text
+
+    async def test_low_priority_is_dropped_before_critical(self):
+        """When the budget is tight, LOW goes and CRITICAL stays."""
+        from pocketpaw.bus.events import Channel
+
+        assembled = await assemble(
+            _layers("channel.identity", "channel.channel_hints"),
+            _ctx(identity="X" * 800, channel=Channel.TELEGRAM),
+            budget_chars=850,
+        )
+        assert "X" * 800 in assembled.text
+        assert "# Response Format" not in assembled.text
+        # Two entries, and they are two different cuts: the Telegram hint is
+        # over its own 500-char cap FIRST (unconditional, before the budget is
+        # consulted), and the capped 515 chars are then what the budget cannot
+        # afford. ``dropped`` records both because neither is the other.
+        assert [(d.name, d.reason.split()[0]) for d in assembled.dropped] == [
+            ("channel.channel_hints", "truncated"),
+            ("channel.channel_hints", "dropped"),
         ]
-        result = AgentContextBuilder._assemble_with_budget(blocks, budget_chars=10_000)
-        assert "I am PocketPaw." in result
-        assert "User likes coffee." in result
-        assert "Keep it short." in result
 
-    def test_low_priority_dropped_first(self):
-        """When budget is tight, LOW blocks should be dropped before CRITICAL ones."""
-        critical_block = "X" * 800
-        high_block = "Y" * 100
-        low_block = "Z" * 200
+    async def test_a_block_over_its_cap_is_truncated_with_a_marker(self):
+        """A block above ``max_chars`` is cut and says so, budget notwithstanding."""
+        assembled = await assemble(
+            _layers("channel.memory_context"),
+            _ctx(memory_context="M" * 9000),
+            budget_chars=50_000,
+        )
+        assert "[...truncated]" in assembled.text
+        assert len(assembled.text) == 4000 + len("\n[...truncated]")
 
-        blocks = [
-            ("identity", _Priority.CRITICAL, critical_block),
-            ("memory_context", _Priority.HIGH, high_block),
-            ("channel_hints", _Priority.LOW, low_block),
-        ]
-        # Budget fits critical + high but not low (800 + 100 + separators < 950 < 800+100+200)
-        result = AgentContextBuilder._assemble_with_budget(blocks, budget_chars=950)
-        assert critical_block in result
-        assert high_block in result
-        assert low_block not in result
-
-    def test_critical_never_dropped(self):
-        """Even with a tiny budget, CRITICAL blocks are truncated but still present."""
-        critical_content = "A" * 500
-        medium_content = "B" * 200
-
-        blocks = [
-            ("identity", _Priority.CRITICAL, critical_content),
-            ("sender_block", _Priority.MEDIUM, medium_content),
-        ]
-        result = AgentContextBuilder._assemble_with_budget(blocks, budget_chars=100)
-        # Critical block should be truncated to 100 chars, but present
-        assert len(result) <= 100
-        assert result.startswith("A")
-        # Medium block should be dropped entirely
-        assert "B" not in result
-
-    def test_per_block_caps_applied(self):
-        """A block exceeding its per-block cap should be truncated with a marker."""
-        memory_cap = _INJECTION_CAPS["memory_context"]
-        assert memory_cap is not None  # sanity check
-
-        oversized_content = "M" * (memory_cap + 5000)
-        blocks = [
-            ("memory_context", _Priority.HIGH, oversized_content),
-        ]
-        result = AgentContextBuilder._assemble_with_budget(blocks, budget_chars=50_000)
-        # Should be capped to memory_cap + truncation marker, not the full content
-        assert len(result) <= memory_cap + len("\n[...truncated]") + 10
-        assert "[...truncated]" in result
-
-    def test_empty_blocks_skipped(self):
-        """Empty or whitespace-only blocks should not consume any budget."""
-        blocks = [
-            ("identity", _Priority.CRITICAL, "Hello"),
-            ("memory_context", _Priority.HIGH, ""),
-            ("channel_hints", _Priority.LOW, "   "),
-            ("sender_block", _Priority.MEDIUM, "World"),
-        ]
-        result = AgentContextBuilder._assemble_with_budget(blocks, budget_chars=10_000)
-        assert "Hello" in result
-        assert "World" in result
-        # Only two non-empty blocks joined by \n\n
-        assert result == "Hello\n\nWorld"
-
-    def test_default_budget_is_generous(self):
-        """The default 32K budget should accommodate typical prompt assemblies."""
+    async def test_the_default_budget_is_still_generous(self):
+        """The 32K default accommodates a typical assembly."""
         assert _DEFAULT_BUDGET_CHARS == 32_000
+        assembled = await assemble(
+            _layers("channel.identity", "channel.memory_context"),
+            _ctx(identity="X" * 2000, memory_context="Y" * 1500),
+        )
+        assert "X" * 2000 in assembled.text
+        assert "Y" * 1500 in assembled.text
 
-        # A reasonable set of blocks totalling ~5K should all fit
-        blocks = [
-            ("identity", _Priority.CRITICAL, "X" * 2000),
-            ("memory_context", _Priority.HIGH, "Y" * 1500),
-            ("sender_block", _Priority.MEDIUM, "Z" * 500),
-            ("channel_hints", _Priority.LOW, "W" * 300),
-            ("skills_list", _Priority.MEDIUM, "S" * 700),
-        ]
-        result = AgentContextBuilder._assemble_with_budget(blocks)
-        # All blocks should be present
-        assert "X" * 2000 in result
-        assert "Y" * 1500 in result
-        assert "Z" * 500 in result
-        assert "W" * 300 in result
-        assert "S" * 700 in result
+    async def test_an_uncapped_block_is_never_truncated(self):
+        """``channel.identity`` has no cap, so 20k chars arrive whole."""
+        big = "I" * 20_000
+        assembled = await assemble(
+            _layers("channel.identity"), _ctx(identity=big), budget_chars=25_000
+        )
+        assert assembled.text == big
 
-    def test_budget_chars_kwarg(self):
-        """Caller should be able to pass a custom budget_chars value."""
-        blocks = [
-            ("identity", _Priority.CRITICAL, "A" * 100),
-            ("memory_context", _Priority.HIGH, "B" * 100),
-        ]
-        # With budget=150, only the critical block fits (100 chars + need room for second)
-        result = AgentContextBuilder._assemble_with_budget(blocks, budget_chars=150)
-        assert "A" * 100 in result
-        # 100 chars used, 50 remaining — not enough for 100 chars of B
-        assert "B" * 100 not in result
+    async def test_blank_blocks_leave_no_separator(self):
+        """A layer with nothing to say contributes no text AND no ``\\n\\n``.
 
-    def test_priority_ordering_preserved(self):
-        """Blocks should be assembled in priority order, not insertion order."""
-        blocks = [
-            ("channel_hints", _Priority.LOW, "low"),
-            ("identity", _Priority.CRITICAL, "critical"),
-            ("memory_context", _Priority.HIGH, "high"),
-            ("sender_block", _Priority.MEDIUM, "medium"),
-        ]
-        result = AgentContextBuilder._assemble_with_budget(blocks, budget_chars=10_000)
-        # CRITICAL should come before HIGH, which should come before MEDIUM, then LOW
-        crit_pos = result.index("critical")
-        high_pos = result.index("high")
-        med_pos = result.index("medium")
-        low_pos = result.index("low")
-        assert crit_pos < high_pos < med_pos < low_pos
-
-    def test_uncapped_block_uses_remaining_budget(self):
-        """A block with no cap (None) should use whatever budget remains."""
-        # identity has no cap in _INJECTION_CAPS
-        large_identity = "I" * 20_000
-        blocks = [
-            ("identity", _Priority.CRITICAL, large_identity),
-        ]
-        result = AgentContextBuilder._assemble_with_budget(blocks, budget_chars=25_000)
-        assert result == large_identity
-
-    def test_multiple_blocks_same_priority(self):
-        """Multiple blocks at the same priority should all be included if budget allows."""
-        blocks = [
-            ("sender_block", _Priority.MEDIUM, "sender"),
-            ("session_key", _Priority.MEDIUM, "session"),
-            ("file_context", _Priority.MEDIUM, "files"),
-        ]
-        result = AgentContextBuilder._assemble_with_budget(blocks, budget_chars=10_000)
-        assert "sender" in result
-        assert "session" in result
-        assert "files" in result
+        MUTATION: drop ``_nonblank`` from ``ChannelIdentityLayer.render``. A
+        whitespace-only identity starts contributing a separator and the
+        assertion below fails.
+        """
+        assembled = await assemble(
+            _layers("channel.identity", "channel.session_key", "channel.file_context"),
+            _ctx(identity="   ", session_key="s-1", file_context=None),
+            budget_chars=10_000,
+        )
+        assert assembled.text.startswith("\n# Session Management")
+        assert "\n\n" not in assembled.text.strip()
 
 
 class TestKbContext:
@@ -230,6 +284,6 @@ class TestKbContext:
 
     def test_kb_context_has_injection_cap(self):
         """kb_context should have a reasonable cap to avoid blowing the context window."""
-        cap = _INJECTION_CAPS.get("kb_context")
+        cap = prompt_layer_registry.get("channel.kb_context").max_chars
         assert cap is not None
         assert 1000 <= cap <= 5000  # sanity range
