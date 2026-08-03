@@ -535,27 +535,34 @@ async def test_the_behavior_prefix_is_byte_identical_to_the_written_expectation(
 
 
 async def test_the_prefix_still_carries_the_two_sections_the_key_ignores():
-    """The honest statement of what this task did NOT fix.
+    """The honest statement of what PA-3b did NOT fix, and what PA-6 then did.
 
     `## Current State` and `## Self-Understanding` are excluded from the
     assembler's digest and are still inside `_behavior_prefix`'s retained text,
-    because moving them is a byte change this task is not allowed to make. So
-    the claude_sdk warm client still rebuilds when they drift — measured at 7/8
-    substantive turns — while a backend keying on `stable_digest` does not.
+    because moving them is a byte change PA-3b was not allowed to make. So the
+    prefix rebuilt the claude_sdk warm client whenever they drifted — measured
+    at 7/8 substantive turns.
 
-    PA-6 removes `_behavior_prefix`, and READ THE DIRECTION BEFORE CALLING THAT
-    A WIN. It closes the gap toward MORE cache reuse: content the prefix
-    currently re-hashes every turn stops forcing a rebuild. That is only an
-    improvement if the digest is RIGHT about what is stable, and the digest's
-    stability rests entirely on `_VOLATILE_IDENTITY_SECTIONS` being a complete
-    and correct denylist. That list was measured, but its completeness against
-    FUTURE soul-protocol releases is assumed, not verified — the denylist is
-    built to fail toward an extra rebuild precisely because nobody has proven
-    it. If PA-6 deletes the prefix and a section is misclassified, the failure
-    is no longer a wasted rebuild, it is a stale prompt served from a warm
-    client. So PA-6 inherits the caveat with the claim: before deleting the
-    prefix, re-run the drift measurement against the soul-protocol version
-    shipping at that time rather than trusting this list.
+    PA-6 DID NOT DELETE THE PREFIX, and the direction is the reason. It was
+    filed as a deletion, on the reading that the digest supersedes it. It does —
+    on the CLOUD path, where `_client_cache_key` now takes the digest and never
+    consults this function. It does not on the CHANNEL path: `AgentLoop` builds
+    its prompt in `AgentContextBuilder`, arrives with no digest until PA-7, and
+    `ClaudeSDKBackend.run` splices a GROWING `# Recent Conversation` block into
+    `options.system_prompt` — so a key over the whole prompt respawns the
+    subprocess every turn. Measured 2026-08-03 over 8 turns of a realistic
+    channel prompt: whole-prompt keying held 0 of 7 boundaries, this prefix 7 of
+    7. So it survives as the no-digest fallback and PA-7 deletes it.
+
+    WHAT THAT MEANS FOR THE CAVEAT THIS TEST WAS WRITTEN TO CARRY. On the cloud
+    path the second line of defence IS gone: the digest's stability rests
+    entirely on `_VOLATILE_IDENTITY_SECTIONS` being a complete denylist, and a
+    misclassified section is now a stale prompt served from a warm client rather
+    than a wasted rebuild. PA-6 re-ran the drift measurement against
+    soul-protocol 0.4.0 as shipping before making that trade — 8 sections
+    rendered, exactly the two on the list moved, nothing volatile was missing and
+    nothing on the list held still. The list is still a claim about the version
+    measured; re-run it when soul-protocol moves. See `soul/_bridge.py`.
     """
     prefix = ClaudeSDKBackend._behavior_prefix(await _full_prompt("abc123"))
 

@@ -316,13 +316,25 @@ def _accepts_prompt_digest(backend_cls: type) -> bool:
     Cached because this runs once per turn, and a backend class's signature
     cannot change at runtime.
     """
-    import inspect
-
     run = getattr(backend_cls, "run", None)
     if run is None:  # pragma: no cover - not a backend
         return False
+    return _accepts_prompt_digest_kwarg(run)
+
+
+def _accepts_prompt_digest_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``system_prompt_digest`` in its signature?
+
+    Split out of ``_accepts_prompt_digest`` at PA-6 because ``prewarm`` needs the
+    same question asked of a BOUND METHOD rather than of a backend class. Not
+    cached: a bound method is a fresh object per access, so a cache keyed on it
+    would grow without ever hitting, and the check is one ``inspect.signature``
+    on a path that already builds SDK options.
+    """
+    import inspect
+
     try:
-        return "system_prompt_digest" in inspect.signature(run).parameters
+        return "system_prompt_digest" in inspect.signature(func).parameters
     except (TypeError, ValueError):  # pragma: no cover - exotic callables
         return False
 
@@ -622,13 +634,19 @@ class AgentPool:
 
         # The backend's prewarm swallows ALL of its own errors, so this is
         # already safe; the outer guards above cover instance/prompt failures.
-        # ``.text`` and nothing else: the prewarmed client must hash to the same
-        # behavioral prefix turn 1 will produce, and only the Claude SDK backend
-        # has a client to prewarm — it computes its own prefix digest.
         prewarm_kwargs: dict[str, Any] = {
             "session_key": session_key,
             "system_prompt": assembled.text,
         }
+        # PA-6: the digest is now what the warm-client key hashes, so a prewarm
+        # that withheld it would key under ``t:`` and turn 1 would key under
+        # ``d:`` — the prewarmed subprocess EVICTED by the very turn it exists to
+        # serve. Asked of the signature for the same reason ``_accepts_policy``
+        # is: a backend opts in by taking the argument. Sent unconditionally
+        # (never gated on truthiness) because turn 1 sends it unconditionally,
+        # and the two keys have to be built from the same inputs.
+        if _accepts_prompt_digest_kwarg(backend_prewarm):
+            prewarm_kwargs["system_prompt_digest"] = assembled.stable_digest
         if deny_mcp_tool_ids:
             prewarm_kwargs["deny_mcp_tool_ids"] = deny_mcp_tool_ids
         if allow_sdk_tools:

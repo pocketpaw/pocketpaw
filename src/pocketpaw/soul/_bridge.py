@@ -58,12 +58,25 @@ logger = logging.getLogger(__name__)
 # leaving implied: a section ALREADY on this list whose MEANING changes — if
 # soul-protocol ever renders something behavioural under ``## Current State`` —
 # is excised from the key and does produce a stale prompt. Nothing here detects
-# that; only re-measuring against the shipping version does. The exposure is
-# bounded today because ``ClaudeSDKBackend._behavior_prefix`` still hashes both
-# sections independently, so a soul-enabled claude_sdk agent rebuilds anyway.
-# PA-6 deletes that prefix, which REMOVES the second line of defence and leaves
-# this list alone with the question — see the pin in
-# ``tests/test_prompt_identity_soul_key.py``.
+# that; only re-measuring against the shipping version does.
+#
+# RE-MEASURED 2026-08-03 (PA-6), against soul-protocol 0.4.0 as shipping, before
+# the cloud path stopped consulting ``ClaudeSDKBackend._behavior_prefix``. Same
+# method: birth a soul PocketPaw's way, 8 substantive turns, split
+# ``to_system_prompt()`` into sections and diff each across the 7 boundaries.
+# 0.4.0 renders EIGHT sections — preamble, Personality, Communication Style,
+# Current State, Biorhythms, Persona Memory, Safety guardrails,
+# Self-Understanding. Exactly two moved: ``## Self-Understanding`` on 6/7 and
+# ``## Current State`` on 1/7 (the density-driven focus band). The other six held
+# on all 7. So: nothing volatile is missing from this list, and nothing on it is
+# denylisted for nothing — both directions checked, both clean.
+#
+# What that measurement does NOT establish, and PA-6 inherits: the list is still
+# a claim about the version measured. On the cloud path the warm client now keys
+# on the assembler's digest alone, so a FUTURE release that renders something
+# behavioural under one of these two headings serves a stale prompt rather than
+# paying an extra rebuild. Re-run the measurement when soul-protocol moves — see
+# the pin in ``tests/test_prompt_identity_soul_key.py``.
 _VOLATILE_IDENTITY_SECTIONS = frozenset({"## Current State", "## Self-Understanding"})
 
 
