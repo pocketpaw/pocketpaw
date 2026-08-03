@@ -12,6 +12,12 @@
 #   4. MemoryManager.get_session_history — persisted attachments are lifted to a
 #      TOP-LEVEL ``attachments`` key (the shape the client reads on reload), so a
 #      delivered card survives a refresh; plain messages return an empty list.
+#
+# Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the stub builder
+# returns an ``AssembledPrompt`` from ``assemble_system_prompt`` and the fake
+# backend declares ``system_prompt_digest``, because ``AgentLoop`` now carries the
+# assembled prompt's stable digest through the router. Seam 2 above is the only
+# one affected, and only in what it fakes.
 
 from __future__ import annotations
 
@@ -22,6 +28,7 @@ import pytest
 from pocketpaw.agents.loop import AgentLoop
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.bus import Channel, InboundMessage
+from pocketpaw.prompt import AssembledPrompt
 
 
 # ── 1. upload_local_artifact ────────────────────────────────────────────────
@@ -127,7 +134,9 @@ async def _run_loop_with(router, mock_bus, mock_memory, artifact_meta):
         patch("pocketpaw.agents.loop.Settings") as settings_cls,
     ):
         settings_cls.load.return_value = _settings()
-        builder_cls.return_value.build_system_prompt = AsyncMock(return_value="SP")
+        builder_cls.return_value.assemble_system_prompt = AsyncMock(
+            return_value=AssembledPrompt(text="SP", stable_digest="0123456789abcdef")
+        )
 
         loop = AgentLoop()
         loop._deliver_oss_artifact = AsyncMock(return_value=artifact_meta)
@@ -163,7 +172,9 @@ class TestLoopArtifactEmission:
     async def test_media_tag_emits_event_and_persists_attachment(self, mock_bus, mock_memory):
         meta = {"file_id": "fid1", "name": "chart.png", "mime": "image/png", "size": 42}
 
-        async def run(message, *, system_prompt=None, history=None, session_key=None):
+        async def run(
+            message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        ):
             yield AgentEvent(type="message", content="Here is your chart.")
             yield AgentEvent(
                 type="tool_result",
@@ -195,7 +206,9 @@ class TestLoopArtifactEmission:
         # still be persisted so its artifact attachment survives a reload.
         meta = {"file_id": "fid2", "name": "export.zip", "mime": "application/zip", "size": 9}
 
-        async def run(message, *, system_prompt=None, history=None, session_key=None):
+        async def run(
+            message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        ):
             yield AgentEvent(
                 type="tool_result",
                 content="<!-- media:/tmp/export.zip -->",
@@ -218,7 +231,9 @@ class TestLoopArtifactEmission:
 
     @pytest.mark.asyncio
     async def test_no_media_no_artifact_and_no_attachment(self, mock_bus, mock_memory):
-        async def run(message, *, system_prompt=None, history=None, session_key=None):
+        async def run(
+            message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        ):
             yield AgentEvent(type="message", content="Just a plain answer.")
             yield AgentEvent(type="done", content="")
 
