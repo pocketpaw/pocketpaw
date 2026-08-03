@@ -314,6 +314,22 @@ class TestConstants:
         assert CACHE_MIN_TOKENS["anthropic-haiku"] == 4096
         assert CACHE_MIN_TOKENS["anthropic-opus"] == 4096
 
+    def test_deepseek_floor_is_the_measured_512_not_the_documented_1024(self):
+        """DeepSeek cached a 595-token prefix (PA-9, 2026-08-03).
+
+        Measured on deepseek-v4-flash through the LiteLLM gateway: a 595-token
+        prompt reported 512 cached tokens on the warm turn, so the real floor is
+        at or below 512 and reads arrive in 512-token blocks. The documented
+        1024 was conservative in the direction that costs money — it would skip
+        prompts between 512 and 1024 that do in fact cache.
+
+        MUTATION: set ``deepseek`` back to 1024 in
+        ``src/pocketpaw/llm/caching.py``; this fails.
+        """
+        assert CACHE_MIN_TOKENS["deepseek"] == 512
+        # Below the generic default, which is the whole point of the row.
+        assert CACHE_MIN_TOKENS["deepseek"] < CACHE_MIN_TOKENS["default"]
+
     def test_no_sonnet_floor_is_above_the_default(self):
         """Every shipping Sonnet caches from 1024 tokens (PA-9, 2026-08-03).
 

@@ -40,12 +40,29 @@ nothing runs it implicitly and no test imports it.
     uv run python scripts/evals/prompt_cache_eval.py --arm summary-ab
     uv run python scripts/evals/prompt_cache_eval.py --arm all
 
-Route: OpenRouter (``settings.openrouter_api_key``). The LiteLLM gateway at
-``settings.litellm_api_base`` 502s every chat completion behind a
-``headroom-compression`` guardrail that 404s, and the direct DeepSeek route
-returns 401 — both were probed on 2026-08-03 and neither is a fault in this
-repo. OpenRouter is passed ``{"usage": {"include": true}}`` so every response
-carries ``usage.cost`` and ``usage.prompt_tokens_details.cached_tokens``.
+TWO ROUTES, and they answer different questions — ``--route openrouter``
+(default) or ``--route litellm``.
+
+  openrouter  The only route that reaches ANTHROPIC models, so the only one that
+      can answer anything about ``cache_control`` or the per-model floors.
+      Passed ``{"usage": {"include": true}}`` so each response carries
+      ``usage.cost`` and ``usage.prompt_tokens_details.cached_tokens``.
+
+  litellm     The gateway at ``settings.litellm_api_base``. It serves DeepSeek
+      only, and DeepSeek caches AUTOMATICALLY — ``cache_control`` is ignored
+      entirely — so this route CANNOT speak to the Anthropic floor questions,
+      and ``--arm threshold`` prints a warning saying so. What it is good for is
+      the warm-turn harness, which needs no marker. Cost arrives in the
+      ``x-litellm-response-cost`` header rather than the usage body.
+
+Both usage shapes are read by the SAME ``report_savings`` (OpenAI-shaped
+``cached_tokens`` on one, DeepSeek's ``prompt_cache_hit_tokens`` on the other),
+which is why this script carries no savings reporter of its own.
+
+A ``headroom-compression`` pre-call guardrail on the gateway 502s on large
+prompts — 40,000 chars passes, 67,563 fails (measured 2026-08-03) — so the
+litellm route cannot take the whole specialist prompt in one request. Use
+``--prefix-chars 40000``.
 
 The key is read from settings at run time and never printed. Every arm skips
 with a clear message (exit 0) when no key is configured, so this file is safe
@@ -66,11 +83,34 @@ from pocketpaw.llm.caching import CACHE_MIN_TOKENS, build_cacheable, report_savi
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+# Two routes, because neither answers every question alone.
+#
+#   openrouter — the only route that reaches ANTHROPIC models, so it is the only
+#       one that can answer the cache_control / per-model-floor questions. Marker
+#       placement is meaningful here.
+#   litellm — the captain's gateway (``settings.litellm_api_base``). Serves
+#       DeepSeek only, which caches AUTOMATICALLY: ``cache_control`` markers are
+#       ignored, and the usage shape is
+#       ``prompt_cache_hit_tokens``/``prompt_cache_miss_tokens``. It therefore
+#       cannot speak to Anthropic floors at all, but it CAN run the warm-turn
+#       harness, and it is not metered against a personal balance.
+#
+# A ``headroom-compression`` pre-call guardrail on the gateway 502s on large
+# prompts: 40,000 chars succeeds, 67,563 fails (measured 2026-08-03). Keep the
+# litellm-route prefix under that ceiling.
+ROUTES = ("openrouter", "litellm")
+ROUTE = "openrouter"
+
 # Haiku 4.5 carries the HIGHEST documented Anthropic cache floor (4096 tokens),
 # which makes it the strictest test of a chars-based threshold and also the
 # cheapest model to run the test on. A threshold that is safe here is safe on
 # every other Anthropic model.
 MODEL = "anthropic/claude-haiku-4.5"
+
+DEFAULT_MODEL_BY_ROUTE = {
+    "openrouter": "anthropic/claude-haiku-4.5",
+    "litellm": "deepseek/deepseek-v4-flash",
+}
 
 # Per-model cache floors, in TOKENS, for the models this harness can target.
 # Haiku 4.5 has the highest floor and so needs the largest request to
@@ -80,6 +120,8 @@ MODEL_FLOOR_TOKENS = {
     "anthropic/claude-haiku-4.5": 4096,
     "anthropic/claude-sonnet-4.5": 1024,
     "anthropic/claude-opus-4.5": 4096,
+    "deepseek/deepseek-v4-flash": 1024,
+    "deepseek/deepseek-v4-pro": 1024,
 }
 
 # Keep every completion tiny — this harness measures INPUT accounting, and
@@ -128,30 +170,44 @@ class Ledger:
 
 
 def _api_key() -> str | None:
-    """Read the OpenRouter key from settings at run time. Never logged."""
+    """Read the active route's key from settings at run time. Never logged."""
     from pocketpaw.config import get_settings
 
-    return get_settings().openrouter_api_key or None
+    settings = get_settings()
+    if ROUTE == "litellm":
+        return settings.litellm_api_key or None
+    return settings.openrouter_api_key or None
+
+
+def _endpoint() -> str:
+    """The chat-completions URL for the active route."""
+    if ROUTE == "litellm":
+        from pocketpaw.config import get_settings
+
+        base = str(get_settings().litellm_api_base).rstrip("/")
+        return f"{base}/v1/chat/completions"
+    return OPENROUTER_URL
 
 
 def _post(client: httpx.Client, key: str, system: Any, user: str, label: str) -> Call:
     """One completion. ``system`` is a str or a content-block list."""
-    body = {
+    body: dict[str, Any] = {
         "model": MODEL,
         "max_tokens": MAX_TOKENS,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        # Without this OpenRouter omits cost and the cached-token breakdown,
-        # which is the entire measurement.
-        "usage": {"include": True},
     }
+    if ROUTE == "openrouter":
+        # Without this OpenRouter omits cost and the cached-token breakdown,
+        # which is the entire measurement. LiteLLM rejects the field.
+        body["usage"] = {"include": True}
     resp = client.post(
-        OPENROUTER_URL,
+        _endpoint(),
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         json=body,
-        timeout=120.0,
+        timeout=180.0,
     )
     if resp.status_code == 402:
         # A free-tier OpenRouter key caps the size of a SINGLE request, so a
@@ -165,18 +221,38 @@ def _post(client: httpx.Client, key: str, system: Any, user: str, label: str) ->
             "exhaustion — smaller prefixes still succeed. Re-run with a "
             "smaller --prefix-chars, or fund the key."
         )
+    if resp.status_code == 502 and "headroom-compression" in resp.text:
+        # The gateway's pre-call guardrail, not the model and not this script.
+        # It passes at 40,000 chars and fails at 67,563 (measured 2026-08-03),
+        # so the fix is a smaller prefix rather than a retry.
+        raise BudgetExhausted(
+            f"LiteLLM gateway 502 on the headroom-compression guardrail for "
+            f"{label} (system prompt ~{len(str(system)):,} chars). The guardrail "
+            "rejects large prompts before the model sees them; 40,000 chars is "
+            "known good. Re-run with a smaller --prefix-chars."
+        )
     resp.raise_for_status()
     usage = resp.json().get("usage", {}) or {}
 
-    # Reuse the shipped reporter rather than re-deriving the hit rate here.
-    # OpenRouter returns the OpenAI shape (prompt_tokens +
-    # prompt_tokens_details.cached_tokens), which report_savings already reads.
+    # Reuse the shipped reporter rather than re-deriving the hit rate here, and
+    # note it needs no branch per route: OpenRouter returns the OpenAI shape
+    # (prompt_tokens + prompt_tokens_details.cached_tokens) and the gateway
+    # returns DeepSeek's (prompt_cache_hit_tokens / prompt_cache_miss_tokens).
+    # report_savings already discriminates both, which is the reason this script
+    # does not carry a second savings reporter.
     savings = report_savings(usage)
+
+    # Cost: OpenRouter puts it in the usage body; LiteLLM returns it in a
+    # response header instead.
+    cost = float(usage.get("cost") or 0.0)
+    if not cost:
+        cost = float(resp.headers.get("x-litellm-response-cost") or 0.0)
+
     return Call(
         label=label,
         prompt_tokens=savings.prompt_tokens or int(usage.get("prompt_tokens", 0)),
         cached_tokens=savings.cache_read_tokens,
-        cost=float(usage.get("cost", 0.0)),
+        cost=cost,
         raw_usage=usage,
     )
 
@@ -251,31 +327,73 @@ def arm_threshold(client: httpx.Client, key: str, ledger: Ledger, run_id: str) -
     biggest = rows[-1]
     cpt = biggest[0] / biggest[1] if biggest[1] else 0.0
     print(f"\nmeasured chars/token on our own prompt text: {cpt:.2f}")
-    floor_tokens = CACHE_MIN_TOKENS["anthropic-haiku"]
-    print(f"=> {floor_tokens}-token floor is about {floor_tokens * cpt:,.0f} chars")
+    floor_tokens = MODEL_FLOOR_TOKENS.get(MODEL, CACHE_MIN_TOKENS["default"])
+    print(f"=> {MODEL}'s documented {floor_tokens}-token floor is ~{floor_tokens * cpt:,.0f} chars")
 
     caching = [r for r in rows if r[4]]
     if caching:
-        print(f"=> smallest prefix that cached: {caching[0][0]:,} chars")
+        smallest = caching[0]
+        print(f"=> smallest prefix that cached: {smallest[0]:,} chars ({smallest[1]:,} tokens)")
+        if smallest[1] < floor_tokens:
+            print(
+                f"   NOTE: that is BELOW the documented {floor_tokens}-token floor — "
+                "the documented figure is conservative for this model."
+            )
     else:
         print("=> NOTHING in the sweep cached")
 
     # The write-premium question: does marking a SUB-FLOOR prompt cost extra?
-    # If the provider silently declines to cache, marked and unmarked cold calls
-    # cost the same and the marker is merely inert, not wasteful.
+    #
+    # THE TWO ARMS MUST USE DIFFERENT PREFIXES. An earlier version reused one
+    # prefix for both, which is only sound when nothing caches at that size: on
+    # a provider that DOES cache there, the second call reads the cache the
+    # first one just wrote and the comparison reports a ~13x "premium" that is
+    # really just a warm turn. Distinct salts keep both arms genuinely cold.
     print("\n--- write-premium check at 4000 chars (the live threshold) ---")
-    prefix = _prefix(4_000, run_id + "-wp")
-    marked = ledger.add(_post(client, key, build_cacheable([prefix]), "1", "wp-marked"))
-    unmarked = ledger.add(_post(client, key, prefix, "1", "wp-unmarked"))
-    print(f"  marked   cold: prompt={marked.prompt_tokens} cost=${marked.cost:.6f}")
-    print(f"  unmarked cold: prompt={unmarked.prompt_tokens} cost=${unmarked.cost:.6f}")
-    if unmarked.cost > 0:
+    marked = ledger.add(
+        _post(client, key, build_cacheable([_prefix(4_000, run_id + "-wpA")]), "1", "wp-marked")
+    )
+    unmarked = ledger.add(_post(client, key, _prefix(4_000, run_id + "-wpB"), "1", "wp-unmarked"))
+    print(
+        f"  marked:   prompt={marked.prompt_tokens} cached={marked.cached_tokens} "
+        f"cost=${marked.cost:.6f}"
+    )
+    print(
+        f"  unmarked: prompt={unmarked.prompt_tokens} cached={unmarked.cached_tokens} "
+        f"cost=${unmarked.cost:.6f}"
+    )
+
+    if marked.cached_tokens or unmarked.cached_tokens:
+        # Either arm reading from cache invalidates the comparison outright.
+        print(
+            "  => INVALID: one arm read from cache, so this is a warm-vs-cold\n"
+            "     difference, not a marker difference. The premium question is\n"
+            "     only answerable at a size where nothing caches."
+        )
+    elif unmarked.cost > 0:
         ratio = marked.cost / unmarked.cost
         print(f"  marked/unmarked cost ratio: {ratio:.3f}")
+        # The conclusion depends on which side of the model's floor 4000 chars
+        # lands, and the two readings are NOT interchangeable. Below the floor
+        # this answers "does a marker that cannot cache still cost anything";
+        # above it, on a provider that ignores cache_control, it only says the
+        # marker is a no-op there. Printing one wording for both would let a
+        # DeepSeek run be quoted as evidence about Anthropic floors.
+        floor = MODEL_FLOOR_TOKENS.get(MODEL, CACHE_MIN_TOKENS["default"])
+        below = marked.prompt_tokens < floor
+        where = "BELOW" if below else "ABOVE"
+        print(f"  ({marked.prompt_tokens} tokens is {where} {MODEL}'s {floor}-token floor)")
         if ratio > 1.10:
-            print("  => a write premium IS charged below the floor (marker is wasteful)")
-        else:
+            print("  => marking costs extra here (the marker is not free)")
+        elif below:
             print("  => NO write premium below the floor (marker is inert, not costly)")
+        else:
+            print(
+                "  => marker is a no-op at a CACHEABLE size — expected on a\n"
+                "     provider that caches automatically and ignores cache_control.\n"
+                "     This says nothing about sub-floor behaviour; re-run on a\n"
+                "     model whose floor is above this size for that."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -468,8 +586,18 @@ def arm_summary_ab(client: httpx.Client, key: str, ledger: Ledger) -> None:
 
 
 def main() -> int:
-    global MODEL
+    global MODEL, ROUTE
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--route",
+        default="openrouter",
+        choices=ROUTES,
+        help=(
+            "openrouter reaches Anthropic models (the only route that can answer "
+            "the cache_control / floor questions); litellm is the gateway, which "
+            "serves DeepSeek only and caches automatically."
+        ),
+    )
     parser.add_argument(
         "--arm",
         default="all",
@@ -488,25 +616,40 @@ def main() -> int:
     )
     parser.add_argument(
         "--model",
-        default=MODEL,
-        help="OpenRouter model id. Lower-floor models need a smaller request to cache.",
+        default=None,
+        help=(
+            "Model id. Defaults per route (Haiku 4.5 on openrouter, "
+            "deepseek-v4-flash on litellm). Lower-floor models need a smaller "
+            "request to demonstrate a cache hit."
+        ),
     )
     args = parser.parse_args()
-    MODEL = args.model
+    ROUTE = args.route
+    MODEL = args.model or DEFAULT_MODEL_BY_ROUTE[ROUTE]
 
     key = _api_key()
     if not key:
         # Skip cleanly: this file must never fail a suite run just because the
         # machine has no key configured.
-        print(
-            "SKIP: no OpenRouter key configured "
-            "(set POCKETPAW_OPENROUTER_API_KEY to run this eval)."
-        )
+        env = "POCKETPAW_LITELLM_API_KEY" if ROUTE == "litellm" else "POCKETPAW_OPENROUTER_API_KEY"
+        print(f"SKIP: no {ROUTE} key configured (set {env} to run this eval).")
         return 0
+
+    if ROUTE == "litellm" and args.arm in ("all", "threshold"):
+        # Say this rather than produce a table that looks like an answer. The
+        # gateway serves DeepSeek, which caches automatically at a flat 1024
+        # tokens and ignores cache_control entirely, so a threshold sweep here
+        # measures DeepSeek's floor and says nothing about the Anthropic
+        # per-model floors the threshold question is actually about.
+        print(
+            "NOTE: --arm threshold is meaningful only on --route openrouter. "
+            "The gateway serves DeepSeek, which caches automatically and ignores "
+            "cache_control, so this sweep cannot speak to the Anthropic floors."
+        )
 
     run_id = f"pa9-{int(time.time())}"
     ledger = Ledger()
-    print(f"run_id={run_id}  model={MODEL}")
+    print(f"run_id={run_id}  route={ROUTE}  model={MODEL}")
 
     rc = 0
     try:

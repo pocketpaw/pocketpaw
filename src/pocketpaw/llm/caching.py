@@ -1,13 +1,16 @@
 # src/pocketpaw/llm/caching.py — universal LLM prompt-caching helper (MCG-11).
 #
 # Updated: 2026-08-03 (PA-9, feat/prompt-budget-measurement) — ``CACHE_MIN_TOKENS``
-# is now measured rather than recited, and two of its rows were wrong. A live
+# is now measured rather than recited, and THREE of its rows were wrong. A live
 # sweep either side of the Haiku 4.5 floor (see the constant) confirmed 4096 and
-# pinned our own text at 3.48 chars/token. Two corrections fell out: the
+# pinned our own text at 3.48 chars/token. The corrections: the
 # ``anthropic-sonnet`` row read 2048, which is not the floor of ANY shipping
-# Sonnet (all are 1024) and only ever cost us caching; and ``anthropic-opus``
+# Sonnet (all are 1024) and only ever cost us caching; ``anthropic-opus``
 # cannot be a single number, because Opus floors run 512 (Opus 5) to 4096 (Opus
-# 4.5/4.6) and are NOT monotonic across generations. Also corrected here: the
+# 4.5/4.6) and are NOT monotonic across generations; and ``deepseek`` read 1024
+# while a 595-token prefix demonstrably cached, so it is 512. Every one of the
+# three erred toward being too STRICT, which is the direction that silently
+# forfeits caching rather than the one that merely wastes a marker. Also corrected: the
 # note below that a sub-floor write is "wasted". It is not — the provider
 # declines silently and charges nothing extra (marked and unmarked sub-floor
 # calls billed identically to six significant figures), so an over-permissive
@@ -25,8 +28,10 @@
 #       content goes first, the variable suffix last, so the cached
 #       longest-common-prefix is maximised. Marker placement respects
 #       Anthropic's 4-breakpoint hard cap. For automatic-caching providers
-#       (OpenAI/DeepSeek cache >=1024 tokens with no markup) the structure is
-#       still correct — the markers are simply ignored.
+#       (OpenAI, and DeepSeek from ~512 tokens with no markup) the structure is
+#       still correct — the markers are simply ignored. Confirmed live on
+#       2026-08-03: a DeepSeek run of 7 turns over an unmarked-in-effect 10,578
+#       token prefix read 10,496 from cache on every warm turn.
 #
 #   * ``report_savings(usage)``
 #       Reads ``cache_creation_input_tokens`` / ``cache_read_input_tokens``
@@ -101,7 +106,16 @@ CACHE_MIN_TOKENS: dict[str, int] = {
     "anthropic-opus-4.8": 1024,
     "anthropic-opus-5": 512,
     "openai": 1024,
-    "deepseek": 1024,
+    # MEASURED 2026-08-03 (PA-9) on deepseek-v4-flash via the LiteLLM gateway:
+    # a 595-token prefix cached (512 read on the warm turn), so the effective
+    # floor is at or below 512 — the documented 1024 was conservative and would
+    # have skipped prompts that cache. Reads arrive in 512-token blocks, which
+    # is why a 595-token prompt reports 512 cached rather than 595.
+    #
+    # DeepSeek caches AUTOMATICALLY and ignores ``cache_control`` entirely, so
+    # this row gates nothing on that route today; it is here so a caller that
+    # does gate on it is not told 1024 when the truth is 512.
+    "deepseek": 512,
 }
 
 # Valid Anthropic ``cache_control`` TTL strings. "5m" is the free default;

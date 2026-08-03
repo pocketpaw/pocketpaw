@@ -134,7 +134,10 @@ _ANTHROPIC_PATCHED = False
 #   * "false positives only cost the cache-write overhead" — they cost nothing.
 #     A marked and an unmarked sub-floor call billed identically ($0.001079 vs
 #     $0.001079). Below the floor the provider declines to cache silently; there
-#     is no write to pay for.
+#     is no write to pay for. Both calls were verifiably COLD, which is what
+#     makes that a marker comparison rather than a warm-vs-cold one: the sweep
+#     reports 0 cached tokens at 4000 chars on BOTH the cold and the warm turn,
+#     so nothing cached at that size for the second call to read.
 #
 # So this threshold is wrong in the harmless direction, and RAISING it to a
 # "correct" ~14,300 would be the actual regression: it would stop marking on
