@@ -15,6 +15,14 @@
 # those layers said about themselves. No cache-rate number is claimed here
 # because none was measured.
 #
+# ONE MECHANISM WAS measured, in `test_a_changed_recall_moves_the_prefix_and_not_
+# the_digest`, and it is worth reading before concluding this buys nothing: the
+# prefix's volatile markers are the CLOUD path's block headers, and the channel
+# path's memory / kb headers are not among them. So the per-message recall stays
+# inside the channel prefix and moves it, while the layers that render it declare
+# `cache_key=None` and the digest holds. That is a two-turn probe of a mechanism,
+# not a rate over live traffic, and it is deliberately not converted into one.
+#
 # THE SIGNATURE GATE IS THE LOAD-BEARING PART. The digest is set on every channel
 # turn, so it cannot ride the withhold-when-empty contract the other per-run
 # kwargs use; it is gated on whether a backend's `run` DECLARES the parameter
@@ -396,6 +404,56 @@ async def test_the_disabled_failover_flag_still_delivers_the_digest(monkeypatch)
 # ---------------------------------------------------------------------------
 # 4 — what the digest does NOT cover, which is the design and not a gap
 # ---------------------------------------------------------------------------
+
+
+async def test_a_changed_recall_moves_the_prefix_and_not_the_digest():
+    """What the prefix was never able to cut on THIS path, measured rather than assumed.
+
+    `_behavior_prefix` cuts the volatile tail at `_VOLATILE_PROMPT_MARKERS`:
+    `## Your Knowledge Base`, `## Relevant Past Memories`, `# Recent Conversation`.
+    Those are the CLOUD path's block headers. The channel path emits
+    `# Memory Context (already loaded…)` and `# Knowledge Base (relevant
+    articles…)`, and neither matches — so the per-message recall stays INSIDE the
+    prefix and moves it on any turn where the recall changes, which on a semantic
+    memory backend is most turns. The two channel layers that produce those blocks
+    declare `cache_key=None`, so the digest does not move.
+
+    READ THIS NARROWLY. It is a two-turn probe of a MECHANISM, run here, not a
+    hit-rate over live traffic: no turn count, no percentage, nothing comparable
+    to PA-6's 8-turn measurement on a live soul. It says the prefix and the digest
+    disagree about the recall on this path and which one is right. It does not say
+    how often that costs a rebuild for a real user.
+
+    THE MUTATION THAT BREAKS THIS: add `"\\n\\n# Memory Context"` to
+    `ClaudeSDKBackend._VOLATILE_PROMPT_MARKERS`. Run: the prefix started cutting
+    at the memory block, the two prefixes became equal, and the first assertion
+    failed.
+    """
+    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+    from pocketpaw.bootstrap.context_builder import AgentContextBuilder
+
+    async def _assemble(recall: str):
+        memory = MagicMock()
+        memory.get_semantic_context = AsyncMock(return_value=recall)
+        memory.get_context_for_agent = AsyncMock(return_value=recall)
+        return await AgentContextBuilder(memory_manager=memory).assemble_system_prompt(
+            include_memory=True, user_query="hi", channel=Channel.TELEGRAM, sender_id="s1"
+        )
+
+    turn_1 = await _assemble("user asked about asyncpg pools")
+    turn_2 = await _assemble("user asked about rollback semantics")
+
+    prefix_1 = ClaudeSDKBackend._behavior_prefix(turn_1.text)
+    prefix_2 = ClaudeSDKBackend._behavior_prefix(turn_2.text)
+
+    assert "# Memory Context" in prefix_1, (
+        "the per-message recall left the prefix — re-read this test before trusting it"
+    )
+    assert prefix_1 != prefix_2, "the prefix stopped moving on a changed recall"
+    assert turn_1.stable_digest == turn_2.stable_digest, (
+        "a changed recall moved the digest — the memory/kb layers stopped declaring "
+        "themselves volatile"
+    )
 
 
 @patch("pocketpaw.agents.loop.get_message_bus")
