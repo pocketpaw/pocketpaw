@@ -25,6 +25,7 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 from pocketpaw_ee.cloud._core.time import iso_utc
+from pocketpaw_ee.cloud.agents.defaults import CLOUD_DEFAULT_AGENT_BACKEND
 from pocketpaw_ee.cloud.agents.domain import Agent, AgentConfigSpec
 from pocketpaw_ee.cloud.agents.scope_rules import normalise_and_validate_scopes
 
@@ -38,7 +39,7 @@ class CreateAgentRequest(BaseModel):
     slug: str = Field(min_length=1, max_length=50)
     avatar: str = ""
     visibility: str = Field(default="private", pattern="^(private|workspace|public)$")
-    backend: str = "claude_agent_sdk"
+    backend: str = CLOUD_DEFAULT_AGENT_BACKEND
     model: str = ""
     persona: str = ""
     temperature: float | None = None

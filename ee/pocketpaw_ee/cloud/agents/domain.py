@@ -29,12 +29,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from pocketpaw_ee.cloud.agents.defaults import CLOUD_DEFAULT_AGENT_BACKEND
+
 
 @dataclass(frozen=True)
 class AgentConfigSpec:
     """Configuration data for an agent. Mirrors ``models.agent.AgentConfig``."""
 
-    backend: str = "claude_agent_sdk"
+    backend: str = CLOUD_DEFAULT_AGENT_BACKEND
     model: str = ""
     system_prompt: str = ""
     tools: tuple[str, ...] = ()
