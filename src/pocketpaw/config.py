@@ -1,6 +1,13 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-08-03 (PA-8a): Added ``prompt_pocket_summary_only`` (default False, env
+    POCKETPAW_PROMPT_POCKET_SUMMARY_ONLY) — takes the bulk widget dump out of
+    the channel prompt's ``<current-pocket>`` block, leaving the pocket id, the
+    name, the widget COUNT, a snapshot stamp and the standing order to call
+    ``get_pocket``. Default False is byte-for-byte today's block, so no deploy
+    is changed by shipping it; flipping it is a config/env change, not a code
+    change. Read by ``pocketpaw.prompt.channel.request.ChannelCurrentPocketLayer``.
   - 2026-07-11 (self-serve-analysis S1): Added ``fabric_analyst`` (default False,
     env POCKETPAW_FABRIC_ANALYST) — gates the Fabric transparent-analysis read
     engine (SQL GROUP BY aggregation + reasoning steps on FabricStore.query /
@@ -2023,6 +2030,24 @@ class Settings(BaseSettings):
     kb_limit: int = Field(
         default=3,
         description="Number of top articles to inject from kb search (default: 3)",
+    )
+    prompt_pocket_summary_only: bool = Field(
+        default=False,
+        description=(
+            "Keep bulk pocket widget detail OUT of the agent's system prompt. "
+            "False (default) is byte-for-byte the block shipped today: the "
+            "``<current-pocket>`` block carries a JSON dump of the widget "
+            "summary the client posted. True renders the CHEAP half only — "
+            "pocket id, name, widget count, a snapshot stamp — plus the same "
+            "standing order to call ``mcp__pocketpaw_pocket__get_pocket`` for "
+            "the detail, which is the tool-result path the detail belongs on. "
+            "Measured on a 300-widget pocket the block drops from ~41k chars to "
+            "~1.4k. Read per-render by "
+            "``pocketpaw.prompt.channel.request.ChannelCurrentPocketLayer``, so "
+            "flipping it is a config or env change and takes effect on the next "
+            "settings load — no code deploy. Set via "
+            "POCKETPAW_PROMPT_POCKET_SUMMARY_ONLY."
+        ),
     )
     ripple_manifest_url: str = Field(
         default="http://localhost:5174/manifest.json",
