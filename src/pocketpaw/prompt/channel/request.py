@@ -102,9 +102,22 @@ class ChannelIdentityLayer:
         # interaction, and only the provider knows which of those bytes mean
         # anything. With no claim, hash the text: it over-keys (the digest moves
         # when a counter does) and over-keying is the safe direction.
+        #
+        # ONLY A NON-EMPTY ``str`` COUNTS AS A CLAIM, and the ``isinstance`` is
+        # load-bearing rather than defensive habit. ``BootstrapContext`` declares
+        # the field ``str | None``, but the bootstrap provider is a Protocol and
+        # this layer reads whatever the object actually carries. Anything else
+        # reaching ``LayerOutput`` lands in ``assembler._digest``, which calls
+        # ``.encode`` on it — and that is OUTSIDE the render guard, so it does
+        # not degrade the layer, it kills the turn. On this path that trade is
+        # all downside: ``build_system_prompt`` discards the digest entirely.
+        # Found by ``tests/test_memory_isolation.py`` and ``tests/test_mem0_store.py``,
+        # whose providers are ``MagicMock``s — a mock's attribute is truthy, so
+        # a bare ``or`` forwarded it and six suites went red.
+        claim = ci.identity_cache_key
         return LayerOutput(
             text=_nonblank(ci.identity),
-            cache_key=ci.identity_cache_key or _short_digest(ci.identity),
+            cache_key=claim if isinstance(claim, str) and claim else _short_digest(ci.identity),
         )
 
 

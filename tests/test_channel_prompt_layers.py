@@ -332,6 +332,55 @@ async def test_the_guard_records_the_failure_rather_than_swallowing_it():
     ]
 
 
+async def test_a_bootstrap_provider_that_claims_a_non_string_key_cannot_kill_the_turn():
+    """A malformed ``identity_cache_key`` must not reach the digest.
+
+    ``BootstrapContext`` declares the field ``str | None``, but the bootstrap
+    provider is a Protocol and the identity layer reads whatever the returned
+    object actually carries. A ``MagicMock`` — which is what several existing
+    suites pass — has a truthy attribute for every name, so a bare ``or``
+    forwards the mock as a cache key. ``assembler._digest`` then calls
+    ``.encode`` on it and raises, and THAT IS OUTSIDE THE RENDER GUARD: it does
+    not degrade one layer, it fails the whole turn. On the channel path that is
+    all cost and no benefit, because ``build_system_prompt`` throws the digest
+    away.
+
+    This is a bug PA-7a introduced and the existing suite caught (six failures
+    across tests/test_memory_isolation.py and tests/test_mem0_store.py) — the
+    old channel path never read the field at all.
+
+    MUTATION: change the layer back to ``claim or _short_digest(...)``. Fails
+    with ``TypeError: object supporting the buffer API required``.
+    """
+    provider = MagicMock()
+    context = MagicMock()
+    context.to_system_prompt.return_value = "base prompt"
+    provider.get_context = AsyncMock(return_value=context)
+    memory = MagicMock()
+    memory.get_context_for_agent = AsyncMock(return_value="")
+    builder = AgentContextBuilder(bootstrap_provider=provider, memory_manager=memory)
+
+    prompt = await builder.build_system_prompt(include_memory=False)
+    assert "base prompt" in prompt
+
+    # And the layer still produces a usable key rather than dropping to None,
+    # which would quietly take the persona out of any future digest.
+    from pocketpaw.prompt.channel.request import ChannelIdentityLayer
+
+    out = await ChannelIdentityLayer().render(
+        PromptContext(
+            instance=None,
+            agent_id="",
+            message="",
+            instructions="",
+            knowledge_context="",
+            system_message_override=None,
+            channel_inputs=ChannelInputs(identity="p", identity_cache_key=context.whatever),
+        )
+    )
+    assert isinstance(out.cache_key, str) and out.cache_key
+
+
 # ---------------------------------------------------------------------------
 # 4. The files that did not move
 # ---------------------------------------------------------------------------
