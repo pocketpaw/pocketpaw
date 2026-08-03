@@ -1,4 +1,12 @@
-"""Tests for cross-channel command handler and session aliases."""
+"""Tests for cross-channel command handler and session aliases.
+
+Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the stubbed context
+builders return an ``AssembledPrompt`` from ``assemble_system_prompt``, which is
+what ``AgentLoop`` calls now that the channel turn carries its prompt's stable
+digest to the backend. These tests are about commands and never reached the
+prompt build, so the old ``build_system_prompt`` stubs kept passing while naming
+a method the loop no longer calls — renamed rather than left as false coverage.
+"""
 
 import asyncio
 import json
@@ -7,6 +15,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from pocketpaw.bus.events import Channel, InboundMessage, OutboundMessage
 from pocketpaw.memory.file_store import FileMemoryStore
+from pocketpaw.prompt import AssembledPrompt
+
+
+def _assembled(text: str = "sys prompt") -> AssembledPrompt:
+    """What ``AgentContextBuilder.assemble_system_prompt`` hands the loop back."""
+    return AssembledPrompt(text=text, stable_digest="0123456789abcdef")
 
 # =========================================================================
 # Helpers
@@ -1048,7 +1062,7 @@ class TestAgentLoopCommandIntegration:
 
             with patch.object(loop, "context_builder") as mock_ctx:
                 mock_ctx.memory = mm
-                mock_ctx.build_system_prompt = AsyncMock(return_value="sys prompt")
+                mock_ctx.assemble_system_prompt = AsyncMock(return_value=_assembled())
                 await loop._process_message_inner(msg, "discord:12345")
 
         # User message WAS stored in memory
@@ -1201,7 +1215,7 @@ class TestWelcomeHint:
 
             with patch.object(loop, "context_builder") as mock_ctx:
                 mock_ctx.memory = mm
-                mock_ctx.build_system_prompt = AsyncMock(return_value="sys prompt")
+                mock_ctx.assemble_system_prompt = AsyncMock(return_value=_assembled())
                 await loop._process_message_inner(msg, "discord:12345")
 
         # Discord is excluded from welcome hints
@@ -1257,7 +1271,7 @@ class TestWelcomeHint:
 
             with patch.object(loop, "context_builder") as mock_ctx:
                 mock_ctx.memory = mm
-                mock_ctx.build_system_prompt = AsyncMock(return_value="sys prompt")
+                mock_ctx.assemble_system_prompt = AsyncMock(return_value=_assembled())
                 await loop._process_message_inner(msg, "discord:12345")
 
         outbound_calls = bus.publish_outbound.call_args_list
@@ -1312,7 +1326,7 @@ class TestWelcomeHint:
 
             with patch.object(loop, "context_builder") as mock_ctx:
                 mock_ctx.memory = mm
-                mock_ctx.build_system_prompt = AsyncMock(return_value="sys prompt")
+                mock_ctx.assemble_system_prompt = AsyncMock(return_value=_assembled())
                 await loop._process_message_inner(msg, "websocket:12345")
 
         # get_session_history should NOT have been called (channel excluded)
@@ -1370,7 +1384,7 @@ class TestWelcomeHint:
 
             with patch.object(loop, "context_builder") as mock_ctx:
                 mock_ctx.memory = mm
-                mock_ctx.build_system_prompt = AsyncMock(return_value="sys prompt")
+                mock_ctx.assemble_system_prompt = AsyncMock(return_value=_assembled())
                 await loop._process_message_inner(msg, "discord:12345")
 
         # get_session_history should NOT have been called (feature disabled)
@@ -1429,7 +1443,7 @@ class TestWelcomeHint:
 
             with patch.object(loop, "context_builder") as mock_ctx:
                 mock_ctx.memory = mm
-                mock_ctx.build_system_prompt = AsyncMock(return_value="sys prompt")
+                mock_ctx.assemble_system_prompt = AsyncMock(return_value=_assembled())
                 await loop._process_message_inner(msg, "discord:12345")
 
         # add_to_session should be called for user msg + assistant response

@@ -5,6 +5,17 @@ configured agent backend. Supports optional user-configured fallback
 backends if the primary backend fails.
 
 Changes:
+  - 2026-08-03 (PA-7b, feat/prompt-assembler-channel): ``run`` and
+    ``run_with_failover`` accept ``system_prompt_digest`` — the assembler's
+    ``stable_digest`` for the prompt they were handed — and forward it to a
+    backend only when that backend's ``run`` declares the parameter
+    (``agents.backend.forward_prompt_digest``). The check is per BACKEND, on
+    every one of the three dispatch points here and in ``BackendFailoverRunner``,
+    because both fallback lists mix backends that took the kwarg with backends
+    that never did; a router-level decision would either crash the old ones or
+    withhold from the new ones. This is what lets the channel path's warm Claude
+    subprocess key on the prompt's LAYERS instead of on a pattern-match of its
+    rendered text.
   - 2026-06-26 (MCG-10): Added ``run_with_failover`` — the OSS hook for L2
     cross-backend HARNESS failover. When ``settings.backend_failover_enabled``
     is True it drives the run through ``BackendFailoverRunner`` over
@@ -22,7 +33,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from pocketpaw.agents.backend import BackendInfo
+from pocketpaw.agents.backend import BackendInfo, forward_prompt_digest
 from pocketpaw.agents.failover import BackendFailoverRunner
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.agents.registry import get_backend_class
@@ -159,19 +170,36 @@ class AgentRouter:
         system_prompt: str | None = None,
         history: list[dict] | None = None,
         session_key: str | None = None,
+        system_prompt_digest: str = "",
     ) -> AsyncIterator[AgentEvent]:
-        """Run the agent with optional fallback backends."""
+        """Run the agent with optional fallback backends.
+
+        ``system_prompt_digest`` (PA-7b) is the assembler's ``stable_digest`` for
+        ``system_prompt``, supplied by ``AgentLoop`` on the channel path. It is
+        forwarded to a backend ONLY when that backend's ``run`` declares the
+        parameter — see ``agents.backend.forward_prompt_digest``. That check is
+        per BACKEND and not per router because the fallback list is heterogeneous
+        by construction: the primary may be the Claude SDK backend (which keys
+        its warm subprocess on the digest) while a fallback is one of the
+        backends that never grew the kwarg, and passing it to the latter would
+        raise TypeError mid-failover — a crash on the path taken when something
+        is already wrong. Callers with no digest (``paw/cli``, deep-work,
+        mission-control) leave it "" and nothing about their call changes.
+        """
 
         last_error: str | None = None
+        base_kwargs: dict[str, Any] = {
+            "system_prompt": system_prompt,
+            "history": history,
+            "session_key": session_key,
+        }
 
         # Primary backend (streaming, no buffering, no error-event fallback)
         if self._backend is not None:
             try:
                 async for event in self._backend.run(
                     message,
-                    system_prompt=system_prompt,
-                    history=history,
-                    session_key=session_key,
+                    **forward_prompt_digest(self._backend, base_kwargs, system_prompt_digest),
                 ):
                     yield event
 
@@ -199,9 +227,7 @@ class AgentRouter:
             try:
                 async for event in backend.run(
                     message,
-                    system_prompt=system_prompt,
-                    history=history,
-                    session_key=session_key,
+                    **forward_prompt_digest(backend, base_kwargs, system_prompt_digest),
                 ):
                     yield event
 
@@ -243,6 +269,7 @@ class AgentRouter:
         system_prompt: str | None = None,
         history: list[dict] | None = None,
         session_key: str | None = None,
+        system_prompt_digest: str = "",
     ) -> AsyncIterator[AgentEvent]:
         """Run with L2 cross-backend (harness) failover when enabled.
 
@@ -255,6 +282,14 @@ class AgentRouter:
 
         The EE cloud run path (``run_core``) calling this is a follow-up; the
         mechanism + this hook ship in the OSS slice.
+
+        ``system_prompt_digest`` (PA-7b) travels down BOTH branches. Threading
+        only :meth:`run` would drop it exactly when the flag is on and the chain
+        is in use — a silent downgrade to text-hash keying on the path taken when
+        the primary harness is already down, which is the worst moment to also
+        start rebuilding the warm client every turn. The runner re-asks the
+        signature question per harness, because the chain deliberately mixes
+        backends of different vintages.
         """
         if not self.settings.backend_failover_enabled:
             async for event in self.run(
@@ -262,6 +297,7 @@ class AgentRouter:
                 system_prompt=system_prompt,
                 history=history,
                 session_key=session_key,
+                system_prompt_digest=system_prompt_digest,
             ):
                 yield event
             return
@@ -273,6 +309,7 @@ class AgentRouter:
             system_prompt=system_prompt,
             history=history,
             session_key=session_key,
+            system_prompt_digest=system_prompt_digest,
         ):
             yield event
 

@@ -1,6 +1,16 @@
 """
 Builder for assembling the full agent context.
 Created: 2026-02-02
+Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the digest stops
+being thrown away. The assembler call moved into a new
+``assemble_system_prompt`` that returns the whole ``AssembledPrompt``;
+``build_system_prompt`` is now a delegate returning its ``.text``. The return
+type stayed ``str`` because this is public OSS API and ~30 in-tree call sites
+(the byte goldens among them) read it as one — the same courtesy the digest
+threading extends to an out-of-tree backend whose ``run`` never declared the
+parameter. One body, so the text a caller reads and the text the digest was
+computed over cannot drift. ``AgentLoop`` calls the new method and forwards
+``stable_digest`` to the backend; see ``agents/loop.py`` and ``agents/router.py``.
 Updated: 2026-08-03 (PA-7a, feat/prompt-assembler-channel) — THIS MODULE NO
 LONGER ASSEMBLES ANYTHING. ``build_system_prompt`` resolves the fifteen
 ``channel.*`` layers from ``pocketpaw.prompt.registry`` and calls
@@ -89,7 +99,7 @@ from pocketpaw.bootstrap.default_provider import DefaultBootstrapProvider
 from pocketpaw.bootstrap.protocol import BootstrapProviderProtocol
 from pocketpaw.bus.events import Channel
 from pocketpaw.memory.manager import MemoryManager, get_memory_manager
-from pocketpaw.prompt import PromptContext, assemble, prompt_layer_registry
+from pocketpaw.prompt import AssembledPrompt, PromptContext, assemble, prompt_layer_registry
 from pocketpaw.prompt.channel import CHANNEL_PROMPT_LAYERS, ChannelInputs
 
 logger = logging.getLogger(__name__)
@@ -209,7 +219,73 @@ class AgentContextBuilder:
         kb_ctx: KbContext | None = None,
         skill_names: frozenset[str] | None = None,
     ) -> str:
-        """Build the complete system prompt.
+        """The assembled prompt TEXT. See :meth:`assemble_system_prompt` for the rest.
+
+        STILL RETURNS ``str``, and that is PA-7b's return-type decision rather
+        than an omission. The digest had to reach ``AgentLoop`` and this method
+        had two things to hand back; the options were to widen the return type
+        or to split the method, and the split wins on one argument that the
+        surrounding sprint already accepts elsewhere: this is public OSS API. An
+        out-of-tree embedder calling it gets a string today, and the same
+        reasoning that leaves an out-of-tree BACKEND whose ``run`` lacks
+        ``system_prompt_digest`` working untouched (see
+        ``agents.backend._accepts_prompt_digest``) applies to a caller that does
+        ``len(prompt)`` on the result. Thirty in-tree call sites — every golden,
+        every bootstrap test — also keep working unedited, which means the byte
+        baseline is checked by the tests that already existed rather than by
+        thirty edited ones.
+
+        There is exactly ONE body: this delegates, so the text can never drift
+        from the text the digest was computed over. Every argument is forwarded
+        unchanged; they are documented on ``assemble_system_prompt``.
+        """
+        return (
+            await self.assemble_system_prompt(
+                include_memory=include_memory,
+                user_query=user_query,
+                channel=channel,
+                sender_id=sender_id,
+                session_key=session_key,
+                file_context=file_context,
+                agents_md_dir=agents_md_dir,
+                metadata=metadata,
+                budget_chars=budget_chars,
+                image_bytes=image_bytes,
+                kb_ctx=kb_ctx,
+                skill_names=skill_names,
+            )
+        ).text
+
+    async def assemble_system_prompt(
+        self,
+        include_memory: bool = True,
+        user_query: str | None = None,
+        channel: Channel | None = None,
+        sender_id: str | None = None,
+        session_key: str | None = None,
+        file_context: dict | None = None,
+        agents_md_dir: str | None = None,
+        metadata: dict | None = None,
+        budget_chars: int = _DEFAULT_BUDGET_CHARS,
+        image_bytes: bytes | None = None,
+        kb_ctx: KbContext | None = None,
+        skill_names: frozenset[str] | None = None,
+    ) -> AssembledPrompt:
+        """Build the complete system prompt, and the digest of its stable layers.
+
+        The real body; ``build_system_prompt`` is its ``.text``. Named to match
+        ``AgentPool._assemble_system_prompt``, which returns the same type on the
+        cloud path — one shape for "assemble a prompt", two callers.
+
+        ``stable_digest`` is a hash over the KEYED layers' ``cache_key`` values,
+        NOT over the returned text (see ``pocketpaw.prompt.assembler``). What it
+        deliberately does not cover is everything done to the text AFTER this
+        returns: ``AgentLoop._reinforce_identity`` appends the identity block
+        every 5th message, and ``ClaudeSDKBackend.run`` splices a growing
+        ``# Recent Conversation`` block into ``options.system_prompt``. Both are
+        per-turn mutations of stable content, and a digest that moved for them
+        would rebuild the warm client on the turns they fire — the exact churn
+        the layered digest exists to remove.
 
         Args:
             include_memory: Whether to include memory context.
@@ -312,12 +388,14 @@ class AgentContextBuilder:
             ),
         )
         layers = [prompt_layer_registry.get(name) for name in CHANNEL_PROMPT_LAYERS]
-        assembled = await assemble(layers, ctx, budget_chars=budget_chars)
-        # ``assembled.stable_digest`` is deliberately dropped. Nothing on the
-        # channel path caches an agent object with the prompt baked in, so there
-        # is nothing to fold it into yet; the layers answer ``cache_key``
-        # honestly anyway so the digest is correct the day one does.
-        return assembled.text
+        # Returned WHOLE as of PA-7b. Until then this method took ``.text`` and
+        # threw the digest away, because nothing downstream could receive it;
+        # ``AgentLoop`` now forwards it through ``AgentRouter`` to any backend
+        # whose ``run`` declares the parameter, so the channel path's warm client
+        # keys on what the LAYERS said about themselves instead of on
+        # ``claude_sdk._behavior_prefix``'s guess at where the volatile region
+        # starts.
+        return await assemble(layers, ctx, budget_chars=budget_chars)
 
     @staticmethod
     def _build_atlas_primer() -> str:

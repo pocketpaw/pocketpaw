@@ -1,5 +1,15 @@
 # Tests for Unified Agent Loop
 # Updated for AgentEvent-based architecture (no more dict chunks)
+#
+# Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the loop now calls
+# ``AgentContextBuilder.assemble_system_prompt`` (which returns text AND the
+# prompt's ``stable_digest``) instead of ``build_system_prompt``, so every stub
+# builder here returns an ``AssembledPrompt`` rather than a bare string, and the
+# fake routers declare ``system_prompt_digest`` because the loop passes it. The
+# builder mocks were NOT left on the old name: a mock naming a method the code no
+# longer calls records nothing and reads as coverage. The digest's own behaviour
+# is pinned in ``tests/test_channel_prompt_digest.py``; these tests are unchanged
+# in what they assert.
 
 import asyncio
 import logging
@@ -10,6 +20,16 @@ import pytest
 from pocketpaw.agents.loop import AgentLoop
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.bus import Channel, InboundMessage
+from pocketpaw.prompt import AssembledPrompt
+
+# Any non-empty digest: these tests care that the loop threads ONE through, not
+# which one. ``test_channel_prompt_digest.py`` owns what makes it move.
+_STUB_DIGEST = "0123456789abcdef"
+
+
+def _assembled(text: str = "System Prompt") -> AssembledPrompt:
+    """What the real builder hands the loop back."""
+    return AssembledPrompt(text=text, stable_digest=_STUB_DIGEST)
 
 
 @pytest.fixture
@@ -36,7 +56,9 @@ def mock_router():
     """Mock AgentRouter that yields AgentEvent objects."""
     router = MagicMock()
 
-    async def mock_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def mock_run(
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+    ):
         yield AgentEvent(type="message", content="Hello ")
         yield AgentEvent(type="message", content="world!")
         yield AgentEvent(
@@ -76,7 +98,7 @@ async def test_agent_loop_process_message(
     mock_router_cls.return_value = mock_router
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+    mock_builder_instance.assemble_system_prompt = AsyncMock(return_value=_assembled())
 
     with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
@@ -148,7 +170,7 @@ async def test_agent_loop_handles_error(
     mock_router_cls.return_value = error_router
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+    mock_builder_instance.assemble_system_prompt = AsyncMock(return_value=_assembled())
 
     with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
@@ -250,7 +272,7 @@ async def test_recent_file_tracker_failures_are_logged(
     mock_router_cls.return_value = mock_router
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+    mock_builder_instance.assemble_system_prompt = AsyncMock(return_value=_assembled())
 
     with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
@@ -307,7 +329,7 @@ async def test_agent_loop_emits_tool_events(
     mock_router_cls.return_value = mock_router
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+    mock_builder_instance.assemble_system_prompt = AsyncMock(return_value=_assembled())
 
     with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
@@ -356,7 +378,9 @@ async def test_agent_loop_builds_context_and_passes_to_router(
 
     captured_kwargs = {}
 
-    async def capturing_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def capturing_run(
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+    ):
         captured_kwargs["system_prompt"] = system_prompt
         captured_kwargs["history"] = history
         yield AgentEvent(type="message", content="OK")
@@ -368,8 +392,8 @@ async def test_agent_loop_builds_context_and_passes_to_router(
     mock_router_cls.return_value = router
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(
-        return_value="You are PocketPaw with identity and memory."
+    mock_builder_instance.assemble_system_prompt = AsyncMock(
+        return_value=_assembled("You are PocketPaw with identity and memory.")
     )
     mock_builder_instance.bootstrap.get_context = AsyncMock(
         return_value=MagicMock(to_identity_block=lambda: "<identity>Test</identity>")
@@ -402,7 +426,7 @@ async def test_agent_loop_builds_context_and_passes_to_router(
 
             await loop._process_message(msg)
 
-            mock_builder_instance.build_system_prompt.assert_called_once()
+            mock_builder_instance.assemble_system_prompt.assert_called_once()
             mock_memory.get_compacted_history.assert_called_once()
             assert captured_kwargs["system_prompt"] == "You are PocketPaw with identity and memory."
             assert captured_kwargs["history"] == session_history
@@ -429,7 +453,7 @@ async def test_agent_loop_handles_error_before_router_init(
     )
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+    mock_builder_instance.assemble_system_prompt = AsyncMock(return_value=_assembled())
 
     with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
@@ -491,7 +515,9 @@ async def test_identity_reinforcement_appended_on_long_conversations(
 
     captured: dict = {}
 
-    async def capturing_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def capturing_run(
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+    ):
         captured["system_prompt"] = system_prompt
         yield AgentEvent(type="message", content="OK")
         yield AgentEvent(type="done", content="")
@@ -516,8 +542,8 @@ async def test_identity_reinforcement_appended_on_long_conversations(
     )
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(
-        return_value="<identity>You are PocketPaw</identity>"
+    mock_builder_instance.assemble_system_prompt = AsyncMock(
+        return_value=_assembled("<identity>You are PocketPaw</identity>")
     )
     mock_builder_instance.bootstrap = mock_bootstrap
 
@@ -573,7 +599,9 @@ async def test_identity_reinforcement_not_appended_on_short_conversations(
 
     captured: dict = {}
 
-    async def capturing_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def capturing_run(
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+    ):
         captured["system_prompt"] = system_prompt
         yield AgentEvent(type="message", content="OK")
         yield AgentEvent(type="done", content="")
@@ -598,8 +626,8 @@ async def test_identity_reinforcement_not_appended_on_short_conversations(
     )
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(
-        return_value="<identity>You are PocketPaw</identity>"
+    mock_builder_instance.assemble_system_prompt = AsyncMock(
+        return_value=_assembled("<identity>You are PocketPaw</identity>")
     )
     mock_builder_instance.bootstrap = mock_bootstrap
 
@@ -798,7 +826,9 @@ async def test_auto_tts_triggered_by_voice_message(
     mock_get_memory.return_value = mock_memory
 
     # Mock router yields text response without calling text_to_speech tool
-    async def mock_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def mock_run(
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+    ):
         yield AgentEvent(type="message", content="I heard your voice message!")
         yield AgentEvent(type="done", content="")
 
@@ -808,7 +838,7 @@ async def test_auto_tts_triggered_by_voice_message(
     mock_router_cls.return_value = router
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+    mock_builder_instance.assemble_system_prompt = AsyncMock(return_value=_assembled())
 
     with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
@@ -868,7 +898,9 @@ async def test_auto_tts_skipped_when_agent_already_sent_audio(
     mock_get_memory.return_value = mock_memory
 
     # Mock router yields tool_result with media tag (agent already generated audio)
-    async def mock_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def mock_run(
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+    ):
         yield AgentEvent(type="message", content="Here's my voice reply")
         yield AgentEvent(
             type="tool_result",
@@ -883,7 +915,7 @@ async def test_auto_tts_skipped_when_agent_already_sent_audio(
     mock_router_cls.return_value = router
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+    mock_builder_instance.assemble_system_prompt = AsyncMock(return_value=_assembled())
 
     with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
@@ -933,7 +965,9 @@ async def test_auto_tts_disabled_by_setting(
     mock_get_bus.return_value = mock_bus
     mock_get_memory.return_value = mock_memory
 
-    async def mock_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def mock_run(
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+    ):
         yield AgentEvent(type="message", content="Response")
         yield AgentEvent(type="done", content="")
 
@@ -943,7 +977,7 @@ async def test_auto_tts_disabled_by_setting(
     mock_router_cls.return_value = router
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+    mock_builder_instance.assemble_system_prompt = AsyncMock(return_value=_assembled())
 
     with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
@@ -993,7 +1027,9 @@ async def test_auto_tts_handles_synthesis_failure_gracefully(
     mock_get_bus.return_value = mock_bus
     mock_get_memory.return_value = mock_memory
 
-    async def mock_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def mock_run(
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+    ):
         yield AgentEvent(type="message", content="Response text")
         yield AgentEvent(type="done", content="")
 
@@ -1003,7 +1039,7 @@ async def test_auto_tts_handles_synthesis_failure_gracefully(
     mock_router_cls.return_value = router
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+    mock_builder_instance.assemble_system_prompt = AsyncMock(return_value=_assembled())
 
     with patch("pocketpaw.agents.loop.get_settings") as mock_settings:
         settings = MagicMock()
@@ -1087,7 +1123,7 @@ async def test_agents_md_discovery_failure_is_silently_logged(
     mock_router_cls.return_value = mock_router
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+    mock_builder_instance.assemble_system_prompt = AsyncMock(return_value=_assembled())
 
     with (
         patch("pocketpaw.agents.loop.get_settings") as mock_settings,
@@ -1145,7 +1181,7 @@ async def test_token_metrics_persist_failure_is_logged_at_debug(
     token_router = MagicMock()
 
     async def mock_run_with_token_usage(
-        message, *, system_prompt=None, history=None, session_key=None
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
     ):
         yield AgentEvent(
             type="token_usage",
@@ -1166,7 +1202,7 @@ async def test_token_metrics_persist_failure_is_logged_at_debug(
     mock_router_cls.return_value = token_router
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+    mock_builder_instance.assemble_system_prompt = AsyncMock(return_value=_assembled())
 
     with (
         patch("pocketpaw.agents.loop.get_settings") as mock_settings,
@@ -1222,7 +1258,7 @@ async def test_budget_exhaustion_blocks_before_router_run(
     mock_router_cls.return_value = MagicMock()
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+    mock_builder_instance.assemble_system_prompt = AsyncMock(return_value=_assembled())
 
     tracker = MagicMock()
     tracker.get_summary.return_value = {"total_cost_usd": 12.0}
@@ -1292,7 +1328,7 @@ async def test_budget_warning_event_emitted_on_threshold_cross(
     warning_router = MagicMock()
 
     async def mock_run_with_token_usage(
-        message, *, system_prompt=None, history=None, session_key=None
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
     ):
         yield AgentEvent(
             type="token_usage",
@@ -1313,7 +1349,7 @@ async def test_budget_warning_event_emitted_on_threshold_cross(
     mock_router_cls.return_value = warning_router
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+    mock_builder_instance.assemble_system_prompt = AsyncMock(return_value=_assembled())
 
     class MutableTracker:
         def __init__(self, initial_total: float) -> None:
@@ -1407,7 +1443,7 @@ async def test_health_engine_persist_failure_logged_as_warning(
     mock_router_cls.return_value = boom_router
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+    mock_builder_instance.assemble_system_prompt = AsyncMock(return_value=_assembled())
 
     with (
         patch("pocketpaw.agents.loop.get_settings") as mock_settings,
@@ -1469,7 +1505,7 @@ async def test_router_stop_failure_logged_as_warning(
     mock_router_cls.return_value = flaky_router
 
     mock_builder_instance = mock_builder_cls.return_value
-    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+    mock_builder_instance.assemble_system_prompt = AsyncMock(return_value=_assembled())
 
     with (
         patch("pocketpaw.agents.loop.get_settings") as mock_settings,

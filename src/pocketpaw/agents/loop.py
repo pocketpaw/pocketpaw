@@ -6,6 +6,20 @@ and streams AgentEvent responses back to channels.
 
 PII scanning before memory storage is opt-in via pii_scan_enabled + pii_scan_memory settings.
 
+Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the channel turn
+carries its prompt's ``stable_digest`` to the backend. ``_process_message_inner``
+calls ``AgentContextBuilder.assemble_system_prompt`` (which returns the digest
+alongside the text) instead of ``build_system_prompt``, and passes
+``system_prompt_digest`` to ``AgentRouter.run``, which forwards it only to
+backends whose ``run`` declares it. Everything this module does to the prompt
+AFTER assembly — ``_reinforce_identity``'s every-fifth-message identity append —
+moves the text and NOT the digest, on purpose: a backend caching an agent object
+should not rebuild it for a block the prompt already contained. Before this, the
+warm Claude client on Telegram / Discord / Slack / CLI keyed on
+``claude_sdk._behavior_prefix``, which infers the stable region by pattern-
+matching the rendered text and so cannot see a real behaviour change hiding below
+its cut.
+
 Updated: feat/pocketpaw-cognitive-engine
 - start() now builds a PocketPawCognitiveEngine backed by the active AgentRouter
   and passes it to SoulManager.initialize() so the soul's cognition pipeline
@@ -1122,8 +1136,14 @@ class AgentLoop:
             else:
                 agents_md_dir = str(self.settings.file_jail_path)
 
-            system_prompt, history = await asyncio.gather(
-                self.context_builder.build_system_prompt(
+            # ``assemble_system_prompt`` rather than ``build_system_prompt``
+            # (PA-7b): the same assembly, but it hands back the digest as well as
+            # the text. The digest goes to the backend UNMODIFIED while the text
+            # below is still mutated per turn (identity reinforcement, and the
+            # backend's own history splice) — that asymmetry is the point of a
+            # digest over layer keys rather than over bytes.
+            assembled_prompt, history = await asyncio.gather(
+                self.context_builder.assemble_system_prompt(
                     user_query=content,
                     channel=message.channel,
                     sender_id=sender_id,
@@ -1140,6 +1160,7 @@ class AgentLoop:
                     llm_summarize=self.settings.compaction_llm_summarize,
                 ),
             )
+            system_prompt = assembled_prompt.text
 
             # 2a. Emit AGENTS.md event for the dashboard Activity panel
             try:
@@ -1177,6 +1198,13 @@ class AgentLoop:
             if asyncio.iscoroutine(bootstrap_context):
                 bootstrap_context = await bootstrap_context
             identity_block = bootstrap_context.to_identity_block()
+            # Mutates the TEXT and deliberately not the digest: this appends a
+            # copy of a block the prompt already contains, so two turns that
+            # differ only by reinforcement are the same prompt as far as a
+            # backend caching an agent object is concerned. Moving the digest
+            # here would rebuild the warm client every fifth message for no
+            # change in behaviour. Pinned by
+            # ``tests/test_channel_prompt_digest.py``.
             system_prompt = _reinforce_identity(system_prompt, identity_block, message_count)
 
             # 2c. Emit agent_start + thinking events
@@ -1257,7 +1285,15 @@ class AgentLoop:
 
             await _policy_ctx.__aenter__()
             run_iter = router.run(
-                content, system_prompt=system_prompt, history=history, session_key=session_key
+                content,
+                system_prompt=system_prompt,
+                history=history,
+                session_key=session_key,
+                # The router decides per BACKEND whether this is deliverable —
+                # an out-of-tree backend whose ``run`` never declared the
+                # parameter must keep working, so the check is on the signature
+                # and it lives in ``agents.backend``.
+                system_prompt_digest=assembled_prompt.stable_digest,
             )
             try:
                 async for event in run_iter:
