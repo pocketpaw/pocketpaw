@@ -71,6 +71,13 @@ class AtlasPrimerLayer:
     # ~500 tokens. Inherited from ``_INJECTION_CAPS["atlas_primer"]`` rather
     # than re-derived: it has bounded this block on the channel path for months,
     # and PA-9 is the task with the measurements to change it.
+    #
+    # Measured 2026-08-03: the shipped primer renders 1779 chars, so the cap has
+    # 221 chars of headroom — about two more primitives at the seed's current
+    # one-line-per-primitive rate. The atlas grows by seed edit, so this cap is
+    # closer than it looks and the first thing it will do is silently drop the
+    # LAST primitives in the list. Whoever adds the third primitive after that
+    # gets a truncated primer and a ``dropped`` entry saying so.
     max_chars: int | None = 2000
 
     async def render(self, ctx: PromptContext) -> LayerOutput:

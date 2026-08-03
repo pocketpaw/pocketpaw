@@ -73,8 +73,21 @@ class UserInfoLayer:
     # is over budget. Dropping it saves nothing worth the regression.
     priority: Priority = Priority.HIGH
     # 500 chars, from ``_INJECTION_CAPS["sender_block"]`` — the channel path's
-    # equivalent "who is talking" block. Well under the EE renderer's own 1500
-    # hard cap, so this bites only on a block that arrives from somewhere else.
+    # equivalent "who is talking" block. IT IS TOO TIGHT FOR THE OTHER PRODUCER,
+    # and the number is kept anyway because the tension is real rather than an
+    # oversight. Measured 2026-08-03: a generously-filled ``<about-member>``
+    # block — a long name, role and team on the ``who`` line plus a full
+    # 280-char ``focus`` — is 591 chars, and ``_render_about_member_block``
+    # bounds itself at 1500, not 500. So this cap fits the block PA-7 brings
+    # over from the channel path and cuts the one the cloud path already has.
+    #
+    # It matters more than the tokens: the EE renderer truncates carefully,
+    # re-appending ``</about-member>`` so the block stays well formed. A second
+    # cut here lands mid-focus and glues ``[...truncated]`` on with no closing
+    # tag, which is worse than either cap alone. Whichever task wires a producer
+    # owns the choice — one cap at the widest producer's bound, or a per-producer
+    # cap and no layer-level one. Do not just raise the number; decide which
+    # block this layer is for.
     max_chars: int | None = 500
 
     async def render(self, ctx: PromptContext) -> LayerOutput:
