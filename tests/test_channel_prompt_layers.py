@@ -259,11 +259,18 @@ async def test_a_raising_environment_layer_does_not_fail_the_turn(
     more; ``assemble``'s render guard is the whole of the protection, and this
     drives a genuine exception through each resource to check that the guard
     actually reaches it rather than assuming a ``try`` somewhere covers it. The
-    turn must still produce a prompt, the failure must be RECORDED, and the
-    other layers must be unaffected.
+    turn must still produce a prompt, and the layers after it must be
+    unaffected.
+
+    ``agents_md_dir`` is set for ALL five parametrisations, not just the
+    AGENTS.md one, and that is not tidiness. The first draft left it unset; the
+    narrowed-guard mutation below is what caught it, because the agents_md layer
+    returns early on a missing directory, so that case never reached
+    ``AgentsMdLoader`` and passed the mutation while the other four failed. A
+    parametrisation that cannot reach the resource it names tests nothing.
 
     MUTATION: narrow ``assemble``'s ``except Exception`` to
-    ``except ValueError``. Every parametrisation fails.
+    ``except ValueError``. All five parametrisations fail.
     """
 
     def _boom(*args, **kwargs):
@@ -279,7 +286,9 @@ async def test_a_raising_environment_layer_does_not_fail_the_turn(
     memory.get_context_for_agent = AsyncMock(return_value="")
     builder = AgentContextBuilder(bootstrap_provider=_StubBootstrap(), memory_manager=memory)
 
-    prompt = await builder.build_system_prompt(include_memory=False, session_key="s-1")
+    prompt = await builder.build_system_prompt(
+        include_memory=False, session_key="s-1", agents_md_dir="/does/not/matter"
+    )
     assert "the persona" in prompt  # the turn survived
     assert "# Session Management" in prompt  # and so did the layers after it
 
