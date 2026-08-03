@@ -603,14 +603,145 @@ class Settings(BaseSettings):
             "don't recognize the shape ignore it."
         ),
     )
+    # AgentAPI Settings — drive a terminal coding agent via coder/agentapi.
+    agentapi_base_url: ExternalUrl = Field(
+        default="http://localhost:3284",
+        description=(
+            "Base URL of a running AgentAPI server (`agentapi server -- claude`). "
+            "The backend borrows the wrapped CLI's OWN authentication, so it needs "
+            "no provider key — which is why it is useful for development when no "
+            "API key or working proxy is available. One server is ONE conversation: "
+            "turns are serialized, so this is a single-user tool, not a serving path."
+        ),
+    )
+    agentapi_timeout: int = Field(
+        default=3600,
+        description=(
+            "Seconds to wait on an AgentAPI turn. Generous by default because the "
+            "wrapped agent runs its own tool chains and can work for a long time; "
+            "the previous 600s cut turns off mid-task."
+        ),
+    )
+    # Pydantic AI Settings — in-process, dispatch-only agent backend.
+    # See docs/design/drafts/2026-07-29-pydantic-ai-agent-backend-prd.md.
+    pydantic_ai_model: str = Field(
+        default="litellm:claude-sonnet-4-6",
+        description=(
+            "Model for the Pydantic AI backend in ``provider:model`` format. "
+            "Defaults to the ``litellm`` provider so model access goes through "
+            "the self-hosted LiteLLM proxy (RFC 11), which already owns spend "
+            "logs, virtual keys and per-customer budgets — a second model layer "
+            "would fork metering. A bare model name with no ``provider:`` prefix "
+            "falls back to ``pydantic_ai_provider``."
+        ),
+    )
+    pydantic_ai_provider: str = Field(
+        default="auto",
+        description=(
+            "Provider for the Pydantic AI backend when ``pydantic_ai_model`` "
+            "carries no ``provider:`` prefix. ``auto`` defers to ``llm_provider``, "
+            "then to ``litellm``. One of: litellm, anthropic, openai, "
+            "openai_compatible, openrouter, ollama."
+        ),
+    )
+    pydantic_ai_timeout: int = Field(
+        default=3600,
+        description=(
+            "Seconds the Pydantic AI backend waits on the model before giving "
+            "up (0 = wait indefinitely). Replaces the OpenAI client's 600s "
+            "default, which is not a sensible bound on an agent turn — a long "
+            "tool chain or a reasoning model thinking between tokens trips it "
+            "and the run dies mid-generation. The connect timeout stays short "
+            "regardless, so a dead host still fails fast. A gateway in front of "
+            "the model (LiteLLM / OpenRouter) enforces its own idle window that "
+            "this cannot raise."
+        ),
+    )
+    pydantic_ai_max_turns: int = Field(
+        default=100,
+        description=(
+            "Max model requests per run in the Pydantic AI backend (0 = "
+            "unlimited). Maps to the agent's request limit, which bounds a "
+            "runaway tool loop."
+        ),
+    )
+    pydantic_ai_mcp_enabled: bool = Field(
+        default=True,
+        description=(
+            "Attach configured MCP servers to the Pydantic AI backend. The "
+            "backend holds each server open for the lifetime of the backend "
+            "instance, so pydantic-ai's refcount never returns to zero and a "
+            "server is started exactly once rather than respawning whenever "
+            "concurrent runs briefly reach zero. Set false to drop MCP from the "
+            "tool surface entirely."
+        ),
+    )
+    pydantic_ai_defer_mcp_tools: bool = Field(
+        default=False,
+        description=(
+            "Hide the Pydantic AI backend's MCP tools behind tool search "
+            "instead of advertising every one of them on every model request. "
+            "An ungated surface carries 134 tools whose schemas are ~30,500 "
+            "tokens per request; deferring the 97 bridged ones leaves 38 on "
+            "the wire for ~5,900, and the model calls ``search_tools`` to pull "
+            "what it needs. Costs one extra model request per discovery, and "
+            "buys little on a surface that already gates hard. Off by default: "
+            "the token saving is measured, but whether a given model reliably "
+            "searches rather than giving up is a behaviour question that has "
+            "to be answered per model."
+        ),
+    )
+    pydantic_ai_harness_enabled: bool = Field(
+        default=True,
+        description=(
+            "Attach the pydantic-ai-harness capabilities (compaction, planning, "
+            "tool-output limits, step persistence) to the Pydantic AI backend. "
+            "Set false to run the bare agent loop — the escape hatch if a "
+            "harness release regresses, since the dependency is pre-1.0 in "
+            "cadence and pinned exactly."
+        ),
+    )
+    pydantic_ai_skills_enabled: bool = Field(
+        default=True,
+        description=(
+            "Expose PocketPaw's skills to the Pydantic AI backend via "
+            "pydantic-ai-skills, using progressive disclosure — the model sees "
+            "names and descriptions and pulls a skill's body only when it uses "
+            "one, instead of the whole set riding in the system prompt every "
+            "turn. Skills are passed programmatically from PocketPaw's own "
+            "loader; directory / git / S3 discovery is not used, and the "
+            "script-execution tool is excluded (dispatch-only)."
+        ),
+    )
+    pydantic_ai_compaction_max_messages: int = Field(
+        default=200,
+        description=(
+            "Message count above which the Pydantic AI backend compacts a run's "
+            "history (sliding window + clearing old tool results). A long tool "
+            "loop is what blows the context window on a dispatch-only agent."
+        ),
+    )
+    pydantic_ai_max_tool_output_chars: int = Field(
+        default=200_000,
+        description=(
+            "Truncate any single bridged tool result above this many characters "
+            "before it re-enters the model context (0 = no limit). Guards the "
+            "context against one oversized tool return. NOT a read cap on file "
+            "content — a cap that a tool contract cannot satisfy is how the "
+            "/code fabrication bug happened (2026-07-28); bridged tools here are "
+            "dispatch-only and return summaries, not whole files."
+        ),
+    )
     # Pocket Specialist Settings — see docs/superpowers/specs/2026-05-09-pocket-specialist-design.md
     pocket_specialist_backend: str = Field(
         default="deep_agents",
         description=(
             "Which agent backend runs the pocket specialist's LLM work. Must be a "
             "registered backend name (deep_agents, langchain_react, claude_agent_sdk, "
-            "openai_agents, google_adk, codex_cli, opencode, copilot_sdk). Default "
-            "deep_agents avoids subprocess cold-start."
+            "openai_agents, google_adk, codex_cli, opencode, copilot_sdk, "
+            "pydantic_ai). Default deep_agents avoids subprocess cold-start. The "
+            "backend must implement ``attach_specialist_tools`` — one that raises "
+            "is excluded from the eligible set (``agents/backend.py``)."
         ),
     )
     pocket_specialist_model: str = Field(
