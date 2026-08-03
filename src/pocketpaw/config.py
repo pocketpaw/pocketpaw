@@ -676,6 +676,80 @@ class Settings(BaseSettings):
             "tool surface entirely."
         ),
     )
+    pydantic_ai_instrumentation: bool = Field(
+        default=False,
+        description=(
+            "Emit OpenTelemetry spans for Pydantic AI agent runs (model "
+            "requests, tool calls, token usage, time to first chunk). Calls "
+            "``logfire.configure`` once per process with "
+            "``send_to_logfire='if-token-present'``, so without a LOGFIRE_TOKEN "
+            "the spans stay local and reach whatever OTel exporter is already "
+            "configured. Off by default. Cheap since pydantic-ai 2.17.0, which "
+            "caches per-message span serialization — before that it was O(n^2) "
+            "over a run's history and a long tool loop paid for it."
+        ),
+    )
+    pydantic_ai_native_web_tools: bool = Field(
+        default=False,
+        description=(
+            "Let the model run web search and page fetch PROVIDER-SIDE on "
+            "backends that support it, instead of PocketPaw's own tools making "
+            "those HTTP calls from inside the agent process. On an in-process "
+            "backend serving every tenant, a bridged web fetch means our event "
+            "loop does the waiting. PocketPaw's ``web_search`` / ``url_extract`` "
+            "stay wired as the LOCAL fallback, so a provider without native "
+            "support behaves exactly as before and the model never sees two "
+            "tools for one job. Off by default: the profile that advertises "
+            "native support describes the OpenAI API, and whether a LiteLLM "
+            "proxy forwards the native tool to its upstream is a per-deployment "
+            "question."
+        ),
+    )
+    pydantic_ai_thinking: str = Field(
+        default="default",
+        description=(
+            "Reasoning effort for the Pydantic AI backend: 'default' (leave the "
+            "provider's own setting alone), 'off', or one of 'minimal', 'low', "
+            "'medium', 'high', 'xhigh'. Maps to pydantic-ai's portable "
+            "``thinking`` model setting, so it works across providers rather "
+            "than needing the Anthropic or OpenAI spelling. This is the "
+            "largest latency dial on a reasoning model and it is currently "
+            "whatever the provider picked; 'default' keeps that, and any other "
+            "value makes the choice ours."
+        ),
+    )
+    pydantic_ai_fast_model: str = Field(
+        default="",
+        description=(
+            "Optional cheaper/faster model in ``provider:model`` form that the "
+            "Pydantic AI backend downshifts to part-way through a long run. "
+            "Empty disables model selection entirely, which is the default: a "
+            "run stays on ``pydantic_ai_model`` from first step to last. "
+            "Requires one of the two thresholds below to be non-zero."
+        ),
+    )
+    pydantic_ai_fast_model_after_step: int = Field(
+        default=0,
+        description=(
+            "Downshift to ``pydantic_ai_fast_model`` once a run reaches this "
+            "request step (0 = never). A long tool chain front-loads its hard "
+            "judgement and spends its later steps digesting tool results, "
+            "which is also where the context — and so the cost — is largest. "
+            "Whether that trade is worth making is an empirical question per "
+            "model, which is what the evals harness is for; this ships the "
+            "mechanism, off."
+        ),
+    )
+    pydantic_ai_fast_model_after_tokens: int = Field(
+        default=0,
+        description=(
+            "Downshift to ``pydantic_ai_fast_model`` once a run's accumulated "
+            "input tokens exceed this (0 = never). A cost ceiling rather than a "
+            "step count: it turns a runaway loop into a cheap one instead of a "
+            "larger bill. Applied with ``pydantic_ai_fast_model_after_step`` — "
+            "whichever trips first wins."
+        ),
+    )
     pydantic_ai_defer_mcp_tools: bool = Field(
         default=False,
         description=(

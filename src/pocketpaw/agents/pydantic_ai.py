@@ -209,6 +209,10 @@ _OPENAI_COMPATIBLE = frozenset({"litellm", "openai", "openai_compatible", "openr
 _POCKET_SCOPE_SENTINEL = "<pocket-scope>"
 
 # Bounds on the per-session transcript cache (see ``_session_messages``).
+# ``logfire.configure`` is process-global and one backend instance exists per
+# agent, so the capability builder would otherwise reconfigure it per agent.
+_LOGFIRE_CONFIGURED = False
+
 _MAX_TRACKED_SESSIONS = 200
 _MAX_SESSION_MESSAGES = 60
 
@@ -670,15 +674,21 @@ class PydanticAIBackend:
 
     # -- model --------------------------------------------------------------
 
-    def _parse_provider_model(self) -> tuple[str, str]:
-        """Split ``pydantic_ai_model`` into ``(provider, model)``.
+    def _parse_provider_model(self, model_spec: str | None = None) -> tuple[str, str]:
+        """Split a ``provider:model`` spec into its parts.
+
+        Defaults to ``pydantic_ai_model``; ``model_spec`` lets the fast-model
+        selector reuse the same parsing and fallback chain rather than growing a
+        second, subtly different one.
 
         Accepts ``provider:model`` or a bare model name, falling back to
         ``pydantic_ai_provider`` then ``llm_provider`` then ``litellm``.
         Mirrors ``DeepAgentsBackend._parse_provider_model`` so an operator can
         move a value between the two settings without reformatting it.
         """
-        model_str = (self.settings.pydantic_ai_model or "").strip()
+        model_str = (
+            model_spec if model_spec is not None else (self.settings.pydantic_ai_model or "")
+        ).strip()
         if ":" in model_str:
             provider, _, model = model_str.partition(":")
             return provider.strip(), model.strip()
@@ -690,9 +700,9 @@ class PydanticAIBackend:
             provider = "litellm"
         return provider, model_str
 
-    def _build_model(self) -> Any:
+    def _build_model(self, model_spec: str | None = None) -> Any:
         """Build the pydantic-ai model client for the configured provider."""
-        provider, model = self._parse_provider_model()
+        provider, model = self._parse_provider_model(model_spec)
 
         if provider == "agentapi":
             # Development path: borrow a local CLI's own authentication instead
@@ -1098,9 +1108,16 @@ class PydanticAIBackend:
         # pydantic-ai core, so turning the harness off must not silently drop
         # our ranking function back to the built-in one.
         capabilities: list = []
-        tool_search = self._build_tool_search_capability()
-        if tool_search is not None:
-            capabilities.append(tool_search)
+        for build in (
+            self._build_tool_search_capability,
+            self._build_thinking_capability,
+            self._build_select_model_capability,
+            self._build_instrumentation_capability,
+        ):
+            cap = build()
+            if cap is not None:
+                capabilities.append(cap)
+        capabilities += self._build_web_capabilities()
 
         if not getattr(self.settings, "pydantic_ai_harness_enabled", True):
             return capabilities
@@ -1349,6 +1366,160 @@ class PydanticAIBackend:
             return None
         return ToolSearch(strategy=pocketpaw_tool_search)
 
+    # Bridged tool -> the capability that supersedes it when native web tools
+    # are on. The bridged tool is not dropped; it becomes that capability's
+    # LOCAL fallback, which is what keeps one implementation serving both paths
+    # and stops the model being offered two tools for one job.
+    _NATIVE_WEB_EQUIVALENTS: dict[str, str] = {"web_search": "WebSearch", "url_extract": "WebFetch"}
+
+    def _build_instrumentation_capability(self) -> Any:
+        """OTel spans for the run, so latency claims can be checked.
+
+        This backend's whole argument is a cost curve, and PA-1 — the
+        concurrency measurement that decides whether it beats ``deep_agents`` —
+        is still unrun. Spans are what make that measurable from the inside
+        rather than by wrapping a stopwatch around the whole request.
+
+        ``logfire.configure`` is called with ``send_to_logfire='if-token-present'``
+        so this is safe to enable on a deployment with no Logfire account: the
+        spans go to whatever OTel exporter is already configured, or nowhere.
+        Configuration is process-global and guarded by a module flag, because
+        one instance per agent means this method runs many times.
+        """
+        if not getattr(self.settings, "pydantic_ai_instrumentation", False):
+            return None
+        try:
+            from pydantic_ai.capabilities import Instrumentation
+        except ImportError:  # pragma: no cover - pydantic-ai too old
+            return None
+
+        global _LOGFIRE_CONFIGURED
+        if not _LOGFIRE_CONFIGURED:
+            _LOGFIRE_CONFIGURED = True
+            try:
+                import logfire
+
+                logfire.configure(
+                    send_to_logfire="if-token-present",
+                    service_name="pocketpaw-pydantic-ai",
+                    console=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Instrumentation is observability, never load-bearing: a
+                # misconfigured exporter must not stop a tenant's run.
+                logger.warning("Could not configure logfire, spans stay local: %s", exc)
+        return Instrumentation()
+
+    def _build_web_capabilities(self) -> list:
+        """Move web search and fetch provider-side, keeping ours as the fallback.
+
+        The win is specific to this backend. A bridged web tool makes its HTTP
+        call from inside the agent process, so on one process serving every
+        tenant our event loop does the waiting; a native tool is executed by the
+        provider and arrives as a result. ``research`` is deliberately left
+        alone — it is a multi-step routine of ours, not a single fetch, so no
+        native tool is equivalent to it.
+
+        ``local=`` takes our own ``Tool`` rather than pydantic-ai's DuckDuckGo
+        fallback on purpose: a second search implementation would drift from the
+        one the other backends use, and the charter's one-canonical-module rule
+        is the reason the in-process MCP bridge exists at all.
+        """
+        if not getattr(self.settings, "pydantic_ai_native_web_tools", False):
+            return []
+        try:
+            from pydantic_ai.capabilities import WebFetch, WebSearch
+        except ImportError:  # pragma: no cover - pydantic-ai too old
+            return []
+
+        by_name = {getattr(t, "name", ""): t for t in self._build_custom_tools()}
+        out: list = []
+        for tool_name, cap_name in self._NATIVE_WEB_EQUIVALENTS.items():
+            local = by_name.get(tool_name)
+            if local is None:
+                # The surface withheld it, so there is nothing to fall back to.
+                # Registering the native tool anyway would GRANT a capability
+                # the policy just removed.
+                logger.info("Native %s not wired: %r is not on this surface", cap_name, tool_name)
+                continue
+            cap = WebSearch if cap_name == "WebSearch" else WebFetch
+            out.append(cap(local=local))
+        return out
+
+    def _build_thinking_capability(self) -> Any:
+        """Set reasoning effort explicitly instead of inheriting the provider's.
+
+        ``Thinking`` writes pydantic-ai's portable ``thinking`` model setting,
+        so one value works across Anthropic, OpenAI and the proxy rather than
+        needing each vendor's own spelling. Returns ``None`` for ``default``,
+        which leaves the setting absent entirely — not the same as ``off``,
+        which actively disables thinking on a model that would otherwise use it.
+        """
+        raw = str(getattr(self.settings, "pydantic_ai_thinking", "default") or "default").lower()
+        if raw == "default":
+            return None
+        try:
+            from pydantic_ai.capabilities import Thinking
+        except ImportError:  # pragma: no cover - pydantic-ai too old
+            return None
+        if raw in ("off", "false", "no"):
+            return Thinking(effort=False)
+        if raw in ("minimal", "low", "medium", "high", "xhigh"):
+            return Thinking(effort=raw)
+        logger.warning(
+            "Ignoring POCKETPAW_PYDANTIC_AI_THINKING=%r — expected one of "
+            "default, off, minimal, low, medium, high, xhigh",
+            raw,
+        )
+        return None
+
+    def _build_select_model_capability(self) -> Any:
+        """Downshift to a cheaper model part-way through a long run.
+
+        Off unless a fast model AND at least one threshold are configured, so
+        the default path is byte-for-byte what it was: one model, first step to
+        last.
+
+        The selector is deliberately dumb. ``ModelSelectionContext`` offers the
+        step number, the accumulated usage and the whole message history, and a
+        cleverer policy is easy to write and hard to justify — which of them
+        actually pays is a per-model empirical question, and answering it is
+        what the evals harness is for. This ships the mechanism with the two
+        thresholds that can be reasoned about without a benchmark: a step count
+        and a token ceiling.
+        """
+        spec = str(getattr(self.settings, "pydantic_ai_fast_model", "") or "").strip()
+        after_step = int(getattr(self.settings, "pydantic_ai_fast_model_after_step", 0) or 0)
+        after_tokens = int(getattr(self.settings, "pydantic_ai_fast_model_after_tokens", 0) or 0)
+        if not spec or (after_step <= 0 and after_tokens <= 0):
+            return None
+        try:
+            from pydantic_ai.capabilities import SelectModel
+        except ImportError:  # pragma: no cover - pydantic-ai too old
+            return None
+
+        # Built once, not per step. The fast model shares the instance HTTP
+        # client through ``_build_model``, so this does not reintroduce the
+        # per-turn connection pool the anthropic branch used to leak.
+        fast_model = self._build_model(spec)
+
+        def _select(ctx: Any) -> Any:
+            step = getattr(ctx, "run_step", 1) or 1
+            used = int(getattr(getattr(ctx, "usage", None), "input_tokens", 0) or 0)
+            if (after_step > 0 and step >= after_step) or (
+                after_tokens > 0 and used >= after_tokens
+            ):
+                return fast_model
+            return ctx.model
+
+        logger.info(
+            "Pydantic AI: downshifting to %r after step %s / %s input tokens",
+            spec,
+            after_step or "never",
+            after_tokens or "never",
+        )
+        return SelectModel(selector=_select)
+
     def _get_or_create_agent(
         self,
         model: Any,
@@ -1431,6 +1602,14 @@ class PydanticAIBackend:
         # (they are private to one specialist run), so screening them against it
         # would strip the very tools the caller just attached.
         tools = [t for t in tools if getattr(t, "name", "") not in _WITHHELD_TOOLS]
+
+        # A tool that is now a native capability's LOCAL fallback must not also
+        # ride the plain tool list: the capability puts it on the wire itself on
+        # a provider without native support, and two entries for one job is the
+        # duplicate problem this backend already has four of.
+        if getattr(self.settings, "pydantic_ai_native_web_tools", False):
+            superseded = set(self._NATIVE_WEB_EQUIVALENTS)
+            tools = [t for t in tools if getattr(t, "name", "") not in superseded]
 
         agent = Agent(
             model,
