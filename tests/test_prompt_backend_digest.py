@@ -1,7 +1,14 @@
 # tests/test_prompt_backend_digest.py
 # Created: 2026-08-03 (PA-6, feat/prompt-assembler-seam) — pins the cutover of
-# the three prompt-caching backends from their own hand-rolled keys onto the
-# assembler's `stable_digest`.
+# the four prompt-caching backends from their own hand-rolled keys onto the
+# assembler's `stable_digest`: `pydantic_ai` (agent key, since PA-1),
+# `deep_agents` and `langchain_react` (compiled-graph key), and `claude_sdk`
+# (warm-client key, in place of `_behavior_prefix`).
+#
+# PA-6 had a second half — put the persona back at the FRONT of the pydantic_ai
+# prompt — and it was attempted, measured, and REVERTED. Section 5 holds what is
+# left of it: a tripwire pinning the library fact that made it unsafe. The
+# pydantic_ai module docstring carries the full account.
 #
 # WHAT PA-6 MEASURED, because these tests only make sense against the numbers.
 # 8 ordinary turns, a soul birthed through PocketPaw's own path, the same
@@ -27,7 +34,11 @@
 # and what `claude_sdk`'s volatile markers have always done. What a reused object
 # can never carry is a different agent, surface, override or instruction set.
 #
-# EACH TEST NAMES THE MUTATION THAT BREAKS IT, and each mutation was run.
+# EACH TEST NAMES THE MUTATION THAT BREAKS IT, and each mutation was run. Two
+# say in their own docstrings that they do not, and why: the Windows
+# spilled-prompt test asserts a fallback behaviour whose fix is covered
+# elsewhere, and the section-5 tripwire characterises pydantic-ai rather than our
+# code (it was checked by flipping its own fixture instead).
 
 from __future__ import annotations
 
@@ -198,7 +209,7 @@ async def test_a_digest_and_a_text_hash_cannot_be_mistaken_for_each_other():
 # ---------------------------------------------------------------------------
 
 
-async def test_the_three_ported_backends_declare_the_digest_on_run():
+async def test_the_four_ported_backends_declare_the_digest_on_run():
     """`AgentPool` decides by SIGNATURE, not by a list of class names.
 
     `_accepts_prompt_digest` inspects `run` and refuses `**kwargs`, so a backend
