@@ -37,7 +37,7 @@ The following skills have been created and are available. Do NOT recreate them o
 - **commit**: Stage and commit work. (user-invocable)
 - **humanize**: Strip AI tells from prose.
 
-Skills directories: \fixture\skills, \fixture\more-skills
+Skills directories: /fixture/skills, /fixture/more-skills
 
 
 # Paw OS Primer

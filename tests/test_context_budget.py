@@ -76,6 +76,7 @@ _OLD_PRIORITIES: dict[str, Priority] = {
     "channel.health_state": Priority.LOW,
 }
 
+
 def _ctx(**channel_inputs) -> PromptContext:
     return PromptContext(
         instance=None,

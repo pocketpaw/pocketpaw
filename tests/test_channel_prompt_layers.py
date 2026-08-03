@@ -250,9 +250,7 @@ class _StubBootstrap:
         ("channel.health_state", "pocketpaw.health.get_health_engine"),
     ],
 )
-async def test_a_raising_environment_layer_does_not_fail_the_turn(
-    monkeypatch, layer_name, target
-):
+async def test_a_raising_environment_layer_does_not_fail_the_turn(monkeypatch, layer_name, target):
     """Each of the five ex-``try/except`` blocks, made to raise for real.
 
     ``build_system_prompt`` used to wrap these five itself. It does not any
@@ -323,9 +321,7 @@ async def test_the_guard_records_the_failure_rather_than_swallowing_it():
         system_message_override=None,
         channel_inputs=ChannelInputs(identity="persona"),
     )
-    assembled = await assemble(
-        [prompt_layer_registry.get("channel.identity"), _Boom()], ctx
-    )
+    assembled = await assemble([prompt_layer_registry.get("channel.identity"), _Boom()], ctx)
     assert assembled.text == "persona"
     assert [(d.name, d.reason) for d in assembled.dropped] == [
         ("channel.health_state", "render raised RuntimeError")

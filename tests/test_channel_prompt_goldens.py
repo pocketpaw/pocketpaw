@@ -42,7 +42,7 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -85,7 +85,13 @@ class _StubSkill:
 
 
 class _StubSkillLoader:
-    paths = (Path("/fixture/skills"), Path("/fixture/more-skills"))
+    # ``PurePosixPath``, NOT ``Path``. The skills block renders
+    # ``", ".join(str(p) for p in loader.paths)``, and ``str(Path("/fixture/skills"))``
+    # is ``\fixture\skills`` on Windows and ``/fixture/skills`` on Linux — so a
+    # golden generated on one OS cannot pass on the other. CI caught it; a
+    # Windows-only run never can. ``PurePosixPath`` still exercises the ``str(p)``
+    # conversion the production code does, and renders the same bytes everywhere.
+    paths = (PurePosixPath("/fixture/skills"), PurePosixPath("/fixture/more-skills"))
 
     def get_all(self) -> dict[str, _StubSkill]:
         return {
