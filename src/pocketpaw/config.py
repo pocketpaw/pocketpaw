@@ -1,6 +1,12 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-08-03 (PA-9): Re-measured ``prompt_pocket_summary_only``'s payoff against
+    the live layer and corrected its description. The flag saves ~1,631 chars/turn
+    (3,240 -> 1,609 on a 300-widget pocket), not the ~39.6k the old note implied —
+    PA-8a's ``_WIDGET_SUMMARY_MAX_CHARS`` had already bounded the block, so the
+    dramatic figure described behaviour that no longer exists. Default is
+    unchanged; only the docstring was wrong.
   - 2026-08-03 (PA-8a): Added ``prompt_pocket_summary_only`` (default False, env
     POCKETPAW_PROMPT_POCKET_SUMMARY_ONLY) — takes the bulk widget dump out of
     the channel prompt's ``<current-pocket>`` block, leaving the pocket id, the
@@ -2041,8 +2047,17 @@ class Settings(BaseSettings):
             "pocket id, name, widget count, a snapshot stamp — plus the same "
             "standing order to call ``mcp__pocketpaw_pocket__get_pocket`` for "
             "the detail, which is the tool-result path the detail belongs on. "
-            "Measured on a 300-widget pocket the block drops from ~41k chars to "
-            "~1.4k. Read per-render by "
+            "RE-MEASURED 2026-08-03 (PA-9) against the live layer: on a "
+            "300-widget pocket the block is 3,240 chars / 1,092 tokens OFF and "
+            "1,609 chars / 444 tokens ON, so the flag saves 648 tokens (59%) per "
+            "turn — NOT the ~39.6k chars the old '~41k chars to ~1.4k' note "
+            "implied. That figure described the "
+            "pre-PA-8a block; _WIDGET_SUMMARY_MAX_CHARS now bounds the dump at "
+            "2,000 chars before serialisation, so the block plateaus around "
+            "3,240 chars from ~50 widgets upward and does not grow with pocket "
+            "size. The block is per-turn (it varies, so it never sits inside a "
+            "cached prefix), but the saving is now modest rather than dramatic. "
+            "Read per-render by "
             "``pocketpaw.prompt.channel.request.ChannelCurrentPocketLayer``, so "
             "flipping it is a config or env change and takes effect on the next "
             "settings load — no code deploy. Set via "

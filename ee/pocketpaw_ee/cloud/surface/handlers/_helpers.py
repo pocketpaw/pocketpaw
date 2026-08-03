@@ -7,6 +7,14 @@
 # audit-snapshot lines, etc.). Pulling these out keeps each handler
 # small (≤80 LOC) per the PR brief.
 #
+# Changes: 2026-08-03 (PA-9, feat/prompt-budget-measurement) — both preamble
+# caps now carry their measured cost, and the 12-widget cut moved here from a
+# bare literal in ``handlers/pocket.py`` as ``WIDGET_PREVIEW_LIMIT`` so the two
+# caps that jointly bound the pocket preamble live together. Measurement showed
+# they do not currently interact (12 widgets renders at 609 of 1500 chars), which
+# is exactly the kind of thing that was previously true by luck and unasserted;
+# ``tests/cloud/surface/test_preamble_caps.py`` now holds it.
+#
 # Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — added the two
 # cache-key builders every handler now needs to answer ``SurfacePreamble``'s
 # ``cache_key``. The split is by what the handler READS, and there are only two
@@ -31,7 +39,33 @@ logger = logging.getLogger(__name__)
 
 # Preamble length cap. Soft cap — we never split mid-tag, just truncate
 # the trailing lines and append an ellipsis marker.
+#
+# MEASURED 2026-08-03 (PA-9): 1500 chars is 378 tokens on the live route
+# (scripts/evals/prompt_cache_eval.py --arm caps). That is the per-turn,
+# per-surface price of this cap, and it is small enough that the number alone
+# argues for neither raising nor lowering it. KEPT at 1500. What was NOT
+# measured is fit — whether real preambles are losing content to the truncation
+# — because that needs production pocket data this harness has no access to. If
+# you are here because a preamble looks cut off, that is the unmeasured half.
 PREAMBLE_MAX_CHARS = 1500
+
+# How many widgets the pocket preamble lists before collapsing the rest into a
+# "... (+N more)" line. Extracted from a bare ``widgets[:12]`` literal in
+# ``handlers/pocket.py`` by PA-9 so the two caps that jointly bound this preamble
+# sit together and their interaction is visible — and testable.
+#
+# MEASURED 2026-08-03 (PA-9): a rendered widget line averages 36.2 chars, so 12
+# lines cost 434 chars and the full 300-widget preamble renders at 609 chars —
+# 41% of PREAMBLE_MAX_CHARS. The two caps do NOT interact today: ~36 widgets
+# would still fit under 1500.
+#
+# KEPT at 12 anyway, and the reason is not token cost. This preamble's text is
+# digested into the surface ``cache_key`` (see ``handlers/pocket.py``), so every
+# extra widget listed is another edit that moves the key and buys a cache
+# invalidation — roughly a 12s reconnect on the Claude SDK backend. Raising the
+# limit trades ~30 tokens per extra widget (cheap, measured) against a reconnect
+# rate (expensive, NOT measured). Measure the invalidation side before moving it.
+WIDGET_PREVIEW_LIMIT = 12
 
 
 def truncate_preamble(text: str, *, limit: int = PREAMBLE_MAX_CHARS) -> str:
@@ -182,6 +216,7 @@ def format_widget_line(widget: Any) -> str:
 
 __all__ = [
     "PREAMBLE_MAX_CHARS",
+    "WIDGET_PREVIEW_LIMIT",
     "composio_tool_names",
     "content_key",
     "format_widget_line",

@@ -1,5 +1,18 @@
 # src/pocketpaw/llm/caching.py — universal LLM prompt-caching helper (MCG-11).
 #
+# Updated: 2026-08-03 (PA-9, feat/prompt-budget-measurement) — ``CACHE_MIN_TOKENS``
+# is now measured rather than recited, and two of its rows were wrong. A live
+# sweep either side of the Haiku 4.5 floor (see the constant) confirmed 4096 and
+# pinned our own text at 3.48 chars/token. Two corrections fell out: the
+# ``anthropic-sonnet`` row read 2048, which is not the floor of ANY shipping
+# Sonnet (all are 1024) and only ever cost us caching; and ``anthropic-opus``
+# cannot be a single number, because Opus floors run 512 (Opus 5) to 4096 (Opus
+# 4.5/4.6) and are NOT monotonic across generations. Also corrected here: the
+# note below that a sub-floor write is "wasted". It is not — the provider
+# declines silently and charges nothing extra (marked and unmarked sub-floor
+# calls billed identically to six significant figures), so an over-permissive
+# threshold is inert, while an over-strict one loses real money.
+#
 # Created 2026-06-26 (integration/model-catalog-v2, MCG-11): generalizes the
 # ad-hoc Anthropic cache-control monkey-patch in
 # ``src/pocketpaw/agents/deep_agents.py`` into a reusable, provider-agnostic,
@@ -30,9 +43,11 @@
 #     trailing-whitespace difference) busts the cache for every downstream call.
 #     ``build_cacheable`` therefore never mutates the prefix text and keeps every
 #     variable part strictly after the last cache breakpoint.
-#   * Min-token thresholds: 1024 tokens (most models), 2048 (Anthropic Sonnet),
-#     4096 (Anthropic Haiku / Opus 4.5+). Below the floor the provider declines
-#     to cache and the write is wasted — callers should gate on prefix size.
+#   * Min-token thresholds: see ``CACHE_MIN_TOKENS`` — 512 to 4096 depending on
+#     the exact model, NOT the family. Below the floor the provider declines to
+#     cache; measured 2026-08-03, it declines FOR FREE, so a caller that gates
+#     too permissively loses nothing and one that gates too strictly loses the
+#     whole saving. When in doubt, mark it.
 #   * 1h TTL costs 2x a 5m write on the create call; only worth it when the same
 #     prefix recurs within the hour (the site-gen / pocket-gen case). 5m is the
 #     default.
@@ -51,15 +66,40 @@ from typing import Any
 # clamps to it.
 MAX_CACHE_BREAKPOINTS = 4
 
-# Per-model minimum cacheable prefix sizes (tokens). Below the floor the
-# provider silently declines to cache and the write is wasted. These are the
-# documented Anthropic floors; the 1024 default also covers OpenAI/DeepSeek
-# automatic caching. Keyed by a coarse model family the caller can look up.
+# Per-model minimum cacheable prefix sizes (TOKENS, never chars). Below the
+# floor the provider silently declines to cache — measured 2026-08-03 (PA-9),
+# see below — so the write is not "wasted", it simply never happens.
+#
+# MEASURED 2026-08-03 (PA-9, scripts/evals/prompt_cache_eval.py --arm threshold)
+# on anthropic/claude-haiku-4.5. A prefix sweep either side of the 4096 floor:
+#
+#     prompt_tokens   warm cache_read
+#             3,304                 0   <- below floor, never caches
+#             4,478             4,470   <- above floor, caches
+#
+# The crossover brackets 4096 exactly, confirming the Haiku 4.5 row. The same
+# run measured 3.48 chars/token on our own prompt text, which is the conversion
+# any chars-expressed threshold has to use.
+#
+# THE FLOORS ARE NOT MONOTONIC ACROSS GENERATIONS, which is why "anthropic-opus"
+# cannot be one number: Opus 4.5/4.6 sit at 4096 while Opus 4.8 is 1024 and Opus
+# 5 is 512. A single coarse key here is what makes a caller either skip caching
+# it could have had, or believe it cached when it did not.
 CACHE_MIN_TOKENS: dict[str, int] = {
     "default": 1024,
-    "anthropic-sonnet": 2048,
-    "anthropic-haiku": 4096,
-    "anthropic-opus": 4096,  # Opus 4.5+ raised the floor to 4096
+    # Every shipping Sonnet (4, 4.5, 4.6, 5) is 1024. This row previously read
+    # 2048, which is not the floor for any Sonnet — it only ever cost caching.
+    "anthropic-sonnet": 1024,
+    "anthropic-haiku": 4096,  # Haiku 4.5 — MEASURED above
+    # Opus spans 512..4096 by generation; the family key keeps the most
+    # conservative value so a caller that cannot resolve the generation is
+    # never told a prefix will cache when it will not.
+    "anthropic-opus": 4096,
+    "anthropic-opus-4.5": 4096,
+    "anthropic-opus-4.6": 4096,
+    "anthropic-opus-4.7": 2048,
+    "anthropic-opus-4.8": 1024,
+    "anthropic-opus-5": 512,
     "openai": 1024,
     "deepseek": 1024,
 }
