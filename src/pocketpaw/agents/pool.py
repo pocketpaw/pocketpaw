@@ -3,6 +3,14 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Updated: 2026-08-02 (PA-4, feat/prompt-assembler-seam) — the authoritative
+  ``instructions`` left ``legacy_tail`` for their own KEYED layer, so the most
+  stable content in the prompt stops inheriting the knowledge wrapper's silence
+  on the cache-key question. NOT ONE BYTE MOVED: the tail rendered
+  instructions-then-knowledge and the layer list now names ``instructions``
+  immediately before it. The layer order itself became a contract a test holds —
+  every keyed layer above the volatile region, identity at the U-curve's head,
+  retrieval at its tail — rather than a comment on the tuple below.
 Updated: 2026-08-02 (PA-3, feat/prompt-assembler-seam) — the per-message soul
   recall left ``legacy_tail`` for its own ``retrieval`` layer, which DECLARES
   itself volatile (``cache_key=None``) rather than being inferred as volatile by
@@ -169,15 +177,40 @@ logger = logging.getLogger(__name__)
 # ``retrieval`` renders LAST (PA-3): stable first, volatile last. Extracting the
 # per-message soul recall out of ``legacy_tail`` MOVED it — the bytes used to run
 # ``instructions → recall → knowledge`` and now run ``instructions → knowledge →
-# recall`` — because the tail still holds ``instructions`` and splitting those
-# out is PA-4's slice. The move is deliberate and cost nothing measurable: both
-# trailing blocks are per-message volatile, so their relative order cannot affect
-# prompt caching, ``_behavior_prefix`` cuts at the earliest volatile marker and
-# both orders open that region at the same offset (pinned in
+# recall`` — because the tail still held ``instructions`` at the time. The move
+# is deliberate and cost nothing measurable: both trailing blocks are per-message
+# volatile, so their relative order cannot affect prompt caching,
+# ``_behavior_prefix`` cuts at the earliest volatile marker and both orders open
+# that region at the same offset (pinned in
 # ``tests/test_prompt_retrieval_layer.py``), and the end of the prompt is the
 # best-attended position — which memories retrieved for THIS question earn over
 # a knowledge-base dump.
-_SYSTEM_PROMPT_LAYERS = ("identity", "surface", "legacy_tail", "retrieval")
+#
+# ``instructions`` sits between ``surface`` and the tail (PA-4), and NOTHING
+# MOVED. ``legacy_tail`` rendered instructions-then-knowledge; listing
+# ``instructions`` immediately before it is the same concatenation. That is the
+# whole reason this position and not another: PA-3 had a reason to move bytes and
+# argued it, PA-4 has none, and a byte moved above ``_behavior_prefix``'s cut
+# invalidates every warm Claude SDK client live at deploy.
+#
+# THE ORDER IS A CACHE CONTRACT, NOT A STYLE. Two properties make it one, and
+# both are pinned in ``tests/test_prompt_instructions_layer.py`` rather than
+# trusted to this comment:
+#   * every KEYED layer must sit ABOVE the volatile region. ``_behavior_prefix``
+#     cuts the warm-client key at the EARLIEST ``_VOLATILE_PROMPT_MARKERS`` match
+#     (``min()`` across them), so a keyed layer ordered below one is cut out of
+#     that key entirely — it would look keyed and behave unkeyed, losing its
+#     cache contribution silently. ``instructions`` is keyed as of PA-4, so it
+#     belongs above ``legacy_tail``'s ``## Your Knowledge Base`` marker, which is
+#     exactly where byte-neutrality already put it.
+#   * the prompt's two best-attended positions are its start and its end (the
+#     U-curve). Identity takes the start; the memories retrieved for THIS
+#     question take the end. The stable middle is where the material that must
+#     be PRESENT but is not being attended to moment-by-moment belongs, and it is
+#     also the region a prefix cache can actually reuse.
+# PA-5 inserts ``atlas`` and ``user`` after ``identity``; the order test is
+# written as pairwise rules so that is two added lines rather than a rewrite.
+_SYSTEM_PROMPT_LAYERS = ("identity", "surface", "instructions", "legacy_tail", "retrieval")
 
 
 def _resolve_agent_model() -> Any:
@@ -409,11 +442,18 @@ class AgentPool:
           cloud layer and handed here as plain data. KEYED, on what the handler
           that built the preamble says it read (``None``, i.e. no key, on every
           path with no surface — OSS local runs, the channel adapters).
-        * ``legacy_tail`` — the authoritative ``instructions`` and the knowledge
-          wrapper, still one block. UNKEYED: the wrapper's content is a
-          per-message KB retrieval, so keying the pair would move the digest
-          every turn and destroy the cache it exists to protect. PA-4 splits
-          ``instructions`` out, which is what lets them take a real key.
+        * ``instructions`` — the authoritative behaviour rules (runtime identity,
+          artifact delivery, the ripple LAW + delegation rule or, when an entity
+          set one, the ``system_message_override`` that replaces them, plus the
+          pocket-summary and about-member blocks). KEYED, on a digest of its own
+          bytes — the one layer whose text is the complete artifact rather than a
+          truncated view of a larger one, which is what makes hashing it an exact
+          key here and a wrong one for ``surface`` and ``identity``.
+        * ``legacy_tail`` — the knowledge-base wrapper. UNKEYED: its content is a
+          per-message KB retrieval, so a key would move the digest every turn and
+          destroy the cache it exists to protect. Until PA-4 it also carried the
+          ``instructions``, so the most stable content in the prompt inherited
+          the silence of the least.
         * ``retrieval`` — the per-message soul recall, keyed on nothing because
           it is keyed on the user's message. UNKEYED, and unlike the tail that
           is its PURPOSE rather than a limitation: it is the layer that makes

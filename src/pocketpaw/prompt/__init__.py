@@ -8,6 +8,11 @@ Updated: 2026-08-02 (PA-2) — exports :class:`SurfaceContextLayer`, the surface
 Updated: 2026-08-02 (PA-3) — exports :class:`RetrievalLayer`, the per-message
   soul recall. It is the first layer that exists to ANSWER ``cache_key`` with
   ``None``, and it renders LAST: stable first, volatile last.
+Updated: 2026-08-02 (PA-4) — exports :class:`InstructionsLayer`, the
+  authoritative behaviour rules. It is the answer to ``cache_key`` at the other
+  end: the one layer whose text is the WHOLE artifact rather than a lossy view
+  of one, so a digest of its bytes is an exact key rather than an optimistic
+  one. Not a byte of the assembled prompt moved when it was split out.
 
 The public surface for anyone writing a prompt layer or consuming an assembled
 prompt. Start at :class:`LayerOutput` — its ``cache_key`` field is what makes
@@ -17,6 +22,7 @@ one three backends independently got wrong before PR #1842.
 
 from pocketpaw.prompt.assembler import AssembledPrompt, DroppedLayer, assemble
 from pocketpaw.prompt.identity import AgentIdentityLayer
+from pocketpaw.prompt.instructions import InstructionsLayer
 from pocketpaw.prompt.layer import LayerOutput, PromptContext, PromptLayer
 from pocketpaw.prompt.passthrough import LegacyTailLayer
 from pocketpaw.prompt.registry import PromptLayerRegistry, prompt_layer_registry
@@ -27,6 +33,7 @@ __all__ = [
     "AgentIdentityLayer",
     "AssembledPrompt",
     "DroppedLayer",
+    "InstructionsLayer",
     "LayerOutput",
     "LegacyTailLayer",
     "PromptContext",

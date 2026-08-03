@@ -150,8 +150,15 @@ async def test_the_retrieval_layer_declares_itself_volatile():
 async def test_the_retrieval_layer_is_the_last_layer_assembled():
     """Order is behaviour. Stable first, volatile last — and last is also the
     end of the prompt, the position the model attends best, which the block
-    chosen for THIS question earns over a knowledge-base dump."""
-    assert _SYSTEM_PROMPT_LAYERS == ("identity", "surface", "legacy_tail", "retrieval")
+    chosen for THIS question earns over a knowledge-base dump.
+
+    Held as the PROPERTY this test names rather than as the whole tuple. PA-4
+    inserted ``instructions`` and PA-5 inserts ``atlas`` and ``user``; none of
+    them touch what this file is about, and a test that has to be rewritten on
+    every insertion is a test nobody reads before rewriting. The full order
+    contract lives in ``tests/test_prompt_instructions_layer.py``.
+    """
+    assert _SYSTEM_PROMPT_LAYERS[-1] == "retrieval"
     assert "retrieval" in prompt_layer_registry.list()
 
 

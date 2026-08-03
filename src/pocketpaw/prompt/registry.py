@@ -7,6 +7,10 @@ Updated: 2026-08-02 (PA-2) — registers ``surface``. It holds no surface state
 Updated: 2026-08-02 (PA-3) — registers ``retrieval``, the per-message soul
   recall extracted from ``legacy_tail``. Stateless for the same reason: it
   reaches the soul through ``ctx.instance``, never through a field of its own.
+Updated: 2026-08-02 (PA-4) — registers ``instructions``, the authoritative
+  behaviour rules, also extracted from ``legacy_tail``. Stateless in the
+  strongest sense of the four: it renders ``ctx.instructions`` and keys on it,
+  reaching for nothing else at all.
 
 Follows the runtime's registry convention (workspace engineering charter,
 Pillar 3): ``register`` / ``get`` / ``list`` over a name-keyed dict, plus one
@@ -18,6 +22,7 @@ safe to share across tenants.
 from __future__ import annotations
 
 from pocketpaw.prompt.identity import AgentIdentityLayer
+from pocketpaw.prompt.instructions import InstructionsLayer
 from pocketpaw.prompt.layer import PromptLayer
 from pocketpaw.prompt.passthrough import LegacyTailLayer
 from pocketpaw.prompt.retrieval import RetrievalLayer
@@ -48,5 +53,6 @@ prompt_layer_registry = PromptLayerRegistry()
 # WHICH implementation answers to a name.
 prompt_layer_registry.register(AgentIdentityLayer.name, AgentIdentityLayer())
 prompt_layer_registry.register(SurfaceContextLayer.name, SurfaceContextLayer())
+prompt_layer_registry.register(InstructionsLayer.name, InstructionsLayer())
 prompt_layer_registry.register(LegacyTailLayer.name, LegacyTailLayer())
 prompt_layer_registry.register(RetrievalLayer.name, RetrievalLayer())

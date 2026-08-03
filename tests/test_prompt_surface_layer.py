@@ -79,13 +79,15 @@ async def test_the_surface_layer_is_assembled_between_identity_and_the_tail():
     and outside the volatile region the Claude SDK strips from its client key.
 
     ``retrieval`` joined the end of the tuple in PA-3 (the per-message soul
-    recall, extracted from ``legacy_tail`` and rendered last). It changes
-    nothing this test holds: the surface still sits second, still above every
-    volatile block. What the surface's own position must survive is pinned
-    below, and again against the recall in
-    ``tests/test_prompt_retrieval_layer.py``.
+    recall, extracted from ``legacy_tail`` and rendered last) and PA-4 inserted
+    ``instructions`` between the surface and the tail. Neither changes what this
+    test holds: the surface still sits below identity and above every volatile
+    block. Asserted as those two facts rather than as the whole tuple, so PA-5's
+    ``atlas`` and ``user`` layers do not rewrite it either — the full order
+    contract lives in ``tests/test_prompt_instructions_layer.py``.
     """
-    assert _SYSTEM_PROMPT_LAYERS == ("identity", "surface", "legacy_tail", "retrieval")
+    order = list(_SYSTEM_PROMPT_LAYERS)
+    assert order.index("identity") < order.index("surface") < order.index("legacy_tail")
 
     assembled = await _assemble(
         instructions="RIPPLE LAW: narrate before every tool call.",
