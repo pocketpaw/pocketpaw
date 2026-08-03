@@ -5,6 +5,22 @@
 # have?" with real names rather than handwaving. Tenancy enforced by
 # the service.
 #
+# Changes: 2026-08-03 (feat/prompt-entity-ids) — rows render through
+# ``pocketpaw.prompt.entity.entity_line`` and carry ``UnifiedFile.id``.
+#
+# NO TOOL TAKES A FILE ID. Checked, not assumed: enumerating every MCP server's
+# schemas on 2026-08-03 found no ``file_id`` parameter anywhere, required or
+# optional. So this row is NOT covered by the "a tool requires <kind>_id" rule
+# that forced the pocket and widget ids, and the ~30 chars it spends per row buy
+# something smaller: two uploads sharing a filename — the same document at two
+# revisions, which is the common case, not a corner one — were previously
+# indistinguishable in the listing, so the agent could not even TELL THE USER
+# there were two, let alone act on one. Disambiguation in the answer, not tool
+# addressing.
+#
+# If that trade stops being worth it, the fix is to drop the id from this call —
+# not to hand-roll the row again. The contract test enforces the shape.
+#
 # Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
 # ``SurfacePreamble``. Mutable state, read as a LIST (the most recent files'
 # names and mime types), so the key is a digest of what was rendered: it moves
@@ -15,6 +31,7 @@ from __future__ import annotations
 
 import logging
 
+from pocketpaw.prompt.entity import entity_line
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import (
     content_key,
@@ -53,9 +70,13 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
     else:
         rows = []
         for f in files[:LIST_LIMIT]:
-            name = getattr(f, "filename", None) or "(unnamed)"
-            mime = getattr(f, "mime", None) or "?"
-            rows.append(f"- {name} ({mime})")
+            rows.append(
+                entity_line(
+                    getattr(f, "filename", None),
+                    getattr(f, "id", None),
+                    mime=getattr(f, "mime", None),
+                )
+            )
         parts.append("<files-list>\n" + "\n".join(rows) + "\n</files-list>")
     text = truncate_preamble("\n".join(parts))
     return SurfacePreamble(text=text, cache_key=content_key("files", text))

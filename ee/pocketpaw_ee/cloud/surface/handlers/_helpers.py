@@ -7,6 +7,13 @@
 # audit-snapshot lines, etc.). Pulling these out keeps each handler
 # small (≤80 LOC) per the PR brief.
 #
+# Changes: 2026-08-03 (feat/prompt-entity-ids) — ``format_widget_line`` now
+# renders through ``pocketpaw.prompt.entity.entity_line`` and carries the widget
+# id. It named a widget the agent could not address while ``update_widget``
+# declares ``widget_id`` required; that module's docstring holds the full class
+# of bug and ``tests/cloud/surface/test_entity_id_contract.py`` stops a new
+# handler from re-introducing it.
+#
 # Changes: 2026-08-03 (PA-9, feat/prompt-budget-measurement) — both preamble
 # caps now carry their measured cost, and the 12-widget cut moved here from a
 # bare literal in ``handlers/pocket.py`` as ``WIDGET_PREVIEW_LIMIT`` so the two
@@ -35,6 +42,8 @@ import hashlib
 import logging
 from typing import Any
 
+from pocketpaw.prompt.entity import entity_line
+
 logger = logging.getLogger(__name__)
 
 # Preamble length cap. Soft cap — we never split mid-tag, just truncate
@@ -54,10 +63,22 @@ PREAMBLE_MAX_CHARS = 1500
 # ``handlers/pocket.py`` by PA-9 so the two caps that jointly bound this preamble
 # sit together and their interaction is visible — and testable.
 #
-# MEASURED 2026-08-03 (PA-9): a rendered widget line averages 36.2 chars, so 12
-# lines cost 434 chars and the full 300-widget preamble renders at 609 chars —
-# 41% of PREAMBLE_MAX_CHARS. The two caps do NOT interact today: ~36 widgets
-# would still fit under 1500.
+# RE-MEASURED 2026-08-03 (feat/prompt-entity-ids), same fixture, after the row
+# started carrying the widget id. A line averages 70.2 chars (was 36.2), 12 lines
+# cost 842 (was 434) and the 300-widget preamble renders at 1159 — 77% of
+# PREAMBLE_MAX_CHARS, up from 41%.
+#
+# THE TWO CAPS NOW NEARLY INTERACT, which PA-9 measured as comfortably clear:
+# ~16 widgets fit under 1500, where ~36 did. The 12-widget limit is unchanged and
+# still fits, but the margin is 1.3x rather than 3x, so RAISING it is now a real
+# constraint rather than a free choice — 17 widgets truncates, and truncation
+# eats the node and backend summaries at the tail, not the widget list that
+# caused it (``tests/cloud/surface/test_preamble_caps.py`` pins that ordering).
+#
+# The 24 chars an ObjectId costs per row buys the agent the ability to call
+# ``update_widget`` at all; without it the row named a widget that could only be
+# addressed by spending a ``get_pocket`` round-trip, which is far more than 24
+# chars. See ``pocketpaw.prompt.entity``.
 #
 # KEPT at 12 anyway, and the reason is not token cost. This preamble's text is
 # digested into the surface ``cache_key`` (see ``handlers/pocket.py``), so every
@@ -201,8 +222,15 @@ def format_widget_line(widget: Any) -> str:
     Accepts duck-typed widget objects (anything with ``name`` / ``type``
     attrs) so the helper works for both Beanie subdocs and domain
     objects without importing either.
+
+    CARRIES THE WIDGET ID because ``update_widget`` declares it required
+    (``"required": ["pocket_id", "widget_id", "fields"]``) — see
+    ``pocketpaw.prompt.entity``. Until 2026-08-03 this row named a widget the
+    agent had no way to address, so editing one meant a ``get_pocket``
+    round-trip to recover the id the prompt had already dropped, and two
+    same-named widgets stayed ambiguous even after it.
     """
-    name = getattr(widget, "name", None) or "(unnamed)"
+    name = getattr(widget, "name", None)
     kind = getattr(widget, "type", None) or "custom"
     spec = getattr(widget, "spec", None)
     if kind == "native":
@@ -211,7 +239,7 @@ def format_widget_line(widget: Any) -> str:
         marker = "spec — BROKEN (no spec subtree)" if not spec else "spec — live"
     else:
         marker = f"{kind} — live" if spec else f"{kind} — no spec"
-    return f"- {name} ({marker})"
+    return entity_line(name, getattr(widget, "id", None), state=marker)
 
 
 __all__ = [

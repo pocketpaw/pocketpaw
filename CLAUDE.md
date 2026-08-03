@@ -334,6 +334,39 @@ When you touch any `ee/pocketpaw_ee/cloud/<entity>/*.py` file for any reason —
 
 ---
 
+## Prompt rows must carry the id the tools take
+
+Applies to every prompt block that lists entities — cloud surface preambles
+(`ee/pocketpaw_ee/cloud/surface/handlers/`) and the channel prompt layers
+(`src/pocketpaw/prompt/`) alike.
+
+**The rule:** if any tool declares a required `<kind>_id`, every prompt row that
+lists `<kind>`s must carry that id.
+
+**Never hand-roll a row.** Use `pocketpaw.prompt.entity.entity_line(label,
+entity_id, **facts)`. `entity_id` is a required positional, so a row cannot
+silently omit it; pass `None` where there genuinely is no id and it renders a
+visible `id=?`.
+
+**Why:** four handlers independently rendered `- {name} (…)` with no id while
+`update_widget` required `widget_id`, so the prompt named widgets and pockets the
+agent could not address. Two pockets called "Sales" rendered identical rows and
+the tool call resolved to the wrong one silently. `rows.append(f"- {name} …")` is
+the obvious thing to type, which is why this is a gate and not a review note.
+
+**Enforcement** (`tests/cloud/surface/test_entity_id_contract.py`): an AST scan
+fails any hand-rolled row; allow-listed modules pin their row *count*, so an
+exempt file cannot grow a new one; and the set of addressable kinds is **derived
+from the MCP tool schemas**, so adding a tool with a required `site_id` fails the
+build until someone decides whether the sites preamble owes an id.
+
+**Rendering an id costs ~30 chars a row.** That is real — carrying the widget id
+took the 300-widget preamble from 41% to 77% of `PREAMBLE_MAX_CHARS`. Check the
+cap when you convert a list, and make the fixture carry a *realistic* id: a test
+widget with no `id` measures rows 23 chars shorter than production.
+
+---
+
 ## Desktop Client (`client/`)
 
 The Tauri 2.0 + SvelteKit desktop app lives in `client/`. It connects to the Python backend via REST/WebSocket.

@@ -19,6 +19,7 @@ These are pure-function tests over the two helpers — no DB, no fixtures.
 
 from __future__ import annotations
 
+from bson import ObjectId
 from pocketpaw_ee.cloud.surface.handlers._helpers import (
     PREAMBLE_MAX_CHARS,
     WIDGET_PREVIEW_LIMIT,
@@ -30,12 +31,21 @@ from pocketpaw_ee.cloud.surface.handlers._helpers import (
 class _Widget:
     """A widget with realistic field lengths.
 
-    ``format_widget_line`` reads ``name`` / ``type`` / ``spec`` off a duck-typed
-    object. Names must be plausible: a ``(unnamed)`` fallback renders ~7 chars
-    shorter per line and would flatter the measurement.
+    ``format_widget_line`` reads ``id`` / ``name`` / ``type`` / ``spec`` off a
+    duck-typed object. Every field must be plausible or the measurement flatters
+    itself: a ``(unnamed)`` fallback renders ~7 chars shorter per line, and —
+    added 2026-08-03 (feat/prompt-entity-ids) — a MISSING ``id`` renders the
+    1-char ``?`` marker where production carries a 24-char ObjectId.
+
+    That second one nearly shipped. When the row started carrying the widget id,
+    this fixture had no ``id`` attribute, so the cap test went on passing while
+    measuring rows 23 chars shorter than the ones the agent actually sees. A cap
+    test that under-measures is worse than none: it reports headroom that is not
+    there. The id is a real ObjectId here for exactly that reason.
     """
 
     def __init__(self, i: int) -> None:
+        self.id = str(ObjectId())
         self.name = f"Revenue by region {i}"
         self.type = "spec"
         self.spec = {"kind": "chart"}
@@ -69,9 +79,14 @@ def test_widget_preview_limit_fits_inside_the_preamble_char_cap():
     """A full widget preview must not push the preamble over its own cap.
 
     MUTATION: set ``WIDGET_PREVIEW_LIMIT = 60`` in
-    ``ee/pocketpaw_ee/cloud/surface/handlers/_helpers.py``. 60 lines at ~36
-    chars is ~2,170 chars against a 1,500 cap, ``truncate_preamble`` fires, and
+    ``ee/pocketpaw_ee/cloud/surface/handlers/_helpers.py``. 60 lines at ~70
+    chars is ~4,200 chars against a 1,500 cap, ``truncate_preamble`` fires, and
     both assertions below fail.
+
+    The margin here is much thinner than it was. Since the row began carrying
+    the widget id (2026-08-03), a line averages 70.2 chars rather than 36.2 and
+    this preamble renders at 1159 of 1500 — so ~16 widgets fit, not ~36. 12 is
+    still safe; 17 is not.
     """
     raw = _render_preamble(300)
 
