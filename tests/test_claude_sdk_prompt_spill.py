@@ -171,7 +171,14 @@ async def test_build_options_actually_uses_the_content_addressed_path(monkeypatc
     from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
     from pocketpaw.config import get_settings
 
-    monkeypatch.setattr(os, "name", "nt")
+    # Force the Windows branch by patching the PREDICATE, never ``os.name``.
+    # ``pathlib`` binds ``WindowsPath.__new__`` to a raising stub at import time
+    # on POSIX, so a Linux process with ``os.name`` forced to "nt" sends every
+    # ``Path(...)`` into that stub — this test died on CI and passed on Windows.
+    monkeypatch.setattr(
+        "pocketpaw.agents.claude_sdk._prompt_must_spill",
+        lambda prompt: len(prompt) > _WINDOWS_PROMPT_SPILL_CHARS,
+    )
     backend = ClaudeSDKBackend(get_settings())
     monkeypatch.setattr(backend, "_collect_mcp_tool_ids", lambda: [])
 
@@ -209,7 +216,14 @@ async def test_a_prompt_under_the_limit_is_still_passed_inline(monkeypatch, _hom
     from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
     from pocketpaw.config import get_settings
 
-    monkeypatch.setattr(os, "name", "nt")
+    # Force the Windows branch by patching the PREDICATE, never ``os.name``.
+    # ``pathlib`` binds ``WindowsPath.__new__`` to a raising stub at import time
+    # on POSIX, so a Linux process with ``os.name`` forced to "nt" sends every
+    # ``Path(...)`` into that stub — this test died on CI and passed on Windows.
+    monkeypatch.setattr(
+        "pocketpaw.agents.claude_sdk._prompt_must_spill",
+        lambda prompt: len(prompt) > _WINDOWS_PROMPT_SPILL_CHARS,
+    )
     backend = ClaudeSDKBackend(get_settings())
     monkeypatch.setattr(backend, "_collect_mcp_tool_ids", lambda: [])
 

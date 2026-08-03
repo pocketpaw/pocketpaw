@@ -561,6 +561,21 @@ def _mcp_server_of(tool_id: str) -> str:
 # to walk without changing what any process can read (same OS user, same home).
 _WINDOWS_PROMPT_SPILL_CHARS = 24_000
 
+
+def _prompt_must_spill(prompt: str) -> bool:
+    """Is this prompt too long to pass inline on this platform?
+
+    A function rather than an inline ``os.name == "nt" and len(...)`` so a test
+    can force the Windows branch on Linux by patching THIS, and not ``os.name``.
+    Patching ``os.name`` looks equivalent and is not: ``pathlib`` decides at
+    IMPORT time whether ``WindowsPath.__new__`` is the real one or a stub that
+    raises, so a POSIX process with ``os.name`` forced to ``"nt"`` dispatches
+    every ``Path(...)`` to the raising stub. The spill test did exactly that and
+    only CI could see it — on Windows both spellings pass.
+    """
+    return os.name == "nt" and len(prompt) > _WINDOWS_PROMPT_SPILL_CHARS
+
+
 # How many spilled prompts survive a prune. They are 24k+ chars each and they
 # accumulate in the user's HOME, so an unbounded pile is not an acceptable price
 # for a cache key. 32 is chosen to be larger than any plausible count of live
@@ -2252,7 +2267,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # see ``_spill_prompt_to_file`` and the block above it for why one fixed
         # path was both a cross-run race and a cache-key collapse.
         system_prompt_arg: Any = final_prompt
-        if os.name == "nt" and len(final_prompt) > _WINDOWS_PROMPT_SPILL_CHARS:
+        if _prompt_must_spill(final_prompt):
             prompt_path = _spill_prompt_to_file(final_prompt)
             system_prompt_arg = {"type": "file", "path": str(prompt_path)}
             logger.info(
