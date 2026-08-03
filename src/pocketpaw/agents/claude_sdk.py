@@ -1580,11 +1580,22 @@ class ClaudeSDKBackend(BaseAgentBackend):
         splices a GROWING ``# Recent Conversation`` block into
         ``options.system_prompt`` (see the history injection in
         ``_build_options``) — so the warm subprocess would be torn down and
-        respawned every turn. With this prefix it held 7/7. That number is also
-        why PA-7b is not claimed as a cache win on the channel path: 7/7 was
-        already the baseline there. What the prefix cannot do is see a REAL
-        behaviour change that sits below the marker it cuts at, and no
-        pattern-match ever will.
+        respawned every turn. With this prefix it held 7/7. So PA-7b claims no
+        cache-rate win on the channel path — 7/7 was already the baseline that
+        measurement recorded, and what the prefix genuinely cannot do is see a
+        REAL behaviour change sitting below the marker it cuts at.
+
+        ONE CAVEAT ON THAT 7/7, found while threading PA-7b and worth stating
+        where it will be read. ``_VOLATILE_PROMPT_MARKERS`` are the CLOUD path's
+        block headers. The channel path emits ``# Memory Context (already
+        loaded…)`` and ``# Knowledge Base (relevant articles…)``, and NEITHER is
+        in the tuple — so the per-message recall stays inside the prefix, and a
+        two-turn probe (``tests/test_channel_prompt_digest.py::
+        test_a_changed_recall_moves_the_prefix_and_not_the_digest``) shows the
+        prefix moving when only that recall changes, while the digest holds. The
+        7/7 is presumably a run whose recall did not vary between turns. That is
+        a mechanism, not a rate: nobody has measured how often a real channel
+        turn changes its recall, and this note is not a licence to assume.
 
         What it is worse at than the digest, measured on the cloud path over the
         same 8 turns: it retains ``## Self-Understanding``, which
