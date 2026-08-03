@@ -838,6 +838,70 @@ def test_skill_names_is_part_of_the_agent_cache_key(monkeypatch):
     assert wide is not narrow, "cached agent reused across different skill subsets"
 
 
+async def test_a_new_session_does_not_inherit_the_previous_prompt():
+    """The system prompt on the wire must be THIS turn's, not the last one's.
+
+    Reported from the product side: build a site, open a brand-new chat, say
+    "hi", and the agent offers to keep working on the site. The agent was not
+    remembering — ``_get_or_create_agent`` baked ``instructions`` into the
+    cached ``Agent`` while the cache key covered model / pocket-ness / tools /
+    skills / gating but NOT the prompt text, and ``AgentPool`` keeps ONE
+    instance per agent across every session.
+
+    Asserted at the MODEL boundary rather than on the Agent object, because
+    that is where the leak was actually observable.
+    """
+    seen: list[str | None] = []
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        seen.append(messages[-1].instructions)
+        yield "ok"
+
+    backend = _backend_with_model(FunctionModel(stream_function=stream_fn))
+
+    await _collect(
+        backend,
+        "build me a landing site",
+        system_prompt="You are Paw.\n<current-pocket id='p1' />\nProject: Acme Dental",
+        session_key="cloud:session:aaa:agent1",
+    )
+    await _collect(
+        backend,
+        "hi",
+        system_prompt="You are Paw.\n(no pocket open)",
+        session_key="cloud:session:bbb:agent1",
+    )
+
+    assert len(seen) == 2
+    # Capability instructions (the planning tool) legitimately ride in front of
+    # the per-run prompt, so this is containment rather than equality — the
+    # property under test is WHOSE turn prompt is on the wire.
+    assert "(no pocket open)" in (seen[1] or "")
+    assert "Acme Dental" not in (seen[1] or ""), (
+        "the new session ran with the previous session's system prompt"
+    )
+    assert "Acme Dental" in (seen[0] or ""), "turn 1 should still get its own prompt"
+
+
+async def test_the_cached_agent_carries_no_prompt_of_its_own():
+    """The mechanism behind the test above, pinned separately.
+
+    Two turns that differ ONLY in prompt must still share one cached agent —
+    rebuilding per prompt would be correct but would throw the cache away on
+    nearly every turn, since the prompt tail varies per message. Correctness
+    comes from the agent holding no instructions at all.
+    """
+    backend = _backend_with_model(TestModel())
+
+    a1 = backend._get_or_create_agent(TestModel(), "PROMPT A", [])
+    a2 = backend._get_or_create_agent(TestModel(), "PROMPT B", [])
+
+    assert a1 is a2, "a prompt change must not cost a rebuild"
+    assert not a1._instructions, (
+        "the shared agent must hold no instructions — they are passed per run"
+    )
+
+
 def test_the_skills_catalog_is_deferred_by_default(monkeypatch):
     """Read off the field, not off a constructed ``Settings``.
 

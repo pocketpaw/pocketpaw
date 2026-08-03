@@ -179,6 +179,30 @@ claimed but did not deliver:
 5. Smaller: the agent cache key uses ``_tools_version`` rather than
    ``id(_custom_tools)``, and deferral is skipped on a surface that already
    named its tools.
+
+Updated 2026-08-01 (f) — **the system prompt is per-RUN, not per-agent.**
+Reported from the product side: create a site, open a BRAND-NEW chat, say "hi",
+and the agent offers to keep working on the site. Nothing was remembering it —
+it was being told. ``_get_or_create_agent`` passed ``instructions`` to the
+``Agent`` constructor while the cache key covered model, pocket-ness, toolset
+counts, skills and the gating sets but NOT the prompt text, and ``AgentPool``
+keeps one instance per agent across every session and surface. So turn N built
+the agent with turn N's prompt and turn N+1 — same tool surface, different
+session — was handed it back, still carrying the earlier turn's surface
+preamble, ``<current-pocket id=…>`` and ``## Relevant Past Memories`` block.
+
+Adding a prompt digest to the key would fix correctness and destroy the cache:
+the prompt's tail varies per MESSAGE (``pool._assemble_system_prompt`` appends a
+soul recall keyed on the user's text), so nearly every turn would rebuild.
+pydantic-ai takes ``instructions`` on ``run``/``run_stream_events`` and appends
+it to the agent-level set per run, so the agent is now built with NO
+instructions and each run supplies its own. One cached agent, this turn's
+prompt, no digest.
+
+The same bug lives in ``deep_agents`` and ``langchain_react`` and is fixed in
+the same change; ``claude_sdk`` never had it, because its warm-client key
+already carries ``session_key`` plus a digest of the prompt's behavioral prefix
+(``_client_cache_key``).
 """
 
 from __future__ import annotations
@@ -1642,6 +1666,12 @@ class PydanticAIBackend:
         Cached on everything that shapes the tool surface or the model, so
         flipping between pocket and non-pocket sessions on one instance rebuilds
         rather than silently reusing the wrong tool set.
+
+        ``instructions`` is READ here (its shape decides ``is_pocket_session``)
+        but deliberately NOT passed to the ``Agent`` — see the class docstring's
+        2026-08-01 (f) note. The agent is shared across sessions, so a prompt
+        baked in at construction is one session's prompt served to the next.
+        ``run`` passes it per-run instead.
         """
         from pydantic_ai import Agent
 
@@ -1719,7 +1749,13 @@ class PydanticAIBackend:
 
         agent = Agent(
             model,
-            instructions=instructions,
+            # NO ``instructions=`` here on purpose. The system prompt is
+            # per-TURN (surface preamble, ``<current-pocket>``, the soul-memory
+            # recall keyed on this message) while the agent is per-INSTANCE and
+            # this cache key cannot see prompt text. Baking it in served the
+            # NEXT session the PREVIOUS session's prompt. ``run`` passes
+            # ``instructions=`` to ``run_stream_events``, which pydantic-ai
+            # appends to the (now empty) agent-level set per run.
             tools=tools,
             toolsets=list(mcp_toolsets) or None,
             capabilities=self._build_capabilities(skill_names) or None,
@@ -1891,7 +1927,11 @@ class PydanticAIBackend:
             )
 
             kwargs: dict[str, Any] = {
-                "message_history": self._session_history(session_key, history)
+                "message_history": self._session_history(session_key, history),
+                "instructions": instructions,
+                # Per-RUN, not per-agent. The cached agent is built with no
+                # instructions at all, so this is the only system prompt on the
+                # wire — and it is THIS turn's. See ``_get_or_create_agent``.
             }
             max_turns = self.settings.pydantic_ai_max_turns
             if max_turns and max_turns > 0:
