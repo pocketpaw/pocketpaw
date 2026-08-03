@@ -9,6 +9,10 @@ tags: ["api", "configuration"]
 
 {/*
   docs/api/configuration-reference.mdx
+  Updated 2026-08-03 (feat/prompt-bulk-retrieval, PA-8a) — added the "Prompt
+  Assembly" section with prompt_pocket_summary_only, the default-off switch that
+  moves bulk pocket widget detail out of the system prompt and onto the
+  get_pocket tool-result path.
   Updated 2026-07-11 (feat/fst-8-harness, FST-8) — added the "Fabric" section
   with fabric_source_truth_mode (the off/shadow/enforce rollout switch) and
   its divergence-report enforce gate.
@@ -77,6 +81,14 @@ Cloud / subscription (PEE) only. The credit ledger and these knobs are inert on 
 | `tool_profile` | `POCKETPAW_TOOL_PROFILE` | enum | `full` | Tool profile (`minimal`, `coding`, `full`) |
 | `tools_allow` | `POCKETPAW_TOOLS_ALLOW` | string[] | `[]` | Allowed tools (comma-separated list) |
 | `tools_deny` | `POCKETPAW_TOOLS_DENY` | string[] | `[]` | Denied tools (comma-separated list) |
+
+## Prompt Assembly
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `prompt_pocket_summary_only` | `POCKETPAW_PROMPT_POCKET_SUMMARY_ONLY` | boolean | `false` | Keep bulk pocket widget detail out of the system prompt. `false` (default) is the block shipped today: `<current-pocket>` carries a JSON dump of the widget summary the client posted. `true` renders the cheap half only — pocket id, name, widget count and a snapshot stamp — plus the same standing order to call `mcp__pocketpaw_pocket__get_pocket`, so detail arrives as a tool result and costs nothing until it is asked for. On a 300-widget pocket the block drops from ~41,000 chars to ~1,700. |
+
+Independent of the flag, the `<current-pocket>` widget summary is bounded to 2,000 serialised characters (whole widgets only, with a `widgets_summary_truncated: showing N of M` line when anything is cut) and the pocket name to 200. Before that bound, a large pocket could render the block past the whole prompt budget, and the budget's answer was to drop the block whole — taking the pocket id and the `get_pocket` instruction with it, on exactly the pockets too large to answer without a fetch.
 
 ## Telegram
 
