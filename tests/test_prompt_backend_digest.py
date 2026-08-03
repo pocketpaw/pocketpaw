@@ -34,11 +34,19 @@
 # and what `claude_sdk`'s volatile markers have always done. What a reused object
 # can never carry is a different agent, surface, override or instruction set.
 #
-# EACH TEST NAMES THE MUTATION THAT BREAKS IT, and each mutation was run. Two
-# say in their own docstrings that they do not, and why: the Windows
-# spilled-prompt test asserts a fallback behaviour whose fix is covered
-# elsewhere, and the section-5 tripwire characterises pydantic-ai rather than our
-# code (it was checked by flipping its own fixture instead).
+# EACH TEST NAMES THE MUTATION THAT BREAKS IT, and each mutation was run. One
+# says in its own docstring that it does not, and why: the section-5 tripwire
+# characterises pydantic-ai rather than our code (it was checked by flipping its
+# own fixture instead).
+#
+# Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the Windows
+# spilled-prompt test used to ASSERT the collapse: one fixed filename, so every
+# prompt over 24k hashed alike and the warm client stopped rebuilding for exactly
+# the prompts big enough to spill. PA-6 recorded it as expected behaviour with
+# the fix out of scope. It is now content-addressed, so that test pins the fix
+# and would fail if any constant filename came back. The file-level half of the
+# same bug — two concurrent runs overwriting one path — lives in
+# `test_claude_sdk_prompt_spill.py`.
 
 from __future__ import annotations
 
@@ -355,46 +363,62 @@ async def test_a_caller_without_a_digest_keeps_the_behaviour_prefix():
     ) != ClaudeSDKBackend._client_cache_key(_opts(changed), session_key="s1")
 
 
-async def test_a_windows_file_prompt_is_keyed_by_the_digest_and_was_not_before():
-    """A Windows-only cache bug PA-6 closes as a side effect, pinned so it stays closed.
+async def test_a_spilled_windows_prompt_no_longer_collapses_into_one_cache_key():
+    """A Windows-only cache bug. PA-6 pinned it as expected behaviour; PA-7b closed it.
 
-    `_build_options` spills a system prompt over 24,000 chars to
-    `~/.pocketpaw/runtime/system_prompt.md` and passes `{type: file, path: …}`
-    instead of the text, because the CLI's inline argument blows the Windows
-    command-line limit. `_behavior_prefix` has no text to cut there, so it falls
-    back to `file:<path>` — and the path is a CONSTANT. Every large prompt on a
+    `_build_options` spills a system prompt over 24,000 chars to a file and passes
+    `{type: file, path: …}` instead of the text, because the CLI's inline argument
+    blows the Windows command-line limit. `_behavior_prefix` has no text to cut
+    there, so it falls back to `file:<path>` — and until PA-7b that path was a
+    CONSTANT, `~/.pocketpaw/runtime/system_prompt.md`. Every large prompt on a
     Windows box therefore hashed identically, so the warm client never rebuilt on
-    a prompt change: the exact staleness the 2026-05-31 behavioural-prefix fix
-    exists to prevent, defeated for the prompts big enough to need spilling.
+    a prompt change: exactly the staleness the behavioural-prefix key exists to
+    prevent, defeated for the prompts big enough to need spilling. (The same
+    single path also let two concurrent runs overwrite each other's prompt; that
+    half is pinned in `test_claude_sdk_prompt_spill.py`.)
 
-    The digest never sees the transport, so it keys correctly regardless. Held as
-    the pair — the old behaviour is asserted too, because a test that only shows
-    the fix cannot tell you whether there was ever anything to fix.
+    PA-7b puts a hash of the CONTENT in the filename, so the fallback key moves
+    when the prompt moves and no I/O is added to the key function. This test
+    reads the paths from `_spilled_prompt_path` rather than writing them out,
+    which is what makes it the tripwire the brief asked for: a revert to any
+    constant name collapses the two paths and the first assertion fails.
 
-    THE MUTATION THAT BREAKS THIS: none needed on the second assertion — it is
-    covered by `test_a_changed_identity_still_evicts_the_warm_client`. The first
-    is a characterisation of the fallback: it fails if `_behavior_prefix` starts
-    reading the spilled FILE, which would fix the same bug a different way and is
-    worth noticing rather than silently double-covering.
+    THE MUTATION THAT BREAKS THIS: make `_spilled_prompt_path` return
+    `Path.home() / ".pocketpaw" / "runtime" / "system_prompt.md"` — the pre-PA-7b
+    name. Run: the two spilled prompts produced one path and one key, and both of
+    the first two assertions failed.
     """
-    spilled = {"type": "file", "path": "C:/Users/x/.pocketpaw/runtime/system_prompt.md"}
+    from pocketpaw.agents.claude_sdk import _spilled_prompt_path
+
+    big_a = "You are Paw.\n\n## THE LAW\nNever fabricate.\n" + "A" * 24_000
+    big_b = "You are Paw.\n\n## THE LAW\nAlways fabricate.\n" + "A" * 24_000
 
     from types import SimpleNamespace
 
-    def _file_opts():
+    def _file_opts(prompt: str):
         return SimpleNamespace(
-            model="claude-x", allowed_tools=["Agent"], system_prompt=spilled, cwd="/jail"
+            model="claude-x",
+            allowed_tools=["Agent"],
+            cwd="/jail",
+            system_prompt={"type": "file", "path": str(_spilled_prompt_path(prompt))},
         )
 
+    assert _spilled_prompt_path(big_a) != _spilled_prompt_path(big_b)
     assert ClaudeSDKBackend._client_cache_key(
-        _file_opts(), session_key="s1"
-    ) == ClaudeSDKBackend._client_cache_key(_file_opts(), session_key="s1"), (
-        "the no-digest fallback stopped collapsing spilled prompts — re-read this test"
+        _file_opts(big_a), session_key="s1"
+    ) != ClaudeSDKBackend._client_cache_key(_file_opts(big_b), session_key="s1"), (
+        "two spilled prompts share a warm client again — the constant filename is back"
     )
+    # Stable in the other direction: the same prompt must not churn the key, or
+    # the warm client rebuilds every turn for no reason.
     assert ClaudeSDKBackend._client_cache_key(
-        _file_opts(), session_key="s1", system_prompt_digest="aaaaaaaaaaaaaaaa"
+        _file_opts(big_a), session_key="s1"
+    ) == ClaudeSDKBackend._client_cache_key(_file_opts(big_a), session_key="s1")
+    # And the digest still wins over the transport where a caller has one.
+    assert ClaudeSDKBackend._client_cache_key(
+        _file_opts(big_a), session_key="s1", system_prompt_digest="aaaaaaaaaaaaaaaa"
     ) != ClaudeSDKBackend._client_cache_key(
-        _file_opts(), session_key="s1", system_prompt_digest="bbbbbbbbbbbbbbbb"
+        _file_opts(big_a), session_key="s1", system_prompt_digest="bbbbbbbbbbbbbbbb"
     ), "a spilled Windows prompt still cannot tell two identities apart"
 
 
