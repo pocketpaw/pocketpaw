@@ -5,6 +5,7 @@ Provides:
 - build_openai_function_tools(): wrap tools as OpenAI Agents SDK FunctionTool objects
 - build_adk_function_tools(): wrap tools as Google ADK FunctionTool objects
 - build_deep_agents_tools(): wrap tools as LangChain StructuredTool objects for Deep Agents
+- build_pydantic_ai_tools(): wrap tools as pydantic-ai Tool objects
 - get_tool_instructions_compact(): compact markdown for system-prompt injection
 
 Backend-aware exclusion:
@@ -13,6 +14,14 @@ Backend-aware exclusion:
 - BrowserTool/DesktopTool: always excluded (need special session state)
 
 Changes:
+- 2026-07-29 (feat/pydantic-ai-backend): added build_pydantic_ai_tools() plus the
+  two signature builders it shares. pydantic-ai derives a tool's JSON schema from
+  the wrapper's *signature*, so the wrappers synthesize one instead of emitting
+  schema by hand. Two differences from the LangChain bridge, both deliberate:
+  the JSON-schema path honours ``required`` (optional params become
+  ``str | None = None`` rather than all-required), and every wrapper is asserted
+  async — a sync tool would run on anyio's bounded thread pool and throttle every
+  concurrent run in the in-process backend.
 - 2026-03-12: Added EditFileTool to _CLAUDE_SDK_EXCLUDED (has native Edit)
 - 2026-05-21 (#1160): _scan_tool_output now also caps oversized results via
   cap_tool_output(), so tool blobs returned through the OpenAI / ADK /
@@ -464,6 +473,170 @@ def build_deep_agents_tools(
     return structured_tools
 
 
+def build_pydantic_ai_tools(
+    settings: Any, backend: str = "pydantic_ai", policy: ToolPolicy | None = None
+) -> list:
+    """Build a list of pydantic-ai ``Tool`` objects for PocketPaw tools.
+
+    The pydantic-ai analogue of :func:`build_deep_agents_tools`. Only tools
+    permitted by the active ``ToolPolicy`` are included, so the RFC-14 surface
+    policy — ``(agent ∪ surface ∪ entity).allow − deny`` — is enforced by
+    ABSENCE from the model's tool list rather than by a refusal at call time.
+
+    Every returned tool is a coroutine, and that is asserted rather than
+    assumed. The Pydantic AI backend runs in-process and shares one event loop
+    with the API tier: a single blocking tool function would execute on anyio's
+    bounded worker-thread pool and throttle every concurrent run in the process,
+    which is precisely the ceiling this backend exists to raise.
+
+    Args:
+        settings: A ``Settings`` instance used to build the ToolPolicy.
+        backend: Backend name passed to the tool instantiator.
+        policy: Explicit policy; built from *settings* when omitted.
+
+    Returns:
+        List of ``pydantic_ai.tools.Tool`` (empty if pydantic-ai isn't installed).
+    """
+    try:
+        from pydantic_ai.tools import Tool
+    except ImportError:
+        logger.debug("pydantic-ai not installed — returning empty tools list")
+        return []
+
+    if policy is None:
+        policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
+
+    registry = ToolRegistry(policy=policy)
+    for tool in _instantiate_all_tools(backend=backend):
+        registry.register(tool)
+
+    tools: list = []
+    for tool_name in registry.allowed_tool_names:
+        tool = registry.get(tool_name)
+        if tool is None:
+            continue
+        try:
+            tools.append(_make_pydantic_ai_tool(Tool, tool, settings))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Skipping tool %s — could not build wrapper: %s", tool_name, exc)
+
+    logger.info("Built %d Pydantic AI Tools from PocketPaw tools", len(tools))
+    return tools
+
+
+def _make_pydantic_ai_tool(tool_cls: Any, tool: Any, settings: Any) -> Any:
+    """Wrap one PocketPaw tool as a pydantic-ai ``Tool``.
+
+    pydantic-ai derives a tool's JSON schema from the wrapper's *signature*, so
+    both paths below build a synthetic signature rather than hand-writing schema:
+
+    * ``args_schema`` present — mirror the Pydantic model's fields with their
+      real annotations and defaults, so nested objects (the pocket specialist's
+      ``hints``) round-trip as ``$defs`` instead of being flattened to strings.
+    * otherwise — one ``str`` parameter per declared property, optional ones
+      annotated ``str | None`` with a ``None`` default so the model isn't forced
+      to invent a value for every field. (The LangChain bridge marks all
+      parameters required; respecting ``required`` here is deliberate.)
+    """
+    import inspect
+
+    defn = tool.definition
+    limit = int(getattr(settings, "pydantic_ai_max_tool_output_chars", 0) or 0)
+
+    async def _run(**kwargs: Any) -> str:
+        try:
+            result = await tool.execute(**kwargs)
+        except Exception as exc:
+            logger.error("Pydantic AI tool %s execution error: %s", tool.name, exc)
+            return f"Error executing {tool.name}: {exc}"
+        scanned = _scan_tool_output(result, tool.name)
+        if limit and isinstance(scanned, str) and len(scanned) > limit:
+            # Announce the truncation with the true length. A silent "...(truncated)"
+            # on a tool whose contract asks for complete content is how the /code
+            # fabrication bug happened (2026-07-28): past the cap the instruction
+            # pair became jointly unobeyable and the model reconstructed the tail.
+            return (
+                f"{scanned[:limit]}\n\n[truncated: {tool.name} returned "
+                f"{len(scanned)} chars, limit {limit}. This output is INCOMPLETE — "
+                f"narrow the request rather than inferring the remainder.]"
+            )
+        return scanned
+
+    _run.__name__ = defn.name
+    _run.__qualname__ = defn.name
+    _run.__doc__ = defn.description
+
+    schema_cls = getattr(tool, "args_schema", None)
+    if schema_cls is not None:
+        params, annotations = _signature_from_model(inspect, schema_cls)
+    else:
+        params, annotations = _signature_from_json_schema(inspect, defn.parameters or {})
+
+    annotations["return"] = str
+    _run.__signature__ = inspect.Signature(parameters=params, return_annotation=str)
+    _run.__annotations__ = annotations
+
+    if not inspect.iscoroutinefunction(_run):  # pragma: no cover - defensive
+        raise TypeError(
+            f"Bridged tool {defn.name} is not async. Sync tools run on anyio's "
+            "bounded thread pool and throttle every concurrent run in the process."
+        )
+
+    return tool_cls(_run, name=defn.name, description=defn.description)
+
+
+def _signature_from_model(inspect: Any, model: Any) -> tuple[list, dict]:
+    """Build signature params from a Pydantic model's fields, preserving types."""
+    params: list = []
+    annotations: dict = {}
+    for name, field in model.model_fields.items():
+        if field.is_required():
+            default = inspect.Parameter.empty
+        else:
+            default = field.get_default(call_default_factory=True)
+        params.append(
+            inspect.Parameter(
+                name,
+                inspect.Parameter.KEYWORD_ONLY,
+                annotation=field.annotation,
+                default=default,
+            )
+        )
+        annotations[name] = field.annotation
+    return params, annotations
+
+
+def _signature_from_json_schema(inspect: Any, parameters: dict) -> tuple[list, dict]:
+    """Build ``str``-typed signature params from a tool's JSON-schema properties.
+
+    Honours the schema's ``required`` list: optional properties become
+    ``str | None = None`` so the model may omit them.
+    """
+    props = parameters.get("properties", {}) or {}
+    required = set(parameters.get("required", []) or [])
+    params: list = []
+    annotations: dict = {}
+    for name in props:
+        if name in required:
+            params.append(inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, annotation=str))
+            annotations[name] = str
+        else:
+            params.append(
+                inspect.Parameter(
+                    name,
+                    inspect.Parameter.KEYWORD_ONLY,
+                    annotation=str | None,
+                    default=None,
+                )
+            )
+            annotations[name] = str | None
+    return params, annotations
+
+
 def _make_langchain_wrapper(tool: Any):
     """Create a LangChain StructuredTool wrapper for a PocketPaw tool.
 
@@ -571,3 +744,170 @@ def get_tool_instructions_compact(settings: Any, backend: str = "opencode") -> s
     lines.append("")
     lines.append(f"Total: {len(allowed)} tools available.")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# in-process MCP servers -> pydantic-ai toolsets
+# ---------------------------------------------------------------------------
+
+
+async def build_inprocess_mcp_toolsets(
+    policy: ToolPolicy | None = None, settings: Any = None
+) -> list:
+    """Bridge PocketPaw's IN-PROCESS MCP servers into pydantic-ai toolsets.
+
+    Added 2026-07-31. These are the sites / pocket / connectors / media / …
+    servers registered through the ``pocketpaw.mcp_servers`` entry points, and
+    until now they reached the Claude SDK backend and NOTHING else — every
+    provider's ``build_server`` is written against ``claude_agent_sdk``'s
+    ``create_sdk_mcp_server`` and returns ``None`` without it.
+
+    The consequence was not a missing convenience. Asked to build a site on the
+    ``pydantic_ai`` backend the agent had no ``create_svelte_site`` to call, so
+    it did the next best thing it could see — and "the model wrote a file
+    instead of calling the tool" is what a missing tool looks like from outside.
+
+    What makes the bridge cheap is that ``create_sdk_mcp_server`` returns a
+    plain low-level ``mcp.server.Server``. Its ``request_handlers`` can be
+    driven directly, in this process, with no transport, no subprocess and no
+    second copy of the handler logic — the tools that run here are the same
+    objects the SDK backend calls.
+
+    Names come out as ``<server>_<tool>``, matching what pydantic-ai's
+    ``PrefixedToolset`` produces for external servers, so a surface's
+    ``mcp__<server>__<tool>`` deny/allow ids translate onto them with the
+    normalization that already exists.
+    """
+    try:
+        import mcp.types as mcp_types
+        from pydantic_ai.toolsets import FunctionToolset, PrefixedToolset
+    except ImportError:
+        logger.debug("mcp / pydantic-ai toolsets unavailable; in-process MCP bridge skipped")
+        return []
+
+    try:
+        from pocketpaw._registry import providers as _ext_providers
+        from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS
+    except ImportError:
+        return []
+
+    toolsets: list = []
+    for provider in _ext_providers("pocketpaw.mcp_servers"):
+        provider_name = type(provider).__name__
+        try:
+            built = provider.build_server()
+        except Exception as exc:  # noqa: BLE001
+            # WARNING, not DEBUG: a stale editable install silently swallowing
+            # this cost 30+ minutes to diagnose on the SDK path (claude_sdk:1143).
+            logger.warning(
+                "MCP provider %s failed to build: %s: %s", provider_name, type(exc).__name__, exc
+            )
+            continue
+        if not built:
+            continue
+
+        name, server = built
+        instance = server.get("instance") if isinstance(server, dict) else None
+        if instance is None:
+            logger.debug("MCP provider %s returned no server instance", provider_name)
+            continue
+        if policy is not None and not policy.is_mcp_server_allowed(name):
+            logger.info("In-process MCP server '%s' blocked by tool policy", name)
+            continue
+        # Opt-in servers stay off unless the agent named them, mirroring the
+        # SDK backend's allowlist rule rather than inventing a second one.
+        if name in OPT_IN_MCP_SERVERS and not (
+            policy is not None and policy.is_mcp_server_explicitly_allowed(name)
+        ):
+            continue
+
+        try:
+            tools = await _bridge_inprocess_server(name, instance, mcp_types, settings)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not bridge in-process MCP server '%s': %s", name, exc)
+            continue
+        if tools:
+            toolsets.append(PrefixedToolset(FunctionToolset(tools), name))
+            logger.info("Bridged in-process MCP server '%s' (%d tools)", name, len(tools))
+
+    return toolsets
+
+
+async def _bridge_inprocess_server(
+    name: str, instance: Any, mcp_types: Any, settings: Any = None
+) -> list:
+    """Enumerate one in-process MCP server's tools as pydantic-ai ``Tool``s."""
+    from pydantic_ai.tools import Tool
+
+    list_handler = instance.request_handlers.get(mcp_types.ListToolsRequest)
+    call_handler = instance.request_handlers.get(mcp_types.CallToolRequest)
+    if list_handler is None or call_handler is None:
+        return []
+
+    listed = await list_handler(mcp_types.ListToolsRequest(method="tools/list"))
+    tools: list = []
+    for spec in getattr(listed.root, "tools", None) or []:
+        tools.append(
+            Tool.from_schema(
+                _make_inprocess_caller(spec.name, call_handler, mcp_types, settings),
+                name=spec.name,
+                description=spec.description or spec.name,
+                # The server's OWN schema, passed through untouched. Synthesizing
+                # a signature would flatten every object and array argument to a
+                # string — ``edit_svelte_component`` takes a list of edits and
+                # ``create_dynamic_site`` a whole spec object.
+                json_schema=spec.inputSchema or {"type": "object", "properties": {}},
+            )
+        )
+    return tools
+
+
+def _make_inprocess_caller(tool_name: str, call_handler: Any, mcp_types: Any, settings: Any = None):
+    """Build the coroutine that invokes one in-process MCP tool.
+
+    A factory rather than a closure written inline in the loop: the latter
+    captures the loop variable, so every tool ends up calling the last one.
+
+    The result goes through the SAME post-processing as a bridged function tool
+    (``_scan_tool_output`` plus the per-tool character cap). It did not until
+    2026-08-01, which meant 97 of the backend's 134 tools skipped the
+    prompt-injection scan and the output budget — including
+    ``connector_execute`` and ``sense_execute``, which return data from
+    EXTERNAL systems and are exactly the hostile-content case the scanner
+    exists for.
+    """
+    limit = int(getattr(settings, "pydantic_ai_max_tool_output_chars", 0) or 0)
+
+    async def _call(**kwargs: Any) -> str:
+        # Drop unset optionals — MCP handlers check presence, and an explicit
+        # ``None`` is not the same as an omitted argument to them.
+        arguments = {k: v for k, v in kwargs.items() if v is not None}
+        result = await call_handler(
+            mcp_types.CallToolRequest(
+                method="tools/call",
+                params=mcp_types.CallToolRequestParams(name=tool_name, arguments=arguments),
+            )
+        )
+        root = result.root
+        text = "\n".join(
+            getattr(block, "text", "") or "" for block in (getattr(root, "content", None) or [])
+        ).strip()
+        if getattr(root, "isError", False):
+            # Returned, not raised: the model can read the reason and correct
+            # its arguments. Raising would burn a retry on an error it never saw.
+            return text or f"Error: {tool_name} failed."
+
+        scanned = _scan_tool_output(text, tool_name)
+        if limit and len(scanned) > limit:
+            # Announced, never silent — see the same cap in
+            # ``_make_pydantic_ai_tool`` for why a quiet truncation on a tool
+            # asked for complete content is how the /code fabrication bug began.
+            return (
+                f"{scanned[:limit]}\n\n[truncated: {tool_name} returned "
+                f"{len(scanned)} chars, limit {limit}. This output is INCOMPLETE — "
+                f"narrow the request rather than inferring the remainder.]"
+            )
+        return scanned
+
+    _call.__name__ = tool_name
+    return _call

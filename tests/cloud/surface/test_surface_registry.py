@@ -79,13 +79,18 @@ def test_completeness_check_fails_on_orphan_kind():
 
 def test_sites_svelte_create_drops_ripple_and_denies():
     """svelte-create (engine="svelte", no pocket_id) → ripple OFF + deny set +
-    create-svelte-site skill. The ONLY /sites mode that loses ripple."""
+    the svelte authoring skill. The ONLY /sites mode that loses ripple."""
     profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="svelte"))
     assert isinstance(profile, SurfaceProfile)
     assert profile.ripple_mode == "off"
     # svelte-create denies the two ripple-create tools AND the file/shell built-ins.
     assert profile.deny_mcp_tool_ids == _SITES_SVELTE_CREATE_DENY | _SITES_BUILTIN_DENY
-    assert "create-svelte-site" in profile.skill_names
+    # The BUNDLED name. This asserted "create-svelte-site" until 2026-07-31 —
+    # a literal never checked against a real skill, so the test passed for a
+    # year while the surface loaded no skills at all.
+    # ``test_every_surface_skill_name_resolves_to_a_real_skill`` is what stops
+    # a name and a reality diverging again.
+    assert "pocketpaw-create-svelte-site" in profile.skill_names
 
 
 def test_sites_ripple_create_keeps_ripple():
@@ -200,3 +205,43 @@ def test_toolbelt_survives_the_real_sdk_allowlist_filter():
     # Control: an unrelated MCP id NOT granted to /sites is filtered out — proves
     # the allow-list is real, not a no-op that keeps everything.
     assert not _survives("mcp__pocketpaw_foresight__save_scenario")
+
+
+def test_every_surface_skill_name_resolves_to_a_real_skill():
+    """A ``SurfaceProfile.skill_names`` entry that matches nothing is worse than
+    naming none at all.
+
+    A non-empty set SUPPRESSES the wholesale bundled-skills plugin
+    (``claude_sdk._should_load_bundled_plugin`` returns ``enabled and not
+    skill_names``), and ``materialize_run_skills`` skips unknown names with a
+    log line rather than failing. So one wrong name means the run gets ZERO
+    skills — the allowlist withholds everything and grants nothing back.
+
+    That is not hypothetical. /sites svelte-create asked for
+    ``create-svelte-site`` while the skill is ``pocketpaw-create-svelte-site``,
+    so the agent that most needed its authoring skill ran with none and
+    improvised the site by hand (observed 2026-07-31).
+    """
+    import re
+    from pathlib import Path
+
+    import pocketpaw.skills.materialize as materialize
+    from pocketpaw.skills import get_skill_loader
+
+    registry = Path("ee/pocketpaw_ee/cloud/surface/surface_registry.py")
+    if not registry.is_file():  # pragma: no cover - OSS-only checkout
+        import pytest
+
+        pytest.skip("pocketpaw-ee sources not present")
+
+    referenced: set[str] = set()
+    for block in re.findall(
+        r"skill_names=frozenset\(\{([^}]*)\}\)", registry.read_text(encoding="utf-8")
+    ):
+        referenced |= {n.strip().strip("\"'") for n in block.split(",") if n.strip()}
+
+    assert referenced, "expected the registry to name at least one skill"
+
+    known = set(get_skill_loader().get_all()) | set(materialize._bundled_skill_dirs())
+    unknown = sorted(referenced - known)
+    assert not unknown, f"surface profiles name skills that do not exist: {unknown}"

@@ -130,6 +130,7 @@ async def verify_token(
     if (
         request.url.path.startswith("/static")
         or request.url.path.startswith("/uploads")
+        or request.url.path.startswith("/pawbar-app")
         or request.url.path == "/favicon.ico"
     ):
         return True
@@ -437,6 +438,10 @@ async def _auth_dispatch(request: Request) -> Response | None:
         "/static",
         "/uploads",
         "/favicon.ico",
+        # Paw Bar glass app bundle (pawbar.js/css) — loaded by the public
+        # concierge iframe on published sites; visitors have no session.
+        # Read-only StaticFiles mount, same trust class as /static.
+        "/pawbar-app",
         # NOTE: /ws, /v1/ws, /api/v1/ws are no longer exempted here — WebSocket
         # scopes are now authenticated at the middleware level (issue #883).
         "/api/auth/login",

@@ -27,6 +27,24 @@ soft-disable / revoke-everywhere flow. Both carry the SAME owner/admin guard
 tenant-scope protection, so a cross-workspace / non-owner caller cannot revoke
 or restore an agent it doesn't own.
 
+Updated 2026-07-31 (AL-1, agent ledger spine): added
+``GET /agents/{id}/ledger?window=30d`` — the agent's own track record: counts by
+kind, the outcome ratio, attributed value, and the recent rows. It reads the
+per-workspace ``agent_ledger`` store and NOTHING else. That single-source rule is
+the whole point: the previous way to answer "what did this agent do for me" was
+to assemble numbers from paw_bar_events, the run docs, and Instinct by hand,
+which is exactly how a dashboard ends up disagreeing with the ledger it claims
+to summarize.
+
+Ops metrics (tokens, cost, latency, model mix) are deliberately NOT in this
+response. They live in the run docs / usage tracker, are read federated where
+they already are, and copying them into an analytics payload is the two-meters
+bug we have paid for once already.
+
+Carries the same visibility gate as the knowledge reads
+(``agents_service.ensure_can_read``): a track record is at least as revealing as
+the config that produced it, so another member cannot read a private agent's.
+
 Updated 2026-07-15 (fix/agent-visibility-enforcement, ASG-7): the READ endpoints
 now enforce agent visibility. ``GET /agents/{id}`` routes through
 ``agents_service.get_for_viewer`` (404 for another user's private agent);
@@ -38,6 +56,8 @@ id. ``GET /agents/{id}/scope`` was already owner-gated and is unchanged.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
 from fastapi import File as FastAPIFile
@@ -464,3 +484,228 @@ async def set_agent_scope(
     """
     updated = await agents_service.set_scopes(agent_id, body.scopes)
     return ScopeAssignmentResponse(agent_id=agent_id, scopes=updated)
+
+
+# ---------------------------------------------------------------------------
+# Agent ledger — the track record (AL-1)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{agent_id}/ledger")
+async def get_agent_ledger(
+    agent_id: str,
+    window: str = Query(default="30d"),
+    limit: int = Query(default=50, ge=1, le=200),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """What this agent actually achieved, over ``window``.
+
+    ``window`` accepts ``24h`` / ``7d`` / ``30d`` / ``2w`` / ``all``. A window
+    that cannot be parsed is a 422 rather than a silent fallback to the default:
+    an analytics surface that quietly answers a different question than the one
+    asked is worse than one that refuses.
+
+    The response is assembled from ONE source (this workspace's agent ledger),
+    with each aggregate computed in SQL over the same filter, so the counts, the
+    outcome ratio, and the value total can never disagree with each other or
+    with the rows listed beneath them.
+    """
+    from pocketpaw.agent_ledger.models import WindowParseError, window_start
+    from pocketpaw.stores import get_agent_ledger_store
+
+    # Visibility gate: same guard as the knowledge reads — a private agent's
+    # record is not another member's to read.
+    await agents_service.ensure_can_read(agent_id, workspace_id, user_id)
+
+    try:
+        since = window_start(window)
+    except WindowParseError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    store = get_agent_ledger_store(workspace_id=workspace_id or None)
+    scope = {"agent_id": agent_id, "workspace_id": workspace_id or "", "since": since}
+    counts = await store.counts_by_kind(**scope)
+    outcomes = await store.counts_by_outcome(**scope)
+    value_by_currency = await store.value_by_currency(**scope)
+    recent = await store.query(**scope, limit=limit)
+    # Day-bucketed activity for the trend line, aggregated over the SAME filter as
+    # every other number in this payload — so the shape of the line can never
+    # disagree with the totals printed above it. A chart drawn from a different
+    # read than its own headline is the two-meters bug in a nicer hat.
+    # The store fills gaps with zeros: a series of only the days that had rows
+    # draws a straight line across a silent week and calls it activity.
+    series = await store.activity_by_day(**scope, days=_series_days(window))
+
+    # Ratios are reported over the rows that actually carry a verdict, and the
+    # denominator ships with them. "60% solved" out of five is a different claim
+    # from "60% solved" out of five hundred, and a board that hides which one it
+    # means teaches its reader to over-trust it.
+    decided = sum(outcomes.values())
+    outcome_ratio = (
+        {status: round(count / decided, 4) for status, count in outcomes.items()} if decided else {}
+    )
+
+    # One currency → a headline total. More than one → no headline, because
+    # adding cents to pence produces a number that is wrong invisibly. The
+    # per-currency breakdown is always the authoritative field.
+    single_currency = next(iter(value_by_currency)) if len(value_by_currency) == 1 else ""
+
+    return {
+        "agent_id": agent_id,
+        "window": window,
+        "since": since,
+        "counts_by_kind": counts,
+        "total_events": sum(counts.values()),
+        "outcome": {
+            "counts": outcomes,
+            "decided": decided,
+            "ratio": outcome_ratio,
+        },
+        "value": {
+            "by_currency": value_by_currency,
+            "currency": single_currency,
+            "total_cents": value_by_currency.get(single_currency, 0) if single_currency else 0,
+        },
+        "recent": [row.model_dump() for row in recent],
+        # Oldest-first [{day, count}] for the trend line. Named ``series`` rather
+        # than ``sparkline`` because the shape is the data's business, not the
+        # chart's.
+        "series": series,
+    }
+
+
+def _series_days(window: str) -> int:
+    """How many daily points the trend line should carry for ``window``.
+
+    Not simply "the window in days": a 24h window has ONE day-bucket, which is a
+    dot rather than a line, so it gets a week of context around today instead of
+    a chart that cannot show change. And ``all`` is capped at 90 — an unbounded
+    line is unreadable long before it is expensive, and the honest answer to "show
+    me two years" is a rollup, which v1 deliberately does not have yet.
+    """
+    key = (window or "").strip().lower()
+    return {"24h": 7, "7d": 7, "2w": 14, "30d": 30}.get(key, 90 if key == "all" else 30)
+
+
+# How many approved actions the reconcile scan reads before it stops. A cap is
+# required — the comparison is a full scan by nature — and the response NAMES it
+# rather than silently truncating, because a capped count that looks like a total
+# would report false drift and train an owner to ignore the alarm.
+_RECONCILE_SCAN_CAP = 2000
+
+
+def _action_stamp(action: Any) -> str:
+    """When an action's APPROVAL happened, as an ISO-UTC string.
+
+    ``approved_at`` rather than ``created_at``: the ledger row is written at the
+    moment of the click, so comparing against creation time would count an action
+    proposed last month and approved today as outside a 7-day window while its
+    ledger row sits inside it — reporting drift that does not exist. Falls back to
+    creation only when the field is missing (a legacy row), and to the epoch when
+    neither parses, which puts an undatable action inside every window rather than
+    silently outside them all.
+    """
+    from datetime import UTC, datetime
+
+    stamp = getattr(action, "approved_at", None) or getattr(action, "created_at", None)
+    if not isinstance(stamp, datetime):
+        return datetime.min.replace(tzinfo=UTC).isoformat()
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    return stamp.astimezone(UTC).isoformat()
+
+
+@router.get("/analytics/reconcile")
+async def reconcile_agent_ledger(
+    window: str = Query(default="30d"),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    """Does the ledger agree with the systems it claims to mirror? (AL-4)
+
+    Every emitter in this design is FAIL-SOFT: a ledger failure is swallowed so
+    it can never cost an operator their approve click, a visitor their answer, or
+    a workspace its billing. The price of that promise is silence — a broken
+    emitter looks exactly like a quiet week. This endpoint is how the promise is
+    paid back, and it is the reason fail-soft was an acceptable trade at all.
+
+    It compares the ledger against the system that holds the same facts
+    independently:
+
+    * ``approved`` — Instinct's own approved actions vs ``paw.action.approved``
+      rows. Instinct is authoritative: it is where a human actually clicked.
+    * ``delivered`` — the approvals carrying a customer reply (the paw-bar
+      decisions that reach a visitor) vs ``paw.action.delivered`` rows.
+
+    ``delta = source - ledger``. POSITIVE means the ledger is BEHIND: an emitter
+    is failing silently, and ``behind`` names which check. NEGATIVE means the
+    ledger holds rows the source cannot account for — a duplicate or a mis-keyed
+    write, which is a different and worse bug — so it is reported rather than
+    clamped to zero.
+
+    Workspace-scoped with no ``agent_id`` filter on purpose: an emitter that
+    breaks breaks for every agent at once, and a per-agent question would require
+    the owner to already suspect which one.
+    """
+    from pocketpaw.agent_ledger.models import (
+        KIND_ACTION_APPROVED,
+        KIND_ACTION_DELIVERED,
+        WindowParseError,
+        window_start,
+    )
+    from pocketpaw.instinct.models import ActionStatus
+    from pocketpaw.stores import get_agent_ledger_store, get_instinct_store
+    from pocketpaw_ee.paw_bar.decision_loop import CUSTOMER_REPLY_KEY
+
+    try:
+        since = window_start(window)
+    except WindowParseError as exc:
+        # Same refusal as the ledger read above: a 422, never a silent fallback to
+        # the default window. This must also catch an OVER-LARGE window —
+        # ``timedelta`` raises OverflowError rather than ValueError past its own
+        # cap, which escaped this handler as a 500 until ``parse_window`` started
+        # bounding the amount before constructing one.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    ws = workspace_id or ""
+    ledger = get_agent_ledger_store(workspace_id=workspace_id or None)
+    instinct = get_instinct_store(workspace_id=workspace_id or None)
+
+    counts = await ledger.counts_by_kind(workspace_id=ws, since=since)
+
+    # The source side. ``list_actions`` is the read the dashboard's own feeds use,
+    # so this compares against what an operator would actually see rather than
+    # against a private query shape only this endpoint knows.
+    approved = await instinct.list_actions(
+        status=ActionStatus.APPROVED,
+        workspace_id=workspace_id or None,
+        limit=_RECONCILE_SCAN_CAP,
+    )
+    in_window = [a for a in approved if since is None or _action_stamp(a) >= since]
+    # A delivered row exists only where the approval carried a customer reply.
+    # Comparing EVERY approval against deliveries would report a permanent,
+    # meaningless deficit for every non-paw-bar agent in the workspace — an alarm
+    # that is always ringing is an alarm nobody hears.
+    delivered_source = sum(1 for a in in_window if CUSTOMER_REPLY_KEY in (a.parameters or {}))
+
+    checks: dict[str, dict[str, Any]] = {
+        "approved": {"source": len(in_window), "ledger": counts.get(KIND_ACTION_APPROVED, 0)},
+        "delivered": {"source": delivered_source, "ledger": counts.get(KIND_ACTION_DELIVERED, 0)},
+    }
+    for name, pair in checks.items():
+        pair["delta"] = pair["source"] - pair["ledger"]
+        pair["behind"] = name if pair["delta"] > 0 else ""
+
+    drifting = [name for name, pair in checks.items() if pair["delta"] != 0]
+
+    return {
+        "window": window,
+        "since": since,
+        "workspace_id": ws,
+        "checks": checks,
+        # The one field a caller can act on without reading the rest.
+        "healthy": not drifting,
+        "drifting": drifting,
+        "scanned_cap": _RECONCILE_SCAN_CAP,
+        "capped": len(approved) >= _RECONCILE_SCAN_CAP,
+    }

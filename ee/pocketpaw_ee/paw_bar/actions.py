@@ -1,4 +1,18 @@
 # ee/paw_bar/actions.py — the shared Paw Bar action executor (C1).
+# Updated: 2026-08-01 (AL-2, paw-bar emitters) — a SUCCESSFUL auto verb now
+#   records ``paw.visitor.action`` in the agent ledger, carrying ``value_cents``
+#   priced from the widget spec's own catalog (add_to_cart: the product's
+#   declared price × the qty added; checkout: the cart total the link was
+#   rendered for). This is the only ledger kind that routinely carries money,
+#   and it is what turns "the concierge answered some questions" into "the
+#   concierge put $X in carts". The emit sits in ``execute_action`` after the
+#   verb dispatch rather than inside ``_do_add_to_cart`` / ``_do_checkout``: one
+#   call site means the verbs cannot drift about the row's shape, and the auto
+#   branch was restructured (assign-then-return) purely to give it that seam.
+#   Gated verbs are NOT emitted here — they execute nothing, and their proposal
+#   and its approval are already AL-1's rows on the Instinct choke point.
+#   Failure paths emit nothing: an unknown product or an empty cart changed no
+#   state and belongs on no board. The emitter never raises (paw_bar/ledger.py).
 # Created: 2026-07-16 (Paw Bar action registry, C1) — the SINGLE code path both
 #   the public POST /paw-bar/action endpoint and the concierge agent's per-verb
 #   tools run through, so a visitor and the agent get identical validation +
@@ -232,12 +246,34 @@ async def execute_action(
     # --- auto (visitor-scoped) verbs: add_to_cart / checkout ---------------
     if policy == "auto":
         if verb == "add_to_cart":
-            return await _do_add_to_cart(store, widget, spec, customer_ref, coerced)
-        if verb == "checkout":
-            return await _do_checkout(store, widget, spec, customer_ref)
-        # The spec validator forbids policy="auto" on any non-cart verb, so this
-        # is unreachable for a validated spec — fail closed if it ever isn't.
-        return _fail("unsupported_auto_verb", 422)
+            outcome = await _do_add_to_cart(store, widget, spec, customer_ref, coerced)
+        elif verb == "checkout":
+            outcome = await _do_checkout(store, widget, spec, customer_ref)
+        else:
+            # The spec validator forbids policy="auto" on any non-cart verb, so
+            # this is unreachable for a validated spec — fail closed if it isn't.
+            return _fail("unsupported_auto_verb", 422)
+        # AL-2 — the visitor-action beat, recorded HERE rather than inside each
+        # verb handler: one place means the two verbs cannot disagree about the
+        # row's shape, and a third auto verb gets its row for free. Only a
+        # SUCCESSFUL action is a beat — a rejected product id or an empty cart
+        # changed nothing and belongs on no board. Fail-soft by construction.
+        if outcome.ok:
+            from pocketpaw_ee.paw_bar import ledger
+
+            await ledger.emit_visitor_action(
+                widget=widget,
+                # The executor's resolved tenant — the same token the gated path
+                # below routes its Instinct store by, so both halves of the
+                # action registry write into one tenant's ledger file.
+                workspace_id=workspace_id,
+                customer_ref=customer_ref,
+                verb=verb,
+                spec=spec,
+                result=outcome.result,
+                cart=outcome.cart,
+            )
+        return outcome
 
     # --- gated verbs: the proposal is the ONLY effect (SS-2) ----------------
     return await _do_gated(store, widget, workspace_id, customer_ref, verb, coerced)

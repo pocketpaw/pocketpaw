@@ -1,3 +1,14 @@
+# Updated: 2026-07-31 (AL-1, agent ledger spine) — registered a THIRD
+#   workspace-keyed store kind, ``agent_ledger``, and its public factory
+#   ``get_agent_ledger_store``. It is wired through the same generic
+#   ``_StoreKind`` engine Fabric (ISO-1) and Instinct (ISO-2) use, which the
+#   module docstring already promised would make a third store a one-liner —
+#   this is that one-liner. Doing it this way (rather than a Paw-Bar-style
+#   process-wide singleton) is deliberate: the ledger is per-tenant analytics, so
+#   it must inherit the per-workspace file routing, the path-traversal allowlist,
+#   the fail-closed ``POCKETPAW_REQUIRE_WORKSPACE_SCOPE`` guard, and the bounded
+#   LRU that aclose()s evicted handles — every one of which would have to be
+#   re-implemented (and could drift) if it got its own factory.
 # Updated: 2026-07-08 — Renamed widget "Paw Print" → "Paw Bar": get_paw_print_store→
 #   get_paw_bar_store, PawPrintStore→PawBarStore, paw_print.db→paw_bar.db. The separate
 #   one-word audit feed (past-tense record) is a DIFFERENT feature and is not affected.
@@ -76,6 +87,7 @@ from pathlib import Path
 from typing import Any
 
 from pocketpaw._registry import first
+from pocketpaw.agent_ledger.store import AgentLedgerStore
 from pocketpaw.fabric.store import FabricStore
 from pocketpaw.instinct.store import InstinctStore
 from pocketpaw.paw_bar.store import PawBarStore
@@ -235,10 +247,12 @@ class _StoreKind:
 
 
 # The registry of workspace-keyed store kinds. Fabric is wired by ISO-1, Instinct
-# by ISO-2. Paw Bar stays a plain shared singleton (not tenant-isolated yet).
+# by ISO-2, the agent ledger by AL-1. Paw Bar stays a plain shared singleton (not
+# tenant-isolated yet).
 _FABRIC_KIND = _StoreKind(name="fabric", cls=FabricStore)
 _INSTINCT_KIND = _StoreKind(name="instinct", cls=InstinctStore)
-_STORE_KINDS: tuple[_StoreKind, ...] = (_FABRIC_KIND, _INSTINCT_KIND)
+_AGENT_LEDGER_KIND = _StoreKind(name="agent_ledger", cls=AgentLedgerStore)
+_STORE_KINDS: tuple[_StoreKind, ...] = (_FABRIC_KIND, _INSTINCT_KIND, _AGENT_LEDGER_KIND)
 _KIND_BY_NAME: dict[str, _StoreKind] = {k.name: k for k in _STORE_KINDS}
 
 
@@ -476,6 +490,60 @@ def get_instinct_store(*, workspace_id: str | None = None) -> InstinctStore:
     inherited from the generic factory.
     """
     return _get_workspace_store(_INSTINCT_KIND, workspace_id)
+
+
+def get_agent_ledger_store(*, workspace_id: str | None = None) -> AgentLedgerStore:
+    """Return the AgentLedgerStore for the resolved workspace (AL-1).
+
+    Same contract as :func:`get_instinct_store`, through the same generic
+    factory: explicit ``workspace_id`` arg → ``current_workspace`` ContextVar →
+    ``None``.
+
+    * A resolved workspace returns a per-workspace store at
+      ``~/.pocketpaw/workspaces/<workspace_id>/agent_ledger.db``.
+    * No workspace + ``POCKETPAW_REQUIRE_WORKSPACE_SCOPE`` truthy → raises
+      :class:`WorkspaceScopeRequired` (fail-closed; never a shared read).
+    * No workspace + flag unset → the legacy shared
+      ``~/.pocketpaw/agent_ledger.db`` singleton, so a self-hosted single-tenant
+      box works with no cloud at all.
+
+    The in-row ``workspace_id`` column on every ledger row is the second layer,
+    exactly as W4a is for Instinct. Note that EVERY caller of this factory is a
+    fail-soft emitter or a read endpoint: the fail-closed raise above is real and
+    an emitter with no workspace WILL hit it in cloud mode, which is why each
+    emitter wraps its own resolve-and-append rather than assuming this returns.
+    """
+    return _get_workspace_store(_AGENT_LEDGER_KIND, workspace_id)
+
+
+def get_agent_ledger_store_beside(sibling_db_path: str | Path) -> AgentLedgerStore:
+    """Return the AgentLedgerStore living NEXT TO an already-resolved store file.
+
+    For emitters that hold an open store but no trustworthy workspace TOKEN.
+
+    The Instinct emitter is the case this exists for. It runs inside
+    ``InstinctStore``, which knows only its own ``db_path`` — and the workspace
+    value nearest to hand there is the action's IN-ROW ``workspace_id``, which is
+    not guaranteed to be a store-path token. The paw-bar decision loop
+    deliberately keeps two different values apart (see its module header): a real
+    workspace for file routing, and ``resolve_workspace_id``, which falls back to
+    the widget OWNER label for in-row scope only. Feeding that owner label to
+    :func:`get_agent_ledger_store` either raises inside ``_safe_workspace_dir``
+    (swallowed by the emitter's guard → the row silently vanishes) or writes into
+    a directory keyed by a user id that no reader ever opens. Either way the
+    primary producer under-counts in silence.
+
+    Whoever opened the sibling store already resolved the workspace correctly, so
+    the directory is the answer — no second resolution, no second chance to get it
+    wrong. Kept HERE rather than at the call site on purpose: ``stores.py`` is the
+    approved seam, so this stays inside the ISO-4 store-isolation guard instead of
+    becoming the one direct construction that erodes it.
+
+    Deliberately NOT cached: the caller already holds a long-lived store, these
+    objects are thin path wrappers, and keying an LRU by path would be a second
+    cache that can disagree with the workspace-keyed one.
+    """
+    return AgentLedgerStore(Path(sibling_db_path).with_name(f"{_AGENT_LEDGER_KIND.name}.db"))
 
 
 # ---------------------------------------------------------------------------

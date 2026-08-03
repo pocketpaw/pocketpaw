@@ -388,6 +388,34 @@ class TestDeepAgentsSkillsMemoryPlumbing:
             agent2 = backend._get_or_create_agent(MagicMock(), "sys")
             assert agent2 is not agent1
 
+    def test_a_changed_system_prompt_rebuilds_the_graph(self):
+        """A new session must not be served the previous session's prompt.
+
+        ``system_prompt`` is compiled INTO the graph and ``AgentPool`` keeps ONE
+        instance per agent across every session and surface, so a cache key
+        that ignores the prompt hands session B the graph built for session A —
+        carrying A's surface preamble, ``<current-pocket>`` tag and soul recall.
+        That is how a brand-new chat greeted the user with the site they had
+        just built somewhere else.
+        """
+        from pocketpaw.agents.deep_agents import DeepAgentsBackend
+
+        backend = DeepAgentsBackend(Settings())
+        backend._custom_tools = []
+        captured: list[str] = []
+
+        def fake_create(**kwargs):
+            captured.append(kwargs.get("system_prompt"))
+            return MagicMock(name=f"graph:{len(captured)}")
+
+        with patch("deepagents.create_deep_agent", side_effect=fake_create):
+            a1 = backend._get_or_create_agent(MagicMock(), "SITE: Acme Dental")
+            a2 = backend._get_or_create_agent(MagicMock(), "CHAT: fresh session")
+
+        assert a1 is not a2, "prompt change did not rebuild the graph"
+        assert captured[-1] == "CHAT: fresh session"
+        assert "Acme Dental" not in (captured[-1] or "")
+
 
 class TestDeepAgentsAttachSpecialistTools:
     """attach_specialist_tools() merges into _custom_tools and invalidates the

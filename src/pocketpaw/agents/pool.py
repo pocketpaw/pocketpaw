@@ -150,6 +150,23 @@ class AgentInstance:
     active_runs: int = 0
 
 
+def _accepts_policy(backend_cls: type) -> bool:
+    """Does this backend's ``__init__`` take a ``policy`` keyword?
+
+    The pool builds the per-agent :class:`ToolPolicy` — it is the only place
+    ``mcp_servers_allow`` is assembled from an agent's ``tools`` list — so a
+    backend that cannot receive it runs under the process-wide policy instead.
+    Asking the signature rather than checking a class means a new backend opts
+    in by accepting the argument, not by being added to a list here.
+    """
+    import inspect
+
+    try:
+        return "policy" in inspect.signature(backend_cls.__init__).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
 class AgentPool:
     """Manages running agent instances with on-demand creation and idle eviction."""
 
@@ -662,7 +679,6 @@ class AgentPool:
 
     async def _build(self, agent_doc: Any) -> AgentInstance:
         """Build a new AgentInstance from an Agent document."""
-        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
         from pocketpaw.agents.registry import _LEGACY_BACKENDS, get_backend_class
         from pocketpaw.config import Settings
         from pocketpaw.llm.providers.base import route_model
@@ -673,6 +689,13 @@ class AgentPool:
 
         # Clone settings and override with agent config
         settings = Settings.load()
+        # The literal stays ``claude_agent_sdk`` on purpose, and is NOT the
+        # cloud default (``pocketpaw_ee.cloud.agents.defaults``, which OSS core
+        # cannot import anyway). ``AgentConfig`` carries a default, so
+        # ``model_dump`` always includes the key and this fallback only fires
+        # for a document written before the field existed — which is to say a
+        # document from when ``claude_agent_sdk`` WAS the default. Answering
+        # with today's default would silently re-home the oldest agents.
         settings.agent_backend = config.get("backend", "claude_agent_sdk")
 
         # Map the per-agent model onto the Settings field the chosen backend
@@ -695,12 +718,16 @@ class AgentPool:
         backend_cls = get_backend_class(settings.agent_backend)
         if not backend_cls:
             raise AgentBackendUnavailable(settings.agent_backend)
-        # Only the Claude SDK backend reads an injected policy. Branch on
-        # the resolved class (not ``settings.agent_backend``) so legacy
-        # backend names that remap to ClaudeSDKBackend are handled too;
-        # every other backend's ``__init__`` accepts only ``settings``, so
-        # passing ``policy=`` to one would raise TypeError.
-        if backend_cls is ClaudeSDKBackend:
+        # Hand the per-agent policy to any backend that takes one. This used
+        # to name ClaudeSDKBackend outright, which meant every backend added
+        # afterwards silently ran under the PROCESS-WIDE policy instead of the
+        # agent's own — default profile ``full``, no narrowing — and its
+        # ``mcp_servers_allow`` opt-ins were unreachable, since this is the only
+        # place that set is built. Asking the signature keeps the guarantee with
+        # the backend rather than with a list somebody has to remember to edit;
+        # a backend whose ``__init__`` takes only ``settings`` is unaffected,
+        # because passing ``policy=`` to one would raise TypeError.
+        if _accepts_policy(backend_cls):
             # Per-agent tool policy. The agent's ``tools`` list may name
             # built-in in-process MCP servers (e.g. ``pocketpaw_planner``);
             # any token in ``OPT_IN_MCP_SERVERS`` becomes an

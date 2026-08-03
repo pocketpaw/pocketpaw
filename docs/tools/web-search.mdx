@@ -1,19 +1,19 @@
 ---
-title: "Web Search Tool: Tavily & Brave Search Integration"
-description: "Search the web from PocketPaw using Tavily or Brave Search APIs. Returns structured results the agent can reason over. Configure your preferred search provider with a single environment variable."
+title: "Web Search Tool: Tavily, Brave, Parallel & LiteLLM Search"
+description: "Search the web from PocketPaw using Tavily, Brave, Parallel AI, or your LiteLLM gateway's Search API. Returns structured results the agent can reason over. Configure your preferred search provider with a single environment variable."
 section: Tools
 ogType: article
-keywords: ["web search", "tavily", "brave search", "search api", "internet search"]
+keywords: ["web search", "tavily", "brave search", "parallel ai", "litellm", "search api", "internet search"]
 tags: ["tools", "search"]
 ---
 
-# Web Search Tool: Tavily & Brave Search Integration
+# Web Search Tool: Tavily, Brave, Parallel & LiteLLM Search
 
 The web search tool enables PocketPaw to search the internet for real-time information.
 
 ## Providers
 
-Two search providers are supported:
+Four search providers are supported.
 
 ### Tavily (Recommended)
 
@@ -32,6 +32,59 @@ export POCKETPAW_TAVILY_API_KEY="tvly-your-key"
 export POCKETPAW_WEB_SEARCH_PROVIDER="brave"
 export POCKETPAW_BRAVE_SEARCH_API_KEY="your-key"
 ```
+
+### Parallel AI
+
+[Parallel](https://parallel.ai) called directly, with its own key.
+
+```bash
+export POCKETPAW_WEB_SEARCH_PROVIDER="parallel"
+export POCKETPAW_PARALLEL_API_KEY="your-key"
+```
+
+### LiteLLM gateway
+
+If you already run a [LiteLLM](https://docs.litellm.ai) proxy, register your
+search tools there and PocketPaw will call them through it. No second vendor
+key to distribute, no second egress path to allow, and the proxy keeps usage
+accounting for search next to completions.
+
+```bash
+export POCKETPAW_WEB_SEARCH_PROVIDER="litellm"
+export POCKETPAW_LITELLM_API_BASE="https://your-gateway"
+export POCKETPAW_LITELLM_API_KEY="sk-..."
+export POCKETPAW_LITELLM_SEARCH_TOOL_NAME="web_search"
+```
+
+`POCKETPAW_LITELLM_SEARCH_TOOL_NAME` picks which registered tool to call. Those
+names are chosen by whoever configured the proxy, so ask yours:
+
+```bash
+curl -H "Authorization: Bearer $POCKETPAW_LITELLM_API_KEY" \
+  "$POCKETPAW_LITELLM_API_BASE/v1/search/tools"
+```
+
+```json
+{"object": "list", "data": [
+  {"search_tool_name": "web_search", "search_provider": "parallel_ai"},
+  {"search_tool_name": "tinyfish_web_Search", "search_provider": "tinyfish"}
+]}
+```
+
+A name that isn't registered fails with
+`Search tool '<name>' not found in router.search_tools`, and the tool echoes
+that back along with the URL above.
+
+<Note>
+A LiteLLM gateway's search lives at `POST /v1/search`, which is a **different
+endpoint from chat completions**. Asking the model's own provider to search
+inside `chat/completions` — via `web_search_options` or a
+`{"type": "web_search"}` server tool — is silently ignored on a gateway
+fronting a model without native search: the request returns 200, no citations
+come back, and the model answers from training data as though nothing was
+asked. Use this provider rather than a provider-side web capability when your
+search lives on the gateway.
+</Note>
 
 ## Usage
 
