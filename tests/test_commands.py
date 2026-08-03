@@ -22,6 +22,7 @@ def _assembled(text: str = "sys prompt") -> AssembledPrompt:
     """What ``AgentContextBuilder.assemble_system_prompt`` hands the loop back."""
     return AssembledPrompt(text=text, stable_digest="0123456789abcdef")
 
+
 # =========================================================================
 # Helpers
 # =========================================================================
