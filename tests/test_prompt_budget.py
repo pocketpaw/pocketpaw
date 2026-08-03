@@ -155,6 +155,42 @@ def _block(assembled: AssembledPrompt, starts_with: str) -> str:
     return matches[0]
 
 
+class _StubLayer:
+    """A layer with every property under test set explicitly.
+
+    Used only where the claim is about the ASSEMBLER rather than about a shipped
+    layer: comparing a budget-dropped layer against one that was never in the
+    list at all needs two different lists, which the pool's fixed tuple cannot
+    give. Everything else in this file goes through the real seam.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        priority: Priority,
+        text: str,
+        cache_key: str | None,
+        *,
+        raises: bool = False,
+        max_chars: int | None = None,
+    ) -> None:
+        self.name = name
+        self.priority = priority
+        self.max_chars = max_chars
+        self._text = text
+        self._cache_key = cache_key
+        self._raises = raises
+
+    async def render(self, ctx: PromptContext) -> LayerOutput:
+        if self._raises:
+            raise RuntimeError("handler exploded")
+        return LayerOutput(text=self._text, cache_key=self._cache_key)
+
+
+def _core() -> _StubLayer:
+    return _StubLayer("core", Priority.CRITICAL, "C" * 100, "core-v1")
+
+
 _GOLDEN = "\n\n".join(
     [
         _IDENTITY,
@@ -265,8 +301,15 @@ async def test_a_layer_that_fits_is_admitted_after_a_bigger_one_was_skipped():
     equal blocks to keep this interaction out of it, and an untested behaviour
     that looks like a bug gets "fixed".
 
-    MUTATION: change the ``continue`` in ``_fit_to_budget`` to ``break``.
-    ``retrieval`` is dropped along with ``atlas`` and this fails.
+    MUTATION: set ``remaining = -1`` alongside ``layer.kept = False``, so the
+    first drop takes everything below it. ``retrieval`` is dropped with ``atlas``
+    and this fails.
+
+    NOT ``break`` instead of ``continue``, which is the mutation this test was
+    first written against and which SURVIVED it: ``break`` abandons the budget
+    rather than tightening it, so every remaining layer keeps ``kept=True`` and
+    is emitted. It makes the budget weaker, not strict — a different bug, and one
+    the ladder catches.
     """
     # Room for both CRITICAL layers, then enough for the small LOW block but not
     # for the oversized MEDIUM one that is offered the space first.
@@ -452,20 +495,50 @@ async def test_a_dropped_keyed_layer_is_a_different_identity_from_an_absent_one(
     dropping a layer from ``text`` must never drop it from the digest.
 
     Three states of ``atlas`` must be three digests — present, dropped for
-    budget, and never supplied. Collapse the middle into either neighbour and a
-    backend caching on the digest hands a cached agent to a prompt that is
-    missing the block it was built with.
+    budget, and supplied with nothing in it. Collapse any pair and a backend
+    caching on the digest hands a cached agent to a prompt that is missing the
+    block it was built with.
 
-    MUTATION: skip dropped layers when building ``keyed``. "dropped" and
-    "absent" collapse and this fails. MUTATION: keep the layer's REAL key when
-    dropped — "dropped" and "present" collapse and this fails too.
+    MUTATION: keep the layer's REAL key when dropped. "dropped" and "present"
+    collapse and this fails.
     """
     present = await _turn(budget_chars=_TOTAL)
     dropped = await _turn(budget_chars=_TOTAL - 2 * _BLOCK - 1)
-    absent = await _turn(atlas_primer="", budget_chars=_TOTAL)
+    empty = await _turn(atlas_primer="", budget_chars=_TOTAL)
 
     assert "atlas" in _dropped(dropped)
-    assert len({present.stable_digest, dropped.stable_digest, absent.stable_digest}) == 3
+    assert len({present.stable_digest, dropped.stable_digest, empty.stable_digest}) == 3
+
+
+async def test_a_dropped_layer_is_not_the_same_identity_as_one_never_assembled():
+    """The rule stated the way ``_digest``'s docstring states it, and the way
+    that can actually fail: "atlas dropped" and "atlas never present" must not be
+    one identity.
+
+    The test above cannot catch this. Its three states all keep ``atlas`` IN the
+    layer list, so omitting a dropped layer's key still leaves three distinct
+    digests — it is a weaker claim than it reads as. The claim that bites needs
+    two different layer LISTS, which the pool's fixed tuple cannot give, so this
+    one goes through ``assemble`` directly.
+
+    The two prompts here are the SAME BYTES and must be different identities.
+    That is the whole point: the text cannot tell you whether a layer was
+    considered and dropped or never offered, and a backend that caches on the
+    digest has to be able to.
+
+    MUTATION: skip dropped layers when building ``keyed``
+    (``if record.cache_key is not None and record.kept``). The two collapse and
+    this fails.
+    """
+    big = _StubLayer("big", Priority.LOW, "B" * 500, "big-v1")
+    ctx = _bare_ctx()
+
+    dropped = await assemble([_core(), big], ctx, budget_chars=100)
+    never_offered = await assemble([_core()], ctx, budget_chars=100)
+
+    assert _dropped(dropped) == {"big"}
+    assert dropped.text == never_offered.text, "the fixture must produce identical bytes"
+    assert dropped.stable_digest != never_offered.stable_digest
 
 
 async def test_dropping_an_unkeyed_layer_leaves_the_digest_alone():
@@ -680,38 +753,38 @@ async def test_an_absent_channel_still_contributes_a_key():
 # ---------------------------------------------------------------------------
 
 
-async def test_a_raising_layer_is_still_dropped_rather_than_failing_the_turn():
+async def test_a_failure_a_budget_drop_and_a_success_are_three_identities():
     """PA-1's render guard, re-checked because the budget pass now runs after it
-    and reads the record it leaves behind. A failed layer keeps ``kept=True``
-    with empty text (empty text is skipped everywhere), so it cannot be confused
-    with a budget drop — the two mean different things and hash differently.
+    and reads the record it leaves behind.
 
-    MUTATION: mark the failed record ``kept=False``. Its key silently becomes
-    ``_BUDGET_DROPPED_KEY`` and the digest assertion fails.
+    One layer, one name, three fates: it RAISED, it was DROPPED for budget, it
+    rendered. All three leave nothing or something different in the text, and all
+    three must hash apart — a layer that exploded might have rendered anything,
+    while a dropped one rendered something known and too large, and a backend
+    caching on the digest has to be able to tell those apart before reusing an
+    agent. The guard is also still doing its first job: the raising layer does
+    not fail the turn, and ``core`` is still in the prompt.
+
+    Stated over three assemblies rather than two on purpose. The first draft
+    compared a failure under a budget against the same failure without one — and
+    marking the failed record ``kept=False`` moves BOTH sides identically, so the
+    mutation survived a test that claimed to catch it.
+
+    MUTATION: mark the failed record ``kept=False`` in ``assemble``'s except
+    branch. Its key becomes ``_BUDGET_DROPPED_KEY``, the first two collapse to
+    one identity, and this fails.
     """
-
-    class _Boom:
-        name = "boom"
-        priority = Priority.LOW
-        max_chars = None
-
-        async def render(self, ctx: PromptContext) -> LayerOutput:
-            raise RuntimeError("handler exploded")
-
-    class _Fine:
-        name = "fine"
-        priority = Priority.CRITICAL
-        max_chars = None
-
-        async def render(self, ctx: PromptContext) -> LayerOutput:
-            return LayerOutput(text="kept", cache_key="k")
-
     ctx = _bare_ctx()
-    raised = await assemble([_Boom(), _Fine()], ctx, budget_chars=1000)
-    budget_dropped = await assemble([_Boom(), _Fine()], ctx)
-
-    assert raised.text == "kept"
-    assert [entry.reason for entry in raised.dropped] == ["render raised RuntimeError"]
-    assert raised.stable_digest == budget_dropped.stable_digest, (
-        "a render failure changed identity depending on whether a budget was set"
+    raised = await assemble(
+        [_core(), _StubLayer("x", Priority.LOW, "", None, raises=True)], ctx, budget_chars=200
     )
+    dropped = await assemble(
+        [_core(), _StubLayer("x", Priority.LOW, "X" * 500, "x-v1")], ctx, budget_chars=200
+    )
+    fine = await assemble(
+        [_core(), _StubLayer("x", Priority.LOW, "X" * 10, "x-v1")], ctx, budget_chars=200
+    )
+
+    assert raised.text == "C" * 100, "one layer must not fail the turn"
+    assert [entry.reason for entry in raised.dropped] == ["render raised RuntimeError"]
+    assert len({raised.stable_digest, dropped.stable_digest, fine.stable_digest}) == 3
