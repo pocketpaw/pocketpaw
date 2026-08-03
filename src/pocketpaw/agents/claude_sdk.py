@@ -1,5 +1,19 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-08-03 (PA-6, feat/prompt-assembler-seam) — ``run`` / ``prewarm`` take
+  ``system_prompt_digest`` and the warm-client key prefers it over
+  ``_behavior_prefix``. The prefix INFERS which bytes are stable by cutting the
+  rendered text at known markers; the digest is what the prompt LAYERS said about
+  themselves. The prefix was inferring badly: it excises ``# Key Knowledge`` but
+  ``## Self-Understanding`` renders above that block, so the strip never reached
+  it and an ordinary turn respawned the subprocess. Measured over 8 turns on a
+  live soul, the prefix held 1 of 7 turn boundaries and the digest held 7 of 7.
+  The prefix STAYS as the no-digest fallback — the channel path builds its prompt
+  in ``AgentContextBuilder`` until PA-7, and ``run`` splices a growing
+  ``# Recent Conversation`` block into ``options.system_prompt`` after assembly,
+  so a whole-prompt key would rebuild there every turn (measured 0 of 7). The two
+  slots are prefixed ``d:`` / ``t:`` so a client warmed under one rule can never
+  answer a turn asking the other.
 Updated: 2026-08-02 (PA-1 review, feat/prompt-assembler-seam) — ``_behavior_prefix``
   matches its volatile markers at a BLOCK BOUNDARY instead of on the literal
   ``"\\n\\n…"`` alone: a block that OPENS the prompt carries no separator, so the

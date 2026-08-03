@@ -164,10 +164,16 @@ class LeasedClient:
       supervisor can hold it without importing the concrete SDK type, mirroring
       ``SessionHandle.session_store``'s opaque pass-through.
     * ``options_key`` — the backend's ``_client_cache_key`` for the options the
-      client was connected with (session + cwd + model + tools + system-prompt
-      behavioral-prefix digest + plugin-identity digest). The backend recomputes
-      THIS turn's key and reuses the leased client ONLY on an exact match; a
-      mismatch routes to a fresh build (and the supervisor rebinds the new slot).
+      client was connected with (session + cwd + model + tools + the prompt's
+      identity + plugin-identity digest). The backend recomputes THIS turn's key
+      and reuses the leased client ONLY on an exact match; a mismatch routes to a
+      fresh build (and the supervisor rebinds the new slot). The key is minted by
+      the backend on both sides — the supervisor stores what ``on_client_built``
+      handed it — so the two can never disagree about how it was computed. That
+      matters as of PA-6, where the prompt slot has two forms: a lease minted
+      under ``t:`` (a behavioural-prefix hash) mismatches a ``d:`` turn (the
+      assembler's digest) and costs one rebuild across the deploy that ports a
+      caller, which is the intended reading of a changed prompt identity.
     * ``busy`` — set by the backend while it is driving a query on ``client`` so a
       second concurrent turn never drives two queries on one subprocess. A busy
       lease makes the second turn fall back to a fresh stateless client for that

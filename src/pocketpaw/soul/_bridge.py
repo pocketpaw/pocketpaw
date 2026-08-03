@@ -14,6 +14,10 @@
 #   over the soul content that moves only on a real soul edit, with the parts
 #   that re-render on ordinary interaction left out. Not one rendered byte
 #   changed; only the claim about them is new. See _stable_identity_projection.
+# 2026-08-03 (PA-6): no code change here — the denylist below was RE-MEASURED
+#   against soul-protocol 0.4.0 before the cloud path stopped double-checking it
+#   through ``ClaudeSDKBackend._behavior_prefix``. It held in both directions.
+#   The comment on _VOLATILE_IDENTITY_SECTIONS carries the numbers.
 
 from __future__ import annotations
 

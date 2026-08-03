@@ -3,6 +3,13 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Updated: 2026-08-03 (PA-6, feat/prompt-assembler-seam) — ``prewarm`` forwards the
+  digest too, and ``_accepts_prompt_digest_kwarg`` is split out to ask the same
+  signature question of a bound ``prewarm`` as of a backend class's ``run``. With
+  the warm-client key now hashing the digest, a prewarm that withheld it would
+  key under the OLD rule and be evicted by the very turn it spent ~12s connecting
+  for. Both entry points read the digest off the SAME ``AssembledPrompt``, which
+  is the only way the two keys can be equal.
 Updated: 2026-08-03 (PA-5, feat/prompt-assembler-seam) — ``_SYSTEM_PROMPT_LAYERS``
   gains ``atlas`` and ``user`` directly under ``identity``, and
   ``_assemble_system_prompt`` grows the four plain-data fields that feed them
