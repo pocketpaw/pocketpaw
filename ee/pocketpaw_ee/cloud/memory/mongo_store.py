@@ -313,15 +313,29 @@ class MongoMemoryStore:
         """
         return await Session.find_one(Session.sessionId == session_key)
 
-    async def _load_session_index_async(self) -> dict:
-        """Build a session-index dict from pocket-context Session docs.
+    async def _load_session_index_async(self, *, workspace_id: str, owner_id: str) -> dict:
+        """Build a session-index dict from one owner's pocket-context Sessions.
 
         Shape-compatible with ``FileMemoryStore._load_session_index`` so the
         ``GET /sessions/runtime`` endpoint is backend-agnostic. Returns a mapping
-        ``{sessionId: {title, channel, last_activity, message_count}}`` for all
-        non-deleted pocket sessions.
+        ``{sessionId: {title, channel, last_activity, message_count}}``.
+
+        The scope arguments are REQUIRED (2026-08-01). This index backs a
+        "your sessions" listing, so every read of it is per-owner within a
+        workspace and a deployment-wide variant has no legitimate caller.
+        Mandatory parameters rather than ones defaulting to None mean the
+        unscoped form cannot reappear by omission — a caller that forgets the
+        scope fails to call at all, rather than silently querying across
+        tenants.
         """
-        docs = await Session.find({"context_type": "pocket", "deleted_at": None}).to_list()
+        docs = await Session.find(
+            {
+                "context_type": "pocket",
+                "deleted_at": None,
+                "workspace": workspace_id,
+                "owner": owner_id,
+            }
+        ).to_list()
 
         index: dict[str, dict] = {}
         for doc in docs:

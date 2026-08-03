@@ -1,5 +1,11 @@
 """User and OAuth account models (fastapi-users + Beanie).
 
+Updated: 2026-08-01 (AM-6) — added ``OAuthAccount.linked_at`` so the
+connected-accounts panel can say WHEN an identity was attached. Nullable with
+no default rather than ``default_factory=now``: rows written before this field
+existed have no honest timestamp, and stamping them with "now" on first read
+would invent one. They read back as ``None`` and the UI omits the date.
+
 Updated: 2026-05-21 — added ``home_pocket_id`` so the home page can be
 backed by a per-user "home pocket". Optional (default None) — the auth
 service resolves-or-provisions it lazily; existing users read back as
@@ -16,9 +22,13 @@ from pydantic import BaseModel, Field
 
 
 class OAuthAccount(BaseOAuthAccount):
-    """OAuth account linked to a User (Google, GitHub, etc.)."""
+    """OAuth account linked to a User (Google, GitHub, etc.).
 
-    pass
+    ``linked_at`` is ours, not fastapi-users'. See the module docstring for why
+    it is nullable instead of defaulting to now.
+    """
+
+    linked_at: datetime | None = None
 
 
 class WorkspaceMembership(BaseModel):
