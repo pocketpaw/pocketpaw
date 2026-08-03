@@ -344,6 +344,49 @@ async def test_a_caller_without_a_digest_keeps_the_behaviour_prefix():
     ) != ClaudeSDKBackend._client_cache_key(_opts(changed), session_key="s1")
 
 
+async def test_a_windows_file_prompt_is_keyed_by_the_digest_and_was_not_before():
+    """A Windows-only cache bug PA-6 closes as a side effect, pinned so it stays closed.
+
+    `_build_options` spills a system prompt over 24,000 chars to
+    `~/.pocketpaw/runtime/system_prompt.md` and passes `{type: file, path: …}`
+    instead of the text, because the CLI's inline argument blows the Windows
+    command-line limit. `_behavior_prefix` has no text to cut there, so it falls
+    back to `file:<path>` — and the path is a CONSTANT. Every large prompt on a
+    Windows box therefore hashed identically, so the warm client never rebuilt on
+    a prompt change: the exact staleness the 2026-05-31 behavioural-prefix fix
+    exists to prevent, defeated for the prompts big enough to need spilling.
+
+    The digest never sees the transport, so it keys correctly regardless. Held as
+    the pair — the old behaviour is asserted too, because a test that only shows
+    the fix cannot tell you whether there was ever anything to fix.
+
+    THE MUTATION THAT BREAKS THIS: none needed on the second assertion — it is
+    covered by `test_a_changed_identity_still_evicts_the_warm_client`. The first
+    is a characterisation of the fallback: it fails if `_behavior_prefix` starts
+    reading the spilled FILE, which would fix the same bug a different way and is
+    worth noticing rather than silently double-covering.
+    """
+    spilled = {"type": "file", "path": "C:/Users/x/.pocketpaw/runtime/system_prompt.md"}
+
+    from types import SimpleNamespace
+
+    def _file_opts():
+        return SimpleNamespace(
+            model="claude-x", allowed_tools=["Agent"], system_prompt=spilled, cwd="/jail"
+        )
+
+    assert ClaudeSDKBackend._client_cache_key(
+        _file_opts(), session_key="s1"
+    ) == ClaudeSDKBackend._client_cache_key(_file_opts(), session_key="s1"), (
+        "the no-digest fallback stopped collapsing spilled prompts — re-read this test"
+    )
+    assert ClaudeSDKBackend._client_cache_key(
+        _file_opts(), session_key="s1", system_prompt_digest="aaaaaaaaaaaaaaaa"
+    ) != ClaudeSDKBackend._client_cache_key(
+        _file_opts(), session_key="s1", system_prompt_digest="bbbbbbbbbbbbbbbb"
+    ), "a spilled Windows prompt still cannot tell two identities apart"
+
+
 async def test_prewarm_takes_the_digest_or_it_evicts_the_client_it_paid_for():
     """The regression this cutover could have shipped silently.
 
