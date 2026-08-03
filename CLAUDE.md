@@ -360,10 +360,52 @@ exempt file cannot grow a new one; and the set of addressable kinds is **derived
 from the MCP tool schemas**, so adding a tool with a required `site_id` fails the
 build until someone decides whether the sites preamble owes an id.
 
-**Rendering an id costs ~30 chars a row.** That is real — carrying the widget id
-took the 300-widget preamble from 41% to 77% of `PREAMBLE_MAX_CHARS`. Check the
-cap when you convert a list, and make the fixture carry a *realistic* id: a test
-widget with no `id` measures rows 23 chars shorter than production.
+**No id to render?** Use `unaddressed_line("<kind>", label, **facts)` — it emits
+no id, and the `<kind>` literal is *checked* against the tool schemas, so the
+exemption fails the moment a tool starts requiring that id. Prefer it over adding
+an allow-list entry.
+
+**Ids render short.** `entity_line` shows the last 8 characters
+(`id=…3f9a1c07`), and `ee/pocketpaw_ee/cloud/pockets/id_resolve.py` resolves a
+tail back to the whole id, scoped to the workspace/pocket, erroring on ambiguity
+rather than picking. The **tail**, not the head: an ObjectId starts with a
+timestamp, so 12 widgets created together share their first 20 characters.
+
+**Check the cap when you convert a list, and make the fixture realistic.** A test
+entity with no `id` measures rows ~23 chars shorter than production, and the cap
+test will pass while reporting headroom that isn't there.
+
+---
+
+## A gate is not a gate until a mutation has been observed to break it
+
+Applies to any test you are treating as protection — a contract test, a cap
+assertion, a security check, a regression guard.
+
+**Before claiming a test guards something, break the code on purpose and watch it
+fail.** Use `scripts/mutate.py`:
+
+```bash
+uv run python scripts/mutate.py --plan tests/mutations/<area>.json
+```
+
+A plan is a JSON list of `{label, file, find, replace, tests}`. The script applies
+each mutation, runs the tests, restores the file, and exits non-zero if any
+mutation **escaped** (tests still passed).
+
+**Why:** a passing test means the code and the test agree, which is also true when
+both are wrong. That is not hypothetical here — `updatedAt` never updated and
+every key on it reported "unchanged"; a `FunctionModel` double advertised native
+tool search and a deferred-loading probe reported 0% saving; a cap fixture with no
+`id` measured rows 23 chars short and kept passing; a positional-only test
+asserted a `TypeError` that came from a missing argument, not from the property it
+named. Each was found by mutation, not by review.
+
+**How to apply:** when you add or change a gate, add its mutations to a plan under
+`tests/mutations/` and run it. Docstrings in this repo name the mutation that
+breaks each test — that convention is only worth anything if the mutation was
+actually run, so run it. An escaping mutation is a bug in your test, not a
+curiosity.
 
 ---
 

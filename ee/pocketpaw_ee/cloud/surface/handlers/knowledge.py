@@ -8,6 +8,14 @@
 # kb-unreachable path still degrades to "(no scopes detected)" so a
 # missing kb binary doesn't break the chat send.
 #
+# Changes: 2026-08-03 (feat/prompt-entity-suffix) — renders through
+# ``unaddressed_line("kb_scope", ...)`` rather than a bare f-string. A KB scope
+# is one of the cases where the label genuinely IS the address — ``workspace:w1``
+# is what a caller passes — so there is no id to add, and this handler wants the
+# no-id renderer rather than an exemption from the entity-row rule. Stating it
+# through the renderer means the claim gets checked against the tool schemas on
+# every run instead of sitting in an allow-list nobody rereads.
+#
 # Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
 # ``SurfacePreamble``. Mutable state, read as a LIST (the workspace's real KB
 # scopes), so the key is a digest of what was rendered: it moves when a scope
@@ -20,6 +28,7 @@ from __future__ import annotations
 
 import logging
 
+from pocketpaw.prompt.entity import unaddressed_line
 from pocketpaw_ee.cloud.kb import service as kb_service
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import content_key, truncate_preamble
@@ -34,7 +43,7 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
     if not scopes:
         parts.append("<knowledge-snapshot>(no scopes detected)</knowledge-snapshot>")
     else:
-        rows = [f"- {s}" for s in scopes[:10]]
+        rows = [unaddressed_line("kb_scope", s) for s in scopes[:10]]
         body = "\n".join(rows)
         parts.append(f'<knowledge-scopes count="{len(scopes)}">\n{body}\n</knowledge-scopes>')
     text = truncate_preamble("\n".join(parts))

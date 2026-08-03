@@ -5,21 +5,22 @@
 # have?" with real names rather than handwaving. Tenancy enforced by
 # the service.
 #
-# Changes: 2026-08-03 (feat/prompt-entity-ids) — rows render through
-# ``pocketpaw.prompt.entity.entity_line`` and carry ``UnifiedFile.id``.
+# Changes: 2026-08-03 (feat/prompt-entity-suffix) — renders through
+# ``unaddressed_line("file", ...)``, which carries NO id.
 #
 # NO TOOL TAKES A FILE ID. Checked, not assumed: enumerating every MCP server's
-# schemas on 2026-08-03 found no ``file_id`` parameter anywhere, required or
-# optional. So this row is NOT covered by the "a tool requires <kind>_id" rule
-# that forced the pocket and widget ids, and the ~30 chars it spends per row buy
-# something smaller: two uploads sharing a filename — the same document at two
-# revisions, which is the common case, not a corner one — were previously
-# indistinguishable in the listing, so the agent could not even TELL THE USER
-# there were two, let alone act on one. Disambiguation in the answer, not tool
-# addressing.
+# schema found no ``file_id`` parameter anywhere, required or optional. An
+# earlier pass on this branch rendered the id anyway and justified it as helping
+# the agent tell two same-named uploads apart; review cut it, correctly — that
+# benefit was reasoned backwards from a change already made, and it was spending
+# ~10 chars a row on an identifier nothing accepts.
 #
-# If that trade stops being worth it, the fix is to drop the id from this call —
-# not to hand-roll the row again. The contract test enforces the shape.
+# The ``"file"`` literal is not decoration. ``tests/cloud/surface/
+# test_entity_id_contract.py`` reads it and fails if ``file`` ever appears among
+# the kinds derived from the tool schemas, so the day a tool takes a ``file_id``
+# this handler stops passing instead of quietly under-informing the agent. That
+# is what makes this an exemption with a tripwire rather than an allow-list entry
+# nobody revisits.
 #
 # Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
 # ``SurfacePreamble``. Mutable state, read as a LIST (the most recent files'
@@ -31,7 +32,7 @@ from __future__ import annotations
 
 import logging
 
-from pocketpaw.prompt.entity import entity_line
+from pocketpaw.prompt.entity import unaddressed_line
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import (
     content_key,
@@ -71,9 +72,9 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         rows = []
         for f in files[:LIST_LIMIT]:
             rows.append(
-                entity_line(
+                unaddressed_line(
+                    "file",
                     getattr(f, "filename", None),
-                    getattr(f, "id", None),
                     mime=getattr(f, "mime", None),
                 )
             )

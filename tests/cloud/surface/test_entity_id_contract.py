@@ -61,21 +61,14 @@ _SCANNED_PACKAGES = (
 # either it is a record of an event rather than a thing, or its label already IS
 # its address. Both numbers may only ever go DOWN.
 _HANDROLLED_ALLOWED = {
-    # "- 10:30 AM · Sync with Sarah" ×2 (with and without a parsed time).
-    # Google Calendar events via Composio. They carry an id and no tool takes
-    # it: the ``meeting_id`` five tools require addresses a ``_MeetingDoc`` in
-    # our own collection, a different entity that no preamble lists. Checked
-    # against meetings/service.py::cancel_meeting on 2026-08-03.
-    "calendar.py": (2, "google calendar events; no tool takes a calendar event id"),
     # "- pocket.created: Sales" — a record OF an action, not a thing to act on.
+    # These three are event/log lines, not entity rows, and routing them through
+    # the renderer would say something false about what they are.
     "activity.py": (1, "activity feed lines are events, not addressable entities"),
     "audit.py": (1, "audit entries are events, not addressable entities"),
     "home.py": (1, "home activity digest lines are events, not entities"),
-    # "- workspace:w1" — a KB scope. The label IS the address; there is no
-    # separate id to carry.
-    "knowledge.py": (1, "a kb scope string is its own identifier"),
-    # "- hero: https://… (alt: "…")" — asset manifest lines. The URL is the
-    # address, and it is already rendered.
+    # "- hero: https://… (alt: "…")" — asset manifest lines in a design brief,
+    # not a surface preamble. The URL is the address and is already rendered.
     "sites.py": (1, "an asset url is its own identifier"),
     # Two rows, exempt for two different reasons. "- Ripple: a Svelte runtime
     # that…" is an atlas glossary entry from a static seed — prose. "- **name**:
@@ -123,6 +116,30 @@ def _scanned_files() -> list[Path]:
         assert root.is_dir(), f"scan target moved: {root}"
         files.extend(p for p in root.rglob("*.py") if "__pycache__" not in p.parts)
     return files
+
+
+def _unaddressed_claims(path: Path) -> list[tuple[str | None, int]]:
+    """Every ``unaddressed_line("<kind>", ...)`` call site, as ``(kind, lineno)``.
+
+    ``kind`` is ``None`` when the first argument is not a plain string literal —
+    a computed kind cannot be checked statically, and a claim that cannot be
+    checked is the allow-list problem wearing a function call.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    claims: list[tuple[str | None, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        if name != "unaddressed_line" or not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            claims.append((first.value, node.lineno))
+        else:
+            claims.append((None, node.lineno))
+    return claims
 
 
 class TestNoHandRolledEntityRows:
@@ -261,6 +278,83 @@ def _derive_addressable_kinds() -> tuple[set[str], list[str]]:
                     if match:
                         kinds.add(match.group("kind"))
     return kinds, skipped
+
+
+class TestUnaddressedClaimsStayTrue:
+    """``unaddressed_line("file", ...)`` is a claim, and this is the check.
+
+    This replaced two allow-list entries (files.py, agents.py) and later two
+    more (calendar.py, knowledge.py). The difference is not cosmetic: an
+    allow-list says "somebody reviewed this once", and these say "still true,
+    re-derived from the tool schemas on every run". The day a tool ships with a
+    required ``file_id``, files.py fails here instead of quietly continuing to
+    render rows the agent now needs an id for.
+    """
+
+    @pytest.fixture(scope="class")
+    def derived(self) -> tuple[set[str], list[str]]:
+        return _derive_addressable_kinds()
+
+    def test_nothing_claims_unaddressed_for_a_kind_a_tool_addresses(
+        self, derived: tuple[set[str], list[str]]
+    ) -> None:
+        """The tripwire that makes the exemption self-checking.
+
+        THE MUTATION THAT BREAKS THIS: change files.py's call to
+        ``unaddressed_line("pocket", ...)``. Run: pocket IS in the derived set,
+        the offender list was non-empty and this failed. (Applied 2026-08-03.)
+        """
+        kinds, _skipped = derived
+        offenders = []
+        for path in _scanned_files():
+            for kind, lineno in _unaddressed_claims(path):
+                if kind is not None and kind in kinds:
+                    offenders.append(
+                        f"{path.relative_to(_REPO_ROOT)}:{lineno} claims '{kind}' is "
+                        "unaddressed, but a tool now requires its id"
+                    )
+        assert not offenders, (
+            "a row says its entity has no id-taking tool, and that is no longer "
+            "true — render the id via entity_line:\n  " + "\n  ".join(offenders)
+        )
+
+    def test_every_unaddressed_claim_is_a_readable_literal(self) -> None:
+        """A computed kind cannot be checked, so it is not allowed to be one.
+
+        Without this, ``unaddressed_line(kind_var, ...)`` would silently opt out
+        of the check above while still looking compliant — the allow-list
+        problem wearing a function call.
+
+        THE MUTATION THAT BREAKS THIS: change knowledge.py's call to
+        ``unaddressed_line(some_var, s)``. Run: the kind read as None and this
+        failed. (Applied 2026-08-03.)
+        """
+        unreadable = [
+            f"{path.relative_to(_REPO_ROOT)}:{lineno}"
+            for path in _scanned_files()
+            for kind, lineno in _unaddressed_claims(path)
+            if kind is None
+        ]
+        assert not unreadable, (
+            "unaddressed_line needs a literal kind so the claim can be checked "
+            "against the tool schemas:\n  " + "\n  ".join(unreadable)
+        )
+
+    def test_the_claims_that_exist_are_the_ones_expected(self) -> None:
+        """Pins WHICH kinds currently claim to be unaddressed.
+
+        A new claim is a new exemption, and exemptions are the thing that rots.
+        This makes adding one a deliberate edit rather than a side effect.
+
+        THE MUTATION THAT BREAKS THIS: add ``unaddressed_line("widget", ...)``
+        anywhere in the scan. Run: reported as unexpected and this failed.
+        """
+        found = {
+            kind for path in _scanned_files() for kind, _ln in _unaddressed_claims(path) if kind
+        }
+        assert found == {"agent", "calendar_event", "file", "kb_scope"}, (
+            f"the set of unaddressed-entity claims moved: {sorted(found)}"
+        )
 
 
 class TestAddressableKindsAreReviewed:

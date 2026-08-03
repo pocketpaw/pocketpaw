@@ -63,22 +63,28 @@ PREAMBLE_MAX_CHARS = 1500
 # ``handlers/pocket.py`` by PA-9 so the two caps that jointly bound this preamble
 # sit together and their interaction is visible — and testable.
 #
-# RE-MEASURED 2026-08-03 (feat/prompt-entity-ids), same fixture, after the row
-# started carrying the widget id. A line averages 70.2 chars (was 36.2), 12 lines
-# cost 842 (was 434) and the 300-widget preamble renders at 1159 — 77% of
-# PREAMBLE_MAX_CHARS, up from 41%.
+# RE-MEASURED 2026-08-03 on one fixture, three times, because the row changed
+# twice. Same ``_Widget`` fixture in ``tests/cloud/surface/test_preamble_caps.py``
+# throughout, so these numbers are comparable to each other and to PA-9's:
 #
-# THE TWO CAPS NOW NEARLY INTERACT, which PA-9 measured as comfortably clear:
-# ~16 widgets fit under 1500, where ~36 did. The 12-widget limit is unchanged and
-# still fits, but the margin is 1.3x rather than 3x, so RAISING it is now a real
-# constraint rather than a free choice — 17 widgets truncates, and truncation
-# eats the node and backend summaries at the tail, not the widget list that
-# caused it (``tests/cloud/surface/test_preamble_caps.py`` pins that ordering).
+#     row avg   12 rows   300-widget preamble   widgets that fit
+#      36.2       434        609  (41% of cap)        ~36     PA-9, no id
+#      70.2       842       1159  (77% of cap)        ~16     whole ObjectId
+#      55.2       662        979  (65% of cap)        ~21     8-char tail  <- now
 #
-# The 24 chars an ObjectId costs per row buys the agent the ability to call
-# ``update_widget`` at all; without it the row named a widget that could only be
-# addressed by spending a ``get_pocket`` round-trip, which is far more than 24
-# chars. See ``pocketpaw.prompt.entity``.
+# The middle row is why the tail exists. Carrying a whole 24-char ObjectId took
+# the margin over WIDGET_PREVIEW_LIMIT from 3x to 1.3x, which made raising the
+# limit a real constraint rather than a free choice. Rendering the last 8
+# characters instead (``pocketpaw.prompt.entity.short_id``, resolved back by
+# ``pockets/id_resolve.py``) buys most of that back: the margin is 1.75x.
+#
+# Truncation still eats the node and backend summaries at the tail rather than
+# the widget list that caused the overflow — ``test_preamble_caps.py`` pins that
+# ordering, and it is the reason the cap matters at all.
+#
+# What the remaining ~370 chars buy is the agent's ability to call
+# ``update_widget``. Without an id the row named a widget addressable only by
+# spending a ``get_pocket`` round-trip, which costs far more than 370 chars.
 #
 # KEPT at 12 anyway, and the reason is not token cost. This preamble's text is
 # digested into the surface ``cache_key`` (see ``handlers/pocket.py``), so every

@@ -21,7 +21,14 @@ from __future__ import annotations
 
 import pytest
 
-from pocketpaw.prompt.entity import MISSING_ID, entity_line
+from pocketpaw.prompt.entity import (
+    ID_TAIL_CHARS,
+    ID_TAIL_MARKER,
+    MISSING_ID,
+    entity_line,
+    short_id,
+    unaddressed_line,
+)
 
 
 class TestInjectiveOnId:
@@ -40,20 +47,59 @@ class TestInjectiveOnId:
         two = entity_line("Sales", "68af1c2d9e4b7a0012f3c4d6", type="custom")
 
         assert one != two
-        assert "68af1c2d9e4b7a0012f3c4d5" in one
-        assert "68af1c2d9e4b7a0012f3c4d6" in two
+        assert "12f3c4d5" in one
+        assert "12f3c4d6" in two
 
-    def test_the_id_survives_whole(self) -> None:
-        """An id is exact or it is a failed tool call — never shortened.
+    def test_ids_that_differ_only_in_the_head_still_render_differently(self) -> None:
+        """The adversarial case for a TAIL, and the reason it is a tail.
 
-        Every other field here is advisory. This one is an address, so no cap
-        applies to it and none should be added later without reading this test.
+        Two ids sharing a tail would render identically and reintroduce the bug.
+        That is not the shape ObjectIds actually collide in — they share HEADS,
+        because the leading 4 bytes are a timestamp and the next 5 are constant
+        per process — but a renderer that only works for one id scheme is a trap
+        for whoever adds the next one.
 
-        THE MUTATION THAT BREAKS THIS: truncate the id to 8 chars in
-        ``entity_line``. Run: the full-id assertion failed.
+        So: heads differ, tails differ, rows differ. If a future id scheme puts
+        the entropy at the front, this is the test that will fail and say so.
+
+        THE MUTATION THAT BREAKS THIS: render the HEAD instead of the tail
+        (``text[:ID_TAIL_CHARS]``). Run: two ids created in the same second
+        rendered the same row and this failed. (Applied 2026-08-03.)
+        """
+        one = entity_line("Sales", "6a70c69ecdf9641d9280ebb6")
+        two = entity_line("Sales", "6a70c69ecdf9641d9280ebb7")
+        assert one != two
+
+    def test_a_short_id_is_not_shortened_further(self) -> None:
+        """Slugs, uuids and fixture ids pass through untouched.
+
+        Marking an 8-char id as a tail would spend a character to say nothing,
+        and would hand the resolver a marker where it expects a whole id.
+
+        THE MUTATION THAT BREAKS THIS: drop the length guard in ``short_id`` and
+        always prepend the marker. Run: ``pk-123`` rendered as ``…pk-123``.
+        """
+        assert entity_line("Sales", "pk-123") == "- Sales (id=pk-123)"
+        assert short_id("abcd1234") == "abcd1234"
+
+    def test_the_rendered_tail_is_the_real_tail(self) -> None:
+        """What replaced "the id survives whole".
+
+        The id used to be rendered entire, on the reasoning that an id is exact
+        or it is a failed tool call. That is still true — what changed is that
+        the TOOLS now resolve a tail (``pockets/id_resolve.py``), so a tail is
+        exact. This test holds the renderer's half of that bargain: the chars it
+        shows are genuinely the last ones of the id, so the resolver can match on
+        them. The round trip through the real resolver is asserted in
+        ``tests/cloud/pockets/test_id_resolve.py``.
+
+        THE MUTATION THAT BREAKS THIS: render ``text[-ID_TAIL_CHARS - 1 : -1]``.
+        Run: the endswith assertion failed. (Applied 2026-08-03.)
         """
         ident = "68af1c2d9e4b7a0012f3c4d5"
-        assert ident in entity_line("Sales", ident)
+        rendered = short_id(ident)
+        assert rendered == f"{ID_TAIL_MARKER}{ident[-ID_TAIL_CHARS:]}"
+        assert ident.endswith(rendered.lstrip(ID_TAIL_MARKER))
 
     def test_labels_differing_still_render_differently(self) -> None:
         """Injectivity on id must not have cost injectivity on the label.
@@ -207,3 +253,58 @@ class TestFactRendering:
         row = entity_line("", "p1")
         assert "(unnamed)" in row
         assert "id=p1" in row
+
+
+class TestUnaddressedLine:
+    """The row for an entity no tool addresses by id.
+
+    Added 2026-08-03 (feat/prompt-entity-suffix). Review's verdict on the first
+    pass was that files and agents were rendering ids no tool accepts, justified
+    after the fact. This is what replaced that: no id at all, and the ``kind``
+    argument turns the exemption into a claim the contract test re-checks against
+    the tool schemas on every run.
+    """
+
+    def test_it_renders_no_id(self) -> None:
+        """The whole point — the chars an unusable id would cost are not spent.
+
+        THE MUTATION THAT BREAKS THIS: have ``unaddressed_line`` delegate to
+        ``entity_line`` with a None id. Run: the row carried ``id=?``.
+        """
+        row = unaddressed_line("file", "report.pdf", mime="application/pdf")
+        assert row == "- report.pdf (mime=application/pdf)"
+        assert "id=" not in row
+
+    def test_the_kind_is_never_rendered(self) -> None:
+        """``kind`` exists to be READ BY THE TEST, not by the model.
+
+        Leaking it would put a word in the prompt that means nothing to the
+        agent and costs tokens on every row.
+
+        THE MUTATION THAT BREAKS THIS: prepend ``f"{kind}: "`` to the label.
+        Run: 'file' appeared in the row and this failed.
+        """
+        assert "file" not in unaddressed_line("file", "report.pdf")
+
+    def test_a_row_with_no_facts_has_no_empty_parens(self) -> None:
+        """``- workspace:w1`` — a KB scope has nothing to add and should say so.
+
+        THE MUTATION THAT BREAKS THIS: always append ``(…)``. Run: the row
+        rendered ``- workspace:w1 ()`` and this failed. (Applied 2026-08-03.)
+        """
+        assert unaddressed_line("kb_scope", "workspace:w1") == "- workspace:w1"
+
+    def test_it_still_collapses_newlines(self) -> None:
+        """Same one-row-per-row hazard as ``entity_line``; same fix.
+
+        THE MUTATION THAT BREAKS THIS: stop routing the label through ``_clean``.
+        Run: the row contained a newline.
+        """
+        assert "\n" not in unaddressed_line("file", "Q3\nplan.pdf")
+
+    def test_it_still_names_a_nameless_entity(self) -> None:
+        """Degrade, never drop.
+
+        THE MUTATION THAT BREAKS THIS: return "" for a falsy label. Run: empty.
+        """
+        assert unaddressed_line("file", "") == "- (unnamed)"

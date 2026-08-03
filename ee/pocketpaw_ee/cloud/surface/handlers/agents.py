@@ -3,19 +3,18 @@
 # Created: 2026-05-24 — Workspace agents list. Reads via
 # ``agents_service.list_agents`` (tenancy via workspace_id).
 #
-# Changes: 2026-08-03 (feat/prompt-entity-ids) — renders through
-# ``pocketpaw.prompt.entity.entity_line``. This handler was ALREADY the one that
-# got it right: it carried ``slug``, the only surface row in the package with any
+# Changes: 2026-08-03 (feat/prompt-entity-suffix) — renders through
+# ``unaddressed_line("agent", ...)``. This handler was ALREADY the one that got
+# it right: it carried ``slug``, the only surface row in the package with any
 # identifier at all. It is converted anyway, because the contract test checks the
 # SHAPE of the call — a hand-rolled row that happens to be correct today is one
 # edit away from not being, and the exemplar is the worst place to leave that.
 #
-# NO TOOL TAKES AN AGENT ID either — enumerating every MCP server's schemas on
-# 2026-08-03 found no ``agent_id`` parameter, required or optional — so, like
-# files.py, this row is outside the rule that forced the pocket and widget ids.
-# The slug survives as a fact because it is the handle a human uses; the id joins
-# it because two agents can be renamed to the same display name while their slugs
-# and ids stay distinct, and the row should not be the thing that hides that.
+# NO TOOL TAKES AN AGENT ID — enumerating every MCP server's schema found no
+# ``agent_id`` parameter, required or optional — so no id is rendered. The
+# ``slug`` stays, because it is what a human and the agent both use to refer to
+# one, and it was already there. The ``"agent"`` literal is checked against the
+# derived kind set; see files.py for why that beats an allow-list entry.
 #
 # Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
 # ``SurfacePreamble``. Mutable state, read as a LIST (every agent's name and
@@ -27,7 +26,7 @@ from __future__ import annotations
 
 import logging
 
-from pocketpaw.prompt.entity import entity_line
+from pocketpaw.prompt.entity import unaddressed_line
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import (
     content_key,
@@ -66,9 +65,9 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         rows = []
         for a in agents[:LIST_LIMIT]:
             rows.append(
-                entity_line(
+                unaddressed_line(
+                    "agent",
                     getattr(a, "name", None),
-                    getattr(a, "id", None),
                     slug=getattr(a, "slug", None),
                 )
             )
