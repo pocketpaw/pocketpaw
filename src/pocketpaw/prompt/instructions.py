@@ -78,20 +78,24 @@ from __future__ import annotations
 
 import hashlib
 
-from pocketpaw.prompt.layer import LayerOutput, PromptContext
+from pocketpaw.prompt.layer import LayerOutput, Priority, PromptContext
 
 
 class InstructionsLayer:
     """Renders the authoritative behavioural rules and keys them on their bytes."""
 
     name = "instructions"
-    # The same rank as ``identity`` (100), and a tie is the honest answer rather
-    # than an unranked pair. In PA-5's terms both are CRITICAL: dropping the
-    # ripple LAW for budget produces an agent that does the wrong KIND of work,
-    # exactly as dropping the persona does. Inventing a number above identity's
-    # would claim identity is the one to drop first, which is not a claim this
-    # task measured or believes.
-    priority = 100
+    # CRITICAL, tied with ``identity``, which is what PA-4 predicted in this
+    # comment and PA-5 now says in the type. Dropping the ripple LAW produces an
+    # agent that does the wrong KIND of work, exactly as dropping the persona
+    # does; a rank between them would claim one is droppable first, which
+    # nothing has measured. Ties fall back to layer order, so ``identity``
+    # simply takes the budget first.
+    priority: Priority = Priority.CRITICAL
+    # UNCAPPED, matching ``_INJECTION_CAPS["instructions"] = None``. This is the
+    # stack that says what the agent may and may not do; a cut lands mid-rule
+    # and the agent obeys half of it, which is worse than a longer prompt.
+    max_chars: int | None = None
 
     async def render(self, ctx: PromptContext) -> LayerOutput:
         # Authoritative behavior rules — rendered BEFORE the knowledge wrapper so

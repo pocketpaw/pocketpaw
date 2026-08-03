@@ -465,6 +465,15 @@ async def test_every_keyed_layer_lands_inside_the_behaviour_prefix():
 # Each rule is (earlier, later, why). The WHY is the point: layer order is a
 # cache contract and an attention contract, not a matter of taste, so a change
 # here has to argue with a reason rather than edit a tuple.
+#
+# PA-5 added THREE rules, not the two its layers might suggest. Two
+# (``identity → atlas``, ``atlas → user``) satisfy the exhaustiveness guard
+# below, and satisfying it is not the point: with only those, nothing would
+# order ``user`` against ``surface`` and the guard would pass while a keyed
+# layer floated. The third pins it. No rule was rewritten or removed —
+# ``identity → surface`` is still true and still says why identity opens the
+# prompt, so it stays; a reorder hides in a rewritten constant, which is the
+# whole reason these are pairwise.
 _ORDER_RULES = (
     (
         "identity",
@@ -472,6 +481,32 @@ _ORDER_RULES = (
         "identity opens the prompt — the U-curve's strongest position, and the "
         "block that is identical across every turn of a session, so it is also "
         "the longest reusable prefix a prompt cache can hold",
+    ),
+    (
+        "identity",
+        "atlas",
+        "who the agent is, then what world it is running inside. Orientation "
+        "about the environment only lands once the reader knows who is being "
+        "oriented — and after the persona the primer is the most stable block "
+        "in the prompt (packaged seed data, one process-wide singleton), so "
+        "the prefix cache wants it as high as it can go",
+    ),
+    (
+        "atlas",
+        "user",
+        "the OS is the same for everybody and the person is not. Stable-to-"
+        "volatile inside the stable region: the primer changes on deploy, a "
+        "member's block changes when a profile is edited, so the block that "
+        "moves more often sits lower and leaves the reusable prefix longer",
+    ),
+    (
+        "user",
+        "surface",
+        "who is talking outranks where they are looking. A member's role and "
+        "focus govern how the agent reads every surface it is then handed — "
+        "the surface is the object of the conversation, the member is its "
+        "addressee. The volatility ladder agrees: the surface key moves on "
+        "every navigation, the member's on a profile edit",
     ),
     (
         "surface",

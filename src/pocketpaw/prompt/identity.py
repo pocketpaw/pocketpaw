@@ -56,7 +56,7 @@ from __future__ import annotations
 import hashlib
 import logging
 
-from pocketpaw.prompt.layer import LayerOutput, PromptContext
+from pocketpaw.prompt.layer import LayerOutput, Priority, PromptContext
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,19 @@ class AgentIdentityLayer:
     """Renders the agent's identity block and keys it on the agent's revision."""
 
     name = "identity"
-    priority = 100
+    # CRITICAL: an agent without its persona is a different product, so the
+    # budget may never drop it. PA-5 flipped the convention — this was ``100``
+    # under "bigger is more important" and nothing read it.
+    priority: Priority = Priority.CRITICAL
+    # UNCAPPED, and not merely unmeasured. This layer's key deliberately
+    # UNDER-reports its text: it identifies the agent and lets the soul's
+    # counters (bond level, memory count, self-image confidence) drift beneath
+    # one key, which is what keeps a backend's agent cache alive across ordinary
+    # turns. A cap on a key like that is unsound in a way a cap on ``atlas`` is
+    # not — a growing counter would push stable persona bytes off the end, so
+    # one key would name two prompts. Bounding this block means fixing the key
+    # first. See ``assembler._apply_cap``.
+    max_chars: int | None = None
 
     async def render(self, ctx: PromptContext) -> LayerOutput:
         instance = ctx.instance

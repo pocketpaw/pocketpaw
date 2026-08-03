@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import logging
 
-from pocketpaw.prompt.layer import LayerOutput, PromptContext
+from pocketpaw.prompt.layer import LayerOutput, Priority, PromptContext
 
 logger = logging.getLogger(__name__)
 
@@ -78,14 +78,22 @@ class RetrievalLayer:
     """Renders the per-message soul recall, and declares it volatile."""
 
     name = "retrieval"
-    # NOT a ranking against ``legacy_tail``'s 0. Priority is carried but not yet
-    # consumed — the budget pass (PA-5) is what reads it — and the honest rank
-    # for this block is "drop it first": five recalled memories are the most
-    # expendable thing in the prompt. It cannot say so yet, because the block it
-    # would have to outrank still contains the authoritative ``instructions``,
-    # which are the LEAST expendable. Those come apart in PA-4; until then a
-    # number here would encode a claim neither block can honour.
-    priority = 0
+    # LOW — the rank this comment said it wanted and could not have until PA-4
+    # took the authoritative ``instructions`` out of the block it shares a rank
+    # with. Five recalled memories are the most expendable thing in the prompt.
+    # It ties with ``legacy_tail`` and loses the tiebreak to it (ties fall back
+    # to layer order and ``retrieval`` renders last), which is the right way
+    # round: of the two per-message blocks, this is the one to lose first.
+    #
+    # A budget drop here is INVISIBLE TO THE DIGEST, and that follows from
+    # ``cache_key=None`` rather than being a hole. An unkeyed layer is outside
+    # the digest whether it renders or not; making only its absence visible
+    # would move the digest on a per-turn condition, which is exactly the churn
+    # this layer declares itself volatile to avoid.
+    priority: Priority = Priority.LOW
+    # UNCAPPED: ``soul.context_for`` is already bounded by ``max_memories=5``,
+    # so the block has a natural ceiling that is not a character count.
+    max_chars: int | None = None
 
     async def render(self, ctx: PromptContext) -> LayerOutput:
         instance = ctx.instance

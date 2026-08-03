@@ -13,6 +13,14 @@ Updated: 2026-08-02 (PA-2) — ``PromptContext`` carries the surface the user is
   ``deny_mcp_tool_ids`` crosses on). Defaulted so every non-cloud caller (the
   channel path, OSS local runs, ``prewarm`` before a surface is known) is
   unchanged.
+Updated: 2026-08-03 (PA-5) — three additions, all in service of the budget:
+  :class:`Priority` (the drop order), ``PromptLayer.max_chars`` (the per-layer
+  cap), and two more plain-data channels on ``PromptContext`` — the atlas
+  primer (+ its tenant scope) and the about-member block (+ its user id). The
+  ``priority`` field flips MEANING here: it was a free int where BIGGER was
+  more important and nothing read it, and it is now a ``Priority`` where
+  SMALLER is, matching ``context_builder._Priority`` so PA-7 can delete that
+  enum instead of translating between two conventions.
 
 The system prompt used to be one long string built by appending blocks in
 ``AgentPool._assemble_system_prompt``. That worked until three backends
@@ -31,8 +39,35 @@ message), and excludes the layer from the assembled digest.
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+
+class Priority(enum.IntEnum):
+    """The order layers are DROPPED in when the prompt exceeds its budget.
+
+    Lower value = more important, which is ``context_builder._Priority``'s
+    convention rather than the ``priority = 100`` ints these layers carried
+    before PA-5. Deliberately identical to that enum, values included, because
+    PA-7 deletes it in favour of this one and a task that has to translate
+    between two conventions while moving 14 blocks will get one of them wrong.
+
+    CRITICAL means something stronger here than it does in
+    ``_assemble_with_budget``, and the difference is the whole of PA-5's
+    constraint 3. There, a CRITICAL block over budget is TRUNCATED to whatever
+    is left. Here it is emitted WHOLE and the budget is allowed to overrun,
+    because a budget-dependent truncation is the one cut that breaks a cache
+    key: how much of a layer survives would depend on what its SIBLINGS
+    rendered, so one key could name two different texts. A layer that must be
+    bounded gets a constant ``max_chars`` instead — that is a pure function of
+    its own content and composes with any key. See :func:`.assembler.assemble`.
+    """
+
+    CRITICAL = 0  # Never dropped, never truncated to fit — bound it with max_chars
+    HIGH = 1  # Dropped only after everything below it is gone
+    MEDIUM = 2  # Dropped when the budget is tight
+    LOW = 3  # First to go
 
 
 @dataclass(frozen=True)
@@ -93,6 +128,15 @@ class PromptContext:
     editing widget 13 moves the pocket without moving a single rendered byte.
     ``None`` (no surface, or a producer that would not claim stability) means
     the layer keeps its text out of the digest.
+
+    ``atlas_primer`` / ``tenant_scope`` and ``user_info`` / ``user_id`` (PA-5)
+    are the two channels the budget was built for. Same plain-data shape as the
+    surface pair and for the same reason, but note the asymmetry: the surface
+    pair's KEY is the producer's claim because its text is a lossy view of a
+    live pocket, whereas here the id/scope is only the coarse half of the key —
+    the layers hash their own bytes as well, because unlike a preamble these
+    two blocks arrive complete. Both default to the no-content answer, so every
+    caller that exists today assembles exactly the bytes it did before.
     """
 
     instance: Any
@@ -103,18 +147,34 @@ class PromptContext:
     system_message_override: str | None
     surface_preamble: str = ""
     surface_cache_key: str | None = None
+    atlas_primer: str = ""
+    tenant_scope: str | None = None
+    user_info: str = ""
+    user_id: str | None = None
 
 
 class PromptLayer(Protocol):
     """One contributor to the assembled system prompt.
 
-    ``priority`` is carried but not yet consumed: the assembler concatenates in
-    the order it is given. It is declared now because the order layers are
-    DROPPED in when the prompt exceeds its budget is a property of the layer
-    itself, not of whoever assembled the list — the budget pass reads it.
+    ``priority`` says where this layer sits in the DROP order when the assembled
+    prompt exceeds its budget, and it belongs to the layer rather than to
+    whoever assembled the list: only the layer knows whether losing it costs the
+    agent a nicety or its instructions.
+
+    ``max_chars`` is the layer's own ceiling, applied unconditionally — NOT a
+    share of the budget. That distinction is load-bearing rather than
+    stylistic: a constant cap is a pure function of the layer's own text, so
+    whatever ``cache_key`` promised about the full text it promises equally
+    about the capped text, and the layer keeps its key. A cut sized from what is
+    LEFT of the budget promises nothing of the kind, which is why the assembler
+    drops whole layers instead. ``None`` = no ceiling, which is the right answer
+    for a layer whose key under-reports its text (``identity`` keys on the agent
+    and lets soul counters drift beneath it, so a cap there could push a stable
+    byte off the end as a counter grew) and for one nobody has measured yet.
     """
 
     name: str
-    priority: int
+    priority: Priority
+    max_chars: int | None
 
     async def render(self, ctx: PromptContext) -> LayerOutput: ...

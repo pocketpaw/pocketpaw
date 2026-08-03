@@ -13,6 +13,12 @@ Updated: 2026-08-02 (PA-4) — exports :class:`InstructionsLayer`, the
   end: the one layer whose text is the WHOLE artifact rather than a lossy view
   of one, so a digest of its bytes is an exact key rather than an optimistic
   one. Not a byte of the assembled prompt moved when it was split out.
+Updated: 2026-08-03 (PA-5) — exports :class:`Priority`, :class:`AtlasPrimerLayer`
+  and :class:`UserInfoLayer`. The budget is now real: ``assemble`` takes a
+  ``budget_chars``, layers declare a ``max_chars``, and every cut lands in
+  ``AssembledPrompt.dropped`` and in the log. The two new layers are the first
+  with caps that can bite, and neither has a producer yet — wiring them moves
+  bytes, which is PA-6/PA-7's business, not this task's.
 
 The public surface for anyone writing a prompt layer or consuming an assembled
 prompt. Start at :class:`LayerOutput` — its ``cache_key`` field is what makes
@@ -21,26 +27,31 @@ one three backends independently got wrong before PR #1842.
 """
 
 from pocketpaw.prompt.assembler import AssembledPrompt, DroppedLayer, assemble
+from pocketpaw.prompt.atlas import AtlasPrimerLayer
 from pocketpaw.prompt.identity import AgentIdentityLayer
 from pocketpaw.prompt.instructions import InstructionsLayer
-from pocketpaw.prompt.layer import LayerOutput, PromptContext, PromptLayer
+from pocketpaw.prompt.layer import LayerOutput, Priority, PromptContext, PromptLayer
 from pocketpaw.prompt.passthrough import LegacyTailLayer
 from pocketpaw.prompt.registry import PromptLayerRegistry, prompt_layer_registry
 from pocketpaw.prompt.retrieval import RetrievalLayer
 from pocketpaw.prompt.surface import SurfaceContextLayer
+from pocketpaw.prompt.user import UserInfoLayer
 
 __all__ = [
     "AgentIdentityLayer",
     "AssembledPrompt",
+    "AtlasPrimerLayer",
     "DroppedLayer",
     "InstructionsLayer",
     "LayerOutput",
     "LegacyTailLayer",
+    "Priority",
     "PromptContext",
     "PromptLayer",
     "PromptLayerRegistry",
     "RetrievalLayer",
     "SurfaceContextLayer",
+    "UserInfoLayer",
     "assemble",
     "prompt_layer_registry",
 ]

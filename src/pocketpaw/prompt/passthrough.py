@@ -37,7 +37,7 @@ leading ``\\n\\n``. Every input with any preceding content is byte-identical.
 
 from __future__ import annotations
 
-from pocketpaw.prompt.layer import LayerOutput, PromptContext
+from pocketpaw.prompt.layer import LayerOutput, Priority, PromptContext
 
 _KNOWLEDGE_HEADER = (
     "## Your Knowledge Base\n"
@@ -51,7 +51,18 @@ class LegacyTailLayer:
     """The knowledge-base wrapper, still unkeyed."""
 
     name = "legacy_tail"
-    priority = 0
+    # LOW, and PA-8 is the strongest possible argument for it: the plan is to
+    # take this block OUT of the system prompt entirely and serve it as a tool
+    # result. A block whose roadmap is "stop sending it" is the block to drop
+    # when something has to go. ``_INJECTION_CAPS`` ranks the channel path's
+    # ``kb_context`` HIGH; that block is a small per-scope retrieval and this
+    # one is the bulk dump PA-8 exists to move, so the ranks part company here.
+    priority: Priority = Priority.LOW
+    # UNCAPPED for now. A cap belongs on this block — it is the largest thing in
+    # a cloud prompt — but sizing it is PA-9's job, and guessing one here would
+    # start truncating live traffic in a task whose acceptance is that no byte
+    # moves. PA-8 may make the question moot.
+    max_chars: int | None = None
 
     async def render(self, ctx: PromptContext) -> LayerOutput:
         # Inject knowledge context directly into the system prompt. Rendered

@@ -3,6 +3,16 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Updated: 2026-08-03 (PA-5, feat/prompt-assembler-seam) — ``_SYSTEM_PROMPT_LAYERS``
+  gains ``atlas`` and ``user`` directly under ``identity``, and
+  ``_assemble_system_prompt`` grows the four plain-data fields that feed them
+  plus a ``budget_chars``. NOTHING MOVED: neither layer has a producer yet, so
+  both render to nothing and the empty-text skip leaves no gap; the budget
+  defaults to unbounded and no pre-PA-5 layer declares a cap, so both sizing
+  passes are no-ops on every prompt this path builds today. What DID change is
+  the digest — two more keyed layers now contribute to it, which costs one
+  agent-cache rebuild at deploy, the same price every layer split in this sprint
+  has paid.
 Updated: 2026-08-02 (PA-4, feat/prompt-assembler-seam) — the authoritative
   ``instructions`` left ``legacy_tail`` for their own KEYED layer, so the most
   stable content in the prompt stops inheriting the knowledge wrapper's silence
@@ -208,9 +218,33 @@ logger = logging.getLogger(__name__)
 #     question take the end. The stable middle is where the material that must
 #     be PRESENT but is not being attended to moment-by-moment belongs, and it is
 #     also the region a prefix cache can actually reuse.
-# PA-5 inserts ``atlas`` and ``user`` after ``identity``; the order test is
-# written as pairwise rules so that is two added lines rather than a rewrite.
-_SYSTEM_PROMPT_LAYERS = ("identity", "surface", "instructions", "legacy_tail", "retrieval")
+# ``atlas`` and ``user`` sit directly under ``identity`` (PA-5), and NOTHING
+# MOVED for the same reason PA-4 moved nothing: neither has a producer yet, so
+# both render to nothing and the assembler's empty-text skip leaves no gap. Their
+# position is chosen for the day they do render — who the agent is, then what OS
+# it runs inside, then who is talking, then where that person is looking. That is
+# the volatility ladder the prefix cache wants (the primer changes on deploy, a
+# member's block on a profile edit, the surface key on every navigation) and it
+# keeps both above the volatile region, which a KEYED layer must be.
+#
+# What each will eventually carry is worth knowing before wiring it:
+#   * ``atlas`` — the Paw OS primer, which today only the CHANNEL path builds
+#     (``AgentContextBuilder._build_atlas_primer``). Handing it to the cloud path
+#     adds ~1.5k chars to every cloud turn; that is a product call with a token
+#     bill, not a consequence of adding a budget.
+#   * ``user`` — the ``<about-member>`` block, which today reaches the prompt
+#     INSIDE ``instructions`` (``build_behavior_instructions`` appends it). Moving
+#     it here moves bytes above ``_behavior_prefix``'s cut AND changes
+#     ``instructions``' key, which is a digest of exactly those bytes.
+_SYSTEM_PROMPT_LAYERS = (
+    "identity",
+    "atlas",
+    "user",
+    "surface",
+    "instructions",
+    "legacy_tail",
+    "retrieval",
+)
 
 
 def _resolve_agent_model() -> Any:
@@ -422,6 +456,11 @@ class AgentPool:
         system_message_override: str | None,
         surface_preamble: str = "",
         surface_cache_key: str | None = None,
+        atlas_primer: str = "",
+        tenant_scope: str | None = None,
+        user_info: str = "",
+        user_id: str | None = None,
+        budget_chars: int | None = None,
     ) -> AssembledPrompt:
         """Assemble the agent's system prompt from its layers.
 
@@ -438,6 +477,15 @@ class AgentPool:
           ``system_prompt``), then the entity-rooms A1
           ``system_message_override``, which SWAPS that base and keeps the
           layers below. KEYED, on the agent rather than on the rendered text.
+        * ``atlas`` — the Paw OS primer. KEYED, on the tenant scope AND a digest
+          of its bytes. Capped at 2000 chars, the first cap in the prompt that
+          can bite. No producer yet: only the channel path builds this block,
+          and it arrives here in PA-7.
+        * ``user`` — the ``<about-member>`` block. KEYED, on the user id AND a
+          digest of its bytes, because the id alone cannot see a profile EDIT
+          and there is no working revision field to use instead. Capped at 500.
+          No producer yet: the block reaches the prompt inside ``instructions``
+          today, and relocating it moves bytes.
         * ``surface`` — the surface the user is looking at, resolved in the EE
           cloud layer and handed here as plain data. KEYED, on what the handler
           that built the preamble says it read (``None``, i.e. no key, on every
@@ -471,6 +519,12 @@ class AgentPool:
         contract survives PA-3's reorder: the cut takes the EARLIEST volatile
         marker, and swapping two blocks that are both below it does not move
         where the volatile region begins.
+
+        ``budget_chars`` defaults to ``None`` — unbounded — and no caller sets
+        it. That is not an oversight: ``context_builder``'s 32,000 is a CHANNEL
+        number, and a cloud prompt's stable prefix alone has been measured past
+        44k (``claude_sdk``'s volatile-marker note), so adopting it here would
+        start dropping layers from live traffic. PA-9 measures the real one.
         """
         ctx = PromptContext(
             instance=instance,
@@ -481,9 +535,13 @@ class AgentPool:
             system_message_override=system_message_override,
             surface_preamble=surface_preamble,
             surface_cache_key=surface_cache_key,
+            atlas_primer=atlas_primer,
+            tenant_scope=tenant_scope,
+            user_info=user_info,
+            user_id=user_id,
         )
         layers = [prompt_layer_registry.get(name) for name in _SYSTEM_PROMPT_LAYERS]
-        return await assemble(layers, ctx)
+        return await assemble(layers, ctx, budget_chars=budget_chars)
 
     async def prewarm(
         self,

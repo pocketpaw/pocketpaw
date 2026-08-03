@@ -27,16 +27,26 @@ the handler, and this layer's only judgement is what to do when there isn't one.
 
 from __future__ import annotations
 
-from pocketpaw.prompt.layer import LayerOutput, PromptContext
+from pocketpaw.prompt.layer import LayerOutput, Priority, PromptContext
 
 
 class SurfaceContextLayer:
     """Renders the resolved surface preamble under the key its producer gave it."""
 
     name = "surface"
-    # Below ``identity`` (100) and above the tail: who the agent is outranks
-    # where the user is, and both outrank the per-turn material.
-    priority = 90
+    # HIGH, not CRITICAL: an agent that loses the preamble still knows who it is
+    # and what it may do, and it can fetch the pocket with a tool call — the
+    # preamble exists to SAVE that round-trip, not to enable it. But it is what
+    # the rules above it are about (``instructions`` carries a
+    # ``<pocket-summary>`` anchor that refers to it), so it yields only to the
+    # two CRITICAL layers. PA-5 flipped the convention; this was ``90``.
+    priority: Priority = Priority.HIGH
+    # UNCAPPED here on purpose, and it is already capped where it is BUILT: the
+    # EE handler renders the first 12 of N widgets under a 1500-char ceiling. A
+    # second cap here would truncate a block whose key is the producer's claim
+    # rather than a function of these bytes — the shape ``assembler._apply_cap``
+    # says not to cap.
+    max_chars: int | None = None
 
     async def render(self, ctx: PromptContext) -> LayerOutput:
         # ``None`` means no producer claimed a key. That is the honest answer on
