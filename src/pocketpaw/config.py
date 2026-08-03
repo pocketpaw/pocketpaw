@@ -751,7 +751,7 @@ class Settings(BaseSettings):
         ),
     )
     pydantic_ai_defer_mcp_tools: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Hide the Pydantic AI backend's MCP tools behind tool search "
             "instead of advertising every one of them on every model request. "
@@ -759,10 +759,22 @@ class Settings(BaseSettings):
             "tokens per request; deferring the 97 bridged ones leaves 38 on "
             "the wire for ~5,900, and the model calls ``search_tools`` to pull "
             "what it needs. Costs one extra model request per discovery, and "
-            "buys little on a surface that already gates hard. Off by default: "
-            "the token saving is measured, but whether a given model reliably "
-            "searches rather than giving up is a behaviour question that has "
-            "to be answered per model."
+            "buys little on a surface that already gates hard. "
+            "On by default since 2026-08-01. It shipped off because the saving "
+            "was measured but 'does this model search rather than give up' was "
+            "not, and that had to be answered per model. Answered: on "
+            "deepseek-v4-pro and deepseek-v4-flash, three prompts needing "
+            "deferred tools (tasks / icons / create-pocket) each called "
+            "``search_tools``, got the right tool back and called it. What "
+            "decided the default is the shape of the cost rather than the size "
+            "of it — tool schemas do NOT prompt-cache on the proxy (the "
+            "caching table in ``agents/pydantic_ai.py`` covers the text "
+            "prefix), so the full block is re-read on every turn including one "
+            "that uses no tools at all. Measured end to end against the proxy: "
+            "'hey' cost 133 tools / 32,225 schema tokens / 15.7s with this off "
+            "and 37 tools / 6,594 / 7.6s with it on. Set false to go back — a "
+            "model that will not search loses the deferred tools entirely, so "
+            "that is the escape hatch for one that turns out not to."
         ),
     )
     pydantic_ai_harness_enabled: bool = Field(
