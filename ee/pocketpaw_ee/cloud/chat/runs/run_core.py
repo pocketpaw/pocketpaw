@@ -738,10 +738,13 @@ async def _generate_session_title(ctx: ScopeContext, first_message: str) -> None
             )
 
     try:
-        from pocketpaw.config import Settings  # type: ignore[import-untyped]
+        from pocketpaw.config import get_settings  # type: ignore[import-untyped]
         from pocketpaw.memory.titler import generate_title  # type: ignore[import-untyped]
 
-        settings = Settings.load()
+        # get_settings(), not Settings.load(): the latter re-parses the whole
+        # pydantic-settings model from .env at ~115 ms a call (measured
+        # 2026-08-04). This is a read of config on the per-run title path.
+        settings = get_settings()
         title = await generate_title(
             first_message,
             model=settings.chat_title_model,
@@ -994,11 +997,12 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
     keep today's cold turn-1.
     """
     try:
-        from pocketpaw.config import Settings
+        from pocketpaw.config import get_settings
 
         # Smart routing makes the model message-dependent → can't match the
         # turn-1 cache key from a message-less prewarm. Skip to avoid churn.
-        if Settings.load().smart_routing_enabled:
+        # get_settings(): a cached flag read, not a fresh parse. See above.
+        if get_settings().smart_routing_enabled:
             return
 
         pool = get_agent_pool()

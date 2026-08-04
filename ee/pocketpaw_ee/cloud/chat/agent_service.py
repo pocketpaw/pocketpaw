@@ -2052,6 +2052,22 @@ def _member_private_user_scope(ctx: ScopeContext) -> str | None:
 # ~400 tokens ≈ 1600 chars (English ≈ 4 chars/token); we cap on chars (a
 # cheap, deterministic proxy — no tokenizer dependency) and truncate with an
 # ellipsis if a rendered block would exceed it.
+# How long one KB scope search may take before the turn gives up on it.
+#
+# 1.5s is a backstop, not a target. A healthy scope answers in ~25 ms (process
+# spawn); the number exists for the unhealthy case, and the unhealthy case is
+# real: a workspace holding 4,051,312 words measured 4.2 SECONDS per search on
+# 2026-08-04, on every turn, because kb-go scans instead of indexing. Search
+# time there was flat across queries — "a" and a six-word question cost the
+# same — which is the signature of a scan. That index is being fixed in kb-go
+# separately; this cap stays regardless, because it bounds any slow scope
+# rather than that one cause.
+#
+# Set high enough that a slow-but-working scope still contributes, low enough
+# that a pathological one cannot own the turn. Exceeding it drops the KB block,
+# which is the same outcome as a scope with no hits.
+_KB_SEARCH_TIMEOUT_SECONDS = 1.5
+
 _BRIEFING_MAX_CHARS = 1600
 
 
@@ -2290,16 +2306,48 @@ async def _build_kb_snippets_block(ctx: ScopeContext, query: str) -> str:
         logger.debug("KnowledgeService unavailable; skipping KB block", exc_info=True)
         return ""
 
-    snippets: list[tuple[str, str]] = []
-    for scope in scopes:
+    # CONCURRENT, and BOUNDED. Both matter, and for different reasons.
+    #
+    # Concurrent: each scope is an independent ``kb`` subprocess, and the loop
+    # here awaited them one after another, so N scopes cost the sum rather than
+    # the max. Measured 2026-08-04 against two empty scopes: 50.2 ms serial,
+    # ~25 ms gathered — the floor is process spawn, which we pay per scope
+    # either way but no longer pay in sequence.
+    #
+    # Bounded: a scope's search time scales with its CONTENT, not the query. A
+    # workspace holding 4,051,312 words took 4.2 SECONDS per turn — measured,
+    # on this machine, on a message that was just "hello" — because kb-go scans
+    # rather than indexes. Nothing capped it, so the whole chat turn inherited
+    # that. The cap degrades to "no KB block", which is the same outcome as the
+    # empty-scope case the code above already handles, rather than a stalled
+    # turn. It is a backstop, NOT the fix — kb-go's missing index is owned by
+    # another teammate as of 2026-08-04. Keep this even after that lands: it
+    # bounds ANY slow scope (a huge corpus, a wedged binary, a stalled mount),
+    # not only the unindexed case that exposed it.
+    async def _one(scope: str) -> tuple[str, str] | None:
         try:
-            text = await KnowledgeService.search_context_for_scope(scope, query, limit=3)
+            text = await asyncio.wait_for(
+                KnowledgeService.search_context_for_scope(scope, query, limit=3),
+                timeout=_KB_SEARCH_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "knowledge search for scope %s exceeded %.1fs; dropping the KB block for "
+                "this turn (is the scope indexed?)",
+                scope,
+                _KB_SEARCH_TIMEOUT_SECONDS,
+            )
+            return None
         except Exception:
             logger.warning("knowledge search failed for scope %s", scope, exc_info=True)
-            continue
-        cleaned = text.strip()
-        if cleaned:
-            snippets.append((scope, cleaned))
+            return None
+        cleaned = (text or "").strip()
+        return (scope, cleaned) if cleaned else None
+
+    # Order is preserved by ``gather``, so the rendered block is byte-identical
+    # to the serial version for any given set of results.
+    results = await asyncio.gather(*(_one(s) for s in scopes))
+    snippets: list[tuple[str, str]] = [r for r in results if r is not None]
 
     if not snippets:
         return ""
