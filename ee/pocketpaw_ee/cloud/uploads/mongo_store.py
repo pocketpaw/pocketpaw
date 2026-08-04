@@ -1,5 +1,9 @@
 """Mongo-backed metadata store, workspace-scoped.
 
+2026-08-04 (Living-wiki API): ``iter_by_workspace`` rows now also carry
+``kb_article_id`` and ``kb_scope`` (the FL-11b ingest-tracking columns) so
+GET /knowledge/uploads can derive ``has_article`` without a second query.
+Additive — existing consumers of the dict shape are unchanged.
 2026-07-03 (FL-11b "hide-from-AI purge"): added ``set_kb_article`` — a
 workspace-scoped setter the FileReady listener uses to record the kb-go
 ``article_id`` + ``scope`` on a row after a successful ingest, and the PATCH
@@ -276,6 +280,10 @@ class MongoFileStore:
                 "tags": list(getattr(doc, "tags", []) or []),
                 "collections": list(getattr(doc, "collections", []) or []),
                 "hide_from_ai": bool(getattr(doc, "hide_from_ai", False)),
+                # Living-wiki API: FL-11b ingest tracking, so /knowledge/uploads
+                # can derive has_article without a second query.
+                "kb_article_id": getattr(doc, "kb_article_id", None),
+                "kb_scope": getattr(doc, "kb_scope", None),
             }
 
     async def list_by_workspace(
