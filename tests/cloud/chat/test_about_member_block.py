@@ -313,14 +313,19 @@ class TestTheFoundingAdminIsNotAStranger:
         assert "user-7" in block
 
     @pytest.mark.asyncio
-    async def test_the_fallback_claims_no_role_or_team(self) -> None:
+    async def test_the_fallback_assigns_no_role_or_team(self) -> None:
         """Saying less is the point.
 
         The user record carries a name and nothing else. A block that invented a
         role would be worse than no block — the agent would state it confidently.
 
-        MUTATION: add ``role: member`` to the fallback render. Run: the
-        no-role assertion failed. (Applied 2026-08-04.)
+        The assertion is about ASSIGNING a value, not about the words appearing:
+        the block's disclaimer necessarily says "role, team and focus", and an
+        earlier version of this test asserted ``"team" not in block``, which
+        broke the moment the disclaimer got more specific. Wrong property.
+
+        MUTATION: add a ``role: member`` line to the fallback render. Run: the
+        no-role-field assertion failed. (Applied 2026-08-04.)
         """
 
         async def _no_person(workspace_id: str, user_id: str):
@@ -335,10 +340,49 @@ class TestTheFoundingAdminIsNotAStranger:
         ):
             block = await _resolve_about_member("ws1", "user-7")
 
-        assert "role:" not in block
-        assert "team" not in block
+        assert "role:" not in block, "the fallback assigned a role it does not know"
         assert "focus:" not in block
-        assert "do not guess" in block
+        assert "team " not in block.replace("role, team and focus", "")
+        assert "do not infer" in block
+
+    @pytest.mark.asyncio
+    async def test_a_role_shaped_display_name_is_labelled_as_a_name(self) -> None:
+        """The trap this fallback walks straight into if worded carelessly.
+
+        The founding admin's ``full_name`` is very often the literal string
+        "Admin" — it is on the deploy where this bug was found. A block that
+        said ``who: Admin`` next to "their role is not on file" gives the model
+        two readings and an obvious way to reconcile them: decide Admin IS the
+        role. That is a guess about the exact field the block exists to stop it
+        guessing at.
+
+        So the name must be stated AS a name, and the disclaimer must name the
+        trap rather than gesture at it. Checked across the display names most
+        likely to be mistaken for roles.
+
+        MUTATION: revert to the ``who: {display}`` field form with a generic
+        "do not guess" line. Run: the "is the display name" assertion failed
+        for every one of them. (Applied 2026-08-04.)
+        """
+        for role_shaped in ("Admin", "Owner", "Support", "root"):
+
+            async def _no_person(workspace_id: str, user_id: str):
+                return None
+
+            async def _names(user_ids, _n=role_shaped):
+                return {"user-7": _n}
+
+            with (
+                patch("pocketpaw_ee.cloud.people.service.get_person", side_effect=_no_person),
+                patch("pocketpaw_ee.cloud.auth.service.resolve_display_names", side_effect=_names),
+            ):
+                block = await _resolve_about_member("ws1", "user-7")
+
+            assert f"You are talking to {role_shaped} " in block
+            assert "is the display name on their account" in block
+            assert "NOT their role" in block, (
+                f"{role_shaped!r} reads as a role and the block does not say otherwise"
+            )
 
     @pytest.mark.asyncio
     async def test_a_real_person_still_wins(self) -> None:

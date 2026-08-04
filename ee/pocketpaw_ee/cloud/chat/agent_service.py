@@ -933,12 +933,24 @@ async def _about_member_from_user_record(user_id: str) -> str | None:
     if not display or display == user_id:
         return None
 
+    # PHRASED INLINE, AND THE DISCLAIMER IS NOT DECORATION. The first draft was
+    # a ``who: {display}`` field, which is ambiguous in the exact case this
+    # fallback exists to serve: the founding admin's ``full_name`` is very often
+    # the literal string "Admin" (it is on this deploy). A model reading
+    # ``who: Admin`` next to "their role is not on file" has two readings and an
+    # obvious way to resolve the tension — decide that Admin IS the role. Which
+    # is a guess, about the one field this block is trying to stop it guessing.
+    #
+    # So the name is stated as a name, in a sentence, and the disclaimer names
+    # the trap rather than gesturing at it. Same reason the block still refuses
+    # to carry a role: an account label is not an org role, and "Owner",
+    # "Support" and "Admin" are all common display names.
     return (
         "<about-member>\n"
-        "You are talking to a member of this workspace. Greet them by name.\n"
-        "Their role and focus are not on file, so do not guess at either.\n"
-        f"  who: {display}\n"
-        f"  id: {user_id}\n"
+        f"You are talking to {display} (id: {user_id}).\n"
+        f"{display!r} is the display name on their account — it is NOT their "
+        "role. Their role, team and focus are not on file; do not infer them "
+        "from the name.\n"
         "</about-member>"
     )
 

@@ -9,15 +9,6 @@
     ]
   },
   {
-    "label": "identity: the fallback stops warning the agent not to guess",
-    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
-    "find": "        \"Their role and focus are not on file, so do not guess at either.\\n\"",
-    "replace": "        \"This member is a standard workspace member with role: member.\\n\"",
-    "tests": [
-      "tests/cloud/chat/test_about_member_block.py"
-    ]
-  },
-  {
     "label": "identity: the thin fallback beats a real Person",
     "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
     "find": "    if person is not None:\n        block = _render_about_member_block(person)\n        if block:\n            return block",
@@ -49,6 +40,33 @@
     "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
     "find": "    except Exception:  # noqa: BLE001 \u2014 same degrade-never-raise contract as above\n        logger.debug(\"about-member user fallback failed for %s\", user_id, exc_info=True)\n        return None",
     "replace": "    except TypeError:\n        logger.debug(\"about-member user fallback failed for %s\", user_id, exc_info=True)\n        return None",
+    "tests": [
+      "tests/cloud/chat/test_about_member_block.py"
+    ]
+  },
+  {
+    "label": "identity: the block drops the not-a-role disclaimer",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "        f\"{display!r} is the display name on their account \u2014 it is NOT their \"",
+    "replace": "        \"Their role and focus are not on file, so do not guess.\n\"",
+    "tests": [
+      "tests/cloud/chat/test_about_member_block.py"
+    ]
+  },
+  {
+    "label": "identity: the name goes back to a bare who: field",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "        f\"You are talking to {display} (id: {user_id}).\\n\"",
+    "replace": "        f\"  who: {display}\n  id: {user_id}\n\"",
+    "tests": [
+      "tests/cloud/chat/test_about_member_block.py"
+    ]
+  },
+  {
+    "label": "identity: the fallback assigns a role field",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "        f\"You are talking to {display} (id: {user_id}).\\n\"",
+    "replace": "        f\"You are talking to {display} (id: {user_id}).\\n\"\n        \"  role: member\n\"",
     "tests": [
       "tests/cloud/chat/test_about_member_block.py"
     ]
