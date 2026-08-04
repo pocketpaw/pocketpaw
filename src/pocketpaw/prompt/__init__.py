@@ -20,6 +20,15 @@ Updated: 2026-08-03 (PA-5) — exports :class:`Priority`, :class:`AtlasPrimerLay
   with caps that can bite, and neither has a producer yet — wiring them moves
   bytes, which is PA-6/PA-7's business, not this task's.
 
+Updated: 2026-08-03 (PA-7a) — exports :class:`ChannelInputs` and
+  ``CHANNEL_PROMPT_LAYERS``. The channel path (Telegram / Discord / Slack / CLI)
+  assembles here now, which retires ``context_builder._assemble_with_budget``
+  and leaves the runtime with one prompt assembler. The fifteen channel layers
+  themselves live in :mod:`pocketpaw.prompt.channel` and are reached through the
+  registry by name; only the input type and the ordered name list are worth
+  re-exporting, because a caller needs exactly those two to assemble a channel
+  prompt.
+
 The public surface for anyone writing a prompt layer or consuming an assembled
 prompt. Start at :class:`LayerOutput` — its ``cache_key`` field is what makes
 the "is this content volatile" question unskippable, and that question is the
@@ -28,6 +37,7 @@ one three backends independently got wrong before PR #1842.
 
 from pocketpaw.prompt.assembler import AssembledPrompt, DroppedLayer, assemble
 from pocketpaw.prompt.atlas import AtlasPrimerLayer
+from pocketpaw.prompt.channel import CHANNEL_PROMPT_LAYERS, ChannelInputs
 from pocketpaw.prompt.identity import AgentIdentityLayer
 from pocketpaw.prompt.instructions import InstructionsLayer
 from pocketpaw.prompt.layer import LayerOutput, Priority, PromptContext, PromptLayer
@@ -38,9 +48,11 @@ from pocketpaw.prompt.surface import SurfaceContextLayer
 from pocketpaw.prompt.user import UserInfoLayer
 
 __all__ = [
+    "CHANNEL_PROMPT_LAYERS",
     "AgentIdentityLayer",
     "AssembledPrompt",
     "AtlasPrimerLayer",
+    "ChannelInputs",
     "DroppedLayer",
     "InstructionsLayer",
     "LayerOutput",

@@ -21,6 +21,13 @@ Updated: 2026-08-03 (PA-5) — three additions, all in service of the budget:
   more important and nothing read it, and it is now a ``Priority`` where
   SMALLER is, matching ``context_builder._Priority`` so PA-7 can delete that
   enum instead of translating between two conventions.
+Updated: 2026-08-03 (PA-7a) — ``PromptContext`` carries ``channel_inputs``, the
+  channel path's fifteen per-turn inputs bundled into one frozen object. PA-5's
+  prediction above came true on schedule: ``context_builder._Priority`` and
+  ``_INJECTION_CAPS`` are deleted and :class:`Priority` is the only drop order
+  in the runtime. One field rather than fifteen because the cloud path reads
+  none of them, and defaulted to ``None`` so no caller that predates it moves a
+  byte.
 
 The system prompt used to be one long string built by appending blocks in
 ``AgentPool._assemble_system_prompt``. That worked until three backends
@@ -41,7 +48,10 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, and a cycle if imported
+    from pocketpaw.prompt.channel.inputs import ChannelInputs
 
 
 class Priority(enum.IntEnum):
@@ -129,6 +139,14 @@ class PromptContext:
     ``None`` (no surface, or a producer that would not claim stability) means
     the layer keeps its text out of the digest.
 
+    ``channel_inputs`` (PA-7a) is the CHANNEL path's fifteen inputs in one
+    frozen object rather than fifteen more fields here — see
+    :class:`~pocketpaw.prompt.channel.inputs.ChannelInputs`. ``None`` is the
+    cloud path and every caller that predates PA-7a; the channel layers read the
+    empty default and render nothing, so the slot cannot change what an existing
+    caller assembles. It is a forward reference because the channel package
+    imports this module.
+
     ``atlas_primer`` / ``tenant_scope`` and ``user_info`` / ``user_id`` (PA-5)
     are the two channels the budget was built for. Same plain-data shape as the
     surface pair and for the same reason, but note the asymmetry: the surface
@@ -151,6 +169,7 @@ class PromptContext:
     tenant_scope: str | None = None
     user_info: str = ""
     user_id: str | None = None
+    channel_inputs: ChannelInputs | None = None
 
 
 class PromptLayer(Protocol):

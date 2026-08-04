@@ -1,6 +1,12 @@
 # E2E test for the tool-output budget (#1160).
 # Created: 2026-05-21
 #
+# Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the stubbed builder
+# returns an ``AssembledPrompt`` from ``assemble_system_prompt`` and the mocked
+# backend declares ``system_prompt_digest``, because ``AgentLoop`` now carries the
+# assembled prompt's stable digest through the router to the backend. Nothing
+# about what this test proves changed; only the shape of the two things it fakes.
+#
 # Proves that an oversized tool result is capped before it reaches agent
 # context, through the real production tool paths:
 #
@@ -27,6 +33,7 @@ import pytest
 from pocketpaw.agents.loop import AgentLoop
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.bus import Channel, InboundMessage
+from pocketpaw.prompt import AssembledPrompt
 from pocketpaw.tools.output_budget import TOOL_OUTPUT_CHAR_CAP
 from pocketpaw.tools.protocol import BaseTool
 from pocketpaw.tools.registry import ToolRegistry
@@ -158,7 +165,9 @@ async def test_agent_loop_tool_result_is_capped(mock_bus, mock_memory):
     # so the test can assert on the exact string that flowed into the loop.
     captured: dict[str, str] = {}
 
-    async def mock_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def mock_run(
+        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+    ):
         """Stand-in for the LLM backend. A real backend would call the tool
         and stream a tool_result; here we run the real registry and yield
         the real (capped) result."""
@@ -204,7 +213,9 @@ async def test_agent_loop_tool_result_is_capped(mock_bus, mock_memory):
         patch("pocketpaw.agents.loop.Settings") as mock_settings_cls,
     ):
         mock_settings_cls.load.return_value = settings
-        mock_builder_cls.return_value.build_system_prompt = AsyncMock(return_value="System Prompt")
+        mock_builder_cls.return_value.assemble_system_prompt = AsyncMock(
+            return_value=AssembledPrompt(text="System Prompt", stable_digest="0123456789abcdef")
+        )
 
         loop = AgentLoop()
         msg = InboundMessage(

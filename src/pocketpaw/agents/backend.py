@@ -3,6 +3,16 @@
 Every agent backend (Claude SDK, OpenAI Agents, Gemini CLI, OpenCode CLI)
 must expose a ``info()`` staticmethod and an async ``run()`` generator.
 
+Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the two signature
+guards that decide who RECEIVES ``system_prompt_digest`` moved here from
+``AgentPool``, plus a ``forward_prompt_digest`` helper for callers holding a
+backend instance. The channel path now has a digest too, and it reaches backends
+through ``AgentRouter`` (both its own fallback loop and the failover runner's
+chain) rather than through the pool — three call sites for one question. Keeping
+the definition next to the ``run`` signature it inspects is what stops a second
+copy appearing that counts ``**kwargs``; ``pool`` re-imports the names so its own
+callers and tests are unmoved.
+
 Updated: 2026-08-02 (PA-1, feat/prompt-assembler-seam) — the shared ``run``
 signature grows ``system_prompt_digest: str = ""``: a hash over the layers of
 the assembled system prompt that declared themselves cacheable (see
@@ -73,9 +83,11 @@ replaying Mongo history into the prompt). ``None`` is the unchanged legacy path.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import Flag, auto
+from functools import cache
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -90,6 +102,71 @@ from pocketpaw.agents.protocol import AgentEvent  # re-export for convenience
 _DEFAULT_IDENTITY = (
     "You are PocketPaw, a helpful AI assistant running locally on the user's computer."
 )
+
+
+@cache
+def _accepts_prompt_digest(backend_cls: type) -> bool:
+    """Does this backend's ``run`` take a ``system_prompt_digest`` keyword?
+
+    The digest (PA-1) is non-empty on every run, so the withhold-when-empty
+    idiom the other per-run kwargs use cannot gate it — passing it to a backend
+    with the narrower signature would raise TypeError. Asking the signature is
+    the same answer ``_accepts_policy`` gives: a backend opts in by accepting
+    the argument, and the backends that have not been ported yet are untouched.
+    ``**kwargs`` does NOT count — a backend that swallows the digest silently
+    would look ported without keying on anything.
+
+    Cached because this runs once per turn, and a backend class's signature
+    cannot change at runtime.
+
+    LIVES HERE, NOT IN ``AgentPool`` (moved at PA-7b). Three call sites now ask
+    it — the pool, ``AgentRouter`` and ``BackendFailoverRunner`` — and the
+    question is a fact about the BACKEND PROTOCOL, which is this module. A
+    second copy in the router would be the failure this guard exists to prevent:
+    two definitions of "declares the digest" drifting apart, one of them
+    counting ``**kwargs``. ``pool`` re-imports both names, so
+    ``from pocketpaw.agents.pool import _accepts_prompt_digest`` still resolves.
+    """
+    run = getattr(backend_cls, "run", None)
+    if run is None:  # pragma: no cover - not a backend
+        return False
+    return _accepts_prompt_digest_kwarg(run)
+
+
+def _accepts_prompt_digest_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``system_prompt_digest`` in its signature?
+
+    Split out of ``_accepts_prompt_digest`` at PA-6 because ``prewarm`` needs the
+    same question asked of a BOUND METHOD rather than of a backend class. Not
+    cached: a bound method is a fresh object per access, so a cache keyed on it
+    would grow without ever hitting, and the check is one ``inspect.signature``
+    on a path that already builds SDK options.
+    """
+    try:
+        return "system_prompt_digest" in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
+def forward_prompt_digest(backend: Any, run_kwargs: dict[str, Any], digest: str) -> dict[str, Any]:
+    """Return ``run_kwargs`` carrying ``digest`` iff ``backend`` declares it.
+
+    The one-line form of the rule above, for the callers that hold a backend
+    INSTANCE rather than a class: ``AgentRouter.run`` (primary + each generic
+    fallback) and ``BackendFailoverRunner.run`` (each harness in the chain).
+    Returns the SAME dict when the backend does not declare the parameter, so a
+    caller can build one kwargs dict and hand it to several backends of
+    different vintages — which is exactly what the failover chain does.
+
+    Sent whenever the signature accepts it, INCLUDING an empty digest, matching
+    ``AgentPool.run``'s rule rather than inventing a second one. An empty digest
+    is not a silent no-op either: every consumer branches on truthiness and
+    falls back to hashing what it can see, so ``""`` means "this caller has no
+    digest" in exactly one place per backend.
+    """
+    if not _accepts_prompt_digest(type(backend)):
+        return run_kwargs
+    return {**run_kwargs, "system_prompt_digest": digest}
 
 
 class Capability(Flag):

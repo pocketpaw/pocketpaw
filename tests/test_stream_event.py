@@ -1,7 +1,14 @@
 # Tests for StreamEvent token-by-token streaming integration
 # Created: 2026-02-06
+# Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the stub builder
+# returns an ``AssembledPrompt`` from ``assemble_system_prompt`` and the fake
+# router declares ``system_prompt_digest``, because ``AgentLoop`` now carries the
+# assembled prompt's stable digest through the router to the backend. What these
+# tests assert about streaming is unchanged.
 
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from pocketpaw.prompt import AssembledPrompt
 
 # ---------------------------------------------------------------------------
 # Helpers — lightweight fakes for SDK types
@@ -257,8 +264,8 @@ class TestLoopThinkingIntegration:
             mem.get_compacted_history = AsyncMock(return_value=[])
             mem.resolve_session_key = AsyncMock(side_effect=lambda k: k)
             mock_mem_fn.return_value = mem
-            mock_builder_cls.return_value.build_system_prompt = AsyncMock(
-                return_value="System Prompt"
+            mock_builder_cls.return_value.assemble_system_prompt = AsyncMock(
+                return_value=AssembledPrompt(text="System Prompt", stable_digest="0123456789abcdef")
             )
 
             from pocketpaw.agents.loop import AgentLoop
@@ -273,7 +280,14 @@ class TestLoopThinkingIntegration:
             # Mock router to yield thinking + done
             router = MagicMock()
 
-            async def fake_run(msg, *, system_prompt=None, history=None, session_key=None):
+            async def fake_run(
+                msg,
+                *,
+                system_prompt=None,
+                history=None,
+                session_key=None,
+                system_prompt_digest="",
+            ):
                 from pocketpaw.agents.protocol import AgentEvent
 
                 yield AgentEvent(type="thinking", content="Deep thought")
@@ -327,8 +341,8 @@ class TestLoopThinkingIntegration:
             mem.get_compacted_history = AsyncMock(return_value=[])
             mem.resolve_session_key = AsyncMock(side_effect=lambda k: k)
             mock_mem_fn.return_value = mem
-            mock_builder_cls.return_value.build_system_prompt = AsyncMock(
-                return_value="System Prompt"
+            mock_builder_cls.return_value.assemble_system_prompt = AsyncMock(
+                return_value=AssembledPrompt(text="System Prompt", stable_digest="0123456789abcdef")
             )
 
             from pocketpaw.agents.loop import AgentLoop
@@ -340,7 +354,14 @@ class TestLoopThinkingIntegration:
 
             router = MagicMock()
 
-            async def fake_run(msg, *, system_prompt=None, history=None, session_key=None):
+            async def fake_run(
+                msg,
+                *,
+                system_prompt=None,
+                history=None,
+                session_key=None,
+                system_prompt_digest="",
+            ):
                 from pocketpaw.agents.protocol import AgentEvent
 
                 yield AgentEvent(type="thinking", content="secret reasoning")

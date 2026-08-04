@@ -33,6 +33,12 @@ the site they had just built in a different session. Recompiles cost ~14 ms
 request the graph sends, not to the graph. See the same note in
 ``pydantic_ai.py`` for why that backend fixes it per-run instead.
 
+Updated 2026-08-03 (PA-7b, feat/prompt-assembler-channel): the ``t:`` fallback's
+justification below named a caller that no longer needs it — ``AgentLoop``'s
+channel path now assembles a digest and ``AgentRouter`` forwards it. The branch
+stays; the reason changed to the two callers that reach ``run`` without going
+through the router at all. No code changed in this module.
+
 Updated 2026-08-03 (PA-6, feat/prompt-assembler-seam): ``run`` takes
 ``system_prompt_digest`` and the graph key prefers it over the text hash above.
 The text hash fixed the leak and paid for it with the cache — measured over 8
@@ -42,11 +48,13 @@ the layers that declared themselves cacheable rather than the rendered text, and
 over the same 8 turns produced ONE key. Same correctness, no per-turn recompile.
 
 The text hash SURVIVES as the fallback for a caller that has no digest, and that
-is not tidiness — ``AgentLoop`` (Telegram / Discord / Slack / CLI) builds its
-prompt in ``AgentContextBuilder``, not in the assembler, until PA-7. Dropping the
-hash outright would give those callers a key that cannot see the prompt at all,
-which is #1842 restored on every channel. The two are prefixed so a digest and a
-text hash can never collide.
+is not tidiness. ``AgentLoop`` (Telegram / Discord / Slack / CLI) was the reason
+when this was written; PA-7b gave that path a digest and the fallback still is
+not dead, because the callers that need it never went through ``AgentRouter``:
+the pocket specialist calls ``backend.run`` directly on an isolated backend, and
+so can any OSS embedder. Dropping the hash would give them a key that cannot see
+the prompt at all, which is #1842 restored for the callers least able to notice.
+The two are prefixed so a digest and a text hash can never collide.
 """
 
 import hashlib
@@ -79,8 +87,13 @@ def _prompt_identity(instructions: str, system_prompt_digest: str) -> str:
     cacheable, so the per-message soul recall (an unkeyed layer) does not move it
     and a warm graph survives an ordinary turn. ``t:`` is #1842's hash of the
     rendered text, kept for callers that do not build their prompt through the
-    assembler yet: ``AgentLoop``'s channel path until PA-7 ports it, and any OSS
-    embedder calling ``run`` directly.
+    assembler: the pocket specialist, which builds an isolated backend and calls
+    ``backend.run(user_message, system_prompt=...)`` itself — bypassing the
+    ``AgentRouter`` that does the forwarding — and any OSS embedder doing the
+    same. ``AgentLoop``'s channel path was on that list until PA-7b threaded a
+    digest through the router; the branch did NOT become dead when it left,
+    because the other two callers never went through the router in the first
+    place.
 
     Prefixed rather than concatenated because the two are different CLAIMS about
     the same 16-64 hex chars — "these layers are the same" versus "these bytes
@@ -974,8 +987,9 @@ class DeepAgentsBackend:
         ``AgentPool._accepts_prompt_digest`` inspects this signature to decide
         whether to pass it, and a backend that accepted it silently would look
         ported while keying on nothing. Empty means the caller does not build its
-        prompt through the assembler (the channel path until PA-7), and the graph
-        key falls back to hashing the prompt text — see ``_prompt_identity``.
+        prompt through the assembler — since PA-7b that is the pocket specialist
+        and out-of-tree embedders, not the channel path — and the graph key falls
+        back to hashing the prompt text; see ``_prompt_identity``.
         """
         if not self._sdk_available:
             yield AgentEvent(

@@ -3,6 +3,14 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — ``_accepts_prompt_digest``
+  and ``_accepts_prompt_digest_kwarg`` no longer live here; they moved to
+  ``pocketpaw.agents.backend`` and are re-imported. The channel path grew a
+  digest of its own, so ``AgentRouter`` and ``BackendFailoverRunner`` have to ask
+  the same signature question the pool asks — and three copies of "does this
+  backend declare the digest" is how one of them ends up counting ``**kwargs``.
+  Nothing about the pool's behaviour changed: same functions, same call sites,
+  same name resolution for anything importing them from here.
 Updated: 2026-08-03 (PA-6, feat/prompt-assembler-seam) — ``prewarm`` forwards the
   digest too, and ``_accepts_prompt_digest_kwarg`` is split out to ask the same
   signature question of a bound ``prewarm`` as of a backend class's ``run``. With
@@ -155,9 +163,14 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from functools import cache
 from typing import TYPE_CHECKING, Any
 
+# Both guards moved to ``agents.backend`` at PA-7b — the router and the failover
+# runner ask the same question now, and the answer is a fact about the backend
+# protocol. Re-imported (not re-implemented) so ``AgentPool``'s own call sites
+# below and the existing ``from pocketpaw.agents.pool import ...`` importers
+# resolve to the ONE definition.
+from pocketpaw.agents.backend import _accepts_prompt_digest, _accepts_prompt_digest_kwarg
 from pocketpaw.agents.errors import (
     AgentBackendUnavailable,
     AgentDisabled,
@@ -304,44 +317,6 @@ def _accepts_policy(backend_cls: type) -> bool:
 
     try:
         return "policy" in inspect.signature(backend_cls.__init__).parameters
-    except (TypeError, ValueError):  # pragma: no cover - exotic callables
-        return False
-
-
-@cache
-def _accepts_prompt_digest(backend_cls: type) -> bool:
-    """Does this backend's ``run`` take a ``system_prompt_digest`` keyword?
-
-    The digest (PA-1) is non-empty on every run, so the withhold-when-empty
-    idiom the other per-run kwargs use cannot gate it — passing it to a backend
-    with the narrower signature would raise TypeError. Asking the signature is
-    the same answer ``_accepts_policy`` gives: a backend opts in by accepting
-    the argument, and the backends that have not been ported yet are untouched.
-    ``**kwargs`` does NOT count — a backend that swallows the digest silently
-    would look ported without keying on anything.
-
-    Cached because this runs once per turn, and a backend class's signature
-    cannot change at runtime.
-    """
-    run = getattr(backend_cls, "run", None)
-    if run is None:  # pragma: no cover - not a backend
-        return False
-    return _accepts_prompt_digest_kwarg(run)
-
-
-def _accepts_prompt_digest_kwarg(func: Any) -> bool:
-    """Does ``func`` name ``system_prompt_digest`` in its signature?
-
-    Split out of ``_accepts_prompt_digest`` at PA-6 because ``prewarm`` needs the
-    same question asked of a BOUND METHOD rather than of a backend class. Not
-    cached: a bound method is a fresh object per access, so a cache keyed on it
-    would grow without ever hitting, and the check is one ``inspect.signature``
-    on a path that already builds SDK options.
-    """
-    import inspect
-
-    try:
-        return "system_prompt_digest" in inspect.signature(func).parameters
     except (TypeError, ValueError):  # pragma: no cover - exotic callables
         return False
 

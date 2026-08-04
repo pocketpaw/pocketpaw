@@ -11,6 +11,14 @@ Updated: 2026-08-02 (PA-4) — registers ``instructions``, the authoritative
   behaviour rules, also extracted from ``legacy_tail``. Stateless in the
   strongest sense of the four: it renders ``ctx.instructions`` and keys on it,
   reaching for nothing else at all.
+Updated: 2026-08-03 (PA-7a) — registers the fifteen ``channel.*`` layers, which
+  is the whole of the channel path's prompt and the end of the second
+  assembler. They are stateless in the same sense as the rest: every per-turn
+  input arrives on ``PromptContext.channel_inputs``, and the five that read the
+  BOX (skills, atlas, health, AGENTS.md, GWS) hold no handle on it between runs
+  — each resolves its loader inside ``render``. Names are prefixed ``channel.``
+  because this dict is flat and ``identity`` was already taken; an unprefixed
+  registration would have silently replaced the cloud path's persona layer.
 Updated: 2026-08-03 (PA-5) — registers ``atlas`` and ``user``, the first two
   layers with caps that can bite. Both are stateless in ``instructions``' sense:
   they render a ``PromptContext`` field and key on it plus the id/scope beside
@@ -27,6 +35,7 @@ safe to share across tenants.
 from __future__ import annotations
 
 from pocketpaw.prompt.atlas import AtlasPrimerLayer
+from pocketpaw.prompt.channel import CHANNEL_LAYER_TYPES
 from pocketpaw.prompt.identity import AgentIdentityLayer
 from pocketpaw.prompt.instructions import InstructionsLayer
 from pocketpaw.prompt.layer import PromptLayer
@@ -65,3 +74,10 @@ prompt_layer_registry.register(SurfaceContextLayer.name, SurfaceContextLayer())
 prompt_layer_registry.register(InstructionsLayer.name, InstructionsLayer())
 prompt_layer_registry.register(LegacyTailLayer.name, LegacyTailLayer())
 prompt_layer_registry.register(RetrievalLayer.name, RetrievalLayer())
+
+# The channel path's fifteen (PA-7a). Registered from one tuple rather than
+# fifteen lines so a new channel layer is wired in exactly one place — the
+# module that also owns the emission order — and cannot end up defined but
+# unregistered.
+for _channel_layer in CHANNEL_LAYER_TYPES:
+    prompt_layer_registry.register(_channel_layer.name, _channel_layer())

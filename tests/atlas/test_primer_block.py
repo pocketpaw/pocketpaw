@@ -12,6 +12,14 @@
 # survive intact (Belt ends on "Instinct gate", Branch keeps "merge/publish"
 # and "revert", Soul keeps "5-tier memory") and that no gist-backed line ends
 # in the truncation ellipsis — the class of miss the fix targets.
+# Updated: 2026-08-03 (PA-7a, feat/prompt-assembler-channel) — the primer's
+# builder moved into ``pocketpaw.prompt.channel.environment`` so it renders
+# inside a layer and under the assembler's render guard;
+# ``AgentContextBuilder._build_atlas_primer`` is now a delegate and every call
+# below still reaches the same code. The cap assertion reads the layer's
+# ``max_chars`` because ``_INJECTION_CAPS`` is deleted. The resilience test is
+# the interesting one: it used to prove the builder's own try/except, and now
+# proves the render guard that replaced it.
 
 from __future__ import annotations
 
@@ -20,8 +28,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import pocketpaw.atlas.store as atlas_store_mod
-from pocketpaw.bootstrap.context_builder import _INJECTION_CAPS, AgentContextBuilder
+from pocketpaw.bootstrap.context_builder import AgentContextBuilder
 from pocketpaw.bootstrap.protocol import BootstrapContext
+from pocketpaw.prompt.channel import ChannelAtlasPrimerLayer
 
 pytestmark = pytest.mark.asyncio
 
@@ -121,8 +130,12 @@ class TestPrimerBudget:
         )
 
     async def test_injection_cap_matches_budget(self):
-        """The assembler-side cap must also enforce the ~500-token ceiling."""
-        cap = _INJECTION_CAPS.get("atlas_primer")
+        """The assembler-side cap must also enforce the ~500-token ceiling.
+
+        PA-7a moved this number off ``_INJECTION_CAPS['atlas_primer']`` and onto
+        the layer that renders the block. Same 2000, one owner.
+        """
+        cap = ChannelAtlasPrimerLayer.max_chars
         assert cap is not None
         assert cap <= _TOKEN_BUDGET * _CHARS_PER_TOKEN
 
