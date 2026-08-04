@@ -1795,7 +1795,9 @@ Response is the row shape above plus `content` (markdown), `backlinks`
 (list of article ids), `source_docs` (raw-doc ids), `scope`, and `orphan`.
 An orphan raw-doc id returns `orphan: true` with the raw text as `content`
 and `compiled_with: null`. Unknown id or an id outside the scope →
-`404 article.not_found`.
+`404 article.not_found`. A kb failure that is NOT a genuine miss (timeout,
+missing binary, transient error) → `500 knowledge.kb_unavailable` — a kb
+outage never reads as "the article vanished".
 
 ### `GET /knowledge/stats`
 
@@ -1833,11 +1835,18 @@ an orphan raw-doc id. Response:
 {
   "scope": "workspace:w1",
   "article_id": "deploy-runbook",
+  "new_article_id": "deploy-runbook-v2",
   "raw_doc_id": "raw-1",
   "source": "notes.txt",
-  "result": { "id": "deploy-runbook", "compiled_with": "llm", "...": "kb ingest output" }
+  "result": { "article": "deploy-runbook-v2", "title": "...", "words": 250, "compiled_with": "llm" }
 }
 ```
+
+`result` is kb-go's ingest receipt passed through verbatim — note the id key
+is `article` (finishIngest's shape), not `id`. `new_article_id` is the
+server-extracted id of the article the recompile produced; when it differs
+from `article_id` (the compile landed under a new slug) the FL-11b tracking
+on any upload row pointing at the old id is re-pointed automatically.
 
 Errors: `404 article.not_found` / `404 raw_doc.not_found`,
 `422 knowledge.empty_raw_doc`, `500 knowledge.reingest_failed`.
@@ -1857,22 +1866,34 @@ FL-11b `kb_article_id`/`kb_scope` tracking on the upload row. Response:
   "scope": "workspace:w1",
   "upload_id": "up-1",
   "filename": "report.pdf",
-  "result": { "id": "report-pdf", "compiled_with": "llm", "...": "kb ingest output" }
+  "article_id": "report-pdf",
+  "result": { "article": "report-pdf", "title": "...", "words": 300, "compiled_with": "llm" }
 }
 ```
 
+`article_id` is the server-extracted id from kb-go's receipt (whose own id
+key is `article`, not `id`) — clients should read the top-level field.
+Pocket-scoped uploads are refused on this workspace surface: ingesting them
+into workspace KB would lift pocket-private content across the pocket ACL
+boundary; reingest those from the pocket surface instead.
+
 Errors: `404 upload.not_found`, `403 knowledge.upload_hidden`
-(`hide_from_ai` files are not ingestable), `422 knowledge.extraction_empty`,
+(`hide_from_ai` files are not ingestable),
+`403 knowledge.upload_pocket_scoped` (pocket files belong to the pocket
+surface), `422 knowledge.extraction_empty`,
 `500 knowledge.extraction_failed` / `knowledge.upload_unreadable` /
 `knowledge.reingest_failed`.
 
 ### `GET /knowledge/uploads?scope=`
 
-The workspace's uploaded files eligible for ingest (soft-deleted and
-`hide_from_ai` rows excluded). `has_article` is derived cheaply: the FL-11b
-tracking column matched against the resolved scope, with a
-filename-vs-article-sources fallback for uploads indexed before the column
-existed.
+The WORKSPACE's uploaded files eligible for ingest. Excluded: soft-deleted
+rows, `hide_from_ai` rows, and any pocket-scoped upload (pocket files are
+ACL-gated on the pocket surface and never list here). `has_article` is
+derived cheaply: primarily the FL-11b tracking column matched against the
+resolved scope; untracked rows fall back to a filename-vs-article-sources
+match that only counts when the upload predates the matching article's
+`compiled_at` — a fresh re-upload of a same-named file reads as pending,
+not compiled.
 
 ```json
 {

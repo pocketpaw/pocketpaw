@@ -1,4 +1,12 @@
 # test_knowledge_wiki_api.py — Integration tests for the living-wiki API.
+# Updated: 2026-08-04 (final review fixes) — pins for the security + tracking
+# round: pocket-private rows excluded from GET /uploads; pocket-scoped upload
+# reingest refused (403 knowledge.upload_pocket_scoped); FL-11b tracking fires
+# on kb-go's REAL receipt shape ({"article": id}, not {"id": ...}) including
+# the reassign on a new slug; kb outage on GET /articles/{id} answers 500
+# knowledge.kb_unavailable (404 only on a genuine "Article not found" miss);
+# and the has_article filename fallback rejects a fresh same-named re-upload
+# (created after the article's compiled_at).
 # Updated: 2026-08-04 (review follow-up) — two guard pins: a path-traversal
 # article_id on POST /reingest answers 404 with no kb call and nothing served
 # from outside the scope dir (sentinel file proves it), and GET /uploads
@@ -127,6 +135,7 @@ class _FakeMongoFileStore:
     rows: list[dict] = []
     doc: SimpleNamespace | None = None
     kb_article_calls: list[dict] = []
+    reassign_calls: list[dict] = []
 
     async def iter_by_workspace(self, workspace: str, **kwargs):
         for row in type(self).rows:
@@ -144,12 +153,24 @@ class _FakeMongoFileStore:
         )
         return SimpleNamespace()
 
+    async def reassign_kb_article(self, workspace, *, old_article_id, new_article_id, scope):
+        type(self).reassign_calls.append(
+            {
+                "workspace": workspace,
+                "old_article_id": old_article_id,
+                "new_article_id": new_article_id,
+                "scope": scope,
+            }
+        )
+        return 1
+
 
 @pytest.fixture()
 def fake_store(monkeypatch) -> type[_FakeMongoFileStore]:
     _FakeMongoFileStore.rows = []
     _FakeMongoFileStore.doc = None
     _FakeMongoFileStore.kb_article_calls = []
+    _FakeMongoFileStore.reassign_calls = []
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.uploads.mongo_store.MongoFileStore", _FakeMongoFileStore
     )
@@ -270,13 +291,23 @@ def test_get_article_full_body(client, kb_home, spy) -> None:
 
 
 def test_get_article_unknown_id_404(client, kb_home, spy) -> None:
-    # kb show exits 1 ("Article not found") and there is no raw doc either.
+    # kb show exits 1 with kb-go's fatal text and there is no raw doc either.
+    spy.responses["show"] = (1, "", "Error: Article not found: nope")
     response = client.get("/api/v1/knowledge/articles/nope")
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "article.not_found"
 
 
+def test_get_article_kb_outage_is_500_not_404(client, kb_home, spy) -> None:
+    """A kb failure that ISN'T a miss must not tell the UI the article vanished."""
+    spy.responses["show"] = (1, "", "some transient failure")
+    response = client.get("/api/v1/knowledge/articles/art-1")
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "knowledge.kb_unavailable"
+
+
 def test_get_article_orphan_raw_doc_fallback(client, kb_home, spy) -> None:
+    spy.responses["show"] = (1, "", "Error: Article not found: raw-orphan")
     _write_raw_doc(
         kb_home,
         WS_DIR,
@@ -384,8 +415,13 @@ def test_reingest_routes_raw_doc_through_funnel(client, kb_home, spy, monkeypatc
     assert spy.calls[0]["input"] == "the raw text"
 
 
-def test_reingest_orphan_raw_id_directly(client, kb_home, spy, monkeypatch) -> None:
-    """An orphan raw-doc id (no wiki article) reingests its own raw doc."""
+def test_reingest_orphan_raw_id_directly(client, kb_home, spy, fake_store, monkeypatch) -> None:
+    """An orphan raw-doc id (no wiki article) reingests its own raw doc.
+
+    Uses kb-go's REAL receipt shape ({"article": id}) — and since the compile
+    landed under a new id, the FL-11b tracking reassign must be attempted so
+    upload rows pointing at the old id keep purging the live copy.
+    """
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     _write_raw_doc(
         kb_home,
@@ -393,12 +429,26 @@ def test_reingest_orphan_raw_id_directly(client, kb_home, spy, monkeypatch) -> N
         "raw-orphan",
         {"source": "orphan.txt", "raw_text": "orphan text", "word_count": 2},
     )
-    spy.responses["ingest"] = (0, json.dumps({"id": "art-new", "compiled_with": "llm"}), "")
+    spy.responses["ingest"] = (
+        0,
+        json.dumps({"article": "art-new", "title": "Orphan", "words": 2, "compiled_with": "llm"}),
+        "",
+    )
 
     response = client.post("/api/v1/knowledge/reingest", json={"article_id": "raw-orphan"})
     assert response.status_code == 200, response.text
-    assert response.json()["raw_doc_id"] == "raw-orphan"
+    body = response.json()
+    assert body["raw_doc_id"] == "raw-orphan"
+    assert body["new_article_id"] == "art-new"  # extracted from the "article" key
     assert spy.calls[0]["input"] == "orphan text"
+    assert fake_store.reassign_calls == [
+        {
+            "workspace": WORKSPACE,
+            "old_article_id": "raw-orphan",
+            "new_article_id": "art-new",
+            "scope": WS_SCOPE,
+        }
+    ]
 
 
 def test_reingest_unknown_article_404(client, kb_home, spy) -> None:
@@ -475,7 +525,14 @@ def test_reingest_upload_extracts_and_funnels(
         hide_from_ai=False,
     )
     _install_upload_pipeline(monkeypatch, tmp_path, text="extracted report text")
-    spy.responses["ingest"] = (0, json.dumps({"id": "art-up", "compiled_with": "llm"}), "")
+    # kb-go's REAL ingest receipt: the id key is "article", not "id"
+    # (finishIngest). Reading result["id"] was the bug that left FL-11b
+    # tracking dead — this receipt shape is what pins the fix.
+    spy.responses["ingest"] = (
+        0,
+        json.dumps({"article": "art-up", "title": "Report", "words": 3, "compiled_with": "llm"}),
+        "",
+    )
 
     response = client.post(
         "/api/v1/knowledge/reingest-upload", json={"upload_id": "up-1", "scope": WS_SCOPE}
@@ -483,7 +540,8 @@ def test_reingest_upload_extracts_and_funnels(
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["filename"] == "report.pdf"
-    assert body["result"]["id"] == "art-up"
+    assert body["article_id"] == "art-up"  # extracted from the "article" key
+    assert body["result"]["article"] == "art-up"
 
     # The funnel argv carries the ORIGINAL filename as source.
     assert spy.calls[0]["cmd"][1:] == [
@@ -516,6 +574,22 @@ def test_reingest_upload_hidden_file_refused(client, kb_home, spy, fake_store) -
     assert spy.calls == []
 
 
+def test_reingest_upload_pocket_scoped_refused(client, kb_home, spy, fake_store) -> None:
+    """A pocket-private upload must not be liftable into workspace KB."""
+    fake_store.doc = SimpleNamespace(
+        file_id="up-pocket",
+        storage_key="ws/up-pocket",
+        filename="pocket-notes.pdf",
+        mime="application/pdf",
+        hide_from_ai=False,
+        pocket_id="pocket-1",
+    )
+    response = client.post("/api/v1/knowledge/reingest-upload", json={"upload_id": "up-pocket"})
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "knowledge.upload_pocket_scoped"
+    assert spy.calls == []  # refused before extraction or any kb call
+
+
 def test_reingest_upload_unknown_id_404(client, kb_home, spy, fake_store) -> None:
     response = client.post("/api/v1/knowledge/reingest-upload", json={"upload_id": "nope"})
     assert response.status_code == 404
@@ -536,6 +610,8 @@ def test_list_uploads_scope_guard_denies_foreign_user_scope(client, kb_home, spy
 
 def test_list_uploads_has_article_markers(client, kb_home, fake_store) -> None:
     uploaded_at = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
+    compiled_at = "2026-08-01T11:00:00Z"  # after uploaded_at, before re-upload
+    reuploaded_at = datetime(2026, 8, 4, 9, 0, tzinfo=UTC)
     fake_store.rows = [
         {
             "file_id": "up-tracked",
@@ -546,6 +622,7 @@ def test_list_uploads_has_article_markers(client, kb_home, fake_store) -> None:
             "hide_from_ai": False,
             "kb_article_id": "art-1",
             "kb_scope": WS_SCOPE,
+            "pocket_id": None,
         },
         {
             "file_id": "up-legacy",
@@ -556,6 +633,20 @@ def test_list_uploads_has_article_markers(client, kb_home, fake_store) -> None:
             "hide_from_ai": False,
             "kb_article_id": None,
             "kb_scope": None,
+            "pocket_id": None,
+        },
+        {
+            # FRESH re-upload of the same filename, created AFTER the article
+            # was compiled — the filename fallback must NOT mark it compiled.
+            "file_id": "up-reupload",
+            "filename": "legacy.txt",
+            "mime": "text/plain",
+            "size": 55,
+            "created_at": reuploaded_at,
+            "hide_from_ai": False,
+            "kb_article_id": None,
+            "kb_scope": None,
+            "pocket_id": None,
         },
         {
             "file_id": "up-pending",
@@ -566,6 +657,7 @@ def test_list_uploads_has_article_markers(client, kb_home, fake_store) -> None:
             "hide_from_ai": False,
             "kb_article_id": None,
             "kb_scope": None,
+            "pocket_id": None,
         },
         {
             "file_id": "up-hidden",
@@ -576,12 +668,30 @@ def test_list_uploads_has_article_markers(client, kb_home, fake_store) -> None:
             "hide_from_ai": True,
             "kb_article_id": None,
             "kb_scope": None,
+            "pocket_id": None,
+        },
+        {
+            # Pocket-private — must not list on the workspace surface at all.
+            "file_id": "up-pocket",
+            "filename": "pocket-notes.pdf",
+            "mime": "application/pdf",
+            "size": 20,
+            "created_at": uploaded_at,
+            "hide_from_ai": False,
+            "kb_article_id": "art-p",
+            "kb_scope": "pocket:pocket-1",
+            "pocket_id": "pocket-1",
         },
     ]
     # legacy.txt predates FL-11b tracking but IS compiled in the scope —
-    # article frontmatter → raw doc → source filename match.
+    # article frontmatter (compiled AFTER the original upload) → raw doc →
+    # source filename match.
     _write_article(
-        kb_home, WS_DIR, "art-legacy", {"title": "Legacy", "source_docs": ["raw-legacy"]}, "# L"
+        kb_home,
+        WS_DIR,
+        "art-legacy",
+        {"title": "Legacy", "source_docs": ["raw-legacy"], "compiled_at": compiled_at},
+        "# L",
     )
     _write_raw_doc(
         kb_home, WS_DIR, "raw-legacy", {"source": "legacy.txt", "raw_text": "x", "word_count": 1}
@@ -592,9 +702,11 @@ def test_list_uploads_has_article_markers(client, kb_home, fake_store) -> None:
     body = response.json()
     assert body["scope"] == WS_SCOPE
     rows = {u["id"]: u for u in body["uploads"]}
-    assert set(rows) == {"up-tracked", "up-legacy", "up-pending"}  # hidden excluded
+    # hidden + pocket-private excluded entirely.
+    assert set(rows) == {"up-tracked", "up-legacy", "up-reupload", "up-pending"}
     assert rows["up-tracked"]["has_article"] is True
-    assert rows["up-legacy"]["has_article"] is True  # filename fallback
+    assert rows["up-legacy"]["has_article"] is True  # fallback: upload predates compile
+    assert rows["up-reupload"]["has_article"] is False  # fresh re-upload stays pending
     assert rows["up-pending"]["has_article"] is False
     assert rows["up-tracked"]["uploaded_at"] == uploaded_at.isoformat()
     assert rows["up-tracked"]["size"] == 100

@@ -1,4 +1,24 @@
 # knowledge_router.py — Workspace-level knowledge browser router.
+# Updated: 2026-08-04 (review follow-up) — security + tracking fixes:
+#   * GET /uploads is WORKSPACE-scoped only: rows with a pocket_id are
+#     excluded (files-service precedent — pocket reads are ACL-gated on
+#     their own surface, and listing pocket-private metadata workspace-wide
+#     was a bleed).
+#   * POST /reingest-upload REFUSES pocket-scoped uploads (403
+#     knowledge.upload_pocket_scoped) — ingesting them into workspace KB
+#     lifted pocket-private content across the pocket ACL boundary.
+#   * FL-11b tracking now actually fires: kb-go's ingest receipt keys the
+#     id as "article" (not "id"); both reingest routes extract via
+#     knowledge.extract_ingest_article_id and return a top-level article_id.
+#   * POST /reingest re-points tracking rows when the recompile lands under
+#     a new slug (MongoFileStore.reassign_kb_article, contained).
+#   * GET /articles/{id} distinguishes kb outage (500
+#     knowledge.kb_unavailable) from a genuine miss (404) instead of
+#     404ing existing articles during a kb timeout.
+#   * has_article: primary signal is the FL-11b column; the filename
+#     fallback only applies to untracked uploads created BEFORE the
+#     matching article was compiled (a fresh same-named re-upload is
+#     pending, not compiled).
 # Updated: 2026-08-04 — Living-wiki API for the /knowledge frontend rebuild:
 #   * GET /articles rows now carry wiki metadata (summary, word_count,
 #     compiled_with, version, categories, concepts, compiled_at) — kb list
@@ -50,12 +70,17 @@ import json
 import logging
 import os
 import re
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 
 from pocketpaw_ee.cloud._core.errors import CloudError, Forbidden, NotFound, ValidationError
-from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService, _kb
+from pocketpaw_ee.cloud.agents.knowledge import (
+    KnowledgeService,
+    _kb,
+    extract_ingest_article_id,
+)
 from pocketpaw_ee.cloud.kb import service as kb_service
 from pocketpaw_ee.cloud.kb.dto import ReingestRequest, ReingestUploadRequest
 from pocketpaw_ee.cloud.kb.workspace_aggregator import aggregate_workspace_articles
@@ -355,7 +380,16 @@ async def get_workspace_article(
     _contained_article_id(article_id)
     try:
         result = await asyncio.to_thread(_kb, "show", article_id, "--scope", resolved)
-    except RuntimeError:
+    except RuntimeError as exc:
+        # A genuine miss surfaces as kb-go's `fatal("Article not found: ...")`
+        # on stderr (exit 1) — fall through to the orphan raw-doc lookup.
+        # Anything else (timeout, missing binary, transient failure) is an
+        # OUTAGE: answering 404 there would tell the UI an existing article
+        # vanished. Distinguish and 500 instead. Match the full "article not
+        # found" phrase — the missing-BINARY error also says "not found".
+        if "article not found" not in str(exc).lower():
+            logger.warning("kb show failed for article=%s scope=%s: %s", article_id, resolved, exc)
+            raise CloudError(500, "knowledge.kb_unavailable", str(exc)) from exc
         result = None
     if not isinstance(result, dict):
         raw = await asyncio.to_thread(_load_raw_doc, resolved, article_id)
@@ -500,9 +534,38 @@ async def reingest_article(
         logger.error("KB reingest failed (scope=%s): %s", resolved, exc, exc_info=True)
         raise CloudError(500, "knowledge.reingest_failed", str(exc)) from exc
 
+    # kb-go's receipt keys the id as "article" — extract via the shared
+    # helper, never result["id"] (that read is always None on real receipts).
+    new_article_id = extract_ingest_article_id(result)
+
+    # The recompile can land under a NEW slug; any upload row still tracking
+    # the old id would purge a dead article on a later hide-from-AI toggle
+    # while the live copy survives. Re-point the tracking. Contained — a
+    # tracking failure never undoes the ingest that succeeded.
+    if new_article_id and new_article_id != body.article_id:
+        try:
+            from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+
+            await MongoFileStore().reassign_kb_article(
+                workspace_id,
+                old_article_id=body.article_id,
+                new_article_id=new_article_id,
+                scope=resolved,
+            )
+        except Exception:
+            logger.exception(
+                "kb-article tracking reassign failed (old=%s new=%s)",
+                body.article_id,
+                new_article_id,
+            )
+
+    # no-event: KB state lives in kb-go's own store, outside the cloud
+    # entity/event system; search-index refresh happens inside kb ingest and
+    # no bus consumer subscribes to article changes today.
     return {
         "scope": resolved,
         "article_id": body.article_id,
+        "new_article_id": new_article_id,
         "raw_doc_id": raw_doc_id,
         "source": source,
         "result": result,
@@ -536,6 +599,15 @@ async def reingest_upload(
         raise Forbidden(
             "knowledge.upload_hidden",
             "this file is hidden from AI and cannot be ingested",
+        )
+    # Pocket-scoped uploads are ACL-gated per pocket (has_edit_access); this
+    # v1 workspace surface has no pocket ACL check, and ingesting a pocket
+    # file into workspace KB would lift pocket-private content across that
+    # boundary. Refuse — pocket content reingests on the pocket surface.
+    if getattr(doc, "pocket_id", None):
+        raise Forbidden(
+            "knowledge.upload_pocket_scoped",
+            "this file belongs to a pocket; reingest it from the pocket surface",
         )
 
     adapter = _resolve_upload_adapter()
@@ -582,20 +654,27 @@ async def reingest_upload(
         raise CloudError(500, "knowledge.reingest_failed", str(exc)) from exc
 
     # FL-11b tracking so a later hide-from-AI toggle can purge the article.
-    # Contained — a tracking failure never undoes the ingest.
-    article_id = result.get("id") if isinstance(result, dict) else None
-    if isinstance(article_id, str) and article_id:
+    # Contained — a tracking failure never undoes the ingest. The id comes
+    # from the shared receipt helper: kb-go keys it as "article", not "id".
+    article_id = extract_ingest_article_id(result)
+    if article_id:
         try:
+            # no-event: FL-11b tracking is a bookkeeping column consumed only
+            # by the hide-from-AI purge read path; no bus consumer exists.
             await store.set_kb_article(
                 body.upload_id, workspace_id, article_id=article_id, scope=resolved
             )
         except Exception:
             logger.exception("kb-article tracking failed for upload=%s", body.upload_id)
 
+    # no-event: KB state lives in kb-go's own store, outside the cloud
+    # entity/event system; search-index refresh happens inside kb ingest and
+    # no bus consumer subscribes to article changes today.
     return {
         "scope": resolved,
         "upload_id": body.upload_id,
         "filename": doc.filename,
+        "article_id": article_id,
         "result": result,
     }
 
@@ -620,20 +699,28 @@ def _resolve_upload_adapter():
         return None
 
 
-def _sources_with_articles(scope: str) -> set[str]:
-    """Source filenames of *scope*'s compiled articles (via raw source_docs).
+def _sources_with_articles(scope: str) -> dict[str, str | None]:
+    """Source filename → latest ``compiled_at`` of *scope*'s compiled articles.
 
     Fallback signal for ``has_article`` on uploads that predate the FL-11b
-    ``kb_article_id`` tracking column: an upload whose filename matches a
-    compiled article's raw-doc source was (almost certainly) ingested.
+    ``kb_article_id`` tracking column. The compiled_at value lets the caller
+    reject false positives: a FRESH re-upload of a same-named file matches
+    the filename but was created AFTER the article was compiled, so it is
+    pending, not compiled.
     """
     sanitized = _sanitize_scope(scope)
-    referenced: set[str] = set()
+    # raw-doc id → compiled_at of the (latest) article referencing it.
+    referenced: dict[str, str | None] = {}
     for fm in _read_scope_frontmatter(scope).values():
+        compiled_at = fm.get("compiled_at")
+        compiled_at = str(compiled_at) if compiled_at else None
         for sd in fm.get("source_docs") or []:
-            referenced.add(str(sd))
-    sources: set[str] = set()
-    for raw_id in referenced:
+            raw_id = str(sd)
+            existing = referenced.get(raw_id)
+            if existing is None or (compiled_at is not None and compiled_at > existing):
+                referenced[raw_id] = compiled_at
+    sources: dict[str, str | None] = {}
+    for raw_id, compiled_at in referenced.items():
         raw_path = os.path.join(KB_HOME, sanitized, "raw", f"{raw_id}.json")
         try:
             with open(raw_path, encoding="utf-8", errors="replace") as fh:
@@ -641,8 +728,31 @@ def _sources_with_articles(scope: str) -> set[str]:
         except (OSError, json.JSONDecodeError):
             continue
         if isinstance(doc, dict) and doc.get("source"):
-            sources.add(str(doc["source"]))
+            source = str(doc["source"])
+            existing = sources.get(source)
+            if source not in sources or (
+                compiled_at is not None and (existing is None or compiled_at > existing)
+            ):
+                sources[source] = compiled_at
     return sources
+
+
+def _parse_compiled_at(value: str | None) -> datetime | None:
+    """Parse kb-go's RFC3339 ``compiled_at`` to an aware datetime, or ``None``."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _as_aware_utc(value: datetime | None) -> datetime | None:
+    """Naive datetimes from the Mongo store are UTC by convention — tag them."""
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
 @router.get(
@@ -654,14 +764,20 @@ async def list_ingestable_uploads(
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> dict:
-    """The workspace's uploaded files eligible for KB ingest.
+    """The WORKSPACE's uploaded files eligible for KB ingest.
 
-    ``has_article`` is derived cheaply, no new tracking: the FL-11b
-    ``kb_article_id`` column (stamped by the FileReady listener and the
-    reingest-upload route) matched against the resolved scope, with a
-    filename-vs-article-sources fallback for uploads indexed before the
-    tracking column existed. Files hidden from AI are excluded — they are
-    not eligible for ingest.
+    Workspace-scoped only: rows with a ``pocket_id`` are excluded (files-
+    service precedent — pocket files are ACL-gated on the pocket surface,
+    and listing their metadata workspace-wide would bleed pocket privacy).
+    Files hidden from AI are excluded too — they are not eligible.
+
+    ``has_article`` is derived cheaply, no new tracking: primarily the
+    FL-11b ``kb_article_id`` column (stamped by the FileReady listener and
+    the reingest-upload route) matched against the resolved scope. For
+    untracked rows only, a filename-vs-article-sources fallback covers
+    uploads indexed before the tracking column existed — guarded by
+    compiled_at so a FRESH re-upload of a same-named file (created after
+    the article was compiled) reads as pending, not compiled.
     """
     resolved = await _resolve_scope(workspace_id, user_id, scope, action="kb.read")
 
@@ -671,19 +787,32 @@ async def list_ingestable_uploads(
         known_sources = await asyncio.to_thread(_sources_with_articles, resolved)
     except Exception:
         logger.debug("source scan failed for scope=%s", resolved, exc_info=True)
-        known_sources = set()
+        known_sources = {}
 
     uploads: list[dict[str, Any]] = []
     async for row in MongoFileStore().iter_by_workspace(workspace_id):
         if row.get("hide_from_ai"):
             continue
+        if row.get("pocket_id"):
+            continue  # pocket-private — not listable on the workspace surface
+        created_at = row.get("created_at")
         kb_article_id = row.get("kb_article_id")
         kb_scope = row.get("kb_scope")
-        has_article = bool(
-            (kb_article_id and (kb_scope is None or kb_scope == resolved))
-            or (row.get("filename") in known_sources)
-        )
-        created_at = row.get("created_at")
+        if kb_article_id:
+            has_article = bool(kb_scope is None or kb_scope == resolved)
+        else:
+            # Legacy fallback: only trust the filename match when THIS upload
+            # predates the article's compile — otherwise a new same-named
+            # upload would instantly read as compiled and drop out of the
+            # rebuild/poll candidates.
+            filename = row.get("filename")
+            compiled_at = _parse_compiled_at(
+                known_sources.get(filename) if filename in known_sources else None
+            )
+            created_cmp = _as_aware_utc(created_at)
+            has_article = bool(
+                compiled_at is not None and created_cmp is not None and created_cmp <= compiled_at
+            )
         uploads.append(
             {
                 "id": row.get("file_id"),

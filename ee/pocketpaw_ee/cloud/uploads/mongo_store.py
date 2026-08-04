@@ -2,7 +2,11 @@
 
 2026-08-04 (Living-wiki API): ``iter_by_workspace`` rows now also carry
 ``kb_article_id`` and ``kb_scope`` (the FL-11b ingest-tracking columns) so
-GET /knowledge/uploads can derive ``has_article`` without a second query.
+GET /knowledge/uploads can derive ``has_article`` without a second query,
+plus ``pocket_id`` so workspace-level listings can exclude pocket-private
+rows. Added ``reassign_kb_article`` — after a reingest recompiles an
+article under a new slug, the tracking rows pointing at the old id are
+moved to the new one so a later hide-from-AI purge hits the live copy.
 Additive — existing consumers of the dict shape are unchanged.
 2026-07-03 (FL-11b "hide-from-AI purge"): added ``set_kb_article`` — a
 workspace-scoped setter the FileReady listener uses to record the kb-go
@@ -145,6 +149,36 @@ class MongoFileStore:
         await doc.save()
         return doc
 
+    async def reassign_kb_article(
+        self,
+        workspace: str,
+        *,
+        old_article_id: str,
+        new_article_id: str,
+        scope: str,
+    ) -> int:
+        """Move FL-11b tracking from one article id to another (living-wiki).
+
+        A reingest can recompile an article under a NEW slug; any upload row
+        still tracking the old id would purge a dead article on a later
+        hide-from-AI toggle while the live copy survives. Workspace-scoped
+        like every other write here. Returns the number of rows updated
+        (usually 0 or 1). No-op when the ids are equal.
+        """
+        if old_article_id == new_article_id:
+            return 0
+        updated = 0
+        docs = await FileUpload.find(
+            FileUpload.workspace == workspace,
+            FileUpload.kb_article_id == old_article_id,
+        ).to_list()
+        for doc in docs:
+            doc.kb_article_id = new_article_id
+            doc.kb_scope = scope
+            await doc.save()
+            updated += 1
+        return updated
+
     async def rewrite_folder_prefix(
         self,
         workspace: str,
@@ -281,9 +315,11 @@ class MongoFileStore:
                 "collections": list(getattr(doc, "collections", []) or []),
                 "hide_from_ai": bool(getattr(doc, "hide_from_ai", False)),
                 # Living-wiki API: FL-11b ingest tracking, so /knowledge/uploads
-                # can derive has_article without a second query.
+                # can derive has_article without a second query; pocket_id so
+                # workspace-level listings can exclude pocket-private rows.
                 "kb_article_id": getattr(doc, "kb_article_id", None),
                 "kb_scope": getattr(doc, "kb_scope", None),
+                "pocket_id": getattr(doc, "pocket_id", None),
             }
 
     async def list_by_workspace(

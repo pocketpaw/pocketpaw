@@ -1,4 +1,9 @@
 # listeners.py — In-process subscribers for upload-related bus events.
+# Updated: 2026-08-04 (living-wiki review follow-up) — _extract_article_id now
+#   delegates to knowledge.extract_ingest_article_id: kb-go's real ingest
+#   receipt keys the id as "article" (finishIngest), which the inline
+#   id/article_id lookup never matched — so FL-11b tracking and the vector
+#   path silently never ran on real receipts.
 # Created: 2026-04-30 — Stage 1.B of "Files as Knowledge". Wires FileReady
 #   into the extraction chain and ingests the resulting text into the
 #   workspace KB scope. Pocket-scope routing lands in Stage 3.E.
@@ -227,16 +232,16 @@ async def index_uploaded_file(event: Event) -> None:
 
 
 def _extract_article_id(ingest_result) -> str | None:
-    """Pull the article id out of a kb-go ingest response.
+    """Pull the article id out of a kb-go ingest receipt.
 
-    kb-go returns ``{"id": "<uuid-or-slug>"}`` on success. We handle the
-    str-fallback case (kb-go falls through to raw stdout when JSON parsing
-    fails — a known shape from agents/knowledge.py:_kb).
+    Delegates to ``knowledge.extract_ingest_article_id`` — kb-go's actual
+    receipt keys the id as ``article`` (finishIngest), which the old inline
+    ``id``/``article_id`` lookup here never matched, so the FL-11b tracking
+    write (and the vector path) silently never ran for real receipts.
     """
-    if isinstance(ingest_result, dict):
-        article_id = ingest_result.get("id") or ingest_result.get("article_id")
-        return article_id if isinstance(article_id, str) else None
-    return None
+    from pocketpaw_ee.cloud.agents.knowledge import extract_ingest_article_id
+
+    return extract_ingest_article_id(ingest_result)
 
 
 async def _maybe_attach_vector(
