@@ -859,21 +859,38 @@ def _render_about_member_block(person: Person) -> str:
 
 
 async def _resolve_about_member(workspace_id: str, user_id: str) -> str | None:
-    """Fetch the member's Fabric ``Person`` and render the about-block, or ``None``.
+    """Render the about-block for this member, or ``None``.
 
     Pre-resolved (async) by every scope resolver and stashed on
     ``ScopeContext.about_member_block`` so the sync
-    ``build_behavior_instructions`` can append it without awaiting. Returns
-    ``None`` — meaning "no block, behave as today" — when:
+    ``build_behavior_instructions`` can append it without awaiting.
 
-    * the member has no materialized Person (a pre-existing / non-invited user);
-    * the Person carries no usable name (render returns "");
-    * the people read raised (degrades gracefully — a Fabric hiccup must never
-      block scope resolution or change the agent's behavior).
+    TWO SOURCES, IN ORDER, and the second one is why "who am I?" used to fail.
+    The Fabric ``Person`` is the rich source — name, role, team, focus — but it
+    is created by exactly one path, ``materialize_person_from_invite``. A member
+    who was never invited has no Person, and the founding admin of a workspace
+    is never invited: they created it. So the one block in the whole prompt that
+    says who the human is rendered NOTHING for the person most likely to be
+    using the product, and the agent answered "I don't know who you are" while
+    ``full_name`` sat in their user document the entire time. Confirmed live on
+    2026-08-04: ``about_member_block`` was ``None`` and the 36,608-char
+    instruction stack contained neither the member's name nor their id.
+
+    So a missing Person now falls back to the authenticated user record, which
+    always exists — that is what "authenticated" means. The fallback block is
+    deliberately THINNER: a name and an id, and no claim about role, team or
+    focus, because those genuinely are not known. Saying less is the point; a
+    block that invented a role would be worse than no block.
+
+    Returns ``None`` — "no block, behave as today" — only when the member cannot
+    be identified at all: no ids passed, or both reads fail. A Fabric hiccup
+    degrades to the user record rather than to silence.
     """
 
     if not workspace_id or not user_id:
         return None
+
+    person = None
     try:
         from pocketpaw_ee.cloud.people.service import get_person
 
@@ -882,11 +899,60 @@ async def _resolve_about_member(workspace_id: str, user_id: str) -> str | None:
         logger.debug(
             "about-member person read failed for %s/%s", workspace_id, user_id, exc_info=True
         )
+
+    if person is not None:
+        block = _render_about_member_block(person)
+        if block:
+            return block
+
+    return await _about_member_from_user_record(user_id)
+
+
+async def _about_member_from_user_record(user_id: str) -> str | None:
+    """Minimal about-block built from the authenticated user, for members with no Person.
+
+    Routes through ``auth.service.resolve_display_names`` rather than reading
+    the Beanie user model here — that helper is the sanctioned accessor (its
+    own docstring says callers go through it so façade layers never touch the
+    model directly) and it already implements the name preference we want:
+    ``full_name`` → ``email`` → the id.
+
+    Returns ``None`` when the lookup yields nothing usable or when the resolved
+    "name" is just the id echoed back, because ``who: 69f88339dc…`` tells the
+    agent nothing it does not already have from the ``id:`` line.
+    """
+    try:
+        from pocketpaw_ee.cloud.auth.service import resolve_display_names
+
+        names = await resolve_display_names({user_id})
+    except Exception:  # noqa: BLE001 — same degrade-never-raise contract as above
+        logger.debug("about-member user fallback failed for %s", user_id, exc_info=True)
         return None
-    if person is None:
+
+    display = (names.get(user_id) or "").strip()
+    if not display or display == user_id:
         return None
-    block = _render_about_member_block(person)
-    return block or None
+
+    # PHRASED INLINE, AND THE DISCLAIMER IS NOT DECORATION. The first draft was
+    # a ``who: {display}`` field, which is ambiguous in the exact case this
+    # fallback exists to serve: the founding admin's ``full_name`` is very often
+    # the literal string "Admin" (it is on this deploy). A model reading
+    # ``who: Admin`` next to "their role is not on file" has two readings and an
+    # obvious way to resolve the tension — decide that Admin IS the role. Which
+    # is a guess, about the one field this block is trying to stop it guessing.
+    #
+    # So the name is stated as a name, in a sentence, and the disclaimer names
+    # the trap rather than gesturing at it. Same reason the block still refuses
+    # to carry a role: an account label is not an org role, and "Owner",
+    # "Support" and "Admin" are all common display names.
+    return (
+        "<about-member>\n"
+        f"You are talking to {display} (id: {user_id}).\n"
+        f"{display!r} is the display name on their account — it is NOT their "
+        "role. Their role, team and focus are not on file; do not infer them "
+        "from the name.\n"
+        "</about-member>"
+    )
 
 
 # ---------------------------------------------------------------------------
