@@ -85,6 +85,17 @@ gained a ``pocket_id`` kwarg and ``current_pocket_id()`` was added beside
 The identity-token tuple grew from 3 to 4 entries; existing 3-arg callers are
 unaffected (``pocket_id`` defaults to ``None``).
 
+Changes: 2026-08-03 (feat/about-member-id) — the ``<about-member>`` block
+carries the member's ``user_id``. It described people by ``name · role · team``
+and nothing else, so two members called the same thing rendered byte-identical
+blocks and the agent had no way to tell which one it was addressing. That is not
+an edge case here: ``_resolve_about_member`` runs from every scope resolver and
+is NOT gated on room type, unlike the member-private ``user:`` KB scope, so it
+is live in shared rooms. The id is ``person.user_id`` — the same opaque cloud id
+the KB scope keys on — and not ``person.id``, which is
+``person-{workspace}-{user}`` and would put a tenant id in the prompt for no
+gain. An id-less Person still renders its block, minus the line.
+
 Changes: 2026-06-08 (feat/vip-agent-block, pp#1367) — ``ScopeContext`` carries
 an optional ``about_member_block``: a concise, token-capped "about this member"
 string (name · role · team · one-line focus) rendered from the member's Fabric
@@ -825,6 +836,16 @@ def _render_about_member_block(person: Person) -> str:
         "tailor your help to their role and focus.",
         f"  who: {identity}",
     ]
+    # The id, because a name does not identify anybody. Rooms are shared and two
+    # members can be called the same thing; without this the block renders
+    # identically for both, the agent cannot tell which one it is addressing, and
+    # anything it attributes to "Alex" is ambiguous the moment a second Alex
+    # joins. ``user_id`` and not ``person.id`` — the latter is
+    # ``person-{workspace}-{user}``, which carries the same information plus a
+    # tenant id the model has no use for. Same opaque cloud id the KB scope
+    # already keys on, never an email.
+    if person.user_id:
+        lines.append(f"  id: {person.user_id}")
     if focus:
         lines.append(f"  focus: {focus}")
     lines.append("</about-member>")

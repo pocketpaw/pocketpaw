@@ -1,5 +1,8 @@
 # tests/cloud/chat/test_about_member_block.py — agent member-orientation block.
 # Created: 2026-06-08 (feat/vip-agent-block, pp#1367).
+# Updated: 2026-08-03 (feat/about-member-id) — adds contract 5: the block carries
+#   the member's user_id, so two members sharing a name are distinguishable. The
+#   block identified people by name alone, and rooms are shared.
 #
 # Locks the contract for the "about this member" block that orients the chat
 # agent to who is talking (pp#1367):
@@ -42,11 +45,12 @@ def _person(
     role: str = "admin",
     group: str | None = "team-eng",
     focus: str = "Own the billing rewrite",
+    user_id: str = "user-7",
 ) -> Person:
     return Person(
-        id="person-ws1-user-7",
+        id=f"person-ws1-{user_id}",
         workspace_id="ws1",
-        user_id="user-7",
+        user_id=user_id,
         name=name,
         email="ada@x.c",
         avatar="",
@@ -221,3 +225,49 @@ class TestResolveAboutMember:
         # No workspace / user ⇒ no read attempted, None returned.
         assert await _resolve_about_member("", "user-7") is None
         assert await _resolve_about_member("ws1", "") is None
+
+
+class TestTwoMembersWithOneName:
+    """A name does not identify anybody, and rooms are shared.
+
+    Added 2026-08-03. The block carried name / role / team / focus and no id, so
+    two members called the same thing rendered byte-identical blocks: the agent
+    could not tell which one it was addressing, and anything it attributed to
+    "Alex" became ambiguous the moment a second Alex joined. Not hypothetical —
+    ``_resolve_about_member`` is called by every scope resolver and is NOT gated
+    on room type, unlike the member-private ``user:`` KB scope.
+    """
+
+    def test_same_name_and_role_still_render_different_blocks(self) -> None:
+        """MUTATION: drop the ``id:`` line from ``_render_about_member_block``.
+
+        Both members render identically and this fails. (Applied 2026-08-03.)
+        """
+        one = _render_about_member_block(_person(name="Alex", user_id="user-a"))
+        two = _render_about_member_block(_person(name="Alex", user_id="user-b"))
+        assert one != two, "two members sharing a name are indistinguishable to the agent"
+        assert "user-a" in one
+        assert "user-b" in two
+
+    def test_the_id_is_the_cloud_user_id_not_the_fabric_object_id(self) -> None:
+        """``person.id`` is ``person-{workspace}-{user}`` and leaks a tenant id.
+
+        The block should carry the same opaque cloud id the KB scope keys on, and
+        nothing more.
+
+        MUTATION: render ``person.id`` instead of ``person.user_id``. The
+        workspace assertion fails. (Applied 2026-08-03.)
+        """
+        block = _render_about_member_block(_person(user_id="user-7"))
+        assert "  id: user-7" in block
+        assert "ws1" not in block, "the block must not carry the workspace id"
+
+    def test_a_member_with_no_id_still_renders(self) -> None:
+        """An id-less Person must not lose its block — degrade, never drop.
+
+        MUTATION: make the ``id:`` line unconditional. This raises or renders a
+        bare ``id:`` line. (Applied 2026-08-03.)
+        """
+        block = _render_about_member_block(_person(user_id=""))
+        assert "Alex" in block or "Ada" in block
+        assert "id:" not in block
