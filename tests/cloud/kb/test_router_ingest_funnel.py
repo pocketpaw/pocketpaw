@@ -72,7 +72,9 @@ async def test_ingest_text_without_key_uses_article_json_funnel(monkeypatch):
     """Keyless box: the route must produce the pre-compiled --article-json call."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _install_compiler(monkeypatch)
-    spy = _SubprocessSpy([(0, json.dumps({"id": "art-r1"}), "")])
+    spy = _SubprocessSpy(
+        [(0, json.dumps({"id": "art-r1", "compiled_with": "pocketpaw-agent:claude_agent_sdk"}), "")]
+    )
     monkeypatch.setattr(knowledge.subprocess, "run", spy)
 
     with _patch_candidates():
@@ -123,7 +125,9 @@ async def test_ingest_url_routes_through_funnel(monkeypatch):
     """The URL route extracts here but ingests through the funnel."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _install_compiler(monkeypatch)
-    spy = _SubprocessSpy([(0, json.dumps({"id": "art-r3"}), "")])
+    spy = _SubprocessSpy(
+        [(0, json.dumps({"id": "art-r3", "compiled_with": "pocketpaw-agent:claude_agent_sdk"}), "")]
+    )
     monkeypatch.setattr(knowledge.subprocess, "run", spy)
 
     with (
@@ -142,6 +146,28 @@ async def test_ingest_url_routes_through_funnel(monkeypatch):
     payload = json.loads(spy.calls[0]["input"])
     assert payload["raw_text"] == "page text"
     assert payload["article"]["source"] == "https://example.test/page"
+
+
+@pytest.mark.asyncio
+async def test_ingest_text_old_binary_missing_compiled_with_maps_to_500(monkeypatch):
+    """Old binaries silently ignore --article-json and exit 0 without a
+    compiled_with key; the funnel's missing-key detector must surface at the
+    REST door as a 500 — inherited automatically, not re-implemented here."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _install_compiler(monkeypatch)
+    spy = _SubprocessSpy([(0, json.dumps({"id": "art-old-r"}), "")])
+    monkeypatch.setattr(knowledge.subprocess, "run", spy)
+
+    with _patch_candidates():
+        with pytest.raises(CloudError) as exc:
+            await kb_router.ingest_text(
+                IngestTextRequest(text="doc", source="manual"),
+                workspace_id=WORKSPACE,
+                user_id=CALLER,
+            )
+
+    assert exc.value.code == "kb.ingest_failed"
+    assert "does not support `ingest --article-json`" in exc.value.message
 
 
 @pytest.mark.asyncio

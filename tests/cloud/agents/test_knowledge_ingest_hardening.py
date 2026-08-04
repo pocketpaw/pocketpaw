@@ -120,7 +120,10 @@ async def test_no_key_compiles_with_agent_and_pipes_article_json(monkeypatch):
 async def test_no_key_tolerates_fenced_json(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _install_compiler(monkeypatch, f"```json\n{json.dumps(_ARTICLE)}\n```")
-    spy = _install_spy(monkeypatch, [(0, json.dumps({"id": "art-2"}), "")])
+    spy = _install_spy(
+        monkeypatch,
+        [(0, json.dumps({"id": "art-2", "compiled_with": "pocketpaw-agent:claude_agent_sdk"}), "")],
+    )
 
     result = await KnowledgeService.ingest_text_to_scope("pocket:p1", "some text", source="s")
 
@@ -189,14 +192,25 @@ async def test_compile_verbatim_echo_of_large_doc_rejected(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_old_binary_without_article_json_fails_loudly(monkeypatch):
-    """An old kb binary rejects --article-json; the error must say so, not poison."""
+async def test_old_binary_silently_ignoring_article_json_fails_loudly(monkeypatch, caplog):
+    """Reality check (live-smoke confirmed): kb-go parses flags by hand and
+    silently IGNORES unknown flags. An old binary never errors on
+    --article-json — it stores the JSON payload verbatim via its keyless
+    fallback and exits 0 with old-style output that has NO compiled_with key.
+    The missing key is the version-proof old-binary signal and must raise
+    with an upgrade hint naming the already-stored article for purging."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _install_compiler(monkeypatch, json.dumps(_ARTICLE))
-    _install_spy(monkeypatch, [(1, "", "flag provided but not defined: -article-json")])
+    # Old-style success output: exit 0, id present, compiled_with absent.
+    _install_spy(monkeypatch, [(0, json.dumps({"id": "art-old", "title": "raw"}), "")])
 
-    with pytest.raises(RuntimeError, match="does not support `ingest --article-json`"):
-        await KnowledgeService.ingest_text_to_scope("workspace:w1", "doc", source="a.md")
+    with caplog.at_level(logging.WARNING, logger="pocketpaw_ee.cloud.agents.knowledge"):
+        with pytest.raises(RuntimeError, match="does not support `ingest --article-json`"):
+            await KnowledgeService.ingest_text_to_scope("workspace:w1", "doc", source="a.md")
+
+    warning = "\n".join(r.getMessage() for r in caplog.records)
+    assert "workspace:w1" in warning
+    assert "art-old" in warning
 
 
 # --------------------------------------------------------------------------- #

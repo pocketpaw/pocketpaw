@@ -13,8 +13,12 @@
 #   soft (returns "") so a slow KB can never stall a chat turn; _kb translates
 #   subprocess timeouts into clear RuntimeErrors. ingest_file's text-file path
 #   now routes through ingest_text_to_scope so it gets the same guarantees.
-#   Requires the kb-go binary with --article-json support; an older binary
-#   errors loudly with an upgrade hint instead of poisoning the scope.
+#   Requires the kb-go binary with --article-json support. Old-binary
+#   detection (2026-08-04 follow-up): kb-go silently IGNORES unknown flags,
+#   so an old binary exits 0 after storing the payload verbatim — the
+#   version-proof signal is the MISSING compiled_with key in the result
+#   (the paired binary always emits it); on that path we raise with an
+#   upgrade hint and name the article for purging.
 # Updated: 2026-07-30 — Paw Bar reply sources. Added the scope-form read pair
 #   search_articles_for_scope / list_articles_for_scope (raw {id, title, summary}
 #   hit dicts, mirroring ingest_text_to_scope's "caller owns the scope shape"
@@ -153,7 +157,9 @@ def _kb(*args: str, input_text: str | None = None, timeout: int = 120) -> dict |
         return result.stdout.strip()
 
 
-def _check_ingest_result(result: dict | list | str, scope: str) -> dict | list | str:
+def _check_ingest_result(
+    result: dict | list | str, scope: str, *, require_compiled_with: bool = False
+) -> dict | list | str:
     """Reject verbatim-fallback articles (defense in depth).
 
     kb-go marks an article it stored WITHOUT LLM compilation as
@@ -162,6 +168,16 @@ def _check_ingest_result(result: dict | list | str, scope: str) -> dict | list |
     verbatim article poisons the scope — search pays O(raw corpus) on every
     chat turn for junk snippets — so any ingest that produced one is treated
     as a failure, never a success.
+
+    ``require_compiled_with`` is the old-binary detector for the
+    ``--article-json`` path. kb-go parses flags by hand and silently IGNORES
+    unknown flags — an old binary never errors on ``--article-json``; it
+    reads the ``{"raw_text": ..., "article": ...}`` payload from stdin as
+    raw text, stores the JSON wrapper verbatim via its keyless fallback, and
+    exits 0 with old-style output that predates the ``compiled_with`` field.
+    So on that path a MISSING ``compiled_with`` key IS the old-binary signal
+    (the paired binary always emits it), and the poison has already landed —
+    the error names the article so an operator can purge it.
     """
     if isinstance(result, dict) and result.get("compiled_with") == _FALLBACK_COMPILED_WITH:
         article_id = result.get("id") or result.get("article_id") or result.get("article") or "?"
@@ -176,6 +192,27 @@ def _check_ingest_result(result: dict | list | str, scope: str) -> dict | list |
         raise RuntimeError(
             f"kb ingest produced a verbatim fallback article (scope={scope}, "
             f"article_id={article_id}); refusing to accept uncompiled content"
+        )
+    if require_compiled_with and (not isinstance(result, dict) or "compiled_with" not in result):
+        article_id = "?"
+        if isinstance(result, dict):
+            article_id = (
+                result.get("id") or result.get("article_id") or result.get("article") or "?"
+            )
+        logger.warning(
+            "kb ingest --article-json returned no compiled_with (scope=%s, article_id=%s): "
+            "the kb binary silently ignored the flag and stored the payload VERBATIM. "
+            "Purge the article (kb delete %s --scope %s) and deploy the paired kb-go build.",
+            scope,
+            article_id,
+            article_id,
+            scope,
+        )
+        raise RuntimeError(
+            f"kb binary does not support `ingest --article-json` — it silently ignored "
+            f"the flag and stored the payload verbatim (scope={scope}, "
+            f"article_id={article_id}). Deploy the paired kb-go build (binary: {KB_BIN}) "
+            f"and purge the article (kb delete {article_id} --scope {scope})."
         )
     return result
 
@@ -349,6 +386,10 @@ class KnowledgeService:
                 timeout=_ARTICLE_JSON_INGEST_TIMEOUT_S,
             )
         except RuntimeError as exc:
+            # Belt-and-braces only: current kb-go parses flags by hand and
+            # silently IGNORES unknown ones, so an old binary never produces
+            # a flag error. The PRIMARY old-binary detector is the missing
+            # ``compiled_with`` key below (require_compiled_with).
             msg = str(exc)
             if "unknown flag" in msg or "flag provided but not defined" in msg:
                 raise RuntimeError(
@@ -357,7 +398,10 @@ class KnowledgeService:
                     f"(binary: {KB_BIN}). Original error: {msg}"
                 ) from exc
             raise
-        return _check_ingest_result(result, scope)
+        # The paired binary ALWAYS emits compiled_with on this path; a result
+        # without it means the flag was silently ignored (old binary) and the
+        # payload was stored verbatim — reject loudly, naming the article.
+        return _check_ingest_result(result, scope, require_compiled_with=True)
 
     @staticmethod
     async def ingest_text(agent_id: str, text: str, source: str = "manual") -> dict:
