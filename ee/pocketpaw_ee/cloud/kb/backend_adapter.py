@@ -2,6 +2,10 @@
 # usable as a knowledge_base CompilerBackend.
 #
 # Created: 2026-04-06
+# Updated: 2026-08-04 — an unavailable backend now raises RuntimeError instead
+#   of returning "" (which surfaced downstream as a misleading "empty compiler
+#   response"). The ingest-hardening compile path treats any failure as fatal,
+#   so the error must say what actually went wrong.
 # This bridges the standalone knowledge-base package with PocketPaw's
 # agent registry, so KB compilation uses whatever LLM backend is active.
 
@@ -43,7 +47,10 @@ class PocketPawCompilerBackend:
         backend_cls = get_backend_class(backend_name)
         if not backend_cls:
             logger.warning("KB compiler backend '%s' not available", backend_name)
-            return ""
+            raise RuntimeError(
+                f"agent backend {backend_name!r} is not available for KB compilation "
+                "(not registered in the agent registry)"
+            )
 
         agent = backend_cls(settings)
         chunks: list[str] = []

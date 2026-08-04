@@ -1,5 +1,10 @@
 # tests/cloud/kb/test_router_scope.py — REST-door scope-override leak-prevention.
 #
+# Updated: 2026-08-04 — ingest routes now go through the hardened
+# ``KnowledgeService.ingest_text_to_scope`` funnel; the happy-path ingest test
+# spies the funnel instead of ``_kb``. Deny-path assertions are unchanged (the
+# 403 fires before any ingest machinery runs).
+#
 # Created: 2026-06-08 (VIP Onboarding Phase B) — the SECOND door into the
 # kb-go scope store. The chat-path gate (``_member_private_user_scope`` in
 # chat/agent_service.py) is closed, but the ``/api/v1/kb/*`` REST router
@@ -254,13 +259,21 @@ async def test_search_allows_own_user_override():
 
 @pytest.mark.asyncio
 async def test_ingest_text_allows_own_user_override():
-    """WRITE to the caller's OWN private KB is allowed."""
-    spy = MagicMock(return_value={"ok": True})
-    with _patch_candidates(), _patch_kb(spy):
+    """WRITE to the caller's OWN private KB is allowed.
+
+    2026-08-04: the ingest routes go through the hardened
+    ``KnowledgeService.ingest_text_to_scope`` funnel now (not a direct
+    ``_kb`` call), so the spy sits on the funnel. The funnel's own argv
+    contract is pinned in tests/cloud/kb/test_router_ingest_funnel.py.
+    """
+    spy = AsyncMock(return_value={"ok": True})
+    with (
+        _patch_candidates(),
+        patch.object(kb_router.KnowledgeService, "ingest_text_to_scope", spy),
+    ):
         await kb_router.ingest_text(
             IngestTextRequest(text="note", source="manual", scope=f"user:{CALLER}"),
             workspace_id=WORKSPACE,
             user_id=CALLER,
         )
-    args = spy.call_args.args
-    assert args[args.index("--scope") + 1] == f"user:{CALLER}"
+    spy.assert_awaited_once_with(f"user:{CALLER}", "note", "manual")

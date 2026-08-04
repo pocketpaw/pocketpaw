@@ -1,4 +1,31 @@
 # knowledge.py — Agent knowledge service via the kb-go binary.
+# Updated: 2026-08-04 — Ingest hardening (silent-poisoning fix). On boxes with
+#   no ANTHROPIC_API_KEY (the Claude Code agent backend deployment), kb's own
+#   LLM compile used to fail and kb silently stored every doc VERBATIM — a
+#   54-article / 4M-word scope that every chat turn then paid to search.
+#   Three changes: (1) ingest_text_to_scope now compiles the article with
+#   PocketPaw's own agent backend (PocketPawCompilerBackend) when the key is
+#   absent and pipes the pre-compiled article to `kb ingest --article-json`;
+#   compile failure RAISES — never a verbatim fallback. (2) Any ingest result
+#   with compiled_with == "none (fallback)" is rejected loudly (defense in
+#   depth against older binaries / --allow-fallback misuse). Note: the
+#   missing-compiled_with old-binary detector below applies ONLY to the
+#   --article-json path — the keyed plain-ingest path deliberately tolerates
+#   old-style output so a healthy keyed deployment on an old binary keeps
+#   working. (3) The chat-turn
+#   search path (search_context_for_scope) got a hard 5s timeout and fails
+#   soft (returns "") so a slow KB can never stall a chat turn; _kb translates
+#   subprocess timeouts into clear RuntimeErrors. ingest_file's text-file path
+#   now routes through ingest_text_to_scope so it gets the same guarantees;
+#   code files keep their AST treatment via a --lang hint derived from the
+#   source filename (stdin has no path for kb-go's own detectLanguage), and
+#   the keyless compile prompt is steered to document code structure.
+#   Requires the kb-go binary with --article-json support. Old-binary
+#   detection (2026-08-04 follow-up): kb-go silently IGNORES unknown flags,
+#   so an old binary exits 0 after storing the payload verbatim — the
+#   version-proof signal is the MISSING compiled_with key in the result
+#   (the paired binary always emits it); on that path we raise with an
+#   upgrade hint and name the article for purging.
 # Updated: 2026-07-30 — Paw Bar reply sources. Added the scope-form read pair
 #   search_articles_for_scope / list_articles_for_scope (raw {id, title, summary}
 #   hit dicts, mirroring ingest_text_to_scope's "caller owns the scope shape"
@@ -39,9 +66,54 @@ import mimetypes
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# The chat turn budget: a KB search that takes longer than this gets killed
+# and the turn proceeds without a KB block. See search_context_for_scope.
+SEARCH_CONTEXT_TIMEOUT_S = 5
+
+# `kb ingest --article-json` does no LLM work (the article arrives
+# pre-compiled), so a minute is generous.
+_ARTICLE_JSON_INGEST_TIMEOUT_S = 60
+
+# Ceiling for the agent-backend compile call. Compilation is one completion
+# over a capped excerpt, but the backend may cold-start a CLI process.
+_AGENT_COMPILE_TIMEOUT_S = 300
+
+# The compiler only sees this much of the raw text. The FULL raw text is
+# still stored by kb (raw_text in the --article-json payload) — the cap only
+# bounds the LLM prompt.
+_COMPILE_INPUT_CAP_CHARS = 80_000
+
+# Above this size, a compiled article must be meaningfully shorter than the
+# text the compiler saw, or we treat it as a verbatim echo and reject it.
+_LARGE_DOC_CHARS = 4_000
+_MAX_COMPILED_RATIO = 0.6
+
+# kb-go's marker for "compile failed, stored verbatim". We never accept it.
+_FALLBACK_COMPILED_WITH = "none (fallback)"
+
+# Mirror of kb-go's detectLanguage: source-filename suffixes whose stdin
+# ingest should carry a ``--lang`` hint so kb-go runs its AST parse
+# (parseCode) on the text — the file PATH no longer reaches kb, so the
+# hint is the only way it learns the language. Values are the canonical
+# spellings kb-go's langToExt accepts.
+_CODE_LANG_BY_SUFFIX = {
+    ".go": "go",
+    ".py": "python",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+}
+
+
+def _lang_for_source(source: str) -> str | None:
+    """Language hint for a source filename, or ``None`` for non-code docs."""
+    return _CODE_LANG_BY_SUFFIX.get(Path(source).suffix.lower())
 
 
 def _resolve_kb_bin() -> str:
@@ -99,6 +171,9 @@ def _kb(*args: str, input_text: str | None = None, timeout: int = 120) -> dict |
             "or set POCKETPAW_KB_BIN to the binary path (e.g. /path/to/kb-go/kb), "
             "or place the workspace-local checkout at <paw-workspace>/kb-go/kb."
         )
+    except subprocess.TimeoutExpired:
+        logger.warning("kb timed out after %ds: %s", timeout, " ".join(cmd[:4]))
+        raise RuntimeError(f"kb timed out after {timeout}s: {' '.join(cmd[:4])}")
     if result.returncode != 0:
         logger.warning("kb failed (exit %d): %s", result.returncode, result.stderr[:200])
         raise RuntimeError(f"kb failed: {result.stderr[:200]}")
@@ -106,6 +181,203 @@ def _kb(*args: str, input_text: str | None = None, timeout: int = 120) -> dict |
         return json.loads(result.stdout)
     except json.JSONDecodeError:
         return result.stdout.strip()
+
+
+def _check_ingest_result(
+    result: dict | list | str, scope: str, *, require_compiled_with: bool = False
+) -> dict | list | str:
+    """Reject verbatim-fallback articles (defense in depth).
+
+    kb-go marks an article it stored WITHOUT LLM compilation as
+    ``compiled_with == "none (fallback)"`` (older binaries did this silently
+    on compile failure; newer ones only with ``--allow-fallback``). A
+    verbatim article poisons the scope — search pays O(raw corpus) on every
+    chat turn for junk snippets — so any ingest that produced one is treated
+    as a failure, never a success.
+
+    ``require_compiled_with`` is the old-binary detector for the
+    ``--article-json`` path. kb-go parses flags by hand and silently IGNORES
+    unknown flags — an old binary never errors on ``--article-json``; it
+    reads the ``{"raw_text": ..., "article": ...}`` payload from stdin as
+    raw text, stores the JSON wrapper verbatim via its keyless fallback, and
+    exits 0 with old-style output that predates the ``compiled_with`` field.
+    So on that path a MISSING ``compiled_with`` key IS the old-binary signal
+    (the paired binary always emits it), and the poison has already landed —
+    the error names the article so an operator can purge it.
+    """
+    if isinstance(result, dict) and result.get("compiled_with") == _FALLBACK_COMPILED_WITH:
+        article_id = result.get("id") or result.get("article_id") or result.get("article") or "?"
+        logger.warning(
+            "kb ingest stored a VERBATIM fallback article (scope=%s, article_id=%s); "
+            "rejecting — the scope may need a purge (kb delete %s --scope %s)",
+            scope,
+            article_id,
+            article_id,
+            scope,
+        )
+        raise RuntimeError(
+            f"kb ingest produced a verbatim fallback article (scope={scope}, "
+            f"article_id={article_id}); refusing to accept uncompiled content"
+        )
+    if require_compiled_with and (not isinstance(result, dict) or "compiled_with" not in result):
+        article_id = "?"
+        if isinstance(result, dict):
+            article_id = (
+                result.get("id") or result.get("article_id") or result.get("article") or "?"
+            )
+        logger.warning(
+            "kb ingest --article-json returned no compiled_with (scope=%s, article_id=%s): "
+            "the kb binary silently ignored the flag and stored the payload VERBATIM. "
+            "Purge the article (kb delete %s --scope %s) and deploy the paired kb-go build.",
+            scope,
+            article_id,
+            article_id,
+            scope,
+        )
+        raise RuntimeError(
+            f"kb binary does not support `ingest --article-json` — it silently ignored "
+            f"the flag and stored the payload verbatim (scope={scope}, "
+            f"article_id={article_id}). Deploy the paired kb-go build (binary: {KB_BIN}) "
+            f"and purge the article (kb delete {article_id} --scope {scope})."
+        )
+    return result
+
+
+def _parse_article_json(raw: str) -> dict:
+    """Extract the article JSON object from an LLM response.
+
+    Tolerates markdown fences and stray prose around the object; raises
+    ``ValueError`` when no JSON object can be recovered.
+    """
+    text = (raw or "").strip()
+    if not text:
+        raise ValueError("empty compiler response")
+    candidates = [text]
+    if "```" in text:
+        # Take the first fenced block's body.
+        parts = text.split("```")
+        if len(parts) >= 3:
+            body = parts[1]
+            if body.startswith("json"):
+                body = body[4:]
+            candidates.append(body.strip())
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(text[start : end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError(f"compiler response is not a JSON object: {text[:200]!r}")
+
+
+def _validate_compiled_article(article: dict, *, compile_input_len: int, source: str) -> dict:
+    """Normalize + sanity-check a backend-compiled article.
+
+    Raises ``ValueError`` on garbage: empty title/content, or (for large
+    docs) content that isn't meaningfully shorter than what the compiler
+    saw — that's a verbatim echo, exactly the poisoning we're preventing.
+    """
+    title = str(article.get("title") or "").strip()
+    content = str(article.get("content") or "").strip()
+    if not title or not content:
+        raise ValueError("compiled article is missing a title or content")
+    compiled_cap = compile_input_len * _MAX_COMPILED_RATIO
+    if compile_input_len > _LARGE_DOC_CHARS and len(content) > compiled_cap:
+        raise ValueError(
+            f"compiled article is not a compression: content is {len(content)} chars "
+            f"against a {compile_input_len}-char input (limit "
+            f"{_MAX_COMPILED_RATIO:.0%}) — looks like a verbatim echo"
+        )
+    summary = str(article.get("summary") or "").strip()
+    concepts = [str(c).strip() for c in article.get("concepts") or [] if str(c).strip()]
+    categories = [str(c).strip() for c in article.get("categories") or [] if str(c).strip()]
+    return {
+        "title": title,
+        "summary": summary,
+        "content": content,
+        "concepts": concepts,
+        "categories": categories,
+        "source": source,
+    }
+
+
+async def _compile_article_with_agent(text: str, source: str, lang: str | None = None) -> dict:
+    """Compile ``text`` into a kb article using PocketPaw's own agent backend.
+
+    This is the no-ANTHROPIC_API_KEY path: kb's internal LLM compile cannot
+    run, so we produce the article with the same backend infrastructure the
+    chat runtime uses (``PocketPawCompilerBackend`` → agent registry → the
+    active backend, e.g. the Claude Code SDK backend which authenticates via
+    the CLI, not the API key).
+
+    ``lang`` (when the source is a recognized code file) steers the article
+    toward documenting code structure instead of prose-summarizing — the
+    keyless stand-in for the AST parse kb-go runs on the keyed path.
+
+    Failures raise: compile timeouts and invalid/garbage articles are
+    translated to ``RuntimeError``; backend-level errors (an unavailable
+    backend, a failing completion) propagate as raised. Either way callers
+    must NEVER fall back to verbatim ingestion.
+    """
+    from pocketpaw.config import get_settings
+    from pocketpaw_ee.cloud.kb.backend_adapter import PocketPawCompilerBackend
+
+    excerpt = text[:_COMPILE_INPUT_CAP_CHARS]
+    truncated = len(text) > len(excerpt)
+    code_rule = (
+        f"- The document is {lang} source code: in the content, document its "
+        "structure — the module's purpose, key functions and classes with their "
+        "signatures, and exports — rather than summarizing it as prose.\n"
+        if lang
+        else ""
+    )
+    prompt = (
+        "Compile the document below into a knowledge-base article. Respond with "
+        "ONLY one JSON object, no prose and no markdown fences:\n"
+        '{"title": "...", "summary": "...", "content": "...", '
+        '"concepts": ["..."], "categories": ["..."]}\n\n'
+        "Rules:\n"
+        "- title: short and descriptive.\n"
+        "- summary: at most 2 sentences.\n"
+        "- content: a well-structured wiki-style article (markdown headings and "
+        "lists) that COMPRESSES the document — capture the facts, structure, "
+        "names, and numbers; do NOT reproduce the document verbatim.\n"
+        + code_rule
+        + "- concepts: 3-10 key concepts.\n"
+        "- categories: 1-3 broad categories.\n\n"
+        f"Source: {source}\n"
+        + ("(Document truncated for compilation; compress what you see.)\n" if truncated else "")
+        + f'Document:\n"""\n{excerpt}\n"""'
+    )
+    backend = PocketPawCompilerBackend()
+    try:
+        raw = await asyncio.wait_for(
+            backend.complete(
+                prompt,
+                system_prompt=(
+                    "You are a knowledge-base article compiler. "
+                    "Output ONLY a single valid JSON object."
+                ),
+            ),
+            timeout=_AGENT_COMPILE_TIMEOUT_S,
+        )
+    except TimeoutError:
+        raise RuntimeError(
+            f"agent-backend article compile timed out after {_AGENT_COMPILE_TIMEOUT_S}s "
+            f"(source={source!r})"
+        )
+    try:
+        article = _validate_compiled_article(
+            _parse_article_json(raw), compile_input_len=len(excerpt), source=source
+        )
+    except ValueError as exc:
+        raise RuntimeError(f"agent-backend article compile failed for {source!r}: {exc}")
+    article["compiled_with"] = f"pocketpaw-agent:{get_settings().agent_backend}"
+    return article
 
 
 class KnowledgeService:
@@ -123,10 +395,59 @@ class KnowledgeService:
         ``scope`` is the literal scope string the kb binary understands
         (e.g. ``"workspace:w1"``, ``"agent:a1"``, ``"pocket:p1"``). No
         validation here — kb-go rejects unknown scope shapes itself.
+
+        Compilation strategy (2026-08-04 hardening):
+
+        * ``ANTHROPIC_API_KEY`` set → plain ``kb ingest``; kb compiles the
+          article with its own LLM call (fast, works, unchanged).
+        * No key (e.g. the Claude Code agent-backend deployment) → compile
+          the article with PocketPaw's OWN agent backend and hand kb the
+          pre-compiled article via ``kb ingest --article-json``. kb makes no
+          LLM call of its own on this path.
+
+        Either way, a compile failure RAISES. There is no verbatim
+        fallback — an uncompiled article poisons the scope and makes every
+        chat turn pay O(raw corpus) search cost for junk snippets.
         """
-        return await asyncio.to_thread(
-            _kb, "ingest", "--scope", scope, "--source", source, input_text=text
-        )
+        lang = _lang_for_source(source)
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            args = ["ingest", "--scope", scope, "--source", source]
+            if lang:
+                # Stdin carries no file path, so kb-go can't detect the
+                # language itself — the hint re-enables its AST parse.
+                args += ["--lang", lang]
+            result = await asyncio.to_thread(_kb, *args, input_text=text)
+            return _check_ingest_result(result, scope)
+
+        article = await _compile_article_with_agent(text, source, lang=lang)
+        payload = json.dumps({"raw_text": text, "article": article})
+        try:
+            result = await asyncio.to_thread(
+                _kb,
+                "ingest",
+                "--article-json",
+                "--scope",
+                scope,
+                input_text=payload,
+                timeout=_ARTICLE_JSON_INGEST_TIMEOUT_S,
+            )
+        except RuntimeError as exc:
+            # Belt-and-braces only: current kb-go parses flags by hand and
+            # silently IGNORES unknown ones, so an old binary never produces
+            # a flag error. The PRIMARY old-binary detector is the missing
+            # ``compiled_with`` key below (require_compiled_with).
+            msg = str(exc)
+            if "unknown flag" in msg or "flag provided but not defined" in msg:
+                raise RuntimeError(
+                    "kb binary does not support `ingest --article-json` — it predates "
+                    "the pre-compiled-article contract. Deploy the paired kb-go build "
+                    f"(binary: {KB_BIN}). Original error: {msg}"
+                ) from exc
+            raise
+        # The paired binary ALWAYS emits compiled_with on this path; a result
+        # without it means the flag was silently ignored (old binary) and the
+        # payload was stored verbatim — reject loudly, naming the article.
+        return _check_ingest_result(result, scope, require_compiled_with=True)
 
     @staticmethod
     async def ingest_text(agent_id: str, text: str, source: str = "manual") -> dict:
@@ -153,10 +474,11 @@ class KnowledgeService:
         if path.suffix.lower() in (".pdf", ".docx", ".doc", ".png", ".jpg", ".jpeg"):
             text = await _extract_file(file_path)
             return await KnowledgeService.ingest_text_to_scope(f"agent:{agent_id}", text, label)
-        # Text/code files go directly to kb (without intermediate extraction)
-        return await asyncio.to_thread(
-            _kb, "ingest", file_path, "--scope", f"agent:{agent_id}", "--source", label
-        )
+        # Text/code files: read in Python and route through the common ingest
+        # path so they get the same compile guarantees (agent-backend compile
+        # without an API key, verbatim-fallback rejection) as every other doc.
+        text = await asyncio.to_thread(path.read_text, encoding="utf-8", errors="replace")
+        return await KnowledgeService.ingest_text_to_scope(f"agent:{agent_id}", text, label)
 
     @staticmethod
     async def list_articles(agent_id: str) -> list[dict]:
@@ -247,22 +569,47 @@ class KnowledgeService:
         )
 
     @staticmethod
-    async def search_context_for_scope(scope: str, query: str, limit: int = 3) -> str:
+    async def search_context_for_scope(
+        scope: str,
+        query: str,
+        limit: int = 3,
+        *,
+        timeout: int = SEARCH_CONTEXT_TIMEOUT_S,
+    ) -> str:
         """Get formatted knowledge context for any kb-go scope.
 
         Runs ``_kb`` in a thread so the event loop isn't blocked by the
         subprocess call. See S2 in the code review for context.
+
+        This is the chat-turn path (``_build_kb_snippets_block`` calls it on
+        EVERY turn), so it is fail-soft with a hard timeout: on timeout or
+        any subprocess failure it logs a warning and returns ``""`` — the
+        caller simply skips the KB block. A slow or broken KB must never
+        stall a chat turn.
         """
-        result = await asyncio.to_thread(
-            _kb,
-            "search",
-            query,
-            "--scope",
-            scope,
-            "--limit",
-            str(limit),
-            "--context",
-        )
+        start = time.monotonic()
+        try:
+            result = await asyncio.to_thread(
+                _kb,
+                "search",
+                query,
+                "--scope",
+                scope,
+                "--limit",
+                str(limit),
+                "--context",
+                timeout=timeout,
+            )
+        except Exception:
+            logger.warning(
+                "kb search for chat context failed (scope=%s, elapsed=%.1fs, "
+                "timeout=%ds); returning empty context",
+                scope,
+                time.monotonic() - start,
+                timeout,
+                exc_info=True,
+            )
+            return ""
         return result if isinstance(result, str) else ""
 
     @staticmethod
