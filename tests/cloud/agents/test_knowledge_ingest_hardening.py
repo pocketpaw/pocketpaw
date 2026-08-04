@@ -222,6 +222,33 @@ async def test_fallback_marker_rejected_and_warned(monkeypatch, caplog):
 
 
 # --------------------------------------------------------------------------- #
+# ingest_file text-path reroute
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_ingest_file_text_path_routes_through_ingest_funnel(monkeypatch, tmp_path):
+    """Text/code files no longer hand kb a file path — they are read in Python
+    and piped through ingest_text_to_scope, so they get the same compile
+    guarantees as every other doc."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    spy = _install_spy(monkeypatch, [(0, json.dumps({"id": "art-f1", "compiled_with": "llm"}), "")])
+
+    notes = tmp_path / "notes.md"
+    notes.write_text("# Notes\n\nremember the thing", encoding="utf-8")
+
+    result = await KnowledgeService.ingest_file("a1", str(notes))
+
+    assert result["id"] == "art-f1"
+    cmd = spy.calls[0]["cmd"]
+    # Funnel argv (stdin ingest), NOT the old direct file-path form
+    # ["ingest", "<path>", "--scope", ...].
+    assert cmd[1:] == ["ingest", "--scope", "agent:a1", "--source", "notes.md", "--json"]
+    assert str(notes) not in cmd
+    assert spy.calls[0]["input"] == "# Notes\n\nremember the thing"
+
+
+# --------------------------------------------------------------------------- #
 # Chat-turn search guard
 # --------------------------------------------------------------------------- #
 
