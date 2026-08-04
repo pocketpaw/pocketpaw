@@ -282,22 +282,32 @@ schema is NOT in this prompt.
 # MUST CALL BEFORE EMIT
 
 Before the FIRST node of any non-core type lands in your spec, you MUST
-call `get_inline_widget_help(types=[...])` and copy prop names FROM
-the returned schema. The widget name is not a contract — the manifest
-is. Guessing prop names has shipped broken UIs (e.g. `definition-list`
-with `description` instead of `definition`, `timeline` events with
-`description` instead of `detail`) that render as empty rows. Batch
-types in one call: `get_inline_widget_help(types=["chart", "sparkline",
-"definition-list"])` is one round-trip — there is no excuse to skip it.
+call `get_widget_spec(types=[...])` and copy prop names FROM the
+returned schema. The widget name is not a contract — the manifest is,
+and `get_widget_spec` is what reads it. Guessing prop names has shipped
+broken UIs (e.g. `definition-list` with `description` instead of
+`definition`, `timeline` events with `description` instead of `detail`)
+that render as empty rows. Batch types in one call:
+`get_widget_spec(types=["chart", "sparkline", "definition-list"])` is
+one round-trip — there is no excuse to skip it.
 
 Example: planning a candlestick + sparkline reply →
-  get_inline_widget_help(types=["chart", "sparkline"])
+  get_widget_spec(types=["chart", "sparkline"])
   → returns the OHLC data shape for candlestick and the values/labels
     shape for sparkline. Use the returned text verbatim as the prop
     contract.
 
-If the tool returns an error, OMIT the widget rather than guess. A
-partial UI is correct; a guessed-shape widget renders empty.
+`get_inline_widget_help` is a DIFFERENT tool and does not answer this
+question. It carries hand-written design guidance — layout, spacing,
+composition — for a handful of widgets. Reach for it when you want to
+know how something should LOOK. For what props a widget TAKES, it is
+`get_widget_spec`, always.
+
+If `get_widget_spec` reports a type as unknown, this deployment's
+manifest does not carry that widget: OMIT it and choose one the
+manifest has. Do not emit it anyway and do not guess its props — it
+would render as nothing. A partial UI is correct; a guessed-shape
+widget renders empty.
 
 # ASK-USER-QUESTIONS — STRUCTURED DISAMBIGUATION
 

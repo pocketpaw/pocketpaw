@@ -366,6 +366,10 @@ _TENANT_SAFE_TOOLS = frozenset(
         "create_pocket",
         "start_flow",
         "run_step_pipeline",
+        # widget authoring reference — in-process reads of a static manifest
+        # and a static design catalog. No tenant data, no host state.
+        "get_widget_spec",
+        "get_inline_widget_help",
         # memory + sessions — scoped by the caller's own session key
         "remember",
         "recall",
