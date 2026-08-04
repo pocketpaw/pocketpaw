@@ -1,5 +1,14 @@
 # pocket.py — Pocket-surface preamble.
 #
+# Updated: 2026-08-03 (PA-9, feat/prompt-budget-measurement) — the 12-widget cut
+# is no longer a bare literal; it is ``WIDGET_PREVIEW_LIMIT`` in ``_helpers.py``,
+# beside ``PREAMBLE_MAX_CHARS``, because the two caps jointly bound this preamble
+# and neither could be reasoned about without the other. Measured: a widget line
+# is 36.2 chars, so this preamble renders at 609 chars against a 1500 cap. The
+# limit stays 12 — not for token cost, which is negligible, but because this
+# text is digested into ``cache_key`` below, so each extra widget listed is one
+# more edit that invalidates and costs a reconnect. That side is unmeasured.
+#
 # Updated: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
 # ``SurfacePreamble``: the same text, plus the cache key the ``surface`` prompt
 # layer is keyed on. This handler is the reason the key is the HANDLER's answer
@@ -59,6 +68,7 @@ import logging
 
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import (
+    WIDGET_PREVIEW_LIMIT,
     content_key,
     format_widget_line,
     meta_key,
@@ -107,9 +117,9 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         f'<current-pocket id="{pocket_id}" name="{name}" widgets="{len(widgets)}" />',
     ]
     if widgets:
-        rows = [format_widget_line(_AttrDict(w)) for w in widgets[:12]]
-        if len(widgets) > 12:
-            rows.append(f"... (+{len(widgets) - 12} more)")
+        rows = [format_widget_line(_AttrDict(w)) for w in widgets[:WIDGET_PREVIEW_LIMIT]]
+        if len(widgets) > WIDGET_PREVIEW_LIMIT:
+            rows.append(f"... (+{len(widgets) - WIDGET_PREVIEW_LIMIT} more)")
         parts.append(
             f'<pocket-widgets count="{len(widgets)}">\n' + "\n".join(rows) + "\n</pocket-widgets>"
         )

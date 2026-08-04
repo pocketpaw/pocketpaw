@@ -173,10 +173,29 @@ def _resolve_kb_scopes(ctx: KbContext | None, settings) -> list[str]:
 # with the numbers carried across unchanged. Two things the old table got wrong
 # were carried across too rather than fixed, because PA-9 is the task with the
 # measurements: it capped ``instructions``, a block this path never produced,
-# and it had no entry at all for ``pocket_context`` or ``current_pocket``, which
-# are therefore uncapped — ``current_pocket`` ``json.dumps`` a widget summary
-# into the prompt with no bound.
+# and it had no entry at all for ``pocket_context`` or ``current_pocket``.
+#
+# PA-9 (2026-08-03) closed that loop, and the second half above is now stale in
+# a way worth recording: ``current_pocket`` is NO LONGER unbounded. PA-8a put the
+# ceiling on the layer's INPUTS (``_WIDGET_SUMMARY_MAX_CHARS``) rather than on
+# its rendered text, which is why it is invisible from here — there is still no
+# ``max_chars``, and there correctly never will be, since this assembler's cap
+# truncates the tail and this block's tail is the ``get_pocket`` instruction.
+# Measured against the live layer: the block renders at 3,240 chars for a
+# 300-widget pocket and 3,241 for a 1,000-widget one, so it does not grow with
+# pocket size. ``pocket_context`` remains genuinely uncapped and unmeasured.
 
+# MEASURED 2026-08-03 (PA-9, scripts/evals/prompt_cache_eval.py --arm caps):
+# 32,000 chars is 8,874 tokens on the live route — our own prompt text runs 3.61
+# chars/token here, not the 4.0 the rules of thumb assume.
+#
+# KEPT at 32,000. The measurement that argues for keeping it is a caching one:
+# 8,874 tokens is comfortably above every Anthropic cache floor (512..4096, see
+# ``pocketpaw.llm.caching.CACHE_MIN_TOKENS``), so a byte-stable prompt assembled
+# at this budget is large enough to cache. Cutting the budget toward ~14,000
+# chars would drop a Haiku-4.5 prompt under its 4096-token floor and silently
+# forfeit the ~12x warm-turn saving — the budget would look thriftier per turn
+# and cost more per conversation.
 _DEFAULT_BUDGET_CHARS = 32_000
 
 

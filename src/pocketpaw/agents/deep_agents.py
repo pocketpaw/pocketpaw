@@ -8,6 +8,13 @@ Uses the Deep Agents SDK (pip install deepagents) which provides:
 
 Requires: pip install deepagents
 
+Updated 2026-08-03 (PA-9, feat/prompt-budget-measurement): ``_ANTHROPIC_CACHE_MIN_CHARS``
+is now measured. The value is unchanged at 4000, but the reasoning attached to it
+was wrong on all three counts — the chars/token ratio, the per-model floors, and
+the claim that a sub-floor marker costs a wasted cache write (it costs nothing).
+The constant's comment carries the numbers and the reason raising it would be a
+regression rather than a fix. Harness: ``scripts/evals/prompt_cache_eval.py``.
+
 Updated 2026-06-26 (integration/model-catalog-v2, MCG-11):
   * The Anthropic prompt-cache patch sources its ``cache_control`` marker from
     the universal ``pocketpaw.llm.caching._cache_control`` helper (single source
@@ -113,11 +120,34 @@ _OPENAI_PATCHED = False
 _ANTHROPIC_PATCHED = False
 
 # Threshold above which we tag the system block with ``cache_control``.
-# Anthropic's prompt-cache minimum is ~1024 tokens on Sonnet/Opus and
-# ~2048 on Haiku; one English token ≈ 4 chars, so 4000 chars is well
-# clear of the Sonnet floor but still excludes the small lifestyle
-# prompts the chat agent uses for greetings / one-shot facts. Tuned
-# conservatively — false positives only cost the cache-write overhead.
+#
+# MEASURED 2026-08-03 (PA-9, scripts/evals/prompt_cache_eval.py --arm threshold).
+# The value stays 4000, but every number in the comment that used to justify it
+# was wrong, and the conclusion it drew was backwards:
+#
+#   * "one English token ~ 4 chars" — our own prompt text measures 3.48
+#     chars/token, so 4000 chars is ~1,150 tokens, not 1,000.
+#   * "~1024 on Sonnet/Opus and ~2048 on Haiku" — Haiku 4.5's floor is 4096
+#     tokens (measured: 3,304 tokens did not cache, 4,478 did), and Opus runs
+#     512..4096 by generation. 4000 chars clears NO Anthropic floor except
+#     Opus 5's 512. In chars, Haiku 4.5's floor is about 14,300.
+#   * "false positives only cost the cache-write overhead" — they cost nothing.
+#     A marked and an unmarked sub-floor call billed identically ($0.001079 vs
+#     $0.001079). Below the floor the provider declines to cache silently; there
+#     is no write to pay for. Both calls were verifiably COLD, which is what
+#     makes that a marker comparison rather than a warm-vs-cold one: the sweep
+#     reports 0 cached tokens at 4000 chars on BOTH the cold and the warm turn,
+#     so nothing cached at that size for the second call to read.
+#
+# So this threshold is wrong in the harmless direction, and RAISING it to a
+# "correct" ~14,300 would be the actual regression: it would stop marking on
+# Opus 4.8 (floor 1024) and Opus 5 (floor 512), where prompts between 4k and
+# 14k chars cache today. A gate that is too permissive is inert; one that is
+# too strict silently forfeits a ~12x warm-turn saving. It stays at 4000.
+#
+# What this constant genuinely buys is therefore NOT cost avoidance — it is
+# keeping the marker off the small greeting/one-shot prompts, where it would be
+# noise in the request. Judge future edits on that, and on ``CACHE_MIN_TOKENS``.
 _ANTHROPIC_CACHE_MIN_CHARS = 4000
 
 # MCG-11 — byte-stable sentinel that identifies the pocket/site-GENERATOR
