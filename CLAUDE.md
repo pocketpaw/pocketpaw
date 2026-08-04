@@ -334,6 +334,81 @@ When you touch any `ee/pocketpaw_ee/cloud/<entity>/*.py` file for any reason —
 
 ---
 
+## Prompt rows must carry the id the tools take
+
+Applies to every prompt block that lists entities — cloud surface preambles
+(`ee/pocketpaw_ee/cloud/surface/handlers/`) and the channel prompt layers
+(`src/pocketpaw/prompt/`) alike.
+
+**The rule:** if any tool declares a required `<kind>_id`, every prompt row that
+lists `<kind>`s must carry that id.
+
+**Never hand-roll a row.** Use `pocketpaw.prompt.entity.entity_line(label,
+entity_id, **facts)`. `entity_id` is a required positional, so a row cannot
+silently omit it; pass `None` where there genuinely is no id and it renders a
+visible `id=?`.
+
+**Why:** four handlers independently rendered `- {name} (…)` with no id while
+`update_widget` required `widget_id`, so the prompt named widgets and pockets the
+agent could not address. Two pockets called "Sales" rendered identical rows and
+the tool call resolved to the wrong one silently. `rows.append(f"- {name} …")` is
+the obvious thing to type, which is why this is a gate and not a review note.
+
+**Enforcement** (`tests/cloud/surface/test_entity_id_contract.py`): an AST scan
+fails any hand-rolled row; allow-listed modules pin their row *count*, so an
+exempt file cannot grow a new one; and the set of addressable kinds is **derived
+from the MCP tool schemas**, so adding a tool with a required `site_id` fails the
+build until someone decides whether the sites preamble owes an id.
+
+**No id to render?** Use `unaddressed_line("<kind>", label, **facts)` — it emits
+no id, and the `<kind>` literal is *checked* against the tool schemas, so the
+exemption fails the moment a tool starts requiring that id. Prefer it over adding
+an allow-list entry.
+
+**Ids render short.** `entity_line` shows the last 8 characters
+(`id=…3f9a1c07`), and `ee/pocketpaw_ee/cloud/pockets/id_resolve.py` resolves a
+tail back to the whole id, scoped to the workspace/pocket, erroring on ambiguity
+rather than picking. The **tail**, not the head: an ObjectId starts with a
+timestamp, so 12 widgets created together share their first 20 characters.
+
+**Check the cap when you convert a list, and make the fixture realistic.** A test
+entity with no `id` measures rows ~23 chars shorter than production, and the cap
+test will pass while reporting headroom that isn't there.
+
+---
+
+## A gate is not a gate until a mutation has been observed to break it
+
+Applies to any test you are treating as protection — a contract test, a cap
+assertion, a security check, a regression guard.
+
+**Before claiming a test guards something, break the code on purpose and watch it
+fail.** Use `scripts/mutate.py`:
+
+```bash
+uv run python scripts/mutate.py --plan tests/mutations/<area>.json
+```
+
+A plan is a JSON list of `{label, file, find, replace, tests}`. The script applies
+each mutation, runs the tests, restores the file, and exits non-zero if any
+mutation **escaped** (tests still passed).
+
+**Why:** a passing test means the code and the test agree, which is also true when
+both are wrong. That is not hypothetical here — `updatedAt` never updated and
+every key on it reported "unchanged"; a `FunctionModel` double advertised native
+tool search and a deferred-loading probe reported 0% saving; a cap fixture with no
+`id` measured rows 23 chars short and kept passing; a positional-only test
+asserted a `TypeError` that came from a missing argument, not from the property it
+named. Each was found by mutation, not by review.
+
+**How to apply:** when you add or change a gate, add its mutations to a plan under
+`tests/mutations/` and run it. Docstrings in this repo name the mutation that
+breaks each test — that convention is only worth anything if the mutation was
+actually run, so run it. An escaping mutation is a bug in your test, not a
+curiosity.
+
+---
+
 ## Desktop Client (`client/`)
 
 The Tauri 2.0 + SvelteKit desktop app lives in `client/`. It connects to the Python backend via REST/WebSocket.

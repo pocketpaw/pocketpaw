@@ -5,6 +5,14 @@
 # have?" without an extra round-trip. Uses ``pockets_service.list_pockets``
 # (tenancy enforced).
 #
+# Changes: 2026-08-03 (feat/prompt-entity-ids) — rows carry the pocket id.
+# ``get_pocket``, ``add_widget`` and ``update_widget`` all declare ``pocket_id``
+# required, and this preamble listed pockets by name alone: two called "Sales"
+# rendered byte-identical rows and the agent's only recourse was to guess or
+# spend a ``list_pockets`` call recovering what it had just been shown. Renders
+# through ``pocketpaw.prompt.entity.entity_line`` — the id comes from the wire
+# dict's ``_id``, which is what ``pocket_to_wire_dict`` emits (NOT ``id``).
+#
 # Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
 # ``SurfacePreamble``. This handler DOES read mutable state (the workspace's
 # pockets, with each one's name, type, widget count and agent count), but it
@@ -20,6 +28,7 @@ from __future__ import annotations
 
 import logging
 
+from pocketpaw.prompt.entity import entity_line
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import (
     content_key,
@@ -58,11 +67,17 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
     else:
         rows = []
         for p in pockets[:LIST_LIMIT]:
-            name = p.get("name") or "(unnamed)"
-            kind = p.get("type") or "custom"
             widget_count = len(p.get("widgets", []) or [])
             agent_count = len(p.get("agents", []) or [])
-            rows.append(f"- {name} (type={kind}, widgets={widget_count}, agents={agent_count})")
+            rows.append(
+                entity_line(
+                    p.get("name"),
+                    p.get("_id"),
+                    type=p.get("type") or "custom",
+                    widgets=widget_count,
+                    agents=agent_count,
+                )
+            )
         if total > LIST_LIMIT:
             rows.append(f"... (+{total - LIST_LIMIT} more)")
         parts.append("<pockets-list>\n" + "\n".join(rows) + "\n</pockets-list>")

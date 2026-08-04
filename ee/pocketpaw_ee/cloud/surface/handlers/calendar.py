@@ -37,6 +37,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
+from pocketpaw.prompt.entity import unaddressed_line
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import (
     content_key,
@@ -136,9 +137,14 @@ def _format_event_line(event: dict[str, Any]) -> str:
     title = str(event.get("title") or "(no title)").strip().splitlines()[0]
     start_raw = str(event.get("start") or "")
     when = _format_start_time(start_raw)
+    # No id: a Google Calendar event carries one, and nothing takes it. The
+    # ``meeting_id`` that five tools require addresses a ``_MeetingDoc`` in our
+    # own collection — a different entity, which no preamble lists. The
+    # ``"calendar_event"`` literal is checked against the derived kind set, so
+    # this stops being true loudly rather than silently.
     if when:
-        return f"- {when} · {title}"
-    return f"- {title}"
+        return unaddressed_line("calendar_event", f"{when} · {title}")
+    return unaddressed_line("calendar_event", title)
 
 
 def _format_start_time(iso: str) -> str:

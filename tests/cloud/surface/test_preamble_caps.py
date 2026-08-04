@@ -19,6 +19,7 @@ These are pure-function tests over the two helpers — no DB, no fixtures.
 
 from __future__ import annotations
 
+from bson import ObjectId
 from pocketpaw_ee.cloud.surface.handlers._helpers import (
     PREAMBLE_MAX_CHARS,
     WIDGET_PREVIEW_LIMIT,
@@ -26,16 +27,55 @@ from pocketpaw_ee.cloud.surface.handlers._helpers import (
     truncate_preamble,
 )
 
+from pocketpaw.prompt.entity import ID_TAIL_CHARS, MISSING_ID
+
+
+def test_the_fixture_measures_a_production_shaped_row() -> None:
+    """A cap test is worth exactly what its fixture is worth.
+
+    THIS TEST EXISTS BECAUSE THE MUTATION HARNESS FOUND ITS ABSENCE. Deleting
+    ``self.id`` from ``_Widget`` leaves every cap assertion below GREEN — rows
+    without an id are shorter, so a cap measured on them passes more easily. The
+    suite would happily report headroom that production does not have, which is
+    the precise failure this file exists to prevent. ``scripts/mutate.py``
+    flagged it as the one escaping mutation of twenty-one; everything else in
+    the plan was caught.
+
+    So the fixture's realism is now itself asserted: the widget must carry an
+    id, and the rendered row must actually show it.
+
+    THE MUTATION THAT BREAKS THIS: delete ``self.id = str(ObjectId())`` from
+    ``_Widget``. Run: the row rendered ``id=?`` and both assertions failed.
+    (Applied 2026-08-03, via scripts/mutate.py.)
+    """
+    widget = _Widget(0)
+    row = format_widget_line(widget)
+
+    assert f"id={MISSING_ID}" not in row, (
+        "the fixture widget has no id, so every cap measured below is short by "
+        "~23 chars a row against production"
+    )
+    assert widget.id[-ID_TAIL_CHARS:] in row, f"the row does not carry the fixture's id: {row}"
+
 
 class _Widget:
     """A widget with realistic field lengths.
 
-    ``format_widget_line`` reads ``name`` / ``type`` / ``spec`` off a duck-typed
-    object. Names must be plausible: a ``(unnamed)`` fallback renders ~7 chars
-    shorter per line and would flatter the measurement.
+    ``format_widget_line`` reads ``id`` / ``name`` / ``type`` / ``spec`` off a
+    duck-typed object. Every field must be plausible or the measurement flatters
+    itself: a ``(unnamed)`` fallback renders ~7 chars shorter per line, and —
+    added 2026-08-03 (feat/prompt-entity-ids) — a MISSING ``id`` renders the
+    1-char ``?`` marker where production carries a 24-char ObjectId.
+
+    That second one nearly shipped. When the row started carrying the widget id,
+    this fixture had no ``id`` attribute, so the cap test went on passing while
+    measuring rows 23 chars shorter than the ones the agent actually sees. A cap
+    test that under-measures is worse than none: it reports headroom that is not
+    there. The id is a real ObjectId here for exactly that reason.
     """
 
     def __init__(self, i: int) -> None:
+        self.id = str(ObjectId())
         self.name = f"Revenue by region {i}"
         self.type = "spec"
         self.spec = {"kind": "chart"}
@@ -69,9 +109,16 @@ def test_widget_preview_limit_fits_inside_the_preamble_char_cap():
     """A full widget preview must not push the preamble over its own cap.
 
     MUTATION: set ``WIDGET_PREVIEW_LIMIT = 60`` in
-    ``ee/pocketpaw_ee/cloud/surface/handlers/_helpers.py``. 60 lines at ~36
-    chars is ~2,170 chars against a 1,500 cap, ``truncate_preamble`` fires, and
+    ``ee/pocketpaw_ee/cloud/surface/handlers/_helpers.py``. 60 lines at ~55
+    chars is ~3,300 chars against a 1,500 cap, ``truncate_preamble`` fires, and
     both assertions below fail.
+
+    The margin is thinner than PA-9 measured. Since the row began carrying the
+    widget id (2026-08-03) a line averages 55.2 chars rather than 36.2 and this
+    preamble renders at 979 of 1500, so ~21 widgets fit rather than ~36. 12 is
+    still safe. The full table of how that moved — and why the id is rendered as
+    an 8-char tail rather than whole — is in ``_helpers.py`` beside
+    ``WIDGET_PREVIEW_LIMIT``.
     """
     raw = _render_preamble(300)
 
