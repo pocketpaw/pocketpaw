@@ -1,4 +1,8 @@
 # test_knowledge_wiki_api.py — Integration tests for the living-wiki API.
+# Updated: 2026-08-04 (review follow-up) — two guard pins: a path-traversal
+# article_id on POST /reingest answers 404 with no kb call and nothing served
+# from outside the scope dir (sentinel file proves it), and GET /uploads
+# denies a foreign user: scope with 403 kb.scope_forbidden before any kb call.
 # Created: 2026-08-04 — Covers the /knowledge REST surface the wiki frontend
 # rebuild codes against: enriched GET /articles rows, GET /articles/{id}
 # (full body + orphan fallback + 404), GET /stats, GET /uploads, and the two
@@ -404,6 +408,30 @@ def test_reingest_unknown_article_404(client, kb_home, spy) -> None:
     assert spy.calls == []
 
 
+def test_reingest_traversal_article_id_is_404(client, kb_home, spy) -> None:
+    """A path-traversal article_id never reaches kb or the filesystem walk.
+
+    The containment guard (mirror of kb-go's containedID) rejects the id
+    before any frontmatter/raw read, answering 404 — not 400 — so the route
+    can't be used as a traversal oracle. A sentinel file OUTSIDE the scope
+    dir proves nothing beyond the guard is ever served.
+    """
+    outside = os.path.join(kb_home, "..", "outside-secret.json")
+    with open(outside, "w", encoding="utf-8") as fh:
+        json.dump({"raw_text": "must never surface", "source": "secret"}, fh)
+    try:
+        response = client.post(
+            "/api/v1/knowledge/reingest",
+            json={"article_id": "../../etc/passwd", "scope": WS_SCOPE},
+        )
+        assert response.status_code == 404
+        assert response.json()["error"]["code"] == "article.not_found"
+        assert "must never surface" not in response.text
+        assert spy.calls == []  # rejected before any kb subprocess call
+    finally:
+        os.unlink(outside)
+
+
 def test_reingest_scope_guard_denies_foreign_user_scope(client, kb_home, spy) -> None:
     response = client.post(
         "/api/v1/knowledge/reingest",
@@ -497,6 +525,13 @@ def test_reingest_upload_unknown_id_404(client, kb_home, spy, fake_store) -> Non
 # ---------------------------------------------------------------------------
 # GET /knowledge/uploads
 # ---------------------------------------------------------------------------
+
+
+def test_list_uploads_scope_guard_denies_foreign_user_scope(client, kb_home, spy) -> None:
+    response = client.get("/api/v1/knowledge/uploads?scope=user:someone-else")
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "kb.scope_forbidden"
+    assert spy.calls == []  # denied before any kb call or store read
 
 
 def test_list_uploads_has_article_markers(client, kb_home, fake_store) -> None:
