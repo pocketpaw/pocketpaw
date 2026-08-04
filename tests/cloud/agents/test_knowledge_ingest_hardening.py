@@ -256,10 +256,38 @@ async def test_ingest_file_text_path_routes_through_ingest_funnel(monkeypatch, t
     assert result["id"] == "art-f1"
     cmd = spy.calls[0]["cmd"]
     # Funnel argv (stdin ingest), NOT the old direct file-path form
-    # ["ingest", "<path>", "--scope", ...].
+    # ["ingest", "<path>", "--scope", ...]. Non-code file → no --lang hint.
     assert cmd[1:] == ["ingest", "--scope", "agent:a1", "--source", "notes.md", "--json"]
     assert str(notes) not in cmd
     assert spy.calls[0]["input"] == "# Notes\n\nremember the thing"
+
+
+@pytest.mark.asyncio
+async def test_ingest_file_code_path_passes_lang_hint(monkeypatch, tmp_path):
+    """Stdin carries no file path, so kb-go can't detect the language itself.
+    Code files must carry --lang so kb-go still runs its AST parse — the
+    structure awareness the old file-path form provided."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    spy = _install_spy(monkeypatch, [(0, json.dumps({"id": "art-f2", "compiled_with": "llm"}), "")])
+
+    module = tmp_path / "utils.py"
+    module.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    result = await KnowledgeService.ingest_file("a1", str(module))
+
+    assert result["id"] == "art-f2"
+    cmd = spy.calls[0]["cmd"]
+    assert cmd[1:] == [
+        "ingest",
+        "--scope",
+        "agent:a1",
+        "--source",
+        "utils.py",
+        "--lang",
+        "python",
+        "--json",
+    ]
+    assert spy.calls[0]["input"] == "def add(a, b):\n    return a + b\n"
 
 
 # --------------------------------------------------------------------------- #

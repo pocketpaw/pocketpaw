@@ -8,11 +8,18 @@
 #   absent and pipes the pre-compiled article to `kb ingest --article-json`;
 #   compile failure RAISES — never a verbatim fallback. (2) Any ingest result
 #   with compiled_with == "none (fallback)" is rejected loudly (defense in
-#   depth against older binaries / --allow-fallback misuse). (3) The chat-turn
+#   depth against older binaries / --allow-fallback misuse). Note: the
+#   missing-compiled_with old-binary detector below applies ONLY to the
+#   --article-json path — the keyed plain-ingest path deliberately tolerates
+#   old-style output so a healthy keyed deployment on an old binary keeps
+#   working. (3) The chat-turn
 #   search path (search_context_for_scope) got a hard 5s timeout and fails
 #   soft (returns "") so a slow KB can never stall a chat turn; _kb translates
 #   subprocess timeouts into clear RuntimeErrors. ingest_file's text-file path
-#   now routes through ingest_text_to_scope so it gets the same guarantees.
+#   now routes through ingest_text_to_scope so it gets the same guarantees;
+#   code files keep their AST treatment via a --lang hint derived from the
+#   source filename (stdin has no path for kb-go's own detectLanguage), and
+#   the keyless compile prompt is steered to document code structure.
 #   Requires the kb-go binary with --article-json support. Old-binary
 #   detection (2026-08-04 follow-up): kb-go silently IGNORES unknown flags,
 #   so an old binary exits 0 after storing the payload verbatim — the
@@ -88,6 +95,25 @@ _MAX_COMPILED_RATIO = 0.6
 
 # kb-go's marker for "compile failed, stored verbatim". We never accept it.
 _FALLBACK_COMPILED_WITH = "none (fallback)"
+
+# Mirror of kb-go's detectLanguage: source-filename suffixes whose stdin
+# ingest should carry a ``--lang`` hint so kb-go runs its AST parse
+# (parseCode) on the text — the file PATH no longer reaches kb, so the
+# hint is the only way it learns the language. Values are the canonical
+# spellings kb-go's langToExt accepts.
+_CODE_LANG_BY_SUFFIX = {
+    ".go": "go",
+    ".py": "python",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+}
+
+
+def _lang_for_source(source: str) -> str | None:
+    """Language hint for a source filename, or ``None`` for non-code docs."""
+    return _CODE_LANG_BY_SUFFIX.get(Path(source).suffix.lower())
 
 
 def _resolve_kb_bin() -> str:
@@ -279,21 +305,36 @@ def _validate_compiled_article(article: dict, *, compile_input_len: int, source:
     }
 
 
-async def _compile_article_with_agent(text: str, source: str) -> dict:
+async def _compile_article_with_agent(text: str, source: str, lang: str | None = None) -> dict:
     """Compile ``text`` into a kb article using PocketPaw's own agent backend.
 
     This is the no-ANTHROPIC_API_KEY path: kb's internal LLM compile cannot
     run, so we produce the article with the same backend infrastructure the
     chat runtime uses (``PocketPawCompilerBackend`` → agent registry → the
     active backend, e.g. the Claude Code SDK backend which authenticates via
-    the CLI, not the API key). Raises ``RuntimeError`` on any failure —
-    callers must NEVER fall back to verbatim ingestion.
+    the CLI, not the API key).
+
+    ``lang`` (when the source is a recognized code file) steers the article
+    toward documenting code structure instead of prose-summarizing — the
+    keyless stand-in for the AST parse kb-go runs on the keyed path.
+
+    Failures raise: compile timeouts and invalid/garbage articles are
+    translated to ``RuntimeError``; backend-level errors (an unavailable
+    backend, a failing completion) propagate as raised. Either way callers
+    must NEVER fall back to verbatim ingestion.
     """
     from pocketpaw.config import get_settings
     from pocketpaw_ee.cloud.kb.backend_adapter import PocketPawCompilerBackend
 
     excerpt = text[:_COMPILE_INPUT_CAP_CHARS]
     truncated = len(text) > len(excerpt)
+    code_rule = (
+        f"- The document is {lang} source code: in the content, document its "
+        "structure — the module's purpose, key functions and classes with their "
+        "signatures, and exports — rather than summarizing it as prose.\n"
+        if lang
+        else ""
+    )
     prompt = (
         "Compile the document below into a knowledge-base article. Respond with "
         "ONLY one JSON object, no prose and no markdown fences:\n"
@@ -305,7 +346,8 @@ async def _compile_article_with_agent(text: str, source: str) -> dict:
         "- content: a well-structured wiki-style article (markdown headings and "
         "lists) that COMPRESSES the document — capture the facts, structure, "
         "names, and numbers; do NOT reproduce the document verbatim.\n"
-        "- concepts: 3-10 key concepts.\n"
+        + code_rule
+        + "- concepts: 3-10 key concepts.\n"
         "- categories: 1-3 broad categories.\n\n"
         f"Source: {source}\n"
         + ("(Document truncated for compilation; compress what you see.)\n" if truncated else "")
@@ -367,13 +409,17 @@ class KnowledgeService:
         fallback — an uncompiled article poisons the scope and makes every
         chat turn pay O(raw corpus) search cost for junk snippets.
         """
+        lang = _lang_for_source(source)
         if os.environ.get("ANTHROPIC_API_KEY"):
-            result = await asyncio.to_thread(
-                _kb, "ingest", "--scope", scope, "--source", source, input_text=text
-            )
+            args = ["ingest", "--scope", scope, "--source", source]
+            if lang:
+                # Stdin carries no file path, so kb-go can't detect the
+                # language itself — the hint re-enables its AST parse.
+                args += ["--lang", lang]
+            result = await asyncio.to_thread(_kb, *args, input_text=text)
             return _check_ingest_result(result, scope)
 
-        article = await _compile_article_with_agent(text, source)
+        article = await _compile_article_with_agent(text, source, lang=lang)
         payload = json.dumps({"raw_text": text, "article": article})
         try:
             result = await asyncio.to_thread(

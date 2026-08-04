@@ -18,11 +18,11 @@ import subprocess
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pocketpaw_ee.cloud._core.errors import CloudError
 from pocketpaw_ee.cloud.agents import knowledge
 from pocketpaw_ee.cloud.kb import backend_adapter
 from pocketpaw_ee.cloud.kb import router as kb_router
 from pocketpaw_ee.cloud.kb.dto import IngestTextRequest, IngestUrlRequest
-from pocketpaw_ee.cloud.shared.errors import CloudError
 
 WORKSPACE = "w1"
 CALLER = "memberA"
