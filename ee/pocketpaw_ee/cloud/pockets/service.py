@@ -2958,10 +2958,17 @@ async def _resolve_pocket_id_tail(given: str, workspace_id: str) -> tuple[str, s
 
     An ambiguous tail returns its error message rather than picking a winner.
     """
+    # ``get_pymongo_collection``, NOT ``get_motor_collection`` — the latter is
+    # beanie 1.x and this is on 2.1.0, where it does not exist. The first version
+    # of this used the old name; every isolated resolver and handler test still
+    # passed, because the broad ``except`` below turned a missing attribute into
+    # a tidy "could not resolve" string and no test called this function.
+    # ``tests/cloud/pockets/test_short_id_tool_wiring.py`` is what caught it.
     try:
-        cursor = _PocketDoc.get_motor_collection().find({"workspace": workspace_id}, {"_id": 1})
+        cursor = _PocketDoc.get_pymongo_collection().find({"workspace": workspace_id}, {"_id": 1})
         candidates = [{"_id": str(row["_id"])} async for row in cursor]
     except Exception as exc:  # noqa: BLE001
+        logger.warning("pocket id tail resolve failed for %s: %s", given, exc, exc_info=True)
         return "", f"could not resolve pocket {given}: {exc}"
     try:
         return resolve_id(given, candidates), None
