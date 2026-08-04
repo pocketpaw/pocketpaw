@@ -271,3 +271,153 @@ class TestTwoMembersWithOneName:
         block = _render_about_member_block(_person(user_id=""))
         assert "Alex" in block or "Ada" in block
         assert "id:" not in block
+
+
+class TestTheFoundingAdminIsNotAStranger:
+    """A member with no Fabric ``Person`` still gets identified.
+
+    Added 2026-08-04. The Person is created by exactly one path,
+    ``materialize_person_from_invite``, so a member who was never invited has
+    none — and the founding admin of a workspace is never invited, they created
+    it. The block rendered nothing for them, so the agent answered "I don't know
+    who you are" while ``full_name`` sat in their user document the whole time.
+
+    Confirmed live before the fix: ``about_member_block`` was ``None`` and the
+    36,608-char instruction stack contained neither the member's name nor their
+    id. After: ``who: Admin``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_member_with_no_person_is_still_named(self) -> None:
+        """The bug, directly.
+
+        MUTATION: make ``_resolve_about_member`` return ``None`` when
+        ``get_person`` yields ``None`` (the pre-fix behaviour). Run: the block
+        was None and this failed. (Applied 2026-08-04.)
+        """
+
+        async def _no_person(workspace_id: str, user_id: str):
+            return None
+
+        async def _names(user_ids):
+            return {"user-7": "Admin"}
+
+        with (
+            patch("pocketpaw_ee.cloud.people.service.get_person", side_effect=_no_person),
+            patch("pocketpaw_ee.cloud.auth.service.resolve_display_names", side_effect=_names),
+        ):
+            block = await _resolve_about_member("ws1", "user-7")
+
+        assert block is not None
+        assert "Admin" in block
+        assert "user-7" in block
+
+    @pytest.mark.asyncio
+    async def test_the_fallback_claims_no_role_or_team(self) -> None:
+        """Saying less is the point.
+
+        The user record carries a name and nothing else. A block that invented a
+        role would be worse than no block — the agent would state it confidently.
+
+        MUTATION: add ``role: member`` to the fallback render. Run: the
+        no-role assertion failed. (Applied 2026-08-04.)
+        """
+
+        async def _no_person(workspace_id: str, user_id: str):
+            return None
+
+        async def _names(user_ids):
+            return {"user-7": "Admin"}
+
+        with (
+            patch("pocketpaw_ee.cloud.people.service.get_person", side_effect=_no_person),
+            patch("pocketpaw_ee.cloud.auth.service.resolve_display_names", side_effect=_names),
+        ):
+            block = await _resolve_about_member("ws1", "user-7")
+
+        assert "role:" not in block
+        assert "team" not in block
+        assert "focus:" not in block
+        assert "do not guess" in block
+
+    @pytest.mark.asyncio
+    async def test_a_real_person_still_wins(self) -> None:
+        """The rich source takes precedence — the fallback is a fallback.
+
+        MUTATION: check the user record FIRST. Run: the thin block rendered and
+        the ``focus`` assertion failed. (Applied 2026-08-04.)
+        """
+
+        async def _has_person(workspace_id: str, user_id: str):
+            return _person(name="Ada Lovelace", focus="Own the billing rewrite")
+
+        with patch("pocketpaw_ee.cloud.people.service.get_person", side_effect=_has_person):
+            block = await _resolve_about_member("ws1", "user-7")
+
+        assert "Ada Lovelace" in block
+        assert "Own the billing rewrite" in block
+        assert "do not guess" not in block
+
+    @pytest.mark.asyncio
+    async def test_a_name_that_is_just_the_id_yields_no_block(self) -> None:
+        """``who: 69f88339dc…`` tells the agent nothing the ``id:`` line does not.
+
+        ``resolve_display_names`` falls back to the raw id when a user has
+        neither a name nor an email, so this case is reachable.
+
+        MUTATION: drop the ``display == user_id`` guard. Run: a block rendered
+        with the id as the name and this failed. (Applied 2026-08-04.)
+        """
+
+        async def _no_person(workspace_id: str, user_id: str):
+            return None
+
+        async def _names(user_ids):
+            return {"user-7": "user-7"}
+
+        with (
+            patch("pocketpaw_ee.cloud.people.service.get_person", side_effect=_no_person),
+            patch("pocketpaw_ee.cloud.auth.service.resolve_display_names", side_effect=_names),
+        ):
+            assert await _resolve_about_member("ws1", "user-7") is None
+
+    @pytest.mark.asyncio
+    async def test_a_fabric_hiccup_degrades_to_the_user_record_not_to_silence(self) -> None:
+        """A people-read failure used to cost the member their identity entirely.
+
+        MUTATION: ``return None`` in the ``except`` around ``get_person``
+        instead of falling through. Run: the block was None and this failed.
+        (Applied 2026-08-04.)
+        """
+
+        async def _boom(workspace_id: str, user_id: str):
+            raise RuntimeError("fabric exploded")
+
+        async def _names(user_ids):
+            return {"user-7": "Admin"}
+
+        with (
+            patch("pocketpaw_ee.cloud.people.service.get_person", side_effect=_boom),
+            patch("pocketpaw_ee.cloud.auth.service.resolve_display_names", side_effect=_names),
+        ):
+            block = await _resolve_about_member("ws1", "user-7")
+
+        assert block is not None and "Admin" in block
+
+    @pytest.mark.asyncio
+    async def test_both_sources_failing_is_still_no_block(self) -> None:
+        """Degrade to silence only when the member truly cannot be identified.
+
+        MUTATION: drop the try/except around ``resolve_display_names``. Run: the
+        RuntimeError propagated out of scope resolution and sank the turn.
+        (Applied 2026-08-04.)
+        """
+
+        async def _boom(*a, **k):
+            raise RuntimeError("everything exploded")
+
+        with (
+            patch("pocketpaw_ee.cloud.people.service.get_person", side_effect=_boom),
+            patch("pocketpaw_ee.cloud.auth.service.resolve_display_names", side_effect=_boom),
+        ):
+            assert await _resolve_about_member("ws1", "user-7") is None

@@ -1,0 +1,56 @@
+[
+  {
+    "label": "identity: no Person means no block again (the original bug)",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "    return await _about_member_from_user_record(user_id)",
+    "replace": "    return None",
+    "tests": [
+      "tests/cloud/chat/test_about_member_block.py"
+    ]
+  },
+  {
+    "label": "identity: the fallback stops warning the agent not to guess",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "        \"Their role and focus are not on file, so do not guess at either.\\n\"",
+    "replace": "        \"This member is a standard workspace member with role: member.\\n\"",
+    "tests": [
+      "tests/cloud/chat/test_about_member_block.py"
+    ]
+  },
+  {
+    "label": "identity: the thin fallback beats a real Person",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "    if person is not None:\n        block = _render_about_member_block(person)\n        if block:\n            return block",
+    "replace": "    if False:\n        block = _render_about_member_block(person)\n        if block:\n            return block",
+    "tests": [
+      "tests/cloud/chat/test_about_member_block.py"
+    ]
+  },
+  {
+    "label": "identity: an id echoed back is rendered as a name",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "    if not display or display == user_id:\n        return None",
+    "replace": "    if not display:\n        return None",
+    "tests": [
+      "tests/cloud/chat/test_about_member_block.py"
+    ]
+  },
+  {
+    "label": "identity: a fabric hiccup costs the member their name",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "        logger.debug(\n            \"about-member person read failed for %s/%s\", workspace_id, user_id, exc_info=True\n        )\n",
+    "replace": "        logger.debug(\n            \"about-member person read failed for %s/%s\", workspace_id, user_id, exc_info=True\n        )\n        return None\n",
+    "tests": [
+      "tests/cloud/chat/test_about_member_block.py"
+    ]
+  },
+  {
+    "label": "identity: the user-record read is allowed to raise into the turn",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "    except Exception:  # noqa: BLE001 \u2014 same degrade-never-raise contract as above\n        logger.debug(\"about-member user fallback failed for %s\", user_id, exc_info=True)\n        return None",
+    "replace": "    except TypeError:\n        logger.debug(\"about-member user fallback failed for %s\", user_id, exc_info=True)\n        return None",
+    "tests": [
+      "tests/cloud/chat/test_about_member_block.py"
+    ]
+  }
+]
