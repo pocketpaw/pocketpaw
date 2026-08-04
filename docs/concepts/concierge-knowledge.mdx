@@ -76,6 +76,17 @@ Pages that extract to almost nothing (an empty layout, a redirect stub) are skip
 rather than indexed, and a very large site is truncated rather than allowed to turn
 one publish into an unbounded run of article compilations.
 
+### Every article is LLM-compiled — never stored verbatim
+
+Ingest always compiles the extracted text into a structured article (title, summary,
+compressed wiki-style content) before it is stored. On deployments with an
+`ANTHROPIC_API_KEY`, the kb binary runs that compilation itself. On deployments
+without one (for example the Claude Code agent-backend cloud box), PocketPaw
+compiles the article with its own agent backend and hands the pre-compiled article
+to the kb binary. If compilation fails on either path, the ingest **fails loudly**
+— the document is never stored verbatim, because uncompiled raw text poisons the
+scope and makes every chat turn pay full-corpus search cost for junk snippets.
+
 ### When it runs
 
 - **On publish.** The site's content just changed, so what the concierge can quote
