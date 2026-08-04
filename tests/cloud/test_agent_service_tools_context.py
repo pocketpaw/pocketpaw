@@ -793,13 +793,23 @@ def _session_ctx() -> ScopeContext:
 
 
 def _force_settings(monkeypatch, **overrides):
-    """Make ``Settings.load()`` return a controlled instance for the
-    Composio gating checks inside ``build_behavior_instructions``.
+    """Make the config read return a controlled instance for the Composio
+    gating checks inside ``build_behavior_instructions``.
 
     Clears the Composio env vars first so the result depends only on the
     explicit overrides, not on whatever the host machine has exported.
+
+    Patches ``Settings.load`` AND drops the ``get_settings`` cache, because
+    production reads through the cached accessor. Patching ``load`` alone used
+    to be equivalent; it stopped being equivalent when ``composio.is_enabled``
+    moved to ``get_settings()`` (the 115 ms-per-turn ``Settings.load`` fix), and
+    the helper silently kept handing back a value nothing read — the disabled
+    case then asserted "no Composio rules" against a machine that had Composio
+    credentials exported. Clearing the cache after the patch makes the next read
+    go through the patched ``load`` again. ``_isolate_settings_cache`` below
+    handles the teardown half.
     """
-    from pocketpaw.config import Settings
+    from pocketpaw.config import Settings, get_settings
 
     for var in (
         "POCKETPAW_COMPOSIO_API_KEY",
@@ -809,7 +819,34 @@ def _force_settings(monkeypatch, **overrides):
         monkeypatch.delenv(var, raising=False)
     s = Settings(_env_file=None, **overrides)
     monkeypatch.setattr(Settings, "load", classmethod(lambda cls: s))
+    get_settings.cache_clear()
     return s
+
+
+@pytest.fixture(autouse=True)
+def _isolate_settings_cache():
+    """Keep one test's forced ``Settings`` out of every later test.
+
+    ``get_settings`` is process-wide and ``lru_cache``d, so a controlled
+    instance installed by ``_force_settings`` outlives the monkeypatch that
+    created it — the patch on ``Settings.load`` is undone, but the cached
+    OBJECT it produced is not. That is an order-dependent failure: the suite
+    passes file-by-file and fails as a whole, or vice versa.
+
+    NOT MUTATION-PROVEN, deliberately recorded as such. Removing this fixture
+    escapes ``tests/mutations/prompt_truth.json`` — and correctly so, because
+    what it protects is the NEXT file in the process, and that harness runs one
+    file at a time. ``_force_settings`` clears the cache itself, which is what
+    makes this file's own tests pass without the fixture. Rather than invent a
+    weak assertion that would "prove" it, the honest note: this is teardown
+    hygiene, its value is cross-file, and the repo convention of naming a
+    verified mutation does not apply to it.
+    """
+    from pocketpaw.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def test_composio_rules_injected_when_enabled_without_toolkits(monkeypatch):
@@ -858,6 +895,143 @@ def test_composio_rules_omitted_when_disabled(monkeypatch):
     assert "<composio-auth-flow>" not in block
     assert "<composio-search-fallback>" not in block
     assert "<runtime-identity>" in block
+
+
+# ── Composio rules are gated on the BACKEND, not just the credentials ────────
+#
+# The gate above answers "does this deployment have Composio?". It did not ask
+# "does THIS BACKEND get Composio tools?", and the two are not the same
+# question. ``providers.py`` builds tools for four backend kinds; this
+# deployment runs a fifth (``pydantic_ai``), which gets none. So 2,516
+# characters describing a Gmail/Slack/GitHub tool surface rode in every turn,
+# naming tools that were not on the wire.
+#
+# The cost is not context. An agent told it has those integrations tells the
+# USER it has them, and a user who asks it to read their mail gets a four-step
+# OAuth walkthrough ending at a tool that does not exist. Wrong capability
+# claims are worse than absent ones.
+#
+# The two rules are gated separately because their tool sets differ:
+# ``initiate_connection`` / ``verify_connection`` are built only for the Claude
+# SDK backend, while the search meta-tools reach all four supported kinds.
+#
+# EACH TEST NAMES THE MUTATION THAT BREAKS IT, and every one was applied, run,
+# observed to fail, and reverted (``scripts/mutate.py``).
+
+
+def _enabled_composio(monkeypatch):
+    return _force_settings(
+        monkeypatch,
+        composio_api_key="ck_test",
+        composio_enterprise_id="ent_acme",
+        composio_toolkits=[],
+    )
+
+
+def test_force_settings_takes_effect_on_a_second_call(monkeypatch):
+    """The reason ``_force_settings`` clears the cache itself.
+
+    ``_isolate_settings_cache`` clears once per test, which covers the common
+    single-call shape — so a mutation removing the helper's own clear escaped
+    at first. It only bites on a SECOND call: the first read populates the
+    cache, and without a clear the second forced value is never seen. That is
+    a silent wrong-answer bug in a helper whose whole job is controlling the
+    answer, and it would land on whoever next writes a test that toggles
+    Composio on and off in one function.
+
+    THE MUTATION THAT BREAKS THIS: drop ``get_settings.cache_clear()`` from
+    ``_force_settings``. Run: the second read returned the first instance and
+    this failed. (Applied 2026-08-04.)
+    """
+    from pocketpaw_ee.cloud.composio import service as composio_service
+
+    _force_settings(monkeypatch)
+    assert composio_service.is_enabled() is False
+
+    _force_settings(monkeypatch, composio_api_key="ck_test", composio_enterprise_id="ent_acme")
+    assert composio_service.is_enabled() is True, (
+        "the second _force_settings did not take effect — a stale cached Settings outlived it"
+    )
+
+
+def test_composio_rules_omitted_on_a_backend_with_no_composio_tools(monkeypatch):
+    """Credentials present, but ``pydantic_ai`` receives no Composio tools.
+
+    THE MUTATION THAT BREAKS THIS: drop the ``supports_composio_tools`` /
+    ``supports_connection_tools`` conditions and gate on ``is_enabled()``
+    alone. Run: both blocks were injected and this failed. (Applied
+    2026-08-04.)
+    """
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    _enabled_composio(monkeypatch)
+    block = build_behavior_instructions(_session_ctx(), backend_name="pydantic_ai")
+    assert "<composio-auth-flow>" not in block, (
+        "the auth flow names initiate_connection / verify_connection, which this "
+        "backend does not have"
+    )
+    assert "<composio-search-fallback>" not in block, (
+        "the search fallback names COMPOSIO_SEARCH_TOOLS, which this backend does not have"
+    )
+
+
+def test_auth_flow_omitted_on_a_backend_with_tools_but_no_auth_wrapper(monkeypatch):
+    """The narrow middle case, and the reason the two rules gate separately.
+
+    ``openai_agents`` DOES get Composio's concrete action tools, so the search
+    fallback is honest there — but the connection wrappers were only ever
+    written for the Claude SDK, so the auth flow is not.
+
+    THE MUTATION THAT BREAKS THIS: gate the auth flow on
+    ``supports_composio_tools`` instead of ``supports_connection_tools``. Run:
+    the auth flow appeared for openai_agents and this failed. (Applied
+    2026-08-04.)
+    """
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    _enabled_composio(monkeypatch)
+    block = build_behavior_instructions(_session_ctx(), backend_name="openai_agents")
+    assert "<composio-auth-flow>" not in block
+    assert "<composio-search-fallback>" in block
+
+
+def test_the_prompt_gate_reads_the_same_source_as_the_tool_builder(monkeypatch):
+    """The gate must not be a second, hand-maintained copy of the backend list.
+
+    A duplicated list is how this drifts back: someone adds an openai_agents
+    auth wrapper, and the prompt keeps withholding the block because nobody
+    remembered a second file. Both predicates live in ``providers.py`` next to
+    the code that builds the tools.
+
+    THE MUTATION THAT BREAKS THIS: add ``pydantic_ai`` to
+    ``CONNECTION_TOOL_BACKENDS``. Run: the auth flow appeared for pydantic_ai
+    and this failed — which is the point: widening the tool set widens the
+    prompt, automatically. (Applied 2026-08-04.)
+    """
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+    from pocketpaw_ee.cloud.composio import providers
+
+    _enabled_composio(monkeypatch)
+    for backend in ("claude_agent_sdk", "openai_agents", "google_adk", "pydantic_ai"):
+        block = build_behavior_instructions(_session_ctx(), backend_name=backend)
+        assert ("<composio-auth-flow>" in block) is providers.supports_connection_tools(backend)
+        assert ("<composio-search-fallback>" in block) is providers.supports_composio_tools(backend)
+
+
+def test_an_unknown_backend_name_gets_no_composio_claims(monkeypatch):
+    """Fail closed. An unrecognised backend is one whose tool surface we cannot
+    vouch for, so it must not be told it has integrations.
+
+    THE MUTATION THAT BREAKS THIS: make ``supports_composio_tools`` return True
+    for anything not explicitly excluded. Run: failed. (Applied 2026-08-04.)
+    """
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    _enabled_composio(monkeypatch)
+    for backend in (None, "", "some_future_backend"):
+        block = build_behavior_instructions(_session_ctx(), backend_name=backend)
+        assert "<composio-auth-flow>" not in block
+        assert "<composio-search-fallback>" not in block
 
 
 @pytest.mark.asyncio

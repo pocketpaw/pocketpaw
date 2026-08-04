@@ -1,0 +1,107 @@
+[
+  {
+    "label": "widget_help miss returns the whole 58,765-char rulebook again",
+    "file": "src/pocketpaw/ripple/_inline_core.py",
+    "find": "    return _unknown_types_note(wanted)",
+    "replace": "    return RIPPLE_DESIGN_RULES",
+    "tests": ["tests/test_widget_help_lookup.py"]
+  },
+  {
+    "label": "tier 3 matches the section BODY again, so every lookup hits WIDGET CATALOG",
+    "file": "src/pocketpaw/ripple/_inline_core.py",
+    "find": "            heading = sect.split(\"\\n\", 1)[0].lower().replace(\"_\", \"-\")\n            hits = {t for t in unresolved if t in heading}",
+    "replace": "            heading = sect.lower()\n            hits = {t for t in unresolved if t in heading}",
+    "tests": ["tests/test_widget_help_lookup.py"]
+  },
+  {
+    "label": "a partial hit stops reporting the half that missed",
+    "file": "src/pocketpaw/ripple/_inline_core.py",
+    "find": "            parts.append(_unknown_types_note(unresolved))",
+    "replace": "            unresolved = unresolved",
+    "tests": ["tests/test_widget_help_lookup.py"]
+  },
+  {
+    "label": "the miss note stops naming the type that missed",
+    "file": "src/pocketpaw/ripple/_inline_core.py",
+    "find": "        f\"# NO INLINE DESIGN GUIDANCE FOR: {asked}\\n\"",
+    "replace": "        \"# NO INLINE DESIGN GUIDANCE\\n\"",
+    "tests": ["tests/test_widget_help_lookup.py"]
+  },
+  {
+    "label": "the miss note stops routing to get_widget_spec",
+    "file": "src/pocketpaw/ripple/_inline_core.py",
+    "find": "        \"notes. For every other widget, call `get_widget_spec(types=[...])`: it \"\n        \"reads the Ripple manifest and returns the canonical prop schema, which \"\n        \"is what you need to author a spec.\\n\"",
+    "replace": "        \"notes.\\n\"",
+    "tests": ["tests/test_widget_help_lookup.py"]
+  },
+  {
+    "label": "the miss note stops explaining what an unknown type means",
+    "file": "src/pocketpaw/ripple/_inline_core.py",
+    "find": "manifest does not carry that widget",
+    "replace": "manifest may lack that widget",
+    "tests": ["tests/test_widget_help_lookup.py"]
+  },
+  {
+    "label": "the MUST-CALL block points back at get_inline_widget_help",
+    "file": "src/pocketpaw/ripple/_inline.py",
+    "find": "call `get_widget_spec(types=[...])` and copy prop names FROM the",
+    "replace": "call `get_inline_widget_help(types=[...])` and copy prop names FROM the",
+    "tests": ["tests/test_prompt_names_only_real_tools.py"]
+  },
+  {
+    "label": "the block stops distinguishing the two widget tools",
+    "file": "src/pocketpaw/ripple/_inline.py",
+    "find": "`get_inline_widget_help` is a DIFFERENT tool and does not answer this\nquestion.",
+    "replace": "Widget help is available.",
+    "tests": ["tests/test_prompt_names_only_real_tools.py"]
+  },
+  {
+    "label": "get_widget_spec is dropped from the runtime builtin registry",
+    "file": "src/pocketpaw/tools/cli.py",
+    "find": "        WidgetSpecTool(),\n",
+    "replace": "",
+    "tests": ["tests/test_prompt_names_only_real_tools.py"]
+  },
+  {
+    "label": "the widget tools go unclassified, so pydantic_ai withholds them",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        \"get_widget_spec\",\n        \"get_inline_widget_help\",\n",
+    "replace": "",
+    "tests": ["tests/test_prompt_names_only_real_tools.py"]
+  },
+  {
+    "label": "composio rules go back to gating on credentials alone",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "        if _composio_providers.supports_connection_tools(backend_name):\n            parts.append(_COMPOSIO_AUTH_FLOW_RULE)\n        if _composio_providers.supports_composio_tools(backend_name):\n            parts.append(_COMPOSIO_SEARCH_FALLBACK_RULE)",
+    "replace": "        parts.append(_COMPOSIO_AUTH_FLOW_RULE)\n        parts.append(_COMPOSIO_SEARCH_FALLBACK_RULE)",
+    "tests": ["tests/cloud/test_agent_service_tools_context.py"]
+  },
+  {
+    "label": "the auth flow is gated on the wider predicate",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "        if _composio_providers.supports_connection_tools(backend_name):",
+    "replace": "        if _composio_providers.supports_composio_tools(backend_name):",
+    "tests": ["tests/cloud/test_agent_service_tools_context.py"]
+  },
+  {
+    "label": "CONNECTION_TOOL_BACKENDS is widened without a wrapper existing",
+    "file": "ee/pocketpaw_ee/cloud/composio/providers.py",
+    "find": "CONNECTION_TOOL_BACKENDS: frozenset[str] = frozenset({BACKEND_CLAUDE_SDK})",
+    "replace": "CONNECTION_TOOL_BACKENDS: frozenset[str] = frozenset({BACKEND_CLAUDE_SDK, \"pydantic_ai\"})",
+    "tests": ["tests/cloud/test_agent_service_tools_context.py"]
+  },
+  {
+    "label": "supports_composio_tools fails OPEN for an unknown backend",
+    "file": "ee/pocketpaw_ee/cloud/composio/providers.py",
+    "find": "    \"\"\"Whether ``backend_kind`` receives ANY Composio tools at all.\"\"\"\n    return backend_kind in SUPPORTED_BACKENDS",
+    "replace": "    \"\"\"Whether ``backend_kind`` receives ANY Composio tools at all.\"\"\"\n    return backend_kind not in {\"definitely_not_a_backend\"}",
+    "tests": ["tests/cloud/test_agent_service_tools_context.py"]
+  },
+  {
+    "label": "_force_settings stops clearing the get_settings cache",
+    "file": "tests/cloud/test_agent_service_tools_context.py",
+    "find": "    monkeypatch.setattr(Settings, \"load\", classmethod(lambda cls: s))\n    get_settings.cache_clear()\n    return s",
+    "replace": "    monkeypatch.setattr(Settings, \"load\", classmethod(lambda cls: s))\n    return s",
+    "tests": ["tests/cloud/test_agent_service_tools_context.py"]
+  }
+]

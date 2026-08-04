@@ -1,0 +1,79 @@
+[
+  {
+    "label": "the SDK surface gets its own description literal again",
+    "file": "src/pocketpaw/agents/sdk_mcp_widgets.py",
+    "find": "        from pocketpaw.ripple._flows import START_FLOW_DESCRIPTION\n\n        return START_FLOW_DESCRIPTION",
+    "replace": "        return \"Scaffold a multi-step flow from a flat step-graph.\"",
+    "tests": ["tests/test_start_flow_contract_is_shared.py"]
+  },
+  {
+    "label": "the SDK surface gets its own schema literal again",
+    "file": "src/pocketpaw/agents/sdk_mcp_widgets.py",
+    "find": "        from pocketpaw.ripple._flows import start_flow_parameters\n\n        return start_flow_parameters()",
+    "replace": "        return {\"type\": \"object\", \"properties\": {\"steps\": {\"type\": \"array\"}}, \"required\": []}",
+    "tests": ["tests/test_start_flow_contract_is_shared.py"]
+  },
+  {
+    "label": "start_flow_parameters returns a cached shared mutable",
+    "file": "src/pocketpaw/ripple/_flows.py",
+    "find": "def start_flow_parameters() -> dict[str, Any]:",
+    "replace": "@lru_cache(maxsize=1)\ndef start_flow_parameters() -> dict[str, Any]:",
+    "tests": ["tests/test_start_flow_contract_is_shared.py"]
+  },
+  {
+    "label": "the flow_type enum is hardcoded instead of read from FLOW_TYPES",
+    "file": "src/pocketpaw/ripple/_flows.py",
+    "find": "                \"enum\": list(FLOW_TYPES),",
+    "replace": "                \"enum\": [\"onboarding_wizard\"],",
+    "tests": ["tests/test_start_flow_contract_is_shared.py"]
+  },
+  {
+    "label": "the set-stepped anti-pattern is dropped from the shared contract",
+    "file": "src/pocketpaw/ripple/_flows.py",
+    "find": "    \"hand-author nested chain / chain_map step trees and DO NOT fake a \"\n    \"flow with a single `set`-stepped spec — both render only the first \"\n    \"step and dead-end. You describe a flat list of steps; this tool \"",
+    "replace": "    \"hand-author nested chain / chain_map step trees. You describe a flat list of steps; this tool \"",
+    "tests": ["tests/test_start_flow_contract_is_shared.py"]
+  },
+  {
+    "label": "the action-vs-type rule is dropped from the shared contract",
+    "file": "src/pocketpaw/ripple/_flows.py",
+    "find": "    \"create_pocket | invoke_tool) — NEVER `type:`/`kind:`:\\n\"",
+    "replace": "    \"create_pocket | invoke_tool):\\n\"",
+    "tests": ["tests/test_start_flow_contract_is_shared.py"]
+  },
+  {
+    "label": "the approve/reject-is-an-action-button rule is dropped",
+    "file": "src/pocketpaw/ripple/_flows.py",
+    "find": "    \"reject / fulfill / take action — that is a `call_binding` ACTION \"\n    \"BUTTON wired to the verb, not a yes/no select.\\n\"",
+    "replace": "    \"reject / fulfill / take action, handle it in the flow.\\n\"",
+    "tests": ["tests/test_start_flow_contract_is_shared.py"]
+  },
+  {
+    "label": "the repair-vs-reject retry contract is dropped",
+    "file": "src/pocketpaw/ripple/_flows.py",
+    "find": "    \"The builder REPAIRS recoverable slips (a missing terminal \"",
+    "replace": "    \"The builder handles slips (a missing terminal \"",
+    "tests": ["tests/test_start_flow_contract_is_shared.py"]
+  },
+  {
+    "label": "the tool returns a COPY of the contract instead of the constant",
+    "file": "src/pocketpaw/tools/builtin/flow_tool.py",
+    "find": "        return START_FLOW_DESCRIPTION",
+    "replace": "        return \"\".join(list(START_FLOW_DESCRIPTION))",
+    "tests": ["tests/test_start_flow_contract_is_shared.py"]
+  },
+  {
+    "label": "the prompt restates the transition keys the schema owns",
+    "file": "src/pocketpaw/ripple/_inline.py",
+    "find": "HOW TO AUTHOR: think in states, not screens. `start_flow`'s own schema",
+    "replace": "HOW TO AUTHOR (think in states, not screens):\n  steps: a list. Each step has an `id`, a `kind`\n    (select | form | confirm | info), a title, its content\n    (options / fields / review rows), and where it goes next:\n      - `next: \"<id>\"`        → linear next step\n      - `branch: { \"<optId>\": \"<id>\" }` → branch on the picked option\nOLD BLOCK RESTORED. `start_flow`'s own schema",
+    "tests": ["tests/test_start_flow_contract_is_shared.py"]
+  },
+  {
+    "label": "deduplication deletes a worked skeleton the prompt alone had",
+    "file": "src/pocketpaw/ripple/_inline.py",
+    "find": "SKELETON C — APPROVE / REJECT (the buttons ARE the action, not a select):",
+    "replace": "SKELETON_REMOVED — APPROVE / REJECT:",
+    "tests": ["tests/test_start_flow_contract_is_shared.py"]
+  }
+]

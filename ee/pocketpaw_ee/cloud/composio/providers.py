@@ -61,6 +61,31 @@ SUPPORTED_BACKENDS: frozenset[str] = frozenset(
     }
 )
 
+# Backends that get the ``initiate_connection`` / ``verify_connection`` pair.
+# Narrower than SUPPORTED_BACKENDS: the other three receive Composio's concrete
+# action tools but no auth wrappers, because only the Claude-SDK wrapper has
+# been written (see ``_build_initiate_connection_tool`` /
+# ``_build_verify_connection_tool``, which return None everywhere else).
+#
+# This exists so the SYSTEM PROMPT can ask the question instead of assuming the
+# answer. ``<composio-auth-flow>`` teaches a four-step sequence built on these
+# two tools and was gated on credentials alone, so a deployment with Composio
+# keys and a backend outside this set told its agent to call two tools that
+# were not on the wire — and the agent relayed the dead end to the user as
+# instructions. Widen this set in the same commit that adds a wrapper, and the
+# prompt follows automatically.
+CONNECTION_TOOL_BACKENDS: frozenset[str] = frozenset({BACKEND_CLAUDE_SDK})
+
+
+def supports_connection_tools(backend_kind: str | None) -> bool:
+    """Whether ``backend_kind`` receives the connection auth tool pair."""
+    return backend_kind in CONNECTION_TOOL_BACKENDS
+
+
+def supports_composio_tools(backend_kind: str | None) -> bool:
+    """Whether ``backend_kind`` receives ANY Composio tools at all."""
+    return backend_kind in SUPPORTED_BACKENDS
+
 
 @dataclass(frozen=True, slots=True)
 class _CachedTools:
@@ -570,7 +595,10 @@ __all__ = [
     "BACKEND_DEEP_AGENTS",
     "BACKEND_GOOGLE_ADK",
     "BACKEND_OPENAI_AGENTS",
+    "CONNECTION_TOOL_BACKENDS",
     "SUPPORTED_BACKENDS",
     "build_tools_for_backend",
     "reset_cache_for_tests",
+    "supports_composio_tools",
+    "supports_connection_tools",
 ]

@@ -66,6 +66,23 @@
 #   button + referenced in the text guidance. Spliced into the assembled prompt
 #   after `_MULTI_STEP_FLOW_RULE` and added to the final self-check.
 
+# Modified: 2026-08-04 (fix/prompt-tells-the-truth) — two changes, both about
+#   the prompt saying only what is true and saying it once.
+#   1. `# MUST CALL BEFORE EMIT` mandated `get_inline_widget_help`, which reads
+#      a 16-widget design catalog. Prop schemas come from the manifest, which
+#      `get_widget_spec` reads — 759 chars of answer for `definition-list`
+#      against 18,623 chars that never named the field. The block cited that
+#      exact widget as a known failure while pointing at the tool that caused
+#      it. Now mandates `get_widget_spec`, and says what the other tool is for.
+#   2. `_MULTI_STEP_FLOW_RULE`'s HOW TO AUTHOR block restated the step shape
+#      (steps / kinds / next / branch / terminal complete / actions /
+#      {stepId.field}) that `start_flow`'s own schema specifies and the builder
+#      enforces — a THIRD copy of a contract that already existed twice. The
+#      prompt now routes to the schema and keeps only what a schema cannot say:
+#      when to reach for a flow, the two anti-patterns, and the skeletons.
+#      Section 8,733 -> 7,308 chars; nothing unique to the prompt was dropped
+#      (guarded by tests/test_start_flow_contract_is_shared.py).
+
 from pocketpaw.ripple._design import USE_THE_WIDGET_RULE, WIDGET_CATALOG
 
 _GROUND_TRUTH_RULE = """\
@@ -282,22 +299,32 @@ schema is NOT in this prompt.
 # MUST CALL BEFORE EMIT
 
 Before the FIRST node of any non-core type lands in your spec, you MUST
-call `get_inline_widget_help(types=[...])` and copy prop names FROM
-the returned schema. The widget name is not a contract — the manifest
-is. Guessing prop names has shipped broken UIs (e.g. `definition-list`
-with `description` instead of `definition`, `timeline` events with
-`description` instead of `detail`) that render as empty rows. Batch
-types in one call: `get_inline_widget_help(types=["chart", "sparkline",
-"definition-list"])` is one round-trip — there is no excuse to skip it.
+call `get_widget_spec(types=[...])` and copy prop names FROM the
+returned schema. The widget name is not a contract — the manifest is,
+and `get_widget_spec` is what reads it. Guessing prop names has shipped
+broken UIs (e.g. `definition-list` with `description` instead of
+`definition`, `timeline` events with `description` instead of `detail`)
+that render as empty rows. Batch types in one call:
+`get_widget_spec(types=["chart", "sparkline", "definition-list"])` is
+one round-trip — there is no excuse to skip it.
 
 Example: planning a candlestick + sparkline reply →
-  get_inline_widget_help(types=["chart", "sparkline"])
+  get_widget_spec(types=["chart", "sparkline"])
   → returns the OHLC data shape for candlestick and the values/labels
     shape for sparkline. Use the returned text verbatim as the prop
     contract.
 
-If the tool returns an error, OMIT the widget rather than guess. A
-partial UI is correct; a guessed-shape widget renders empty.
+`get_inline_widget_help` is a DIFFERENT tool and does not answer this
+question. It carries hand-written design guidance — layout, spacing,
+composition — for a handful of widgets. Reach for it when you want to
+know how something should LOOK. For what props a widget TAKES, it is
+`get_widget_spec`, always.
+
+If `get_widget_spec` reports a type as unknown, this deployment's
+manifest does not carry that widget: OMIT it and choose one the
+manifest has. Do not emit it anyway and do not guess its props — it
+would render as nothing. A partial UI is correct; a guessed-shape
+widget renders empty.
 
 # ASK-USER-QUESTIONS — STRUCTURED DISAMBIGUATION
 
@@ -366,31 +393,12 @@ the tool materializes the nested, validated tree and returns a
 {version, ui} doc. Drop that doc VERBATIM into your `ui-spec` fence. The
 flow then advances entirely client-side — no model calls between steps.
 
-HOW TO AUTHOR (think in states, not screens):
-  steps: a list. Each step has an `id`, a `kind`
-    (select | form | confirm | info), a title, its content
-    (options / fields / review rows), and where it goes next:
-      - `next: "<id>"`        → linear next step
-      - `branch: { "<optId>": "<id>" }` → branch on the picked option
-    A step with neither `next` nor `branch` is the TERMINAL step and
-    carries `complete` (what to do with the answers).
-
-  Actions make it a real mini-app, not just Q&A:
-    - per-step `actions`: buttons that call a tool/API mid-flow
-      (verb: call_binding | api | invoke_tool) without leaving the step.
-    - terminal `complete.action`:
-        chat        → hand the collected answers back to you (default)
-        call_binding→ write to the backend
-        create_pocket → materialize a permanent pocket from the answers
-        navigate / emit → go somewhere / raise an event
-        invoke_tool → run a named tool with the answers
-                      (connector reads fire; connector writes are
-                       proposed for the user's approval — the Tray)
-
-  Reference earlier answers with `{stepId.field}` (e.g.
-  `{pick_goal.label}`, `{enter_details.company}`) in review rows and
-  action args. The tool rewrites them correctly — you never write the
-  raw `{state.…_selection/_formData}` form.
+HOW TO AUTHOR: think in states, not screens. `start_flow`'s own schema
+is the authoring contract — the step shape, the transitions, the
+terminal `complete`, the per-step `actions`, and the `{stepId.field}`
+answer references are all specified there, and it is the one place that
+stays in step with the builder. Read it and author against it rather
+than working from memory.
 
 DO NOT hand-write a nested `chain` / `chain_map` tree, and do NOT fake a
 flow with a single `set`-stepped spec (that anti-pattern renders step 1
@@ -416,19 +424,13 @@ STATE GRAMMAR — the primitives every flow composes from:
   transition, every terminal state has a `complete`. (You can't violate
   this even if you try — the builder repairs or rejects it.)
 
-ACTION GRAMMAR — the rules that turn a flow into a real tool, not Q&A:
-  - A terminal `complete` uses `action:` (chat | navigate | emit |
-    call_binding | create_pocket) — NEVER `type:`/`kind:`. (If you slip and
-    write `type:`/`kind:`, the builder coerces it, but author `action:`.)
-  - When the user says approve / reject / fulfill / take action / do X —
-    that is a `call_binding` ACTION BUTTON wired to the verb, NOT a yes/no
-    select. Never leave an action flow as plain Q&A.
-  - To act on backend / connector data, use `call_binding` (works today).
-    `invoke_tool` runs a named tool the owner allow-listed on the pocket:
-    a connector READ fires immediately; a connector WRITE is proposed for
-    the user's approval (it lands in their Instinct Tray, fires on approve)
-    rather than running inline. Reach for `call_binding` first; use
-    `invoke_tool` when the action is a named tool/connector grant.
+ACTION GRAMMAR — the one rule the tool schema cannot tell you, because it
+is about reading the REQUEST rather than shaping the output:
+  - Never leave an action flow as plain Q&A. When the user says approve /
+    reject / fulfill / take action / do X, the flow must DO it — that is
+    an action button wired to the verb, not a select that collects an
+    opinion and hands it back. The tool's schema says how to write the
+    button; this says when the request demands one.
 
 SKELETON A — branching intake (collect, then hand answers to you):
 ```

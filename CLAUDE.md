@@ -377,6 +377,61 @@ test will pass while reporting headroom that isn't there.
 
 ---
 
+## The prompt may not command a tool the agent doesn't have
+
+Applies to every system-prompt block — `src/pocketpaw/ripple/_inline.py`, the
+rule constants in `ee/pocketpaw_ee/cloud/chat/agent_service.py`, and any new
+block you add.
+
+**The rule:** before a prompt block names a tool, confirm the agent it reaches
+actually has that tool. If the answer depends on the backend, gate the block on
+`backend_name` — `build_behavior_instructions` already takes it.
+
+**Why it fails silently.** A model handed an unsatisfiable instruction does not
+raise; it improvises, and the improvisation looks like a normal reply. Two live
+examples, both found by dumping the wire body rather than reading the code:
+
+- `# MUST CALL BEFORE EMIT` made `get_inline_widget_help` mandatory and said "if
+  the tool returns an error, OMIT the widget". The tool was on the
+  `pocketpaw_widgets` MCP server, which only `agents/claude_sdk.py` builds — so
+  on every other backend it did not error, it was absent, and the agent's only
+  consistent move was to drop the widget. A block written to protect widget
+  quality was destroying it.
+- `<composio-auth-flow>` taught a four-step OAuth sequence on
+  `initiate_connection` / `verify_connection`, gated on credentials alone.
+  Composio builds tools for four backend kinds; this deploy runs a fifth. The
+  agent was told it had Gmail/Slack/GitHub — and told the *user* so.
+
+**Naming an existing-but-wrong tool is the same defect.** The MUST-CALL block
+was satisfiable on the SDK backend and still wrong: `get_inline_widget_help`
+returns hand-written design prose for 16 widgets, while `get_widget_spec` reads
+the manifest and returns the prop schema. For `definition-list` — the block's own
+cited failure — that is 18,623 chars without the answer versus 759 chars with it.
+
+**Gate from one source of truth.** `providers.py` owns
+`supports_composio_tools` / `supports_connection_tools` next to the code that
+builds the tools, so adding a wrapper widens the prompt in the same commit. Never
+hand-maintain a second backend list in the prompt layer.
+
+**Enforcement** (`tests/test_prompt_names_only_real_tools.py`): every backticked
+`tool(` call in the inline prompt must resolve in the runtime builtin registry —
+the registry every backend gets, not the SDK's MCP surface. Per-backend gating is
+tested next to the assembly in
+`tests/cloud/test_agent_service_tools_context.py`.
+
+**Bridging beats deleting.** When the instruction is right and the tool is
+merely unreachable, add it to `tools/builtin/` and `tools/cli.py::_TOOLS` (see
+`widget_spec.py`, and `flow_tool.py` before it) rather than dropping the rule.
+Then classify it in `pydantic_ai._TENANT_SAFE_TOOLS` — an unclassified tool is
+withheld, so registry presence alone still leaves the prompt lying.
+
+**A tool result is prompt too.** A lookup miss that returns the whole catalog is
+not "erring toward too much": `widget_help` answered any unknown type with all
+58,765 chars of the design rulebook, which never contained the answer. Return the
+miss, name what can answer it.
+
+---
+
 ## A gate is not a gate until a mutation has been observed to break it
 
 Applies to any test you are treating as protection — a contract test, a cap

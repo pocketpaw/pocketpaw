@@ -1742,18 +1742,36 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     # preamble.
     if override is None:
         parts.append(_DELIVER_ARTIFACT_RULE)
-    # Composio auth/search guidance is injected whenever Composio is
-    # enabled. An enabled deployment ALWAYS surfaces at least the
-    # discovery meta-tools — ``providers.py`` falls back to them when no
-    # toolkit is allow-listed — and the search-fallback rule matters MOST
-    # in that meta-tools-only mode. So gate on credentials (is_enabled),
-    # not on the toolkit allow-list: the prompt and the real tool list
-    # agree because enabled ⇒ tools present.
+    # Composio auth/search guidance. Gated on credentials AND on the backend
+    # actually receiving the tools each rule talks about.
+    #
+    # The credentials half is the original reasoning and still holds: an
+    # enabled deployment ALWAYS surfaces at least the discovery meta-tools —
+    # ``providers.py`` falls back to them when no toolkit is allow-listed — and
+    # the search-fallback rule matters MOST in that meta-tools-only mode, so
+    # gating on the toolkit allow-list would drop it exactly where it counts.
+    #
+    # The backend half is the part that was missing, and "enabled ⇒ tools
+    # present" was simply not true. Composio builds tools for four backend
+    # kinds; this deployment runs a fifth (``pydantic_ai``), which gets NONE.
+    # So 2,516 characters of instruction about a Gmail/Slack/GitHub tool
+    # surface rode in every turn describing tools that did not exist. That is
+    # worse than wasted context — an agent told it has those integrations
+    # tells the USER it has them.
+    #
+    # The two rules are gated separately because the tool sets differ:
+    # ``initiate_connection`` / ``verify_connection`` exist only on the Claude
+    # SDK backend, while the search meta-tools reach all four. Both predicates
+    # live next to the code that builds the tools, so a new wrapper widens the
+    # prompt in the same commit.
+    from pocketpaw_ee.cloud.composio import providers as _composio_providers
     from pocketpaw_ee.cloud.composio import service as _composio_service
 
     if _composio_service.is_enabled():
-        parts.append(_COMPOSIO_AUTH_FLOW_RULE)
-        parts.append(_COMPOSIO_SEARCH_FALLBACK_RULE)
+        if _composio_providers.supports_connection_tools(backend_name):
+            parts.append(_COMPOSIO_AUTH_FLOW_RULE)
+        if _composio_providers.supports_composio_tools(backend_name):
+            parts.append(_COMPOSIO_SEARCH_FALLBACK_RULE)
     # The home pocket is a special case: its agent mutates widgets directly
     # via the ``add_widget`` MCP tool — it does NOT delegate to the pocket
     # specialist. ``POCKET_DELEGATION_RULE`` ("never call add_widget,
