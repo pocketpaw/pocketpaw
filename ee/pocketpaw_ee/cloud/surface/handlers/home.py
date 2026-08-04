@@ -10,14 +10,26 @@
 # All reads respect ``workspace_id`` (the pocket service enforces it
 # per the tenancy-on-every-read rule). Audit reads use the canonical
 # ``audit_service.agent_list_audit`` which also enforces tenancy.
+#
+# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
+# ``SurfacePreamble`` keyed on a digest of everything it rendered: the pinned
+# widgets, the live snapshot line, the available-tools line and the recent
+# activity. Three sources with no shared revision, and the render is the one
+# place they meet, so digesting it covers all three at once. It moves when a
+# widget is pinned, renamed or unpinned, when the tool line changes, or when
+# new activity lands — and holds still otherwise, including for a home-pocket
+# edit past the 12-row cut, which produces the same bytes and therefore the
+# same prompt. (The pocket's ``updatedAt`` would look like a better revision
+# for the widget half; it never moves at all — see ``_helpers.content_key``.)
 
 from __future__ import annotations
 
 import logging
 
-from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
+from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import (
     composio_tool_names,
+    content_key,
     format_widget_line,
     truncate_preamble,
 )
@@ -30,7 +42,7 @@ WIDGET_LIST_LIMIT = 12
 ACTIVITY_LIMIT = 5
 
 
-async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
+async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
     """Build the home-surface preamble — pinned widgets, snapshot, tools."""
     widgets_block = await _build_widgets_block(workspace_id, user_id)
     snapshot_line = _build_snapshot_line(widgets_block["widget_count"])
@@ -46,7 +58,8 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         parts.append(f"<available-data-tools>{tools_line}</available-data-tools>")
     if activity_block:
         parts.append(activity_block)
-    return truncate_preamble("\n".join(parts))
+    text = truncate_preamble("\n".join(parts))
+    return SurfacePreamble(text=text, cache_key=content_key("home", text))
 
 
 async def _build_widgets_block(workspace_id: str, user_id: str) -> dict:

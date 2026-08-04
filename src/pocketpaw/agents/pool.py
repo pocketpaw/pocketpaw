@@ -3,6 +3,65 @@
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
 Instances are cached and evicted when idle (default 5 minutes).
 
+Updated: 2026-08-03 (PA-6, feat/prompt-assembler-seam) — ``prewarm`` forwards the
+  digest too, and ``_accepts_prompt_digest_kwarg`` is split out to ask the same
+  signature question of a bound ``prewarm`` as of a backend class's ``run``. With
+  the warm-client key now hashing the digest, a prewarm that withheld it would
+  key under the OLD rule and be evicted by the very turn it spent ~12s connecting
+  for. Both entry points read the digest off the SAME ``AssembledPrompt``, which
+  is the only way the two keys can be equal.
+Updated: 2026-08-03 (PA-5, feat/prompt-assembler-seam) — ``_SYSTEM_PROMPT_LAYERS``
+  gains ``atlas`` and ``user`` directly under ``identity``, and
+  ``_assemble_system_prompt`` grows the four plain-data fields that feed them
+  plus a ``budget_chars``. NOTHING MOVED: neither layer has a producer yet, so
+  both render to nothing and the empty-text skip leaves no gap; the budget
+  defaults to unbounded and no pre-PA-5 layer declares a cap, so both sizing
+  passes are no-ops on every prompt this path builds today. What DID change is
+  the digest — two more keyed layers now contribute to it, which costs one
+  agent-cache rebuild at deploy, the same price every layer split in this sprint
+  has paid.
+Updated: 2026-08-02 (PA-4, feat/prompt-assembler-seam) — the authoritative
+  ``instructions`` left ``legacy_tail`` for their own KEYED layer, so the most
+  stable content in the prompt stops inheriting the knowledge wrapper's silence
+  on the cache-key question. NOT ONE BYTE MOVED: the tail rendered
+  instructions-then-knowledge and the layer list now names ``instructions``
+  immediately before it. The layer order itself became a contract a test holds —
+  every keyed layer above the volatile region, identity at the U-curve's head,
+  retrieval at its tail — rather than a comment on the tuple below.
+Updated: 2026-08-02 (PA-3, feat/prompt-assembler-seam) — the per-message soul
+  recall left ``legacy_tail`` for its own ``retrieval`` layer, which DECLARES
+  itself volatile (``cache_key=None``) rather than being inferred as volatile by
+  ``ClaudeSDKBackend._behavior_prefix``'s string surgery two modules away. It
+  renders LAST, so the assembled bytes moved from ``instructions → recall →
+  knowledge`` to ``instructions → knowledge → recall``; see the comment on
+  ``_SYSTEM_PROMPT_LAYERS`` for why that is free and where it is pinned.
+Updated: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — ``run`` and ``prewarm``
+  accept ``surface_preamble: str`` + ``surface_cache_key: str | None``, the
+  surface the user is looking at and what the EE handler that built it says it
+  read. Both are plain data (no ``pocketpaw_ee`` symbol crosses), and they feed
+  the new ``surface`` layer, which sits between ``identity`` and the tail. The
+  preamble used to ride inside ``knowledge_context``, where it landed under the
+  "Your Knowledge Base" wrapper and contributed nothing to the digest — so
+  navigating from pocket A to pocket B produced the same digest as staying put.
+  ``prewarm`` takes them too, and for the usual reason: it must assemble the
+  prompt turn 1 will, or turn 1 evicts the client it warmed. Both default to the
+  no-surface answer, so the channel path and OSS local runs are unchanged.
+Updated: 2026-08-02 (PA-1, feat/prompt-assembler-seam) —
+  ``_assemble_system_prompt`` no longer builds a string by appending blocks. It
+  renders a LIST OF LAYERS through ``pocketpaw.prompt.assemble`` and returns an
+  ``AssembledPrompt``: the same text (byte-identical), plus a ``stable_digest``
+  over the layers that declared themselves cacheable. One layer is real so far —
+  the agent identity block (soul/persona + the A1 ``system_message_override``),
+  keyed on the agent's id, its document revision, which branch produced it and
+  the override. Everything below it (the authoritative ``instructions``, the
+  per-message soul recall, the knowledge wrapper) rides one unkeyed passthrough
+  layer until it is split up.
+  The digest is forwarded to ``backend.run`` as ``system_prompt_digest`` for any
+  backend whose ``run`` declares the parameter (asked of the signature, like
+  ``_accepts_policy`` — a backend opts in by accepting it, not by being listed
+  here). ``pydantic_ai`` folds it into its agent cache key. This is the shape
+  fix behind PR #1842: an agent cached with a prompt baked in but keyed on
+  everything EXCEPT the prompt served session B what session A was told.
 Updated: 2026-07-24 (CX-2, feat/code-agent-exclusive-tools) — ``run`` and
   ``prewarm`` accept ``exclusive_mcp_tools: bool = False`` and forward it to the
   backend ONLY when True (same withhold-when-empty idiom as ``model_override`` /
@@ -96,6 +155,7 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import cache
 from typing import TYPE_CHECKING, Any
 
 from pocketpaw.agents.errors import (
@@ -103,6 +163,7 @@ from pocketpaw.agents.errors import (
     AgentDisabled,
     AgentNotFound,
 )
+from pocketpaw.prompt import AssembledPrompt, PromptContext, assemble, prompt_layer_registry
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -111,6 +172,86 @@ if TYPE_CHECKING:
     from pocketpaw.soul import SoulManager
 
 logger = logging.getLogger(__name__)
+
+# The cloud path's prompt layers, in the order they are concatenated. The names
+# resolve through ``prompt_layer_registry``; the ORDER is this caller's, because
+# it is what makes the assembled text what a cloud agent expects to read.
+#
+# ``surface`` sits between the two (PA-2): who the agent is, then where the user
+# is, then everything per-turn. That MOVES the preamble — it used to arrive
+# inside ``knowledge_context``, i.e. below the authoritative instructions and
+# inside the "Your Knowledge Base" wrapper that frames its content as reference
+# data. Two consequences worth knowing about:
+#   * the EE ``build_dynamic_context`` no longer prepends it, or it would render
+#     twice;
+#   * it now sits ABOVE ``ClaudeSDKBackend._VOLATILE_PROMPT_MARKERS``, so it
+#     participates in the warm-client cache key. That is the point rather than a
+#     side effect: a reused warm subprocess was keeping the preamble it launched
+#     with, so the agent's prompt described the pocket as it looked when the
+#     session started. It does mean a turn that changes the surface rebuilds the
+#     subprocess — the same trade the home-pocket backend summary already makes.
+#
+# ``retrieval`` renders LAST (PA-3): stable first, volatile last. Extracting the
+# per-message soul recall out of ``legacy_tail`` MOVED it — the bytes used to run
+# ``instructions → recall → knowledge`` and now run ``instructions → knowledge →
+# recall`` — because the tail still held ``instructions`` at the time. The move
+# is deliberate and cost nothing measurable: both trailing blocks are per-message
+# volatile, so their relative order cannot affect prompt caching,
+# ``_behavior_prefix`` cuts at the earliest volatile marker and both orders open
+# that region at the same offset (pinned in
+# ``tests/test_prompt_retrieval_layer.py``), and the end of the prompt is the
+# best-attended position — which memories retrieved for THIS question earn over
+# a knowledge-base dump.
+#
+# ``instructions`` sits between ``surface`` and the tail (PA-4), and NOTHING
+# MOVED. ``legacy_tail`` rendered instructions-then-knowledge; listing
+# ``instructions`` immediately before it is the same concatenation. That is the
+# whole reason this position and not another: PA-3 had a reason to move bytes and
+# argued it, PA-4 has none, and a byte moved above ``_behavior_prefix``'s cut
+# invalidates every warm Claude SDK client live at deploy.
+#
+# THE ORDER IS A CACHE CONTRACT, NOT A STYLE. Two properties make it one, and
+# both are pinned in ``tests/test_prompt_instructions_layer.py`` rather than
+# trusted to this comment:
+#   * every KEYED layer must sit ABOVE the volatile region. ``_behavior_prefix``
+#     cuts the warm-client key at the EARLIEST ``_VOLATILE_PROMPT_MARKERS`` match
+#     (``min()`` across them), so a keyed layer ordered below one is cut out of
+#     that key entirely — it would look keyed and behave unkeyed, losing its
+#     cache contribution silently. ``instructions`` is keyed as of PA-4, so it
+#     belongs above ``legacy_tail``'s ``## Your Knowledge Base`` marker, which is
+#     exactly where byte-neutrality already put it.
+#   * the prompt's two best-attended positions are its start and its end (the
+#     U-curve). Identity takes the start; the memories retrieved for THIS
+#     question take the end. The stable middle is where the material that must
+#     be PRESENT but is not being attended to moment-by-moment belongs, and it is
+#     also the region a prefix cache can actually reuse.
+# ``atlas`` and ``user`` sit directly under ``identity`` (PA-5), and NOTHING
+# MOVED for the same reason PA-4 moved nothing: neither has a producer yet, so
+# both render to nothing and the assembler's empty-text skip leaves no gap. Their
+# position is chosen for the day they do render — who the agent is, then what OS
+# it runs inside, then who is talking, then where that person is looking. That is
+# the volatility ladder the prefix cache wants (the primer changes on deploy, a
+# member's block on a profile edit, the surface key on every navigation) and it
+# keeps both above the volatile region, which a KEYED layer must be.
+#
+# What each will eventually carry is worth knowing before wiring it:
+#   * ``atlas`` — the Paw OS primer, which today only the CHANNEL path builds
+#     (``AgentContextBuilder._build_atlas_primer``). Handing it to the cloud path
+#     adds ~1.5k chars to every cloud turn; that is a product call with a token
+#     bill, not a consequence of adding a budget.
+#   * ``user`` — the ``<about-member>`` block, which today reaches the prompt
+#     INSIDE ``instructions`` (``build_behavior_instructions`` appends it). Moving
+#     it here moves bytes above ``_behavior_prefix``'s cut AND changes
+#     ``instructions``' key, which is a digest of exactly those bytes.
+_SYSTEM_PROMPT_LAYERS = (
+    "identity",
+    "atlas",
+    "user",
+    "surface",
+    "instructions",
+    "legacy_tail",
+    "retrieval",
+)
 
 
 def _resolve_agent_model() -> Any:
@@ -163,6 +304,44 @@ def _accepts_policy(backend_cls: type) -> bool:
 
     try:
         return "policy" in inspect.signature(backend_cls.__init__).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
+@cache
+def _accepts_prompt_digest(backend_cls: type) -> bool:
+    """Does this backend's ``run`` take a ``system_prompt_digest`` keyword?
+
+    The digest (PA-1) is non-empty on every run, so the withhold-when-empty
+    idiom the other per-run kwargs use cannot gate it — passing it to a backend
+    with the narrower signature would raise TypeError. Asking the signature is
+    the same answer ``_accepts_policy`` gives: a backend opts in by accepting
+    the argument, and the backends that have not been ported yet are untouched.
+    ``**kwargs`` does NOT count — a backend that swallows the digest silently
+    would look ported without keying on anything.
+
+    Cached because this runs once per turn, and a backend class's signature
+    cannot change at runtime.
+    """
+    run = getattr(backend_cls, "run", None)
+    if run is None:  # pragma: no cover - not a backend
+        return False
+    return _accepts_prompt_digest_kwarg(run)
+
+
+def _accepts_prompt_digest_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``system_prompt_digest`` in its signature?
+
+    Split out of ``_accepts_prompt_digest`` at PA-6 because ``prewarm`` needs the
+    same question asked of a BOUND METHOD rather than of a backend class. Not
+    cached: a bound method is a fresh object per access, so a cache keyed on it
+    would grow without ever hitting, and the check is one ``inspect.signature``
+    on a path that already builds SDK options.
+    """
+    import inspect
+
+    try:
+        return "system_prompt_digest" in inspect.signature(func).parameters
     except (TypeError, ValueError):  # pragma: no cover - exotic callables
         return False
 
@@ -294,96 +473,94 @@ class AgentPool:
         instructions: str,
         knowledge_context: str,
         system_message_override: str | None,
-    ) -> str | None:
-        """Build the agent's system prompt from soul/persona + override +
-        instructions + per-message soul recall + knowledge wrapper.
+        surface_preamble: str = "",
+        surface_cache_key: str | None = None,
+        atlas_primer: str = "",
+        tenant_scope: str | None = None,
+        user_info: str = "",
+        user_id: str | None = None,
+        budget_chars: int | None = None,
+    ) -> AssembledPrompt:
+        """Assemble the agent's system prompt from its layers.
+
+        Returns the text AND a ``stable_digest`` over the layers that declared
+        a cache key. The digest is what a backend caching an agent object folds
+        into its own key: without it, an agent built on turn N with turn N's
+        prompt baked in is handed back on turn N+1 to a different session (the
+        bug PR #1842 fixed per-backend).
+
+        The layers, in order:
+
+        * ``identity`` — soul/persona identity (bootstrap ``identity`` + its
+          ``# Key Knowledge``, falling back to the config persona /
+          ``system_prompt``), then the entity-rooms A1
+          ``system_message_override``, which SWAPS that base and keeps the
+          layers below. KEYED, on the agent rather than on the rendered text.
+        * ``atlas`` — the Paw OS primer. KEYED, on the tenant scope AND a digest
+          of its bytes. Capped at 2000 chars, the first cap in the prompt that
+          can bite. No producer yet: only the channel path builds this block,
+          and it arrives here in PA-7.
+        * ``user`` — the ``<about-member>`` block. KEYED, on the user id AND a
+          digest of its bytes, because the id alone cannot see a profile EDIT
+          and there is no working revision field to use instead. Capped at 500.
+          No producer yet: the block reaches the prompt inside ``instructions``
+          today, and relocating it moves bytes.
+        * ``surface`` — the surface the user is looking at, resolved in the EE
+          cloud layer and handed here as plain data. KEYED, on what the handler
+          that built the preamble says it read (``None``, i.e. no key, on every
+          path with no surface — OSS local runs, the channel adapters).
+        * ``instructions`` — the authoritative behaviour rules (runtime identity,
+          artifact delivery, the ripple LAW + delegation rule or, when an entity
+          set one, the ``system_message_override`` that replaces them, plus the
+          pocket-summary and about-member blocks). KEYED, on a digest of its own
+          bytes — the one layer whose text is the complete artifact rather than a
+          truncated view of a larger one, which is what makes hashing it an exact
+          key here and a wrong one for ``surface`` and ``identity``.
+        * ``legacy_tail`` — the knowledge-base wrapper. UNKEYED: its content is a
+          per-message KB retrieval, so a key would move the digest every turn and
+          destroy the cache it exists to protect. Until PA-4 it also carried the
+          ``instructions``, so the most stable content in the prompt inherited
+          the silence of the least.
+        * ``retrieval`` — the per-message soul recall, keyed on nothing because
+          it is keyed on the user's message. UNKEYED, and unlike the tail that
+          is its PURPOSE rather than a limitation: it is the layer that makes
+          "declares itself volatile" a thing a layer can do.
 
         Factored out of ``run`` (feat/claude-sdk-prewarm) so ``prewarm`` builds
         the IDENTICAL prompt the first real turn will. The Claude SDK warm-client
         cache key hashes the prompt's STABLE behavioral prefix (soul/persona +
-        override + ``instructions``); the volatile tail this also appends
-        (``## Relevant Past Memories`` soul recall, ``## Your Knowledge Base``)
-        is stripped before hashing, so a prewarm that passes ``message=""`` /
-        ``knowledge_context=""`` still hashes to the SAME prefix as the run that
-        passes the real values — which is exactly what makes the prewarmed client
-        reused rather than evicted on turn 1.
+        override + surface + ``instructions``); the volatile tail this also
+        appends (``## Your Knowledge Base``, then the ``## Relevant Past
+        Memories`` soul recall) is stripped before hashing, so a prewarm that
+        passes ``message=""`` / ``knowledge_context=""`` still hashes to the SAME
+        prefix as the run that passes the real values — which is exactly what
+        makes the prewarmed client reused rather than evicted on turn 1. That
+        contract survives PA-3's reorder: the cut takes the EARLIEST volatile
+        marker, and swapping two blocks that are both below it does not move
+        where the volatile region begins.
+
+        ``budget_chars`` defaults to ``None`` — unbounded — and no caller sets
+        it. That is not an oversight: ``context_builder``'s 32,000 is a CHANNEL
+        number, and a cloud prompt's stable prefix alone has been measured past
+        44k (``claude_sdk``'s volatile-marker note), so adopting it here would
+        start dropping layers from live traffic. PA-9 measures the real one.
         """
-        # Build system prompt via soul bootstrap if available
-        system_prompt = None
-        if instance.soul_manager and instance.soul_manager.bootstrap_provider:
-            try:
-                ctx = await instance.soul_manager.bootstrap_provider.get_context()
-                system_prompt = ctx.identity
-                # Append soul-level knowledge (semantic memories, bond info, etc.)
-                # into the identity block so the agent carries persistent context.
-                if ctx.knowledge:
-                    knowledge_lines = "\n".join(f"- {k}" for k in ctx.knowledge)
-                    system_prompt = f"{system_prompt}\n\n# Key Knowledge\n{knowledge_lines}"
-            except Exception:
-                logger.warning("Failed to build soul prompt for agent %s", agent_id)
-
-        # Fall back to config system_prompt or persona
-        if not system_prompt:
-            persona = instance.config.get("soul_persona", "")
-            extra = instance.config.get("system_prompt", "")
-            system_prompt = f"{persona}\n\n{extra}".strip() if persona or extra else ""
-
-        # Per-entity system-message override (entity-rooms A1): SWAP the base,
-        # KEEP the layers. Everything assembled ABOVE this point is the base
-        # persona/soul identity — exactly what the override replaces. The
-        # downstream layers (authoritative ``instructions`` incl. the ripple LAW,
-        # the soul-memory recall, the knowledge wrapper) are appended BELOW, so
-        # they still ride on top of the override. ``None`` leaves the base
-        # untouched (legacy path). Applied here so a backend never needs to know
-        # the override exists — it rides the existing ``system_prompt`` channel.
-        if system_message_override is not None:
-            system_prompt = system_message_override
-
-        # Authoritative behavior rules — injected BEFORE the knowledge
-        # wrapper so the model reads them as instructions, not reference.
-        if instructions:
-            system_prompt = f"{system_prompt}\n\n{instructions}" if system_prompt else instructions
-
-        # Query-specific soul memory recall — inject relevant past interactions
-        # so the agent can reference cross-session memories. This complements
-        # the general semantic facts already injected by SoulBootstrapProvider.
-        # Skipped on an empty message (e.g. prewarm) — and stripped from the
-        # cache key's behavioral prefix regardless, so it never affects reuse.
-        if instance.soul_manager and instance.soul_manager.soul and message.strip():
-            try:
-                soul_ctx = await instance.soul_manager.soul.context_for(
-                    message,
-                    max_memories=5,
-                    include_state=False,
-                    include_self_model=False,
-                )
-                if soul_ctx:
-                    memory_block = (
-                        "## Relevant Past Memories\n"
-                        "Below are memories from previous conversations that "
-                        "are relevant to the current question. Use them to "
-                        "provide continuity and a personalized response.\n\n"
-                        f"{soul_ctx}"
-                    )
-                    if system_prompt:
-                        system_prompt = f"{system_prompt}\n\n{memory_block}"
-                    else:
-                        system_prompt = memory_block
-            except Exception:
-                logger.debug("Soul context_for() failed for agent %s", agent_id)
-
-        # Inject knowledge context directly into system prompt
-        if knowledge_context:
-            system_prompt = (
-                f"{system_prompt}\n\n"
-                "## Your Knowledge Base\n"
-                "Use the following information from your knowledge base to answer questions. "
-                "Always reference this data when relevant instead of "
-                "making things up or using tools to search.\n\n"
-                f"{knowledge_context}"
-            )
-
-        return system_prompt
+        ctx = PromptContext(
+            instance=instance,
+            agent_id=agent_id,
+            message=message,
+            instructions=instructions,
+            knowledge_context=knowledge_context,
+            system_message_override=system_message_override,
+            surface_preamble=surface_preamble,
+            surface_cache_key=surface_cache_key,
+            atlas_primer=atlas_primer,
+            tenant_scope=tenant_scope,
+            user_info=user_info,
+            user_id=user_id,
+        )
+        layers = [prompt_layer_registry.get(name) for name in _SYSTEM_PROMPT_LAYERS]
+        return await assemble(layers, ctx, budget_chars=budget_chars)
 
     async def prewarm(
         self,
@@ -397,6 +574,8 @@ class AgentPool:
         system_message_override: str | None = None,
         skill_names: frozenset[str] = frozenset(),
         exclusive_mcp_tools: bool = False,
+        surface_preamble: str = "",
+        surface_cache_key: str | None = None,
     ) -> None:
         """Eagerly warm the agent's CLI subprocess for ``session_key`` before its
         first turn, so the first ``run`` reuses it instead of paying the cold
@@ -441,13 +620,20 @@ class AgentPool:
         effective_skills = skill_names | own_skills
 
         try:
-            system_prompt = await self._assemble_system_prompt(
+            assembled = await self._assemble_system_prompt(
                 instance,
                 agent_id=agent_id,
                 message="",  # no turn yet — the volatile tail is stripped anyway
                 instructions=instructions,
                 knowledge_context="",  # stripped from the cache-key prefix
                 system_message_override=system_message_override,
+                # PA-2: the surface preamble is NOT part of the stripped tail —
+                # it sits above the volatile markers now — so unlike ``message``
+                # and ``knowledge_context`` it cannot be passed empty here. The
+                # caller resolves the surface before firing this, and passing it
+                # is what keeps the prewarmed client's prefix equal to turn 1's.
+                surface_preamble=surface_preamble,
+                surface_cache_key=surface_cache_key,
             )
         except Exception:
             logger.debug("prewarm: prompt assembly failed for %s (skipped)", agent_id)
@@ -457,8 +643,17 @@ class AgentPool:
         # already safe; the outer guards above cover instance/prompt failures.
         prewarm_kwargs: dict[str, Any] = {
             "session_key": session_key,
-            "system_prompt": system_prompt,
+            "system_prompt": assembled.text,
         }
+        # PA-6: the digest is now what the warm-client key hashes, so a prewarm
+        # that withheld it would key under ``t:`` and turn 1 would key under
+        # ``d:`` — the prewarmed subprocess EVICTED by the very turn it exists to
+        # serve. Asked of the signature for the same reason ``_accepts_policy``
+        # is: a backend opts in by taking the argument. Sent unconditionally
+        # (never gated on truthiness) because turn 1 sends it unconditionally,
+        # and the two keys have to be built from the same inputs.
+        if _accepts_prompt_digest_kwarg(backend_prewarm):
+            prewarm_kwargs["system_prompt_digest"] = assembled.stable_digest
         if deny_mcp_tool_ids:
             prewarm_kwargs["deny_mcp_tool_ids"] = deny_mcp_tool_ids
         if allow_sdk_tools:
@@ -492,6 +687,8 @@ class AgentPool:
         on_client_built: Callable[[Any, str, Callable], None] | None = None,
         model_override: str | None = None,
         exclusive_mcp_tools: bool = False,
+        surface_preamble: str = "",
+        surface_cache_key: str | None = None,
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -550,6 +747,17 @@ class AgentPool:
         narrower signature and only the Claude SDK backend acts on it (where it wins
         over smart-routing / ``claude_sdk_model``). ``None`` = the unchanged path.
 
+        ``surface_preamble`` / ``surface_cache_key`` (PA-2) are the surface the
+        user is looking at: the rendered block (route, pocket snapshot, pinned
+        widgets, live lists) and what the EE handler that built it says it read.
+        They are NOT withhold-when-empty — they never reach a backend, they feed
+        the ``surface`` prompt layer here. The key is threaded rather than
+        derived from the text because the handler is the only thing that knows
+        what it read: the pocket preamble shows the first 12 of N widgets under
+        a 1500-char cap, so an edit to widget 13 changes the pocket and changes
+        no rendered byte. ``""`` / ``None`` (the default) is the no-surface
+        answer every non-cloud path gives, and leaves the layer keyless.
+
         ``exclusive_mcp_tools`` (CX-2) is the per-agent exclusive-tool signal. It
         rides the SAME withhold-when-empty contract: forwarded to the backend's
         ``run`` ONLY when ``True``, so the 6 non-Claude backends keep their narrower
@@ -578,13 +786,15 @@ class AgentPool:
         # so ``prewarm`` builds the SAME prompt this run will — the warm-client
         # cache key hashes the prompt's stable behavioral prefix, so a divergent
         # prefix would make the first turn evict the prewarmed client).
-        system_prompt = await self._assemble_system_prompt(
+        assembled = await self._assemble_system_prompt(
             instance,
             agent_id=agent_id,
             message=message,
             instructions=instructions,
             knowledge_context=knowledge_context,
             system_message_override=system_message_override,
+            surface_preamble=surface_preamble,
+            surface_cache_key=surface_cache_key,
         )
 
         # Mark this instance as actively running for the duration of the
@@ -605,10 +815,24 @@ class AgentPool:
             # (which always runs on the Claude SDK backend), so this never
             # withholds a needed deny from a backend that would honor it.
             run_kwargs: dict[str, Any] = {
-                "system_prompt": system_prompt,
+                "system_prompt": assembled.text,
                 "history": history,
                 "session_key": session_key,
             }
+            # The prompt's stable digest (PA-1). NOT withhold-when-empty — it is
+            # non-empty on every run — so the gate is the backend's SIGNATURE,
+            # the same question ``_accepts_policy`` asks: a backend receives it
+            # by declaring the parameter, not by being named in a list here.
+            # As of PA-6 all four prompt-caching backends declare it and it is the
+            # SOURCE of their cache keys rather than defence in depth:
+            # ``pydantic_ai`` folds it into its agent key, ``deep_agents`` and
+            # ``langchain_react`` into the compiled-graph key, and ``claude_sdk``
+            # into the warm-client key in place of its behavioural prefix. A
+            # backend that stops declaring it does not fail — it silently falls
+            # back to hashing the prompt TEXT, which is #1842's trade (correct,
+            # and a rebuild almost every turn).
+            if _accepts_prompt_digest(type(instance.backend)):
+                run_kwargs["system_prompt_digest"] = assembled.stable_digest
             if deny_mcp_tool_ids:
                 run_kwargs["deny_mcp_tool_ids"] = deny_mcp_tool_ids
             # Same withhold-when-empty rule as the deny set: only the Claude SDK

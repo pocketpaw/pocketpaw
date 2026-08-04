@@ -40,7 +40,9 @@ GATE_TOOL_ID = "mcp__pocketpaw_belt__belt_propose_change"
 async def test_belt_handler_carries_station_orientation() -> None:
     """The preamble orients to the develop station — and must NOT frame the
     deliverable as a dashboard or a pocket."""
-    preamble = await belt_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/belt"))
+    preamble = (
+        await belt_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/belt"))
+    ).text
 
     assert '<surface kind="belt" ' in preamble
     lower = preamble.lower()
@@ -56,7 +58,9 @@ async def test_belt_handler_carries_station_orientation() -> None:
 
 async def test_belt_handler_enforces_orient_first() -> None:
     """The procedure makes the agent ORIENT FIRST via loom before touching code."""
-    preamble = await belt_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/belt"))
+    preamble = (
+        await belt_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/belt"))
+    ).text
 
     lower = preamble.lower()
     assert "orient" in lower
@@ -67,7 +71,9 @@ async def test_belt_handler_enforces_orient_first() -> None:
 async def test_belt_handler_names_gate_tool_and_forbids_direct_apply() -> None:
     """The procedure names the Instinct gate tool and forbids applying / pushing /
     merging directly — every change leaves the station ONLY as a proposal."""
-    preamble = await belt_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/belt"))
+    preamble = (
+        await belt_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/belt"))
+    ).text
 
     # The gate tool the agent must propose through.
     assert GATE_TOOL_ID in preamble
@@ -81,7 +87,9 @@ async def test_belt_handler_names_gate_tool_and_forbids_direct_apply() -> None:
 
 async def test_belt_handler_names_builtin_dev_tools() -> None:
     """The develop stage names the built-in coding tools used in the worktree."""
-    preamble = await belt_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/belt"))
+    preamble = (
+        await belt_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/belt"))
+    ).text
 
     for tool in ("Bash", "Read", "Write", "Edit", "Glob", "Grep"):
         assert tool in preamble, f"preamble should name the {tool} tool"
@@ -98,7 +106,7 @@ async def test_belt_handler_injects_bound_repo_and_branch() -> None:
         repo="/srv/checkouts/acme-api",
         base_branch="develop",
     )
-    preamble = await belt_handler.build_preamble(WORKSPACE, USER, meta)
+    preamble = (await belt_handler.build_preamble(WORKSPACE, USER, meta)).text
 
     # The bound repo + branch appear verbatim.
     assert "/srv/checkouts/acme-api" in preamble
@@ -113,7 +121,9 @@ async def test_belt_handler_injects_bound_repo_and_branch() -> None:
 async def test_belt_handler_ask_first_when_no_repo_bound() -> None:
     """Without repo/base_branch the preamble keeps ask-first behavior — it does
     NOT inject a repo line and instructs the agent to confirm the repo first."""
-    preamble = await belt_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/belt"))
+    preamble = (
+        await belt_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/belt"))
+    ).text
 
     assert "<belt-repo>" not in preamble
     lower = preamble.lower()
@@ -123,12 +133,16 @@ async def test_belt_handler_ask_first_when_no_repo_bound() -> None:
 async def test_belt_handler_partial_meta_is_ask_first() -> None:
     """A repo WITHOUT a base_branch (or vice-versa) is treated as no binding —
     the page must supply BOTH for the bound path."""
-    only_repo = await belt_handler.build_preamble(
-        WORKSPACE, USER, SurfaceMeta(route_path="/belt", repo="/srv/checkouts/acme-api")
-    )
-    only_branch = await belt_handler.build_preamble(
-        WORKSPACE, USER, SurfaceMeta(route_path="/belt", base_branch="main")
-    )
+    only_repo = (
+        await belt_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/belt", repo="/srv/checkouts/acme-api")
+        )
+    ).text
+    only_branch = (
+        await belt_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/belt", base_branch="main")
+        )
+    ).text
     assert "<belt-repo>" not in only_repo
     assert "<belt-repo>" not in only_branch
 

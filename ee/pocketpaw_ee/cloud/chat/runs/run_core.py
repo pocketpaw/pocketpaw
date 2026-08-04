@@ -1,6 +1,18 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-08-02 (PA-2, feat/prompt-assembler-seam) — ``_drive_agent_loop`` and
+  ``_prewarm_session`` thread the resolved surface into ``pool.run`` /
+  ``pool.prewarm`` as ``surface_preamble`` + ``surface_cache_key``. The
+  preamble no longer reaches the prompt through ``knowledge_context`` (see
+  ``agent_service.build_dynamic_context``): it is a prompt LAYER now, so it
+  sits above the per-turn material and its key reaches the assembled prompt's
+  digest — which is what lets a backend caching an agent object notice that the
+  user navigated to a different pocket, or edited the one they were on. Both
+  halves cross the EE→OSS boundary as plain data, the shape
+  ``deny_mcp_tool_ids`` already uses. Unlike the other per-run kwargs these are
+  NOT withhold-when-empty: they never reach a backend, they feed the assembler,
+  and ``""`` / ``None`` is itself the meaningful "no surface" answer.
 - 2026-07-15 (fix/paw-bar-concierge-soul-policy) — ``_persist_and_complete``
   now gates the ``pool.observe`` soul-learning call: a Paw Bar concierge run
   (session_key prefix ``cloud:concierge:``) SKIPS it so anonymous, untrusted
@@ -1055,6 +1067,19 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
                 system_message_override=surface_sys_override,
                 skill_names=surface_skills,
                 exclusive_mcp_tools=prewarm_exclusive,
+                # PA-2 — mirror _drive_agent_loop's surface threading. The
+                # preamble sits ABOVE the volatile markers the warm-client key
+                # cuts at, so unlike ``knowledge_context`` it is part of the
+                # hashed prefix: omitting it here would warm a client whose
+                # prefix turn 1 does not match, and turn 1 would evict the very
+                # client this call paid to build. ``execute_run`` resolves
+                # ``ctx.surface_context`` before firing this, so it is in hand.
+                surface_preamble=(
+                    ctx.surface_context.preamble or "" if ctx.surface_context else ""
+                ),
+                surface_cache_key=(
+                    ctx.surface_context.preamble_cache_key if ctx.surface_context else None
+                ),
             )
         finally:
             unbind_pawbar_run(pawbar_token)
@@ -1230,12 +1255,28 @@ async def _drive_agent_loop(
         # including the legacy ``resolved_profile is None`` path (no entity / no
         # profile). Still a plain ``frozenset[str]`` crossing into the OSS pool.
         surface_skills = surface_skills | _agent_skill_set(instance)
+        # PA-2 — the surface the user is looking at, as its own prompt layer.
+        # The preamble used to arrive folded into ``knowledge_context`` (see
+        # ``build_dynamic_context``, which no longer prepends it); it now rides
+        # ``pool.run`` beside the key its handler produced, so the assembled
+        # prompt's digest moves when the user navigates or the pocket they are
+        # looking at is edited. Both cross the EE→OSS boundary as plain data —
+        # a ``str`` and a ``str | None`` — exactly like ``deny_mcp_tool_ids``.
+        # ``surface_context is None`` (older clients, non-surface paths) leaves
+        # both at their no-surface defaults and the layer renders nothing.
+        surface_preamble = ""
+        surface_cache_key: str | None = None
+        if ctx.surface_context is not None:
+            surface_preamble = ctx.surface_context.preamble or ""
+            surface_cache_key = ctx.surface_context.preamble_cache_key
         run_kwargs: dict[str, Any] = dict(
             history=history,
             knowledge_context=knowledge_context,
             instructions=behavior_instructions,
             deny_mcp_tool_ids=surface_deny,
             allow_sdk_tools=surface_allow,
+            surface_preamble=surface_preamble,
+            surface_cache_key=surface_cache_key,
         )
         if surface_allow_mcp is not None:
             run_kwargs["allow_mcp_tool_ids"] = surface_allow_mcp

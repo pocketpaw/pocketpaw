@@ -203,6 +203,51 @@ The same bug lives in ``deep_agents`` and ``langchain_react`` and is fixed in
 the same change; ``claude_sdk`` never had it, because its warm-client key
 already carries ``session_key`` plus a digest of the prompt's behavioral prefix
 (``_client_cache_key``).
+
+Updated 2026-08-02 (PA-1, feat/prompt-assembler-seam) — the agent cache key now
+also carries ``system_prompt_digest``. The note above is still the mechanism:
+this agent holds no instructions and each run supplies its own. What changed is
+that the pool assembles the prompt from LAYERS and hands down a digest over the
+ones that declared a cache key — so the digest does not move when the soul
+recall does, and keying on it costs no rebuilds. Adding it here is defence in
+depth: three backends independently cached a prompt behind a key that could not
+see one, and a key that cannot see the prompt is what made that possible in the
+first place.
+
+Updated 2026-08-03 (PA-6, feat/prompt-assembler-seam) — **the persona cannot be
+moved back to the front, and here is the measurement, so nobody spends the
+afternoon rediscovering it.** The 2026-08-01 (f) note above moved our
+instructions from the agent-level bucket to the per-run one, which is right and
+stays. It also handed the FRONT of every prompt to the capabilities, because
+pydantic-ai composes literals in a fixed order — agent-level, then capability,
+then per-run (``Agent._get_instructions``) — and joins them with a newline.
+Measured on the shipped default config: 240 characters of the Planning
+capability's ``write_plan`` blurb, with the persona starting at char 241. The
+start of a prompt is one of its two best-attended positions and a tool blurb is
+the wrong thing to spend it on, so PA-6 tried to reclaim it. It does not work:
+
+* A CALLABLE at agent level does not help. Literals are joined first and function
+  results appended after ALL of them, so a ContextVar-reading instruction
+  function moves the persona later rather than earlier.
+* ``Agent.override(instructions=...)`` is the only supported hook that writes the
+  whole list, and it REPLACES capability contributions (its own docstring says
+  so). Re-supplying ``agent._cap_instructions`` looks like it closes that, and it
+  does not: that list is built at CONSTRUCTION, while some capability
+  instructions are contributed at RUN time. The deferred-capability catalog is
+  one — it is assembled from what the message history says is already loaded, so
+  it cannot exist before the run. Measured: with ``pydantic_ai_skills_enabled``
+  False the wire prompt is 296 chars either way and nothing is lost; with it TRUE
+  (the shipped default) it is 769 chars un-reordered and 296 reordered — the
+  reorder eats the ``load_capability`` pointer and the whole skills catalog.
+  ``pydantic_ai_defer_mcp_tools`` is not the trigger; the skills capability's
+  deferral is.
+
+So the ordering stands as #1842 left it, and the cost is bounded and known: 240
+characters, ahead of a prompt that runs to tens of thousands. Reopen this only
+with a pydantic-ai that can place a per-run string ahead of capability
+instructions WITHOUT replacing the ones it resolves per run —
+``test_capability_instructions_are_still_contributed_at_run_time`` in
+tests/test_prompt_backend_digest.py is the tripwire for that day.
 """
 
 from __future__ import annotations
@@ -1660,6 +1705,7 @@ class PydanticAIBackend:
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
         allow_mcp_tool_ids: frozenset[str] | None = None,
         exclusive_mcp_tools: bool = False,
+        system_prompt_digest: str = "",
     ) -> Any:
         """Build (and cache) the pydantic-ai ``Agent``.
 
@@ -1672,6 +1718,16 @@ class PydanticAIBackend:
         2026-08-01 (f) note. The agent is shared across sessions, so a prompt
         baked in at construction is one session's prompt served to the next.
         ``run`` passes it per-run instead.
+
+        ``system_prompt_digest`` (PA-1) is the assembler's ``stable_digest``:
+        a hash over the prompt layers that declared themselves cacheable, NOT
+        over the prompt text. That distinction is what makes it safe to key on —
+        the per-message soul recall is an unkeyed layer, so it does not move the
+        digest and does not cost this cache a rebuild per turn. Here it is
+        defence in depth rather than the mechanism: this backend's correctness
+        comes from the agent holding no instructions at all. It is the mechanism
+        for the backends that DO bake a prompt in. Empty (an unported caller)
+        keys exactly as before.
         """
         from pydantic_ai import Agent
 
@@ -1704,6 +1760,11 @@ class PydanticAIBackend:
             tuple(sorted(deny)),
             None if allow_mcp_tool_ids is None else tuple(sorted(allow_mcp_tool_ids)),
             exclusive_mcp_tools,
+            # The prompt's stable digest. The tool surface above says WHAT the
+            # agent can do; this says WHOSE it is — one ``AgentPool`` instance
+            # serves every session and surface, so an agent cached under one
+            # identity must not answer for another.
+            system_prompt_digest,
         )
         if self._cached_agent is not None and self._cached_agent_key == agent_key:
             return self._cached_agent
@@ -1859,6 +1920,12 @@ class PydanticAIBackend:
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
         allow_mcp_tool_ids: frozenset[str] | None = None,
         exclusive_mcp_tools: bool = False,
+        # The assembled prompt's stable digest (PA-1). Unlike the kwargs above
+        # this is NOT withhold-when-empty — it is set on every run — so the pool
+        # gates it on this signature instead: declaring the parameter is how a
+        # backend opts in. Folded into the agent cache key so an agent built
+        # under one identity is never handed to another.
+        system_prompt_digest: str = "",
         # Accepted and deliberately unused — each is Claude-SDK plumbing with no
         # analogue here, and each is safe to drop:
         #   ``allow_sdk_tools``   ADDITIVE grant of SDK built-ins. There are no
@@ -1924,6 +1991,7 @@ class PydanticAIBackend:
                 deny_mcp_tool_ids=deny_mcp_tool_ids,
                 allow_mcp_tool_ids=allow_mcp_tool_ids,
                 exclusive_mcp_tools=exclusive_mcp_tools,
+                system_prompt_digest=system_prompt_digest,
             )
 
             kwargs: dict[str, Any] = {

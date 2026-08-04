@@ -3,6 +3,18 @@
 Every agent backend (Claude SDK, OpenAI Agents, Gemini CLI, OpenCode CLI)
 must expose a ``info()`` staticmethod and an async ``run()`` generator.
 
+Updated: 2026-08-02 (PA-1, feat/prompt-assembler-seam) — the shared ``run``
+signature grows ``system_prompt_digest: str = ""``: a hash over the layers of
+the assembled system prompt that declared themselves cacheable (see
+``pocketpaw.prompt``). A backend that caches an agent/graph/client object with
+the prompt baked in folds this into its cache key, so an object built under one
+identity can never answer for another — the bug PR #1842 fixed three times, once
+per backend. It is the only kwarg here that does NOT ride the
+withhold-when-empty contract (it is set on every run), so ``AgentPool.run``
+gates it on the backend's signature: a backend receives the digest by declaring
+the parameter. ``pydantic_ai`` does today; the rest keep the narrower signature
+and are unaffected.
+
 Updated: 2026-07-08 (CS-13, feat/per-send-model-override) — the shared ``run``
 signature grows an optional ``model_override: str | None = None`` keyword: the
 client's per-send model choice. It rides the same withhold-when-empty contract as
@@ -152,10 +164,16 @@ class LeasedClient:
       supervisor can hold it without importing the concrete SDK type, mirroring
       ``SessionHandle.session_store``'s opaque pass-through.
     * ``options_key`` — the backend's ``_client_cache_key`` for the options the
-      client was connected with (session + cwd + model + tools + system-prompt
-      behavioral-prefix digest + plugin-identity digest). The backend recomputes
-      THIS turn's key and reuses the leased client ONLY on an exact match; a
-      mismatch routes to a fresh build (and the supervisor rebinds the new slot).
+      client was connected with (session + cwd + model + tools + the prompt's
+      identity + plugin-identity digest). The backend recomputes THIS turn's key
+      and reuses the leased client ONLY on an exact match; a mismatch routes to a
+      fresh build (and the supervisor rebinds the new slot). The key is minted by
+      the backend on both sides — the supervisor stores what ``on_client_built``
+      handed it — so the two can never disagree about how it was computed. That
+      matters as of PA-6, where the prompt slot has two forms: a lease minted
+      under ``t:`` (a behavioural-prefix hash) mismatches a ``d:`` turn (the
+      assembler's digest) and costs one rebuild across the deploy that ports a
+      caller, which is the intended reading of a changed prompt identity.
     * ``busy`` — set by the backend while it is driving a query on ``client`` so a
       second concurrent turn never drives two queries on one subprocess. A busy
       lease makes the second turn fall back to a fresh stateless client for that
@@ -196,6 +214,12 @@ class AgentBackend(Protocol):
         # accept it (the Claude SDK backend) let it win over their own model
         # selection; any other backend that grows the kwarg may simply ignore it.
         model_override: str | None = None,
+        # PA-1 — the assembled system prompt's stable digest. The ONE kwarg here
+        # that does not ride the withhold-when-empty contract: it is set on every
+        # run, so ``AgentPool.run`` gates it on the backend's SIGNATURE instead
+        # (``_accepts_prompt_digest``). Declaring the parameter is how a backend
+        # opts in; the ones that have not been ported are untouched.
+        system_prompt_digest: str = "",
     ) -> AsyncIterator[AgentEvent]: ...
 
     async def stop(self) -> None: ...

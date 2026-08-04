@@ -129,13 +129,22 @@
 # tool, because widget catalog/actions are owner-authored and configuring them from
 # chat is a real gap, not a capability to imply. See `_CONCIERGE_NOTE` for the
 # per-claim code citations.
+#
+# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — ``build_preamble``
+# returns a ``SurfacePreamble`` keyed on the five ``meta`` fields the three
+# sub-preambles read (route, pocket_id, site_id, engine, mode). No I/O happens
+# here, and no site content is read — refine and chat echo the pocket id and
+# never describe the page — so a key built from meta is EXACT, and editing a
+# site correctly leaves it still. The sub-builders keep returning ``str``; only
+# the entry point answers the key.
 
 from __future__ import annotations
 
 import functools
 from typing import Any
 
-from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
+from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
+from pocketpaw_ee.cloud.surface.handlers._helpers import meta_key
 from pocketpaw_ee.sites_crew.models import DesignBrief
 
 # --- The concierge block (fix/concierge-tools-for-site-agent) -----------------
@@ -246,8 +255,15 @@ def _design_taste_system() -> str:
     )
 
 
-async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
+async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
     """Render the /sites surface preamble.
+
+    The cache key is built from ``meta`` alone, and here that is exact rather
+    than a concession: all three sub-preambles are pure functions of the meta
+    plus a process-cached read of the design-taste SKILL.md. Nothing about the
+    SITE is read — the refine and chat modes echo the ``pocket_id`` and never
+    describe the page's contents — so editing a site does NOT move this key,
+    and should not: the preamble says the same thing before and after.
 
     Modes, keyed on the meta:
 
@@ -262,10 +278,18 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
       site by editing its source pocket in place; never rebuild from scratch.
     """
     if meta.pocket_id:
-        if meta.mode == "chat":
-            return _chat_preamble(meta)
-        return _refine_preamble(meta)
-    return _create_preamble(meta)
+        text = _chat_preamble(meta) if meta.mode == "chat" else _refine_preamble(meta)
+    else:
+        text = _create_preamble(meta)
+    # The five inputs the three sub-preambles read, all off ``meta``. ``mode``
+    # and ``engine`` are in there because they pick which preamble was rendered
+    # at all — toggling Build/Chat on the same site is a different prompt.
+    return SurfacePreamble(
+        text=text,
+        cache_key=meta_key(
+            "sites", meta.route_path, meta.pocket_id, meta.site_id, meta.engine, meta.mode
+        ),
+    )
 
 
 def _create_preamble(meta: SurfaceMeta) -> str:

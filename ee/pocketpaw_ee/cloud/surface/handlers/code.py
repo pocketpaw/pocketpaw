@@ -1,5 +1,13 @@
 # code.py — /code surface preamble.
 #
+# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
+# ``SurfacePreamble`` keyed on the route plus ``meta.project_name``. Nothing
+# mutable is read (the CD-3 rewrite is what made that true — the four storage
+# hints it used to branch on are gone), so those two inputs ARE the preamble
+# and the key is exact. The user's code changing does NOT move it, which is
+# right: this block orients the agent toward the file tools, it never claimed
+# to describe the project's contents.
+#
 # Created: 2026-06-10 (feat/studio-code-migration) — Orients the chat agent when
 # the user is on the /code surface. Without it the surface falls back to GENERIC
 # and the agent builds a dashboard pocket instead of writing code — the same
@@ -66,10 +74,11 @@
 
 from __future__ import annotations
 
-from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
+from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
+from pocketpaw_ee.cloud.surface.handlers._helpers import meta_key
 
 
-async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
+async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
     """Render the /code surface preamble — code reached only via the file tools.
 
     Static: the preamble does not vary with storage flavour, working
@@ -78,10 +87,20 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
     writeFile) reach the project; the browser that runs them owns the sandbox
     and the file session. The only thing read from ``meta`` is ``project_name``,
     and purely so the agent can name the project the user is looking at.
+
+    That makes the cache key exact rather than a digest: the route and the
+    project name are the only two inputs, so naming them names the preamble.
+    Switching projects moves the key; the user editing their code does not,
+    which is correct — the file tools read the project live and this block
+    never claimed to describe its contents.
     """
     route = meta.route_path or "/code"
-    return (
-        f'<surface kind="code" route="{route}" />\n{_orientation(meta.project_name)}{_procedure()}'
+    return SurfacePreamble(
+        text=(
+            f'<surface kind="code" route="{route}" />\n'
+            f"{_orientation(meta.project_name)}{_procedure()}"
+        ),
+        cache_key=meta_key("code", route, meta.project_name),
     )
 
 

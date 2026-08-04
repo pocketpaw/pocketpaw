@@ -47,6 +47,15 @@ prepends its preamble before the legacy scope/participants/current-pocket
 tags so the chat agent sees the surface snapshot first. Clients that
 don't stamp a surface hint keep the old three-line shape unchanged —
 ``surface_context is None`` is the legacy path.
+Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — that prepend is GONE.
+The preamble is a prompt layer now (``pocketpaw.prompt.surface``), assembled
+under the agent's identity and above the per-turn material instead of inside
+the "Your Knowledge Base" wrapper this block lands in, and it carries the
+handler's cache key so the assembled prompt's digest moves when the user
+navigates or the pocket they are looking at is edited. ``run_core`` threads
+both halves into ``pool.run``; leaving the prepend here would double the text.
+``build_dynamic_context`` is back to exactly its three legacy tags, for every
+client, surface-stamping or not.
 Changes: 2026-05-31 (feat/home-agent-source-authoring) — ``ScopeContext``
 carries an optional ``backend_summary`` (the non-secret {base_url,
 auth_type, configured} dict from ``pockets.service.get_pocket_backend``,
@@ -1886,17 +1895,17 @@ def build_dynamic_context(ctx: ScopeContext) -> str:
     data and lives inside the ``knowledge_context`` wrapper; the
     behavioral instructions live at the top level.
 
-    When a ``surface_context`` is attached, its preamble is prepended
-    FIRST — surface state (pinned widgets, snapshot, available tools)
-    is more informationally dense than the bare scope tags and the
-    agent should see it before anything else. ``surface_context is None``
-    keeps the legacy three-line shape (clients that don't stamp a
-    surface hint, or surfaces that fell back to GENERIC with an empty
-    preamble).
+    The surface preamble used to be prepended here, on the reasoning that the
+    agent should see surface state before anything else. It never did: this
+    block ends up inside the "Your Knowledge Base" wrapper at the BOTTOM of the
+    prompt, framed as reference data. Since PA-2 the preamble is its own prompt
+    layer, assembled directly under the agent's identity and above the per-turn
+    material — which is where "before anything else" actually lives — and it
+    carries a cache key, which it could not do from in here. ``run_core`` reads
+    it off ``ctx.surface_context`` and threads it into ``pool.run``; prepending
+    it here as well would render it twice.
     """
     parts: list[str] = []
-    if ctx.surface_context and ctx.surface_context.preamble:
-        parts.append(ctx.surface_context.preamble)
     member_list = ", ".join(ctx.members) if ctx.members else "(none)"
     parts.append(f"<scope>{ctx.kind.value} {ctx.scope_id}</scope>")
     parts.append(f"<participants>{member_list}</participants>")

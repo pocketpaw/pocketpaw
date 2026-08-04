@@ -1,5 +1,30 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-08-03 (PA-6, feat/prompt-assembler-seam) — ``run`` / ``prewarm`` take
+  ``system_prompt_digest`` and the warm-client key prefers it over
+  ``_behavior_prefix``. The prefix INFERS which bytes are stable by cutting the
+  rendered text at known markers; the digest is what the prompt LAYERS said about
+  themselves. The prefix was inferring badly: it excises ``# Key Knowledge`` but
+  ``## Self-Understanding`` renders above that block, so the strip never reached
+  it and an ordinary turn respawned the subprocess. Measured over 8 turns on a
+  live soul, the prefix held 1 of 7 turn boundaries and the digest held 7 of 7.
+  The prefix STAYS as the no-digest fallback — the channel path builds its prompt
+  in ``AgentContextBuilder`` until PA-7, and ``run`` splices a growing
+  ``# Recent Conversation`` block into ``options.system_prompt`` after assembly,
+  so a whole-prompt key would rebuild there every turn (measured 0 of 7). The two
+  slots are prefixed ``d:`` / ``t:`` so a client warmed under one rule can never
+  answer a turn asking the other.
+Updated: 2026-08-02 (PA-1 review, feat/prompt-assembler-seam) — ``_behavior_prefix``
+  matches its volatile markers at a BLOCK BOUNDARY instead of on the literal
+  ``"\\n\\n…"`` alone: a block that OPENS the prompt carries no separator, so the
+  old ``find`` missed it and the whole volatile block stayed in the warm-client
+  key — subprocess rebuilt every turn, prewarm evicted on turn 1. It only ever
+  worked because the legacy string assembly emitted that separator even with
+  nothing before it; the prompt assembler joins layers, and PA-3/PA-4/PA-8 give
+  these blocks their own layers, where the join means their text never carries a
+  leading blank line. The cut is still a cut: a marker mid-prompt without its
+  blank line is content, not a header, and a real persona/instructions change
+  still rebuilds.
 Updated: 2026-07-24 (CX-1, feat/code-agent-cx1) — ``_build_options`` / ``run`` /
   ``prewarm`` grow an ``exclusive_mcp_tools: bool = False`` keyword. When True, the
   MCP scoping block CAPS the tool surface to ``allow_mcp_tool_ids`` alone — no
@@ -1252,6 +1277,17 @@ class ClaudeSDKBackend(BaseAgentBackend):
     # every turn would needlessly tear down and rebuild the subprocess. The
     # behavioral prefix BEFORE these markers carries the home-pocket backend
     # summary, which is exactly the mutable state we want the key to track.
+    # Stored WITH the leading blank line, and matched at a block BOUNDARY: the
+    # separator is present when something precedes the block and absent when the
+    # block opens the prompt, and both are the same block. Matching the literal
+    # alone was correct only while the legacy string assembly appended the
+    # knowledge wrapper unconditionally — it always emitted the "\n\n" even with
+    # nothing before it. The prompt assembler (``pocketpaw.prompt``) joins layers
+    # instead, so a block that is FIRST starts at index 0 with no separator at
+    # all; a marker-blind ``find`` misses it and the whole volatile block lands
+    # in the key, rebuilding the warm subprocess every turn. That is not a
+    # transitional quirk: PA-3/PA-4/PA-8 give these blocks their own layers,
+    # where the join means their text NEVER carries a leading "\n\n".
     _VOLATILE_PROMPT_MARKERS = (
         "\n\n## Your Knowledge Base",
         "\n\n## Relevant Past Memories",
@@ -1351,6 +1387,30 @@ class ClaudeSDKBackend(BaseAgentBackend):
     def _behavior_prefix(cls, system_prompt: Any) -> str:
         """Return the stable behavioral prefix of ``system_prompt``.
 
+        AS OF PA-6 THIS IS THE FALLBACK, NOT THE MECHANISM. A caller that
+        assembles its prompt through :mod:`pocketpaw.prompt` passes
+        ``system_prompt_digest`` and this function is never consulted for its
+        key — the digest is a claim the LAYERS made about themselves, where this
+        is a guess made by pattern-matching two modules away. PA-6 was filed as
+        "delete it"; it is kept because ``AgentLoop`` (Telegram / Discord /
+        Slack / CLI) builds its prompt in ``AgentContextBuilder`` and has no
+        digest until PA-7, and the number says what deleting it would cost
+        there. Measured 2026-08-03 over 8 turns of a realistic channel prompt:
+        keying on the whole prompt instead held 0/7 boundaries, because ``run``
+        itself splices a GROWING ``# Recent Conversation`` block into
+        ``options.system_prompt`` (see the history injection in ``_build_options``)
+        — so the warm subprocess would be torn down and respawned every turn.
+        With this prefix it held 7/7. PA-7 deletes it when the channel path
+        produces a digest of its own.
+
+        What it is worse at than the digest, measured on the cloud path over the
+        same 8 turns: it retains ``## Self-Understanding``, which
+        ``to_system_prompt()`` renders ABOVE the ``# Key Knowledge`` block this
+        excises, so the strip never reaches it. It moved on 6 of 7 boundaries,
+        and the warm client rebuilt with it — 1/7 held, against 7/7 for the
+        digest. The prefix was never the high baseline PA-6's success metric
+        assumed.
+
         Two independent volatile strips run here so two turns that differ only
         in per-turn soul/retrieval state hash to the same value:
 
@@ -1359,11 +1419,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
            recalled memories increment every turn but carry no behavioral
            instructions.
         2. The volatile per-turn TAIL (KB block, soul-memory recall, injected
-           history) is cut at the earliest ``_VOLATILE_PROMPT_MARKERS`` marker.
+           history) is cut at the earliest ``_VOLATILE_PROMPT_MARKERS`` marker,
+           matched at a block boundary — after the separator, or at index 0 when
+           the block opens the prompt and there is no separator to find.
 
         A REAL behavioral change (different persona/identity, override, or
         ``instructions``) still lands in the retained text, so it changes the
-        digest and forces a warm-client rebuild. On Windows the SDK may pass
+        digest and forces a warm-client rebuild. The boundary rule keeps that
+        true: a marker mid-prompt without its blank line is content, not a
+        section header, and is left alone. On Windows the SDK may pass
         ``system_prompt`` as a ``{type: "file", path: ...}`` dict — there is no
         inline text to key on, so fall back to the path (stable per connect).
         """
@@ -1374,6 +1438,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
         system_prompt = cls._strip_soul_knowledge_block(system_prompt)
         cut = len(system_prompt)
         for marker in cls._VOLATILE_PROMPT_MARKERS:
+            # The block opens the prompt: nothing precedes it, so the separator
+            # the marker carries was never emitted. Everything is volatile.
+            if system_prompt.startswith(marker.lstrip("\n")):
+                return ""
             idx = system_prompt.find(marker)
             if idx != -1:
                 cut = min(cut, idx)
@@ -1451,10 +1519,32 @@ class ClaudeSDKBackend(BaseAgentBackend):
         session_key: str | None = None,
         plugin_digest: str = "",
         tenant_scope: str = "",
+        system_prompt_digest: str = "",
     ) -> str:
-        """Persistent-client cache key: session + cwd + model + tools + a digest
-        of the system prompt's stable behavioral prefix + the plugin-identity
-        digest.
+        """Persistent-client cache key: session + cwd + model + tools + the
+        prompt's identity + the plugin-identity digest.
+
+        THE PROMPT SLOT HAS TWO SOURCES AND THEY ARE DIFFERENT CLAIMS (PA-6).
+        ``d:`` is the assembler's ``stable_digest`` — a hash over the prompt
+        LAYERS that declared themselves cacheable. ``t:`` is a hash of
+        ``_behavior_prefix``, which infers the same thing by cutting the rendered
+        text at known markers. They are prefixed rather than sharing a namespace
+        because a caller that gains a digest mid-deploy must rebuild once rather
+        than silently match a key minted under the other rule.
+
+        The digest WINS where it exists, and it is strictly better there. It sees
+        the drift the prefix cannot: ``## Self-Understanding`` renders above the
+        ``# Key Knowledge`` block the prefix excises, so the prefix keeps it and
+        rebuilt the warm subprocess on 6 of 7 measured turn boundaries. Over the
+        same 8 turns the digest held one value. It is also honest about what it
+        does NOT cover — the ``# Recent Conversation`` block this backend splices
+        into ``options.system_prompt`` after assembly is per-turn volatile and is
+        outside both, which is the intended answer in both cases.
+
+        ``t:`` is not a transitional wart to be deleted on sight: ``AgentLoop``'s
+        channel path builds its prompt in ``AgentContextBuilder`` and has no
+        digest until PA-7. On that path, keying on the whole prompt instead held
+        0 of 7 boundaries against the prefix's 7 of 7 — see ``_behavior_prefix``.
 
         The prefix digest is what makes a mid-session backend config change
         (configured:false -> configured:true, baked into the static home
@@ -1479,20 +1569,28 @@ class ClaudeSDKBackend(BaseAgentBackend):
         set at connect() time, so a changed scope must also force a fresh
         subprocess rather than reusing one warmed for another tenant.
         """
-        prefix = cls._behavior_prefix(getattr(options, "system_prompt", None))
-        prefix_digest = hashlib.sha256(prefix.encode("utf-8", "replace")).hexdigest()[:16]
+        if system_prompt_digest:
+            prompt_key = f"d:{system_prompt_digest}"
+        else:
+            prefix = cls._behavior_prefix(getattr(options, "system_prompt", None))
+            prompt_key = "t:" + hashlib.sha256(prefix.encode("utf-8", "replace")).hexdigest()[:16]
         return (
             f"{session_key or ''}:"
             f"{getattr(options, 'cwd', '')}:"
             f"{getattr(options, 'model', '')}:"
             f"{sorted(getattr(options, 'allowed_tools', []) or [])}:"
-            f"{prefix_digest}:"
+            f"{prompt_key}:"
             f"{plugin_digest}:"
             f"{tenant_scope}"
         )
 
     async def _get_or_create_client(
-        self, options: Any, *, session_key: str | None = None, plugin_digest: str = ""
+        self,
+        options: Any,
+        *,
+        session_key: str | None = None,
+        plugin_digest: str = "",
+        system_prompt_digest: str = "",
     ) -> Any:
         """Get or create a persistent ClaudeSDKClient.
 
@@ -1527,6 +1625,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             session_key=session_key,
             plugin_digest=plugin_digest,
             tenant_scope=self._tenant_scope_key(),
+            system_prompt_digest=system_prompt_digest,
         )
 
         async with self._client_lock:
@@ -2243,6 +2342,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         allow_mcp_tool_ids: frozenset[str] | None = None,
         skill_names: frozenset[str] = frozenset(),
         exclusive_mcp_tools: bool = False,
+        system_prompt_digest: str = "",
     ) -> None:
         """Eagerly ``connect()`` the warm CLI subprocess for a session before its
         first turn, so the first real ``run`` reuses it instead of paying the
@@ -2254,6 +2354,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
         client already live. If the keys diverged the first turn would EVICT the
         prewarmed client (a net loss), which is why the caller must prewarm with
         the same model/tools/prefix/skills the first turn will use.
+
+        ``system_prompt_digest`` (PA-6) joins that list, and it is the reason the
+        prewarm still matches after the cutover. ``AgentPool.prewarm`` assembles
+        with ``message=""`` and ``knowledge_context=""``, which changes the
+        rendered TEXT — the old prefix survived that only because those two
+        blocks sit below its cut. The digest survives it for a stronger reason:
+        ``legacy_tail`` and ``retrieval`` are the layers those two fields feed and
+        both declare ``cache_key=None``, so neither can reach the digest at all.
 
         FIRE-AND-FORGET, never-break-a-turn semantics:
           * ALL exceptions are logged and SWALLOWED — a failed prewarm must never
@@ -2303,6 +2411,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 built.options,
                 session_key=session_key,
                 plugin_digest=built.plugin_digest,
+                system_prompt_digest=system_prompt_digest,
             )
             logger.info(
                 "Prewarmed Claude client for session_key=%s (skills=%d)",
@@ -2483,10 +2592,20 @@ class ClaudeSDKBackend(BaseAgentBackend):
         on_client_built: Callable[[Any, str, Callable], None] | None = None,
         model_override: str | None = None,
         exclusive_mcp_tools: bool = False,
+        system_prompt_digest: str = "",
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
         Yields AgentEvent objects as the agent responds.
+
+        ``system_prompt_digest`` (PA-6) is the assembler's ``stable_digest``, and
+        it replaces ``_behavior_prefix`` in the warm-client cache key for every
+        caller that has one. Declared rather than swallowed by ``**kwargs``:
+        ``AgentPool._accepts_prompt_digest`` reads this signature to decide
+        whether to pass it, and a backend that accepted it silently would look
+        ported while keying on nothing. Empty = a caller outside the assembler
+        (the channel path until PA-7), which keeps the prefix. See
+        ``_client_cache_key``.
 
         ``session_handle`` (feat/session-supervisor SS-1) carries native-resume
         identity. When it holds a non-None ``cli_session_id``, the SDK options
@@ -2700,6 +2819,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     session_key=session_key,
                     plugin_digest=plugin_digest,
                     tenant_scope=self._tenant_scope_key(),
+                    system_prompt_digest=system_prompt_digest,
                 )
                 event_stream, _warm_lease = await self._leased_dispatch(
                     message=message,
@@ -2723,7 +2843,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     self._client_in_use = True
                     acquired_lease = True
                     _persistent_client = await self._get_or_create_client(
-                        options, session_key=session_key, plugin_digest=plugin_digest
+                        options,
+                        session_key=session_key,
+                        plugin_digest=plugin_digest,
+                        system_prompt_digest=system_prompt_digest,
                     )
                     logger.info("Persistent client: sending query (%d chars)", len(message))
                     await _persistent_client.query(message)
