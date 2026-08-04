@@ -38,7 +38,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from pocketpaw.config import Settings
+from pocketpaw.config import Settings, get_settings
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
 from pocketpaw_ee.cloud.composio import service as composio_service
 
@@ -104,7 +104,7 @@ def build_tools_for_backend(
     if backend_kind not in SUPPORTED_BACKENDS:
         return []
 
-    s = settings or Settings.load()
+    s = settings or get_settings()
     if not composio_service.is_enabled(s):
         return []
 

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from pocketpaw.config import Settings
+from pocketpaw.config import Settings, get_settings
 from pocketpaw_ee.cloud._core.context import RequestContext
 from pocketpaw_ee.cloud._core.errors import Internal, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
@@ -47,10 +47,26 @@ def is_enabled(settings: Settings | None = None) -> bool:
     The ``Settings`` validator already enforces ``api_key →
     enterprise_id``; this is a cheap helper for the call sites that
     just want a yes/no before deciding whether to inject the MCP
-    server. Accepts an optional ``Settings`` so callers that already
-    have one don't pay the ``Settings.load()`` cost twice.
+    server.
+
+    IT WAS NOT CHEAP. The docstring used to end "accepts an optional
+    ``Settings`` so callers that already have one don't pay the
+    ``Settings.load()`` cost twice" — an accurate warning that the default
+    path then ignored. ``Settings.load()`` re-parses the whole pydantic-settings
+    model from ``.env`` on every call: MEASURED 2026-08-04 at 114.9 ms, and
+    11.9M Python function calls for five invocations.
+
+    ``build_behavior_instructions`` calls this with no argument on EVERY chat
+    turn, so that 115 ms WAS the entire cost of assembling the system prompt —
+    profiling it looking for slow string work turned up one config load and
+    essentially nothing else. ``get_settings()`` is the ``lru_cache``d
+    accessor and measures 0.000 ms.
+
+    An explicit ``settings`` still wins, so a caller holding a fresher snapshot
+    is unaffected. Anything needing to observe a just-written config change
+    wants ``get_settings(force_reload=True)``, not a bare ``load()``.
     """
-    s = settings or Settings.load()
+    s = settings or get_settings()
     return bool(s.composio_api_key and s.composio_enterprise_id)
 
 
@@ -61,7 +77,7 @@ def composio_user_id(ctx: RequestContext, settings: Settings | None = None) -> C
     ``ComposioUserId`` value object so the tenancy invariants live
     in one place (domain), not scattered across f-strings.
     """
-    s = settings or Settings.load()
+    s = settings or get_settings()
     if not s.composio_enterprise_id:
         raise ValidationError(
             "composio.disabled",
@@ -84,7 +100,7 @@ async def _get_client(settings: Settings | None = None) -> object:
     if _client is not None:
         return _client
 
-    s = settings or Settings.load()
+    s = settings or get_settings()
     if not is_enabled(s):
         raise ValidationError(
             "composio.disabled",
@@ -130,7 +146,7 @@ async def list_available_toolkits(settings: Settings | None = None) -> list[str]
     integrations or an admin disables one upstream. Callers that
     want caching should wrap this themselves.
     """
-    s = settings or Settings.load()
+    s = settings or get_settings()
     client = await _get_client(s)
     try:
         toolkits = await asyncio.to_thread(_list_toolkits_sync, client)
