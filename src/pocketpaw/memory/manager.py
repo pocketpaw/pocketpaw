@@ -343,6 +343,47 @@ class MemoryManager:
             )
         return history
 
+    async def get_session_history_page(
+        self,
+        session_key: str,
+        limit: int = 50,
+        before: str | None = None,
+    ) -> dict[str, Any]:
+        """Keyset-paginated chat history for the /chat transcript.
+
+        Returns ``{"messages": [...], "has_more": bool}`` where ``messages``
+        is the most recent ``limit`` rows ASCENDING (oldest→newest), matching
+        the cloud history shape plus ``has_more`` so the client can page
+        backward. ``before`` is a ``{createdAt}|{entry_id}`` cursor — pass
+        the oldest loaded message's cursor to fetch the previous (older)
+        page. An invalid cursor yields an empty page (defensive; the client
+        only ever echoes back a cursor it received).
+        """
+        entries = await self._store.get_session(session_key)
+        try:
+            if before:
+                before_iso, before_id = before.split("|", 1)
+                before_ts = datetime.fromisoformat(before_iso)
+                entries = [e for e in entries if (e.created_at, e.id) < (before_ts, before_id)]
+        except (ValueError, TypeError):
+            return {"messages": [], "has_more": False}
+
+        has_more = len(entries) > limit
+        page = entries[-limit:]
+        return {
+            "messages": [
+                {
+                    "_id": e.id,
+                    "role": e.role or "user",
+                    "content": e.content,
+                    "createdAt": e.created_at.isoformat(),
+                    "attachments": (e.metadata or {}).get("attachments") or [],
+                }
+                for e in page
+            ],
+            "has_more": has_more,
+        }
+
     async def search(
         self,
         query: str,
