@@ -2,6 +2,12 @@
 
 Uses the shared ``mongo_db`` fixture so service functions exercise real
 Beanie reads/writes against an isolated mongomock-motor DB.
+
+Updated 2026-08-05 (T-2, feat/coupling-person-freshness): added coverage
+for ``get_profile_by_id`` (the plain-user_id profile read the people
+module's Person refresh paths use). ``update_profile``'s new
+``profile.updated`` emit is covered in
+tests/cloud/people/test_person_freshness.py next to its consumer.
 """
 
 from __future__ import annotations
@@ -81,6 +87,21 @@ async def test_update_profile_partial_only_full_name() -> None:
     assert refreshed is not None
     assert refreshed.full_name == "Bob"
     assert refreshed.avatar == ""  # untouched
+
+
+async def test_get_profile_by_id_returns_profile_and_memberships() -> None:
+    doc = await _seed_user(workspace_role="admin")
+    out = await auth_service.get_profile_by_id(str(doc.id))
+    assert out.id == str(doc.id)
+    assert out.full_name == "Alice"
+    assert [(m.workspace, m.role) for m in out.workspaces] == [("w1", "admin")]
+
+
+async def test_get_profile_by_id_raises_not_found() -> None:
+    from beanie import PydanticObjectId
+
+    with pytest.raises(NotFound):
+        await auth_service.get_profile_by_id(str(PydanticObjectId()))
 
 
 async def test_set_active_workspace_persists() -> None:
