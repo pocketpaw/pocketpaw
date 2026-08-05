@@ -1,4 +1,16 @@
 # listeners.py — In-process subscribers for upload-related bus events.
+# Updated: 2026-08-05 — Coupling T-1 "file delete prunes extracted knowledge".
+#   (1) FileDeleted finally has a subscriber: prune_deleted_file_knowledge reads
+#   the tombstoned FileUpload row (get_doc_scoped_any — the service soft-deletes
+#   BEFORE emitting) and deletes the tracked kb-go article via
+#   KnowledgeService.remove_article(kb_scope, kb_article_id), then clears the
+#   tracking on the tombstone. No tracked article → safe no-op. kb-go's delete
+#   also removes the article's vector-index entry and raw docs (see
+#   kb-go delete_test.go TestCmdDelete_RemovesArticleEverywhere), so the Stage
+#   2.D vector artifact needs no separate cleanup. (2) The FileReady ingest now
+#   stamps provenance the other way: --source carries
+#   "<filename>#file:<file_id>" (source_with_file_id) so a KB article can be
+#   joined back to the upload it came from.
 # Created: 2026-04-30 — Stage 1.B of "Files as Knowledge". Wires FileReady
 #   into the extraction chain and ingests the resulting text into the
 #   workspace KB scope. Pocket-scope routing lands in Stage 3.E.
@@ -71,7 +83,7 @@ import logging
 from pathlib import Path
 
 from pocketpaw_ee.cloud._core.realtime.bus import get_bus
-from pocketpaw_ee.cloud._core.realtime.events import Event, FileReady
+from pocketpaw_ee.cloud._core.realtime.events import Event, FileDeleted, FileReady
 from pocketpaw_ee.cloud.uploads.resolver import materialize_to_local_path
 
 logger = logging.getLogger(__name__)
@@ -186,12 +198,17 @@ async def index_uploaded_file(event: Event) -> None:
         else:
             scope = f"workspace:{workspace_id}"
         try:
-            from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
+            from pocketpaw_ee.cloud.agents.knowledge import (
+                KnowledgeService,
+                source_with_file_id,
+            )
 
+            # Coupling T-1: stamp the upload's file_id into the kb-go source
+            # string so the article carries a join back to the FileUpload row.
             ingest_result = await KnowledgeService.ingest_text_to_scope(
                 scope=scope,
                 text=text,
-                source=filename,
+                source=source_with_file_id(filename, file_id),
             )
         except Exception:
             logger.exception("KB ingest failed for file_id=%s", file_id)
@@ -514,6 +531,109 @@ def _resolve_adapter():
         return None
 
 
+async def prune_deleted_file_knowledge(event: Event) -> None:
+    """Delete the KB article extracted from a now-deleted file (Coupling T-1).
+
+    ``EEUploadService.delete`` soft-deletes the row, then emits
+    :class:`FileDeleted` "so subscribers can prune cached state" — this is that
+    subscriber. It recovers the tracked ``kb_article_id`` / ``kb_scope`` from
+    the tombstoned row (``get_doc_scoped_any`` — the live-row readers can't see
+    it post-tombstone), purges the article via ``kb delete``, and clears the
+    tracking on success. Without this, deleted (possibly sensitive) content
+    stayed agent-retrievable through KB search forever.
+
+    Safe no-ops: missing payload fields, an unresolvable row, or a row with no
+    tracked article all return quietly. kb-go's ``delete`` removes the vector
+    index entry and raw docs along with the article and is idempotent, so no
+    separate vector cleanup is needed and a re-fire is harmless. Fully
+    contained like every bus handler here — a purge failure logs and leaves the
+    tracking in place so a sweeper (or re-fire) can re-purge.
+    """
+    data = event.data or {}
+    workspace_id = data.get("workspace_id") or data.get("workspace")
+    file_id = data.get("file_id")
+    if not workspace_id or not file_id:
+        logger.debug(
+            "FileDeleted missing workspace_id or file_id; skipping KB prune "
+            "(workspace_id=%r, file_id=%r)",
+            workspace_id,
+            file_id,
+        )
+        return
+
+    try:
+        from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+
+        doc = await MongoFileStore().get_doc_scoped_any(file_id, str(workspace_id))
+    except Exception:
+        logger.exception(
+            "could not load FileUpload row for deleted file_id=%s; KB article "
+            "(if any) not pruned — sweeper can reconcile",
+            file_id,
+        )
+        return
+    if doc is None:
+        logger.debug("no FileUpload row for deleted file_id=%s; nothing to prune", file_id)
+        return
+
+    article_id = getattr(doc, "kb_article_id", None)
+    scope = getattr(doc, "kb_scope", None)
+    if not article_id or not scope:
+        logger.debug(
+            "deleted file_id=%s has no tracked KB article; nothing to prune",
+            file_id,
+        )
+        return
+
+    try:
+        from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
+
+        purged = await KnowledgeService.remove_article(scope, article_id)
+    except Exception:
+        # remove_article is fail-soft itself; this is belt-and-braces so a
+        # surprise never propagates back into the bus dispatch.
+        logger.exception(
+            "KB prune raised for deleted file_id=%s (article_id=%s scope=%s)",
+            file_id,
+            article_id,
+            scope,
+        )
+        return
+
+    if not purged:
+        logger.warning(
+            "KB prune failed for deleted file_id=%s (article_id=%s scope=%s); "
+            "tracking kept so a sweeper can re-purge",
+            file_id,
+            article_id,
+            scope,
+        )
+        return
+
+    logger.info(
+        "pruned KB article %s (scope=%s) for deleted file_id=%s",
+        article_id,
+        scope,
+        file_id,
+    )
+    try:
+        from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+
+        await MongoFileStore().set_kb_article(
+            file_id,
+            str(workspace_id),
+            article_id=None,
+            scope=None,
+            include_deleted=True,
+        )
+    except Exception:
+        logger.debug(
+            "clearing kb tracking failed for deleted file_id=%s; harmless — "
+            "kb delete is idempotent on a re-fire",
+            file_id,
+        )
+
+
 def register_upload_listeners() -> None:
     """Wire the upload subscribers into the bus.
 
@@ -524,6 +644,13 @@ def register_upload_listeners() -> None:
     """
     bus = get_bus()
     bus.subscribe(FileReady.EVENT_TYPE, index_uploaded_file)
+    # Coupling T-1: FileDeleted had zero subscribers — deleted files left
+    # their extracted knowledge agent-retrievable forever. This closes it.
+    bus.subscribe(FileDeleted.EVENT_TYPE, prune_deleted_file_knowledge)
 
 
-__all__ = ["index_uploaded_file", "register_upload_listeners"]
+__all__ = [
+    "index_uploaded_file",
+    "prune_deleted_file_knowledge",
+    "register_upload_listeners",
+]

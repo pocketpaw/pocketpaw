@@ -1,4 +1,11 @@
 # knowledge.py — Agent knowledge service via the kb-go binary.
+# Updated: 2026-08-05 — Coupling T-1 "file→KB provenance". Added
+#   source_with_file_id(filename, file_id) → "<filename>#file:<file_id>" so the
+#   FileReady listener can stamp the originating upload's id into the kb-go
+#   --source string (a plain string on kb-go's side; flagStr in kb.go). The
+#   separator lives in KB_SOURCE_FILE_ID_SEP; _lang_for_source now strips the
+#   fragment before the suffix lookup so a stamped code file ("main.py#file:f1")
+#   still gets its --lang AST hint.
 # Updated: 2026-08-04 — Ingest hardening (silent-poisoning fix). On boxes with
 #   no ANTHROPIC_API_KEY (the Claude Code agent backend deployment), kb's own
 #   LLM compile used to fail and kb silently stored every doc VERBATIM — a
@@ -111,9 +118,27 @@ _CODE_LANG_BY_SUFFIX = {
 }
 
 
+# Separator for stamping an upload's file_id into the kb-go --source string
+# (Coupling T-1). kb-go treats --source as a plain opaque string, so the
+# provenance rides along as "<filename>#file:<file_id>" — enough to join a KB
+# article back to the FileUpload row it came from.
+KB_SOURCE_FILE_ID_SEP = "#file:"
+
+
+def source_with_file_id(filename: str, file_id: str) -> str:
+    """Build the kb-go ``--source`` string carrying the upload's file id."""
+    return f"{filename}{KB_SOURCE_FILE_ID_SEP}{file_id}"
+
+
 def _lang_for_source(source: str) -> str | None:
-    """Language hint for a source filename, or ``None`` for non-code docs."""
-    return _CODE_LANG_BY_SUFFIX.get(Path(source).suffix.lower())
+    """Language hint for a source filename, or ``None`` for non-code docs.
+
+    Strips a trailing ``#file:<id>`` provenance fragment first — a stamped
+    source like ``"main.py#file:f1"`` must still resolve ``.py`` (Path.suffix
+    would otherwise see ``".py#file:f1"`` and miss the lookup).
+    """
+    filename = source.split(KB_SOURCE_FILE_ID_SEP, 1)[0]
+    return _CODE_LANG_BY_SUFFIX.get(Path(filename).suffix.lower())
 
 
 def _resolve_kb_bin() -> str:
