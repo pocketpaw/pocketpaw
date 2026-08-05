@@ -1,4 +1,6 @@
 # test_listener.py — tests for the FileReady KB-indexing subscriber.
+# Updated: 2026-08-05 — Coupling T-1. Ingest source assertions now expect the
+#   provenance-stamped form "<filename>#file:<file_id>".
 # Created: 2026-04-30 — Stage 1.B "Files as Knowledge". Verifies the
 #   listener resolves the storage path, runs extraction, ingests into
 #   workspace KB, and contains failures so they don't propagate back to
@@ -149,7 +151,7 @@ async def test_index_uploaded_file_calls_chain_then_kb(monkeypatch, tmp_path):
     ingest.assert_awaited_once_with(
         scope="workspace:w1",
         text="hello world",
-        source="doc.pdf",
+        source="doc.pdf#file:f1",
     )
 
 
@@ -247,7 +249,7 @@ async def test_remote_adapter_streams_into_temp_then_extracts(monkeypatch):
     ingest.assert_awaited_once_with(
         scope="workspace:w1",
         text="caption from gemini",
-        source="whiteboard.png",
+        source="whiteboard.png#file:f1",
     )
 
 
