@@ -30,6 +30,11 @@
 #   - 2026-07-04: Added StockImageTool — search free Pexels/Unsplash stock photos
 #     for Paw Sites imagery (shared search_stock_images() helper; EE MCP surface
 #     for the SDK backend).
+#   - 2026-08-04: Added WidgetSpecTool + InlineWidgetHelpTool. Both tools already
+#     existed on the `pocketpaw_widgets` in-process MCP server, which only
+#     `agents/claude_sdk.py` builds — so every other backend ran without them
+#     while the chat-inline system prompt called one of them MANDATORY before
+#     emitting a non-core widget. Same gap, same fix, as StartFlowTool above.
 
 import importlib as _importlib
 
@@ -100,6 +105,8 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "AddWidgetTool": (".pocket", "AddWidgetTool"),
     "RemoveWidgetTool": (".pocket", "RemoveWidgetTool"),
     "StartFlowTool": (".flow_tool", "StartFlowTool"),
+    "WidgetSpecTool": (".widget_spec", "WidgetSpecTool"),
+    "InlineWidgetHelpTool": (".widget_spec", "InlineWidgetHelpTool"),
     "StepPipelineTool": (".step_pipeline_tool", "StepPipelineTool"),
     "DiscordCLITool": (".discord", "DiscordCLITool"),
     "ConnectorListTool": (".connector_tools", "ConnectorListTool"),

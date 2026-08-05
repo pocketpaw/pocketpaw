@@ -295,6 +295,11 @@
             "icon": "lucide:eye"
           },
           {
+            "label": "Concierge Knowledge",
+            "href": "/concepts/concierge-knowledge",
+            "icon": "lucide:book-open"
+          },
+          {
             "label": "Pocket Sources",
             "href": "/concepts/pocket-sources",
             "icon": "lucide:database"
@@ -443,6 +448,11 @@
             "label": "Deep Agents",
             "href": "/backends/deep-agents",
             "icon": "lucide:workflow"
+          },
+          {
+            "label": "Pydantic AI",
+            "href": "/backends/pydantic-ai",
+            "icon": "lucide:gauge"
           },
           {
             "label": "Ollama (Local LLMs)",

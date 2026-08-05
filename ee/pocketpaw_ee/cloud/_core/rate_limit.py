@@ -13,7 +13,7 @@ assumption.
 
 from __future__ import annotations
 
-from fastapi import Depends
+from fastapi import Depends, Request
 
 from pocketpaw.security.rate_limiter import RateLimiter
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
@@ -26,6 +26,29 @@ _invite_create_limiter = RateLimiter(rate=50.0 / 86400.0, capacity=50)
 # 5 resends per 30 minutes per invite. Keyed on invite_id rather than actor
 # so an admin can't sidestep by rotating between teammates.
 _invite_resend_limiter = RateLimiter(rate=5.0 / 1800.0, capacity=5)
+
+
+# 10 social exchange-code redemptions per minute per IP. The code is already
+# single-use with a 60s TTL and 32 bytes of entropy, so this is defence in
+# depth against someone spraying guesses rather than the primary control.
+# Keyed on IP because the endpoint is UNAUTHENTICATED by nature - it is how a
+# desktop client turns a callback into its first token, so there is no actor
+# to key on yet.
+_social_exchange_limiter = RateLimiter(rate=10.0 / 60.0, capacity=10)
+
+
+async def rate_limit_social_exchange(request: Request) -> None:
+    """Per-IP bucket guarding POST /auth/social/exchange."""
+    client = request.client.host if request.client else "unknown"
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        # Left-most entry is the originating client when behind a proxy.
+        client = forwarded.split(",")[0].strip() or client
+    if not _social_exchange_limiter.check(f"social-exchange:{client}").allowed:
+        raise RateLimited(
+            "social.exchange_rate_limited",
+            "Too many attempts - try again shortly.",
+        )
 
 
 async def rate_limit_invite_create(

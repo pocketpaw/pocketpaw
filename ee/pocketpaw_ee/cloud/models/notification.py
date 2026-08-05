@@ -15,6 +15,10 @@ class NotificationSource(BaseModel):
     id: str
     pocket_id: str | None = None
     room_id: str | None = None
+    # The agent this source belongs to, when it belongs to one. The concierge
+    # kinds set it: their inbox lives on an AGENT, so without it a client has
+    # no id to build a link from and falls back to the chat surface.
+    agent_id: str | None = None
 
 
 class Notification(TimestampedDocument):

@@ -1,4 +1,46 @@
 # ee/paw_bar/models.py — Pydantic models for the Paw Bar widget layer.
+# Updated: 2026-07-30 (owner inbox, slice 2 — type-to-takeover) — the OUT-OF-BAND
+#   thread vocabulary: ``OwnerMessageRole`` (owner | system | visitor) and
+#   ``OwnerMessage``, the rows of ``paw_bar_owner_messages``. These are the thread
+#   lines that have no ChatRunDoc: the owner's own replies, the system's
+#   explanations (the bot handing itself back), and a visitor line that arrived
+#   while the bot was muted and therefore never dispatched a run. They are NOT run
+#   docs on purpose — ``metering.sweeper.sweep_unbilled_runs`` bills every unbilled
+#   terminal run, so an owner reply shaped as one would charge the owner credits
+#   for typing their own sentence and count as agent compute that never happened.
+#   ``created_at`` is an ISO string in UTC (aware), matching ChatRunDoc.createdAt,
+#   so the transcript reader can merge both sources on one comparable clock.
+# Updated: 2026-07-30 (owner inbox, slice 1) — the conversation STATE vocabulary:
+#   ``ConversationState`` (open | needs_human | snoozed | closed),
+#   ``ConversationNote`` (an owner's private {author, text, at}) and
+#   ``Conversation`` — a thin lifecycle row over the concierge run docs, keyed by
+#   (widget_id, customer_ref). It stores NO messages: the transcript stays derived
+#   from ChatRunDoc and this row adds only lifecycle + operator metadata, so the
+#   queue and the log never disagree about what was said.
+# Updated: 2026-07-30 (async decision delivery) — DecisionStatus gains an
+#   optional ``contact_email`` (empty default). A visitor who leaves the page
+#   while their request is PENDING can leave an email; when the owner decides,
+#   the delivery hook sends the same customer-facing reply there. PII posture:
+#   the email lives ONLY on this row — see the field comment.
+# Updated: 2026-07-16 (Paw Bar action registry, C1) — the visitor-commerce
+#   vocabulary. PawBarSpec gains three optional fields: ``actions`` (declared
+#   verbs: {verb, policy in {auto,gated}, args flat-type-map, label}), ``catalog``
+#   (products: {id, name, price_cents>=0, currency, image_url, url}) and
+#   ``checkout_url`` (http(s), may carry a ``{cart_ref}`` placeholder). New
+#   validators reject a malformed declaration with a clear error (unique
+#   snake_case verbs, policy allowlist, flat arg types, unique catalog ids,
+#   non-negative int prices, http(s) checkout url). ``PawBarCartItem`` /
+#   ``PawBarCart`` are the visitor-scoped cart the store persists per
+#   (widget_id, customer_ref). All additive — a spec with none of these fields
+#   is byte-identical to today. SS-2 alignment lives in the executor, not here.
+# Updated: 2026-07-14 (Paw Bar concierge seam, T3) — PawBarWidget +
+#   PawBarWidgetPublic gain `agent_id: str = ""`, mirroring the workspace_id
+#   column right beside it (same nullability/default). It binds a concierge
+#   widget to the agent that answers its chats; "" = unbound (legacy / no agent).
+#   The KB scope is NOT stored — it is derived where needed (as of D5, the union
+#   of `pocket:<pocket_id>` and `agent:<the widget's own agent_id>`, never a
+#   `workspace:` or `user:` scope) — so this is the only new tenancy-adjacent
+#   field.
 # Updated: 2026-07-11 (W4a tenancy seam) — PawBarWidget + PawBarWidgetPublic
 #   gain `workspace_id: str = ""` (in-row tenancy, same model as DecisionStatus).
 #   Empty string = legacy/single-tenant row; the store's scoped reads match it.
@@ -25,6 +67,7 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 from datetime import datetime
 from enum import StrEnum
@@ -39,6 +82,25 @@ _MAX_ITEMS_PER_LIST = 50
 _MAX_DOMAINS_PER_WIDGET = 20
 _MAX_PAYLOAD_BYTES = 4 * 1024  # 4KB cap matches the planning doc
 _MAX_SPEC_BYTES = 64 * 1024
+
+# Action-registry caps (C1). Bound the declaration surface so a malformed or
+# hostile spec can't blow up the tool set / catalog.
+_MAX_ACTIONS_PER_SPEC = 16
+_MAX_ARGS_PER_ACTION = 12
+_MAX_CATALOG_ITEMS = 200
+_MAX_CART_ITEMS = 50
+# The arg-type names an action may declare — a FLAT map of {name: type-name}.
+# Nested/object args are rejected so the tool input schema stays simple and the
+# executor's per-arg coercion is total.
+_ACTION_ARG_TYPES = frozenset({"str", "int", "float", "bool"})
+_ACTION_POLICIES = frozenset({"auto", "gated"})
+# SS-2: only these built-in verbs touch VISITOR-scoped state (the visitor's own
+# cart / a handoff link) and may therefore carry policy "auto". Every other verb
+# MUST be "gated" — a non-cart effect auto-firing would violate the staffed-sites
+# rule that tenant-scoped effects only happen through an Instinct proposal.
+_AUTO_VERBS = frozenset({"add_to_cart", "checkout"})
+# snake_case verb: lowercase, digits, underscores; must start with a letter.
+_VERB_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def _gen_token() -> str:
@@ -112,6 +174,80 @@ class PawBarBlock(BaseModel):
         return value
 
 
+# ---------------------------------------------------------------------------
+# Action registry (C1) — the visitor-commerce vocabulary
+# ---------------------------------------------------------------------------
+
+
+class PawBarActionSpec(BaseModel):
+    """One declared action the concierge agent may invoke on a visitor's behalf.
+
+    ``policy`` gates the effect (SS-2): ``auto`` verbs touch ONLY visitor-scoped
+    state (the visitor's own cart / a handoff link) and fire immediately;
+    ``gated`` verbs never execute — they raise an Instinct proposal for a human.
+    ``args`` is a FLAT map of ``{arg_name: type-name}`` where the type-name is one
+    of ``str|int|float|bool`` — the executor validates and coerces each arg
+    against it and rejects unknown keys. ``label`` is the human CTA text the
+    widget renders; optional (falls back to the verb).
+    """
+
+    verb: str
+    policy: Literal["auto", "gated"] = "gated"
+    args: dict[str, str] = Field(default_factory=dict)
+    label: str = ""
+
+    @field_validator("verb")
+    @classmethod
+    def _snake_case_verb(cls, value: str) -> str:
+        v = value.strip()
+        if not _VERB_RE.match(v):
+            raise ValueError(
+                f"action verb {value!r} must be snake_case "
+                "(lowercase letters, digits, underscores; starts with a letter)"
+            )
+        return v
+
+    @field_validator("args")
+    @classmethod
+    def _flat_arg_types(cls, value: dict[str, str]) -> dict[str, str]:
+        if len(value) > _MAX_ARGS_PER_ACTION:
+            raise ValueError(f"an action declares at most {_MAX_ARGS_PER_ACTION} args")
+        for name, type_name in value.items():
+            if not _VERB_RE.match(name):
+                raise ValueError(f"action arg name {name!r} must be snake_case")
+            if type_name not in _ACTION_ARG_TYPES:
+                raise ValueError(
+                    f"action arg {name!r} type {type_name!r} must be one of "
+                    f"{sorted(_ACTION_ARG_TYPES)} (args are a flat type map)"
+                )
+        return value
+
+
+class PawBarCatalogItem(BaseModel):
+    """One product the concierge can add to a cart / render on a card."""
+
+    id: str
+    name: str
+    price_cents: int = 0
+    currency: str = "USD"
+    image_url: str = ""
+    url: str = ""
+
+    @field_validator("id")
+    @classmethod
+    def _non_empty_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("catalog item id is required")
+        return value.strip()
+
+    @field_validator("price_cents")
+    @classmethod
+    def _non_negative_price(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("catalog item price_cents must be a non-negative integer")
+        return value
+
+
 class PawBarSpec(BaseModel):
     """The payload the widget fetches and renders."""
 
@@ -120,6 +256,10 @@ class PawBarSpec(BaseModel):
     layout: Literal["vertical", "horizontal", "grid"] = "vertical"
     theme: dict[str, str] = Field(default_factory=dict)
     blocks: list[PawBarBlock] = Field(default_factory=list)
+    # C1 action registry — all optional; a spec without them is unchanged.
+    actions: list[PawBarActionSpec] = Field(default_factory=list)
+    catalog: list[PawBarCatalogItem] = Field(default_factory=list)
+    checkout_url: str = ""
 
     @field_validator("blocks")
     @classmethod
@@ -127,6 +267,46 @@ class PawBarSpec(BaseModel):
         if len(value) > _MAX_BLOCKS_PER_SPEC:
             raise ValueError(f"spec accepts at most {_MAX_BLOCKS_PER_SPEC} blocks")
         return value
+
+    @field_validator("actions")
+    @classmethod
+    def _cap_and_dedupe_actions(cls, value: list[PawBarActionSpec]) -> list[PawBarActionSpec]:
+        if len(value) > _MAX_ACTIONS_PER_SPEC:
+            raise ValueError(f"spec accepts at most {_MAX_ACTIONS_PER_SPEC} actions")
+        seen: set[str] = set()
+        for action in value:
+            if action.verb in seen:
+                raise ValueError(f"duplicate action verb {action.verb!r} — verbs must be unique")
+            seen.add(action.verb)
+            # SS-2: a non-cart verb must never be "auto" — only visitor-scoped
+            # cart verbs auto-fire; everything else is gated to an Instinct proposal.
+            if action.policy == "auto" and action.verb not in _AUTO_VERBS:
+                raise ValueError(
+                    f"action {action.verb!r} may not use policy 'auto' — only "
+                    f"{sorted(_AUTO_VERBS)} touch visitor-scoped state and may auto-fire; "
+                    "every other verb must be 'gated'"
+                )
+        return value
+
+    @field_validator("catalog")
+    @classmethod
+    def _cap_and_dedupe_catalog(cls, value: list[PawBarCatalogItem]) -> list[PawBarCatalogItem]:
+        if len(value) > _MAX_CATALOG_ITEMS:
+            raise ValueError(f"spec accepts at most {_MAX_CATALOG_ITEMS} catalog items")
+        seen: set[str] = set()
+        for item in value:
+            if item.id in seen:
+                raise ValueError(f"duplicate catalog id {item.id!r} — catalog ids must be unique")
+            seen.add(item.id)
+        return value
+
+    @field_validator("checkout_url")
+    @classmethod
+    def _http_checkout_url(cls, value: str) -> str:
+        v = value.strip()
+        if v and not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("checkout_url must be an http(s) URL")
+        return v
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +332,10 @@ class PawBarWidget(BaseModel):
     # W4a in-row tenancy — the owning workspace. Empty string means a
     # legacy/single-tenant row (matched by every scoped read, like decisions).
     workspace_id: str = ""
+    # T3 concierge binding — the agent that answers this widget's chats. "" =
+    # unbound (legacy row / no agent). Mirrors workspace_id above (same default);
+    # public read paths stay widget_id-keyed, this is just carried through.
+    agent_id: str = ""
     name: str = ""
     spec: PawBarSpec
     allowed_domains: list[str] = Field(default_factory=list)
@@ -199,6 +383,9 @@ class PawBarWidgetPublic(BaseModel):
     pocket_id: str
     owner: str
     workspace_id: str = ""
+    # T3 — mirror of PawBarWidget.agent_id; the token-free projection carries it
+    # too (it is not a secret, just the binding).
+    agent_id: str = ""
     name: str = ""
     spec: PawBarSpec
     allowed_domains: list[str] = Field(default_factory=list)
@@ -280,8 +467,244 @@ class DecisionStatus(BaseModel):
     state: DecisionState = DecisionState.PENDING
     reply: str = ""
     decided_by: str = ""
+    # PII INVARIANT (binding): the visitor's optional contact email lives ONLY
+    # on this DecisionStatus row. It must never be copied into the Instinct
+    # Action / its ``_customer_reply`` blob, the agent's context, the KB,
+    # transcripts, or the soul — and it is never echoed back by any public
+    # read (the decision poll response omits it). Storage is capped here at
+    # the row level; the only consumer is the one-shot email the delivery
+    # hook sends when the row flips out of PENDING.
+    contact_email: str = ""
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
+
+
+# ---------------------------------------------------------------------------
+# Conversation lifecycle — the owner inbox's state row (slice 1)
+#
+# A concierge conversation already EXISTS as a stream of ChatRunDoc rows keyed by
+# (workspace, context_type='concierge', scope_id, customer_ref). What it lacks is
+# a place to say "this one still needs me". These models are that place, and
+# nothing more: no messages, no copies of the transcript. One row per
+# (widget_id, customer_ref), created lazily on the visitor's first turn, so the
+# log becomes a queue without a backfill.
+# ---------------------------------------------------------------------------
+
+
+def _gen_conversation_id() -> str:
+    """Fresh conversation row id (``ppc_…``).
+
+    Named rather than inlined so the model default and the store's INSERT mint
+    ids the same way — the store writes rows with raw SQL, so without this the
+    prefix would live in two places and drift.
+    """
+    return _gen_id("ppc")
+
+
+class ConversationState(StrEnum):
+    """Where a visitor conversation sits in the owner's queue.
+
+    ``OPEN``        — live; the bot is handling it (or the owner is) and it sits
+                      in the default inbox view.
+    ``NEEDS_HUMAN`` — escalated: the visitor asked for a person, or the bot could
+                      not answer. It is the ONE state a visitor reply does not
+                      change — already at the top of the queue, nowhere to raise.
+    ``SNOOZED``     — deliberately hidden until ``snooze_until``. Expiry is
+                      computed on READ (see the store) — there is no sweeper, so
+                      a snooze always ends on time even if nothing is running.
+    ``CLOSED``      — done. A new visitor message re-opens it automatically.
+    """
+
+    OPEN = "open"
+    NEEDS_HUMAN = "needs_human"
+    SNOOZED = "snoozed"
+    CLOSED = "closed"
+
+
+class ConversationNote(BaseModel):
+    """One private operator note on a conversation — never shown to the visitor.
+
+    Notes are append-only from the owner API (a PATCH carrying ``note`` appends
+    rather than replaces), so the internal thread of "what we know about this
+    person" survives every other edit. ``at`` is an ISO timestamp string, matching
+    how the row's other time fields are stored.
+    """
+
+    author: str = ""
+    text: str = ""
+    at: str = ""
+
+    @field_validator("author", mode="before")
+    @classmethod
+    def _author_to_str(cls, value: Any) -> str:
+        """Same ObjectId-vs-str coercion as :class:`OwnerMessage.author`.
+
+        The router already stringifies before calling, but the model is the one
+        place every caller passes through — belt and braces against the seam
+        that has now bitten this layer four separate times.
+        """
+        if value is None:
+            return ""
+        return value if isinstance(value, str) else str(value)
+
+
+class Conversation(BaseModel):
+    """The lifecycle + operator metadata for ONE visitor conversation.
+
+    Identity is ``(widget_id, customer_ref)`` — 1:1 with the concierge run
+    stream's ``session_key`` — and the row is deliberately thin: the transcript is
+    NOT here, it stays derived from the run docs. What lives here is only what the
+    runs cannot express: the queue state, whether the bot is muted, the owner's
+    tags and private notes, and the unread counter.
+
+    ``workspace_id`` is the REAL tenant workspace (the concierge run's
+    ``ctx.workspace_id``), unlike ``DecisionStatus.workspace_id``, which stores
+    the widget owner — so scoped reads here are a true tenancy filter.
+
+    ``snooze_until`` / ``last_visitor_at`` / ``last_owner_at`` are ISO strings
+    rather than datetimes so the store can compare them in SQL (the snooze-expiry
+    CASE) without a round trip through Python.
+
+    PII posture: ``contact_email`` mirrors the invariant on
+    ``DecisionStatus.contact_email`` — a visitor-supplied address, owner-visible
+    only. It must never reach the Instinct action, the agent's context, the KB,
+    the transcript, the soul, or any PUBLIC read. Slice 1 never writes it (the
+    owner list derives the display name from the decision row that captured it);
+    the column exists so a later slice can promote it explicitly.
+    """
+
+    id: str = Field(default_factory=_gen_conversation_id)
+    widget_id: str
+    customer_ref: str
+    workspace_id: str = ""
+    state: ConversationState = ConversationState.OPEN
+    bot_paused: bool = False
+    snooze_until: str = ""
+    # Present for the operator toolkit later; there is no assignment UI in v1
+    # (solo-owner posture), so nothing writes it yet.
+    assignee: str = ""
+    tags: list[str] = Field(default_factory=list)
+    notes: list[ConversationNote] = Field(default_factory=list)
+    contact_email: str = ""
+    last_visitor_at: str = ""
+    last_owner_at: str = ""
+    # When the bot was muted (slice 2). Set whenever ``bot_paused`` flips on,
+    # cleared when it flips off. The idle auto-resume reads it, and the owner UI
+    # uses it to say when the bot hands itself back.
+    bot_paused_at: str = ""
+    unread_for_owner: int = 0
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
+def _gen_owner_message_id() -> str:
+    """Fresh owner-message row id (``ppm_…``) — same reason as the conversation id."""
+    return _gen_id("ppm")
+
+
+class OwnerMessageRole(StrEnum):
+    """Who spoke a line that has no run doc behind it.
+
+    ``OWNER``   — a human on the site's team typed it. The line the visitor is
+                  waiting for; the whole point of the takeover.
+    ``SYSTEM``  — the product explaining itself in the thread ("the assistant is
+                  answering again"). Visitor-facing, but authored by nobody.
+    ``VISITOR`` — a visitor message that arrived while the bot was MUTED. It never
+                  became a ``ChatRunDoc`` because no run was dispatched (that is
+                  the entire point of muting), so without this row the owner's
+                  transcript would simply stop mid-conversation at the moment a
+                  human took over. Never returned by the public poll: the visitor
+                  already has their own words on screen, and echoing them back is
+                  how a public read starts leaking a thread.
+    """
+
+    OWNER = "owner"
+    SYSTEM = "system"
+    VISITOR = "visitor"
+
+
+class OwnerMessage(BaseModel):
+    """One thread line stored outside the run stream (owner inbox, slice 2).
+
+    The transcript is normally derived from ``ChatRunDoc`` — one run per visitor
+    turn, carrying both halves. These are the lines with no run: see
+    :class:`OwnerMessageRole`. Keyed by ``(widget_id, customer_ref)``, the same
+    identity as :class:`Conversation`, so the reader merges the two sources on one
+    key and one clock.
+
+    ``created_at`` is an ISO-8601 string in UTC (timezone-aware), deliberately NOT
+    a naive local stamp like the conversation row's: this value is sorted against
+    ``ChatRunDoc.createdAt`` (aware UTC) to interleave the thread, and it is
+    handed to clients. A naive local stamp would interleave wrongly by the host's
+    UTC offset on every machine that isn't set to UTC.
+
+    PII posture: ``content`` is free text an owner or a visitor typed, so treat it
+    as personal data — same class as ``ChatRunDoc.user_text``. ``author`` is the
+    owner's user id, and is owner-facing only: the public poll projects role +
+    content + timestamp and nothing else.
+    """
+
+    id: str = Field(default_factory=_gen_owner_message_id)
+    widget_id: str
+    customer_ref: str
+    workspace_id: str = ""
+    role: OwnerMessageRole = OwnerMessageRole.OWNER
+    content: str = ""
+    author: str = ""
+    created_at: str = ""
+
+    @field_validator("author", mode="before")
+    @classmethod
+    def _author_to_str(cls, value: Any) -> str:
+        """Coerce the caller id, which arrives as a ``PydanticObjectId``.
+
+        The authenticated principal (``current_active_user``) carries an
+        ObjectId, not a str, so an owner reply built straight from it failed
+        string_type validation and the endpoint 500'd. Every unit test hands in
+        a plain string, which is why the suites were green and only a live
+        reply surfaced it — the fourth time this exact ObjectId-vs-str seam bit
+        this layer, so it is coerced at the MODEL now rather than at each of
+        the call sites that keep forgetting.
+        """
+        if value is None:
+            return ""
+        return value if isinstance(value, str) else str(value)
+
+
+# ---------------------------------------------------------------------------
+# Visitor cart (C1) — the visitor-scoped state the store persists per
+# (widget_id, customer_ref). "auto" add_to_cart upserts here; no TTL in v1.
+# ---------------------------------------------------------------------------
+
+
+class PawBarCartItem(BaseModel):
+    """One line in a visitor's cart — a catalog snapshot plus a quantity."""
+
+    id: str
+    name: str
+    price_cents: int = 0
+    currency: str = "USD"
+    qty: int = 1
+
+
+class PawBarCart(BaseModel):
+    """A visitor's cart summary — what GET /paw-bar/cart returns.
+
+    Keyed by ``(widget_id, customer_ref)`` in the store; this value object is the
+    read model the endpoint + the executor return. ``total_cents`` is derived
+    from the items so callers never re-sum.
+    """
+
+    widget_id: str
+    customer_ref: str
+    items: list[PawBarCartItem] = Field(default_factory=list)
+    currency: str = "USD"
+    checkout_url: str = ""
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+    @property
+    def total_cents(self) -> int:
+        return sum(item.price_cents * item.qty for item in self.items)
 
 
 # ---------------------------------------------------------------------------
@@ -293,3 +716,9 @@ MAX_ITEMS_PER_LIST = _MAX_ITEMS_PER_LIST
 MAX_DOMAINS_PER_WIDGET = _MAX_DOMAINS_PER_WIDGET
 MAX_PAYLOAD_BYTES = _MAX_PAYLOAD_BYTES
 MAX_SPEC_BYTES = _MAX_SPEC_BYTES
+MAX_ACTIONS_PER_SPEC = _MAX_ACTIONS_PER_SPEC
+MAX_ARGS_PER_ACTION = _MAX_ARGS_PER_ACTION
+MAX_CATALOG_ITEMS = _MAX_CATALOG_ITEMS
+MAX_CART_ITEMS = _MAX_CART_ITEMS
+ACTION_ARG_TYPES = _ACTION_ARG_TYPES
+ACTION_POLICIES = _ACTION_POLICIES

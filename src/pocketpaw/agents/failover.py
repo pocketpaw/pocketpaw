@@ -2,6 +2,16 @@
 #
 # Created: 2026-06-26 (integration/model-catalog-v2, WU-D / MCG-10).
 #
+# Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — ``run`` now filters
+# ``system_prompt_digest`` per harness instead of forwarding every kwarg verbatim.
+# The channel path assembles a digest for every turn and the chain deliberately
+# mixes backends that declare the parameter with backends that never grew it, so
+# a verbatim forward would raise TypeError on the SECOND harness — during a
+# failover, which is the one moment nothing else is going right either. The
+# signature guard is imported from ``agents.backend`` rather than re-implemented;
+# a local copy is how one of the three call sites ends up counting ``**kwargs``
+# and silently keying on nothing.
+#
 # What this is: the MECHANISM for failing over between agent HARNESSES when a
 # whole backend lane is down. This is the *second* failover level:
 #   * L1 (model / account) is owned by LiteLLM (multi-account weighted failover
@@ -37,6 +47,7 @@ import re
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from pocketpaw.agents.backend import forward_prompt_digest
 from pocketpaw.agents.protocol import AgentEvent
 
 logger = logging.getLogger(__name__)
@@ -177,7 +188,17 @@ class BackendFailoverRunner:
 
         ``run_kwargs`` (system_prompt / history / session_key / the optional
         per-surface frozensets) are forwarded verbatim to each backend's
-        ``run`` — the runner does not interpret them.
+        ``run`` — the runner does not interpret them, with ONE named exception.
+
+        ``system_prompt_digest`` (PA-7b) is dropped for any harness whose ``run``
+        does not declare it. It is the only kwarg here that does not ride the
+        withhold-when-empty contract — it is set on every channel turn — so
+        "forward verbatim" would hand it to a backend with the narrower
+        signature and raise TypeError. The chain mixes vintages by design
+        (claude_agent_sdk -> codex_cli -> opencode), so the question has to be
+        re-asked per harness rather than once by the caller. Asked via the shared
+        ``agents.backend`` guard, which refuses ``**kwargs`` — a harness that
+        swallowed the digest would key on nothing while looking ported.
         """
         last_error: str | None = "All configured harnesses failed"
         tried_any = False
@@ -201,8 +222,16 @@ class BackendFailoverRunner:
             # the generator is fully exhausted/closed before we move on.
             failed_over = False
 
+            attempt_kwargs = run_kwargs
+            if "system_prompt_digest" in run_kwargs:
+                digest = run_kwargs["system_prompt_digest"]
+                attempt_kwargs = {
+                    k: v for k, v in run_kwargs.items() if k != "system_prompt_digest"
+                }
+                attempt_kwargs = forward_prompt_digest(backend, attempt_kwargs, digest)
+
             try:
-                async for event in backend.run(message, **run_kwargs):
+                async for event in backend.run(message, **attempt_kwargs):
                     etype = getattr(event, "type", None)
 
                     # An error event: decide failover BEFORE forwarding it, so a

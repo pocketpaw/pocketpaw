@@ -8,6 +8,13 @@ Uses the Deep Agents SDK (pip install deepagents) which provides:
 
 Requires: pip install deepagents
 
+Updated 2026-08-03 (PA-9, feat/prompt-budget-measurement): ``_ANTHROPIC_CACHE_MIN_CHARS``
+is now measured. The value is unchanged at 4000, but the reasoning attached to it
+was wrong on all three counts — the chars/token ratio, the per-model floors, and
+the claim that a sub-floor marker costs a wasted cache write (it costs nothing).
+The constant's comment carries the numbers and the reason raising it would be a
+regression rather than a fix. Harness: ``scripts/evals/prompt_cache_eval.py``.
+
 Updated 2026-06-26 (integration/model-catalog-v2, MCG-11):
   * The Anthropic prompt-cache patch sources its ``cache_control`` marker from
     the universal ``pocketpaw.llm.caching._cache_control`` helper (single source
@@ -22,8 +29,42 @@ Updated 2026-06-26 (integration/model-catalog-v2, MCG-11):
     counts (``_accumulate_cache_usage``) and emits a ``token_usage`` AgentEvent
     (via ``report_savings``) before ``done``, so the margin is measurable on this
     backend (mirrors the claude_sdk hook).
+
+Updated 2026-08-01 (fix/agent-system-prompt-per-run): the compiled-graph cache
+key carries a digest of ``instructions``. ``system_prompt`` is baked into the
+graph at compile time, and ``AgentPool`` keeps ONE instance per agent across
+every session and surface, so the key's silence about prompt text meant turn N+1
+ran turn N's system prompt — which is how a brand-new chat greeted the user with
+the site they had just built in a different session. Recompiles cost ~14 ms
+(measured), and prompt caching is unaffected: the marker is applied to the
+request the graph sends, not to the graph. See the same note in
+``pydantic_ai.py`` for why that backend fixes it per-run instead.
+
+Updated 2026-08-03 (PA-7b, feat/prompt-assembler-channel): the ``t:`` fallback's
+justification below named a caller that no longer needs it — ``AgentLoop``'s
+channel path now assembles a digest and ``AgentRouter`` forwards it. The branch
+stays; the reason changed to the two callers that reach ``run`` without going
+through the router at all. No code changed in this module.
+
+Updated 2026-08-03 (PA-6, feat/prompt-assembler-seam): ``run`` takes
+``system_prompt_digest`` and the graph key prefers it over the text hash above.
+The text hash fixed the leak and paid for it with the cache — measured over 8
+ordinary turns on a live soul, ``sha256(instructions)`` produced 8 distinct keys,
+so the graph recompiled on EVERY turn. The assembler's ``stable_digest`` hashes
+the layers that declared themselves cacheable rather than the rendered text, and
+over the same 8 turns produced ONE key. Same correctness, no per-turn recompile.
+
+The text hash SURVIVES as the fallback for a caller that has no digest, and that
+is not tidiness. ``AgentLoop`` (Telegram / Discord / Slack / CLI) was the reason
+when this was written; PA-7b gave that path a digest and the fallback still is
+not dead, because the callers that need it never went through ``AgentRouter``:
+the pocket specialist calls ``backend.run`` directly on an isolated backend, and
+so can any OSS embedder. Dropping the hash would give them a key that cannot see
+the prompt at all, which is #1842 restored for the callers least able to notice.
+The two are prefixed so a digest and a text hash can never collide.
 """
 
+import hashlib
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -45,16 +86,68 @@ _LANGCHAIN_PROVIDER_MAP: dict[str, str] = {
 }
 
 
+def _prompt_identity(instructions: str, system_prompt_digest: str) -> str:
+    """The cache-key slot that answers "whose prompt is this".
+
+    Two sources, and the prefix keeps them apart. ``d:`` is the assembler's
+    ``stable_digest`` — a hash over the prompt LAYERS that declared themselves
+    cacheable, so the per-message soul recall (an unkeyed layer) does not move it
+    and a warm graph survives an ordinary turn. ``t:`` is #1842's hash of the
+    rendered text, kept for callers that do not build their prompt through the
+    assembler: the pocket specialist, which builds an isolated backend and calls
+    ``backend.run(user_message, system_prompt=...)`` itself — bypassing the
+    ``AgentRouter`` that does the forwarding — and any OSS embedder doing the
+    same. ``AgentLoop``'s channel path was on that list until PA-7b threaded a
+    digest through the router; the branch did NOT become dead when it left,
+    because the other two callers never went through the router in the first
+    place.
+
+    Prefixed rather than concatenated because the two are different CLAIMS about
+    the same 16-64 hex chars — "these layers are the same" versus "these bytes
+    are the same" — and a caller that switched between them mid-life must be
+    treated as a changed prompt, not silently matched.
+
+    Measured 2026-08-03 over 8 ordinary turns on a live soul: ``t:`` produced 8
+    distinct keys (recompile every turn), ``d:`` produced 1.
+    """
+    if system_prompt_digest:
+        return f"d:{system_prompt_digest}"
+    return "t:" + hashlib.sha256((instructions or "").encode("utf-8", "replace")).hexdigest()
+
+
 _LITELLM_PATCHED = False
 _OPENAI_PATCHED = False
 _ANTHROPIC_PATCHED = False
 
 # Threshold above which we tag the system block with ``cache_control``.
-# Anthropic's prompt-cache minimum is ~1024 tokens on Sonnet/Opus and
-# ~2048 on Haiku; one English token ≈ 4 chars, so 4000 chars is well
-# clear of the Sonnet floor but still excludes the small lifestyle
-# prompts the chat agent uses for greetings / one-shot facts. Tuned
-# conservatively — false positives only cost the cache-write overhead.
+#
+# MEASURED 2026-08-03 (PA-9, scripts/evals/prompt_cache_eval.py --arm threshold).
+# The value stays 4000, but every number in the comment that used to justify it
+# was wrong, and the conclusion it drew was backwards:
+#
+#   * "one English token ~ 4 chars" — our own prompt text measures 3.48
+#     chars/token, so 4000 chars is ~1,150 tokens, not 1,000.
+#   * "~1024 on Sonnet/Opus and ~2048 on Haiku" — Haiku 4.5's floor is 4096
+#     tokens (measured: 3,304 tokens did not cache, 4,478 did), and Opus runs
+#     512..4096 by generation. 4000 chars clears NO Anthropic floor except
+#     Opus 5's 512. In chars, Haiku 4.5's floor is about 14,300.
+#   * "false positives only cost the cache-write overhead" — they cost nothing.
+#     A marked and an unmarked sub-floor call billed identically ($0.001079 vs
+#     $0.001079). Below the floor the provider declines to cache silently; there
+#     is no write to pay for. Both calls were verifiably COLD, which is what
+#     makes that a marker comparison rather than a warm-vs-cold one: the sweep
+#     reports 0 cached tokens at 4000 chars on BOTH the cold and the warm turn,
+#     so nothing cached at that size for the second call to read.
+#
+# So this threshold is wrong in the harmless direction, and RAISING it to a
+# "correct" ~14,300 would be the actual regression: it would stop marking on
+# Opus 4.8 (floor 1024) and Opus 5 (floor 512), where prompts between 4k and
+# 14k chars cache today. A gate that is too permissive is inert; one that is
+# too strict silently forfeits a ~12x warm-turn saving. It stays at 4000.
+#
+# What this constant genuinely buys is therefore NOT cost avoidance — it is
+# keeping the marker off the small greeting/one-shot prompts, where it would be
+# noise in the request. Judge future edits on that, and on ``CACHE_MIN_TOKENS``.
 _ANTHROPIC_CACHE_MIN_CHARS = 4000
 
 # MCG-11 — byte-stable sentinel that identifies the pocket/site-GENERATOR
@@ -751,7 +844,12 @@ class DeepAgentsBackend:
         return init_chat_model(model_id, **kwargs)
 
     def _get_or_create_agent(
-        self, model: Any, instructions: str, mcp_tools: list | None = None
+        self,
+        model: Any,
+        instructions: str,
+        mcp_tools: list | None = None,
+        *,
+        system_prompt_digest: str = "",
     ) -> Any:
         """Cache the compiled LangGraph agent to avoid recompilation on every call."""
         from deepagents import create_deep_agent
@@ -766,8 +864,34 @@ class DeepAgentsBackend:
         # Invalidate cache if any input that shapes the compiled graph changed.
         # is_pocket_session is part of the key so flipping between pocket and
         # non-pocket sessions in the same backend recompiles the agent.
+        #
+        # The prompt identity is in the key because ``instructions`` is baked into
+        # the compiled graph below (``kwargs["system_prompt"]``) while
+        # ``AgentPool`` keeps ONE instance per agent across every session. Without
+        # it, turn N+1 was served the graph compiled for turn N — carrying turn
+        # N's surface preamble, ``<current-pocket>`` tag and soul-memory recall.
+        # That is how a brand-new chat opened by offering to continue the last
+        # session's work. ``pydantic_ai`` solves this by passing instructions
+        # per-run; ``create_deep_agent`` takes ``str | SystemMessage`` only, so
+        # here the fix is to recompile.
+        #
+        # PA-6 changed WHAT that identity is, not whether there is one — see
+        # ``_prompt_identity``. #1842 hashed the rendered text, which recompiled
+        # on every turn (8 distinct keys over 8 measured turns) because the recall
+        # is keyed on the user's message. ``stable_digest`` hashes the layers that
+        # claimed to be cacheable and held at 1 key over the same 8 turns.
+        #
+        # THE CONSEQUENCE WORTH STATING: a reused graph keeps the prompt it was
+        # compiled with, so a turn that only changed the per-message recall now
+        # runs against the PREVIOUS turn's recall block. That is the trade PA-3
+        # made when it declared retrieval unkeyed, and it is the trade
+        # ``claude_sdk``'s warm client has always made (its volatile markers cut
+        # the same block out of the same decision). What a reused graph can never
+        # carry is a different agent, surface, override or instruction set —
+        # those are keyed layers, and they move the digest.
         model_key = (
             self.settings.deep_agents_model,
+            _prompt_identity(instructions, system_prompt_digest),
             tuple(skills),
             tuple(memory),
             is_pocket_session,
@@ -884,7 +1008,19 @@ class DeepAgentsBackend:
         system_prompt: str | None = None,
         history: list[dict] | None = None,
         session_key: str | None = None,
+        system_prompt_digest: str = "",
     ) -> AsyncIterator[AgentEvent]:
+        """Stream a turn through the compiled Deep Agents graph.
+
+        ``system_prompt_digest`` (PA-6) is the assembler's ``stable_digest``. It
+        is DECLARED rather than swallowed by ``**kwargs`` on purpose:
+        ``AgentPool._accepts_prompt_digest`` inspects this signature to decide
+        whether to pass it, and a backend that accepted it silently would look
+        ported while keying on nothing. Empty means the caller does not build its
+        prompt through the assembler — since PA-7b that is the pocket specialist
+        and out-of-tree embedders, not the channel path — and the graph key falls
+        back to hashing the prompt text; see ``_prompt_identity``.
+        """
         if not self._sdk_available:
             yield AgentEvent(
                 type="error",
@@ -907,7 +1043,12 @@ class DeepAgentsBackend:
 
             # Load MCP tools from configured servers (async, cached after first call)
             mcp_tools = await self._build_mcp_tools()
-            agent = self._get_or_create_agent(model, instructions, mcp_tools=mcp_tools)
+            agent = self._get_or_create_agent(
+                model,
+                instructions,
+                mcp_tools=mcp_tools,
+                system_prompt_digest=system_prompt_digest,
+            )
 
             # Build messages list: history + current message
             messages: list[dict[str, str]] = []

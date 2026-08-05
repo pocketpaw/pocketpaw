@@ -9,6 +9,19 @@ handles *what the agent sees*:
 * ``load_history_for_scope`` rehydrates prior chat turns from Mongo so the
   agent carries context across backend restarts and pool evictions.
 
+Changes: 2026-07-14 (Paw Bar concierge seam, T2) — added ``ScopeKind.CONCIERGE``
+and ``_resolve_concierge``: a PUBLIC, anonymous Paw Bar concierge run resolves
+its ``ScopeContext`` from the server-authoritative spec (Site pocket + widget
+agent) WITHOUT the member-auth path — the caller authed at the HTTP edge with an
+origin-bound Site key. ``_kb_scopes_for_context`` locks a concierge run to
+``[pocket:<pocket_id>]`` alone (never ``agent:`` / ``workspace:`` / ``user:``) so
+a public caller can't reach a sibling pocket or the whole tenant KB (finding #2);
+``session_key_for`` folds the anonymous ``customer_ref`` into the key so visitors
+don't collide on the shared Site pocket; ``load_history_for_scope`` treats
+CONCIERGE like pocket/session (customer-isolated). ``_resolve_concierge``
+reconciles the pocket's workspace against the key's (cross-tenant guard) and
+verifies the widget's agent belongs to that workspace (``_agent_in_workspace``).
+
 Changes: 2026-05-22 — ``ScopeContext`` carries the anchored pocket's
 ``pocket_type``; ``build_behavior_instructions`` appends ``HOME_POCKET_PROMPT``
 when that type is ``"home"`` so the agent behaves correctly on the home page
@@ -34,6 +47,15 @@ prepends its preamble before the legacy scope/participants/current-pocket
 tags so the chat agent sees the surface snapshot first. Clients that
 don't stamp a surface hint keep the old three-line shape unchanged —
 ``surface_context is None`` is the legacy path.
+Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — that prepend is GONE.
+The preamble is a prompt layer now (``pocketpaw.prompt.surface``), assembled
+under the agent's identity and above the per-turn material instead of inside
+the "Your Knowledge Base" wrapper this block lands in, and it carries the
+handler's cache key so the assembled prompt's digest moves when the user
+navigates or the pocket they are looking at is edited. ``run_core`` threads
+both halves into ``pool.run``; leaving the prepend here would double the text.
+``build_dynamic_context`` is back to exactly its three legacy tags, for every
+client, surface-stamping or not.
 Changes: 2026-05-31 (feat/home-agent-source-authoring) — ``ScopeContext``
 carries an optional ``backend_summary`` (the non-secret {base_url,
 auth_type, configured} dict from ``pockets.service.get_pocket_backend``,
@@ -62,6 +84,17 @@ gained a ``pocket_id`` kwarg and ``current_pocket_id()`` was added beside
 (``mcp_servers/connectors.py``) so its tools scope to the current pocket.
 The identity-token tuple grew from 3 to 4 entries; existing 3-arg callers are
 unaffected (``pocket_id`` defaults to ``None``).
+
+Changes: 2026-08-03 (feat/about-member-id) — the ``<about-member>`` block
+carries the member's ``user_id``. It described people by ``name · role · team``
+and nothing else, so two members called the same thing rendered byte-identical
+blocks and the agent had no way to tell which one it was addressing. That is not
+an edge case here: ``_resolve_about_member`` runs from every scope resolver and
+is NOT gated on room type, unlike the member-private ``user:`` KB scope, so it
+is live in shared rooms. The id is ``person.user_id`` — the same opaque cloud id
+the KB scope keys on — and not ``person.id``, which is
+``person-{workspace}-{user}`` and would put a tenant id in the prompt for no
+gain. An id-less Person still renders its block, minus the line.
 
 Changes: 2026-06-08 (feat/vip-agent-block, pp#1367) — ``ScopeContext`` carries
 an optional ``about_member_block``: a concise, token-capped "about this member"
@@ -174,6 +207,16 @@ cloud Mongo client is connected — so it hard-failed EVERY workspace-less run
 ``run_core.execute_run`` now wraps the run lifecycle in ``mark_cloud_chat_run``
 and the jail fails closed only when this marker is set; otherwise it falls back
 to ``settings.file_jail_path`` (pre-ART-2 behavior).
+
+Changes: 2026-07-30 (Paw Bar inbox D5) — ``_kb_scopes_for_context`` now grants a
+CONCIERGE run ``agent:<target_agent_id>`` ALONGSIDE ``pocket:<pocket_id>``.
+Before this, an owner who opened their site's concierge in ``/agents`` and
+attached knowledge to the AGENT got nothing on the site — only the site→pocket
+page sync reached the visitor, and the failure was silent. Each site concierge is
+a dedicated, bijective agent (``paw_bar.agent_provisioning.ensure_site_agent``),
+so its ``agent:`` scope is that one site's knowledge, not a cross-tenant pool.
+``workspace:`` and ``user:`` stay DROPPED — those are the tenant-wide and
+member-private tiers a public, anonymous visitor must never reach.
 
 Changes: 2026-07-22 (CD-1, feat/code-delegate-channel) — added
 ``has_sse_event_sink()`` beside ``push_sse_event``. Read-only introspection of
@@ -354,6 +397,29 @@ def current_pocket_id() -> str | None:
     return _active_pocket_id.get()
 
 
+# Per-stream Paw Bar action context (C1). Set by ``run_core`` for a CONCIERGE run
+# whose widget declares actions; read by the in-process ``pawbar_actions`` MCP
+# server to build ONE tool per declared verb and by each tool handler to resolve
+# which widget to run ``execute_action`` against. ``None`` (every non-concierge or
+# no-actions run) means the server builds NO tools — deny-all, exactly as before.
+# Shape: ``{"widget_id": str, "actions": [{"verb","policy","args","label"}, ...]}``.
+_active_pawbar_run: ContextVar[dict[str, Any] | None] = ContextVar("agent_pawbar_run", default=None)
+
+
+def bind_pawbar_run(run: dict[str, Any] | None) -> Token:
+    """Bind (or clear) the active stream's Paw Bar action context. Returns a
+    reset token — the caller resets it in a finally so it never leaks past a run."""
+    return _active_pawbar_run.set(run)
+
+
+def unbind_pawbar_run(token: Token) -> None:
+    _active_pawbar_run.reset(token)
+
+
+def current_pawbar_run() -> dict[str, Any] | None:
+    return _active_pawbar_run.get()
+
+
 def current_cloud_chat_run() -> bool:
     """True when the active context is a live cloud CHAT run dispatch.
 
@@ -513,6 +579,15 @@ class ScopeKind(StrEnum):
     GROUP = "group"
     POCKET = "pocket"
     SESSION = "session"
+    # A PUBLIC, anonymous Paw Bar concierge run (T2). The caller is not a
+    # workspace member — it authenticated at the HTTP edge with an origin-bound
+    # Site embed key (``auth.site_keys.resolve_site_key`` → a CONCIERGE
+    # ``RequestContext``). The run is bound to the Site's ``pocket_id`` and the
+    # widget's agent; ``_resolve_concierge`` builds this ctx WITHOUT the
+    # member-auth path, and ``_kb_scopes_for_context`` locks the KB read to
+    # ``pocket:<pocket_id>`` (never ``agent:`` / ``workspace:``) so a concierge
+    # can't reach a sibling pocket in the same workspace.
+    CONCIERGE = "concierge"
 
 
 class InvalidScope(ValueError):
@@ -761,6 +836,16 @@ def _render_about_member_block(person: Person) -> str:
         "tailor your help to their role and focus.",
         f"  who: {identity}",
     ]
+    # The id, because a name does not identify anybody. Rooms are shared and two
+    # members can be called the same thing; without this the block renders
+    # identically for both, the agent cannot tell which one it is addressing, and
+    # anything it attributes to "Alex" is ambiguous the moment a second Alex
+    # joins. ``user_id`` and not ``person.id`` — the latter is
+    # ``person-{workspace}-{user}``, which carries the same information plus a
+    # tenant id the model has no use for. Same opaque cloud id the KB scope
+    # already keys on, never an email.
+    if person.user_id:
+        lines.append(f"  id: {person.user_id}")
     if focus:
         lines.append(f"  focus: {focus}")
     lines.append("</about-member>")
@@ -774,21 +859,38 @@ def _render_about_member_block(person: Person) -> str:
 
 
 async def _resolve_about_member(workspace_id: str, user_id: str) -> str | None:
-    """Fetch the member's Fabric ``Person`` and render the about-block, or ``None``.
+    """Render the about-block for this member, or ``None``.
 
     Pre-resolved (async) by every scope resolver and stashed on
     ``ScopeContext.about_member_block`` so the sync
-    ``build_behavior_instructions`` can append it without awaiting. Returns
-    ``None`` — meaning "no block, behave as today" — when:
+    ``build_behavior_instructions`` can append it without awaiting.
 
-    * the member has no materialized Person (a pre-existing / non-invited user);
-    * the Person carries no usable name (render returns "");
-    * the people read raised (degrades gracefully — a Fabric hiccup must never
-      block scope resolution or change the agent's behavior).
+    TWO SOURCES, IN ORDER, and the second one is why "who am I?" used to fail.
+    The Fabric ``Person`` is the rich source — name, role, team, focus — but it
+    is created by exactly one path, ``materialize_person_from_invite``. A member
+    who was never invited has no Person, and the founding admin of a workspace
+    is never invited: they created it. So the one block in the whole prompt that
+    says who the human is rendered NOTHING for the person most likely to be
+    using the product, and the agent answered "I don't know who you are" while
+    ``full_name`` sat in their user document the entire time. Confirmed live on
+    2026-08-04: ``about_member_block`` was ``None`` and the 36,608-char
+    instruction stack contained neither the member's name nor their id.
+
+    So a missing Person now falls back to the authenticated user record, which
+    always exists — that is what "authenticated" means. The fallback block is
+    deliberately THINNER: a name and an id, and no claim about role, team or
+    focus, because those genuinely are not known. Saying less is the point; a
+    block that invented a role would be worse than no block.
+
+    Returns ``None`` — "no block, behave as today" — only when the member cannot
+    be identified at all: no ids passed, or both reads fail. A Fabric hiccup
+    degrades to the user record rather than to silence.
     """
 
     if not workspace_id or not user_id:
         return None
+
+    person = None
     try:
         from pocketpaw_ee.cloud.people.service import get_person
 
@@ -797,11 +899,60 @@ async def _resolve_about_member(workspace_id: str, user_id: str) -> str | None:
         logger.debug(
             "about-member person read failed for %s/%s", workspace_id, user_id, exc_info=True
         )
+
+    if person is not None:
+        block = _render_about_member_block(person)
+        if block:
+            return block
+
+    return await _about_member_from_user_record(user_id)
+
+
+async def _about_member_from_user_record(user_id: str) -> str | None:
+    """Minimal about-block built from the authenticated user, for members with no Person.
+
+    Routes through ``auth.service.resolve_display_names`` rather than reading
+    the Beanie user model here — that helper is the sanctioned accessor (its
+    own docstring says callers go through it so façade layers never touch the
+    model directly) and it already implements the name preference we want:
+    ``full_name`` → ``email`` → the id.
+
+    Returns ``None`` when the lookup yields nothing usable or when the resolved
+    "name" is just the id echoed back, because ``who: 69f88339dc…`` tells the
+    agent nothing it does not already have from the ``id:`` line.
+    """
+    try:
+        from pocketpaw_ee.cloud.auth.service import resolve_display_names
+
+        names = await resolve_display_names({user_id})
+    except Exception:  # noqa: BLE001 — same degrade-never-raise contract as above
+        logger.debug("about-member user fallback failed for %s", user_id, exc_info=True)
         return None
-    if person is None:
+
+    display = (names.get(user_id) or "").strip()
+    if not display or display == user_id:
         return None
-    block = _render_about_member_block(person)
-    return block or None
+
+    # PHRASED INLINE, AND THE DISCLAIMER IS NOT DECORATION. The first draft was
+    # a ``who: {display}`` field, which is ambiguous in the exact case this
+    # fallback exists to serve: the founding admin's ``full_name`` is very often
+    # the literal string "Admin" (it is on this deploy). A model reading
+    # ``who: Admin`` next to "their role is not on file" has two readings and an
+    # obvious way to resolve the tension — decide that Admin IS the role. Which
+    # is a guess, about the one field this block is trying to stop it guessing.
+    #
+    # So the name is stated as a name, in a sentence, and the disclaimer names
+    # the trap rather than gesturing at it. Same reason the block still refuses
+    # to carry a role: an account label is not an org role, and "Owner",
+    # "Support" and "Admin" are all common display names.
+    return (
+        "<about-member>\n"
+        f"You are talking to {display} (id: {user_id}).\n"
+        f"{display!r} is the display name on their account — it is NOT their "
+        "role. Their role, team and focus are not on file; do not infer them "
+        "from the name.\n"
+        "</about-member>"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1093,7 +1244,119 @@ async def resolve_scope_context(
         return await _resolve_session(
             scope_id, user_id, agent_id_hint, expected_workspace_id, surface
         )
+    if kind is ScopeKind.CONCIERGE:
+        # No ``surface`` here on purpose: that param exists so an unhinted turn on
+        # the CODE surface routes to the dedicated code agent (CX-3). A concierge
+        # run is never the code surface, and its agent is already server-resolved
+        # from the widget binding, so passing a client-supplied hint down this path
+        # could only redirect a PUBLIC run at a different agent.
+        return await _resolve_concierge(scope_id, user_id, agent_id_hint, expected_workspace_id)
     return await _resolve_group_like(kind, scope_id, user_id, agent_id_hint, expected_workspace_id)
+
+
+async def _resolve_concierge(
+    scope_id: str,
+    user_id: str,
+    agent_id_hint: str | None,
+    expected_workspace_id: str | None = None,
+) -> ScopeContext:
+    """Resolve a PUBLIC Paw Bar concierge run's ``ScopeContext`` (T2).
+
+    Unlike every other resolver here, the caller is NOT a workspace member — it
+    authenticated at the HTTP edge with an origin-bound Site embed key
+    (``resolve_site_key``), and the authority for this run is the RESOLVED Site
+    scope, never the caller. So this resolver deliberately does NOT run the
+    member-auth path (``_resolve_pocket``'s owner/team/shared check, the
+    participant list, the about-member block). It trusts the server-authoritative
+    spec fields the concierge router built AFTER a successful ``resolve_site_key``
+    + widget lookup:
+
+      * ``scope_id`` — the Site's ``pocket_id`` (from the resolved key). The run
+        is bound to THIS pocket; ``_kb_scopes_for_context`` locks the KB read to
+        ``pocket:<pocket_id>``.
+      * ``user_id`` — the anonymous, widget-minted ``customer_ref``. Used ONLY as
+        a session / rate-limit handle — never treated as an authenticated
+        principal. ``members`` is left EMPTY so no workspace participant is
+        exposed and the member-private ``user:`` KB scope can never fire.
+      * ``agent_id_hint`` — the widget's bound concierge agent.
+      * ``expected_workspace_id`` — the workspace off the resolved key.
+
+    Defense-in-depth (finding #2 — no sibling-pocket reach): the pocket is
+    re-loaded and its workspace RECONCILED against ``expected_workspace_id`` (a
+    non-empty doc workspace that disagrees raises ``Forbidden`` — the same
+    cross-tenant guard the member paths use), and the widget's agent is verified
+    to belong to that workspace so a mis-set ``agent_id`` can't run a sibling
+    workspace's agent under this Site's identity.
+
+    Raises:
+        NotFound: the pocket doesn't exist.
+        CloudError: no agent bound (``concierge.no_agent``), the agent is not in
+            the Site's workspace (``concierge.agent_forbidden``), or the pocket's
+            workspace disagrees with the resolved key (``Forbidden``).
+    """
+    pocket = await _get_pocket(scope_id)
+    if pocket is None:
+        raise NotFound("pocket", scope_id)
+
+    # Reconcile the pocket's workspace against the key's — a non-empty doc
+    # workspace that disagrees raises Forbidden (cross-tenant guard); an empty
+    # doc workspace falls back to the trusted key workspace.
+    workspace_id = _reconcile_workspace_id(
+        str(getattr(pocket, "workspace", "")), expected_workspace_id
+    )
+    if not workspace_id:
+        raise CloudError(400, "concierge.no_workspace", "Concierge run has no workspace")
+
+    target = (agent_id_hint or "").strip()
+    if not target:
+        raise CloudError(400, "concierge.no_agent", "Widget has no concierge agent")
+    # Bind the agent to the Site's workspace: the widget's agent_id is admin-set
+    # (T3) but never validated against the workspace at create time, so verify it
+    # here. A missing / cross-workspace agent is refused — a concierge must not
+    # run a sibling workspace's agent (persona / soul / tools) under this Site.
+    if not await _agent_in_workspace(target, workspace_id):
+        raise CloudError(403, "concierge.agent_forbidden", "Agent not in this workspace")
+
+    # Pocket orientation for grounding — sanitized, from the doc already fetched
+    # (no extra read). Lets the concierge answer "what is this site about?".
+    pocket_summary = _pocket_summary_data(pocket)
+
+    return ScopeContext(
+        kind=ScopeKind.CONCIERGE,
+        scope_id=scope_id,
+        workspace_id=workspace_id,
+        # The anonymous customer handle — a rate-limit / session key, NOT an
+        # authenticated principal (finding #2). members stays empty.
+        user_id=user_id,
+        members=[],
+        target_agent_id=target,
+        agent_ids_in_scope=[target],
+        pocket_id=scope_id,
+        pocket_type=getattr(pocket, "type", None),
+        pocket_summary=pocket_summary,
+    )
+
+
+async def _agent_in_workspace(agent_id: str, workspace_id: str) -> bool:
+    """True when ``agent_id`` names an Agent that belongs to ``workspace_id``.
+
+    Used by the concierge resolver to bind the widget's agent to the Site's
+    workspace. A bad id / missing agent / read error is treated as NOT in the
+    workspace (fail closed) — a public concierge must never run an agent we
+    can't prove belongs to its tenant.
+    """
+    if not agent_id or not workspace_id:
+        return False
+    try:
+        from beanie import PydanticObjectId
+
+        from pocketpaw_ee.cloud.models.agent import Agent
+
+        agent = await Agent.get(PydanticObjectId(agent_id))
+    except Exception:
+        logger.debug("concierge agent lookup failed for %s", agent_id, exc_info=True)
+        return False
+    return agent is not None and str(getattr(agent, "workspace", "")) == str(workspace_id)
 
 
 async def _resolve_session(
@@ -1479,18 +1742,36 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     # preamble.
     if override is None:
         parts.append(_DELIVER_ARTIFACT_RULE)
-    # Composio auth/search guidance is injected whenever Composio is
-    # enabled. An enabled deployment ALWAYS surfaces at least the
-    # discovery meta-tools — ``providers.py`` falls back to them when no
-    # toolkit is allow-listed — and the search-fallback rule matters MOST
-    # in that meta-tools-only mode. So gate on credentials (is_enabled),
-    # not on the toolkit allow-list: the prompt and the real tool list
-    # agree because enabled ⇒ tools present.
+    # Composio auth/search guidance. Gated on credentials AND on the backend
+    # actually receiving the tools each rule talks about.
+    #
+    # The credentials half is the original reasoning and still holds: an
+    # enabled deployment ALWAYS surfaces at least the discovery meta-tools —
+    # ``providers.py`` falls back to them when no toolkit is allow-listed — and
+    # the search-fallback rule matters MOST in that meta-tools-only mode, so
+    # gating on the toolkit allow-list would drop it exactly where it counts.
+    #
+    # The backend half is the part that was missing, and "enabled ⇒ tools
+    # present" was simply not true. Composio builds tools for four backend
+    # kinds; this deployment runs a fifth (``pydantic_ai``), which gets NONE.
+    # So 2,516 characters of instruction about a Gmail/Slack/GitHub tool
+    # surface rode in every turn describing tools that did not exist. That is
+    # worse than wasted context — an agent told it has those integrations
+    # tells the USER it has them.
+    #
+    # The two rules are gated separately because the tool sets differ:
+    # ``initiate_connection`` / ``verify_connection`` exist only on the Claude
+    # SDK backend, while the search meta-tools reach all four. Both predicates
+    # live next to the code that builds the tools, so a new wrapper widens the
+    # prompt in the same commit.
+    from pocketpaw_ee.cloud.composio import providers as _composio_providers
     from pocketpaw_ee.cloud.composio import service as _composio_service
 
     if _composio_service.is_enabled():
-        parts.append(_COMPOSIO_AUTH_FLOW_RULE)
-        parts.append(_COMPOSIO_SEARCH_FALLBACK_RULE)
+        if _composio_providers.supports_connection_tools(backend_name):
+            parts.append(_COMPOSIO_AUTH_FLOW_RULE)
+        if _composio_providers.supports_composio_tools(backend_name):
+            parts.append(_COMPOSIO_SEARCH_FALLBACK_RULE)
     # The home pocket is a special case: its agent mutates widgets directly
     # via the ``add_widget`` MCP tool — it does NOT delegate to the pocket
     # specialist. ``POCKET_DELEGATION_RULE`` ("never call add_widget,
@@ -1719,17 +2000,17 @@ def build_dynamic_context(ctx: ScopeContext) -> str:
     data and lives inside the ``knowledge_context`` wrapper; the
     behavioral instructions live at the top level.
 
-    When a ``surface_context`` is attached, its preamble is prepended
-    FIRST — surface state (pinned widgets, snapshot, available tools)
-    is more informationally dense than the bare scope tags and the
-    agent should see it before anything else. ``surface_context is None``
-    keeps the legacy three-line shape (clients that don't stamp a
-    surface hint, or surfaces that fell back to GENERIC with an empty
-    preamble).
+    The surface preamble used to be prepended here, on the reasoning that the
+    agent should see surface state before anything else. It never did: this
+    block ends up inside the "Your Knowledge Base" wrapper at the BOTTOM of the
+    prompt, framed as reference data. Since PA-2 the preamble is its own prompt
+    layer, assembled directly under the agent's identity and above the per-turn
+    material — which is where "before anything else" actually lives — and it
+    carries a cache key, which it could not do from in here. ``run_core`` reads
+    it off ``ctx.surface_context`` and threads it into ``pool.run``; prepending
+    it here as well would render it twice.
     """
     parts: list[str] = []
-    if ctx.surface_context and ctx.surface_context.preamble:
-        parts.append(ctx.surface_context.preamble)
     member_list = ", ".join(ctx.members) if ctx.members else "(none)"
     parts.append(f"<scope>{ctx.kind.value} {ctx.scope_id}</scope>")
     parts.append(f"<participants>{member_list}</participants>")
@@ -1855,6 +2136,22 @@ def _member_private_user_scope(ctx: ScopeContext) -> str | None:
 # ~400 tokens ≈ 1600 chars (English ≈ 4 chars/token); we cap on chars (a
 # cheap, deterministic proxy — no tokenizer dependency) and truncate with an
 # ellipsis if a rendered block would exceed it.
+# How long one KB scope search may take before the turn gives up on it.
+#
+# 1.5s is a backstop, not a target. A healthy scope answers in ~25 ms (process
+# spawn); the number exists for the unhealthy case, and the unhealthy case is
+# real: a workspace holding 4,051,312 words measured 4.2 SECONDS per search on
+# 2026-08-04, on every turn, because kb-go scans instead of indexing. Search
+# time there was flat across queries — "a" and a six-word question cost the
+# same — which is the signature of a scan. That index is being fixed in kb-go
+# separately; this cap stays regardless, because it bounds any slow scope
+# rather than that one cause.
+#
+# Set high enough that a slow-but-working scope still contributes, low enough
+# that a pathological one cannot own the turn. Exceeding it drops the KB block,
+# which is the same outcome as a scope with no hits.
+_KB_SEARCH_TIMEOUT_SECONDS = 1.5
+
 _BRIEFING_MAX_CHARS = 1600
 
 
@@ -1974,7 +2271,45 @@ def _kb_scopes_for_context(ctx: ScopeContext) -> list[str]:
     agent context. Mirrors the OSS ``_resolve_kb_scopes`` priority; the gate
     is the cloud-side decision (the OSS resolver only honors the field it is
     handed).
+
+    CONCIERGE (T2 finding #2, widened by Paw Bar inbox D5): a PUBLIC, anonymous
+    concierge run reads exactly TWO scopes — ``pocket:<pocket_id>`` (the Site's
+    own pocket, where the page sync writes) and ``agent:<target_agent_id>`` (the
+    knowledge the owner attached to this site's concierge agent directly). Site
+    pocket first: it is the more specific answer to "what is this site about".
+
+    ``agent:`` is safe here and ``workspace:`` is not, and the difference is not
+    cosmetic:
+
+    * Each site concierge is a DEDICATED agent, bijective with its site
+      (``paw_bar.agent_provisioning.ensure_site_agent``; deterministic slug
+      ``concierge-<site_id>``, never a shared/universal agent). Its ``agent:``
+      scope therefore holds one site's knowledge — the owner put it there for
+      these visitors — and ``_resolve_concierge`` has already proven that agent
+      belongs to this Site's workspace (``_agent_in_workspace``) and that the
+      run's pocket reconciles to the same tenant. A sibling agent's scope is
+      unreachable: the id comes from the widget binding, never from the caller.
+    * ``workspace:`` is the TENANT-WIDE tier — every pocket, every agent, every
+      owner upload in the workspace. Handing that to an anonymous caller is the
+      "ask the right question, read the whole company" hole, so it stays dropped.
+    * ``user:`` is the member-private tier and can never fire here anyway
+      (``members`` is empty for a concierge), but it is dropped explicitly.
+
+    The consequence is a product rule, not just a code rule: anything attached to
+    a site concierge agent is PUBLISHABLE BY DEFINITION. The agent knowledge read
+    advertises that with ``visible_to_site_visitors`` (see
+    ``agents.service.is_visible_to_site_visitors``) so the owner is told before
+    they attach, not after a visitor quotes it back at them.
     """
+    if ctx.kind is ScopeKind.CONCIERGE:
+        # Public, site-scoped grounding: the Site's pocket + this site's own
+        # dedicated concierge agent. NEVER workspace:/user:.
+        concierge_scopes: list[str] = []
+        if ctx.pocket_id:
+            concierge_scopes.append(f"pocket:{ctx.pocket_id}")
+        if ctx.target_agent_id:
+            concierge_scopes.append(f"agent:{ctx.target_agent_id}")
+        return concierge_scopes
     scopes: list[str] = []
     seen: set[str] = set()
     for candidate in (
@@ -2055,16 +2390,48 @@ async def _build_kb_snippets_block(ctx: ScopeContext, query: str) -> str:
         logger.debug("KnowledgeService unavailable; skipping KB block", exc_info=True)
         return ""
 
-    snippets: list[tuple[str, str]] = []
-    for scope in scopes:
+    # CONCURRENT, and BOUNDED. Both matter, and for different reasons.
+    #
+    # Concurrent: each scope is an independent ``kb`` subprocess, and the loop
+    # here awaited them one after another, so N scopes cost the sum rather than
+    # the max. Measured 2026-08-04 against two empty scopes: 50.2 ms serial,
+    # ~25 ms gathered — the floor is process spawn, which we pay per scope
+    # either way but no longer pay in sequence.
+    #
+    # Bounded: a scope's search time scales with its CONTENT, not the query. A
+    # workspace holding 4,051,312 words took 4.2 SECONDS per turn — measured,
+    # on this machine, on a message that was just "hello" — because kb-go scans
+    # rather than indexes. Nothing capped it, so the whole chat turn inherited
+    # that. The cap degrades to "no KB block", which is the same outcome as the
+    # empty-scope case the code above already handles, rather than a stalled
+    # turn. It is a backstop, NOT the fix — kb-go's missing index is owned by
+    # another teammate as of 2026-08-04. Keep this even after that lands: it
+    # bounds ANY slow scope (a huge corpus, a wedged binary, a stalled mount),
+    # not only the unindexed case that exposed it.
+    async def _one(scope: str) -> tuple[str, str] | None:
         try:
-            text = await KnowledgeService.search_context_for_scope(scope, query, limit=3)
+            text = await asyncio.wait_for(
+                KnowledgeService.search_context_for_scope(scope, query, limit=3),
+                timeout=_KB_SEARCH_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "knowledge search for scope %s exceeded %.1fs; dropping the KB block for "
+                "this turn (is the scope indexed?)",
+                scope,
+                _KB_SEARCH_TIMEOUT_SECONDS,
+            )
+            return None
         except Exception:
             logger.warning("knowledge search failed for scope %s", scope, exc_info=True)
-            continue
-        cleaned = text.strip()
-        if cleaned:
-            snippets.append((scope, cleaned))
+            return None
+        cleaned = (text or "").strip()
+        return (scope, cleaned) if cleaned else None
+
+    # Order is preserved by ``gather``, so the rendered block is byte-identical
+    # to the serial version for any given set of results.
+    results = await asyncio.gather(*(_one(s) for s in scopes))
+    snippets: list[tuple[str, str]] = [r for r in results if r is not None]
 
     if not snippets:
         return ""
@@ -2200,7 +2567,15 @@ def session_key_for(ctx: ScopeContext) -> str:
     Mirrors the Mongo ``Message.session_key`` written by the router's
     persist helpers. Keeping the formula in one place lets history
     rehydration use the same key the persist path writes with.
+
+    CONCIERGE (T2): a public widget's ``scope_id`` is the SHARED Site pocket, so
+    the customer handle (``user_id`` = the anonymous ``customer_ref``) is folded
+    in to isolate one visitor's session/warm-client from another's — without it
+    every anonymous visitor of a widget would collide on one session key (and
+    one warm CLI subprocess), bleeding conversation state across visitors.
     """
+    if ctx.kind is ScopeKind.CONCIERGE:
+        return f"cloud:concierge:{ctx.scope_id}:{ctx.user_id}:{ctx.target_agent_id}"
     return f"cloud:{ctx.kind.value}:{ctx.scope_id}:{ctx.target_agent_id}"
 
 
@@ -2223,7 +2598,7 @@ async def load_history_for_scope(ctx: ScopeContext, *, limit: int = 50) -> list[
         return []
 
     try:
-        if ctx.kind in (ScopeKind.POCKET, ScopeKind.SESSION):
+        if ctx.kind in (ScopeKind.POCKET, ScopeKind.SESSION, ScopeKind.CONCIERGE):
             # Scope by workspace_id too (defense-in-depth). Pocket/session
             # ObjectIds are globally unique, so session_key alone never
             # collides in practice — but pinning the workspace makes tenant

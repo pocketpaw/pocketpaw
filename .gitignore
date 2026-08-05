@@ -78,6 +78,8 @@ private.key
 
 # Backups and secrets
 .env.bak
+.env.backup*
+.env.backup-*
 *.bak
 
 output.txt
@@ -94,3 +96,6 @@ output.txt
 !/deploy/paw-sites/.gitkeep
 /deploy/ripple/*
 !/deploy/ripple/.gitkeep
+
+# Load-test artifacts (scripts/loadtest)
+out/

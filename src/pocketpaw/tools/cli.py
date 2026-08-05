@@ -54,6 +54,7 @@ from pocketpaw.tools.builtin import (
     GmailTrashTool,
     HealthCheckTool,
     ImageGenerateTool,
+    InlineWidgetHelpTool,
     ListSessionsTool,
     NewSessionTool,
     OCRTool,
@@ -77,6 +78,7 @@ from pocketpaw.tools.builtin import (
     TranslateTool,
     UrlExtractTool,
     WebSearchTool,
+    WidgetSpecTool,
 )
 
 # All tools available via CLI (excluding shell/filesystem — those are SDK built-in)
@@ -136,6 +138,8 @@ _TOOLS = {
         AddWidgetTool(),
         RemoveWidgetTool(),
         StartFlowTool(),
+        WidgetSpecTool(),
+        InlineWidgetHelpTool(),
         ConnectorListTool(),
         ConnectorActionsTool(),
         ConnectorConnectTool(),

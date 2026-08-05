@@ -1,6 +1,19 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-08-03 (PA-9): Re-measured ``prompt_pocket_summary_only``'s payoff against
+    the live layer and corrected its description. The flag saves ~1,631 chars/turn
+    (3,240 -> 1,609 on a 300-widget pocket), not the ~39.6k the old note implied —
+    PA-8a's ``_WIDGET_SUMMARY_MAX_CHARS`` had already bounded the block, so the
+    dramatic figure described behaviour that no longer exists. Default is
+    unchanged; only the docstring was wrong.
+  - 2026-08-03 (PA-8a): Added ``prompt_pocket_summary_only`` (default False, env
+    POCKETPAW_PROMPT_POCKET_SUMMARY_ONLY) — takes the bulk widget dump out of
+    the channel prompt's ``<current-pocket>`` block, leaving the pocket id, the
+    name, the widget COUNT, a snapshot stamp and the standing order to call
+    ``get_pocket``. Default False is byte-for-byte today's block, so no deploy
+    is changed by shipping it; flipping it is a config/env change, not a code
+    change. Read by ``pocketpaw.prompt.channel.request.ChannelCurrentPocketLayer``.
   - 2026-07-11 (self-serve-analysis S1): Added ``fabric_analyst`` (default False,
     env POCKETPAW_FABRIC_ANALYST) — gates the Fabric transparent-analysis read
     engine (SQL GROUP BY aggregation + reasoning steps on FabricStore.query /
@@ -603,14 +616,259 @@ class Settings(BaseSettings):
             "don't recognize the shape ignore it."
         ),
     )
+    # AgentAPI Settings — drive a terminal coding agent via coder/agentapi.
+    agentapi_base_url: ExternalUrl = Field(
+        default="http://localhost:3284",
+        description=(
+            "Base URL of a running AgentAPI server (`agentapi server -- claude`). "
+            "The backend borrows the wrapped CLI's OWN authentication, so it needs "
+            "no provider key — which is why it is useful for development when no "
+            "API key or working proxy is available. One server is ONE conversation: "
+            "turns are serialized, so this is a single-user tool, not a serving path."
+        ),
+    )
+    agentapi_timeout: int = Field(
+        default=3600,
+        description=(
+            "Seconds to wait on an AgentAPI turn. Generous by default because the "
+            "wrapped agent runs its own tool chains and can work for a long time; "
+            "the previous 600s cut turns off mid-task."
+        ),
+    )
+    # Pydantic AI Settings — in-process, dispatch-only agent backend.
+    # See docs/design/drafts/2026-07-29-pydantic-ai-agent-backend-prd.md.
+    pydantic_ai_model: str = Field(
+        default="litellm:claude-sonnet-4-6",
+        description=(
+            "Model for the Pydantic AI backend in ``provider:model`` format. "
+            "Defaults to the ``litellm`` provider so model access goes through "
+            "the self-hosted LiteLLM proxy (RFC 11), which already owns spend "
+            "logs, virtual keys and per-customer budgets — a second model layer "
+            "would fork metering. A bare model name with no ``provider:`` prefix "
+            "falls back to ``pydantic_ai_provider``."
+        ),
+    )
+    pydantic_ai_provider: str = Field(
+        default="auto",
+        description=(
+            "Provider for the Pydantic AI backend when ``pydantic_ai_model`` "
+            "carries no ``provider:`` prefix. ``auto`` defers to ``llm_provider``, "
+            "then to ``litellm``. One of: litellm, anthropic, openai, "
+            "openai_compatible, openrouter, ollama."
+        ),
+    )
+    pydantic_ai_timeout: int = Field(
+        default=3600,
+        description=(
+            "Seconds the Pydantic AI backend waits on the model before giving "
+            "up (0 = wait indefinitely). Replaces the OpenAI client's 600s "
+            "default, which is not a sensible bound on an agent turn — a long "
+            "tool chain or a reasoning model thinking between tokens trips it "
+            "and the run dies mid-generation. The connect timeout stays short "
+            "regardless, so a dead host still fails fast. A gateway in front of "
+            "the model (LiteLLM / OpenRouter) enforces its own idle window that "
+            "this cannot raise."
+        ),
+    )
+    pydantic_ai_max_turns: int = Field(
+        default=100,
+        description=(
+            "Max model requests per run in the Pydantic AI backend (0 = "
+            "unlimited). Maps to the agent's request limit, which bounds a "
+            "runaway tool loop."
+        ),
+    )
+    pydantic_ai_mcp_enabled: bool = Field(
+        default=True,
+        description=(
+            "Attach configured MCP servers to the Pydantic AI backend. The "
+            "backend holds each server open for the lifetime of the backend "
+            "instance, so pydantic-ai's refcount never returns to zero and a "
+            "server is started exactly once rather than respawning whenever "
+            "concurrent runs briefly reach zero. Set false to drop MCP from the "
+            "tool surface entirely."
+        ),
+    )
+    pydantic_ai_instrumentation: bool = Field(
+        default=False,
+        description=(
+            "Emit OpenTelemetry spans for Pydantic AI agent runs (model "
+            "requests, tool calls, token usage, time to first chunk). Calls "
+            "``logfire.configure`` once per process with "
+            "``send_to_logfire='if-token-present'``, so without a LOGFIRE_TOKEN "
+            "the spans stay local and reach whatever OTel exporter is already "
+            "configured. Off by default. Cheap since pydantic-ai 2.17.0, which "
+            "caches per-message span serialization — before that it was O(n^2) "
+            "over a run's history and a long tool loop paid for it."
+        ),
+    )
+    pydantic_ai_native_web_tools: bool = Field(
+        default=False,
+        description=(
+            "Let the model run web search and page fetch PROVIDER-SIDE on "
+            "backends that support it, instead of PocketPaw's own tools making "
+            "those HTTP calls from inside the agent process. On an in-process "
+            "backend serving every tenant, a bridged web fetch means our event "
+            "loop does the waiting. PocketPaw's ``web_search`` / ``url_extract`` "
+            "stay wired as the LOCAL fallback, so a provider without native "
+            "support behaves exactly as before and the model never sees two "
+            "tools for one job. Off by default: the profile that advertises "
+            "native support describes the OpenAI API, and whether a LiteLLM "
+            "proxy forwards the native tool to its upstream is a per-deployment "
+            "question."
+        ),
+    )
+    pydantic_ai_thinking: str = Field(
+        default="default",
+        description=(
+            "Reasoning effort for the Pydantic AI backend: 'default' (leave the "
+            "provider's own setting alone), 'off', or one of 'minimal', 'low', "
+            "'medium', 'high', 'xhigh'. Maps to pydantic-ai's portable "
+            "``thinking`` model setting, so it works across providers rather "
+            "than needing the Anthropic or OpenAI spelling. This is the "
+            "largest latency dial on a reasoning model and it is currently "
+            "whatever the provider picked; 'default' keeps that, and any other "
+            "value makes the choice ours."
+        ),
+    )
+    pydantic_ai_fast_model: str = Field(
+        default="",
+        description=(
+            "Optional cheaper/faster model in ``provider:model`` form that the "
+            "Pydantic AI backend downshifts to part-way through a long run. "
+            "Empty disables model selection entirely, which is the default: a "
+            "run stays on ``pydantic_ai_model`` from first step to last. "
+            "Requires one of the two thresholds below to be non-zero."
+        ),
+    )
+    pydantic_ai_fast_model_after_step: int = Field(
+        default=0,
+        description=(
+            "Downshift to ``pydantic_ai_fast_model`` once a run reaches this "
+            "request step (0 = never). A long tool chain front-loads its hard "
+            "judgement and spends its later steps digesting tool results, "
+            "which is also where the context — and so the cost — is largest. "
+            "Whether that trade is worth making is an empirical question per "
+            "model, which is what the evals harness is for; this ships the "
+            "mechanism, off."
+        ),
+    )
+    pydantic_ai_fast_model_after_tokens: int = Field(
+        default=0,
+        description=(
+            "Downshift to ``pydantic_ai_fast_model`` once a run's accumulated "
+            "input tokens exceed this (0 = never). A cost ceiling rather than a "
+            "step count: it turns a runaway loop into a cheap one instead of a "
+            "larger bill. Applied with ``pydantic_ai_fast_model_after_step`` — "
+            "whichever trips first wins."
+        ),
+    )
+    pydantic_ai_defer_mcp_tools: bool = Field(
+        default=True,
+        description=(
+            "Hide the Pydantic AI backend's MCP tools behind tool search "
+            "instead of advertising every one of them on every model request. "
+            "An ungated surface carries 134 tools whose schemas are ~30,500 "
+            "tokens per request; deferring the 97 bridged ones leaves 38 on "
+            "the wire for ~5,900, and the model calls ``search_tools`` to pull "
+            "what it needs. Costs one extra model request per discovery, and "
+            "buys little on a surface that already gates hard. "
+            "On by default since 2026-08-01. It shipped off because the saving "
+            "was measured but 'does this model search rather than give up' was "
+            "not, and that had to be answered per model. Answered: on "
+            "deepseek-v4-pro and deepseek-v4-flash, three prompts needing "
+            "deferred tools (tasks / icons / create-pocket) each called "
+            "``search_tools``, got the right tool back and called it. What "
+            "decided the default is the shape of the cost rather than the size "
+            "of it — tool schemas do NOT prompt-cache on the proxy (the "
+            "caching table in ``agents/pydantic_ai.py`` covers the text "
+            "prefix), so the full block is re-read on every turn including one "
+            "that uses no tools at all. Measured end to end against the proxy: "
+            "'hey' cost 133 tools / 32,225 schema tokens / 15.7s with this off "
+            "and 37 tools / 6,594 / 7.6s with it on. Set false to go back — a "
+            "model that will not search loses the deferred tools entirely, so "
+            "that is the escape hatch for one that turns out not to."
+        ),
+    )
+    pydantic_ai_defer_skills: bool = Field(
+        default=True,
+        description=(
+            "Hide the Pydantic AI backend's skills catalog behind the agent's "
+            "``load_capability`` tool instead of listing every skill's name and "
+            "description in the system prompt. Measured against the proxy, the "
+            "19 bundled skills are 18,717 chars (~4,679 tokens) of the system "
+            "prompt; deferring drops that to 751 chars (~187), and a trivial "
+            "turn from 6.3s to 2.9s. "
+            "This depends on the ``reasoning_content`` echo fix in "
+            "``agents/pydantic_ai.py`` (``_reasoning_echo_model_class``) and "
+            "must not be enabled without it. Deferral is what reliably produces "
+            "an assistant turn with no thinking part — the continuation after "
+            "``load_capability`` — and DeepSeek 400s the whole request when one "
+            "comes back without ``reasoning_content``. Before that fix this "
+            "setting failed 4 of 4 landing-page runs on both v4-flash and "
+            "v4-pro, dying after exactly one tool call; after it, 4 of 4 pass "
+            "(7 to 28 tool calls each). "
+            "Worth knowing the saving is smaller than "
+            "``pydantic_ai_defer_mcp_tools``: tool schemas never prompt-cache "
+            "on the proxy, while this catalog rides in the system prompt, which "
+            "does — so mainly a cold turn or a cache miss pays for it. The "
+            "downside is also sharper. A model that never calls "
+            "``load_capability`` loses every skill, and skills are how pocket "
+            "creation, Paw Sites and Foresight know their own procedures. Set "
+            "false if a model turns out not to load them."
+        ),
+    )
+    pydantic_ai_harness_enabled: bool = Field(
+        default=True,
+        description=(
+            "Attach the pydantic-ai-harness capabilities (compaction, planning, "
+            "tool-output limits, step persistence) to the Pydantic AI backend. "
+            "Set false to run the bare agent loop — the escape hatch if a "
+            "harness release regresses, since the dependency is pre-1.0 in "
+            "cadence and pinned exactly."
+        ),
+    )
+    pydantic_ai_skills_enabled: bool = Field(
+        default=True,
+        description=(
+            "Expose PocketPaw's skills to the Pydantic AI backend via "
+            "pydantic-ai-skills, using progressive disclosure — the model sees "
+            "names and descriptions and pulls a skill's body only when it uses "
+            "one, instead of the whole set riding in the system prompt every "
+            "turn. Skills are passed programmatically from PocketPaw's own "
+            "loader; directory / git / S3 discovery is not used, and the "
+            "script-execution tool is excluded (dispatch-only)."
+        ),
+    )
+    pydantic_ai_compaction_max_messages: int = Field(
+        default=200,
+        description=(
+            "Message count above which the Pydantic AI backend compacts a run's "
+            "history (sliding window + clearing old tool results). A long tool "
+            "loop is what blows the context window on a dispatch-only agent."
+        ),
+    )
+    pydantic_ai_max_tool_output_chars: int = Field(
+        default=200_000,
+        description=(
+            "Truncate any single bridged tool result above this many characters "
+            "before it re-enters the model context (0 = no limit). Guards the "
+            "context against one oversized tool return. NOT a read cap on file "
+            "content — a cap that a tool contract cannot satisfy is how the "
+            "/code fabrication bug happened (2026-07-28); bridged tools here are "
+            "dispatch-only and return summaries, not whole files."
+        ),
+    )
     # Pocket Specialist Settings — see docs/superpowers/specs/2026-05-09-pocket-specialist-design.md
     pocket_specialist_backend: str = Field(
         default="deep_agents",
         description=(
             "Which agent backend runs the pocket specialist's LLM work. Must be a "
             "registered backend name (deep_agents, langchain_react, claude_agent_sdk, "
-            "openai_agents, google_adk, codex_cli, opencode, copilot_sdk). Default "
-            "deep_agents avoids subprocess cold-start."
+            "openai_agents, google_adk, codex_cli, opencode, copilot_sdk, "
+            "pydantic_ai). Default deep_agents avoids subprocess cold-start. The "
+            "backend must implement ``attach_specialist_tools`` — one that raises "
+            "is excluded from the eligible set (``agents/backend.py``)."
         ),
     )
     pocket_specialist_model: str = Field(
@@ -1199,7 +1457,45 @@ class Settings(BaseSettings):
 
     # Web Search
     web_search_provider: str = Field(
-        default="tavily", description="Web search provider: 'tavily' or 'brave'"
+        default="tavily",
+        description=(
+            "Web search provider: 'tavily', 'brave', 'parallel', or 'litellm'. "
+            "'litellm' routes through the LiteLLM proxy's Search API "
+            "(``POST {litellm_api_base}/v1/search``) instead of calling a "
+            "vendor directly, so it reuses the proxy credentials already "
+            "configured and inherits whatever search tools the operator "
+            "registered there — no second key to distribute, and the proxy "
+            "keeps the usage accounting. Pick which registered tool with "
+            "``litellm_search_tool_name``; list them with "
+            "``GET {litellm_api_base}/v1/search/tools``."
+        ),
+    )
+    litellm_search_api_base: str | None = Field(
+        default=None,
+        description=(
+            "Base URL for the search API when "
+            "``web_search_provider='litellm'``. Defaults to "
+            "``litellm_api_base``, which is right until something is chained in "
+            "front of the gateway. A compression or observability proxy "
+            "(Headroom, for one) intercepts ``/v1/chat/completions``, "
+            "``/v1/messages`` and ``/v1/responses`` and knows nothing about "
+            "``/v1/search`` — so pointing ``litellm_api_base`` at it moves the "
+            "model traffic and 404s every web search. Set this to the real "
+            "gateway to send search straight there while completions take the "
+            "detour."
+        ),
+    )
+    litellm_search_tool_name: str = Field(
+        default="web_search",
+        description=(
+            "Which search tool to call when ``web_search_provider='litellm'``. "
+            "These names are defined by whoever configured the proxy, not by a "
+            "convention — on the reference gateway they are 'web_search' "
+            "(provider parallel_ai) and 'tinyfish_web_Search' (provider "
+            "tinyfish). ``GET {litellm_api_base}/v1/search/tools`` lists what a "
+            "given proxy actually has; a name that is not registered fails with "
+            "``Search tool '<name>' not found in router.search_tools``."
+        ),
     )
     tavily_api_key: str | None = Field(default=None, description="Tavily search API key")
     brave_search_api_key: str | None = Field(default=None, description="Brave Search API key")
@@ -1740,6 +2036,33 @@ class Settings(BaseSettings):
     kb_limit: int = Field(
         default=3,
         description="Number of top articles to inject from kb search (default: 3)",
+    )
+    prompt_pocket_summary_only: bool = Field(
+        default=False,
+        description=(
+            "Keep bulk pocket widget detail OUT of the agent's system prompt. "
+            "False (default) is byte-for-byte the block shipped today: the "
+            "``<current-pocket>`` block carries a JSON dump of the widget "
+            "summary the client posted. True renders the CHEAP half only — "
+            "pocket id, name, widget count, a snapshot stamp — plus the same "
+            "standing order to call ``mcp__pocketpaw_pocket__get_pocket`` for "
+            "the detail, which is the tool-result path the detail belongs on. "
+            "RE-MEASURED 2026-08-03 (PA-9) against the live layer: on a "
+            "300-widget pocket the block is 3,240 chars / 1,092 tokens OFF and "
+            "1,609 chars / 444 tokens ON, so the flag saves 648 tokens (59%) per "
+            "turn — NOT the ~39.6k chars the old '~41k chars to ~1.4k' note "
+            "implied. That figure described the "
+            "pre-PA-8a block; _WIDGET_SUMMARY_MAX_CHARS now bounds the dump at "
+            "2,000 chars before serialisation, so the block plateaus around "
+            "3,240 chars from ~50 widgets upward and does not grow with pocket "
+            "size. The block is per-turn (it varies, so it never sits inside a "
+            "cached prefix), but the saving is now modest rather than dramatic. "
+            "Read per-render by "
+            "``pocketpaw.prompt.channel.request.ChannelCurrentPocketLayer``, so "
+            "flipping it is a config or env change and takes effect on the next "
+            "settings load — no code deploy. Set via "
+            "POCKETPAW_PROMPT_POCKET_SUMMARY_ONLY."
+        ),
     )
     ripple_manifest_url: str = Field(
         default="http://localhost:5174/manifest.json",

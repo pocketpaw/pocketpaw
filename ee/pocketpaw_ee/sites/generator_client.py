@@ -8,6 +8,13 @@
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-07-30 (fix/sites-d1-svelte-audit): corrected the build-timeout
+# comments. They claimed "a legit build is ~45-60s", which is true for a static site
+# and false for a dynamic one — a measured 1-table dynamic ripple build takes 4m47s,
+# so the 120s default kills a healthy dynamic build and blames a wedged workerd
+# prerender. Comment-only; the default and the code are unchanged (see the
+# ``_DEFAULT_BUILD_TIMEOUT_SEC`` block for the measurement and the operator note).
+#
 # Updated 2026-07-17 (feat/sites-native-artifact-no-build): added ``artifact_home()``
 # (the ~/.pocketpaw/site-artifacts root for the native-artifact read-through cache,
 # mirroring build_home) and ``generator_version()`` (an artifact-format + dep epoch
@@ -116,9 +123,10 @@
 #     whole process GROUP (``_kill_process_group`` → ``os.killpg`` — kills the leaked
 #     workerd CHILD too, not just the bun parent), reaps the parent, and raises the
 #     internal ``_BuildTimeout``.
-#   * Timeout is ``PAW_SITES_BUILD_TIMEOUT_SEC`` (int, default 120s — a legit build is
-#     ~45-60s, a wedged one runs for minutes, so 120s cleanly separates them); read
-#     once per call via ``_build_timeout_sec()`` with an int-parse-or-fallback.
+#   * Timeout is ``PAW_SITES_BUILD_TIMEOUT_SEC`` (int, default 120s); read once per
+#     call via ``_build_timeout_sec()`` with an int-parse-or-fallback. 120s separates
+#     wedged from legit for a STATIC site only — see the constant below for the
+#     measured dynamic-lane figure and why a dynamic deploy must raise the var.
 #   * Each call site converts ``_BuildTimeout`` into its EXISTING failure contract
 #     (callers unchanged): ``install``/``build_static`` return ``(False, "<step> timed
 #     out after Ns ...")`` — the same ``(ok, msg)`` shape the non-zero-exit path
@@ -287,11 +295,22 @@ logger = logging.getLogger(__name__)
 # and the `bun run build` static build) so a wedged step fails FAST instead of
 # hanging the request unbounded. The static build runs adapter-cloudflare's workerd
 # prerender, which can hang forever on a known upstream SvelteKit bug; without a
-# timeout `/editable` and publish hang for tens of minutes. A legit build is
-# ~45-60s and a wedged one runs for minutes, so the 120s default cleanly separates
-# them. Override with PAW_SITES_BUILD_TIMEOUT_SEC (int seconds). Read once per call
-# via _build_timeout_sec() with an int-parse-or-fallback so a malformed value can
-# never crash the build.
+# timeout `/editable` and publish hang for tens of minutes. A legit STATIC build is
+# ~45-60s, so the 120s default cleanly separates a static publish from a wedged one.
+#
+# It does NOT separate them for a DYNAMIC site. Measured 2026-07-30 on a 1-table
+# dynamic ripple pocket (one read source + one write action) on an M-series laptop:
+# `bun run build` took 4m47s, because the dynamic page is SSR'd (prerender off) and
+# the whole Ripple widget bundle lands in the server chunk (_page.js ~2.6 MB). At
+# 120s the gate kills that build and reports it as "likely a wedged workerd
+# prerender", so the provision job fails on a healthy site. A deployment that
+# publishes dynamic sites must raise PAW_SITES_BUILD_TIMEOUT_SEC (≥ 600 leaves
+# headroom on a cold node_modules); the default is deliberately left at 120 because
+# the STATIC publish path is request-synchronous and cannot afford a longer hang.
+#
+# Override with PAW_SITES_BUILD_TIMEOUT_SEC (int seconds). Read once per call via
+# _build_timeout_sec() with an int-parse-or-fallback so a malformed value can never
+# crash the build.
 _DEFAULT_BUILD_TIMEOUT_SEC = 120
 
 

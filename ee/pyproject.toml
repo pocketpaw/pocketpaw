@@ -238,6 +238,7 @@ cloud = "pocketpaw_ee.extensions:CloudPocketWriter"
 
 [project.entry-points."pocketpaw.mcp_servers"]
 tasks = "pocketpaw_ee.extensions:CloudTasksMcpProvider"
+pawbar = "pocketpaw_ee.extensions:CloudPawBarActionsMcpProvider"
 connectors = "pocketpaw_ee.extensions:CloudConnectorsMcpProvider"
 planner = "pocketpaw_ee.extensions:CloudPlannerMcpProvider"
 pocket_planner = "pocketpaw_ee.extensions:CloudPocketPlannerMcpProvider"
@@ -747,6 +748,24 @@ forbidden_modules = [
     "pocketpaw_ee.cloud.models.user",
     "pocketpaw_ee.cloud.models.agent",
 ]
+
+[[tool.importlinter.contracts]]
+name = "AgentActivity — reads runs only through the chat-runs service"
+type = "forbidden"
+allow_indirect_imports = "true"
+# HR-12a. Unlike its siblings this entity owns NO document — it is a read-only
+# view over someone else's. The rule it pins is the one that makes that safe:
+# the activity board must reach ChatRunDoc only through
+# ``chat.runs.service``, which is where the workspace filter and the window
+# live. Import the doc here and the tenancy filter becomes this module's job
+# to remember on every future query — the exact shape of bug that leaks one
+# tenant's agents into another's board, and one a reviewer reads as a harmless
+# "query it directly, it's simpler" diff.
+#
+# Sourced from the PACKAGE (as_packages defaults to true) so submodules added
+# later are covered without anyone remembering to extend a file list.
+source_modules = ["pocketpaw_ee.cloud.agent_activity"]
+forbidden_modules = ["pocketpaw_ee.cloud.models.chat_run"]
 
 [[tool.importlinter.contracts]]
 name = "Tasks — Beanie writes only from service.py"

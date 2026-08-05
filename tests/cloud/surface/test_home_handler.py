@@ -78,7 +78,7 @@ async def test_home_handler_lists_pinned_widgets() -> None:
         ],
     )
 
-    preamble = await home_handler.build_preamble(WORKSPACE, user_id, SurfaceMeta())
+    preamble = (await home_handler.build_preamble(WORKSPACE, user_id, SurfaceMeta())).text
 
     assert '<surface kind="home"' in preamble
     assert "<pinned-widgets" in preamble
@@ -108,7 +108,7 @@ async def test_home_handler_marks_broken_spec_widget() -> None:
         ],
     )
 
-    preamble = await home_handler.build_preamble(WORKSPACE, user_id, SurfaceMeta())
+    preamble = (await home_handler.build_preamble(WORKSPACE, user_id, SurfaceMeta())).text
 
     assert "Broken tile" in preamble
     assert "BROKEN" in preamble
@@ -119,7 +119,7 @@ async def test_home_handler_empty_workspace_returns_minimal_preamble() -> None:
     user_id = await _seed_user("owner-empty@surface.test")
     # No widgets seeded — ensure_home_pocket provisions an empty pocket.
 
-    preamble = await home_handler.build_preamble(WORKSPACE, user_id, SurfaceMeta())
+    preamble = (await home_handler.build_preamble(WORKSPACE, user_id, SurfaceMeta())).text
 
     assert '<surface kind="home"' in preamble
     # The pinned-widgets block exists with count=0 and an empty marker.

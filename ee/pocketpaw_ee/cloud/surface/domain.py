@@ -61,12 +61,34 @@
 # so the belt handler's ``build_preamble`` injects them into the preamble and
 # tells the agent NOT to ask for the repo (and to pass exactly these into
 # ``belt_propose_change``). Absent → the handler keeps the ask-first behavior.
+# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — added
+# ``SurfacePreamble``, the value object every ``build_preamble`` handler now
+# returns: the rendered text AND the ``cache_key`` that says what the handler
+# read to render it. ``SurfaceContext`` carries that key through as
+# ``preamble_cache_key``. The preamble became a real prompt LAYER on the OSS
+# side (``pocketpaw.prompt.surface``), and a layer's key is what a backend
+# caching an agent object folds into its own key — so the question "what does
+# this preamble depend on" now has to be answered, per handler, by the handler.
+# It is deliberately NOT derived centrally from ``(kind, pocket_id, intent)``,
+# which every dispatcher has to hand: a pocket preamble lists the first 12 of N
+# widgets under a 1500-char cap, so editing widget 13 leaves all three
+# identical while the pocket the agent is being told about has changed.
+# ``cache_key`` has NO DEFAULT and rejects ``""`` for the same reason
+# ``LayerOutput`` does — ``""`` reads as "stable forever" and is what someone
+# types when they mean "nothing".
+# Changes: 2026-07-14 (Paw Bar concierge seam, T2) — added the ``CONCIERGE``
+# surface (/paw-bar — the public, origin-bound concierge widget). Its handler
+# (``handlers/concierge.build_preamble``) and its ripple-OFF, PUBLIC-SAFE profile
+# (``surface_registry._concierge_profile``: deny web + code/write/subagent tools,
+# lock the MCP surface) live beside the other rows. The run rides
+# ``chat.agent_service.ScopeKind.CONCIERGE``, which locks the KB read to the
+# Site's pocket.
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -101,6 +123,13 @@ class SurfaceKind(StrEnum):
     STUDIO = "studio"  # /studio — describe→generate media (image + video)
     CODE = "code"  # /code — agent edits + runs code in the workspace
     BELT = "belt"  # /belt — the develop station (orient→develop→propose via gate)
+    # A PUBLIC, anonymous Paw Bar concierge chat (T2) — a foreign site's embedded
+    # widget, answering visitors grounded in the Site's pocket ONLY. Its profile
+    # (``surface_registry._concierge_profile``) is ripple-OFF and PUBLIC-SAFE: it
+    # denies the web + code/write/subagent tools and locks the MCP surface, so a
+    # prompt-injected anonymous caller can't run code, exfiltrate, or mutate the
+    # tenant. The run rides ``ScopeKind.CONCIERGE`` (KB locked to pocket:<id>).
+    CONCIERGE = "concierge"  # /paw-bar — public, origin-bound concierge widget
     GENERIC = "generic"  # any unknown surface — agent still gets a usable preamble
 
 
@@ -182,6 +211,63 @@ class SurfaceMeta:
     storage_root: str | None = None
     is_cloud_storage: str | None = None
     workspace_vm: str | None = None
+    # Concierge action registry hint (C1). A CONCIERGE run whose Paw Bar widget
+    # declares actions carries the declarations here (a JSON-shaped list of
+    # {verb, policy, args, label}). ``concierge_chat`` stamps it from the widget
+    # spec; the concierge PROFILE reads the verbs to allow-list exactly this
+    # widget's per-verb tools, the PREAMBLE lists them, and ``run_core`` binds them
+    # onto the per-stream ContextVar the pawbar_actions MCP server builds from.
+    # Absent on every other surface — the concierge stays deny-all.
+    pawbar_actions: list[dict[str, Any]] | None = None
+    # Concierge catalog hint (C1). The widget's product catalog (capped, JSON of
+    # {id, name, price_cents, currency}) so the preamble can name real products
+    # and the agent emits pawbar-card fences with real ids. Only for the preamble;
+    # the tools re-load the live widget, so this never feeds an effect.
+    pawbar_catalog: list[dict[str, Any]] | None = None
+
+
+@dataclass(frozen=True)
+class SurfacePreamble:
+    """What one surface handler produced: the text, and what it read.
+
+    ``cache_key`` is REQUIRED and has no default, so a handler author cannot
+    ship without answering "what does this preamble depend on". The answer
+    reaches the agent's prompt as the ``surface`` layer's cache key, which a
+    backend caching an agent object folds into its own key — a key that holds
+    still while the text moves is how a user ends up reading a description of a
+    pocket that no longer looks like that.
+
+    What a good answer looks like, in descending order of preference:
+
+      * a REVISION of the mutable thing the handler read (a pocket's
+        ``updatedAt``). Strongest, because it moves even when the rendered text
+        cannot: the pocket preamble shows the first 12 of N widgets and
+        truncates at 1500 chars, so editing widget 13 is invisible in the text
+        and visible in ``updatedAt``.
+      * a digest of what the handler actually rendered
+        (``_helpers.content_key``), for the handlers that read a LIST with no
+        single revision to point at. Weaker than a revision — it cannot see
+        past truncation — but it cannot claim stability it does not have, and
+        what it cannot see is by definition not in the prompt either.
+      * the surface kind plus the ``meta`` fields the handler read, for the
+        handlers that read nothing mutable at all. Their text is a pure
+        function of ``meta``, so this is exact rather than approximate.
+
+    ``None`` means volatile: the layer keeps its text and stays out of the
+    digest. Correct for a handler that genuinely cannot say what it depends on;
+    NOT a shortcut for one that has not thought about it, because a volatile
+    layer gives a caching backend nothing to notice a change with.
+    """
+
+    text: str
+    cache_key: str | None
+
+    def __post_init__(self) -> None:
+        if self.cache_key == "":
+            raise ValueError(
+                "cache_key must be a non-empty string or None; "
+                "None is how a handler declares its preamble volatile"
+            )
 
 
 @dataclass(frozen=True)
@@ -192,10 +278,22 @@ class SurfaceContext:
     construction time per the entity rules' tenancy-at-construction
     contract. Constructing one without tenancy info is a type error.
 
-    ``preamble`` is the rendered XML-ish block the chat router prepends
-    to the dynamic context (before scope/participants). Empty when the
-    handler failed or had nothing meaningful to say — the chat path keeps
-    going regardless.
+    ``preamble`` is the rendered XML-ish block. Since PA-2 it rides its own
+    prompt layer (``pocketpaw.prompt.surface``) rather than being prepended to
+    the dynamic context, so it sits above the per-turn material instead of
+    inside the "Your Knowledge Base" wrapper. Empty when the handler failed or
+    had nothing meaningful to say — the chat path keeps going regardless.
+
+    ``preamble_cache_key`` is the handler's answer to "what did I read"
+    (see :class:`SurfacePreamble`), threaded to the OSS prompt layer as a plain
+    ``str``. ``None`` covers both "no key claimed" and every fall-back path
+    below — an invalid body, an unregistered kind, a handler that raised. Those
+    all render an EMPTY preamble, so they contribute the same prompt as having
+    no surface at all and should hash alike; the assembler makes the same
+    argument for two different exceptions in one layer. It defaults to ``None``
+    so a legacy constructor keeps working, but ``resolve_surface_context``
+    always passes it explicitly — a produced preamble with a silently dropped
+    key is the failure this field exists to prevent.
     """
 
     workspace_id: str
@@ -203,6 +301,7 @@ class SurfaceContext:
     kind: SurfaceKind
     meta: SurfaceMeta
     preamble: str
+    preamble_cache_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -303,6 +402,7 @@ __all__ = [
     "SurfaceKind",
     "SurfaceMeta",
     "SurfaceContext",
+    "SurfacePreamble",
     "SurfaceProfile",
     "PocketSurfaceProfile",
 ]

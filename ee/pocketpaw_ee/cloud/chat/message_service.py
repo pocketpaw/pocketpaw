@@ -3,6 +3,17 @@
 Sole owner of writes to the ``Message`` Beanie document. Module-level
 ``async def`` API. The doc → domain mapping helpers (formerly in
 ``repositories.py``) live alongside the public API as private helpers.
+
+Updated 2026-07-31 (Paw Bar inbox, slice 0): a CONCIERGE turn now persists NO
+``Message`` at all. ``ContextType`` has no "concierge" value, so those turns
+used to fall through to the group branch and write
+``Message(context_type="group", group=<pocket_id>)`` — an orphan row no surface
+reads, keyed by a pocket id in a field that means "room id". Concierge
+transcripts derive from ``ChatRunDoc`` instead, so
+``persist_assistant_message_for_scope`` returns an unsaved doc for that kind and
+the caller keeps the id and timestamp it needs. Consequence for anything built
+later: a message-id-addressable feature (reactions, thumbs writeback) must key
+off the RUN doc for concierge, because that id has no row behind it.
 """
 
 from __future__ import annotations
@@ -1314,8 +1325,42 @@ async def persist_assistant_message_for_scope(
     content: str,
     attachments: list[dict] | None = None,
 ) -> _MessageDoc:
-    """Persist an agent's reply in an agent-stream context."""
+    """Persist an agent's reply in an agent-stream context.
+
+    A CONCIERGE reply is the one context with NO Message home — see the branch
+    below; it returns an unsaved doc rather than writing an orphan row.
+    """
     att_models = [_AttachmentDoc(**a) if isinstance(a, dict) else a for a in (attachments or [])]
+    if kind == "concierge":
+        # Forcing a Message home for a concierge turn was a defect. ContextType
+        # has no "concierge" value, so this fell through to the else branch and
+        # wrote Message(context_type="group", group=<pocket_id>, session_key
+        # unset): a row NO surface reads, keyed by a pocket id in a field that
+        # means "room id" (a collision risk the day those id spaces meet).
+        # Concierge transcripts derive from ChatRunDoc (the admin transcript
+        # reads + _load_concierge_history), never from Messages, and nothing
+        # dereferences ``assistant_message_id`` as a Message lookup — it only
+        # rides the run doc and the SSE tail.
+        #
+        # So persist NOTHING and hand back an in-memory doc, keeping the caller
+        # contract intact (``msg.id`` for mark_completed + the SSE tail,
+        # ``msg.createdAt`` for the broadcast). The id is a real unique
+        # ObjectId with no row behind it — deliberate, and the reason any future
+        # message-id-addressable feature (reactions, thumbs writeback) must key
+        # off the RUN doc for concierge rather than this id.
+        msg = _MessageDoc(
+            context_type="session",
+            session_key=session_key,
+            role="assistant",
+            sender=None,
+            sender_type="agent",
+            agent=target_agent_id,
+            content=content,
+            attachments=att_models,
+            workspace_id=workspace_id,
+        )
+        msg.id = PydanticObjectId()
+        return msg
     if kind in ("pocket", "session"):
         msg = _MessageDoc(
             context_type=kind,  # type: ignore[arg-type]

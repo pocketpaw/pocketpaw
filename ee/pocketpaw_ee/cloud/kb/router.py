@@ -1,4 +1,13 @@
 # router.py — Knowledge base domain router for ee/cloud.
+# Updated: 2026-08-04 — Ingest hardening: the two ingest routes
+# (POST /kb/ingest/text, POST /kb/ingest/url) now route through
+# ``KnowledgeService.ingest_text_to_scope`` instead of calling ``_kb`` directly.
+# They were the last ingest paths outside the hardened funnel — direct ``_kb``
+# calls got no agent-backend compile on keyless boxes and no verbatim-fallback
+# rejection, re-opening the silent-poisoning hole the funnel closed. Routing
+# through the service also moves the subprocess call off the event loop
+# (``asyncio.to_thread`` inside the service) — the direct calls blocked the
+# async handler for the whole kb run.
 # Updated: 2026-06-08 (VIP Onboarding Phase B) — bound the client ``scope``
 # override to the caller. The four override-accepting endpoints (search,
 # ingest/text, ingest/url, lint) now resolve ``body.scope`` through
@@ -22,7 +31,7 @@ import logging
 
 from fastapi import APIRouter, Depends
 
-from pocketpaw_ee.cloud.agents.knowledge import _extract_url, _kb
+from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService, _extract_url, _kb
 from pocketpaw_ee.cloud.kb import service as kb_service
 from pocketpaw_ee.cloud.kb.dto import (
     IngestTextRequest,
@@ -114,10 +123,16 @@ async def ingest_text(
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> dict:
-    """Ingest plain text into the workspace knowledge base."""
+    """Ingest plain text into the workspace knowledge base.
+
+    Routes through :meth:`KnowledgeService.ingest_text_to_scope` — the
+    hardened funnel (agent-backend compile on keyless boxes, verbatim-
+    fallback rejection, subprocess off the event loop). Never call ``_kb``
+    for ingest directly.
+    """
     scope = await _resolve_scope(workspace_id, user_id, body.scope, action="kb.write")
     try:
-        return _kb("ingest", "--scope", scope, "--source", body.source, input_text=body.text)
+        return await KnowledgeService.ingest_text_to_scope(scope, body.text, body.source)
     except Exception as exc:
         logger.error("KB text ingest failed: %s", exc, exc_info=True)
         raise CloudError(500, "kb.ingest_failed", str(exc)) from exc
@@ -129,11 +144,15 @@ async def ingest_url(
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> dict:
-    """Fetch and ingest a URL into the workspace knowledge base."""
+    """Fetch and ingest a URL into the workspace knowledge base.
+
+    Extraction stays here (trafilatura via ``_extract_url``); the ingest
+    itself goes through the hardened funnel like every other path.
+    """
     scope = await _resolve_scope(workspace_id, user_id, body.scope, action="kb.write")
     try:
         text = await _extract_url(body.url)
-        return _kb("ingest", "--scope", scope, "--source", body.url, input_text=text)
+        return await KnowledgeService.ingest_text_to_scope(scope, text, body.url)
     except Exception as exc:
         logger.error("KB URL ingest failed: %s", exc, exc_info=True)
         raise CloudError(500, "kb.ingest_failed", str(exc)) from exc

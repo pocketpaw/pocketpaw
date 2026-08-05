@@ -43,9 +43,11 @@ async def test_pocket_handler_summarizes_existing_pocket() -> None:
         CreatePocketRequest(name="Sales Pipeline"),
     )
 
-    preamble = await pocket_handler.build_preamble(
-        WORKSPACE, user_id, SurfaceMeta(pocket_id=pocket["_id"])
-    )
+    preamble = (
+        await pocket_handler.build_preamble(
+            WORKSPACE, user_id, SurfaceMeta(pocket_id=pocket["_id"])
+        )
+    ).text
 
     assert '<surface kind="pocket"' in preamble
     assert "Sales Pipeline" in preamble
@@ -64,9 +66,9 @@ async def test_pocket_handler_unknown_pocket_id_falls_back() -> None:
     # Mongo ObjectIds are 24-hex-chars; supply one that points at nothing.
     bad_id = "ffffffffffffffffffffffff"
 
-    preamble = await pocket_handler.build_preamble(
-        WORKSPACE, user_id, SurfaceMeta(pocket_id=bad_id)
-    )
+    preamble = (
+        await pocket_handler.build_preamble(WORKSPACE, user_id, SurfaceMeta(pocket_id=bad_id))
+    ).text
 
     # Surface tag still present — agent knows it's on a pocket route.
     assert '<surface kind="pocket"' in preamble

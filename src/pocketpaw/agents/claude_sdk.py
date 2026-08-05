@@ -1,5 +1,47 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — two things, and the
+  first is a docstring that had become false. ``_behavior_prefix`` said PA-7
+  would delete it once the channel path produced a digest of its own. The channel
+  path now does, and the function is NOT deletable: the pocket specialist calls
+  ``backend.run`` directly (bypassing the router that forwards the digest) and so
+  can any out-of-tree embedder, and both would key a warm client on a constant
+  without it. The correction is in the docstring itself rather than here, where a
+  reader of the function would not find it.
+  Second, ``_build_options``' Windows prompt spill is content-addressed:
+  ``~/.pocketpaw/runtime/prompts/system_prompt-<sha256>.md`` instead of one fixed
+  path. The fixed path was two bugs at once — two concurrent large-prompt runs on
+  one box overwrote each other's file (the pool holds an instance per agent, so
+  this is reachable on the desktop app), and ``_behavior_prefix`` returns
+  ``file:<path>`` for the dict form, which was CONSTANT, so every prompt over 24k
+  hashed identically and the warm client stopped rebuilding on prompt changes for
+  exactly the prompts big enough to spill. The hash in the name fixes both with no
+  I/O in the key function.
+Updated: 2026-08-03 (PA-6, feat/prompt-assembler-seam) — ``run`` / ``prewarm`` take
+  ``system_prompt_digest`` and the warm-client key prefers it over
+  ``_behavior_prefix``. The prefix INFERS which bytes are stable by cutting the
+  rendered text at known markers; the digest is what the prompt LAYERS said about
+  themselves. The prefix was inferring badly: it excises ``# Key Knowledge`` but
+  ``## Self-Understanding`` renders above that block, so the strip never reached
+  it and an ordinary turn respawned the subprocess. Measured over 8 turns on a
+  live soul, the prefix held 1 of 7 turn boundaries and the digest held 7 of 7.
+  The prefix STAYS as the no-digest fallback — see the PA-7b note above for who
+  still reaches it now that the channel path does not, and ``run`` splices a growing
+  ``# Recent Conversation`` block into ``options.system_prompt`` after assembly,
+  so a whole-prompt key would rebuild there every turn (measured 0 of 7). The two
+  slots are prefixed ``d:`` / ``t:`` so a client warmed under one rule can never
+  answer a turn asking the other.
+Updated: 2026-08-02 (PA-1 review, feat/prompt-assembler-seam) — ``_behavior_prefix``
+  matches its volatile markers at a BLOCK BOUNDARY instead of on the literal
+  ``"\\n\\n…"`` alone: a block that OPENS the prompt carries no separator, so the
+  old ``find`` missed it and the whole volatile block stayed in the warm-client
+  key — subprocess rebuilt every turn, prewarm evicted on turn 1. It only ever
+  worked because the legacy string assembly emitted that separator even with
+  nothing before it; the prompt assembler joins layers, and PA-3/PA-4/PA-8 give
+  these blocks their own layers, where the join means their text never carries a
+  leading blank line. The cut is still a cut: a marker mid-prompt without its
+  blank line is content, not a header, and a real persona/instructions change
+  still rebuilds.
 Updated: 2026-07-24 (CX-1, feat/code-agent-cx1) — ``_build_options`` / ``run`` /
   ``prewarm`` grow an ``exclusive_mcp_tools: bool = False`` keyword. When True, the
   MCP scoping block CAPS the tool surface to ``allow_mcp_tool_ids`` alone — no
@@ -299,6 +341,7 @@ Uses the official Claude Agent SDK (pip install claude-agent-sdk) which provides
 import asyncio
 import hashlib
 import logging
+import os
 import re
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -473,6 +516,161 @@ def _mcp_server_of(tool_id: str) -> str:
     """Extract ``<server>`` from an ``mcp__<server>__<tool>`` id (else "")."""
     parts = tool_id.split("__")
     return parts[1] if len(parts) >= 2 and parts[0] == "mcp" else ""
+
+
+# ── the Windows prompt spill ────────────────────────────────────────────────
+#
+# Windows caps a whole command line at ~32,767 chars (CreateProcess), and the SDK
+# passes a string ``system_prompt`` inline via ``--system-prompt``. A long
+# identity/KB prompt blows that limit and surfaces as a misleading
+# ``CLINotFoundError``, so since SDK 0.1.72 we hand it a
+# ``{"type": "file", "path": ...}`` dict instead and the CLI reads
+# ``--system-prompt-file``.
+#
+# THE FILENAME CARRIES A HASH OF THE CONTENT (PA-7b), where it used to be one
+# fixed path, ``~/.pocketpaw/runtime/system_prompt.md``. That single path was two
+# bugs wearing one coat:
+#
+# * A CROSS-RUN RACE. ``AgentPool`` holds one backend instance per agent, so two
+#   concurrent large-prompt runs on one box both wrote that file and whichever
+#   CLI subprocess started second read the other's prompt. Windows-only, so the
+#   cloud never saw it — but the desktop app runs a pool.
+# * A CACHE-KEY COLLAPSE. ``_behavior_prefix`` has no text to cut when the prompt
+#   arrives as a dict, so it returns ``file:<path>`` — which was CONSTANT. Every
+#   prompt over the threshold hashed identically, so the warm client stopped
+#   rebuilding on prompt changes for exactly the prompts big enough to spill:
+#   the staleness the behavioural-prefix key exists to prevent, restored at the
+#   top of the size range.
+#
+# Content-addressing fixes both at once and adds no I/O to ``_client_cache_key``,
+# which reads the path it is given and nothing else. What it costs: the name
+# hashes the WHOLE prompt, volatile tail included, so a no-digest caller on
+# Windows now rebuilds its warm client on every spilled turn instead of never.
+# That is the right side of the trade — never rebuilding meant serving the wrong
+# prompt — and it is close to free in practice, because the callers still without
+# a digest (the pocket specialist, out-of-tree embedders) build an isolated
+# backend per run and stop it in a ``finally``, so they have no warm client to
+# lose. Hashing the STABLE PREFIX instead would keep the key still, and would be
+# wrong: two prompts with the same prefix and different tails would share a
+# filename, and the CLI would read one of them for both.
+#
+# NOT SCOPED PER AGENT, deliberately. A hash of the content already separates two
+# tenants' prompts, because their prompts differ; two runs that land on one
+# filename have byte-identical content, so there is nothing one could learn from
+# the other. An agent/session directory would multiply the surface the pruner has
+# to walk without changing what any process can read (same OS user, same home).
+_WINDOWS_PROMPT_SPILL_CHARS = 24_000
+
+
+def _prompt_must_spill(prompt: str) -> bool:
+    """Is this prompt too long to pass inline on this platform?
+
+    A function rather than an inline ``os.name == "nt" and len(...)`` so a test
+    can force the Windows branch on Linux by patching THIS, and not ``os.name``.
+    Patching ``os.name`` looks equivalent and is not: ``pathlib`` decides at
+    IMPORT time whether ``WindowsPath.__new__`` is the real one or a stub that
+    raises, so a POSIX process with ``os.name`` forced to ``"nt"`` dispatches
+    every ``Path(...)`` to the raising stub. The spill test did exactly that and
+    only CI could see it — on Windows both spellings pass.
+    """
+    return os.name == "nt" and len(prompt) > _WINDOWS_PROMPT_SPILL_CHARS
+
+
+# How many spilled prompts survive a prune. They are 24k+ chars each and they
+# accumulate in the user's HOME, so an unbounded pile is not an acceptable price
+# for a cache key. 32 is chosen to be larger than any plausible count of live
+# concurrent sessions on one desktop (a file is only load-bearing between the
+# spill and the CLI's read at process start) while still bounding the directory
+# at a few MB.
+_SPILLED_PROMPT_KEEP = 32
+_SPILLED_PROMPT_STEM = "system_prompt-"
+
+
+def _spilled_prompt_path(prompt: str) -> Path:
+    """The content-addressed path a given prompt spills to.
+
+    32 hex chars (128 bits), wider than the 16 used by ``_client_cache_key`` and
+    ``_plugin_digest``, because a collision means something different here. A
+    collision in a CACHE key costs a wrong reuse of an in-memory object; a
+    collision in this name means the write is skipped and the CLI reads ANOTHER
+    prompt off disk. Cheap insurance for 16 characters of filename.
+    """
+    digest = hashlib.sha256(prompt.encode("utf-8", "replace")).hexdigest()[:32]
+    return Path.home() / ".pocketpaw" / "runtime" / "prompts" / f"{_SPILLED_PROMPT_STEM}{digest}.md"
+
+
+def _spill_prompt_to_file(prompt: str) -> Path:
+    """Write ``prompt`` to its content-addressed path and return it.
+
+    Skips the write when the file is already there: the name IS the content, so
+    an existing file has the bytes we were about to write. That also removes the
+    common concurrent case — two turns on the same prompt — from the race
+    entirely, rather than relying on the write being atomic.
+
+    For the uncommon case (two processes spilling the same NEW prompt at once)
+    the write goes to a pid-suffixed temp and is moved into place. On Windows the
+    move fails if the destination exists or is open; both mean somebody else
+    landed the identical bytes first, so the failure is swallowed and their file
+    is used.
+    """
+    path = _spilled_prompt_path(prompt)
+    if path.exists():
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(prompt, encoding="utf-8")
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:  # pragma: no cover - best effort
+            pass
+        return path
+    _prune_spilled_prompts(path.parent, protect=path)
+    return path
+
+
+def _prune_spilled_prompts(
+    directory: Path, keep: int = _SPILLED_PROMPT_KEEP, *, protect: Path | None = None
+) -> None:
+    """Keep the ``keep`` newest spilled prompts in ``directory``; drop the rest.
+
+    Runs only after a NEW file was created, which is the only moment the
+    directory grows.
+
+    ``protect`` is the file the caller is about to hand to the CLI, and it is
+    excluded from the candidates rather than trusted to sort first. Newest-by-
+    mtime would USUALLY put it at the head, but "usually" is not a property to
+    hang a turn on: filesystem timestamp resolution is coarse enough that a burst
+    of spills can tie, and a tie resolves to glob order. One slot of the budget is
+    reserved for it so the total stays at ``keep``.
+
+    Best-effort throughout: a prompt file that cannot be deleted (a live CLI
+    holding it open on Windows) is left for the next prune and never fails the
+    turn. The glob is deliberately wider than ``*.md`` so an orphaned ``.tmp``
+    from a process that died mid-write is bounded too.
+    """
+    try:
+        files = sorted(
+            (p for p in directory.glob(f"{_SPILLED_PROMPT_STEM}*") if p.is_file()),
+            key=lambda p: p.stat().st_mtime_ns,
+            reverse=True,
+        )
+    except OSError:  # pragma: no cover - unreadable dir
+        return
+    budget = keep - 1 if protect is not None else keep
+    survivors = 0
+    for candidate in files:
+        if candidate == protect:
+            continue
+        if survivors < budget:
+            survivors += 1
+            continue
+        try:
+            candidate.unlink()
+        except OSError:
+            logger.debug("could not prune spilled system prompt %s", candidate)
 
 
 class ClaudeSDKBackend(BaseAgentBackend):
@@ -1252,6 +1450,17 @@ class ClaudeSDKBackend(BaseAgentBackend):
     # every turn would needlessly tear down and rebuild the subprocess. The
     # behavioral prefix BEFORE these markers carries the home-pocket backend
     # summary, which is exactly the mutable state we want the key to track.
+    # Stored WITH the leading blank line, and matched at a block BOUNDARY: the
+    # separator is present when something precedes the block and absent when the
+    # block opens the prompt, and both are the same block. Matching the literal
+    # alone was correct only while the legacy string assembly appended the
+    # knowledge wrapper unconditionally — it always emitted the "\n\n" even with
+    # nothing before it. The prompt assembler (``pocketpaw.prompt``) joins layers
+    # instead, so a block that is FIRST starts at index 0 with no separator at
+    # all; a marker-blind ``find`` misses it and the whole volatile block lands
+    # in the key, rebuilding the warm subprocess every turn. That is not a
+    # transitional quirk: PA-3/PA-4/PA-8 give these blocks their own layers,
+    # where the join means their text NEVER carries a leading "\n\n".
     _VOLATILE_PROMPT_MARKERS = (
         "\n\n## Your Knowledge Base",
         "\n\n## Relevant Past Memories",
@@ -1351,6 +1560,66 @@ class ClaudeSDKBackend(BaseAgentBackend):
     def _behavior_prefix(cls, system_prompt: Any) -> str:
         """Return the stable behavioral prefix of ``system_prompt``.
 
+        AS OF PA-6 THIS IS THE FALLBACK, NOT THE MECHANISM. A caller that
+        assembles its prompt through :mod:`pocketpaw.prompt` passes
+        ``system_prompt_digest`` and this function is never consulted for its
+        key — the digest is a claim the LAYERS made about themselves, where this
+        is a guess made by pattern-matching two modules away. PA-6 was filed as
+        "delete it" and PA-7 was expected to finish the job when the channel path
+        gained a digest.
+
+        IT IS NOT DELETABLE, and PA-7b is where that gets said in the right
+        place. The channel path DOES have a digest now (``AgentLoop`` forwards
+        ``AgentContextBuilder``'s through ``AgentRouter``), which was the whole
+        premise of the deletion — and two callers reach ``run`` without one
+        anyway, so this function still keys real traffic:
+
+        * the pocket specialist, which builds an isolated backend via
+          ``AgentRouter.create_isolated_backend`` and calls ``backend.run(
+          user_message, system_prompt=...)`` DIRECTLY, bypassing the router that
+          does the forwarding (``ee/pocketpaw_ee/agent/pocket_specialist/
+          runtime.py``, the create path and the edit path). Its prompt is built
+          by its own ``_build_system_prompt``, not by the assembler, so there is
+          no digest to forward even in principle;
+        * any out-of-tree embedder holding a backend and calling ``run`` itself,
+          which is a supported thing to do — ``system_prompt`` is a public
+          parameter of the ``AgentBackend`` protocol.
+
+        Deleting this would hand both of them a constant key: every prompt would
+        look identical to the warm client and a changed persona would be served
+        the previous one. That is #1842, restored for the callers least able to
+        notice.
+
+        Measured 2026-08-03 over 8 turns of a realistic channel prompt: keying on
+        the whole prompt instead held 0/7 boundaries, because ``run`` itself
+        splices a GROWING ``# Recent Conversation`` block into
+        ``options.system_prompt`` (see the history injection in
+        ``_build_options``) — so the warm subprocess would be torn down and
+        respawned every turn. With this prefix it held 7/7. So PA-7b claims no
+        cache-rate win on the channel path — 7/7 was already the baseline that
+        measurement recorded, and what the prefix genuinely cannot do is see a
+        REAL behaviour change sitting below the marker it cuts at.
+
+        ONE CAVEAT ON THAT 7/7, found while threading PA-7b and worth stating
+        where it will be read. ``_VOLATILE_PROMPT_MARKERS`` are the CLOUD path's
+        block headers. The channel path emits ``# Memory Context (already
+        loaded…)`` and ``# Knowledge Base (relevant articles…)``, and NEITHER is
+        in the tuple — so the per-message recall stays inside the prefix, and a
+        two-turn probe (``tests/test_channel_prompt_digest.py::
+        test_a_changed_recall_moves_the_prefix_and_not_the_digest``) shows the
+        prefix moving when only that recall changes, while the digest holds. The
+        7/7 is presumably a run whose recall did not vary between turns. That is
+        a mechanism, not a rate: nobody has measured how often a real channel
+        turn changes its recall, and this note is not a licence to assume.
+
+        What it is worse at than the digest, measured on the cloud path over the
+        same 8 turns: it retains ``## Self-Understanding``, which
+        ``to_system_prompt()`` renders ABOVE the ``# Key Knowledge`` block this
+        excises, so the strip never reaches it. It moved on 6 of 7 boundaries,
+        and the warm client rebuilt with it — 1/7 held, against 7/7 for the
+        digest. The prefix was never the high baseline PA-6's success metric
+        assumed.
+
         Two independent volatile strips run here so two turns that differ only
         in per-turn soul/retrieval state hash to the same value:
 
@@ -1359,13 +1628,25 @@ class ClaudeSDKBackend(BaseAgentBackend):
            recalled memories increment every turn but carry no behavioral
            instructions.
         2. The volatile per-turn TAIL (KB block, soul-memory recall, injected
-           history) is cut at the earliest ``_VOLATILE_PROMPT_MARKERS`` marker.
+           history) is cut at the earliest ``_VOLATILE_PROMPT_MARKERS`` marker,
+           matched at a block boundary — after the separator, or at index 0 when
+           the block opens the prompt and there is no separator to find.
 
         A REAL behavioral change (different persona/identity, override, or
         ``instructions``) still lands in the retained text, so it changes the
-        digest and forces a warm-client rebuild. On Windows the SDK may pass
-        ``system_prompt`` as a ``{type: "file", path: ...}`` dict — there is no
-        inline text to key on, so fall back to the path (stable per connect).
+        digest and forces a warm-client rebuild. The boundary rule keeps that
+        true: a marker mid-prompt without its blank line is content, not a
+        section header, and is left alone.
+
+        On Windows the SDK may pass ``system_prompt`` as a
+        ``{type: "file", path: ...}`` dict — there is no inline text to key on,
+        so fall back to the path. That path is CONTENT-ADDRESSED as of PA-7b
+        (``_spill_prompt_to_file``), which is what makes the fallback a real key:
+        it used to be one fixed filename, so every spilled prompt hashed alike
+        and the warm client never rebuilt for them. It keys on the whole prompt
+        rather than on the stable prefix — no cut is possible without reading the
+        file, and a key function that does disk I/O per turn is not a trade worth
+        making. See the module-level block above ``_spill_prompt_to_file``.
         """
         if isinstance(system_prompt, dict):
             return f"file:{system_prompt.get('path', '')}"
@@ -1374,6 +1655,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
         system_prompt = cls._strip_soul_knowledge_block(system_prompt)
         cut = len(system_prompt)
         for marker in cls._VOLATILE_PROMPT_MARKERS:
+            # The block opens the prompt: nothing precedes it, so the separator
+            # the marker carries was never emitted. Everything is volatile.
+            if system_prompt.startswith(marker.lstrip("\n")):
+                return ""
             idx = system_prompt.find(marker)
             if idx != -1:
                 cut = min(cut, idx)
@@ -1451,10 +1736,35 @@ class ClaudeSDKBackend(BaseAgentBackend):
         session_key: str | None = None,
         plugin_digest: str = "",
         tenant_scope: str = "",
+        system_prompt_digest: str = "",
     ) -> str:
-        """Persistent-client cache key: session + cwd + model + tools + a digest
-        of the system prompt's stable behavioral prefix + the plugin-identity
-        digest.
+        """Persistent-client cache key: session + cwd + model + tools + the
+        prompt's identity + the plugin-identity digest.
+
+        THE PROMPT SLOT HAS TWO SOURCES AND THEY ARE DIFFERENT CLAIMS (PA-6).
+        ``d:`` is the assembler's ``stable_digest`` — a hash over the prompt
+        LAYERS that declared themselves cacheable. ``t:`` is a hash of
+        ``_behavior_prefix``, which infers the same thing by cutting the rendered
+        text at known markers. They are prefixed rather than sharing a namespace
+        because a caller that gains a digest mid-deploy must rebuild once rather
+        than silently match a key minted under the other rule.
+
+        The digest WINS where it exists, and it is strictly better there. It sees
+        the drift the prefix cannot: ``## Self-Understanding`` renders above the
+        ``# Key Knowledge`` block the prefix excises, so the prefix keeps it and
+        rebuilt the warm subprocess on 6 of 7 measured turn boundaries. Over the
+        same 8 turns the digest held one value. It is also honest about what it
+        does NOT cover — the ``# Recent Conversation`` block this backend splices
+        into ``options.system_prompt`` after assembly is per-turn volatile and is
+        outside both, which is the intended answer in both cases.
+
+        ``t:`` is not a transitional wart to be deleted on sight, and PA-7b did
+        NOT retire it. The channel path gained a digest there, but the pocket
+        specialist calls ``backend.run`` directly (bypassing the router that
+        forwards it) and so does any out-of-tree embedder; both would key on a
+        constant without this branch. See ``_behavior_prefix`` for the full
+        argument and for the measurement — on a channel-shaped prompt, keying on
+        the whole prompt held 0 of 7 boundaries against the prefix's 7 of 7.
 
         The prefix digest is what makes a mid-session backend config change
         (configured:false -> configured:true, baked into the static home
@@ -1479,20 +1789,28 @@ class ClaudeSDKBackend(BaseAgentBackend):
         set at connect() time, so a changed scope must also force a fresh
         subprocess rather than reusing one warmed for another tenant.
         """
-        prefix = cls._behavior_prefix(getattr(options, "system_prompt", None))
-        prefix_digest = hashlib.sha256(prefix.encode("utf-8", "replace")).hexdigest()[:16]
+        if system_prompt_digest:
+            prompt_key = f"d:{system_prompt_digest}"
+        else:
+            prefix = cls._behavior_prefix(getattr(options, "system_prompt", None))
+            prompt_key = "t:" + hashlib.sha256(prefix.encode("utf-8", "replace")).hexdigest()[:16]
         return (
             f"{session_key or ''}:"
             f"{getattr(options, 'cwd', '')}:"
             f"{getattr(options, 'model', '')}:"
             f"{sorted(getattr(options, 'allowed_tools', []) or [])}:"
-            f"{prefix_digest}:"
+            f"{prompt_key}:"
             f"{plugin_digest}:"
             f"{tenant_scope}"
         )
 
     async def _get_or_create_client(
-        self, options: Any, *, session_key: str | None = None, plugin_digest: str = ""
+        self,
+        options: Any,
+        *,
+        session_key: str | None = None,
+        plugin_digest: str = "",
+        system_prompt_digest: str = "",
     ) -> Any:
         """Get or create a persistent ClaudeSDKClient.
 
@@ -1527,6 +1845,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             session_key=session_key,
             plugin_digest=plugin_digest,
             tenant_scope=self._tenant_scope_key(),
+            system_prompt_digest=system_prompt_digest,
         )
 
         async with self._client_lock:
@@ -1680,8 +1999,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
         ``stderr`` callback appends to (so ``run`` keeps capturing CLI stderr for
         diagnostics; ``prewarm`` passes a throwaway list).
         """
-        import os
-
         run_skills_root: Path | None = None
         skills_dir_adopted = False
         plugin_digest = ""
@@ -1945,18 +2262,13 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
         # Build options
         #
-        # Windows note: CreateProcess caps the entire command line at
-        # ~32,767 chars. The SDK passes string ``system_prompt`` inline
-        # via ``--system-prompt``; long KB/identity blobs blow that limit
-        # and surface as a misleading ``CLINotFoundError``. Since SDK
-        # 0.1.72 we can pass a ``SystemPromptFile`` dict instead, which
-        # the CLI reads via ``--system-prompt-file <path>``.
+        # Windows note: an oversized prompt is spilled to a file and passed as a
+        # ``SystemPromptFile`` dict. The path is content-addressed and pruned —
+        # see ``_spill_prompt_to_file`` and the block above it for why one fixed
+        # path was both a cross-run race and a cache-key collapse.
         system_prompt_arg: Any = final_prompt
-        if os.name == "nt" and len(final_prompt) > 24_000:
-            runtime_dir = Path.home() / ".pocketpaw" / "runtime"
-            runtime_dir.mkdir(parents=True, exist_ok=True)
-            prompt_path = runtime_dir / "system_prompt.md"
-            prompt_path.write_text(final_prompt, encoding="utf-8")
+        if _prompt_must_spill(final_prompt):
+            prompt_path = _spill_prompt_to_file(final_prompt)
             system_prompt_arg = {"type": "file", "path": str(prompt_path)}
             logger.info(
                 "System prompt %d chars exceeds Windows CLI safe limit; "
@@ -2243,6 +2555,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         allow_mcp_tool_ids: frozenset[str] | None = None,
         skill_names: frozenset[str] = frozenset(),
         exclusive_mcp_tools: bool = False,
+        system_prompt_digest: str = "",
     ) -> None:
         """Eagerly ``connect()`` the warm CLI subprocess for a session before its
         first turn, so the first real ``run`` reuses it instead of paying the
@@ -2254,6 +2567,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
         client already live. If the keys diverged the first turn would EVICT the
         prewarmed client (a net loss), which is why the caller must prewarm with
         the same model/tools/prefix/skills the first turn will use.
+
+        ``system_prompt_digest`` (PA-6) joins that list, and it is the reason the
+        prewarm still matches after the cutover. ``AgentPool.prewarm`` assembles
+        with ``message=""`` and ``knowledge_context=""``, which changes the
+        rendered TEXT — the old prefix survived that only because those two
+        blocks sit below its cut. The digest survives it for a stronger reason:
+        ``legacy_tail`` and ``retrieval`` are the layers those two fields feed and
+        both declare ``cache_key=None``, so neither can reach the digest at all.
 
         FIRE-AND-FORGET, never-break-a-turn semantics:
           * ALL exceptions are logged and SWALLOWED — a failed prewarm must never
@@ -2303,6 +2624,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 built.options,
                 session_key=session_key,
                 plugin_digest=built.plugin_digest,
+                system_prompt_digest=system_prompt_digest,
             )
             logger.info(
                 "Prewarmed Claude client for session_key=%s (skills=%d)",
@@ -2483,10 +2805,22 @@ class ClaudeSDKBackend(BaseAgentBackend):
         on_client_built: Callable[[Any, str, Callable], None] | None = None,
         model_override: str | None = None,
         exclusive_mcp_tools: bool = False,
+        system_prompt_digest: str = "",
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
         Yields AgentEvent objects as the agent responds.
+
+        ``system_prompt_digest`` (PA-6) is the assembler's ``stable_digest``, and
+        it replaces ``_behavior_prefix`` in the warm-client cache key for every
+        caller that has one. Declared rather than swallowed by ``**kwargs``:
+        ``AgentPool._accepts_prompt_digest`` reads this signature to decide
+        whether to pass it, and a backend that accepted it silently would look
+        ported while keying on nothing. Empty = a caller outside the assembler,
+        which keeps the prefix. As of PA-7b that is no longer the channel path
+        (``AgentLoop`` forwards a digest through ``AgentRouter``); it is the
+        pocket specialist calling ``backend.run`` directly and any out-of-tree
+        embedder doing the same. See ``_client_cache_key``.
 
         ``session_handle`` (feat/session-supervisor SS-1) carries native-resume
         identity. When it holds a non-None ``cli_session_id``, the SDK options
@@ -2571,8 +2905,6 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 ),
             )
             return
-
-        import os
 
         self._stop_flag = False
 
@@ -2700,6 +3032,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     session_key=session_key,
                     plugin_digest=plugin_digest,
                     tenant_scope=self._tenant_scope_key(),
+                    system_prompt_digest=system_prompt_digest,
                 )
                 event_stream, _warm_lease = await self._leased_dispatch(
                     message=message,
@@ -2723,7 +3056,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     self._client_in_use = True
                     acquired_lease = True
                     _persistent_client = await self._get_or_create_client(
-                        options, session_key=session_key, plugin_digest=plugin_digest
+                        options,
+                        session_key=session_key,
+                        plugin_digest=plugin_digest,
+                        system_prompt_digest=system_prompt_digest,
                     )
                     logger.info("Persistent client: sending query (%d chars)", len(message))
                     await _persistent_client.query(message)

@@ -1,0 +1,239 @@
+[
+  {
+    "label": "renderer: drop the id from the row",
+    "file": "src/pocketpaw/prompt/entity.py",
+    "find": "    parts = [f\"id={ident}\"]",
+    "replace": "    parts = []",
+    "tests": [
+      "tests/test_prompt_entity_line.py"
+    ]
+  },
+  {
+    "label": "renderer: entity_id gets a default",
+    "file": "src/pocketpaw/prompt/entity.py",
+    "find": "def entity_line(label: Any, entity_id: Any, /, **facts: Any) -> str:",
+    "replace": "def entity_line(label: Any, entity_id: Any = None, /, **facts: Any) -> str:",
+    "tests": [
+      "tests/test_prompt_entity_line.py"
+    ]
+  },
+  {
+    "label": "renderer: drop the positional-only marker",
+    "file": "src/pocketpaw/prompt/entity.py",
+    "find": "def entity_line(label: Any, entity_id: Any, /, **facts: Any) -> str:",
+    "replace": "def entity_line(label: Any, entity_id: Any, **facts: Any) -> str:",
+    "tests": [
+      "tests/test_prompt_entity_line.py"
+    ]
+  },
+  {
+    "label": "renderer: show the HEAD of the id instead of the tail",
+    "file": "src/pocketpaw/prompt/entity.py",
+    "find": "    return f\"{ID_TAIL_MARKER}{text[-ID_TAIL_CHARS:]}\"",
+    "replace": "    return f\"{ID_TAIL_MARKER}{text[:ID_TAIL_CHARS]}\"",
+    "tests": [
+      "tests/test_prompt_entity_line.py",
+      "tests/cloud/pockets/test_id_resolve.py"
+    ]
+  },
+  {
+    "label": "renderer: shorten ids that are already short",
+    "file": "src/pocketpaw/prompt/entity.py",
+    "find": "    if len(text) <= ID_TAIL_CHARS:\n        return text",
+    "replace": "    if False:\n        return text",
+    "tests": [
+      "tests/test_prompt_entity_line.py"
+    ]
+  },
+  {
+    "label": "renderer: stop collapsing newlines",
+    "file": "src/pocketpaw/prompt/entity.py",
+    "find": "    return \" \".join(str(value).split())",
+    "replace": "    return str(value)",
+    "tests": [
+      "tests/test_prompt_entity_line.py"
+    ]
+  },
+  {
+    "label": "renderer: unaddressed_line leaks the kind into the prompt",
+    "file": "src/pocketpaw/prompt/entity.py",
+    "find": "    name = _clean(label) or \"(unnamed)\"\n    rendered = [f\"{key}={_clean(value) or MISSING_ID}\" for key, value in facts.items()]",
+    "replace": "    name = f\"{kind}: \" + (_clean(label) or \"(unnamed)\")\n    rendered = [f\"{key}={_clean(value) or MISSING_ID}\" for key, value in facts.items()]",
+    "tests": [
+      "tests/test_prompt_entity_line.py"
+    ]
+  },
+  {
+    "label": "renderer: unaddressed_line emits empty parens with no facts",
+    "file": "src/pocketpaw/prompt/entity.py",
+    "find": "    if not rendered:\n        return f\"- {name}\"",
+    "replace": "    if False:\n        return f\"- {name}\"",
+    "tests": [
+      "tests/test_prompt_entity_line.py"
+    ]
+  },
+  {
+    "label": "resolver: pick the first match instead of raising on ambiguity",
+    "file": "ee/pocketpaw_ee/cloud/pockets/id_resolve.py",
+    "find": "    if len(matches) > 1:\n        raise AmbiguousId(given, matches)",
+    "replace": "    if len(matches) > 1:\n        return matches[0]",
+    "tests": [
+      "tests/cloud/pockets/test_id_resolve.py"
+    ]
+  },
+  {
+    "label": "resolver: drop the empty-id guard",
+    "file": "ee/pocketpaw_ee/cloud/pockets/id_resolve.py",
+    "find": "    if not given:\n        raise KeyError(\"no id given\")",
+    "replace": "    if False:\n        raise KeyError(\"no id given\")",
+    "tests": [
+      "tests/cloud/pockets/test_id_resolve.py"
+    ]
+  },
+  {
+    "label": "resolver: match anything by suffix, however long",
+    "file": "ee/pocketpaw_ee/cloud/pockets/id_resolve.py",
+    "find": "    if len(given) > ID_TAIL_CHARS:\n        raise KeyError(given)",
+    "replace": "    if False:\n        raise KeyError(given)",
+    "tests": [
+      "tests/cloud/pockets/test_id_resolve.py"
+    ]
+  },
+  {
+    "label": "resolver: drop the exact-match fast path",
+    "file": "ee/pocketpaw_ee/cloud/pockets/id_resolve.py",
+    "find": "    if given in ids:\n        return given",
+    "replace": "    if False:\n        return given",
+    "tests": [
+      "tests/cloud/pockets/test_id_resolve.py"
+    ]
+  },
+  {
+    "label": "resolver: stop stripping the tail marker the agent echoes back",
+    "file": "ee/pocketpaw_ee/cloud/pockets/id_resolve.py",
+    "find": "    for prefix in _STRIPPABLE_PREFIXES:",
+    "replace": "    for prefix in ():",
+    "tests": [
+      "tests/cloud/pockets/test_id_resolve.py"
+    ]
+  },
+  {
+    "label": "resolver: ignore the _id wire spelling",
+    "file": "ee/pocketpaw_ee/cloud/pockets/id_resolve.py",
+    "find": "        value = candidate.get(key) or candidate.get(\"_id\") or candidate.get(\"id\")",
+    "replace": "        value = candidate.get(key)",
+    "tests": [
+      "tests/cloud/pockets/test_id_resolve.py"
+    ]
+  },
+  {
+    "label": "handler: pockets_list reads 'id' instead of the wire dict's '_id'",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/pockets_list.py",
+    "find": "                    p.get(\"_id\"),",
+    "replace": "                    p.get(\"id\"),",
+    "tests": [
+      "tests/cloud/surface/test_handler_row_injectivity.py",
+      "tests/cloud/surface/test_entity_id_contract.py",
+      "tests/test_prompt_entity_line.py"
+    ]
+  },
+  {
+    "label": "handler: format_widget_line reads a field that does not exist",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/_helpers.py",
+    "find": "    return entity_line(name, getattr(widget, \"id\", None), state=marker)",
+    "replace": "    return entity_line(name, getattr(widget, \"widget_id\", None), state=marker)",
+    "tests": [
+      "tests/cloud/surface/test_handler_row_injectivity.py"
+    ]
+  },
+  {
+    "label": "handler: pockets_list hand-rolls its row again",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/pockets_list.py",
+    "find": "            rows.append(\n                entity_line(",
+    "replace": "            rows.append(f\"- {p.get('name')} (type={p.get('type')})\")\n            _unused = (\n                entity_line(",
+    "tests": [
+      "tests/cloud/surface/test_entity_id_contract.py"
+    ]
+  },
+  {
+    "label": "contract: files.py claims an addressable kind is unaddressed",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/files.py",
+    "find": "                    \"file\",",
+    "replace": "                    \"pocket\",",
+    "tests": [
+      "tests/cloud/surface/test_entity_id_contract.py"
+    ]
+  },
+  {
+    "label": "contract: a computed kind dodges the unaddressed check",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/knowledge.py",
+    "find": "        rows = [unaddressed_line(\"kb_scope\", s) for s in scopes[:10]]",
+    "replace": "        _k = \"kb_scope\"\n        rows = [unaddressed_line(_k, s) for s in scopes[:10]]",
+    "tests": [
+      "tests/cloud/surface/test_entity_id_contract.py"
+    ]
+  },
+  {
+    "label": "contract: update_widget stops requiring a widget_id",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/pockets.py",
+    "find": "\"required\": [\"pocket_id\", \"widget_id\", \"fields\"]",
+    "replace": "\"required\": [\"pocket_id\", \"fields\"]",
+    "tests": [
+      "tests/cloud/surface/test_entity_id_contract.py"
+    ]
+  },
+  {
+    "label": "caps: the fixture widget loses its realistic id again",
+    "file": "tests/cloud/surface/test_preamble_caps.py",
+    "find": "        self.id = str(ObjectId())",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/surface/test_preamble_caps.py"
+    ]
+  },
+  {
+    "label": "wiring: agent_update_widget stops resolving short widget ids",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        widget_id = resolve_id(widget_id, list(doc.widgets))",
+    "replace": "        widget_id = widget_id",
+    "tests": [
+      "tests/cloud/pockets/test_short_id_tool_wiring.py"
+    ]
+  },
+  {
+    "label": "wiring: _agent_load_doc stops resolving short pocket ids",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if not _is_whole_object_id(pocket_id):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/pockets/test_short_id_tool_wiring.py"
+    ]
+  },
+  {
+    "label": "wiring: every id takes the resolve path, including whole ones",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    return len(value) == 24 and all(c in \"0123456789abcdefABCDEF\" for c in value)",
+    "replace": "    return False",
+    "tests": [
+      "tests/cloud/pockets/test_short_id_tool_wiring.py"
+    ]
+  },
+  {
+    "label": "wiring: the tail resolve drops its workspace filter (tenancy)",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "find({\"workspace\": workspace_id}, {\"_id\": 1})",
+    "replace": "find({}, {\"_id\": 1})",
+    "tests": [
+      "tests/cloud/pockets/test_short_id_tool_wiring.py"
+    ]
+  },
+  {
+    "label": "wiring: the beanie 1.x collection API comes back",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "_PocketDoc.get_pymongo_collection().find(",
+    "replace": "_PocketDoc.get_motor_collection().find(",
+    "tests": [
+      "tests/cloud/pockets/test_short_id_tool_wiring.py"
+    ]
+  }
+]

@@ -1,4 +1,12 @@
-"""Sessions domain — FastAPI router."""
+"""Sessions domain — FastAPI router.
+
+Updated 2026-08-01: the three ``runtime`` / ``touch`` routes below now resolve
+identity through the same dependencies as every other route in this router, and
+their reads and writes are scoped to that identity. They were the last routes
+here relying on an in-handler decision instead. The invariants are pinned in
+``tests/cloud/sessions/test_runtime_route_auth.py``; the standing per-route
+audit lives in ``tests/cloud/auth/test_route_auth_audit.py``.
+"""
 
 from __future__ import annotations
 
@@ -135,12 +143,23 @@ async def list_pocket_creation_sessions(
     return await _mode_page("pocket_creation", cursor, limit, workspace_id, user_id)
 
 
-@router.get("/runtime")
-async def list_runtime_sessions(limit: int = 50) -> dict:
-    """List sessions from the active memory store's session index.
+@router.get("/runtime", dependencies=[Depends(require_action_any_workspace("session.read_own"))])
+async def list_runtime_sessions(
+    limit: int = 50,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """List the CALLER's sessions from the active memory store's index.
 
     Dispatches on the store: MongoMemoryStore exposes an async variant,
     FileMemoryStore a sync one. Stores without either return empty.
+
+    Guard and scope both added 2026-08-01, and both are load-bearing:
+    authenticating the caller without also scoping the store query would still
+    answer with rows that are not theirs. The guard mirrors the sibling listing
+    routes above so every listing in this router answers "the caller's own
+    sessions" the same way, and the store query carries the matching workspace
+    and owner filter.
     """
     from pocketpaw.memory import get_memory_manager
 
@@ -148,8 +167,12 @@ async def list_runtime_sessions(limit: int = 50) -> dict:
     store = manager._store
 
     if hasattr(store, "_load_session_index_async"):
-        index = await store._load_session_index_async()
+        index = await store._load_session_index_async(workspace_id=workspace_id, owner_id=user_id)
     elif hasattr(store, "_load_session_index"):
+        # The file store is single-tenant by construction — it is the OSS /
+        # dedicated-install backend, and a cloud deployment cannot reach this
+        # branch (``verify_cloud_memory_backend`` refuses to boot on anything
+        # but MongoMemoryStore). So there is no tenant to scope to here.
         index = store._load_session_index()
     else:
         return {"sessions": [], "total": 0}
@@ -166,8 +189,19 @@ async def list_runtime_sessions(limit: int = 50) -> dict:
 
 
 @router.post("/runtime/create")
-async def create_runtime_session() -> dict:
-    """Create a new runtime session (no MongoDB — just a session key)."""
+async def create_runtime_session(
+    user_id: str = Depends(current_user_id),  # noqa: ARG001 — identity gate, not input
+) -> dict:
+    """Create a new runtime session (no MongoDB — just a session key).
+
+    The dependency is unused by the body on purpose: this handler mints a
+    random key and touches nothing, so there is nothing here to scope. It
+    requires a session anyway, because "needs no session but is currently
+    harmless" stops holding the moment somebody makes this handler persist
+    something, and that change would not look like a security change to
+    whoever writes it. Only ``current_user_id`` — no workspace is needed to
+    generate a string.
+    """
     import uuid
 
     safe_key = f"websocket_{uuid.uuid4().hex[:12]}"
@@ -224,6 +258,17 @@ async def get_session_history(
 
 
 @router.post("/{session_id}/touch", status_code=204)
-async def touch_session(session_id: str) -> Response:
-    await sessions_service.touch(session_id)
+async def touch_session(
+    session_id: str,
+    user_id: str = Depends(current_user_id),
+) -> Response:
+    """Bump a session's activity — the caller's own sessions only.
+
+    Both the dependency and the ``user_id`` argument are new (2026-08-01).
+    Ownership is the requirement here, not merely a session: this writes
+    ``lastActivity`` / ``messageCount`` and emits a ``SessionUpdated`` onto the
+    OWNER's realtime feed, so a caller who cannot read the session must not be
+    able to move it either.
+    """
+    await sessions_service.touch(session_id, user_id)
     return Response(status_code=204)

@@ -1,6 +1,27 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-08-02 (PA-2, feat/prompt-assembler-seam) — ``_drive_agent_loop`` and
+  ``_prewarm_session`` thread the resolved surface into ``pool.run`` /
+  ``pool.prewarm`` as ``surface_preamble`` + ``surface_cache_key``. The
+  preamble no longer reaches the prompt through ``knowledge_context`` (see
+  ``agent_service.build_dynamic_context``): it is a prompt LAYER now, so it
+  sits above the per-turn material and its key reaches the assembled prompt's
+  digest — which is what lets a backend caching an agent object notice that the
+  user navigated to a different pocket, or edited the one they were on. Both
+  halves cross the EE→OSS boundary as plain data, the shape
+  ``deny_mcp_tool_ids`` already uses. Unlike the other per-run kwargs these are
+  NOT withhold-when-empty: they never reach a backend, they feed the assembler,
+  and ``""`` / ``None`` is itself the meaningful "no surface" answer.
+- 2026-07-15 (fix/paw-bar-concierge-soul-policy) — ``_persist_and_complete``
+  now gates the ``pool.observe`` soul-learning call: a Paw Bar concierge run
+  (session_key prefix ``cloud:concierge:``) SKIPS it so anonymous, untrusted
+  website-visitor input can no longer feed the per-agent soul (a memory-
+  poisoning channel). Normal runs still observe unchanged. New helper
+  ``_is_concierge_run`` + constant ``_CONCIERGE_SESSION_PREFIX``; the prefix is
+  the pickle-safe signal that reaches the executor and also covers a typed
+  ``ScopeKind.CONCIERGE`` scope once it lands (session_key derives from
+  ``ctx.kind.value``). A future quarantine-via-Instinct path can supersede this.
 - 2026-07-11 (ART-1) — ``execute_run`` binds a per-run delivered-artifact
   collector (``collect_delivered_artifacts``) around the run and, at persist
   time, drains it into one ``{type:"artifact", meta}`` attachment on the
@@ -253,6 +274,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     ScopeKind,
     attach_agent_identity,
     attach_sse_event_sink,
+    bind_pawbar_run,
     build_behavior_instructions,
     build_knowledge_context,
     collect_delivered_artifacts,
@@ -261,6 +283,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     mark_cloud_chat_run,
     push_sse_event,
     session_key_for,
+    unbind_pawbar_run,
 )
 from pocketpaw_ee.cloud.chat.agent_service import (
     resolve_scope_context as resolve_scope_context,
@@ -437,6 +460,34 @@ async def _resolve_entity_profile(ctx: ScopeContext) -> SurfaceProfile:
         return base
     override = await _load_entity_profile_override(ctx.workspace_id, pocket_id)
     return compose_entity_profile(base, override)
+
+
+def _pawbar_run_from_ctx(ctx: ScopeContext) -> dict[str, Any] | None:
+    """Build the per-stream Paw Bar tool context for a CONCIERGE run, or None.
+
+    A concierge run whose widget declares actions carries them on
+    ``surface_context.meta.pawbar_actions`` (threaded there by ``concierge_chat``).
+    Return ``{"widget_id", "actions", "handoff"}`` so the ``pawbar_actions`` MCP
+    server can build one tool per verb, plus the built-in escape hatch, and its
+    handlers can resolve the widget.
+
+    ``handoff`` (owner inbox, slice 3) is True for ANY concierge run bound to a
+    widget, declared actions or not: a visitor's request to talk to a person is
+    always honored, and a site that sells nothing needs that at least as much as
+    one that does. It is the reason this returns a context where it used to
+    return None. Every non-concierge run still returns ``None`` — the server
+    builds NO tools, so their tool surface is unchanged."""
+    sc = ctx.surface_context
+    if sc is None:
+        return None
+    actions = list(getattr(sc.meta, "pawbar_actions", None) or [])
+    widget_id = getattr(sc.meta, "widget_id", "") or ""
+    # The escape hatch needs a widget to escalate against; the concierge kind is
+    # what makes this a public visitor conversation rather than an owner's chat.
+    handoff = bool(widget_id) and sc.kind is SurfaceKind.CONCIERGE
+    if not actions and not handoff:
+        return None
+    return {"widget_id": widget_id, "actions": actions, "handoff": handoff}
 
 
 async def _persist_assistant_message(
@@ -647,7 +698,20 @@ _TITLE_PLACEHOLDER_LIMIT = 60
 
 
 def _truncate_for_title(message: str) -> str:
-    raw = (message or "").strip().replace("\n", " ").replace("\r", " ")
+    """One-line excerpt of the user's message, used as the placeholder title.
+
+    Strips any client context preamble first (2026-07-22). This placeholder is
+    written to Mongo and pushed over SSE *before* Haiku runs, so it is what the
+    user actually sees in the sidebar — titling the raw wire content named every
+    home-started chat "[Home page snapshot] Time of day: afternoon…". Shares the
+    strip helper with the Haiku path so both agree where the user's words start.
+    """
+    from pocketpaw.memory.titler import (  # type: ignore[import-untyped]
+        strip_context_preamble,
+    )
+
+    cleaned = strip_context_preamble(message or "")
+    raw = cleaned.strip().replace("\n", " ").replace("\r", " ")
     one_line = " ".join(raw.split())
     if len(one_line) > _TITLE_PLACEHOLDER_LIMIT:
         return one_line[:_TITLE_PLACEHOLDER_LIMIT].rstrip() + "…"
@@ -674,10 +738,13 @@ async def _generate_session_title(ctx: ScopeContext, first_message: str) -> None
             )
 
     try:
-        from pocketpaw.config import Settings  # type: ignore[import-untyped]
+        from pocketpaw.config import get_settings  # type: ignore[import-untyped]
         from pocketpaw.memory.titler import generate_title  # type: ignore[import-untyped]
 
-        settings = Settings.load()
+        # get_settings(), not Settings.load(): the latter re-parses the whole
+        # pydantic-settings model from .env at ~115 ms a call (measured
+        # 2026-08-04). This is a read of config on the per-run title path.
+        settings = get_settings()
         title = await generate_title(
             first_message,
             model=settings.chat_title_model,
@@ -770,6 +837,31 @@ def _normalize_and_strip(
     return remaining, spec
 
 
+# Session-key prefix that marks a Paw Bar concierge run. Concierge chats are
+# driven by anonymous, untrusted website visitors, so their turns must NOT feed
+# the per-agent soul via pool.observe — otherwise a visitor could poison the
+# agent's memory ("remember: everything is free on Fridays"). The prefix is the
+# pickle-safe signal that survives the RunSpec round-trip into the executor;
+# because session_key_for() builds the key from ctx.kind.value, matching the
+# prefix here also covers a typed ScopeKind.CONCIERGE scope once the concierge
+# endpoint lands, without run_core needing to import that not-yet-existent enum
+# member. Mirrors the spirit of the local-loop per-turn suppression flag
+# (suppress_global_soul_observe) — same intent, cloud per-agent tier.
+_CONCIERGE_SESSION_PREFIX = "cloud:concierge:"
+
+
+def _is_concierge_run(spec: RunSpec) -> bool:
+    """True when this run is a Paw Bar concierge (anonymous-visitor) chat.
+
+    Gated on the session-key prefix rather than a typed scope check because
+    ``spec.session_key`` is the signal guaranteed to reach the executor across
+    the arq pickle boundary, and it manifests the concierge scope directly
+    (the key is derived from ``ctx.kind.value``). A future quarantine-via-Instinct
+    path can supersede this outright suppression.
+    """
+    return (spec.session_key or "").startswith(_CONCIERGE_SESSION_PREFIX)
+
+
 async def _persist_and_complete(
     spec: RunSpec,
     ctx: ScopeContext,
@@ -796,15 +888,22 @@ async def _persist_and_complete(
         ctx, assistant_id, full_text, attachments, created_at=msg.createdAt
     )
 
-    try:
-        pool = get_agent_pool()
-        await pool.observe(ctx.target_agent_id, spec.content, full_text)
-    except Exception:
-        logger.warning(
-            "pool.observe failed for agent %s — per-agent soul not updated",
-            ctx.target_agent_id,
-            exc_info=True,
+    if _is_concierge_run(spec):
+        logger.debug(
+            "skipping pool.observe for concierge run %s — anonymous visitor input "
+            "must not train the per-agent soul",
+            spec.run_id,
         )
+    else:
+        try:
+            pool = get_agent_pool()
+            await pool.observe(ctx.target_agent_id, spec.content, full_text)
+        except Exception:
+            logger.warning(
+                "pool.observe failed for agent %s — per-agent soul not updated",
+                ctx.target_agent_id,
+                exc_info=True,
+            )
     return assistant_id
 
 
@@ -898,11 +997,12 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
     keep today's cold turn-1.
     """
     try:
-        from pocketpaw.config import Settings
+        from pocketpaw.config import get_settings
 
         # Smart routing makes the model message-dependent → can't match the
         # turn-1 cache key from a message-less prewarm. Skip to avoid churn.
-        if Settings.load().smart_routing_enabled:
+        # get_settings(): a cached flag read, not a fresh parse. See above.
+        if get_settings().smart_routing_enabled:
             return
 
         pool = get_agent_pool()
@@ -957,6 +1057,9 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
             session_mongo_id=session_mongo_id,
             pocket_id=ctx.pocket_id,
         )
+        # C1 — bind the concierge action context so the warm subprocess builds the
+        # same pawbar_actions tool set turn 1 will resolve (None for every other run).
+        pawbar_token = bind_pawbar_run(_pawbar_run_from_ctx(ctx))
         try:
             await pool.prewarm(
                 ctx.target_agent_id,
@@ -968,8 +1071,22 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
                 system_message_override=surface_sys_override,
                 skill_names=surface_skills,
                 exclusive_mcp_tools=prewarm_exclusive,
+                # PA-2 — mirror _drive_agent_loop's surface threading. The
+                # preamble sits ABOVE the volatile markers the warm-client key
+                # cuts at, so unlike ``knowledge_context`` it is part of the
+                # hashed prefix: omitting it here would warm a client whose
+                # prefix turn 1 does not match, and turn 1 would evict the very
+                # client this call paid to build. ``execute_run`` resolves
+                # ``ctx.surface_context`` before firing this, so it is in hand.
+                surface_preamble=(
+                    ctx.surface_context.preamble or "" if ctx.surface_context else ""
+                ),
+                surface_cache_key=(
+                    ctx.surface_context.preamble_cache_key if ctx.surface_context else None
+                ),
             )
         finally:
+            unbind_pawbar_run(pawbar_token)
             detach_agent_identity(identity_tokens)
     except Exception as exc:  # noqa: BLE001 — prewarm must NEVER break a run
         logger.debug("prewarm_session skipped (swallowed): %s", exc)
@@ -1056,6 +1173,10 @@ async def _drive_agent_loop(
         # plain DM/group threads — the connector tools then say "no pocket".
         pocket_id=ctx.pocket_id,
     )
+    # C1 — bind this run's concierge action context (None for every non-concierge
+    # or no-actions run). The pawbar_actions MCP server + tool handlers read it;
+    # reset in the same finally as the identity tokens so it never leaks.
+    pawbar_token = bind_pawbar_run(_pawbar_run_from_ctx(ctx))
 
     if not history and ctx.session_id:
         asyncio.create_task(_generate_session_title(ctx, user_content))
@@ -1138,12 +1259,28 @@ async def _drive_agent_loop(
         # including the legacy ``resolved_profile is None`` path (no entity / no
         # profile). Still a plain ``frozenset[str]`` crossing into the OSS pool.
         surface_skills = surface_skills | _agent_skill_set(instance)
+        # PA-2 — the surface the user is looking at, as its own prompt layer.
+        # The preamble used to arrive folded into ``knowledge_context`` (see
+        # ``build_dynamic_context``, which no longer prepends it); it now rides
+        # ``pool.run`` beside the key its handler produced, so the assembled
+        # prompt's digest moves when the user navigates or the pocket they are
+        # looking at is edited. Both cross the EE→OSS boundary as plain data —
+        # a ``str`` and a ``str | None`` — exactly like ``deny_mcp_tool_ids``.
+        # ``surface_context is None`` (older clients, non-surface paths) leaves
+        # both at their no-surface defaults and the layer renders nothing.
+        surface_preamble = ""
+        surface_cache_key: str | None = None
+        if ctx.surface_context is not None:
+            surface_preamble = ctx.surface_context.preamble or ""
+            surface_cache_key = ctx.surface_context.preamble_cache_key
         run_kwargs: dict[str, Any] = dict(
             history=history,
             knowledge_context=knowledge_context,
             instructions=behavior_instructions,
             deny_mcp_tool_ids=surface_deny,
             allow_sdk_tools=surface_allow,
+            surface_preamble=surface_preamble,
+            surface_cache_key=surface_cache_key,
         )
         if surface_allow_mcp is not None:
             run_kwargs["allow_mcp_tool_ids"] = surface_allow_mcp
@@ -1468,6 +1605,10 @@ async def _drive_agent_loop(
             await asyncio.gather(*pending, return_exceptions=True)
         try:
             detach_sse_event_sink(sink_token)
+        except Exception:
+            pass
+        try:
+            unbind_pawbar_run(pawbar_token)
         except Exception:
             pass
         try:

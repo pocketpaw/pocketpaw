@@ -3,6 +3,19 @@
 # machine-readable `code` emitted on denial. Tests iterate ACTIONS to
 # guarantee every guarded operation is covered.
 #
+# Updated: 2026-07-26 (site knowledge sync) — added ``paw_bar.manage`` (ADMIN) for
+# the owner-triggered site→pocket-KB sync. Same role as ``paw_bar.read`` but its
+# own action: the sync is a mutation that spends compute (ingest compiles
+# articles), and a write should not ride a read gate that could later be widened.
+#
+# Updated: 2026-07-16 (D2 concierge dashboard reads) — added ``paw_bar.read``
+# (ADMIN) so the per-site Concierge dashboard reads (ee.pocketpaw_ee.paw_bar
+# .router: overview / conversations / decisions / handoffs) gate on the caller's
+# workspace ROLE instead of the coarse ``require_scope("admin")`` (which admits
+# any authenticated dashboard user). ADMIN, mirroring ``audit.read``: a site's
+# concierge conversations, decisions, and handoffs carry visitor PII and owner
+# decision context, so they must not be visible to every workspace member.
+#
 # Updated: 2026-07-11 (feat/external-alerting-c2c3) — registered
 # ``automations.read`` (MEMBER) and ``automations.manage`` (ADMIN) for the
 # always-on automation status surface (ee.cloud.automations_status.router): view
@@ -55,6 +68,13 @@
 # ban-capable writes (resolve a decision, PATCH the egress deny/allow config)
 # AND its read feed exposes who-tried-to-egress-what; the whole surface is
 # owner-only, mirroring workspace.delete / billing.manage / instinct.activate.
+#
+# Updated: 2026-07-28 (feat/cockpit-agent-activity, HR-12a) — added
+# ``agent_activity.read`` (MEMBER) gating the workspace agent-activity board
+# (ee.cloud.agent_activity.router). MEMBER, not the ADMIN ``cockpit.read``
+# below: this surface reads the caller's OWN workspace runs and is scoped to
+# them at the query, so it carries the tenancy property that keeps the herdr
+# cockpit admin-only.
 #
 # Updated: 2026-07-24 (feat/herdr-cockpit-sse, HR-10a) — added ``cockpit.read``
 # (ADMIN) gating both routes of the herdr cockpit telemetry surface
@@ -147,10 +167,15 @@ ACTIONS: dict[str, ActionRule] = {
     "workspace.invite": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     "workspace.member.remove": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     "workspace.member.role_change": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Member-permission management (route + connector access). EDITOR is the
+    # minimum: editors can assign routes, connectors, and channel/group
+    # memberships to members but cannot change workspace-level roles or
+    # remove members (those stay ADMIN-gated).
+    "workspace.member.permissions": ActionRule(WorkspaceRole.EDITOR, "workspace.insufficient_role"),
     # Group (chat)
     "group.view": ActionRule(GroupRole.VIEW, "group.not_member"),
     "group.create": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
-    "channel.create": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    "channel.create": ActionRule(WorkspaceRole.EDITOR, "workspace.insufficient_role"),
     "group.post": ActionRule(GroupRole.MEMBER, "group.view_only"),
     "group.admin": ActionRule(GroupRole.ADMIN, "group.not_admin"),
     "group.delete": ActionRule(GroupRole.OWNER, "group.not_owner"),
@@ -167,8 +192,8 @@ ACTIONS: dict[str, ActionRule] = {
     # Agent
     "agent.run": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "agent.create": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
-    "agent.edit": ActionRule(WorkspaceRole.ADMIN, "agent.not_owner"),
-    "agent.delete": ActionRule(WorkspaceRole.ADMIN, "agent.not_owner"),
+    "agent.edit": ActionRule(WorkspaceRole.EDITOR, "agent.not_owner"),
+    "agent.delete": ActionRule(WorkspaceRole.EDITOR, "agent.not_owner"),
     # Session
     "session.read_own": ActionRule(WorkspaceRole.MEMBER, "session.not_owner"),
     "session.read_any": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
@@ -261,6 +286,18 @@ ACTIONS: dict[str, ActionRule] = {
     # pocket produced), with no credentials or decision payloads — any
     # workspace member may view it, mirroring instinct.read.
     "outcomes.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    # Paw Bar concierge dashboard — the per-site owner aggregation reads
+    # (ee.pocketpaw_ee.paw_bar.router: overview / conversations / decisions /
+    # handoffs, D2). ADMIN, mirroring audit.read (NOT the MEMBER bar of
+    # outcomes.read): a site's visitor conversations, decisions, and handoffs
+    # carry visitor PII and owner decision context, so the surface is owner/admin
+    # only and must not be visible to every workspace member.
+    "paw_bar.read": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Paw Bar concierge dashboard — the owner WRITE surface (today: the
+    # site→pocket-KB knowledge sync). ADMIN like the read, but its own action
+    # because it is a mutation that also spends compute (ingest compiles articles),
+    # so it must not inherit a read gate. Mirrors belt.read / belt.manage.
+    "paw_bar.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Belt console — the develop-station read + repo-admin surface
     # (ee.cloud.belt.router, feat/belt-console-backend SC-1). read is MEMBER so
     # any team member can list discoverable repos + their own station runs.
@@ -294,6 +331,27 @@ ACTIONS: dict[str, ActionRule] = {
     # single read action gates both the stream and the preview. TODO(track-b):
     # scope panes to the caller's workspace before relaxing this for multi-tenant.
     "cockpit.read": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Agent activity — the workspace's own agent board (ee.cloud.agent_activity
+    # .router, HR-12a): which of MY agents are working right now. MEMBER, the
+    # same bar as session.read_own / outcomes.read, because every row is the
+    # caller's own workspace data — the board is built from ChatRunDoc rows
+    # filtered to the caller's workspace at the query, so there is no cross-tenant
+    # leak of the kind that forces ``cockpit.read`` above to stay ADMIN. Its
+    # payload is activity metadata only (agent id, status, run count, timestamps)
+    # — no message content, no credentials.
+    #
+    # MEMBER is the whole RBAC statement for this surface, and it is deliberate:
+    # the board is workspace-WIDE, so any member sees every member's agent
+    # activity. That is the team-coordination fact an Agent — a workspace
+    # resource, not a personal one — exists to expose. It knowingly reads wider
+    # than ``chat.runs.router._authorize``, which hides another member's
+    # individual run; the split is aggregate-state-is-shared,
+    # individual-turn-is-private (no user_id, no run id, no content on the wire).
+    # Narrowing to a personal board would be a ``user_id`` filter on the two
+    # reads in ``chat.runs.service``, NOT a role change here — and raising this
+    # to ADMIN would hide the board from exactly the people who need it.
+    # See ee.cloud.agent_activity.router's header for the full rationale.
+    "agent_activity.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
 }
 
 

@@ -159,7 +159,7 @@ from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
 from pocketpaw_ee.cloud.models.instinct_workspace_config import InstinctWorkspaceConfig
-from pocketpaw_ee.cloud.models.invite import Invite
+from pocketpaw_ee.cloud.models.invite import Invite, MeetingInvite
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
 from pocketpaw_ee.cloud.models.meeting import (
@@ -318,6 +318,7 @@ __all__ = [
     "InstinctWorkspaceConfig",
     "WorkspaceAutomationConfig",
     "Invite",
+    "MeetingInvite",
     "Lead",
     "LeadSource",
     "LiteLLMTenantKey",
@@ -423,6 +424,7 @@ def get_all_documents():
         # ``ee.cloud.llm_provisioning.service`` writes this.
         LiteLLMTenantKey,
         Invite,
+        MeetingInvite,
         Group,
         InstinctApproval,
         # Discovered governed rules (SZD slice-2). Only ``ee.cloud.rules.service``

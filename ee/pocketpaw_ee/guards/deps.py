@@ -186,13 +186,21 @@ def check_workspace_action(user: Any, workspace_id: str, action: str) -> Workspa
     Returns the resolved role on success. Raises Forbidden on deny and
     audits the denial. Use inside route handlers when the route needs the
     role value, otherwise prefer the factory deps below.
+
+    Also consults per-member ``action_permissions`` overrides stored on the
+    workspace document — an explicit grant for ``action`` allows it even
+    when the user's base role would not.
     """
     try:
         role = resolve_workspace_role(user, workspace_id)
         check_action(action, role)
     except Forbidden as exc:
+        # Check per-member action overrides before denying.
+        user_id = str(getattr(user, "id", "") or "")
+        if user_id and _has_action_override(workspace_id, user_id, action):
+            return role
         log_denial(
-            actor=str(getattr(user, "id", "") or ""),
+            actor=user_id,
             action=action,
             code=exc.code,
             workspace_id=workspace_id,
@@ -200,6 +208,29 @@ def check_workspace_action(user: Any, workspace_id: str, action: str) -> Workspa
         )
         raise
     return role
+
+
+# In-memory cache for action override lookups. Keyed by (workspace_id, user_id).
+# Lives for process lifetime — fine for a low-cardinality permission store.
+_ACTION_OVERRIDE_CACHE: dict[tuple[str, str], list[str]] = {}
+
+
+def _has_action_override(workspace_id: str, user_id: str, action: str) -> bool:
+    """Return True if ``user_id`` has an explicit override for ``action``."""
+    cache_key = (workspace_id, user_id)
+    if cache_key not in _ACTION_OVERRIDE_CACHE:
+        try:
+            import asyncio
+
+            from pocketpaw_ee.cloud.workspace.service import get_member_action_overrides
+
+            overrides = asyncio.get_event_loop().run_until_complete(
+                get_member_action_overrides(workspace_id, user_id)
+            )
+        except Exception:
+            overrides = []
+        _ACTION_OVERRIDE_CACHE[cache_key] = overrides
+    return action in _ACTION_OVERRIDE_CACHE[cache_key]
 
 
 def resolve_group_role(

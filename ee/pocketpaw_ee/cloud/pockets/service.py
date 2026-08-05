@@ -9,6 +9,10 @@ Updated: 2026-07-23 (SI-5, feat/sites-import-crawler) — added
 html source map on the imported pocket through THIS service (entity isolation —
 the sites service never touches the Pocket model). Workspace-checked fail-closed,
 html-engine pockets only, background-safe (no request context required).
+Updated: 2026-07-15 (fix/agent-visibility-enforcement, ASG-7) — ``add_agent``
+now gates on ``agents.service.ensure_can_use`` (against the pocket's workspace)
+in addition to pocket edit-access, so a pocket editor can no longer attach
+another user's PRIVATE agent.
 
 Updated: 2026-06-28 (AW-7 template gate deny-on-no-match) — added
 ``resolve_workspace_template_default_deny`` — the effective TEMPLATE-level
@@ -318,6 +322,7 @@ from pocketpaw_ee.cloud.pockets.dto import (
     UpdateWidgetRequest,
     pocket_to_wire_dict,
 )
+from pocketpaw_ee.cloud.pockets.id_resolve import AmbiguousId, resolve_id
 from pocketpaw_ee.cloud.ripple_normalizer import normalize_ripple_spec
 from pocketpaw_ee.cloud.ripple_validator import (
     ActionWiringViolationError,
@@ -2865,8 +2870,18 @@ async def remove_team_member(
 
 
 async def add_agent(pocket_id: str, user_id: str, agent_id: str) -> dict:
+    # Visibility gate (ASG-7): pocket edit-access alone does not authorize
+    # attaching ANY agent. The editor must also be able to USE the agent, or a
+    # pocket editor could wire in another user's PRIVATE agent. ``ensure_can_use``
+    # applies the canonical predicate (owner always; else same-workspace +
+    # ``workspace`` visibility; else ``public``) against the pocket's workspace —
+    # a foreign private agent surfaces as ``NotFound``.
+    from pocketpaw_ee.cloud.agents import service as agents_service
+
     doc = await _fetch_pocket(pocket_id)
-    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    pocket = _pocket_to_domain(doc)
+    _check_domain_edit_access(pocket, user_id)
+    await agents_service.ensure_can_use(agent_id, pocket.workspace_id, user_id)
     await _mutate_list_field(pocket_id, "agents", agent_id, "add")
     doc = await _fetch_pocket(pocket_id)
     return await _resolved_wire_dict(doc, user_id)
@@ -2926,6 +2941,43 @@ def _agent_view_dict(doc: _PocketDoc) -> dict:
     return json.loads(json.dumps(view, default=str))
 
 
+def _is_whole_object_id(value: str) -> bool:
+    """True for a full 24-hex-char ObjectId, the form every pre-existing caller sends."""
+    return len(value) == 24 and all(c in "0123456789abcdefABCDEF" for c in value)
+
+
+async def _resolve_pocket_id_tail(given: str, workspace_id: str) -> tuple[str, str | None]:
+    """Turn a shortened pocket id back into a whole one, WITHIN one workspace.
+
+    The workspace filter is the tenancy boundary and is not optional: an
+    unscoped tail resolve could land on another tenant's pocket, which is a
+    worse bug than the prompt bloat the shortening was introduced to fix. The
+    projection keeps this to ids only — a workspace's pocket count is small, but
+    there is no reason to drag every rippleSpec across the wire to compare 8
+    characters.
+
+    An ambiguous tail returns its error message rather than picking a winner.
+    """
+    # ``get_pymongo_collection``, NOT ``get_motor_collection`` — the latter is
+    # beanie 1.x and this is on 2.1.0, where it does not exist. The first version
+    # of this used the old name; every isolated resolver and handler test still
+    # passed, because the broad ``except`` below turned a missing attribute into
+    # a tidy "could not resolve" string and no test called this function.
+    # ``tests/cloud/pockets/test_short_id_tool_wiring.py`` is what caught it.
+    try:
+        cursor = _PocketDoc.get_pymongo_collection().find({"workspace": workspace_id}, {"_id": 1})
+        candidates = [{"_id": str(row["_id"])} async for row in cursor]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pocket id tail resolve failed for %s: %s", given, exc, exc_info=True)
+        return "", f"could not resolve pocket {given}: {exc}"
+    try:
+        return resolve_id(given, candidates), None
+    except AmbiguousId as exc:
+        return "", str(exc)
+    except KeyError:
+        return "", f"pocket {given} not found"
+
+
 async def _agent_load_doc(pocket_id: str) -> tuple[_PocketDoc | None, str | None]:
     """Load a pocket for an agent-initiated mutation, with workspace +
     access-control checks.
@@ -2949,6 +3001,15 @@ async def _agent_load_doc(pocket_id: str) -> tuple[_PocketDoc | None, str | None
         return None, (
             "no active workspace/user — agent pocket mutations require a cloud SSE chat stream"
         )
+    # The prompt renders a SHORTENED id (last 8 chars — see
+    # ``pocketpaw.prompt.entity``), so the agent can hand one back. A whole id
+    # takes the direct path it always took; only a short one pays for a lookup,
+    # so no existing caller changes behaviour.
+    if not _is_whole_object_id(pocket_id):
+        resolved, resolve_err = await _resolve_pocket_id_tail(pocket_id, workspace_id)
+        if resolve_err is not None:
+            return None, resolve_err
+        pocket_id = resolved
     try:
         doc = await _PocketDoc.get(PydanticObjectId(pocket_id))
     except Exception as exc:  # noqa: BLE001
@@ -3424,6 +3485,16 @@ async def agent_update_widget(
     doc, err = await _agent_load_doc(pocket_id)
     if err:
         return None, err
+    # The prompt shows a shortened widget id, so accept one back. Widgets are
+    # already loaded and already scoped to this pocket, so the resolve is free
+    # and cannot reach another tenant's data. An ambiguous tail raises rather
+    # than patching whichever widget sorted first.
+    try:
+        widget_id = resolve_id(widget_id, list(doc.widgets))
+    except AmbiguousId as exc:
+        return None, str(exc)
+    except KeyError:
+        return None, f"widget {widget_id} not found in pocket {pocket_id}"
     widget = next((w for w in doc.widgets if w.id == widget_id), None)
     if widget is None:
         return None, f"widget {widget_id} not found in pocket {pocket_id}"

@@ -6,6 +6,11 @@ during app startup, which tests don't invoke). Tests that want to assert
 on emitted events request the ``recording_bus`` fixture explicitly to read
 ``bus.events``.
 
+Also installs, session-wide and autouse, ``local_store_home``: it redirects
+``pocketpaw.stores._DATA_DIR`` at a tmp directory so a test that reaches an
+unpatched local-store factory writes there instead of into the developer's real
+``~/.pocketpaw`` (see the fixture for what made this visible).
+
 Also exposes:
 - ``mongo_db`` — Beanie initialized against a fresh mongomock-motor DB
   for the test. Used by service-level tests that exercise real Beanie
@@ -67,6 +72,32 @@ class RecordingBus:
         # Tests can install their own subscribers via the real InProcessBus
         # in a dedicated fixture; the recording bus stays inert by design.
         return
+
+
+@pytest.fixture(autouse=True, scope="session")
+def local_store_home(tmp_path_factory):
+    """Point the local store factory at a session tmp dir, never ``~/.pocketpaw``.
+
+    Added 2026-08-01 (AL-2). ``pocketpaw.stores`` resolves every workspace-keyed
+    SQLite file under ``_DATA_DIR``, which defaults to the DEVELOPER'S HOME. A
+    cloud test that reaches an unpatched factory therefore writes real files into
+    the machine's live PocketPaw data directory — which the AL-2 agent-ledger
+    emitters made visible immediately: one run of ``-k paw_bar`` left 25
+    ``~/.pocketpaw/workspaces/<mongomock ObjectId>/agent_ledger.db`` files behind.
+    Nothing was corrupted (the ids are per-run and random), but a suite that
+    writes into the machine it runs on is one deploy-shaped accident away from
+    mattering, and on a box serving a live demo that accident is expensive.
+
+    SESSION-scoped and NOT paired with a cache reset, deliberately: one directory
+    for the whole run keeps any handle the bounded LRU already cached valid, so
+    this changes WHERE files land and nothing else about how tests behave.
+    """
+    from pocketpaw import stores
+
+    original = stores._DATA_DIR
+    stores._DATA_DIR = tmp_path_factory.mktemp("pocketpaw-home")
+    yield stores._DATA_DIR
+    stores._DATA_DIR = original
 
 
 @pytest.fixture(autouse=True)

@@ -4,20 +4,44 @@
 # and a top-N listing so the agent can answer "what pockets do I
 # have?" without an extra round-trip. Uses ``pockets_service.list_pockets``
 # (tenancy enforced).
+#
+# Changes: 2026-08-03 (feat/prompt-entity-ids) — rows carry the pocket id.
+# ``get_pocket``, ``add_widget`` and ``update_widget`` all declare ``pocket_id``
+# required, and this preamble listed pockets by name alone: two called "Sales"
+# rendered byte-identical rows and the agent's only recourse was to guess or
+# spend a ``list_pockets`` call recovering what it had just been shown. Renders
+# through ``pocketpaw.prompt.entity.entity_line`` — the id comes from the wire
+# dict's ``_id``, which is what ``pocket_to_wire_dict`` emits (NOT ``id``).
+#
+# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
+# ``SurfacePreamble``. This handler DOES read mutable state (the workspace's
+# pockets, with each one's name, type, widget count and agent count), but it
+# reads a LIST — there is no single revision to key on, and pulling every
+# pocket's ``updatedAt`` would cost more than the preamble. So the key is a
+# digest of what was rendered: it moves when a pocket is created, deleted,
+# renamed or gains a widget, and it holds still across two turns that render
+# the same list. It is blind to a change past ``LIST_LIMIT``, which is
+# survivable precisely because such a change is not in the prompt either.
+# The unavailable branch reads nothing and gets its own exact key.
 
 from __future__ import annotations
 
 import logging
 
-from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
-from pocketpaw_ee.cloud.surface.handlers._helpers import truncate_preamble
+from pocketpaw.prompt.entity import entity_line
+from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
+from pocketpaw_ee.cloud.surface.handlers._helpers import (
+    content_key,
+    meta_key,
+    truncate_preamble,
+)
 
 logger = logging.getLogger(__name__)
 
 LIST_LIMIT = 10
 
 
-async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
+async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
     """Render the pockets-list surface preamble."""
     try:
         from pocketpaw_ee.cloud.pockets import service as pockets_service
@@ -25,9 +49,12 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         pockets = await pockets_service.list_pockets(workspace_id, user_id)
     except Exception:
         logger.debug("pockets_list_handler: list_pockets failed", exc_info=True)
-        return (
-            '<surface kind="pockets" route="/pockets" />'
-            "<pockets-snapshot>(unavailable)</pockets-snapshot>"
+        return SurfacePreamble(
+            text=(
+                '<surface kind="pockets" route="/pockets" />'
+                "<pockets-snapshot>(unavailable)</pockets-snapshot>"
+            ),
+            cache_key=meta_key("pockets", "unavailable"),
         )
 
     total = len(pockets)
@@ -40,15 +67,22 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
     else:
         rows = []
         for p in pockets[:LIST_LIMIT]:
-            name = p.get("name") or "(unnamed)"
-            kind = p.get("type") or "custom"
             widget_count = len(p.get("widgets", []) or [])
             agent_count = len(p.get("agents", []) or [])
-            rows.append(f"- {name} (type={kind}, widgets={widget_count}, agents={agent_count})")
+            rows.append(
+                entity_line(
+                    p.get("name"),
+                    p.get("_id"),
+                    type=p.get("type") or "custom",
+                    widgets=widget_count,
+                    agents=agent_count,
+                )
+            )
         if total > LIST_LIMIT:
             rows.append(f"... (+{total - LIST_LIMIT} more)")
         parts.append("<pockets-list>\n" + "\n".join(rows) + "\n</pockets-list>")
-    return truncate_preamble("\n".join(parts))
+    text = truncate_preamble("\n".join(parts))
+    return SurfacePreamble(text=text, cache_key=content_key("pockets", text))
 
 
 __all__ = ["build_preamble"]
