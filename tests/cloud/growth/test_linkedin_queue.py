@@ -23,9 +23,28 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
+from pocketpaw_ee.cloud._core.deps import current_workspace_id
 from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.auth import current_active_user
 from pocketpaw_ee.cloud.growth.router import router as growth_router
 from pocketpaw_ee.cloud.license import require_license
+
+
+# Integration (growth-v1) — G-4 landed per-route RBAC guards
+# (``growth.read`` on the queue, ``growth.manage`` on mark-sent) after this
+# slice was branched, so the test app has to supply an authenticated user +
+# active workspace the guard can resolve. Mirrors test_drafts.py's harness.
+class _FakeMembership:
+    def __init__(self, workspace: str, role: str = "admin") -> None:
+        self.workspace = workspace
+        self.role = role
+
+
+class _FakeUser:
+    def __init__(self, user_id: str, workspace_id: str, role: str = "admin") -> None:
+        self.id = user_id
+        self.active_workspace = workspace_id
+        self.workspaces = [_FakeMembership(workspace=workspace_id, role=role)]
 
 
 def _make_ctx(workspace_id: str | None, user_id: str = "u1") -> RequestContext:
@@ -46,8 +65,11 @@ def _build_app(workspace_id: str | None = "w1", user_id: str = "u1") -> FastAPI:
     async def _ctx() -> RequestContext:
         return _make_ctx(workspace_id, user_id)
 
+    user = _FakeUser(user_id, workspace_id or "w1")
     app.dependency_overrides[request_context] = _ctx
     app.dependency_overrides[require_license] = lambda: None
+    app.dependency_overrides[current_active_user] = lambda: user
+    app.dependency_overrides[current_workspace_id] = lambda: user.active_workspace
     return app
 
 
@@ -98,14 +120,32 @@ async def _create_draft(client: AsyncClient, prospect_id: str, **overrides: Any)
     return resp.json()
 
 
-async def _walk(client: AsyncClient, draft_id: str, *statuses: str) -> dict[str, Any]:
+_GATE_OWNED = frozenset({"approved", "sent"})
+
+
+async def _walk(
+    client: AsyncClient, draft_id: str, *statuses: str, workspace_id: str = "w1"
+) -> dict[str, Any]:
+    """Walk a draft through a sequence of legal transitions.
+
+    Public edges go through the HTTP status route; the gate-owned edges
+    (``approved`` / ``sent``) go through ``service.gate_transition`` — G-4
+    landed after this slice branched and made those targets reachable only via
+    the Instinct gate seam. Mirrors test_drafts.py's helper."""
+    from pocketpaw_ee.cloud.growth import service as growth_service
+
     body: dict[str, Any] = {}
     for status in statuses:
-        resp = await client.post(
-            f"/api/v1/growth/drafts/{draft_id}/status", json={"status": status}
-        )
-        assert resp.status_code == 200, f"{status}: {resp.text}"
-        body = resp.json()
+        if status in _GATE_OWNED:
+            result = await growth_service.gate_transition(workspace_id, draft_id, status)
+            body = result.model_dump()
+        else:
+            resp = await client.post(
+                f"/api/v1/growth/drafts/{draft_id}/status", json={"status": status}
+            )
+            assert resp.status_code == 200, f"{status}: {resp.text}"
+            body = resp.json()
+        assert body["status"] == status
     return body
 
 
@@ -141,7 +181,7 @@ async def test_queue_only_linkedin_proposed_or_approved(w1_client, w2_client):
     # Excluded: another tenant's proposed linkedin draft.
     foreign_prospect = await _create_prospect(w2_client, domain="other.io", company="Other")
     foreign = await _create_draft(w2_client, foreign_prospect["id"])
-    await _walk(w2_client, foreign["id"], "proposed")
+    await _walk(w2_client, foreign["id"], "proposed", workspace_id="w2")
 
     assert set(await _queued_ids(w1_client)) == {proposed["id"], approved["id"]}
     assert await _queued_ids(w2_client) == [foreign["id"]]

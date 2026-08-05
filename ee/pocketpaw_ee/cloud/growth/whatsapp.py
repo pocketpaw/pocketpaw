@@ -146,7 +146,7 @@ async def dispatch_whatsapp(draft_id: str) -> None:
     """
     from pocketpaw_ee.cloud.growth import service as growth_service
 
-    draft = await growth_service.load_draft_for_dispatch(draft_id)
+    draft = await growth_service.get_draft_for_dispatch(draft_id)
     if draft is None:
         # Nothing to block, nothing to send, nothing to attribute to a
         # workspace — a deleted draft is a non-event, not a failure.
@@ -176,7 +176,7 @@ async def dispatch_whatsapp(draft_id: str) -> None:
         )
 
     # (2) Tenancy comes off the draft doc, never off the job payload.
-    prospect = await growth_service.load_prospect(workspace_id, draft.prospect_id)
+    prospect = await growth_service.get_prospect_for_dispatch(workspace_id, draft.prospect_id)
     if prospect is None:
         await _blocked("prospect_missing")
         raise ProspectUnavailable(

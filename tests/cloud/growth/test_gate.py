@@ -934,8 +934,6 @@ class TestGrowthRouteRbac:
             ("PATCH", "/growth/drafts/{draft_id}"): "growth.write",
             # The outbound verb sits at the ADMIN tier the executor re-checks.
             ("POST", "/growth/drafts/{draft_id}/propose"): "growth.manage",
-
-
             # G-10a's batch propose is the same outbound verb over N ids, so
             # it sits at the same ADMIN tier — a lower tier here would be a
             # way to file proposals the executor then refuses at approve time.
