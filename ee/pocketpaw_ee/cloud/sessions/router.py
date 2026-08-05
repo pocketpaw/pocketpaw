@@ -245,16 +245,22 @@ async def delete_session(
 @router.get("/{session_id}/history")
 async def get_session_history(
     session_id: str,
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=200),
+    before: str | None = None,
     user_id: str = Depends(current_user_id),
 ) -> dict:
-    """Return session history from the unified Mongo messages store."""
+    """Return session history from the unified Mongo messages store.
+
+    ``before`` is a ``{createdAt}|{_id}`` keyset cursor — pass the oldest
+    loaded message's cursor to fetch the previous (older) page. The response
+    carries ``has_more`` so the client can stop once history is exhausted.
+    """
     from pocketpaw_ee.cloud.shared.errors import NotFound
 
     try:
-        return await sessions_service.get_history(session_id, user_id, limit=limit)
+        return await sessions_service.get_history(session_id, user_id, limit=limit, before=before)
     except NotFound:
-        return {"messages": []}
+        return {"messages": [], "active_run": None, "has_more": False}
 
 
 @router.post("/{session_id}/touch", status_code=204)
