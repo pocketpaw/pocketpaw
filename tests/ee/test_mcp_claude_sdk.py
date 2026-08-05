@@ -8,6 +8,11 @@ Updated: 2026-07-27 (fix/dev-ci) — ``_strip_builtin_servers`` now also drops
   it as an external config and dev went red. Same regime as
   ``pocketpaw_daytona``: ambient registration, scoped by the /code
   SurfaceProfile allowlist rather than by being withheld.
+
+  Two branches hit this and fixed it independently, which is the actual signal:
+  the list below is a dozen entries long, and every one of them was written
+  after an always-on server took six external-config assertions down with it.
+  "A builtin server landed" should fail somewhere more specific than here.
 Updated: 2026-07-06 (feat/paw-sites-stock-imagery) — ``_strip_builtin_servers``
   now also drops ``pocketpaw_stock`` (search_stock_images: free Pexels +
   Unsplash photo search for site imagery, registered always-on via the
@@ -184,12 +189,14 @@ def _strip_builtin_servers(result: dict) -> dict:
     # ``pocketpaw_daytona`` is always-on too — the /code surface scopes access
     # via its profile allowlist, same regime as fabric / instinct / media.
     out.pop(_DAYTONA_MCP_SERVER_NAME, None)
-    # ``pocketpaw_code`` is always-on too — the four /code file tools
-    # (readFile / search / listDir / writeFile) are ambient, NOT in
+    # ``pocketpaw_code`` is always-on too — the /code file tools (readFile /
+    # search / listDir / editFile / writeFile) are ambient, NOT in
     # ``OPT_IN_MCP_SERVERS``. The /code SurfaceProfile scopes them via
     # ``tool_mode="exclusive"`` + ``_CODE_FILE_TOOL_IDS``, so the allowlist is
     # the boundary, not registration — the same regime as its sibling
-    # ``pocketpaw_daytona`` directly above.
+    # ``pocketpaw_daytona`` directly above. Registration could not be the
+    # boundary anyway: each tool parks on a delegate frame that only a tab with
+    # a code project open can answer.
     out.pop(_CODE_MCP_SERVER_NAME, None)
     # ``pocketpaw_atlas`` is always-on too — the capability atlas
     # (atlas_search / atlas_describe) is registered unconditionally in core

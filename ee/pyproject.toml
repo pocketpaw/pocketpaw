@@ -680,6 +680,15 @@ allow_indirect_imports = "true"
 # the turn-agent, which broke the run outright. `as_packages` defaults to true,
 # so naming the package covers every submodule — including the ones added after
 # this contract was written.
+#
+# Two branches fixed this independently (2026-07-28). The other one re-listed the
+# four surviving modules by name and explained the failure in more detail: an
+# unresolvable source module is a HARD error for import-linter, not a skip, so a
+# clean checkout died before evaluating a single contract — while a developer
+# machine stayed green because a stale ``__pycache__/domain.cpython-312.pyc`` was
+# enough for the graph builder to resolve the name. Worth keeping that detail;
+# the package form is kept as the fix, because a name list is what went stale in
+# the first place and would go stale again on the next module added.
 source_modules = ["pocketpaw_ee.cloud.codeagent"]
 forbidden_modules = [
     "pocketpaw_ee.cloud.daytona",

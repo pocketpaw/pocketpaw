@@ -253,17 +253,29 @@ _BELT_GATE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_belt__belt_prop
 # agent drives the /code work in its own tool loop and reaches the project ONLY
 # through these four verbs — each one delegates a single call to the browser,
 # which owns the file session (the project runs in the tab, not on the backend).
-# ``writeFile`` does not write: it stages a proposal for the user's per-hunk
-# review. Spelled as LITERALS for the same reason ``_BELT_GATE_TOOL_IDS`` above
+# ``writeFile`` saves the file (it staged a proposal for per-hunk review until
+# 2026-07-25). Spelled as LITERALS for the same reason ``_BELT_GATE_TOOL_IDS`` above
 # is — their canonical constants live in the in-process MCP server (server
 # ``pocketpaw_code``), which the profile layer must not import. The id format is
 # the SDK's ``mcp__<server>__<tool>`` namespacing. Do NOT drift these ids;
 # ``test_code_mcp_server`` pins them against the server's own constants.
+#
+# ``editFile`` joined the set 2026-07-28 (fix/code-truncated-read-destroys-file).
+# It is not an optional extra: ``readFile`` caps at 30_000 characters, so on any
+# larger file a whole-file ``writeFile`` means sending back invented text for the
+# part never read — which is what a live session reported as the agent
+# "fabricating things". ``editFile`` is the verb that makes a large file
+# changeable without holding all of it, and the browser now refuses the lossy
+# write. Adding the id HERE is not sufficient on its own: the seeded ``code``
+# agent's ``tool_mode="exclusive"`` policy caps the run's ``mcp__*`` surface
+# independently, so the same id has to reach that config too or the tool is
+# defined, allowed here, and still stripped at run time.
 _CODE_FILE_TOOL_IDS: frozenset[str] = frozenset(
     {
         "mcp__pocketpaw_code__readFile",
         "mcp__pocketpaw_code__search",
         "mcp__pocketpaw_code__listDir",
+        "mcp__pocketpaw_code__editFile",
         "mcp__pocketpaw_code__writeFile",
     }
 )
