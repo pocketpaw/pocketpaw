@@ -17,6 +17,14 @@ resolved id here so it survives across sessions and devices; routing the
 read/write through this service keeps ``models.user`` writes inside the
 auth entity. ``claim_home_pocket_id`` is a compare-and-swap (not a plain
 write) so a first-login provision race resolves to a single home pocket.
+Updated: 2026-08-05 (feat/coupling-person-freshness, T-2) —
+``update_profile`` now emits ``ProfileUpdated`` (type="profile.updated")
+with the changed field names, per cloud rule 9 (emit on every write); the
+people module subscribes it to keep the Fabric Person's name/avatar fresh
+in every workspace. Also added ``get_profile_by_id`` — the plain-user_id
+read (same style as ``get_active_workspace``) non-HTTP callers like the
+people refresh/backfill paths use to reach profile + membership data
+without minting a RequestContext.
 """
 
 from __future__ import annotations
@@ -25,6 +33,8 @@ from beanie import PydanticObjectId
 
 from pocketpaw_ee.cloud._core.context import RequestContext
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import ProfileUpdated
 from pocketpaw_ee.cloud.auth.domain import AuthUser, WorkspaceMembershipRef
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 
@@ -74,13 +84,39 @@ async def update_profile(
     doc = await _UserDoc.get(PydanticObjectId(ctx.user_id))
     if doc is None:
         raise NotFound("user", ctx.user_id)
-    if full_name is not None:
+    changed: list[str] = []
+    if full_name is not None and doc.full_name != full_name:
         doc.full_name = full_name
-    if avatar is not None:
+        changed.append("full_name")
+    if avatar is not None and doc.avatar != avatar:
         doc.avatar = avatar
-    if status is not None:
+        changed.append("avatar")
+    if status is not None and doc.status != status:
         doc.status = status
+        changed.append("status")
     await doc.save()
+    if changed:
+        # Field names only — consumers (people/listeners.py re-materializing
+        # the Fabric Person) re-read the user record for the fresh values.
+        await emit(ProfileUpdated(data={"user_id": ctx.user_id, "changed": changed}))
+    # no-event: nothing changed — the save was a no-op write.
+    return _to_domain(doc)
+
+
+async def get_profile_by_id(user_id: str) -> AuthUser:
+    """Return a user's profile (incl. membership refs) by plain ``user_id``.
+
+    Takes a plain ``user_id`` (not a ``RequestContext``) so non-HTTP
+    callers — notably the people module's Person refresh/backfill paths,
+    which run from bus listeners and journal-read misses — can reach the
+    profile fields + workspace membership list without minting a context.
+    Keeps ``models.user`` reads inside the auth entity (Rule 2), same
+    style as ``get_active_workspace``. Raises ``NotFound`` when the user
+    record is missing.
+    """
+    doc = await _UserDoc.get(PydanticObjectId(user_id))
+    if doc is None:
+        raise NotFound("user", user_id)
     return _to_domain(doc)
 
 
@@ -222,6 +258,7 @@ __all__ = [
     "claim_home_pocket_id",
     "get_home_pocket_id",
     "get_profile",
+    "get_profile_by_id",
     "resolve_display_names",
     "set_active_workspace",
     "set_avatar_path",

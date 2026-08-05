@@ -11,6 +11,11 @@ Also installs, session-wide and autouse, ``local_store_home``: it redirects
 unpatched local-store factory writes there instead of into the developer's real
 ``~/.pocketpaw`` (see the fixture for what made this visible).
 
+Also installs, autouse, ``_isolated_person_store`` (T-2, 2026-08-05): lazily
+redirects the people service's default Fabric journal store at a per-test tmp
+journal so workspace create / invite accept / Person refresh paths never write
+into the developer's real ``~/.soul/journal.db``.
+
 Also exposes:
 - ``mongo_db`` — Beanie initialized against a fresh mongomock-motor DB
   for the test. Used by service-level tests that exercise real Beanie
@@ -98,6 +103,46 @@ def local_store_home(tmp_path_factory):
     stores._DATA_DIR = tmp_path_factory.mktemp("pocketpaw-home")
     yield stores._DATA_DIR
     stores._DATA_DIR = original
+
+
+@pytest.fixture(autouse=True)
+def _isolated_person_store(tmp_path, monkeypatch):
+    """Keep the people service's default Fabric store off the real org journal.
+
+    Added 2026-08-05 (T-2, feat/coupling-person-freshness). ``workspace.create``
+    now materializes an owner Person (and ``accept_invite`` has materialized
+    members since pp#1366) through ``people_service._default_store``, which
+    opens the REAL org journal at ``~/.soul/journal.db`` — so any cloud test
+    that creates a workspace would write Person rows into the developer's live
+    soul data. Same hazard class ``local_store_home`` guards against.
+
+    LAZY on purpose: the tmp journal is only opened if a test actually reaches
+    an unpatched ``_default_store()`` call, so the fixture costs nothing for
+    the vast majority of tests. Tests that want to READ the store install
+    their own (e.g. ``person_store`` in the workspace/people test files),
+    which simply re-patches over this one.
+    """
+    from pocketpaw_ee.cloud.people import service as people_service
+
+    state: dict = {}
+
+    def _tmp_store():
+        if "store" not in state:
+            from soul_protocol.engine.journal import open_journal
+
+            from pocketpaw.fabric.journal_store import FabricJournalStore
+
+            journal = open_journal(tmp_path / "person_journal.db")
+            store = FabricJournalStore(journal)
+            store.bootstrap()
+            state["journal"] = journal
+            state["store"] = store
+        return state["store"]
+
+    monkeypatch.setattr(people_service, "_default_store", _tmp_store)
+    yield
+    if "journal" in state:
+        state["journal"].close()
 
 
 @pytest.fixture(autouse=True)

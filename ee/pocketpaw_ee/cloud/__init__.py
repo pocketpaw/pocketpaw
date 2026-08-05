@@ -1,5 +1,10 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-08-05 (feat/coupling-person-freshness, T-2) — Registers
+    ``register_people_listeners`` after the task listeners: the
+    workspace.member_role and profile.updated bus subscribers that keep the
+    Fabric Person (the identity spine agents orient on) fresh across role
+    changes and profile edits.
 Modified: 2026-07-11 (feat/real-pipeline-s1) — Mounts the fabric_ingest
     transform-surface router (``/fabric/ingest/mappings`` CRUD +
     ``/fabric/ingest/run`` run-now) next to the fabric router under
@@ -903,6 +908,15 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.tasks.listeners import register_task_listeners
 
     register_task_listeners()
+
+    # People — keep the Fabric Person (the identity spine agents orient on)
+    # fresh: workspace.member_role → re-materialize that member's role;
+    # profile.updated → re-materialize name/avatar in every workspace the
+    # user belongs to (T-2, feat/coupling-person-freshness). Same
+    # register-after-init_realtime constraint as the other bus subscribers.
+    from pocketpaw_ee.cloud.people.listeners import register_people_listeners
+
+    register_people_listeners()
 
     # Planner — when a plan is generated, auto-execute unblocked tasks
 
