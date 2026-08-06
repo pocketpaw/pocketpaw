@@ -47,6 +47,25 @@
 # preview" needs to be told when it did not work rather than handed back the stale
 # url they were trying to replace.
 #
+# Updated 2026-08-07 (MT-1 — an interactive site keeps its own JavaScript):
+# ``publish_pocket`` now reads the pocket's ``keepsClientBundle`` declaration and
+# threads it through ``publish`` -> ``_deploy_site_doc`` -> ``generator.build``, so a
+# site whose hand-written client JS is load-bearing is generated with ``csr = true``
+# instead of the static ``csr = false`` default (and the ripple prune step then leaves
+# the hydration bundle alone). Two things make it survive the paths that historically
+# lose per-site facts:
+#   * It lives on the POCKET, not on the Site doc, so a republish — an
+#     ``edit_svelte_component`` or a ``make_site_editable``, both of which route back
+#     through ``publish_pocket`` — re-reads it rather than needing to carry it. That
+#     is the failure mode ``builder_origin`` had to be taught to recover from.
+#   * It is captured in ``pending_deploy_inputs`` alongside engine/source/pattern, so
+#     the charge-first deferred deploy replays it at ``subscription.active``. That
+#     snapshot IS the definition of what a deferred publish can reproduce; a field
+#     missing from it is silently dropped, and a PAID interactive site would go live
+#     with its JavaScript stripped. Pending docs written before this field read the
+#     key as absent -> False -> the prior behaviour.
+# Defaults False everywhere, so an ordinary static site is byte-identical.
+#
 # Updated 2026-08-02 (draft render): the PREVIEW deploy in ``publish`` is now
 # engine-aware, closing the half of HE-4 that was missed. HE-4 taught the LIVE
 # deploy that a built site's servable files live somewhere different per engine
@@ -1789,6 +1808,7 @@ async def publish(
     assets: dict[str, str] | None = None,
     pattern: str | None = None,
     builder_origin: str | None = None,
+    keeps_client_bundle: bool = False,
     preview: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
@@ -1913,6 +1933,7 @@ async def publish(
             engine=engine,
             source=source,
             builder_origin=builder_origin,
+            keeps_client_bundle=keeps_client_bundle,
             pocket_id=pocket_id,
             # A preview/edit/arm build skips only the SSR fail-gate (smoke=False); a
             # live publish keeps it (see _deploy_site_doc). It still BUILDS fresh +
@@ -2017,6 +2038,7 @@ async def publish(
         assets=assets,
         pattern=pattern,
         builder_origin=builder_origin,
+        keeps_client_bundle=keeps_client_bundle,
         generator=generator,
         cloudflare=_cloudflare,
         bundle_reader=_bundle_reader,
@@ -2040,6 +2062,7 @@ async def _deploy_site_doc(
     assets: dict[str, str] | None = None,
     pattern: str | None = None,
     builder_origin: str | None = None,
+    keeps_client_bundle: bool = False,
     generator: GeneratorClient | None = None,
     cloudflare: Any | None = None,
     bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -2123,6 +2146,7 @@ async def _deploy_site_doc(
         engine=engine,
         source=source,
         builder_origin=builder_origin,
+        keeps_client_bundle=keeps_client_bundle,
         **_asset_kwargs,
         # PERF-3: build into the STABLE per-pocket working dir so node_modules
         # persists and `bun install` is cached across builds, cutting the dominant
@@ -3178,6 +3202,12 @@ async def publish_pocket(
     # (stamped by the create-dynamic-site tool) tells ``publish`` the site is
     # backed by a per-tenant D1, so its deployed Worker gets a D1 binding.
     pattern = pocket.get("pattern")
+    # MT-1: the pocket's authored declaration that its own client JS is
+    # load-bearing. Rides ``siteConfig.keepsClientBundle`` to the generator, which
+    # then emits ``csr = true`` instead of the static default. camelCase because
+    # that is the pocket WIRE dict (``keeps_client_bundle`` is the Beanie/domain
+    # name). Absent on every legacy pocket → False → today's behaviour.
+    keeps_client_bundle = bool(pocket.get("keepsClientBundle"))
 
     # charge-first: a PREVIEW publish never persists a Site doc and never bills, so
     # it stays the unchanged Branch-primitive preview path — build + smoke-gate +
@@ -3194,6 +3224,7 @@ async def publish_pocket(
             pattern=pattern,
             name=name or pocket.get("name", ""),
             builder_origin=builder_origin,
+            keeps_client_bundle=keeps_client_bundle,
             preview=True,
             _generator=_generator,
             _cloudflare=_cloudflare,
@@ -3239,6 +3270,7 @@ async def publish_pocket(
             pattern=pattern,
             name=name or pocket.get("name", ""),
             builder_origin=builder_origin,
+            keeps_client_bundle=keeps_client_bundle,
             tier=tier,
             provider=_billing_provider,
         )
@@ -3255,6 +3287,7 @@ async def publish_pocket(
         pattern=pattern,
         name=name or pocket.get("name", ""),
         builder_origin=builder_origin,
+        keeps_client_bundle=keeps_client_bundle,
         preview=False,
         _generator=_generator,
         _cloudflare=_cloudflare,
@@ -3404,6 +3437,7 @@ async def _publish_pending_site(
     pattern: str | None,
     name: str,
     builder_origin: str | None,
+    keeps_client_bundle: bool,
     tier: Any,
     provider: Any | None,
 ) -> _SiteDoc:
@@ -3465,6 +3499,11 @@ async def _publish_pending_site(
         "source": source,
         "pattern": pattern,
         "builder_origin": builder_origin,
+        # MT-1 — MUST be captured here. This dict is the complete record of what a
+        # deferred deploy replays; anything the publish path reads that is missing
+        # here is silently lost when the ``subscription.active`` webhook deploys,
+        # and a paid interactive site would go live with its JavaScript stripped.
+        "keeps_client_bundle": keeps_client_bundle,
         "name": site_name,
     }
 
@@ -3627,6 +3666,9 @@ async def activate_site(
         source=inputs.get("source"),
         pattern=inputs.get("pattern"),
         builder_origin=inputs.get("builder_origin"),
+        # MT-1 — replay the authored declaration. A pending doc captured before
+        # this field existed has no key and reads False (the prior behaviour).
+        keeps_client_bundle=bool(inputs.get("keeps_client_bundle")),
         generator=_generator,
         cloudflare=_cloudflare,
         bundle_reader=_bundle_reader,

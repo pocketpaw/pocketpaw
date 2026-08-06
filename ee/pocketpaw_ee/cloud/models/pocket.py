@@ -47,6 +47,14 @@ leaf domain module) and is imported here. This lets ``pockets.dto`` import the
 same class from ``surface.domain`` instead of from ``models.pocket``, which
 the OSS-EE boundary contract forbids. No schema change — the embedded BSON
 shape is identical, so no Mongo migration.
+Updated: 2026-08-07 (MT-1 — an interactive site keeps its own JavaScript) —
+added ``Pocket.keeps_client_bundle`` (``bool``, default ``False``) beside
+``engine``. It declares that the site's hand-written client JS is
+load-bearing, so the generator emits ``csr = true`` instead of the static
+default and the ripple prune step leaves the hydration bundle in place. It
+sits on the pocket for the same reason ``engine`` does — it describes the
+authored artifact, not the deploy. Defaults ``False`` so every existing
+pocket reads back unchanged; additive, no Mongo migration.
 Updated: 2026-06-21 (DSV-5 — dynamic svelte sites write-side) — loosened
 ``Pocket.source`` from ``dict[str, str] | None`` to ``dict[str, Any] | None``
 so a DYNAMIC svelte site's ``source`` envelope can carry its live-data bindings
@@ -164,6 +172,14 @@ class Pocket(TimestampedDocument):
     # pockets; a STATIC svelte pocket carries only the str->str file map (a
     # subset of the looser type — no behaviour change).
     source: dict[str, Any] | None = None
+    # MT-1 — this site's own client JavaScript is load-bearing (an onMount, a
+    # ``use:`` action, an IntersectionObserver scroll-reveal, a WebGL canvas). A
+    # published site is otherwise generated with ``csr = false`` and, on ripple, has
+    # its emitted hydration bundle pruned after the build, so that code never runs.
+    # Lives on the pocket (beside ``engine``) because it describes the AUTHORED
+    # artifact, not the deployment. ``False`` for every legacy pocket — additive, no
+    # Mongo migration.
+    keeps_client_bundle: bool = False
     # Default "workspace": new pockets are visible to every workspace member.
     # Owner can tighten to "private" (owner-only + explicit shared_with) via
     # the visibility toggle in the pocket UI.

@@ -13,6 +13,9 @@ Updated: 2026-06-03 (feat/sites-landing-brain) — added optional
 ``Pocket.pattern`` so the wire layer + sites generator can read the
 layout/conversion intent the pocket was authored as (``"landing"`` for
 marketing sites). ``None`` for legacy pockets.
+Updated: 2026-08-07 (MT-1) — added ``Pocket.keeps_client_bundle`` (default
+``False``), the per-site declaration that the authored client JS must ship
+and run. Mirrors the Beanie field; legacy pockets read back ``False``.
 Updated: 2026-06-04 (feat/sites-svelte-engine) — added the Paw Sites
 "Svelte track" fields ``Pocket.engine`` (``"ripple"`` | ``"svelte"``) and
 ``Pocket.source`` (the SvelteKit source map, or ``None``) so the wire
@@ -146,6 +149,10 @@ class Pocket:
     # dict — hence ``dict[str, Any]`` (DSV-5). ``None`` for ripple pockets; a
     # static svelte pocket carries only the str->str file map (a subset).
     source: dict[str, Any] | None = None
+    # MT-1 — the site's own client JavaScript is load-bearing, so the generator
+    # keeps CSR on instead of emitting the static ``csr = false`` default.
+    # ``False`` for legacy pockets and for every ordinary static site.
+    keeps_client_bundle: bool = False
     # Optional per-entity surface-profile override (the JSON-shaped dict that
     # mirrors the surface-domain ``SurfaceProfile``). Consumed by the
     # entity-aware resolve_profile (entity-rooms chunk ①). ``None`` = use the
