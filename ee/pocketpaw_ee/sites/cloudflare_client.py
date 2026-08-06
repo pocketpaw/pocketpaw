@@ -1,5 +1,5 @@
 # ee/pocketpaw_ee/sites/cloudflare_client.py — async Cloudflare API client for
-# the Sites control plane. Four surfaces:
+# the Sites control plane. Five surfaces:
 #   * Workers for Platforms — PUT a user Worker into our dispatch namespace
 #     (one synchronous call per site; live on 200; no per-account script cap).
 #   * Cloudflare for SaaS — create a custom hostname, return the single CNAME
@@ -9,6 +9,9 @@
 #     create_database.
 #   * D1 (DS-3) — query a dynamic site's per-tenant D1 over the HTTP API so the
 #     control plane can READ its data (the operator data-view); see query_d1.
+#   * Browser Rendering (SC-1) — screenshot a deployed site's live URL so its
+#     gallery card can show the page instead of a title and three pills; see
+#     capture_screenshot.
 # httpx-based; account id + token come from settings (env), not per-tenant rows
 # in v1. Non-2xx raises a CloudError so the standard envelope applies.
 #
@@ -60,6 +63,17 @@
 # site never regresses. The mapping is intentionally MINIMAL + documented (a real
 # CF account tunes the exact toggles); the contract is "feature set in → those
 # CF fields out", asserted with a mocked transport.
+# Updated 2026-08-07 (SC-1 — a site's card shows its own screenshot): added
+# ``capture_screenshot``. It POSTs to the Browser Rendering screenshot endpoint
+# (POST /accounts/{acct}/browser-rendering/screenshot) with a ``{url,
+# screenshotOptions, viewport, gotoOptions}`` body and returns the raw image
+# BYTES. It is the one method here whose happy path is NOT the JSON envelope: a
+# successful render replies with the image itself (``image/png``), so the shared
+# ``_unwrap`` only governs the failure branch. Anything that is not 2xx + an
+# ``image/*`` body raises ValidationError, so a Cloudflare error page or an empty
+# body can never be stored as a site's preview. Callers must NOT pass a
+# ``quality`` in ``screenshot_options`` without also passing a ``type`` of jpeg /
+# webp — quality is incompatible with the default png and Cloudflare answers 400.
 
 from __future__ import annotations
 
@@ -279,6 +293,59 @@ class CloudflareClient:
             resp = await client.post(url, json={"name": name})
         result = self._unwrap(resp)
         return result["uuid"]
+
+    async def capture_screenshot(
+        self,
+        *,
+        url: str,
+        viewport: dict | None = None,
+        goto_options: dict | None = None,
+        screenshot_options: dict | None = None,
+    ) -> bytes:
+        """Screenshot a live page and return the raw image bytes (SC-1).
+
+        POSTs to the Browser Rendering screenshot endpoint
+        (POST /accounts/{acct}/browser-rendering/screenshot). ``url`` is the page
+        to render; the three option dicts ride through untouched as
+        ``viewport`` (width / height / deviceScaleFactor), ``gotoOptions``
+        (waitUntil / timeout) and ``screenshotOptions`` (fullPage / type / ...).
+        Omitted options are left off the body entirely so Cloudflare's own
+        defaults apply (a 1920x1080 viewport, a full-quality png).
+
+        ``screenshot_options`` is passed through rather than assembled here on
+        purpose — but note the one combination Cloudflare rejects: ``quality`` is
+        incompatible with the DEFAULT png and returns 400. A caller that wants
+        ``quality`` must also set ``type`` to ``"jpeg"`` or ``"webp"``.
+
+        Unlike every other method here the SUCCESS path is not the JSON envelope:
+        a rendered screenshot comes back as the image itself, so a 2xx with an
+        ``image/*`` content type returns ``resp.content`` directly. Everything
+        else fails closed — a non-2xx goes through the shared ``_unwrap`` (the
+        standard ValidationError), and a 2xx that is not an image (an error
+        envelope, an empty body) raises too, so an HTML error page can never be
+        persisted as a site's preview image."""
+        api_url = f"{_CF_API}/accounts/{self._account_id}/browser-rendering/screenshot"
+        payload: dict = {"url": url}
+        if screenshot_options:
+            payload["screenshotOptions"] = screenshot_options
+        if viewport:
+            payload["viewport"] = viewport
+        if goto_options:
+            payload["gotoOptions"] = goto_options
+        async with self._client() as client:
+            resp = await client.post(api_url, json=payload)
+        content_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if resp.status_code // 100 == 2 and content_type.startswith("image/") and resp.content:
+            return resp.content
+        if resp.status_code // 100 != 2:
+            # Non-2xx: the shared envelope check raises the standard error. It
+            # never reaches ``resp.json()`` on this branch, so a non-JSON error
+            # page still surfaces as a clean ValidationError.
+            self._unwrap(resp)
+        raise ValidationError(
+            "sites.cloudflare_error",
+            f"Browser Rendering returned no image (content-type {content_type or 'unknown'!r})",
+        )
 
     async def query_d1(
         self, *, database_id: str, sql: str, params: list | None = None

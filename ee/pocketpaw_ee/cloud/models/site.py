@@ -161,6 +161,15 @@
 # it fronts. The ids exist so a re-sync can prune what a renamed page left behind
 # without clearing a scope that also holds owner-uploaded files. All default
 # empty/None, so no migration.
+#
+# Updated 2026-08-07 (SC-1 — a site's card shows its own screenshot): added
+# ``preview_image_url`` — the stored URL of a screenshot of this site's live page,
+# written by the best-effort capture ``sites.screenshot`` schedules from the tail
+# of a successful deploy. Empty when no screenshot has landed (never deployed, no
+# public url yet, capture failed, or Cloudflare is unconfigured), and the gallery
+# card falls back to its text layout on empty — so it is always optional and never
+# a gate on publishing. Defaults "" so every existing row reads "no preview" — no
+# migration.
 
 from __future__ import annotations
 
@@ -323,6 +332,14 @@ class Site(TimestampedDocument):
     # is broken". "" means the last sync was clean.
     kb_synced_at: datetime | None = None
     kb_sync_error: str = ""
+    # SC-1: the stored URL of a screenshot of this site's live page — what the
+    # gallery card renders instead of a title and three pills. Written by the
+    # best-effort capture ``sites.screenshot`` schedules from the tail of a
+    # successful deploy, via a targeted ``set`` so it can never roll back a
+    # concurrent write. "" while no screenshot has landed (never deployed, no
+    # public url, capture failed, Cloudflare unconfigured); the card falls back to
+    # the text layout on empty, so this is never a gate on publishing.
+    preview_image_url: str = ""
 
     def rotate_signed_key(self) -> str:
         """Regenerate the public embed key and return the new value (T1).

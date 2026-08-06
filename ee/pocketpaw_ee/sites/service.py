@@ -1,6 +1,19 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-08-07 (SC-1 — a site's card shows its own screenshot): the tail of
+# a SUCCESSFUL deploy now also schedules a screenshot of the page it just put
+# live (``_schedule_site_screenshot``, next to the knowledge sync it is modelled
+# on), and ``_to_response`` / ``pocket_status`` surface the resulting
+# ``preview_image_url`` on both DTOs so the gallery card can render the page
+# instead of a title and three pills. Both live-deploy paths schedule it —
+# ``_deploy_site_doc`` (static / inline publish) and ``finalize_provisioned_site``
+# (the durable dynamic provision job) — because those are the two places a site
+# actually becomes reachable. The scheduling call is wrapped exactly like the KB
+# sync: a screenshot is a picture of a site that is ALREADY deployed and serving,
+# so nothing about it may fail, delay, or block the publish. On any failure the
+# field stays empty and the card falls back to its text layout.
+#
 # Updated 2026-08-02 (draft render): the PREVIEW deploy in ``publish`` is now
 # engine-aware, closing the half of HE-4 that was missed. HE-4 taught the LIVE
 # deploy that a built site's servable files live somewhere different per engine
@@ -1503,6 +1516,10 @@ def _to_response(doc: _SiteDoc, pattern: str = "", engine: str = "") -> SiteResp
         # SI-4: the persisted import summary for an imported site; None for every
         # non-imported site (empty dict on the doc reads as None on the wire).
         import_report=getattr(doc, "import_report", None) or None,
+        # SC-1: the screenshot of the site's live page the gallery card renders.
+        # None until a capture lands (empty string on the doc, and every pre-SC-1
+        # row via the getattr default, read as None on the wire).
+        preview_image_url=getattr(doc, "preview_image_url", "") or None,
     )
 
 
@@ -2244,6 +2261,11 @@ async def _deploy_site_doc(
     # the concierge catches up a moment later. A preview publish never reaches here
     # (it returns earlier), so a draft never rewrites the live KB.
     _schedule_site_knowledge_sync(doc)
+    # SC-1: the page the gallery card shows is now a different page, so re-shoot
+    # it. Same placement and the same rule as the sync above — the site is
+    # already live, so a screenshot may never fail or delay the publish. A
+    # preview publish never reaches here, so a draft is never photographed.
+    _schedule_site_screenshot(doc)
     return doc
 
 
@@ -2394,6 +2416,30 @@ def _schedule_site_knowledge_sync(site: _SiteDoc) -> None:
     except Exception:  # noqa: BLE001 — never fail a live publish over a KB sync
         logger.warning(
             "sites.kb: could not schedule knowledge sync for site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
+
+
+def _schedule_site_screenshot(site: _SiteDoc) -> None:
+    """Fire the background screenshot of a freshly-deployed site (SC-1). Non-async,
+    never blocks, never raises. Looked up through the module so tests can patch it,
+    mirroring ``_schedule_site_knowledge_sync`` directly above.
+
+    The try/except is the whole point, and it is a stronger requirement here than
+    for the KB sync: this is called from the tail of a LIVE deploy, so anything
+    escaping would fail a publish of a site that is already deployed and serving —
+    and unlike a sync, the work behind it is a paid, quota'd, remote browser render
+    that WILL time out or 400 sooner or later. A card with no picture is not a
+    problem worth failing a publish over.
+    """
+    try:
+        from pocketpaw_ee.sites.screenshot import schedule_site_screenshot
+
+        schedule_site_screenshot(site)
+    except Exception:  # noqa: BLE001 — never fail a live publish over a screenshot
+        logger.warning(
+            "sites.screenshot: could not schedule capture for site %s",
             getattr(site, "id", "?"),
             exc_info=True,
         )
@@ -2756,6 +2802,10 @@ async def finalize_provisioned_site(site: _SiteDoc, *, url: str) -> None:
     # ``_deploy_site_doc``, so it needs its own knowledge sync or its concierge
     # would be the only one left knowing nothing about the business.
     _schedule_site_knowledge_sync(site)
+    # SC-1: and its own screenshot, for the same reason — this is the moment a
+    # dynamic site becomes reachable, so it is the moment there is a page to
+    # photograph. The url was stamped a few lines above.
+    _schedule_site_screenshot(site)
 
 
 async def mark_provision_failed(site: _SiteDoc) -> None:
@@ -4556,6 +4606,12 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
         pattern=pattern,
         engine=engine,
+        # SC-1: the same screenshot the list row carries, so a by-pocket status
+        # read can show the page too. None when there is no deployed site, no
+        # capture has landed yet, or the doc predates the field.
+        preview_image_url=(getattr(doc, "preview_image_url", "") or None)
+        if doc is not None
+        else None,
     )
 
 
