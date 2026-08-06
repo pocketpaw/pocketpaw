@@ -20,6 +20,11 @@
 # ``lead`` → ``/sites/<site>?view=leads`` and reads the site off ``room_id``
 # (its generic navigation-target slot), the same way the meeting bridge passes a
 # group there. The notification ``kind`` stays ``lead_captured``.
+#
+# Updated 2026-08-06 (review fix): the body renders the site's DISPLAY NAME, not
+# ``site_id``. site_id is the deploy script name — a 24-char hex id — so the bell
+# read "Someone submitted the lead form on 6d4a1f2b3c8e9a0f1b2c3d4e". The emit
+# now carries ``site_name`` and the id is only a fallback for an unnamed site.
 
 from __future__ import annotations
 
@@ -56,13 +61,19 @@ async def _on_lead_captured(data: dict[str, Any]) -> None:
         return
 
     form_type = data.get("form_type") or "form"
+    # site_id is the deploy script name — a 24-char hex id. Never put it in the
+    # body: the owner's bell would read "… on 6d4a1f2b3c8e9a0f1b2c3d4e". Use the
+    # display name the emit sends along, and fall back to the id only for a site
+    # that was never named (where the id is at least an identifier they can match
+    # against the URL they land on).
+    site_label = str(data.get("site_name") or "").strip() or site_id
     for recipient in recipients:
         await _create(
             workspace_id=workspace_id,
             recipient=recipient,
             lead_id=lead_id,
             site_id=site_id,
-            body=f"Someone submitted the {form_type} form on {site_id}.",
+            body=f"Someone submitted the {form_type} form on {site_label}.",
         )
 
 

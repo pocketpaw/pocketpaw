@@ -57,12 +57,20 @@
 # the front of the funnel, so a submitted form is the hottest signal the product
 # has — leaving it silent meant nobody heard it until someone happened to open
 # the Leads view. The payload carries workspace_id / lead_id / site_id /
-# form_type and NOTHING from the submitted form: the properties are untrusted
-# visitor PII, subscribers that need them read the tenant-scoped Lead by id. The
-# first subscriber is ``leads.bridges.notifications`` (owner/admin in-app
-# notification); the emit is deliberately fire-and-forget — ``EventBus.emit``
-# logs and swallows a failing handler, so a broken subscriber can never fail the
-# public capture endpoint or lose the persisted lead.
+# site_name / form_type and NOTHING from the submitted form: the properties are
+# untrusted visitor PII, subscribers that need them read the tenant-scoped Lead
+# by id. ``site_name`` rides along because ``site_id`` is ``script_name`` — a
+# 24-char hex id, not something to show a human; a subscriber writing display
+# text needs the name at hand rather than a second query.
+#
+# The emit is AWAITED INLINE on the public capture request, not fire-and-forget:
+# ``EventBus.emit`` runs each handler in sequence, so the visitor's POST does not
+# return until every subscriber finishes (today: one admin query, N notification
+# inserts, their WS emits, and any configured outbound webhook POSTs). Bounded
+# and small at present, and worth knowing before adding a slow subscriber — this
+# is the request path, not a background queue. Failures are contained, though:
+# ``emit`` logs and swallows a raising handler, so a broken subscriber can never
+# fail the capture endpoint or lose the persisted lead.
 
 from __future__ import annotations
 
@@ -280,6 +288,10 @@ async def capture(
             "workspace_id": site.workspace,
             "lead_id": str(doc.id),
             "site_id": site.script_name,
+            # The site's DISPLAY name. site_id is the deploy script name (a hex
+            # id), so anything user-facing needs this; "" when the site was never
+            # named, and subscribers fall back to the id.
+            "site_name": site.name,
             "form_type": form_type,
         },
     )

@@ -16,6 +16,14 @@
 #   • a malformed event payload mints nothing
 #   • cross-tenant: a lead in workspace A never notifies workspace B
 #   • end-to-end through the REAL bus: capture() → lead.captured → notification
+#   • the body names the site the owner recognises, never the raw script id
+#
+# Updated 2026-08-06 (review fix): fixtures use a REALISTIC site id. script_name
+# is a 24-char hex ObjectId, and the friendly "site_1" this file used is exactly
+# why a body rendering the raw id looked fine in the tests and looked like a hash
+# in the bell. The registered_bridge fixture also snapshots and restores the
+# topic's subscriber list, so these tests are hermetic no matter who else
+# (mount_cloud in test_integration.py) subscribed earlier in the session.
 
 from __future__ import annotations
 
@@ -42,11 +50,17 @@ async def _user(email: str, workspace: str, role: str) -> str:
     return str(doc.id)
 
 
-async def _site(ws: str = "ws1", site_id: str = "site_1") -> Site:
+# A real script_name is a 24-char hex ObjectId, not a slug. See the header.
+SITE_ID = "6d4a1f2b3c8e9a0f1b2c3d4e"
+SITE_NAME = "Bright Smile Dental"
+
+
+async def _site(ws: str = "ws1", site_id: str = SITE_ID, name: str = SITE_NAME) -> Site:
     site = Site(
         workspace=ws,
         pocket_id="pk1",
         owner="u1",
+        name=name,
         script_name=site_id,
         allowed_origins=["brightsmiledental.com"],
         signed_key="pp_tok_x",
@@ -68,11 +82,20 @@ async def _notifications(recipient: str | None = None) -> list[_NotificationDoc]
 
 @pytest.fixture
 def registered_bridge():
-    """Register the production subscriber on the real singleton bus, then take
-    it back off so the subscription can't leak into sibling tests."""
+    """Register the production subscriber on the real singleton bus.
+
+    Snapshots the topic's subscriber list and clears it first, so the test sees
+    EXACTLY one handler even when something earlier in the session already
+    subscribed one (``mount_cloud`` does, and tests/cloud/test_integration.py
+    calls it repeatedly) — a duplicate would double every notification and turn
+    the count assertions into order-dependent flakes. The snapshot is restored on
+    teardown so nothing leaks either way.
+    """
+    saved = list(event_bus._handlers["lead.captured"])
+    event_bus._handlers["lead.captured"].clear()
     leads_bridge.register_lead_notification_listeners()
     yield
-    event_bus.unsubscribe("lead.captured", leads_bridge._on_lead_captured)
+    event_bus._handlers["lead.captured"] = saved
 
 
 @pytest.mark.asyncio
@@ -87,7 +110,7 @@ async def test_captured_lead_notifies_owner_and_admins(mongo_db):
         {
             "workspace_id": "ws1",
             "lead_id": "ld-1",
-            "site_id": "site_1",
+            "site_id": SITE_ID,
             "form_type": "AppointmentRequest",
         }
     )
@@ -108,7 +131,7 @@ async def test_notification_kind_and_source_deep_link_the_site(mongo_db):
         {
             "workspace_id": "ws1",
             "lead_id": "ld-42",
-            "site_id": "site_1",
+            "site_id": SITE_ID,
             "form_type": "AppointmentRequest",
         }
     )
@@ -121,16 +144,63 @@ async def test_notification_kind_and_source_deep_link_the_site(mongo_db):
     assert note.source is not None
     assert note.source.type == "lead"
     assert note.source.id == "ld-42"
-    assert note.source.room_id == "site_1"
+    assert note.source.room_id == SITE_ID
     assert "AppointmentRequest" in note.body
+
+
+@pytest.mark.asyncio
+async def test_body_names_the_site_not_its_script_id(mongo_db):
+    """The owner reads this in a bell, so it has to name the site they know.
+    site_id is the deploy script name — a 24-char hex id — and rendering it made
+    the notification read "… on 6d4a1f2b3c8e9a0f1b2c3d4e"."""
+    owner = await _user("owner@x.c", "ws1", "owner")
+
+    await leads_bridge._on_lead_captured(
+        {
+            "workspace_id": "ws1",
+            "lead_id": "ld-1",
+            "site_id": SITE_ID,
+            "site_name": SITE_NAME,
+            "form_type": "AppointmentRequest",
+        }
+    )
+
+    body = (await _notifications(owner))[0].body
+    assert SITE_NAME in body
+    assert SITE_ID not in body
+    assert "AppointmentRequest" in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site_name", [None, "", "   "])
+async def test_body_falls_back_to_the_id_for_an_unnamed_site(mongo_db, site_name):
+    """A site that was never named has no better label — the id is at least
+    something the owner can match against the URL the click lands on. Missing,
+    empty, and whitespace-only all take the fallback rather than rendering
+    "on ." or "on None"."""
+    owner = await _user("owner@x.c", "ws1", "owner")
+
+    payload = {
+        "workspace_id": "ws1",
+        "lead_id": "ld-1",
+        "site_id": SITE_ID,
+        "form_type": "AppointmentRequest",
+    }
+    if site_name is not None:
+        payload["site_name"] = site_name
+
+    await leads_bridge._on_lead_captured(payload)
+    body = (await _notifications(owner))[0].body
+    assert SITE_ID in body
+    assert "None" not in body
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "payload",
     [
-        {"lead_id": "ld-1", "site_id": "site_1"},  # no workspace → no tenancy
-        {"workspace_id": "ws1", "site_id": "site_1"},  # no lead → points nowhere
+        {"lead_id": "ld-1", "site_id": SITE_ID},  # no workspace → no tenancy
+        {"workspace_id": "ws1", "site_id": SITE_ID},  # no lead → points nowhere
         {"workspace_id": "ws1", "lead_id": "ld-1"},  # no site → no surface
         {},
     ],
@@ -187,7 +257,7 @@ async def test_capture_to_notification_end_to_end(mongo_db, registered_bridge):
     assert len(notes) == 1
     assert notes[0].type == "lead_captured"
     assert notes[0].source.id == lead.id
-    assert notes[0].source.room_id == "site_1"
+    assert notes[0].source.room_id == SITE_ID
 
 
 @pytest.mark.asyncio
@@ -218,7 +288,7 @@ async def test_workspace_with_no_admins_is_a_silent_no_op(mongo_db):
         {
             "workspace_id": "ws-empty",
             "lead_id": "ld-1",
-            "site_id": "site_1",
+            "site_id": SITE_ID,
             "form_type": "AppointmentRequest",
         }
     )

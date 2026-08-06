@@ -20,6 +20,11 @@
 # moved MEDIUM -> HIGH. A HIGH-threat injection still drops; a MEDIUM phrase
 # (e.g. "act as a guarantor", a persona_hijack match on legitimate lead text)
 # now passes, because a lost lead is the worst failure here.
+# Updated 2026-08-06 (review fix): the site fixtures use a REALISTIC id. A Site's
+# ``script_name`` is the deploy script name — a 24-char hex ObjectId — and the
+# friendly slug this file used made anything that rendered the raw id read fine
+# here while reading like a hash in the product. The emit payload also carries
+# ``site_name`` now, so a subscriber writing display text has the name.
 # Updated 2026-08-06 (feat/coupling-lead-captured, T-6): capture now EMITS
 # ``lead.captured`` on the cross-domain bus. Covered here against the REAL
 # ``shared.events.event_bus`` (a spy subscriber, not a patched emit) so the test
@@ -55,11 +60,20 @@ def lead_events():
     event_bus.unsubscribe("lead.captured", _record)
 
 
-async def _site(ws="ws1", site_id="site_1", **over) -> Site:
+# A published Site's ``script_name`` IS its deploy script name: a 24-char hex
+# ObjectId, never a slug. Fixtures use one so anything that renders the id reads
+# here exactly as ugly as it reads in the product.
+SITE_ID = "6d4a1f2b3c8e9a0f1b2c3d4e"
+SITE_ID_B = "7e5b2a3c4d9f0b1a2c3d4e5f"
+SITE_NAME = "Bright Smile Dental"
+
+
+async def _site(ws="ws1", site_id=SITE_ID, name=SITE_NAME, **over) -> Site:
     site = Site(
         workspace=ws,
         pocket_id="pk1",
         owner="u1",
+        name=name,
         script_name=site_id,
         allowed_origins=["brightsmiledental.com"],
         signed_key="pp_tok_x",
@@ -86,7 +100,7 @@ async def test_capture_writes_a_tenant_scoped_lead(mongo_db):
     )
     assert lead is not None
     assert lead.workspace_id == "ws1"
-    assert lead.site_id == "site_1"
+    assert lead.site_id == SITE_ID
     # event-mapping interpolation produced the resolved property
     assert lead.properties == {"name": "Sam"}
 
@@ -101,24 +115,24 @@ async def test_capture_drops_honeypot_submission(mongo_db):
         submitter_ref="ip_hash_2",
     )
     assert lead is None  # honeypot tripped → silently dropped
-    assert await leads_service.count_for_site("ws1", "site_1") == 0
+    assert await leads_service.count_for_site("ws1", SITE_ID) == 0
 
 
 @pytest.mark.asyncio
 async def test_list_for_site_is_tenant_scoped(mongo_db):
-    site_a = await _site(ws="ws1", site_id="site_a")
-    site_b = await _site(ws="ws2", site_id="site_b")
+    site_a = await _site(ws="ws1", site_id=SITE_ID)
+    site_b = await _site(ws="ws2", site_id=SITE_ID_B)
     await leads_service.capture(
         site=site_a, form_type="AppointmentRequest", payload={"full_name": "A"}, submitter_ref="i1"
     )
     await leads_service.capture(
         site=site_b, form_type="AppointmentRequest", payload={"full_name": "B"}, submitter_ref="i2"
     )
-    leads_ws1 = await leads_service.list_for_site("ws1", "site_a")
+    leads_ws1 = await leads_service.list_for_site("ws1", SITE_ID)
     assert len(leads_ws1) == 1
     assert leads_ws1[0].properties == {"name": "A"}
     # cross-tenant read returns nothing
-    assert await leads_service.list_for_site("ws1", "site_b") == []
+    assert await leads_service.list_for_site("ws1", SITE_ID_B) == []
 
 
 @pytest.mark.asyncio
@@ -137,7 +151,7 @@ async def test_capture_drops_injection_payload(mongo_db):
         submitter_ref="ip_attacker",
     )
     assert lead is None  # injection screen tripped → dropped
-    assert await leads_service.count_for_site("ws1", "site_1") == 0
+    assert await leads_service.count_for_site("ws1", SITE_ID) == 0
 
 
 @pytest.mark.asyncio
@@ -157,7 +171,7 @@ async def test_capture_allows_medium_threat_phrase_after_threshold_raised(mongo_
         rate_key="rk_lead",
     )
     assert lead is not None  # MEDIUM no longer drops → the lead is captured
-    assert await leads_service.count_for_site("ws1", "site_1") == 1
+    assert await leads_service.count_for_site("ws1", SITE_ID) == 1
 
 
 @pytest.mark.asyncio
@@ -199,7 +213,7 @@ async def test_per_ip_bucket_keyed_on_rate_key_not_submitter_ref(mongo_db):
         rate_key="host_hash_shared",  # … but the host (rate_key) is the same
     )
     assert second is None  # same bucket → rate-limited despite the new ref
-    assert await leads_service.count_for_site("ws1", "site_1") == 1
+    assert await leads_service.count_for_site("ws1", SITE_ID) == 1
 
 
 @pytest.mark.asyncio
@@ -224,7 +238,7 @@ async def test_different_rate_key_gets_its_own_bucket(mongo_db):
     )
     assert a is not None
     assert b is not None  # distinct host, not throttled
-    assert await leads_service.count_for_site("ws1", "site_1") == 2
+    assert await leads_service.count_for_site("ws1", SITE_ID) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +360,7 @@ async def test_inserts_past_the_per_ip_cap_are_rejected(mongo_db):
         if lead is not None:
             accepted += 1
     assert accepted == 2  # exactly the cap, no more
-    assert await leads_service.count_for_site("ws1", "site_1") == 2
+    assert await leads_service.count_for_site("ws1", SITE_ID) == 2
 
 
 @pytest.mark.asyncio
@@ -435,9 +449,38 @@ async def test_capture_emits_lead_captured(mongo_db, lead_events):
     assert lead_events[0] == {
         "workspace_id": "ws1",
         "lead_id": lead.id,
-        "site_id": "site_1",
+        "site_id": SITE_ID,
+        "site_name": SITE_NAME,
         "form_type": "AppointmentRequest",
     }
+
+
+@pytest.mark.asyncio
+async def test_emit_carries_the_site_name_for_display(mongo_db, lead_events):
+    """site_id is the deploy script name — a hex id nobody should be shown. The
+    display name rides along so a subscriber writing user-facing text has it
+    without a second query, and it falls back to "" for an unnamed site rather
+    than going missing (subscribers then use the id)."""
+    named = await _site()
+    await leads_service.capture(
+        site=named,
+        form_type="AppointmentRequest",
+        payload={"full_name": "Sam"},
+        submitter_ref="ip1",
+        rate_key="rk_named",
+    )
+    assert lead_events[0]["site_name"] == SITE_NAME
+    assert lead_events[0]["site_id"] != lead_events[0]["site_name"]
+
+    unnamed = await _site(site_id=SITE_ID_B, name="")
+    await leads_service.capture(
+        site=unnamed,
+        form_type="AppointmentRequest",
+        payload={"full_name": "Ada"},
+        submitter_ref="ip2",
+        rate_key="rk_unnamed",
+    )
+    assert lead_events[1]["site_name"] == ""
 
 
 @pytest.mark.asyncio
