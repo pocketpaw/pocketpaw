@@ -1,0 +1,135 @@
+[
+  {
+    "label": "chain: create never opens the chain (agent.proposed dropped)",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/service.py",
+    "find": "    proposed_id = _safe_chain_emit(\n        record_agent_proposed,",
+    "replace": "    proposed_id = None\n    _never = lambda **_k: _safe_chain_emit(\n        record_agent_proposed,",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "chain: decide never closes the chain (decision.completed dropped)",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/service.py",
+    "find": "    _safe_chain_emit(\n        record_decision_completed,",
+    "replace": "    _never = lambda **_k: _safe_chain_emit(\n        record_decision_completed,",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "chain: decide never records the human (human.corrected dropped)",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/service.py",
+    "find": "    human_event_id = _safe_chain_emit(\n        record_human_corrected,",
+    "replace": "    human_event_id = None\n    _never = lambda **_k: _safe_chain_emit(\n        record_human_corrected,",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "chain: create mints no correlation_id",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/service.py",
+    "find": "        correlation_id=str(correlation_id),",
+    "replace": "        correlation_id=\"\",",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "chain: a reject closes the chain as passed",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/service.py",
+    "find": "    approved = new_status == \"approved\"",
+    "replace": "    approved = True",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "audit: the decision writes no workspace audit row",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/service.py",
+    "find": "    await _record_audit_safe(\n        workspace_id=workspace_id,",
+    "replace": "    _never = lambda **_k: _record_audit_safe(\n        workspace_id=workspace_id,",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "audit: the row is filed under the wrong action name",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/service.py",
+    "find": "            action=f\"instinct_approval.{new_status}\",",
+    "replace": "            action=\"instinct_approval.decided\",",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "audit: the actor is the requester, not the decider",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/service.py",
+    "find": "            actor_id=user_id or \"unknown\",",
+    "replace": "            actor_id=approval.requested_by or \"unknown\",",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "notify: create never publishes to the notification bridge",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/service.py",
+    "find": "    await _publish_created_safe(dict(wire))",
+    "replace": "    _never = lambda: _publish_created_safe(dict(wire))",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "notify: the bridge notifies every member, not just owner+admins",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/bridges/notifications.py",
+    "find": "        return await workspace_service.list_admin_ids(workspace_id)",
+    "replace": "        return await workspace_service.list_member_ids(workspace_id)",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "tenancy: the bridge resolves recipients from a fixed workspace",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/bridges/notifications.py",
+    "find": "    recipients = await _workspace_admin_ids(str(workspace_id))",
+    "replace": "    recipients = await _workspace_admin_ids(\"ws-beta\")",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "notify: the notification loses its source pointer",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/bridges/notifications.py",
+    "find": "            source=NotificationSource(type=\"instinct_action\", id=approval_id, pocket_id=pocket_id),",
+    "replace": "            source=None,",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "resilience: a dead notification sink breaks the approval",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/bridges/notifications.py",
+    "find": "    except Exception:\n        logger.exception(\n            \"Failed to create approval_pending notification for approval=%s\", approval_id\n        )",
+    "replace": "    except TypeError:\n        logger.exception(\n            \"Failed to create approval_pending notification for approval=%s\", approval_id\n        )",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "resilience: a broken membership query breaks the approval",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/bridges/notifications.py",
+    "find": "    except Exception:\n        logger.exception(\"Failed to list admins for workspace=%s\", workspace_id)\n        return []",
+    "replace": "    except TypeError:\n        logger.exception(\"Failed to list admins for workspace=%s\", workspace_id)\n        return []",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "resilience: a journal failure breaks the decision",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/service.py",
+    "find": "    except Exception:  # noqa: BLE001 — chain emit is best-effort by contract",
+    "replace": "    except TypeError:",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "resilience: an audit failure breaks the decision",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/service.py",
+    "find": "    except Exception:  # noqa: BLE001 — audit must never break the decision",
+    "replace": "    except TypeError:",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "resilience: a raising subscriber starves the next one",
+    "file": "ee/pocketpaw_ee/cloud/shared/events.py",
+    "find": "            try:\n                await handler(data)\n            except Exception:",
+    "replace": "            try:\n                await handler(data)\n            except TypeError:",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "resilience: a bus-level failure breaks the approval",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/service.py",
+    "find": "    except Exception:  # noqa: BLE001 — fan-out must never break create",
+    "replace": "    except TypeError:",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "wiring: mount_cloud stops registering the bridge",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "    register_instinct_approval_notification_listeners()",
+    "replace": "    _never = register_instinct_approval_notification_listeners",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  }
+]
