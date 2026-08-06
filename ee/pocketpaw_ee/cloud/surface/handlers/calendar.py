@@ -1,24 +1,28 @@
 # calendar.py — /calendar surface preamble.
 #
-# Updated: 2026-05-24 (feat/calendar-entity-surface, #1218) — restored
-# the third rendering state so "Composio off" and "Composio on but no
-# events" no longer collapse to the same hint. Three distinct branches
-# now drive the snapshot block:
+# Updated: 2026-08-06 (feat/coupling-calendar-sot, T-13) — no code change,
+# but the data source behind ``list_upcoming`` moved: it is now a
+# projection over the canonical calendar store (``pocketpaw_ee.calendar``,
+# refreshed from Composio on a TTL), so the events listed here are the
+# SAME rows /calendar renders — native creates, bridge-minted meetings,
+# and Composio-synced events alike. Branch semantics shift accordingly:
 #
 #   1. Events present — render one line per event ("- 10:30 AM ·
 #      Sync with Sarah") inside the snapshot block.
-#   2. Composio enabled but no upcoming events — render
-#      ``<calendar-snapshot>(no upcoming events)</calendar-snapshot>``
-#      so the agent knows the integration works and the calendar is
-#      genuinely empty.
-#   3. Composio disabled OR the service raised — render the static
+#   2. Composio enabled but no events — the store is genuinely empty
+#      for the upcoming window; render
+#      ``<calendar-snapshot>(no upcoming events)</calendar-snapshot>``.
+#   3. Composio disabled AND the store has nothing — render the static
 #      hint pointing at GOOGLECALENDAR_LIST_EVENTS so the agent still
 #      discovers the action and the user can be guided to connect.
+#      (A workspace with native/bridge events renders branch 1 even
+#      with Composio off — the store serves regardless.)
 #
-# We probe ``composio_service.is_enabled()`` from the handler (lazy
-# import, same as ``list_upcoming``) to split branches 2 and 3 without
-# changing the service signature — the brief calls this out as the
-# minimum-blast-radius split.
+# History: 2026-05-24 (feat/calendar-entity-surface, #1218) restored the
+# third rendering state via the ``composio_service.is_enabled()`` probe
+# (lazy import, same as ``list_upcoming``) so "no integration" and
+# "genuinely empty" stay distinguishable without changing the service
+# signature.
 #
 # Surface tag is always emitted so the agent always knows which route
 # the user is on, regardless of which branch above ran.
@@ -91,9 +95,11 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         )
 
     if not events:
-        # No events AND no error. Two sub-states the agent needs to tell
-        # apart: Composio is on (calendar genuinely empty) vs Composio
-        # is off (no integration at all). Probe is_enabled() to pick.
+        # No events AND no raise. Two sub-states the agent needs to tell
+        # apart: Composio on — the store's upcoming window is empty (or,
+        # rarely, the store read failed and the service degraded to []) —
+        # vs Composio off AND nothing in the store (no integration at
+        # all). Probe is_enabled() to pick.
         # Lazy import mirrors the list_upcoming pattern above — keeps
         # the cold-path cheap and the test monkeypatch surface clean.
         try:

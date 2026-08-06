@@ -1,5 +1,12 @@
 # domain.py — Cloud calendar entity value objects.
 #
+# Updated: 2026-08-06 (feat/coupling-calendar-sot, T-13) — events are now
+# built from the canonical calendar store (``pocketpaw_ee.calendar``)
+# instead of raw Composio payloads. ``id`` is the canonical local event
+# id (the /calendar row id); the upstream Google id lives on the store
+# row as ``source_external_id``. ``source`` gains the "local" slug for
+# rows with no external connector (native /calendar or bridge-minted).
+#
 # Created: 2026-05-24 (feat/calendar-entity-surface, #1214) — frozen
 # dataclass with workspace_id required at construction. Mirrors the
 # ee/cloud rule: domain enforces multi-tenancy at construction time so
@@ -7,11 +14,8 @@
 # workspace_id first after id, so any positional construction lands
 # tenancy in front; missing workspace_id is a TypeError, not silent.
 #
-# ISO-string start/end (not datetime). The data flows in from Composio
-# as JSON strings (Google Calendar returns RFC 3339 timestamps) and
-# flows back out to the surface preamble as strings — there's no
-# date math in the read path, so parsing the strings would be pure
-# overhead. Domain stays as plain pass-through value objects.
+# ISO-string start/end (not datetime) — the preamble renders strings and
+# does no date math, so parsing would be pure overhead.
 
 from __future__ import annotations
 
@@ -27,22 +31,23 @@ class CalendarEvent:
     without one is a TypeError. Same rule as the rest of ``ee/cloud``.
 
     Fields:
-      * ``id`` — the upstream provider's event id (Google Calendar
-        event id when sourced from Composio).
+      * ``id`` — the canonical local event id (the /calendar row id).
+        The upstream Google event id, when there is one, lives on the
+        store row as ``source_external_id``.
       * ``workspace_id`` — owning workspace. Tagged at construction so
         downstream code can fan out events across workspaces without
         accidentally bleeding one tenant into another.
-      * ``title`` — event title (Google Calendar ``summary``). Defaults
-        only to a placeholder when the upstream payload omits it.
-      * ``start`` / ``end`` — ISO 8601 strings. RFC 3339 ``dateTime``
-        when the event has a time component; date-only ``YYYY-MM-DD``
-        when the event is all-day. Empty string when missing upstream.
+      * ``title`` — event title. Defaults only to a placeholder when
+        the upstream payload omitted it at ingest time.
+      * ``start`` / ``end`` — ISO 8601 strings rendered from the store's
+        UTC datetimes. Empty string when missing.
       * ``attendees`` — list of email strings. Optional; defaults to
         an empty list. Each entry is the raw email — no normalization
         is applied at this layer (downstream services may dedupe).
-      * ``source`` — upstream system slug (e.g. ``"google"``, ``"ical"``).
-        Distinct from "the connector" so future providers can ship
-        without renaming the field.
+      * ``source`` — upstream system slug: ``"google"`` for google-family
+        connectors (native gcalendar OAuth or Composio), ``"local"`` for
+        rows with no external connector (native /calendar creates and
+        bridge-minted meetings), other connector slugs pass through.
     """
 
     id: str

@@ -1,43 +1,74 @@
 # tests/cloud/calendar/test_service.py — Cloud calendar service.
 #
-# Updated: 2026-05-24 (feat/calendar-entity-surface, #1218) — added a
-# fifth guarantee: cross-workspace calls against the same mock
-# upstream payload tag each returned event with the requesting
-# workspace_id. Protects the tenancy invariant when the same Composio
-# response (in this contrived test) is read by two workspaces in
-# sequence — the wire dicts must carry their own workspace_id, not
-# leak whichever workspace happened to run first.
+# Updated: 2026-08-06 (feat/coupling-calendar-sot, T-13) — rewritten for
+# the projection architecture: ``list_upcoming`` now reads the canonical
+# calendar store (``pocketpaw_ee.calendar``) and refreshes it from
+# Composio at most once per TTL window, instead of returning raw
+# Composio payloads. Tests run against a real (mongomock) Beanie store
+# via the ``mongo_db`` fixture because the guarantee under test is
+# store/preamble parity — faking the store would mock the seam.
 #
-# Five guarantees:
-#   1. Composio disabled  → ``[]`` (no SDK touch, no error).
-#   2. Happy path         → events flow through with workspace tagging.
-#   3. Workspace required → empty workspace_id raises ``ValidationError``.
-#   4. Limit parameter    → caps the returned slice even when upstream
-#                            returns more rows than asked for.
-#   5. Cross-workspace    → two calls with different workspace_ids
-#                            against one upstream payload return wire
-#                            dicts each tagged with their own workspace.
+# Guarantees:
+#   1. Tenancy + bounds guards refuse bad input (unchanged from #1214).
+#   2. PARITY — the agent preamble's event set equals what /calendar's
+#      ``list_events`` returns: native, bridge-minted, and
+#      Composio-synced events all appear in both.
+#   3. A Composio-only event becomes visible on /calendar after the
+#      sync-on-read ingest.
+#   4. The same Google event arriving via BOTH connectors renders once.
+#   5. Composio outage → the preamble still serves from the store
+#      (degraded freshness, not a broken surface).
+#   6. TTL — repeated preamble builds within the window hit Composio at
+#      most once.
+#   7. Cross-workspace isolation on the store read path.
 #
-# Tests monkeypatch the composio service boundary
-# (``is_enabled`` / ``_get_client`` / ``composio_user_id``) rather than
-# the upstream SDK — we're testing the calendar adapter's contract,
-# not Composio's wire format. The one place we DO exercise Composio's
-# wire shape is the happy-path test, which feeds a Google-shaped
-# payload through the real parsing helpers.
+# Composio is doubled at the service boundary (``is_enabled`` /
+# ``_get_client`` / ``composio_user_id``) exactly as before — we test
+# the calendar service's contract, not Composio's wire format.
+#
+# Mutation gates (tests/mutations/calendar_sot.json): skipping the store
+# projection, dropping the workspace filter, breaking the source
+# mapping, and removing the TTL check are each caught here.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from pocketpaw_ee.calendar._context import RequestContext as CalendarContext
+from pocketpaw_ee.calendar.dto import CreateEventRequest, ListEventsRequest
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.calendar import service as calendar_service
 from pocketpaw_ee.cloud.composio.domain import ComposioUserId
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Fixtures + helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _fresh_refresh_cache():
+    """The sync-on-read TTL memory is module-level state — reset it per
+    test so one test's refresh doesn't suppress another's."""
+    calendar_service._reset_refresh_cache()
+    yield
+    calendar_service._reset_refresh_cache()
+
+
+@pytest.fixture(autouse=True)
+def _silence_calendar_bus(monkeypatch: pytest.MonkeyPatch):
+    """Seeding events via ``calendar.service.create_event`` emits on the
+    shared event bus; if another test module registered the meetings
+    bridge in this process, the fan-out would mint Meeting rows mid-test.
+    Silence emission — bridge behaviour is tested in its own suite."""
+    from pocketpaw_ee.cloud.shared.events import event_bus
+
+    async def _no_emit(_topic: str, _data: dict) -> None:
+        return None
+
+    monkeypatch.setattr(event_bus, "emit", _no_emit)
 
 
 def _patch_composio(
@@ -83,35 +114,66 @@ def _google_event(
     *,
     id: str,
     summary: str,
-    start: str,
-    end: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
     attendees: list[str] | None = None,
-    all_day: bool = False,
 ) -> dict[str, Any]:
-    """Build a Google-Calendar-shaped event dict (the ``items[]`` row).
-
-    Mirrors Google's wire format closely enough that the adapter's
-    parser is exercised the same way it would be in production: nested
-    ``start.dateTime`` (or ``start.date`` for all-day), ``attendees``
-    list of ``{"email": ...}`` dicts, ``summary`` for the title.
-    """
-    start_block = {"date": start} if all_day else {"dateTime": start}
-    end_block: dict[str, Any]
-    if end is None:
-        end_block = start_block
-    elif all_day:
-        end_block = {"date": end}
-    else:
-        end_block = {"dateTime": end}
+    """Build a Google-Calendar-shaped ``items[]`` row for the mocked
+    Composio response. Times default to tomorrow so the event lands in
+    the projection's upcoming window."""
+    start = start or (datetime.now(UTC) + timedelta(days=1))
+    end = end or (start + timedelta(hours=1))
     item: dict[str, Any] = {
         "id": id,
         "summary": summary,
-        "start": start_block,
-        "end": end_block,
+        "start": {"dateTime": start.isoformat()},
+        "end": {"dateTime": end.isoformat()},
     }
     if attendees:
         item["attendees"] = [{"email": e} for e in attendees]
     return item
+
+
+async def _seed_event(
+    workspace_id: str,
+    title: str,
+    *,
+    user_id: str = "user_test",
+    calendar_id: str = "primary",
+    days_ahead: float = 1.0,
+    fabric_object_id: str | None = None,
+) -> str:
+    """Create a store event the way real writers do (the /calendar API
+    and the meetings reverse-bridge both go through ``create_event``).
+    Returns the canonical event id."""
+    from pocketpaw_ee.calendar.service import create_event
+
+    starts = datetime.now(UTC) + timedelta(days=days_ahead)
+    resp = await create_event(
+        CalendarContext(workspace_id=workspace_id, user_id=user_id),
+        CreateEventRequest(
+            calendar_id=calendar_id,
+            title=title,
+            starts_at=starts,
+            ends_at=starts + timedelta(hours=1),
+            timezone="UTC",
+            fabric_object_id=fabric_object_id,
+        ),
+    )
+    return resp.id
+
+
+async def _calendar_page_ids(workspace_id: str, user_id: str = "user_test") -> set[str]:
+    """The /calendar page's view of the upcoming window — the parity
+    oracle. Same store API the calendar router serves."""
+    from pocketpaw_ee.calendar.service import list_events
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    listed = await list_events(
+        CalendarContext(workspace_id=workspace_id, user_id=user_id),
+        ListEventsRequest(starts_after=now, starts_before=now + timedelta(days=30)),
+    )
+    return {ev.id for ev in listed.events}
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +184,7 @@ def _google_event(
 async def test_empty_workspace_id_raises_validation_error() -> None:
     """The first cloud entity rule is "domain enforces tenancy at
     construction". The service mirrors it: empty workspace_id is a
-    refusal, not a quiet degrade — same pattern other cloud services
-    use to refuse a missing workspace."""
+    refusal, not a quiet degrade."""
     with pytest.raises(ValidationError, match="workspace_required"):
         await calendar_service.list_upcoming("", "user_test", limit=5)
 
@@ -139,217 +200,397 @@ async def test_non_positive_limit_raises_validation_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Composio gating
+# Projection — the store is the source of truth
 # ---------------------------------------------------------------------------
 
 
-async def test_returns_empty_when_composio_disabled(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_serves_store_events_when_composio_disabled(
+    monkeypatch: pytest.MonkeyPatch, mongo_db: Any
 ) -> None:
-    """The most common "no data" state: Composio not configured at all.
-    The handler will fall back to its hint; the service stays silent."""
+    """The old path returned ``[]`` whenever Composio was off — hiding
+    every native and bridge-minted event from the agent. The projection
+    serves the store regardless of Composio."""
     execute = _patch_composio(monkeypatch, enabled=False)
+    event_id = await _seed_event("ws_acme", "Native standup")
+
     out = await calendar_service.list_upcoming("ws_acme", "user_test", limit=5)
-    assert out == []
+
+    assert [ev["id"] for ev in out] == [event_id]
+    assert out[0]["title"] == "Native standup"
+    assert out[0]["workspace_id"] == "ws_acme"
+    assert out[0]["source"] == "local"
     execute.assert_not_called()
 
 
-async def test_returns_empty_when_upstream_errors(
+async def test_preamble_parity_with_calendar_page(
+    monkeypatch: pytest.MonkeyPatch, mongo_db: Any
+) -> None:
+    """THE T-13 invariant: the agent's "your upcoming events" and the
+    /calendar page list the same set — native, bridge-minted, and
+    Composio-synced events all present in both."""
+    native_id = await _seed_event("ws_acme", "Native standup")
+    bridge_id = await _seed_event(
+        "ws_acme",
+        "Client call",
+        calendar_id="meetings",
+        fabric_object_id="meeting:m1",
+        days_ahead=2.0,
+    )
+    _patch_composio(
+        monkeypatch,
+        enabled=True,
+        execute_return={
+            "data": {"items": [_google_event(id="gid-1", summary="Composio sync")]},
+            "successful": True,
+        },
+    )
+
+    out = await calendar_service.list_upcoming("ws_acme", "user_test", limit=10)
+    preamble_ids = {ev["id"] for ev in out}
+
+    page_ids = await _calendar_page_ids("ws_acme")
+    assert preamble_ids == page_ids
+    assert {native_id, bridge_id} <= preamble_ids
+    assert len(preamble_ids) == 3
+    # Bridge-minted and native events carry the "local" source; the
+    # Composio-synced one maps to "google".
+    by_id = {ev["id"]: ev for ev in out}
+    assert by_id[native_id]["source"] == "local"
+    assert by_id[bridge_id]["source"] == "local"
+    composio_ev = next(ev for ev in out if ev["title"] == "Composio sync")
+    assert composio_ev["source"] == "google"
+
+
+async def test_composio_only_event_appears_on_calendar_after_ingest(
+    monkeypatch: pytest.MonkeyPatch, mongo_db: Any
+) -> None:
+    """The reverse half of the old split-brain: a Composio-only event
+    used to be invisible on /calendar. The sync-on-read ingest lands it
+    in the store, where the page's ``list_events`` sees it."""
+    _patch_composio(
+        monkeypatch,
+        enabled=True,
+        execute_return={
+            "data": {"items": [_google_event(id="gid-only", summary="Composio-only")]},
+            "successful": True,
+        },
+    )
+
+    assert await _calendar_page_ids("ws_acme") == set()
+
+    out = await calendar_service.list_upcoming("ws_acme", "user_test", limit=5)
+    assert [ev["title"] for ev in out] == ["Composio-only"]
+
+    from pocketpaw_ee.calendar.service import list_events
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    listed = await list_events(
+        CalendarContext(workspace_id="ws_acme", user_id="user_test"),
+        ListEventsRequest(starts_after=now, starts_before=now + timedelta(days=30)),
+    )
+    assert [ev.title for ev in listed.events] == ["Composio-only"]
+    assert listed.events[0].source_connector == "composio_google"
+    assert listed.events[0].source_external_id == "gid-only"
+
+
+async def test_same_google_event_via_both_connectors_renders_once(
+    monkeypatch: pytest.MonkeyPatch, mongo_db: Any
+) -> None:
+    """A user with the native gcalendar connector AND Composio wired to
+    one Google account: the shared upstream event must not double."""
+    from pocketpaw_ee.calendar import sync
+
+    # Native pull ingests the upstream event first.
+    class _FakeGCalClient:
+        async def list_events(self, **_kw: Any) -> list[dict[str, Any]]:
+            starts = datetime.now(UTC) + timedelta(days=1)
+            return [
+                {
+                    "id": "gid-shared",
+                    "summary": "Shared upstream event",
+                    "start": starts.isoformat(),
+                    "end": (starts + timedelta(hours=1)).isoformat(),
+                    "attendees": [],
+                }
+            ]
+
+    import pocketpaw.clients.gcalendar as gcal_module
+
+    monkeypatch.setattr(gcal_module, "CalendarClient", lambda: _FakeGCalClient())
+    await sync.pull_from_gcalendar(
+        CalendarContext(workspace_id="ws_acme", user_id="user_test"), "primary"
+    )
+
+    # Composio then returns the SAME Google event id.
+    _patch_composio(
+        monkeypatch,
+        enabled=True,
+        execute_return={
+            "data": {"items": [_google_event(id="gid-shared", summary="Shared upstream event")]},
+            "successful": True,
+        },
+    )
+
+    out = await calendar_service.list_upcoming("ws_acme", "user_test", limit=10)
+    assert len(out) == 1
+    assert out[0]["source"] == "google"
+    assert await _calendar_page_ids("ws_acme") == {out[0]["id"]}
+
+
+# ---------------------------------------------------------------------------
+# Degradation + freshness
+# ---------------------------------------------------------------------------
+
+
+async def test_composio_outage_still_serves_store(
+    monkeypatch: pytest.MonkeyPatch, mongo_db: Any
+) -> None:
+    """Upstream 5xx / network error / "no connected account": the old
+    path returned ``[]``; the projection serves what the store has —
+    degraded freshness, not a broken preamble."""
+    event_id = await _seed_event("ws_acme", "Survives the outage")
+    _patch_composio(
+        monkeypatch,
+        enabled=True,
+        execute_side_effect=RuntimeError("composio: upstream 502"),
+    )
+
+    out = await calendar_service.list_upcoming("ws_acme", "user_test", limit=5)
+    assert [ev["id"] for ev in out] == [event_id]
+
+
+async def test_refresh_is_ttl_gated(monkeypatch: pytest.MonkeyPatch, mongo_db: Any) -> None:
+    """Sync-on-read hits Composio at most once per TTL window — repeat
+    preamble builds within the window read the store only."""
+    execute = _patch_composio(
+        monkeypatch,
+        enabled=True,
+        execute_return={
+            "data": {"items": [_google_event(id="gid-1", summary="Synced")]},
+            "successful": True,
+        },
+    )
+
+    await calendar_service.list_upcoming("ws_acme", "user_test", limit=5)
+    await calendar_service.list_upcoming("ws_acme", "user_test", limit=5)
+    assert execute.call_count == 1
+
+    # A new TTL window (simulated via the test hook) refreshes again.
+    calendar_service._reset_refresh_cache()
+    await calendar_service.list_upcoming("ws_acme", "user_test", limit=5)
+    assert execute.call_count == 2
+
+
+async def test_store_projection_failure_degrades_to_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Network or auth errors from Composio must degrade gracefully —
-    the handler always sees a list, never a raised exception."""
+    """If the store itself is unavailable (no Beanie init in this deploy
+    shape), the service keeps its never-raise contract."""
+    _patch_composio(monkeypatch, enabled=False)
+
+    async def _boom(*_a: Any, **_kw: Any) -> Any:
+        raise RuntimeError("store not initialized")
+
+    monkeypatch.setattr(calendar_service, "_upcoming_from_store", _boom)
+    out = await calendar_service.list_upcoming("ws_acme", "user_test", limit=5)
+    assert out == []
+
+
+# ---------------------------------------------------------------------------
+# Tenancy + limit on the read path
+# ---------------------------------------------------------------------------
+
+
+async def test_workspaces_see_only_their_own_events(
+    monkeypatch: pytest.MonkeyPatch, mongo_db: Any
+) -> None:
+    """Store rows are tenant-filtered and every wire dict carries the
+    requesting workspace's tag."""
+    _patch_composio(monkeypatch, enabled=False)
+    id_a = await _seed_event("ws_a", "A's event", user_id="user_a")
+    id_b = await _seed_event("ws_b", "B's event", user_id="user_b")
+
+    out_a = await calendar_service.list_upcoming("ws_a", "user_a", limit=10)
+    out_b = await calendar_service.list_upcoming("ws_b", "user_b", limit=10)
+
+    assert [ev["id"] for ev in out_a] == [id_a]
+    assert [ev["id"] for ev in out_b] == [id_b]
+    assert all(ev["workspace_id"] == "ws_a" for ev in out_a)
+    assert all(ev["workspace_id"] == "ws_b" for ev in out_b)
+
+
+async def test_limit_caps_results_sorted_by_start(
+    monkeypatch: pytest.MonkeyPatch, mongo_db: Any
+) -> None:
+    """More store rows than ``limit`` → the soonest ``limit`` events, in
+    start order."""
+    _patch_composio(monkeypatch, enabled=False)
+    ids = []
+    for i in range(5):
+        ids.append(await _seed_event("ws_acme", f"Event {i}", days_ahead=1.0 + i))
+
+    out = await calendar_service.list_upcoming("ws_acme", "user_test", limit=3)
+    assert [ev["id"] for ev in out] == ids[:3]
+    starts = [ev["start"] for ev in out]
+    assert starts == sorted(starts)
+
+
+# ---------------------------------------------------------------------------
+# Per-user privacy — composio feeds are personal data
+# ---------------------------------------------------------------------------
+
+
+async def test_member_b_never_sees_member_a_composio_events(
+    monkeypatch: pytest.MonkeyPatch, mongo_db: Any
+) -> None:
+    """CRITICAL (review round 2): the Composio connection is per-user, so
+    member A's refresh ingests A's PERSONAL Google feed. It must land on
+    A's private calendar — member B's preamble AND B's /calendar view
+    stay empty, while A keeps seeing their own events."""
+    # Member A's refresh ingests their personal feed.
+    _patch_composio(
+        monkeypatch,
+        enabled=True,
+        execute_return={
+            "data": {"items": [_google_event(id="gid-a", summary="A's 1:1 with therapist")]},
+            "successful": True,
+        },
+    )
+    out_a = await calendar_service.list_upcoming("ws_acme", "user_a", limit=10)
+    assert [ev["title"] for ev in out_a] == ["A's 1:1 with therapist"]
+
+    # Member B has no Composio connection — upstream refuses B's refresh.
     _patch_composio(
         monkeypatch,
         enabled=True,
         execute_side_effect=RuntimeError("composio: no connected account"),
     )
+    out_b = await calendar_service.list_upcoming("ws_acme", "user_b", limit=10)
+    assert out_b == []
+    assert await _calendar_page_ids("ws_acme", "user_b") == set()
+
+    # Member A still sees their own event (store read, TTL suppresses
+    # the second upstream call).
+    out_a2 = await calendar_service.list_upcoming("ws_acme", "user_a", limit=10)
+    assert [ev["title"] for ev in out_a2] == ["A's 1:1 with therapist"]
+    assert await _calendar_page_ids("ws_acme", "user_a") == {out_a[0]["id"]}
+
+
+async def test_declared_private_calendar_respected_by_projection(
+    monkeypatch: pytest.MonkeyPatch, mongo_db: Any
+) -> None:
+    """A calendar explicitly declared private (real _CalendarDoc row, not
+    the synthetic default) must filter through ``list_upcoming``
+    specifically — the projection path, not just the /calendar router."""
+    from pocketpaw_ee.calendar.models import _CalendarDoc
+
+    _patch_composio(monkeypatch, enabled=False)
+
+    cal = _CalendarDoc(
+        workspace="ws_acme",
+        name="X's private calendar",
+        owner_user_id="user_x",
+        timezone="UTC",
+        visibility="private",
+    )
+    await cal.insert()
+    event_id = await _seed_event(
+        "ws_acme", "X's private event", user_id="user_x", calendar_id=str(cal.id)
+    )
+
+    out_x = await calendar_service.list_upcoming("ws_acme", "user_x", limit=10)
+    assert [ev["id"] for ev in out_x] == [event_id]
+
+    out_y = await calendar_service.list_upcoming("ws_acme", "user_y", limit=10)
+    assert out_y == []
+
+
+# ---------------------------------------------------------------------------
+# Rendering — event-local wall time + all-day dates
+# ---------------------------------------------------------------------------
+
+
+async def test_start_renders_event_local_wall_time(
+    monkeypatch: pytest.MonkeyPatch, mongo_db: Any
+) -> None:
+    """The store keeps UTC; the wire must render the event's OWN zone.
+    A 10:30 IST meeting rendered from raw UTC would show "5:00 AM" in
+    the preamble — the exact regression the old Composio pass-through
+    never had."""
+    from zoneinfo import ZoneInfo
+
+    ist = ZoneInfo("Asia/Kolkata")
+    start_local = (datetime.now(ist) + timedelta(days=1)).replace(
+        hour=10, minute=30, second=0, microsecond=0
+    )
+    _patch_composio(
+        monkeypatch,
+        enabled=True,
+        execute_return={
+            "data": {
+                "items": [
+                    {
+                        "id": "gid-ist",
+                        "summary": "IST meeting",
+                        "start": {
+                            "dateTime": start_local.isoformat(),
+                            "timeZone": "Asia/Kolkata",
+                        },
+                        "end": {
+                            "dateTime": (start_local + timedelta(hours=1)).isoformat(),
+                            "timeZone": "Asia/Kolkata",
+                        },
+                    }
+                ]
+            },
+            "successful": True,
+        },
+    )
+
     out = await calendar_service.list_upcoming("ws_acme", "user_test", limit=5)
-    assert out == []
+    assert len(out) == 1
+    assert "T10:30:00" in out[0]["start"]
+    assert out[0]["start"].endswith("+05:30")
+
+    # And the preamble's own formatter renders the wall time the user
+    # would see on their Google Calendar.
+    from pocketpaw_ee.cloud.surface.handlers.calendar import _format_start_time
+
+    assert _format_start_time(out[0]["start"]) == "10:30 AM"
 
 
-async def test_returns_empty_when_upstream_returns_no_items(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_all_day_events_render_date_only(
+    monkeypatch: pytest.MonkeyPatch, mongo_db: Any
 ) -> None:
-    """Composio call succeeded but the user's calendar is empty — same
-    end state as disabled. The handler folds these into one fallback."""
+    """Google all-day events arrive as ``{"date": ...}``; the wire must
+    round-trip them as date-only strings so the handler's date branch
+    fires instead of rendering "12:00 AM · Title"."""
+    tomorrow = (datetime.now(UTC) + timedelta(days=1)).date().isoformat()
+    day_after = (datetime.now(UTC) + timedelta(days=2)).date().isoformat()
     _patch_composio(
         monkeypatch,
         enabled=True,
-        execute_return={"data": {"items": []}, "successful": True},
+        execute_return={
+            "data": {
+                "items": [
+                    {
+                        "id": "gid-allday",
+                        "summary": "Offsite",
+                        "start": {"date": tomorrow},
+                        "end": {"date": day_after},
+                    }
+                ]
+            },
+            "successful": True,
+        },
     )
+
     out = await calendar_service.list_upcoming("ws_acme", "user_test", limit=5)
-    assert out == []
+    assert len(out) == 1
+    assert out[0]["start"] == tomorrow
+    assert "T" not in out[0]["start"]
 
+    from pocketpaw_ee.cloud.surface.handlers.calendar import _format_start_time
 
-# ---------------------------------------------------------------------------
-# Happy path + tenancy tagging
-# ---------------------------------------------------------------------------
-
-
-async def test_happy_path_renders_events_with_workspace_tag(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Five Google-shaped events flow through: titles, ISO timestamps,
-    attendees, and the workspace tag all land on each wire dict.
-    Implicitly verifies the domain object refuses to be built without
-    workspace_id (it would raise at construction otherwise)."""
-    items = [
-        _google_event(
-            id="ev1",
-            summary="Sync with Sarah",
-            start="2026-05-25T10:30:00-07:00",
-            end="2026-05-25T11:00:00-07:00",
-            attendees=["sarah@example.com", "me@example.com"],
-        ),
-        _google_event(
-            id="ev2",
-            summary="Q2 planning",
-            start="2026-05-26T14:00:00-07:00",
-            end="2026-05-26T15:30:00-07:00",
-        ),
-        _google_event(
-            id="ev3",
-            summary="All-hands",
-            start="2026-05-27",
-            end="2026-05-28",
-            all_day=True,
-        ),
-    ]
-    execute = _patch_composio(
-        monkeypatch,
-        enabled=True,
-        execute_return={"data": {"items": items}, "successful": True},
-    )
-
-    out = await calendar_service.list_upcoming("ws_acme", "user_test", limit=10)
-
-    assert len(out) == 3
-    assert {ev["id"] for ev in out} == {"ev1", "ev2", "ev3"}
-    # Every event carries the requesting workspace_id — tenancy tag
-    # applied at domain construction time, mirrored onto the wire dict.
-    assert all(ev["workspace_id"] == "ws_acme" for ev in out)
-    # Source is the upstream system slug, not the toolkit name.
-    assert all(ev["source"] == "google" for ev in out)
-    # Title flows from Google's ``summary`` field.
-    titles = [ev["title"] for ev in out]
-    assert "Sync with Sarah" in titles
-    # Attendees collapse to plain emails.
-    sarah_event = next(ev for ev in out if ev["id"] == "ev1")
-    assert sarah_event["attendees"] == ["sarah@example.com", "me@example.com"]
-    # All-day event keeps the date-only ISO string in ``start``.
-    allhands = next(ev for ev in out if ev["id"] == "ev3")
-    assert allhands["start"] == "2026-05-27"
-    # The Composio call was made exactly once with the right action.
-    execute.assert_called_once()
-    args, kwargs = execute.call_args
-    assert args[0] == "GOOGLECALENDAR_LIST_EVENTS"
-    assert kwargs["user_id"] == "ent_test:user_test"
-
-
-async def test_skips_items_missing_required_fields(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An upstream payload missing ``id`` is dropped silently — better
-    than fabricating a placeholder that would confuse the agent."""
-    items = [
-        {"id": "ok", "summary": "Valid", "start": {"dateTime": "2026-05-25T10:00:00Z"}},
-        {"summary": "Missing id", "start": {"dateTime": "2026-05-25T11:00:00Z"}},
-        {"id": "", "summary": "Empty id"},
-    ]
-    _patch_composio(
-        monkeypatch,
-        enabled=True,
-        execute_return={"data": {"items": items}, "successful": True},
-    )
-    out = await calendar_service.list_upcoming("ws_acme", "user_test", limit=10)
-    assert [ev["id"] for ev in out] == ["ok"]
-
-
-# ---------------------------------------------------------------------------
-# Limit
-# ---------------------------------------------------------------------------
-
-
-async def test_limit_caps_results_even_if_upstream_returns_more(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Composio honors ``maxResults`` as a hint — if the upstream
-    returns more rows than asked for, the service trims to ``limit``
-    before mapping to wire dicts."""
-    items = [
-        _google_event(
-            id=f"ev{i}",
-            summary=f"Event {i}",
-            start=f"2026-05-2{i}T10:00:00-07:00",
-            end=f"2026-05-2{i}T11:00:00-07:00",
-        )
-        for i in range(1, 8)
-    ]
-    execute = _patch_composio(
-        monkeypatch,
-        enabled=True,
-        execute_return={"data": {"items": items}, "successful": True},
-    )
-
-    out = await calendar_service.list_upcoming("ws_acme", "user_test", limit=3)
-
-    assert len(out) == 3
-    assert [ev["id"] for ev in out] == ["ev1", "ev2", "ev3"]
-    # Forwarded the limit as ``maxResults`` so the upstream can
-    # short-circuit when possible.
-    _, kwargs = execute.call_args
-    assert kwargs["arguments"] == {"maxResults": 3}
-
-
-# ---------------------------------------------------------------------------
-# Cross-workspace tenancy tagging
-# ---------------------------------------------------------------------------
-
-
-async def test_cross_workspace_calls_tag_each_event_with_caller_workspace(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Two consecutive calls — one from ``ws_a``, one from ``ws_b`` —
-    against the same mocked Composio response. Every returned event
-    must carry the requesting workspace_id, never the other's.
-
-    The shared payload is contrived — in production each workspace
-    would have its own Composio connection. The point of this test is
-    the tag-at-construction invariant: the domain object refuses to
-    be built without a workspace_id and stamps the caller's tag onto
-    every event before it crosses the service boundary."""
-    items = [
-        _google_event(
-            id="shared_ev_1",
-            summary="Shared Event 1",
-            start="2026-05-25T10:00:00-07:00",
-            end="2026-05-25T11:00:00-07:00",
-        ),
-        _google_event(
-            id="shared_ev_2",
-            summary="Shared Event 2",
-            start="2026-05-26T14:00:00-07:00",
-            end="2026-05-26T15:00:00-07:00",
-        ),
-    ]
-    _patch_composio(
-        monkeypatch,
-        enabled=True,
-        execute_return={"data": {"items": items}, "successful": True},
-    )
-
-    out_a = await calendar_service.list_upcoming("ws_a", "user_test", limit=10)
-    out_b = await calendar_service.list_upcoming("ws_b", "user_test", limit=10)
-
-    # Both calls see the same upstream rows.
-    assert {ev["id"] for ev in out_a} == {"shared_ev_1", "shared_ev_2"}
-    assert {ev["id"] for ev in out_b} == {"shared_ev_1", "shared_ev_2"}
-    # But every wire dict carries the requesting workspace_id —
-    # never the other workspace's tag.
-    assert all(ev["workspace_id"] == "ws_a" for ev in out_a)
-    assert all(ev["workspace_id"] == "ws_b" for ev in out_b)
-    # Sanity: no event from out_a ended up tagged with ws_b (would
-    # signal shared-state leak between calls).
-    assert all(ev["workspace_id"] != "ws_b" for ev in out_a)
-    assert all(ev["workspace_id"] != "ws_a" for ev in out_b)
+    # The handler's date-only branch surfaces the date itself.
+    assert _format_start_time(out[0]["start"]) == tomorrow
