@@ -13,6 +13,13 @@
 #      never blanks an already-stored id, and returns None for an unknown id.
 #   4. A pre-T-3 DB file (columns stripped from the schema) upgrades cleanly on
 #      open and its old rows read as NULL.
+# Updated: 2026-08-06 (T-4, coupling-gap wave) — ``_strip_chain_columns`` now
+# also strips the TABLE-FINAL form of a chain column. T-4 put a second
+# ``correlation_id`` on ``instinct_audit`` (the audit ledger's join key), which
+# is declared last in its table and so carries no trailing comma; the original
+# mid-list-only regex left it standing and the "fixture really is pre-T-3"
+# assertion failed. Nothing about what this file tests changed — the fixture is
+# simply faithful again.
 from __future__ import annotations
 
 import re
@@ -157,12 +164,21 @@ async def test_set_chain_ids_unknown_action_and_empty_call(store: InstinctStore)
 
 
 def _strip_chain_columns(schema_sql: str) -> str:
-    """Return ``schema_sql`` with the T-3 chain-id column declarations removed —
+    """Return ``schema_sql`` with the chain-id column declarations removed —
     reconstructing the pre-T-3 CREATE TABLE text. Same technique as
     tests/cloud/test_w4a_migration.py's ``_strip_workspace_id`` (an ALTER ...
-    DROP COLUMN can't always be rewritten by SQLite)."""
+    DROP COLUMN can't always be rewritten by SQLite).
+
+    Two forms, because T-4 added a SECOND column named ``correlation_id`` (the
+    join key on ``instinct_audit``): the actions columns are mid-list and end
+    with a comma, the audit one is table-final and does not. A DB predating T-3
+    also predates T-4, so both come out and the store's guarded ALTERs put both
+    back."""
     for col in ("correlation_id", "proposed_event_id"):
-        schema_sql = re.sub(rf"\n[ \t]*{col} TEXT,", "", schema_sql)
+        schema_sql = re.sub(rf"\n[ \t]*{col} TEXT,", "", schema_sql)  # mid-list
+        schema_sql = re.sub(  # table-final, with any comment lines above it
+            rf",\n(?:[ \t]*--[^\n]*\n)*[ \t]*{col} TEXT\n", "\n", schema_sql
+        )
     return schema_sql
 
 
