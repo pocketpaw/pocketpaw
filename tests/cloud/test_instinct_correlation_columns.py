@@ -110,6 +110,9 @@ async def test_external_action_join_survives_back_write_failure(store, monkeypat
         seen["called"] = True
         raise RuntimeError("simulated back-write failure (locked db)")
 
+    # (``seen`` is asserted after the propose below — it proves the failure was
+    # injected at the real back-write seam, not skipped by a code path change.)
+
     # Fail the back-write at its own seam — everything before it is the real
     # production path.
     monkeypatch.setattr(ea_propose, "_persist_chain_ids", _boom)
@@ -125,6 +128,10 @@ async def test_external_action_join_survives_back_write_failure(store, monkeypat
             params={"application_id": "app-9"},
             requested_by=USER,
         )
+
+    # The stub really fired at the back-write seam — the RuntimeError above came
+    # from OUR injection, not from an unrelated code path.
+    assert seen.get("called") is True
 
     # The proposal DID land (propose committed before the emit/back-write) and
     # carries its correlation on the column despite the failed back-write.
