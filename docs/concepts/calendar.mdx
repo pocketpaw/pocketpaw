@@ -166,6 +166,34 @@ The #1132 review surfaced a stack of gaps. PR #1143 closed the high-severity one
 
 The remaining items from the review are tracked in issue #1142.
 
+## Bridged Sources — Meetings and Tasks on /calendar
+
+Two in-process bridges mint calendar events from other domains, so /calendar
+shows everything with a time on it, not just hand-created appointments. Both
+follow the same conventions: a **synthetic calendar id** (no `_CalendarDoc`
+row needed — `service._load_calendar` synthesizes a workspace-public default),
+a **`fabric_object_id` linkage** stamped on every bridge-minted event, and
+**hard containment** (a calendar failure never breaks the source domain's
+write).
+
+| Source | Bridge | Synthetic calendar | Linkage | Lifecycle |
+|--------|--------|--------------------|---------|-----------|
+| Meetings | `ee/pocketpaw_ee/cloud/meetings/bridges/calendar.py` | `meetings` | `meeting:{meeting_id}` | Bidirectional: `meeting.scheduled` mints an event, `meeting.cancelled` deletes it; forward, a calendar event carrying a Zoom/Meet URL auto-creates a Meeting |
+| Tasks | `ee/pocketpaw_ee/cloud/tasks/bridges/calendar.py` | `tasks` | `task:{task_id}` | One-way: a task with `due_at` mints an event timed at the due date; due moved → event moves; due cleared or task resolved → event deleted |
+
+The tasks bridge subscribes the typed `task.proposed` / `task.updated` /
+`task.resolved` events on the `_core.realtime` bus and runs one reconciler:
+the event exists iff the task has a `due_at` and a still-active status
+(`proposed` / `in_progress` / `blocked`). That invariant makes re-delivered
+bus events converge instead of duplicating.
+
+Loop guards: the meetings forward handler skips any calendar event whose
+`fabric_object_id` starts with `meeting:` or `task:`, so bridge-minted events
+are never re-scanned for join URLs (a task titled with a Zoom link would
+otherwise spawn a phantom Meeting). Both bridges are registered in
+`mount_cloud` after `init_realtime`, and the registration is pinned by
+`tests/cloud/test_integration.py::test_task_calendar_bridge_registered_at_mount`.
+
 ## Frontend Pairing
 
 paw-enterprise wires the routes into a calendar widget that pairs with the [Pocket Templates](/concepts/pocket-templates) `calendar-planner` bundled template. The widget calls `GET /api/v1/calendar/events` for the visible window and `POST /api/v1/calendar/events` from the composer. Live-source state seeding (see `feat/pockets` work in the live recovery cascade) keeps the widget reactive after every mutation without a full pocket rebuild.

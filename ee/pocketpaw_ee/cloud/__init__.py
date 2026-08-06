@@ -969,6 +969,15 @@ def mount_cloud(app: FastAPI) -> None:
 
     register_people_listeners()
 
+    # Task → Calendar bridge — a task with a due_at shows up on /calendar
+    # (synthetic 'tasks' calendar, fabric_object_id='task:{id}'). One-way:
+    # due set → event minted, due moved → event moves, task resolved or
+    # due cleared → event deleted. Same lifecycle constraint as the other
+    # bus subscribers: register AFTER init_realtime installed the bus.
+    from pocketpaw_ee.cloud.tasks.bridges.calendar import register_task_calendar_listeners
+
+    register_task_calendar_listeners()
+
     # Planner — when a plan is generated, auto-execute unblocked tasks
 
     # Meeting bridges — meeting.* events → in-app notifications, and
