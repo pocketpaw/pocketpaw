@@ -9,6 +9,12 @@ handles *what the agent sees*:
 * ``load_history_for_scope`` rehydrates prior chat turns from Mongo so the
   agent carries context across backend restarts and pool evictions.
 
+Changes: 2026-08-05 (feat/coupling-person-freshness, T-2) — updated the
+``_resolve_about_member`` docstring: the Fabric Person is no longer a
+one-time invite snapshot (owner materialized at create, role/profile
+refresh listeners, lazy get_person backfill), so the user-record fallback
+now covers transient failures, not a structural gap. No behavior change here.
+
 Changes: 2026-07-14 (Paw Bar concierge seam, T2) — added ``ScopeKind.CONCIERGE``
 and ``_resolve_concierge``: a PUBLIC, anonymous Paw Bar concierge run resolves
 its ``ScopeContext`` from the server-authoritative spec (Site pocket + widget
@@ -866,15 +872,21 @@ async def _resolve_about_member(workspace_id: str, user_id: str) -> str | None:
     ``build_behavior_instructions`` can append it without awaiting.
 
     TWO SOURCES, IN ORDER, and the second one is why "who am I?" used to fail.
-    The Fabric ``Person`` is the rich source — name, role, team, focus — but it
-    is created by exactly one path, ``materialize_person_from_invite``. A member
-    who was never invited has no Person, and the founding admin of a workspace
-    is never invited: they created it. So the one block in the whole prompt that
-    says who the human is rendered NOTHING for the person most likely to be
-    using the product, and the agent answered "I don't know who you are" while
-    ``full_name`` sat in their user document the entire time. Confirmed live on
-    2026-08-04: ``about_member_block`` was ``None`` and the 36,608-char
-    instruction stack contained neither the member's name nor their id.
+    The Fabric ``Person`` is the rich source — name, role, team, focus. It used
+    to be created by exactly one path, ``materialize_person_from_invite``, so a
+    member who was never invited had no Person, and the founding admin of a
+    workspace is never invited: they created it. So the one block in the whole
+    prompt that says who the human is rendered NOTHING for the person most
+    likely to be using the product, and the agent answered "I don't know who
+    you are" while ``full_name`` sat in their user document the entire time.
+    Confirmed live on 2026-08-04: ``about_member_block`` was ``None`` and the
+    36,608-char instruction stack contained neither the member's name nor
+    their id. Since T-2 (feat/coupling-person-freshness, 2026-08-05) the
+    owner is materialized at workspace-create, role changes and profile edits
+    re-materialize via bus listeners, and ``get_person`` lazily backfills a
+    live member on a miss — so this fallback now covers transient Fabric
+    failures rather than a permanent structural gap. It stays: degraded
+    identity beats no identity.
 
     So a missing Person now falls back to the authenticated user record, which
     always exists — that is what "authenticated" means. The fallback block is
