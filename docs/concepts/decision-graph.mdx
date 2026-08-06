@@ -64,6 +64,31 @@ The terminal-action set is pinned by `_TERMINAL_ACTIONS = frozenset({"decision.g
 
 Precedent supply order (A3): the agent's own payload first, then a projection fallback (same-pocket / same-action / nearest-ts) if the proposer didn't supply any. Out-of-band reconciler is deferred.
 
+## Joining a Decision Back to Its Instinct Action
+
+A gated proposal that opens a chain is also a row in the Instinct decision pipeline — the item a human sees in The Tray. That row carries the chain ids as **first-class, nullable columns** on `instinct_actions`:
+
+| Column | Meaning |
+|---|---|
+| `correlation_id` | The chain key, written at INSERT by the proposer that minted it |
+| `proposed_event_id` | The id of the chain-opening `agent.proposed` event, filled in once that event is durable |
+
+Both are exposed on the `Action` model and on every action view the Instinct router returns (`GET /instinct/actions`, `GET /instinct/actions/pending`), so a Tray row joins to its Decision chain without parsing the per-kind `parameters` blob.
+
+The per-kind blobs (`_external_action`, `_pocket_write`, `_code_change`) still carry their own copies of these ids for blob-schema compatibility, but the **columns are the source of truth**: they land with the INSERT, so the join survives a failed best-effort back-write. `NULL` is legal and permanent — an OSS proposal opens no chain, and rows written before the columns existed were never backfilled (a guessed correlation in an evidence table is worse than an honest blank).
+
+### The audit ledger joins too
+
+The Instinct audit ledger (`instinct_audit`) is the tamper-evident legal record: a sha256 hash chain where each row folds in the previous row's hash, so an insertion, edit or deletion is detectable. On its own it could prove *action X was approved by Y at time T* and nothing more. Why the approval happened — the inputs, the policy evaluation, the precedents — lived in the Decision chain, with no key joining the two records of the same event.
+
+Audit rows now carry `correlation_id` as well, copied at append time from the action's own column (never re-derived from a `parameters` blob). Both writers stamp it, since the propose-time entry and every lifecycle entry (approve / reject / auto-approve / execute / fail) share one append chokepoint. It rides on `AuditEntry`, so `GET /instinct/audit`, `GET /instinct/audit/{id}` and `export_audit` all expose it with no router change.
+
+The id is **copied rather than joined at read time** on purpose: an exported trail has to stand alone, and by the time an auditor reads it the actions table may be purged, archived, or in another tenant's file.
+
+**It is not chain material.** `correlation_id` is deliberately outside `_canonical_audit_payload` and never reaches `compute_audit_hash` — exactly how `workspace_id` has been treated since tenancy landed. Only content fields are hashed, so a ledger written before the column existed still verifies byte-for-byte after the migration. Folding a join column into the hash would silently invalidate every historical chain, so `tests/instinct/test_audit_correlation.py` pins a known-good canonical payload and digest and fails loudly if anyone tries.
+
+`NULL` is legal and permanent here too: an OSS proposal opens no chain, a system event written through `log()` has no action at all, and pre-existing rows were never backfilled.
+
 ## The Python API
 
 `pocketpaw_ee.cloud.decisions.service.DecisionGraph` is the in-process surface. One instance per process (per org), accessed via `get_decision_graph()`. All methods are `async`:

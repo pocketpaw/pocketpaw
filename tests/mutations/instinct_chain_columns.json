@@ -1,0 +1,44 @@
+[
+  {
+    "label": "external_actions propose drops the insert-time correlation column write",
+    "file": "ee/pocketpaw_ee/cloud/external_actions/propose.py",
+    "find": "        # for schema-1 compat.\n        correlation_id=corr,\n",
+    "replace": "        # for schema-1 compat.\n",
+    "tests": ["tests/cloud/test_instinct_correlation_columns.py"]
+  },
+  {
+    "label": "instinct_bridge propose drops the insert-time correlation column write",
+    "file": "ee/pocketpaw_ee/cloud/pockets/instinct_bridge.py",
+    "find": "        correlation_id=column_correlation_id,\n",
+    "replace": "",
+    "tests": ["tests/cloud/test_instinct_correlation_columns.py"]
+  },
+  {
+    "label": "belt propose drops the insert-time correlation column write",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/belt.py",
+    "find": "            # stays for schema-2 compat.\n            correlation_id=str(correlation_id),\n",
+    "replace": "            # stays for schema-2 compat.\n",
+    "tests": ["tests/cloud/test_instinct_correlation_columns.py"]
+  },
+  {
+    "label": "store drops the guarded ALTER that adds the chain-id columns to old DBs",
+    "file": "src/pocketpaw/instinct/store.py",
+    "find": "            for _col in (\"correlation_id\", \"proposed_event_id\"):\n                try:\n                    await db.execute(f\"ALTER TABLE instinct_actions ADD COLUMN {_col} TEXT\")\n                except aiosqlite.OperationalError:\n                    pass\n",
+    "replace": "",
+    "tests": ["tests/instinct/test_correlation_columns.py"]
+  },
+  {
+    "label": "external_actions back-write stops filling the proposed_event_id column",
+    "file": "ee/pocketpaw_ee/cloud/external_actions/propose.py",
+    "find": "        await store.set_chain_ids(\n            action_id,\n            correlation_id=correlation_id,\n            proposed_event_id=proposed_event_id,\n        )\n",
+    "replace": "",
+    "tests": ["tests/cloud/test_instinct_correlation_columns.py"]
+  },
+  {
+    "label": "headless _attach_diff stops mirroring the minted correlation onto the column",
+    "file": "ee/pocketpaw_ee/cloud/belt/headless.py",
+    "find": "            if chain_correlation_id:\n                await store.set_chain_ids(action_id, correlation_id=chain_correlation_id)\n",
+    "replace": "            pass\n",
+    "tests": ["tests/cloud/test_belt_headless.py"]
+  }
+]

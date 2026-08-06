@@ -1,4 +1,9 @@
 # ee/pocketpaw_ee/cloud/belt/service.py
+# Updated: 2026-08-05 (T-3, coupling-gap wave) — the runs read model reads a
+#   run's ``correlation_id`` off the Action's first-class COLUMN, falling back
+#   to the ``_code_change`` blob copy for rows written before the column
+#   existed. The column lands at INSERT, so the run→Decision join survives a
+#   failed best-effort blob back-write.
 # Updated: 2026-06-11 (feat/belt-autopilot) — the runs read model now renders a
 #   QUEUED STATION RUN. A pending ``code_change`` Action whose blob carries
 #   ``station_pending=True`` (filed by the mandate ``StationTaskDispatcher`` with
@@ -706,7 +711,15 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
         "pr_url": blob.get("pr_url") or None,
         "commit_sha": blob.get("commit_sha") or None,
         "created_at": created.isoformat() if hasattr(created, "isoformat") else None,
-        "correlation_id": str(blob.get("correlation_id") or "") or None,
+        # T-3 — read the chain id off the first-class Action COLUMN, falling back
+        # to the blob copy for rows written before the column existed. The column
+        # is the source of truth: it lands at INSERT, so it survives a failed
+        # best-effort blob back-write.
+        "correlation_id": (
+            str(getattr(action, "correlation_id", None) or "")
+            or str(blob.get("correlation_id") or "")
+            or None
+        ),
     }
 
 

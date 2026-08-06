@@ -1,4 +1,13 @@
 # instinct_bridge.py — Routes a parked pocket write through Instinct.
+# Updated: 2026-08-05 (T-3, coupling-gap wave) — ``propose_pocket_write`` now
+#   passes the parked write's ``correlation_id`` into ``store.propose`` so it
+#   lands as a FIRST-CLASS column on the Action row at INSERT (the blob copy
+#   under ``_pocket_write.correlation_id`` stays for schema-2 compat). The
+#   Tray↔Decision join for parked writes no longer depends on parsing the
+#   untyped blob. ``parked_policy_event_id`` is a DIFFERENT event (the parked
+#   ``policy.evaluated``, not ``agent.proposed``) and deliberately stays
+#   blob-only — the ``proposed_event_id`` column is reserved for the
+#   chain-opening event id, which this path never holds.
 # Created: 2026-05-22 (RFC 05 M2b.1) — the impure counterpart to the pure
 #   `action_executor`. When `run_action` parks a `requires_instinct`
 #   write it returns an `instinct_pending` sentinel with the resolved
@@ -222,6 +231,13 @@ async def propose_pocket_write(
 
     approver = _resolve_approver(pocket, backend_config)
 
+    # T-3 — the executor-minted chain correlation id (when the parked write
+    # carries one) lands as a FIRST-CLASS column with the INSERT, so the
+    # Decision join never depends on the blob copy. A parked write without a
+    # chain id stays NULL — legal forever.
+    _blob_corr = pocket_write.get("correlation_id")
+    column_correlation_id = str(_blob_corr) if isinstance(_blob_corr, str) and _blob_corr else None
+
     # ISO: this propose path is reached from BOTH the agent stream (ContextVar
     # set) AND the REST run_action endpoint (FastAPI Depends, no ContextVar) —
     # so scope the store to the pocket's workspace explicitly. When the
@@ -237,6 +253,7 @@ async def propose_pocket_write(
         category=ActionCategory.EXTERNAL,
         parameters={"_pocket_write": pocket_write},
         assignee=approver or None,
+        correlation_id=column_correlation_id,
     )
     logger.info(
         "parked pocket write '%s' on pocket %s → Instinct action %s (approver=%s)",

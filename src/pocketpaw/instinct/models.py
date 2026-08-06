@@ -1,5 +1,27 @@
 # Instinct data models — decision pipeline types.
 # Created: 2026-03-28
+# Updated: 2026-08-06 (T-4, coupling-gap wave) — added an ADDITIVE, nullable
+#   ``AuditEntry.correlation_id`` (the INSTINCT AuditEntry below, not the
+#   unrelated class of the same name in ``pocketpaw/audit/models.py``). The
+#   tamper-evident ledger could prove "action X was approved by Y at T" but not
+#   WHY: the legal record and the Decision-Graph explainability record were two
+#   chains over the same event with no key between them. The store now copies
+#   the id off the action's own ``correlation_id`` column (T-3) at append time.
+#   ``None`` stays legal forever — an OSS proposal opens no chain, a ``log()``
+#   system event has no action at all, and pre-T-4 rows were never backfilled.
+#   The field is NOT hash material: it lives outside the store's
+#   ``_canonical_audit_payload``, exactly as tenancy does, so ledgers written
+#   before it existed still verify byte-for-byte.
+# Updated: 2026-08-05 (T-3, coupling-gap wave) — added ADDITIVE, nullable
+#   ``Action.correlation_id`` + ``Action.proposed_event_id``. Until now the
+#   Decision-Graph chain ids were smuggled inside the per-kind untyped JSON
+#   parameter blobs (``_external_action`` / ``_pocket_write`` / ``_code_change``)
+#   and back-written after propose via best-effort raw SQL — a failed back-write
+#   left the action permanently unjoinable against its Decision chain. The ids
+#   are now first-class columns written at INSERT by the proposers that hold
+#   them; ``None`` stays legal forever (OSS propose paths and legacy rows carry
+#   no chain). The blob copies remain for blob-schema compat — the columns are
+#   the joinable source of truth.
 # Updated: 2026-07-31 (AL-1, agent ledger spine) — added an ADDITIVE, optional
 #   ``Action.actor_agent_id``. Until now the only record of WHICH agent proposed
 #   an action was a free-text ``trigger.source`` string ("paw_bar:<widget_id>",
@@ -150,6 +172,18 @@ class Action(BaseModel):
     # permanent-by-design: an action nobody could attribute still belongs in the
     # ledger, counted honestly as unattributed.
     actor_agent_id: str = ""
+    # ``correlation_id`` / ``proposed_event_id`` (T-3) — the Decision-Graph
+    # chain ids as FIRST-CLASS columns. ``correlation_id`` is the chain key
+    # every Decision event for this action shares (minted at propose time by
+    # the gated EE proposers); ``proposed_event_id`` is the id of the
+    # chain-opening ``agent.proposed`` event, when one was emitted. Both are
+    # nullable and default None: OSS propose paths carry no chain, and legacy
+    # rows predate the columns. The per-kind parameter blobs keep their own
+    # copies for blob-schema compat, but these columns are the joinable truth —
+    # Tray↔Decision navigation must never depend on a best-effort blob
+    # back-write again.
+    correlation_id: str | None = None
+    proposed_event_id: str | None = None
     pocket_id: str
     title: str
     description: str
@@ -204,3 +238,14 @@ class AuditEntry(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
     ai_recommendation: str | None = None
     outcome: str | None = None
+    # ``correlation_id`` (T-4) — the Decision-Graph chain key of the action this
+    # entry records, copied off ``instinct_actions.correlation_id`` (T-3) when
+    # the row is appended. It turns the legal ledger row into a joinable one:
+    # "approved by whom" now reaches the inputs, policy evaluation and
+    # precedents that explain the approval. Nullable and last in the field
+    # order so an existing export's key order is undisturbed.
+    # DO NOT hash it. The W2b chain hashes only the fields above it, via the
+    # store's ``_canonical_audit_payload``; this column sits outside that
+    # payload exactly as ``workspace_id`` does. Folding it in would make every
+    # ledger written before T-4 read as tampered.
+    correlation_id: str | None = None

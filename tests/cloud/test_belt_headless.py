@@ -2,6 +2,12 @@
 # the mandate→belt autonomy gap (feat/belt-headless-exec).
 #
 # Created: 2026-06-13.
+# Updated: 2026-08-05 (T-3, coupling-gap wave) — the success-path test now also
+#   pins that the minted chain ``correlation_id`` is mirrored onto the Action's
+#   first-class COLUMN (``after.correlation_id``), not just the ``_code_change``
+#   blob. The column is the joinable truth for Tray↔Decision navigation; the
+#   matching mutation (drop the ``set_chain_ids`` mirror in ``_attach_diff``)
+#   lives in tests/mutations/instinct_chain_columns.json.
 #
 # THE GAP UNDER TEST — before this, an approved mandate plan task became a
 # QUEUED ``code_change`` Instinct Action (``station_pending=True``, NO diff) and
@@ -137,6 +143,12 @@ async def test_headless_runner_produces_pending_diff(store: InstinctStore):
     # It is APPLYABLE-SHAPED: a chain correlation id was minted so the gate
     # closes the Decision-Graph chain on approve.
     assert cc.get("correlation_id")
+    # T-3 — the minted id is ALSO mirrored onto the first-class Action column
+    # (the joinable truth); a headless run whose mirror silently vanished would
+    # regress exactly what T-3 fixed. Mutation that must break this: drop the
+    # ``set_chain_ids`` call in headless.py's ``_attach_diff`` (codified in
+    # tests/mutations/instinct_chain_columns.json).
+    assert after.correlation_id == cc["correlation_id"]
     # CRITICAL — still PENDING. Not auto-approved, not executed.
     assert after.status == ActionStatus.PENDING
 

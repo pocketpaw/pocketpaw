@@ -2,6 +2,15 @@
 # code-change gate to the claude_agent_sdk cloud chat backend. Created:
 # 2026-06-10 (feat/belt-gate, BS-3).
 #
+# Updated: 2026-08-05 (T-3, coupling-gap wave) — the chain ids are now
+#   FIRST-CLASS columns on the Action row. ``store.propose`` is called with
+#   ``correlation_id=str(correlation_id)`` so the correlation join lands with
+#   the INSERT; ``_persist_chain_ids`` no longer runs raw SQL — it writes the
+#   ``proposed_event_id`` column via the store's ``set_chain_ids`` and
+#   refreshes the blob copies via ``update_parameters`` (the schema-2 blob
+#   keeps carrying both ids for compat). A failed back-write now only loses
+#   the event-id column + blob copies, never the correlation join.
+#
 # Updated: 2026-06-10 (feat/belt-trace, BS-4 — Decision-Graph chain) —
 #   ``belt_propose_change`` now MINTS a Decision-Graph ``correlation_id``
 #   at propose time and emits the chain-opening ``agent.proposed`` event
@@ -344,24 +353,27 @@ async def _persist_chain_ids(
     correlation_id: str,
     proposed_event_id: str | None,
 ) -> None:
-    """Write ``correlation_id`` + ``proposed_event_id`` onto the persisted
-    Action's ``parameters._code_change`` blob after ``agent.proposed`` fired.
+    """Write ``proposed_event_id`` (+ refresh the blob's chain-id copies) onto
+    the persisted Action after ``agent.proposed`` fired.
 
-    The blob is built with these fields already set from the in-memory values,
-    so this re-write only matters when the proposed event id was unknown at
-    propose-build time. We mint the correlation_id BEFORE building the blob, so
-    that field is already correct on the stored row; ``proposed_event_id`` is
-    the one this back-write fills in. Direct SQL update — same pattern as the
-    pocket-write bridge's ``_persist_parked_policy_event_id``. Best-effort:
+    T-3: the ``correlation_id`` COLUMN already landed with the INSERT (the
+    propose call passes it), so the governance-chain join no longer depends on
+    this back-write. The one late-arriving id is the ``agent.proposed`` event
+    id — unknowable before the row is durable. Written via the store's
+    ``set_chain_ids`` (a proper column write, no raw SQL); the blob copies are
+    refreshed via ``update_parameters`` for schema-2 blob compat. Best-effort:
     failure leaves ``proposed_event_id`` None and the eventual
     ``human.corrected`` emits without a causation_id (the chain still folds;
-    causation_id is optional on EventEntry).
+    causation_id is optional on EventEntry) — the correlation join via the
+    column survives regardless.
     """
-    import json as _json
-
-    import aiosqlite
-
     try:
+        await store.set_chain_ids(
+            action_id,
+            correlation_id=correlation_id,
+            proposed_event_id=proposed_event_id,
+        )
+        # Blob-compat copies — schema-2 blob readers keep seeing both ids.
         action = await store.get_action(action_id)
         if action is None:
             return
@@ -373,14 +385,7 @@ async def _persist_chain_ids(
         blob["correlation_id"] = correlation_id
         blob["proposed_event_id"] = proposed_event_id
         params[CODE_CHANGE_PARAM_KEY] = blob
-
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await store.update_parameters(action_id, params)
     except Exception:  # noqa: BLE001 — write-back is best-effort
         logger.warning(
             "belt: failed to persist chain ids onto action %s — the chain's "
@@ -523,6 +528,11 @@ async def _propose_change_handler(args: dict) -> dict:
             priority=ActionPriority.HIGH,
             parameters={CODE_CHANGE_PARAM_KEY: blob},
             assignee=user_id,
+            # T-3 — the chain correlation id lands as a FIRST-CLASS column with
+            # the INSERT itself, so the Tray↔Decision join exists even if the
+            # best-effort emit / back-write below fails. The blob copy above
+            # stays for schema-2 compat.
+            correlation_id=str(correlation_id),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("belt: propose raised (no Action stored)", exc_info=True)
