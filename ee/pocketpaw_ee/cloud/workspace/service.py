@@ -16,6 +16,10 @@ Public API:
 - ``list_member_ids(workspace_id)``, ``list_admin_ids(workspace_id)``,
   ``list_peer_ids(user_id)`` — used as function refs by the realtime
   audience resolver
+- ``get_default_workspace_id()`` — id of the instance's first-created
+  (operator) workspace; used by the OSS operational-alert bridge
+  (``notifications/bridges/alerts.py``) to route instance-scoped alerts
+  that carry no tenant attribution (added 2026-08-06, T-10)
 - ``get_workspace_plan(workspace_id)`` — lightweight plan-tier lookup for
   the plan-feature gate dependency; returns None when the workspace is
   missing/soft-deleted/malformed (the gate maps that to a 404) and
@@ -1853,6 +1857,23 @@ async def list_peer_ids(user_id: str) -> list[str]:
     return [str(u.id) for u in peers]
 
 
+async def get_default_workspace_id() -> str | None:
+    """Return the id of the instance's FIRST-CREATED workspace, or None.
+
+    The first workspace is the one ``seed_default_workspace`` mints for
+    the platform operator at first boot (ObjectIds sort by creation
+    time, so ascending ``_id`` is creation order). Instance-scoped
+    signals with no tenant attribution — today only the OSS
+    operational-alert bridge — route to this workspace's admins rather
+    than fanning out cross-tenant. Returns None on an empty instance.
+    """
+    # global-read: instance-level signal routing — alerts from the OSS
+    # AlertManager have no workspace attribution, so this deliberately
+    # resolves the instance's first (operator) workspace.
+    doc = await _WorkspaceDoc.find().sort("+_id").first_or_none()
+    return str(doc.id) if doc else None
+
+
 async def seed_default_workspace(admin_id: str, *, name: str, slug: str) -> _WorkspaceDoc | None:
     """Insert a default workspace with enterprise plan + 50 seats and
     register ``admin_id`` as the owner. Skips silently if any workspace
@@ -2232,6 +2253,7 @@ __all__ = [
     "get",
     "get_action_permissions",
     "get_connector_permissions",
+    "get_default_workspace_id",
     "get_delete_preview",
     "get_member_action_overrides",
     "get_route_permissions",
