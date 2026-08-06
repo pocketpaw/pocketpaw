@@ -93,6 +93,14 @@ at the route level, because the global AuthMiddleware does not gate /api/v1/,
 so a new cloud route needs its own guard; and localhost_auth_bypass defaults to
 TRUE, so verifying an auth change with curl from your own machine cannot tell
 you whether the guard is there.
+
+Updated: 2026-08-04 (feat/knowledge-wiki-api) — documented the Knowledge —
+Living Wiki API section: the enriched GET /knowledge/articles rows, the new
+GET /knowledge/articles/{id}, GET /knowledge/stats, GET /knowledge/uploads,
+and the two reingest routes (POST /knowledge/reingest,
+POST /knowledge/reingest-upload) that re-run content through the hardened
+KnowledgeService ingest funnel. Design doc:
+docs/design/drafts/2026-08-04-knowledge-wiki-redesign.md (workspace repo).
 -->
 
 # Cloud REST API Reference
@@ -1729,3 +1737,177 @@ the split is the security model:
 Owner replies are stored in their own table rather than as chat runs, because
 the metering sweeper bills every terminal run and would otherwise charge the
 owner credits for typing their own sentence.
+
+## Knowledge — Living Wiki API
+
+The workspace knowledge browser (`/api/v1/knowledge/*`) is the read/reingest
+surface the living-wiki frontend renders. It aggregates the workspace kb-go
+scope (`workspace:{wid}`) with every agent scope in the workspace
+(`agent:{aid}`). All routes require a valid license plus `kb.read`
+(`kb.write` for the reingest POSTs) on the active workspace; routes that
+accept a `scope` bind it to the caller through the same allowlist the `/kb`
+router uses (own workspace + visible pockets + workspace agents + the
+caller's own `user:` scope) and answer `403 kb.scope_forbidden` otherwise.
+Errors use the standard envelope `{"error": {"code", "message"}}`.
+
+### `GET /knowledge/articles`
+
+Query params: `workspace_id` (optional, must match the active workspace),
+`agent_id` (optional filter; `"workspace"` = workspace-only).
+
+Response:
+
+```json
+{
+  "articles": [
+    {
+      "id": "deploy-runbook",
+      "title": "Deploy runbook",
+      "source": "",
+      "scope": "workspace:w1",
+      "agent_id": null,
+      "updated_at": "2026-08-01T12:00:00Z",
+      "summary": "How we deploy.",
+      "word_count": 250,
+      "compiled_with": "claude-haiku-4-5",
+      "version": 3,
+      "categories": ["Ops"],
+      "concepts": ["deploys", "rollbacks"],
+      "compiled_at": "2026-08-01T12:00:00Z"
+    }
+  ],
+  "total": 1,
+  "agent_ids": ["agent-1"]
+}
+```
+
+The first six keys are the pre-2026-08-04 row shape, unchanged. The wiki
+metadata after them comes from `kb list --json` plus the article's wiki
+frontmatter (kb list doesn't emit categories/concepts/compiled_at);
+`updated_at` falls back to `compiled_at`. Orphan raw docs — ingested files
+whose compile never completed — still appear as synthetic rows with
+`compiled_with: null` and `version: null`.
+
+### `GET /knowledge/articles/{article_id}?scope=`
+
+Full article for the reader view. `scope` defaults to the active workspace.
+Response is the row shape above plus `content` (markdown), `backlinks`
+(list of article ids), `source_docs` (raw-doc ids), `scope`, and `orphan`.
+An orphan raw-doc id returns `orphan: true` with the raw text as `content`
+and `compiled_with: null`. Unknown id or an id outside the scope →
+`404 article.not_found`. A kb failure that is NOT a genuine miss (timeout,
+missing binary, transient error) → `500 knowledge.kb_unavailable` — a kb
+outage never reads as "the article vanished".
+
+### `GET /knowledge/stats`
+
+Per-scope `kb stats` rollup across the workspace scope and every agent
+scope. A scope whose stats call fails is skipped, never a 500.
+
+```json
+{
+  "stats": [
+    {
+      "scope": "workspace:w1",
+      "agent_id": null,
+      "articles": 4,
+      "words": 1000,
+      "raw_docs": 5,
+      "concepts": 12,
+      "categories": 3
+    }
+  ],
+  "agent_ids": ["agent-1"]
+}
+```
+
+### `POST /knowledge/reingest`
+
+Body: `{"article_id": "<id>", "scope": "<scope>" | null}`.
+
+Re-runs an article's linked raw doc through the hardened
+`KnowledgeService.ingest_text_to_scope` funnel (agent-backend compile on
+keyless boxes, verbatim-fallback rejection). `article_id` may be a compiled
+article (its frontmatter's first `source_docs` entry names the raw doc) or
+an orphan raw-doc id. Response:
+
+```json
+{
+  "scope": "workspace:w1",
+  "article_id": "deploy-runbook",
+  "new_article_id": "deploy-runbook-v2",
+  "raw_doc_id": "raw-1",
+  "source": "notes.txt",
+  "result": { "article": "deploy-runbook-v2", "title": "...", "words": 250, "compiled_with": "llm" }
+}
+```
+
+`result` is kb-go's ingest receipt passed through verbatim — note the id key
+is `article` (finishIngest's shape), not `id`. `new_article_id` is the
+server-extracted id of the article the recompile produced; when it differs
+from `article_id` (the compile landed under a new slug) the FL-11b tracking
+on any upload row pointing at the old id is re-pointed automatically.
+
+Errors: `404 article.not_found` / `404 raw_doc.not_found`,
+`422 knowledge.empty_raw_doc`, `500 knowledge.reingest_failed`.
+
+### `POST /knowledge/reingest-upload`
+
+Body: `{"upload_id": "<file id>", "scope": "<scope>" | null}`.
+
+Synchronous counterpart of the FileReady auto-index listener, one upload per
+call: resolves the uploaded blob (local or S3 via a temp file), extracts
+text through the configured extraction chain, funnels it through
+`ingest_text_to_scope` with the original filename as source, and stamps the
+FL-11b `kb_article_id`/`kb_scope` tracking on the upload row. Response:
+
+```json
+{
+  "scope": "workspace:w1",
+  "upload_id": "up-1",
+  "filename": "report.pdf",
+  "article_id": "report-pdf",
+  "result": { "article": "report-pdf", "title": "...", "words": 300, "compiled_with": "llm" }
+}
+```
+
+`article_id` is the server-extracted id from kb-go's receipt (whose own id
+key is `article`, not `id`) — clients should read the top-level field.
+Pocket-scoped uploads are refused on this workspace surface: ingesting them
+into workspace KB would lift pocket-private content across the pocket ACL
+boundary; reingest those from the pocket surface instead.
+
+Errors: `404 upload.not_found`, `403 knowledge.upload_hidden`
+(`hide_from_ai` files are not ingestable),
+`403 knowledge.upload_pocket_scoped` (pocket files belong to the pocket
+surface), `422 knowledge.extraction_empty`,
+`500 knowledge.extraction_failed` / `knowledge.upload_unreadable` /
+`knowledge.reingest_failed`.
+
+### `GET /knowledge/uploads?scope=`
+
+The WORKSPACE's uploaded files eligible for ingest. Excluded: soft-deleted
+rows, `hide_from_ai` rows, and any pocket-scoped upload (pocket files are
+ACL-gated on the pocket surface and never list here). `has_article` is
+derived cheaply: primarily the FL-11b tracking column matched against the
+resolved scope; untracked rows fall back to a filename-vs-article-sources
+match that only counts when the upload predates the matching article's
+`compiled_at` — a fresh re-upload of a same-named file reads as pending,
+not compiled.
+
+```json
+{
+  "uploads": [
+    {
+      "id": "up-1",
+      "filename": "report.pdf",
+      "mime": "application/pdf",
+      "size": 12345,
+      "uploaded_at": "2026-08-01T10:00:00+00:00",
+      "has_article": true
+    }
+  ],
+  "total": 1,
+  "scope": "workspace:w1"
+}
+```
