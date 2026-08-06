@@ -381,9 +381,12 @@ def _workspace_scope(workspace_id: str | None) -> tuple[str | None, list[Any]]:
 
     Returns ``(condition, params)``:
 
-    - ``workspace_id is None`` -> ``(None, [])`` — no scoping. OSS / agent-tool
-      callers that don't carry a workspace see everything, exactly as before
-      W4a.
+    - ``workspace_id is None`` -> ``(None, [])`` — no scoping. Callers that
+      don't carry a workspace (OSS single-tenant, CLI, background jobs) see
+      everything, exactly as before W4a. As of C4-a the builtin agent tools are
+      NO LONGER in that group whenever a workspace is in context: they resolve
+      the caller's tenant and pass it, matching their MCP siblings. They reach
+      this branch only on a genuinely workspace-less run.
     - a concrete workspace -> ``("(workspace_id = ? OR workspace_id IS NULL)",
       [workspace_id])`` — the caller's own rows PLUS legacy/global
       NULL-workspace rows that predate tenancy (see the module header). The

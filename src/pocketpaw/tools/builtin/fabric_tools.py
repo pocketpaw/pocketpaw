@@ -21,10 +21,43 @@
 #   call sit inside this tool's try/except, so a too-deep path or a runaway
 #   fan-out surfaces as a readable "Error querying Fabric: …" string the LLM can
 #   act on — never a raised exception or a raw SQLite crash.
+# Updated: 2026-08-06 (C4-a — stop cross-tenant leakage) — every tool is now
+#   WORKSPACE-SCOPED, matching the in-process MCP sibling
+#   (ee/pocketpaw_ee/agent/mcp_servers/fabric.py) which already resolved tenancy
+#   from the per-stream agent identity and passed workspace_id into every store
+#   call. The builtin path — the ONLY Fabric surface the non-SDK backends
+#   (deep_agents, google_adk, openai_agents) see — passed none, so:
+#     * reads ran UNFILTERED. ``fabric_query`` returned, and ``fabric_stats``
+#       counted and NAMED, whatever objects/types shared the database file.
+#       Both now pass workspace_id, so a tenant sees only its own rows (plus
+#       legacy NULL-workspace rows, the W4a compatibility leg).
+#     * writes landed with workspace_id = NULL. Because ``_workspace_scope()``
+#       renders a scoped read as ``(workspace_id = ? OR workspace_id IS NULL)``,
+#       a NULL row is ACTIVELY RETURNED to every tenant's scoped query on that
+#       file — one tenant's object/type/link surfaced in another's ontology.
+#       ``define_type`` / ``create_object`` / ``link`` now stamp the resolved
+#       workspace, and ``get_type_by_name`` resolves scoped so a create can
+#       never bind to another tenant's type id (SZD-2).
+#   NOTE on gating: this does NOT route writes through the Instinct gate. The
+#   MCP sibling does not either — its header (2026-07-11, feat/paw-cli C2)
+#   records that the 2026-06-11 "writes arrive as gated proposals" posture was
+#   deliberately SUPERSEDED so the tool surface matches the REST surface, where
+#   ``fabric.write`` is MEMBER-tier. Making the builtin path stricter than both
+#   REST and MCP would be an inconsistency, not extra safety.
+#   Fail-closed: when the POSITIVE per-run marker ``is_tenant_scoped_run()``
+#   says this is a cloud chat dispatch and no workspace resolves, the tool
+#   REFUSES instead of falling back to NULL/global scope. The marker is
+#   deliberately not a process-global (see _tenancy.py for the #1570 rationale)
+#   so workspace-less OSS / CLI / background runs keep working unchanged.
 
 import logging
 from typing import Any
 
+from pocketpaw.tools.builtin._tenancy import (
+    current_workspace,
+    is_tenant_scoped_run,
+    workspace_required_message,
+)
 from pocketpaw.tools.protocol import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -38,6 +71,21 @@ def _get_fabric_store():
         return get_fabric_store()
     except ImportError:
         return None
+
+
+def _resolve_scope(tool_name: str) -> tuple[str | None, str | None]:
+    """Resolve ``(workspace_id, refusal)`` for one tool invocation.
+
+    ``refusal`` is non-None when the run is tenant-scoped but no workspace
+    resolved — the caller returns it verbatim and performs NO store access.
+    """
+    workspace = current_workspace()
+    if workspace is None and is_tenant_scoped_run():
+        logger.warning(
+            "%s refused: tenant-scoped run with no resolvable workspace identity", tool_name
+        )
+        return None, workspace_required_message(tool_name)
+    return workspace, None
 
 
 async def _emit_trace_events(event_type: str, entries: list[dict[str, Any]]) -> None:
@@ -143,6 +191,10 @@ class FabricQueryTool(BaseTool):
         path: list[dict[str, Any]] | None = None,
         limit: int = 20,
     ) -> str:
+        workspace, refusal = _resolve_scope(self.name)
+        if refusal:
+            return refusal
+
         store = _get_fabric_store()
         if not store:
             return "Fabric is not available (enterprise feature)."
@@ -163,6 +215,7 @@ class FabricQueryTool(BaseTool):
                     except Exception as exc:  # pydantic ValidationError or TypeError
                         return f"Invalid path hop at index {i}: {exc}"
 
+            # C4-a: workspace-filtered read — never another tenant's objects.
             result = await store.query(
                 FabricQuery(
                     type_name=type_name,
@@ -171,7 +224,8 @@ class FabricQueryTool(BaseTool):
                     filters=filters or {},
                     path=hops,
                     limit=min(limit, 50),
-                )
+                ),
+                workspace_id=workspace,
             )
 
             # Emit a trace event per object so decision-time snapshots can
@@ -293,6 +347,10 @@ class FabricCreateTool(BaseTool):
         source_connector: str | None = None,
         source_id: str | None = None,
     ) -> str:
+        workspace, refusal = _resolve_scope(self.name)
+        if refusal:
+            return refusal
+
         store = _get_fabric_store()
         if not store:
             return "Fabric is not available (enterprise feature)."
@@ -310,7 +368,11 @@ class FabricCreateTool(BaseTool):
                             prop_defs.append(PropertyDef(**ptype))
                         else:
                             prop_defs.append(PropertyDef(name=name, type=str(ptype)))
-                obj_type = await store.define_type(name=type_name, properties=prop_defs)
+                # C4-a: stamp the owning tenant (SZD-2) so the type is not
+                # visible/reusable from another workspace.
+                obj_type = await store.define_type(
+                    name=type_name, properties=prop_defs, workspace_id=workspace
+                )
                 return (
                     f"Created object type '{obj_type.name}'"
                     f" (ID: {obj_type.id})"
@@ -320,7 +382,9 @@ class FabricCreateTool(BaseTool):
             elif action == "create_object":
                 if not type_name:
                     return "type_name is required for create_object"
-                obj_type = await store.get_type_by_name(type_name)
+                # C4-a: resolve the type SCOPED, so a create can never bind to
+                # another tenant's type id, then stamp the object's tenant.
+                obj_type = await store.get_type_by_name(type_name, workspace_id=workspace)
                 if not obj_type:
                     return (
                         f"Object type '{type_name}' not found."
@@ -331,6 +395,7 @@ class FabricCreateTool(BaseTool):
                     properties=properties or {},
                     source_connector=source_connector,
                     source_id=source_id,
+                    workspace_id=workspace,
                 )
                 props_str = ", ".join(f"{k}: {v}" for k, v in obj.properties.items())
                 return f"Created {type_name} object (ID: {obj.id}): {props_str}"
@@ -338,7 +403,14 @@ class FabricCreateTool(BaseTool):
             elif action == "link":
                 if not from_id or not to_id or not link_type:
                     return "from_id, to_id, and link_type are all required for link"
-                lnk = await store.link(from_id, to_id, link_type)
+                # C4-a: both endpoints must resolve in the CALLER's workspace
+                # before the link is written, mirroring the MCP sibling's
+                # _fabric_link_create. Without this an agent could name another
+                # tenant's object id and stitch it into its own ontology.
+                for field_name, obj_id in (("from_id", from_id), ("to_id", to_id)):
+                    if await store.get_object(obj_id, workspace_id=workspace) is None:
+                        return f"{field_name} '{obj_id}' was not found in this workspace."
+                lnk = await store.link(from_id, to_id, link_type, workspace_id=workspace)
                 return f"Linked {from_id} → {to_id} (type: {link_type}, link ID: {lnk.id})"
 
             else:
@@ -371,12 +443,20 @@ class FabricStatsTool(BaseTool):
         return {"type": "object", "properties": {}}
 
     async def execute(self) -> str:
+        workspace, refusal = _resolve_scope(self.name)
+        if refusal:
+            return refusal
+
         store = _get_fabric_store()
         if not store:
             return "Fabric is not available (enterprise feature)."
         try:
-            stats = await store.stats()
-            types = await store.list_types()
+            # C4-a: scope counts AND type names. Unscoped stats leaked another
+            # tenant's experimental type names into chat on a shared file —
+            # the same leak fix/fabric-stats-workspace-scope closed on the MCP
+            # side (#1437).
+            stats = await store.stats(workspace_id=workspace)
+            types = await store.list_types(workspace_id=workspace)
             lines = [
                 f"Fabric: {stats['types']} types,"
                 f" {stats['objects']} objects,"
