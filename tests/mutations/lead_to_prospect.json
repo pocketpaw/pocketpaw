@@ -108,6 +108,24 @@
     ]
   },
   {
+    "label": "the @ guard is removed: URL surgery corrupts email keys again",
+    "file": "ee/pocketpaw_ee/cloud/growth/domain.py",
+    "find": "    v = v.strip().lower()\n    if \"@\" in v:\n        return v",
+    "replace": "    v = v.strip().lower()",
+    "tests": [
+      "tests/cloud/growth/test_lead_bridge.py"
+    ]
+  },
+  {
+    "label": "a bare-domain import row never gets its blank name filled",
+    "file": "ee/pocketpaw_ee/cloud/growth/service.py",
+    "find": "        doc.name = body.name",
+    "replace": "        doc.name = doc.name",
+    "tests": [
+      "tests/cloud/growth/test_lead_bridge.py"
+    ]
+  },
+  {
     "label": "the mount registration is deleted (the reviewer's blind spot)",
     "file": "ee/pocketpaw_ee/cloud/__init__.py",
     "find": "    register_growth_lead_listeners()",

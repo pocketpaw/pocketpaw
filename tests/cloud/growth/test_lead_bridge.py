@@ -279,6 +279,59 @@ async def test_other_consumer_providers_key_per_person(mongo_db, registered_brid
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "address",
+    ["a/b@gmail.com", "a:b@gmail.com", "www.smith@gmail.com", "/x@gmail.com"],
+)
+async def test_an_email_key_is_never_url_surgered(mongo_db, registered_bridge, caplog, address):
+    """The dedupe key rides through the DTO's domain normaliser, and a WHOLE
+    ADDRESS must come out the other side intact. Before the ``@`` guard the
+    normaliser treated it as a URL: ``a/b@gmail.com`` truncated at the slash to
+    ``a``, ``www.smith@gmail.com`` lost its ``www.`` prefix, and ``/x@gmail.com``
+    normalised to empty — a ValidationError whose pydantic message carried the
+    visitor's raw address into the error log.
+
+    Rare local parts (Gmail forbids them), but other mailboxes allow them and
+    the bridge's email check is deliberately loose. Asserts the stored key IS
+    the address and that nothing reached the error log.
+
+    Mutation: remove the ``@`` guard in ``normalise_domain`` — this fails.
+    """
+    site = await _site()
+
+    with caplog.at_level(logging.ERROR, logger=growth_bridge.__name__):
+        lead = await _capture(site, full_name="Weird Localpart", email=address, rate_key="rk1")
+
+    assert lead is not None
+    rows = await _prospects()
+    assert len(rows) == 1
+    assert rows[0].domain == address.lower()
+    assert [r.message for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+@pytest.mark.asyncio
+async def test_url_surgery_cannot_merge_unrelated_visitors(mongo_db, registered_bridge):
+    """The collapse class the guard closes: ``a/b@gmail.com`` and
+    ``a:b@gmail.com`` both truncated to the key ``a`` before the fix, merging
+    two strangers onto one prospect. Same for ``www.smith@gmail.com``
+    swallowing the real ``smith@gmail.com``. Four visitors, four rows."""
+    site = await _site()
+
+    await _capture(site, full_name="Visitor One", email="a/b@gmail.com", rate_key="rk1")
+    await _capture(site, full_name="Visitor Two", email="a:b@gmail.com", rate_key="rk2")
+    await _capture(site, full_name="Real Smith", email="smith@gmail.com", rate_key="rk3")
+    await _capture(site, full_name="Www Smith", email="www.smith@gmail.com", rate_key="rk4")
+
+    rows = await _prospects()
+    assert sorted(r.domain for r in rows) == [
+        "a/b@gmail.com",
+        "a:b@gmail.com",
+        "smith@gmail.com",
+        "www.smith@gmail.com",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_company_website_beats_a_personal_address(mongo_db, registered_bridge):
     """Someone enquiring for acme.com from their personal mailbox is still
     acme.com. The form answered the dedupe question directly, so the company
@@ -393,6 +446,41 @@ async def test_an_inbound_lead_never_resets_a_live_prospect(mongo_db, registered
     assert row.source == "discovery"
     # …and the enquiry still added what it knew.
     assert row.emails == ["sam@acme-dental.com", "jo@acme-dental.com"]
+
+
+@pytest.mark.asyncio
+async def test_an_inbound_lead_fills_in_what_a_bare_import_left_blank(mongo_db, registered_bridge):
+    """The other half of enrich-only: a pasted list of bare domains leaves
+    ``name``/``company`` at ``""`` (NOT YET KNOWN, per the doc class), and the
+    form fill is exactly the thing that finally knows them. The fill must land —
+    add-only means "never overwrite", not "never write".
+
+    Mutation: neuter the ``doc.name = body.name`` fill in
+    ``upsert_from_site_lead`` — this fails.
+    """
+    await growth_service.upsert_by_domain(
+        "ws1",
+        CreateProspectRequest(domain="acme-dental.com", source="directory"),
+    )
+    site = await _site()
+
+    await _capture(
+        site,
+        full_name="Sam Founder",
+        email="sam@acme-dental.com",
+        company="Acme Dental",
+        rate_key="rk1",
+    )
+
+    rows = await _prospects()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.name == "Sam Founder"
+    assert row.company == "Acme Dental"
+    assert row.emails == ["sam@acme-dental.com"]
+    assert row.lead_id is not None
+    # Provenance at first capture is still the import's.
+    assert row.source == "directory"
 
 
 # ---------------------------------------------------------------------------

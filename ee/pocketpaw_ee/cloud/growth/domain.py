@@ -168,11 +168,23 @@ def normalise_domain(v: str) -> str:
     prefix, and any path/port suffix — so ``https://www.Acme.com/about`` and
     ``acme.com`` dedupe to the same row.
 
-    Lived in ``dto.py`` until T-7 and moved here unchanged: it canonicalises the
-    KEY, which is a domain rule, and the key logic below needs it as much as the
+    An EMAIL-shaped value passes through untouched (bar case/whitespace). Since
+    T-7 the dedupe key can be a whole address (``contact_dedupe_key``'s
+    person-key case), and URL surgery on an address is not canonicalisation, it
+    is corruption: ``a/b@gmail.com`` would truncate to ``a`` (merging every
+    visitor whose local part starts that way onto one row — the exact collapse
+    this key exists to prevent), ``www.smith@gmail.com`` would collide with the
+    real ``smith@gmail.com``, and ``/x@gmail.com`` would normalise to empty and
+    422 out of the DTO. Rare local parts — Gmail forbids them — but other
+    mailboxes allow them, and the bridge's email check is deliberately loose.
+
+    Lived in ``dto.py`` until T-7 and moved here: it canonicalises the KEY,
+    which is a domain rule, and the key logic below needs it as much as the
     request validator does. One implementation, two callers.
     """
     v = v.strip().lower()
+    if "@" in v:
+        return v
     for scheme in ("https://", "http://"):
         if v.startswith(scheme):
             v = v[len(scheme) :]

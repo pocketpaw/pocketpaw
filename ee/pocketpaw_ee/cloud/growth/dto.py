@@ -78,8 +78,10 @@ from pocketpaw_ee.cloud.growth.domain import (
 )
 
 # The domain canonicaliser moved to ``domain.py`` in T-7 (it canonicalises the
-# DEDUPE KEY, which the key logic there needs too). Re-exported under the old
-# private name so existing importers keep resolving.
+# DEDUPE KEY, which the key logic there needs too, and since T-7 the key can be
+# a whole email address — see ``normalise_domain`` on why an email passes
+# through the URL surgery untouched). Re-exported under the old private name so
+# existing importers keep resolving.
 _normalise_domain = normalise_domain
 
 

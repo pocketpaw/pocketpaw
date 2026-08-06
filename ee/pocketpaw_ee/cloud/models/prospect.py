@@ -45,9 +45,13 @@ class Prospect(TimestampedDocument):
     # legitimate import; research fills these in later.
     name: str = ""
     company: str = ""
-    # Company website domain, lowercased at the service boundary — the dedupe key.
+    # The dedupe key, lowercased at the service boundary. Usually the company
+    # website domain; for a consumer-email site lead (T-7) it is the visitor's
+    # WHOLE address, because a personal mailbox identifies a person, not a
+    # company — see growth/domain.py ``contact_dedupe_key``.
     domain: str
-    # clay | directory | discovery | manual (validated at the DTO boundary)
+    # clay | directory | discovery | manual | site_lead (validated at the DTO
+    # boundary)
     source: str
     # The client this prospect belongs to (``cloud/projects``), or None on a
     # workspace that doesn't use projects. Validated against the workspace by
