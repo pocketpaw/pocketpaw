@@ -5,6 +5,19 @@ Modified: 2026-08-06 (feat/coupling-lead-captured, T-6) — Registers the leads
     bridges, after ``init_realtime``. It subscribes to the new ``lead.captured``
     event and notifies the workspace owner/admins, so a form submitted on a
     published Paw Site is heard instead of waiting to be polled for.
+Modified: 2026-07-28 (feat/growth-api-scale) — The growth router's list route
+    changed shape: ``GET /growth/prospects`` returns
+    ``{items, next_cursor, total}`` instead of a bare array (BREAKING), and
+    gained ``q`` / ``sort`` / ``cursor``. Two new routes on the same mount:
+    ``GET /growth/prospects/facets`` and ``POST /growth/drafts/propose-batch``.
+Modified: 2026-07-27 (feat/growth-g3) — The growth router now also carries
+    drafts (``/growth/prospects/{id}/drafts``, ``/growth/drafts``,
+    ``/growth/drafts/{id}/status``); its prefix widened to ``/growth`` with
+    final prospect URLs unchanged.
+Modified: 2026-07-27 (feat/growth-g1) — Mounts the growth prospect-store
+    router (``/growth/prospects`` create / get / list / update) under
+    ``/api/v1``. License gate + ``request_context`` on every route;
+    workspace-scoped reads inside the service (cross-tenant ids 404).
 Modified: 2026-07-11 (feat/real-pipeline-s1) — Mounts the fabric_ingest
     transform-surface router (``/fabric/ingest/mappings`` CRUD +
     ``/fabric/ingest/run`` run-now) next to the fabric router under
@@ -414,6 +427,8 @@ def mount_cloud(app: FastAPI) -> None:
 
     from pocketpaw_ee.cloud.decisions.router import router as decisions_router
     from pocketpaw_ee.cloud.fabric_ingest.router import router as fabric_ingest_router
+    from pocketpaw_ee.cloud.growth.router import router as growth_router
+    from pocketpaw_ee.cloud.growth.webhooks import router as growth_webhooks_router
     from pocketpaw_ee.cloud.instinct_approvals.router import router as instinct_approvals_router
     from pocketpaw_ee.cloud.kb.router import router as kb_router
     from pocketpaw_ee.cloud.leads.router import router as leads_router
@@ -479,6 +494,20 @@ def mount_cloud(app: FastAPI) -> None:
     # drains here) and authed GET /sites/{id}/leads (plan-gated + RBAC +
     # workspace-scoped) for the Leads view.
     app.include_router(leads_router, prefix="/api/v1")
+    # Growth — G-1 prospect store (/growth outbound engine, first slice).
+    # License-gated, workspace-scoped CRUD under /growth/prospects; cross-tenant
+    # ids 404 inside the service. Later slices add ingestion, drafts, and
+    # Instinct-gated sends (the dedicated ``growth`` arq queue seam lives in
+    # ``growth/worker.py``).
+    app.include_router(growth_router, prefix="/api/v1")
+    # Growth inbound webhooks (G-6) — POST /growth/webhooks/msg91. Mounted
+    # SEPARATELY from growth_router because MSG91 is the caller: no license
+    # gate, no RBAC, no RequestContext. Trust is the shared-secret HMAC in
+    # ``growth/webhooks.py``, which FAILS CLOSED (bad, missing, or
+    # unconfigured signature ⇒ 403) — a forged inbound reply would flip
+    # ``prospect.opted_in`` and unlock business-initiated sends to a number
+    # that never consented.
+    app.include_router(growth_webhooks_router, prefix="/api/v1")
     # Sites control plane — RFC 12 Task 3.5. POST /sites/publish (compile +
     # smoke-gate + WfP deploy), GET /sites, and the custom-domain pair
     # (Cloudflare for SaaS) the Domains panel drives.
@@ -531,6 +560,14 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.mandates.router import router as belt_mandates_router
 
     app.include_router(belt_mandates_router, prefix="/api/v1")
+
+    # /ship managed deploys (SHIP-3, feat/ship-3-cloud-entity). The
+    # workspace-scoped /api/v1/ship surface: provision a box, register + deploy
+    # an app, route a domain, create a database, read logs + box health. The two
+    # DELETEs PARK a teardown for approval and never execute one.
+    from pocketpaw_ee.cloud.ship.router import router as ship_router
+
+    app.include_router(ship_router, prefix="/api/v1")
 
     # Files Tab v2 — /api/v1/files/tree + /api/v1/files/browse. Mounted
     # inline (instead of via build_router's ctx_factory) so the routes can
@@ -784,6 +821,15 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.shared.agent_bridge import register_agent_bridge
 
     register_agent_bridge()
+
+    # Wire the /growth discovery cron's research loop. Until this call the
+    # seam is empty and the sweep is a deliberate no-op — see
+    # ``growth/discovery.py``. The agent itself still has to be seeded per
+    # workspace; a workspace without it stays idle rather than failing.
+    from pocketpaw_ee.cloud.growth.discovery import set_production_research_fn
+    from pocketpaw_ee.cloud.growth.researcher import agent_research
+
+    set_production_research_fn(agent_research)
 
     # NOTE: Composio is wired per-backend via ``pocketpaw_ee.cloud.composio.providers``
     # — each agent backend (claude_sdk, openai_agents, google_adk,

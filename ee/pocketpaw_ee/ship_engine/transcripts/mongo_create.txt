@@ -1,0 +1,19 @@
+# transcript: `dokku mongo:create demo-db` — NOTE: real dokku-mongo prints the
+# full DSN including the generated password; the driver must never let it
+# reach logs or DTOs.
+EXIT: 0
+--- stdout ---
+       Waiting for container to be ready
+=====> MongoDB container created: demo-db
+=====> demo-db mongo service information
+       Config dir:          /var/lib/dokku/services/mongo/demo-db/config
+       Data dir:            /var/lib/dokku/services/mongo/demo-db/data
+       Dsn:                 mongodb://demo-db:s3cr3tpass8f2a@dokku-mongo-demo-db:27017/demo-db
+       Exposed ports:       -
+       Id:                  0f9d3adb33f1
+       Internal ip:         172.17.0.5
+       Links:               -
+       Service root:        /var/lib/dokku/services/mongo/demo-db
+       Status:              running
+       Version:             mongo:8.0
+--- stderr ---

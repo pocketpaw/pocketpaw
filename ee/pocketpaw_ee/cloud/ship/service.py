@@ -1,0 +1,607 @@
+# ee/pocketpaw_ee/cloud/ship/service.py — the /ship business logic (SHIP-3).
+#
+# The workspace-scoped surface behind ``/api/v1/ship``: provision a box, register
+# an app, deploy it, route a domain, link a database, read logs and box health,
+# and PARK a teardown for approval. It is the entity's only caller-facing layer —
+# the router is a thin adapter, ``store`` owns the Beanie documents, ``engine``
+# owns the live SSH/driver seam, and the long deploy runs as an arq job.
+#
+# ee/cloud rules honored here:
+#   3  every domain view carries a REQUIRED ``workspace_id``.
+#   5  module-level ``async def op(workspace_id, user_id, body)``.
+#   6  validate at entry — ``body = <Request>.model_validate(body)`` first line.
+#   7  every read is tenant-filtered (``store`` takes ``workspace_id`` first and
+#      returns None for a foreign id; this module collapses that to ``NotFound``,
+#      so a cross-tenant probe reads as 404 and never leaks existence).
+#   9  emit on every write; read paths carry an explicit ``# no-event:``.
+#   10 CloudError subclasses only — never HTTPException.
+#
+# SECURITY: nothing here ever touches key material. The box's SSH key is
+# decrypted inside ``engine.box_session`` and shredded with the session; env
+# VALUES are never accepted or stored (``env_refs`` are NAMES); a database's
+# connection string never leaves the box (``DbView.env_var`` is the variable's
+# name, per SHIP-1's ``DbResult`` invariant).
+#
+# DESTROY IS NEVER EXECUTED HERE. ``request_box_destroy`` / ``request_app_destroy``
+# mint a placeholder proposal id and park it on the row — see the ``# SHIP-4:``
+# seam markers.
+#
+# Created 2026-07-22 (feat/ship-3-cloud-entity, SHIP-3): new module.
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import TYPE_CHECKING
+
+from pocketpaw_ee.cloud._core.errors import ConflictError, NotFound, ValidationError
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
+    ShipAppCreated,
+    ShipAppUpdated,
+    ShipBoxCreated,
+    ShipDeployQueued,
+    ShipDestroyProposed,
+)
+from pocketpaw_ee.cloud.ship import engine as ship_engine
+from pocketpaw_ee.cloud.ship import enqueue, propose, store
+from pocketpaw_ee.cloud.ship.domain import (
+    AppId,
+    AppView,
+    BoxId,
+    BoxMetricsView,
+    BoxView,
+    DbView,
+    DeployId,
+    DeployView,
+    DestroyProposalView,
+    DomainView,
+    LogsView,
+)
+from pocketpaw_ee.cloud.ship.dto import (
+    AddDomainRequest,
+    AppOut,
+    BoxOut,
+    CreateAppRequest,
+    CreateBoxRequest,
+    CreateDbRequest,
+    DbOut,
+    DeployOut,
+    DomainListOut,
+    DomainOut,
+    LogsOut,
+    MetricsOut,
+    PendingApprovalOut,
+)
+from pocketpaw_ee.ship_engine.port import CommandFailed
+
+if TYPE_CHECKING:
+    from pocketpaw_ee.cloud.models.ship import ShipApp, ShipBox, ShipDeploy
+
+logger = logging.getLogger(__name__)
+
+# Deployment defaults for a freshly provisioned box. Hetzner's ``cx22`` (2 vCPU /
+# 4 GB / 40 GB) in ``fsn1`` is the cheapest shape that comfortably runs Dokku
+# plus a couple of app containers; both are env-overridable per deployment and
+# per request (``CreateBoxRequest.server_type`` / ``.region``).
+DEFAULT_SERVER_TYPE = os.environ.get("POCKETPAW_SHIP_SERVER_TYPE", "").strip() or "cx22"
+DEFAULT_REGION = os.environ.get("POCKETPAW_SHIP_REGION", "").strip() or "fsn1"
+
+# How many log lines ``GET /ship/apps/{id}/logs`` reads by default.
+DEFAULT_LOG_LINES = 100
+
+
+# --------------------------------------------------------------------------- #
+# Boxes
+# --------------------------------------------------------------------------- #
+
+
+async def create_box(workspace_id: str, user_id: str, body: CreateBoxRequest) -> BoxView:
+    """Accept a box provision. Returns immediately with a pollable box.
+
+    The actual provision runs as the SHIP-2 arq job; the returned box is in
+    ``provisioning`` until it answers over SSH.
+    """
+    body = CreateBoxRequest.model_validate(body)
+    box = await enqueue.enqueue_provision(
+        workspace_id=workspace_id,
+        provider=body.provider,
+        server_type=body.server_type or DEFAULT_SERVER_TYPE,
+        region=body.region or DEFAULT_REGION,
+    )
+    view = _box_view(box)
+    await emit(
+        ShipBoxCreated(
+            data={
+                "id": view.id,
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "provider": view.provider,
+                "status": view.status,
+            }
+        )
+    )
+    return view
+
+
+async def list_boxes(workspace_id: str) -> list[BoxView]:
+    """Every box the workspace owns, newest first."""
+    # no-event: read-only path; emit only on writes (cloud rule #9).
+    return [_box_view(box) for box in await store.list_boxes(workspace_id)]
+
+
+async def get_box_metrics(
+    workspace_id: str,
+    box_id: str,
+    *,
+    session_factory: ship_engine.BoxSessionFactory | None = None,
+) -> BoxMetricsView:
+    """Read live CPU / memory / disk off the box.
+
+    A box that is not ``ready`` has nothing to answer with — that is a 409, not
+    a fabricated row of zeroes.
+    """
+    # no-event: read-only path; emit only on writes (cloud rule #9).
+    box = await _require_box(workspace_id, box_id)
+    if box.status != "ready":
+        raise ConflictError("ship.box_not_ready", f"Box is {box.status}, not ready")
+    factory = session_factory or ship_engine.box_session
+    try:
+        async with factory(box) as session:
+            cpu, mem, disk = await ship_engine.read_box_metrics(session)
+    except ship_engine.ENGINE_FAILURES as exc:
+        raise _engine_conflict("ship.metrics_failed", exc) from exc
+    return BoxMetricsView(
+        workspace_id=workspace_id, box_id=str(box.id), cpu=cpu, mem=mem, disk=disk
+    )
+
+
+async def request_box_destroy(workspace_id: str, user_id: str, box_id: str) -> DestroyProposalView:
+    """PARK a box teardown for human approval. Destroys NOTHING."""
+    box = await _require_box(workspace_id, box_id)
+    # File a REAL Instinct proposal (SHIP-4). Nothing is destroyed here — the
+    # approve path (``ship.executor.execute_approved_ship_action``) is the only
+    # code that may ever call the engine's ``destroy`` verb. A box that already
+    # carries a pending proposal reuses it rather than filing a duplicate.
+    if box.pending_destroy_proposal_id:
+        proposal_id = box.pending_destroy_proposal_id
+    else:
+        proposal_id = await propose.propose_ship_action(
+            workspace_id=workspace_id,
+            verb="destroy_box",
+            box_id=str(box.id),
+            target_label=f"box {box.ip or str(box.id)}",
+            requested_by=user_id,
+        )
+    box = await store.park_box_destroy(box, proposal_id=proposal_id)
+    return await _emit_destroy_proposal(
+        workspace_id, user_id, kind="box", target_id=str(box.id), proposal_id=proposal_id
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Apps
+# --------------------------------------------------------------------------- #
+
+
+async def create_app(workspace_id: str, user_id: str, body: CreateAppRequest) -> AppView:
+    """Register an app on one of the workspace's boxes."""
+    body = CreateAppRequest.model_validate(body)
+    box = await _require_box(workspace_id, body.box_id)
+    if await store.find_app_by_name(workspace_id, str(box.id), body.name):
+        raise ConflictError("ship.app_exists", f"An app named '{body.name}' already exists")
+
+    app = await store.create_app(
+        workspace_id=workspace_id,
+        box_id=str(box.id),
+        name=body.name,
+        build_path=body.build_path,
+        git_ref=body.git_ref,
+        image=body.image,
+        env_refs=body.env_refs,
+        prod=body.prod,
+    )
+    view = _app_view(app)
+    await emit(ShipAppCreated(data={**_app_event_payload(view), "user_id": user_id}))
+    return view
+
+
+async def list_apps(workspace_id: str, *, box_id: str | None = None) -> list[AppView]:
+    """Every app the workspace owns, optionally narrowed to one box."""
+    # no-event: read-only path; emit only on writes (cloud rule #9).
+    return [_app_view(app) for app in await store.list_apps(workspace_id, box_id=box_id)]
+
+
+async def deploy_app(workspace_id: str, user_id: str, app_id: str) -> DeployView:
+    """Enqueue a deploy for the app. Returns immediately with a pollable attempt."""
+    app = await _require_app(workspace_id, app_id)
+    if not app.image:
+        raise ValidationError(
+            "ship.app_no_image",
+            "The app has no image to deploy — set one when creating it",
+        )
+    # The box must exist and be reachable before we spend a worker slot on it.
+    box = await _require_box(workspace_id, app.box_id)
+    if box.status != "ready":
+        raise ConflictError("ship.box_not_ready", f"Box is {box.status}, not ready")
+
+    # Flip the app BEFORE dispatching. The worker may pick the job up
+    # immediately and write a terminal status; writing "deploying" afterwards
+    # would clobber it. A dispatch failure leaves the app "deploying" with a
+    # "queued" attempt — a visibly stuck deploy, which is the honest state.
+    app = await store.set_app_status(app, "deploying")
+    deploy = await enqueue.enqueue_deploy(
+        workspace_id=workspace_id, app_id=str(app.id), image=app.image
+    )
+    view = _deploy_view(deploy)
+    await emit(
+        ShipDeployQueued(
+            data={
+                "id": view.id,
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "app_id": view.app_id,
+                "status": view.status,
+            }
+        )
+    )
+    await emit(ShipAppUpdated(data=_app_event_payload(_app_view(app))))
+    return view
+
+
+async def deploy_app_or_propose(
+    workspace_id: str, user_id: str, app_id: str
+) -> DeployView | DestroyProposalView:
+    """Deploy the app — unless it is PROD-flagged, in which case propose it.
+
+    The agent-facing seam (SHIP-4). A non-prod deploy is reversible and runs
+    directly; a production deploy is a gated verb, so this files an Instinct
+    proposal instead and returns the proposal view. The HTTP route keeps calling
+    ``deploy_app`` directly — an operator hitting the API with their own
+    credentials is not the same actor as an agent acting on their behalf.
+    """
+    app = await _require_app(workspace_id, app_id)
+    if not app.prod:
+        return await deploy_app(workspace_id, user_id, app_id)
+
+    if not app.image:
+        raise ValidationError(
+            "ship.app_no_image",
+            "The app has no image to deploy — set one when creating it",
+        )
+    proposal_id = await propose.propose_ship_action(
+        workspace_id=workspace_id,
+        verb="deploy_app",
+        box_id=app.box_id,
+        app_id=str(app.id),
+        target_label=f"app {app.name} (production)",
+        params={"image": app.image},
+        requested_by=user_id,
+    )
+    # A prod deploy is a gated verb, not a teardown — reuse the proposal VIEW
+    # (the wire shape is identical: what was proposed, on what, under which id)
+    # but do NOT emit ``ShipDestroyProposed``, which would tell every listener a
+    # teardown is pending when nothing is being torn down.
+    # no-event: the propose helper already opened the Decision-Graph chain; a
+    # dedicated ship.deploy_proposed event lands with the console work that
+    # renders it.
+    return DestroyProposalView(
+        workspace_id=workspace_id,
+        target_kind="app",
+        target_id=str(app.id),
+        proposal_id=proposal_id,
+    )
+
+
+async def list_deploys(workspace_id: str, app_id: str) -> list[DeployView]:
+    """One app's deploy attempts, newest first."""
+    # no-event: read-only path; emit only on writes (cloud rule #9).
+    app = await _require_app(workspace_id, app_id)
+    return [_deploy_view(d) for d in await store.list_deploys(workspace_id, str(app.id))]
+
+
+async def add_domain(
+    workspace_id: str,
+    user_id: str,
+    app_id: str,
+    body: AddDomainRequest,
+    *,
+    session_factory: ship_engine.BoxSessionFactory | None = None,
+) -> DomainView:
+    """Route a domain to the app and (by default) issue TLS for it."""
+    body = AddDomainRequest.model_validate(body)
+    app, box = await _require_app_on_ready_box(workspace_id, app_id)
+    factory = session_factory or ship_engine.box_session
+    try:
+        async with factory(box) as session:
+            result = await session.engine.add_domain(
+                app.name, body.domain, enable_tls=body.enable_tls
+            )
+    except ship_engine.ENGINE_FAILURES as exc:
+        raise _engine_conflict("ship.domain_failed", exc) from exc
+
+    scheme = "https" if result.tls_enabled else "http"
+    app = await store.record_app_domain(
+        app,
+        domain=result.domain,
+        tls_enabled=result.tls_enabled,
+        url=f"{scheme}://{result.domain}",
+    )
+    await emit(ShipAppUpdated(data={**_app_event_payload(_app_view(app)), "user_id": user_id}))
+    return DomainView(
+        workspace_id=workspace_id,
+        app_id=str(app.id),
+        domain=result.domain,
+        tls_enabled=result.tls_enabled,
+    )
+
+
+async def list_domains(workspace_id: str, app_id: str) -> list[DomainView]:
+    """The domains currently routed to the app (as recorded at add time)."""
+    # no-event: read-only path; emit only on writes (cloud rule #9).
+    app = await _require_app(workspace_id, app_id)
+    return [
+        DomainView(
+            workspace_id=workspace_id,
+            app_id=str(app.id),
+            domain=d.domain,
+            tls_enabled=d.tls_enabled,
+        )
+        for d in app.domains
+    ]
+
+
+async def create_db(
+    workspace_id: str,
+    user_id: str,
+    app_id: str,
+    body: CreateDbRequest,
+    *,
+    session_factory: ship_engine.BoxSessionFactory | None = None,
+) -> DbView:
+    """Create a database service and link it to the app.
+
+    Only the NAME of the injected connection-string variable is recorded — the
+    connection string itself stays on the box.
+    """
+    body = CreateDbRequest.model_validate(body)
+    app, box = await _require_app_on_ready_box(workspace_id, app_id)
+    service = (body.service or f"{app.name}-db").strip()
+    factory = session_factory or ship_engine.box_session
+    try:
+        async with factory(box) as session:
+            result = await session.engine.db_create(app.name, service)
+    except ship_engine.ENGINE_FAILURES as exc:
+        raise _engine_conflict("ship.db_failed", exc) from exc
+
+    app = await store.record_app_db(app, service=result.service, env_var=result.exposed_env_var)
+    await emit(ShipAppUpdated(data={**_app_event_payload(_app_view(app)), "user_id": user_id}))
+    return DbView(
+        workspace_id=workspace_id,
+        app_id=str(app.id),
+        linked_app=result.linked_app,
+        service=result.service,
+        env_var=result.exposed_env_var,
+    )
+
+
+async def get_logs(
+    workspace_id: str,
+    app_id: str,
+    *,
+    num: int = DEFAULT_LOG_LINES,
+    session_factory: ship_engine.BoxSessionFactory | None = None,
+) -> LogsView:
+    """Read the app's most recent log lines (already redacted by the driver)."""
+    # no-event: read-only path; emit only on writes (cloud rule #9).
+    app, box = await _require_app_on_ready_box(workspace_id, app_id)
+    factory = session_factory or ship_engine.box_session
+    try:
+        async with factory(box) as session:
+            chunk = await session.engine.logs(app.name, num=num)
+    except ship_engine.ENGINE_FAILURES as exc:
+        raise _engine_conflict("ship.logs_failed", exc) from exc
+    return LogsView(workspace_id=workspace_id, app_id=str(app.id), lines=tuple(chunk.lines))
+
+
+async def request_app_destroy(workspace_id: str, user_id: str, app_id: str) -> DestroyProposalView:
+    """PARK an app teardown for human approval. Destroys NOTHING."""
+    app = await _require_app(workspace_id, app_id)
+    # File a REAL Instinct proposal (SHIP-4). Nothing is destroyed here — only
+    # the approve path may call the engine's ``destroy`` verb. An app that
+    # already carries a pending proposal reuses it rather than filing a duplicate.
+    if app.pending_destroy_proposal_id:
+        proposal_id = app.pending_destroy_proposal_id
+    else:
+        proposal_id = await propose.propose_ship_action(
+            workspace_id=workspace_id,
+            verb="destroy_app",
+            box_id=app.box_id,
+            app_id=str(app.id),
+            target_label=f"app {app.name}",
+            requested_by=user_id,
+        )
+    app = await store.park_app_destroy(app, proposal_id=proposal_id)
+    return await _emit_destroy_proposal(
+        workspace_id, user_id, kind="app", target_id=str(app.id), proposal_id=proposal_id
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Wire mapping (ee/cloud rule 8 — mapping lives in service.py)
+# --------------------------------------------------------------------------- #
+
+
+def box_to_wire(view: BoxView) -> BoxOut:
+    return BoxOut(
+        id=view.id,
+        provider=view.provider,
+        ip=view.ip,
+        status=view.status,  # type: ignore[arg-type] — the doc's Literal is the same set
+        price_monthly=view.price_monthly,
+    )
+
+
+def app_to_wire(view: AppView) -> AppOut:
+    return AppOut(
+        id=view.id,
+        name=view.name,
+        box_id=view.box_id,
+        status=view.status,
+        urls=list(view.urls),
+    )
+
+
+def deploy_to_wire(view: DeployView) -> DeployOut:
+    return DeployOut(
+        id=view.id,
+        app_id=view.app_id,
+        status=view.status,  # type: ignore[arg-type] — the doc's Literal is the same set
+        started_at=view.started_at,
+        finished_at=view.finished_at,
+    )
+
+
+def logs_to_wire(view: LogsView) -> LogsOut:
+    return LogsOut(lines=list(view.lines))
+
+
+def metrics_to_wire(view: BoxMetricsView) -> MetricsOut:
+    return MetricsOut(cpu=view.cpu, mem=view.mem, disk=view.disk)
+
+
+def domain_to_wire(view: DomainView) -> DomainOut:
+    return DomainOut(domain=view.domain, tls_enabled=view.tls_enabled)
+
+
+def domains_to_wire(views: list[DomainView]) -> DomainListOut:
+    return DomainListOut(domains=[domain_to_wire(v) for v in views])
+
+
+def db_to_wire(view: DbView) -> DbOut:
+    return DbOut(service=view.service, linked_app=view.linked_app, env_var=view.env_var)
+
+
+def proposal_to_wire(view: DestroyProposalView) -> PendingApprovalOut:
+    return PendingApprovalOut(proposal_id=view.proposal_id)
+
+
+# --------------------------------------------------------------------------- #
+# Internals
+# --------------------------------------------------------------------------- #
+
+
+def _box_view(box: ShipBox) -> BoxView:
+    return BoxView(
+        id=BoxId(str(box.id)),
+        workspace_id=box.workspace,
+        provider=box.provider,
+        ip=box.ip,
+        status=box.status,
+        price_monthly=box.price_monthly,
+        pending_destroy_proposal_id=box.pending_destroy_proposal_id,
+    )
+
+
+def _app_view(app: ShipApp) -> AppView:
+    return AppView(
+        id=AppId(str(app.id)),
+        workspace_id=app.workspace,
+        box_id=app.box_id,
+        name=app.name,
+        status=app.status,
+        build_path=app.build_path,
+        git_ref=app.git_ref,
+        image=app.image,
+        prod=app.prod,
+        urls=tuple(app.urls),
+        env_refs=tuple(app.env_refs),
+        pending_destroy_proposal_id=app.pending_destroy_proposal_id,
+    )
+
+
+def _deploy_view(deploy: ShipDeploy) -> DeployView:
+    return DeployView(
+        id=DeployId(str(deploy.id)),
+        workspace_id=deploy.workspace,
+        app_id=deploy.app_id,
+        status=deploy.status,
+        started_at=deploy.started_at,
+        finished_at=deploy.finished_at,
+        image=deploy.image,
+        log_summary=deploy.log_summary,
+    )
+
+
+def _app_event_payload(view: AppView) -> dict:
+    """Event payload for an app write — ids + status + URLs, never secrets."""
+    return {
+        "id": view.id,
+        "workspace_id": view.workspace_id,
+        "box_id": view.box_id,
+        "name": view.name,
+        "status": view.status,
+        "urls": list(view.urls),
+    }
+
+
+async def _require_box(workspace_id: str, box_id: str) -> ShipBox:
+    """Load a box or 404. A cross-tenant id is indistinguishable from a missing
+    one — the store's tenant filter returns None either way."""
+    box = await store.get_box(workspace_id, box_id)
+    if box is None:
+        raise NotFound("ship.box", box_id)
+    return box
+
+
+async def _require_app(workspace_id: str, app_id: str) -> ShipApp:
+    """Load an app or 404 (same tenant-filter collapse as ``_require_box``)."""
+    app = await store.get_app(workspace_id, app_id)
+    if app is None:
+        raise NotFound("ship.app", app_id)
+    return app
+
+
+async def _require_app_on_ready_box(workspace_id: str, app_id: str) -> tuple[ShipApp, ShipBox]:
+    """Load an app together with its box, refusing a box that cannot answer."""
+    app = await _require_app(workspace_id, app_id)
+    box = await _require_box(workspace_id, app.box_id)
+    if box.status != "ready":
+        raise ConflictError("ship.box_not_ready", f"Box is {box.status}, not ready")
+    return app, box
+
+
+async def _emit_destroy_proposal(
+    workspace_id: str, user_id: str, *, kind: str, target_id: str, proposal_id: str
+) -> DestroyProposalView:
+    view = DestroyProposalView(
+        workspace_id=workspace_id,
+        target_kind=kind,
+        target_id=target_id,
+        proposal_id=proposal_id,
+    )
+    await emit(
+        ShipDestroyProposed(
+            data={
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "target_kind": kind,
+                "target_id": target_id,
+                "proposal_id": proposal_id,
+            }
+        )
+    )
+    return view
+
+
+def _engine_conflict(code: str, exc: BaseException) -> ConflictError:
+    """Map an engine/reachability failure to a 409 with a safe reason.
+
+    SHIP-1 redacts ``CommandFailed``'s command + stderr tail before the exception
+    exists, so the tail is safe to surface; anything else (an unreachable box, a
+    timeout) is reported by class name only — a raw ``OSError`` message can carry
+    the box's address, which is not this response's job to publish.
+    """
+    detail = exc.stderr_tail if isinstance(exc, CommandFailed) else type(exc).__name__
+    logger.warning("ship engine call failed (%s)", code)
+    return ConflictError(code, f"The deploy engine refused the request: {detail}"[:500])

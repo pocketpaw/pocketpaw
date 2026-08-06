@@ -1,0 +1,214 @@
+# ee/pocketpaw_ee/cloud/growth/worker.py — arq worker for the dedicated
+# ``growth`` queue.
+#
+# Created 2026-07-27 (feat/growth-g1): registration seam only (a no-op
+# heartbeat so arq would boot).
+# Updated 2026-07-27 (feat/growth-g4): the heartbeat is replaced by the real
+# ``growth.dispatch`` job entrypoint — registered under its explicit dotted
+# name via ``arq.worker.func`` so the enqueue side
+# (``growth.executor.execute_approved_growth_send``) and the worker agree on
+# the name. The job body is a deliberate STUB in this slice: it logs and marks
+# NOTHING sent — G-5 (email via provider) and G-6 (follow-ups) fill in the
+# actual delivery and the draft's ``sent`` flip (via the service's
+# ``gate_transition`` seam). The job only ever EXISTS for a draft whose
+# ``_growth_send`` proposal a human approved — that is the whole gate.
+# Updated 2026-07-27 (feat/growth-g5): the ``email`` branch is live — it hands
+# off to ``growth/email_dispatch.dispatch_email`` (per-channel module, so each
+# channel's delivery stays in its own file and the job body keeps one branch
+# per channel). Other channels still log the stub.
+# Updated 2026-07-27 (feat/growth-g7): the daily follow-up sweep joins the
+# queue as arq's first CRON job (``cron_jobs``, ``unique=True`` so only one
+# worker in a horizontally-scaled deploy runs a given tick). It PROPOSES
+# follow-ups into the Instinct tray and never sends — same gate, same human.
+# Updated 2026-07-27 (feat/growth-g6): the ``channel="whatsapp"`` branch is
+# live — it delegates to ``growth.whatsapp.dispatch_whatsapp``, which enforces
+# the hard ``prospect.opted_in`` guard (no opt-in ⇒ NO provider call at all),
+# the hourly ``GROWTH_WHATSAPP_MAX_PER_HOUR`` cap, the MSG91 send, and the
+# approved→sent flip through ``service.gate_transition``. Only ``linkedin``
+# keeps the stub — it is manual by design (G-8's queue + mark-sent route).
+#
+# Unlike workspace jobs (which ride arq's DEFAULT queue on the shared chat-runs
+# worker — see ``jobs/domain.py``), growth gets its OWN queue + worker process
+# so a burst of outbound work can never starve interactive chat runs. Enqueue
+# with ``_queue_name=GROWTH_QUEUE_NAME`` (arq's selector is the
+# underscore-prefixed kwarg; a bare ``queue=`` is forwarded to the job function
+# and crashes it — see the jobs/domain.py history).
+#
+# Deploy as a separate process alongside the web service::
+#
+#     arq pocketpaw_ee.cloud.growth.worker.WorkerSettings
+#
+# The startup/shutdown pair mirrors ``chat/runs/worker.py``: pin the xproc role
+# BEFORE anything emits, init the cloud DB + realtime bus, close the DB on the
+# way out. ``redis_settings`` is evaluated eagerly at class-body time because
+# arq reads ``settings_cls.__dict__`` directly (bypassing descriptors) — the
+# same shape + rationale as the chat-runs worker; tests set a stub
+# ``POCKETPAW_REDIS_URL`` in ``tests/cloud/conftest.py`` before import.
+
+"""arq worker entry point for the dedicated ``growth`` queue."""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+
+from arq import cron
+from arq.connections import RedisSettings
+from arq.worker import func
+
+from pocketpaw_ee.cloud import init_realtime
+from pocketpaw_ee.cloud._core.realtime import xproc
+from pocketpaw_ee.cloud.growth.discovery import discovery_sweep
+from pocketpaw_ee.cloud.growth.domain import (
+    GROWTH_DISCOVERY_SWEEP_JOB_NAME,
+    GROWTH_DISPATCH_JOB_NAME,
+    GROWTH_QUEUE_NAME,
+)
+from pocketpaw_ee.cloud.growth.followups import (
+    GROWTH_FOLLOWUP_SWEEP_JOB_NAME,
+    followup_sweep,
+)
+from pocketpaw_ee.cloud.shared.db import close_cloud_db, init_cloud_db
+
+logger = logging.getLogger(__name__)
+
+
+async def dispatch(ctx: dict[str, Any], draft_id: str, channel: str) -> None:
+    """Dispatch an APPROVED outbound draft.
+
+    This job is enqueued ONLY by ``executor.execute_approved_growth_send``
+    after a human approved the draft's ``_growth_send`` Instinct proposal —
+    there is no other producer, so a job here IS the approval record's
+    downstream. Each channel owns its own delivery module and re-checks that
+    the draft is still ``approved`` before anything reaches a provider.
+
+    ``email`` is live (G-5) and ``whatsapp`` is live (G-6). WhatsApp
+    additionally enforces the hard opt-in guard, the hourly rate cap, and
+    RAISES on every refusal (``max_tries = 1``, so the job lands as a failed
+    job an operator can see) while writing its own compliance row — a refused
+    send is never a silent success.
+
+    ``linkedin`` keeps the stub on purpose: it is manual by design, sent by
+    hand from G-8's queue and recorded through the mark-sent route.
+    """
+    if channel == "email":
+        # Lazy import — keeps the arq worker's boot free of the HTTP client
+        # stack until an email job actually lands.
+        from pocketpaw_ee.cloud.growth.email_dispatch import dispatch_email
+
+        await dispatch_email(draft_id)
+        return
+
+    if channel == "whatsapp":
+        # Imported lazily so the worker module stays importable (and arq's
+        # settings class evaluable) without the provider stack.
+        from pocketpaw_ee.cloud.growth.whatsapp import dispatch_whatsapp
+
+        await dispatch_whatsapp(draft_id)
+        return
+
+    logger.info(
+        "growth worker: dispatch STUB — draft=%s channel=%s (approved send queued; "
+        "no delivery for this channel yet, nothing marked sent)",
+        draft_id,
+        channel,
+    )
+
+
+async def _startup(ctx: dict[str, Any]) -> None:
+    """Boot the worker: pin role, init the DB + realtime bus.
+
+    ``xproc.set_role("worker")`` must run before any code emits, so ``emit()``
+    routes over the cross-process bridge instead of into the worker's empty
+    local bus — same ordering as the chat-runs worker.
+    """
+    xproc.set_role("worker")
+    mongo_uri = os.environ.get("CLOUD_MONGODB_URI", "mongodb://localhost:27017/paw-enterprise")
+    await init_cloud_db(mongo_uri)
+    init_realtime()
+
+
+async def _shutdown(ctx: dict[str, Any]) -> None:
+    await close_cloud_db()
+
+
+def _redis_settings() -> RedisSettings:
+    """Resolve arq RedisSettings from ``POCKETPAW_REDIS_URL``.
+
+    Eager (called at class-body evaluation) because arq's ``get_kwargs`` reads
+    ``settings_cls.__dict__`` directly, bypassing the descriptor protocol —
+    same rationale as ``chat/runs/worker.py``. Fails loud when the env var is
+    missing rather than silently falling back to localhost.
+    """
+    url = os.environ.get("POCKETPAW_REDIS_URL", "").strip()
+    if not url:
+        raise RuntimeError("POCKETPAW_REDIS_URL must be set to run the growth arq worker")
+    return RedisSettings.from_dsn(url)
+
+
+class WorkerSettings:
+    """arq worker configuration for the ``growth`` queue.
+
+    Loaded by ``arq pocketpaw_ee.cloud.growth.worker.WorkerSettings``.
+    """
+
+    queue_name = GROWTH_QUEUE_NAME
+    # ``func(..., name=...)`` pins the job's wire name to the explicit dotted
+    # constant so the executor's ``enqueue_job(GROWTH_DISPATCH_JOB_NAME, ...)``
+    # always matches, independent of the Python function's name.
+    functions = [func(dispatch, name=GROWTH_DISPATCH_JOB_NAME)]
+    # G-7 — one daily tick at 13:00 UTC (business hours across US/EU, and well
+    # clear of the midnight batch traffic every other scheduler piles onto).
+    # ``unique=True`` (arq's default, explicit here because it is the property
+    # that matters) means a horizontally-scaled growth worker fleet still runs
+    # the sweep exactly once per tick. The sweep only ever PROPOSES — it
+    # cannot send, so a duplicate tick would at worst be a no-op anyway (the
+    # open-follow-up guard makes it idempotent).
+    cron_jobs = [
+        cron(
+            followup_sweep,
+            name=GROWTH_FOLLOWUP_SWEEP_JOB_NAME,
+            hour=13,
+            minute=0,
+            unique=True,
+            run_at_startup=False,
+        ),
+        # G-13 — discovery runs at 06:00 UTC, seven hours AHEAD of the
+        # follow-up sweep rather than near it. Two reasons, in order of
+        # importance. First, they must not contend: discovery is the expensive
+        # tick (an agent research run per due ICP) and the follow-up sweep is
+        # the time-sensitive one, so stacking them would let a slow hunt delay
+        # outreach that is already overdue. Second, discovery FEEDS the list a
+        # human then triages — landing it at the start of the working day in
+        # Europe and India means the morning's finds are waiting when someone
+        # sits down, instead of arriving mid-afternoon behind the day's other
+        # work. ``unique=True`` for the same reason as above: a scaled worker
+        # fleet must run one sweep per tick, and discovery WRITES prospects, so
+        # a duplicate tick would double-file rather than no-op.
+        cron(
+            discovery_sweep,
+            name=GROWTH_DISCOVERY_SWEEP_JOB_NAME,
+            hour=6,
+            minute=0,
+            unique=True,
+            run_at_startup=False,
+        ),
+    ]
+    on_startup = _startup
+    on_shutdown = _shutdown
+    # Crash policy mirrors the chat-runs worker: no auto-retry. Outbound work
+    # must never double-send on a retry; failed jobs surface for manual review.
+    max_tries = 1
+    # Eager: arq reads __dict__, which bypasses descriptors. See `_redis_settings`.
+    redis_settings = _redis_settings()
+
+
+__all__ = [
+    "GROWTH_DISPATCH_JOB_NAME",
+    "GROWTH_FOLLOWUP_SWEEP_JOB_NAME",
+    "GROWTH_QUEUE_NAME",
+    "WorkerSettings",
+    "dispatch",
+    "followup_sweep",
+]

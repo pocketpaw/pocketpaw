@@ -6,6 +6,9 @@
 # depends on the OSS core package `pocketpaw`.
 #
 # Changes:
+#   - 2026-07-21 (ship-1): added `asyncssh` — SSH exec transport for the /ship
+#     deploy engine's Dokku driver (ee/pocketpaw_ee/ship_engine/). Lazy-imported
+#     by AsyncSSHTransport only; the port + transcript-replay tests never load it.
 #   - 2026-07-27 (fix/dev-ci): the "CodeAgent — runtime-agnostic" contract now
 #     sources the codeagent PACKAGE instead of a hand-kept list of its modules.
 #     The list had gone stale twice over — `delegates.py` was never added, and
@@ -81,6 +84,12 @@ dependencies = [
     "redis[hiredis]>=5.0.0",
     # --- DNS (verified-domain TXT lookup, Wave 3 Task 12) ---
     "dnspython>=2.6.0",
+    # --- /ship deploy engine (SHIP-1) — SSH exec for the Dokku driver ---
+    # asyncssh is imported lazily inside AsyncSSHTransport._connect
+    # (ee/pocketpaw_ee/ship_engine/dokku.py), so the ShipEngine contract and
+    # the transcript-replay test path never load it. Floor 2.14.2 (2023-12,
+    # far past the workspace 7-day supply-chain minimum-age rule).
+    "asyncssh>=2.14.2",
     # --- Background worker (Tier 2 resumable chat runs) ---
     # arq is only imported by `pocketpaw_ee.cloud.chat.runs.arq_executor`
     # and `worker.py`; both are gated behind POCKETPAW_CLOUD_RUN_EXECUTOR=arq.
@@ -157,6 +166,7 @@ dependencies = [
     # uses it for the per-workspace keypair + subscribe/unsubscribe endpoints.
     "py-vapid>=1.9.0",
     "pywebpush>=2.3.0",
+    "hcloud>=2.23.0",
 ]
 
 [project.optional-dependencies]
@@ -260,6 +270,8 @@ loom = "pocketpaw_ee.extensions:CloudLoomMcpProvider"
 belt = "pocketpaw_ee.extensions:CloudBeltMcpProvider"
 code = "pocketpaw_ee.extensions:CloudCodeMcpProvider"
 external_actions = "pocketpaw_ee.extensions:CloudExternalActionsMcpProvider"
+ship = "pocketpaw_ee.extensions:CloudShipMcpProvider"
+growth = "pocketpaw_ee.extensions:CloudGrowthMcpProvider"
 fabric = "pocketpaw_ee.extensions:CloudFabricMcpProvider"
 instinct = "pocketpaw_ee.extensions:CloudInstinctMcpProvider"
 daytona = "pocketpaw_ee.extensions:CloudDaytonaMcpProvider"
@@ -824,6 +836,65 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.cycle"]
 
 [[tool.importlinter.contracts]]
+name = "Growth — Beanie writes only from service.py"
+# feat/growth-g1 — only ``growth.service`` owns the Prospect Beanie writes;
+# dto/domain/router/worker go through it. The worker is the dedicated
+# ``growth`` arq queue seam and must never touch the doc class directly.
+# feat/growth-g3 — the Draft doc joins the same boundary: writes only from
+# ``growth.service``.
+# feat/growth-g4 — the gate modules join the boundary: ``propose`` files the
+# Instinct Action and ``executor`` flips drafts ONLY through the service's
+# ``gate_transition`` seam, never the doc class directly.
+# feat/growth-g5 — the MessageLog audit doc joins the boundary (writes only
+# from ``growth.service.record_message_log``), and the dispatch modules join
+# the source list: ``email_dispatch`` records + flips through the service, and
+# ``connector`` only ever touches the provider's HTTP API.
+# feat/growth-g7 — ``followups`` (the daily cron sweep) joins too: it reads and
+# writes drafts/prospects ONLY through the service's system-identity seams
+# (``list_sent_drafts_for_followup`` / ``list_channel_drafts`` /
+# ``create_followup_draft`` / ``mark_prospect_dead``).
+# feat/growth-g6 — the WhatsApp dispatch modules join the boundary: ``whatsapp``
+# (the dispatch branch), ``msg91`` (the provider seam) and ``webhooks`` (the
+# inbound MSG91 endpoint) all read and write through ``growth.service``.
+# integration/growth-v1 — G-6's ``WhatsAppSendLog`` was folded into G-5's
+# ``MessageLog`` (one send record, not two), so only ``models.message_log``
+# stays on the forbidden list.
+# feat/growth-discovery — the ``Icp`` doc joins the forbidden list and
+# ``growth.discovery`` joins the source list. The discovery run reaches ICPs
+# and prospects ONLY through the service's system-identity seams, exactly as
+# ``followups`` does: it is the second cron on this queue, and a module that
+# files rows on a schedule is precisely where a direct doc write would be
+# least visible.
+type = "forbidden"
+allow_indirect_imports = "true"
+# feat/growth-mcp — the agent surface joins the boundary:
+# ``agent.mcp_servers.growth`` reaches prospects and drafts ONLY through
+# ``growth.service``, never a doc class. It is also the module where a stray
+# Beanie import would be least visible, so the contract is the check.
+source_modules = [
+    "pocketpaw_ee.agent.mcp_servers.growth",
+    "pocketpaw_ee.cloud.growth.router",
+    "pocketpaw_ee.cloud.growth.dto",
+    "pocketpaw_ee.cloud.growth.domain",
+    "pocketpaw_ee.cloud.growth.worker",
+    "pocketpaw_ee.cloud.growth.propose",
+    "pocketpaw_ee.cloud.growth.executor",
+    "pocketpaw_ee.cloud.growth.connector",
+    "pocketpaw_ee.cloud.growth.discovery",
+    "pocketpaw_ee.cloud.growth.email_dispatch",
+    "pocketpaw_ee.cloud.growth.followups",
+    "pocketpaw_ee.cloud.growth.whatsapp",
+    "pocketpaw_ee.cloud.growth.msg91",
+    "pocketpaw_ee.cloud.growth.webhooks",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.prospect",
+    "pocketpaw_ee.cloud.models.draft",
+    "pocketpaw_ee.cloud.models.message_log",
+    "pocketpaw_ee.cloud.models.icp",
+]
+
+[[tool.importlinter.contracts]]
 name = "LLM provisioning — Beanie writes only from service.py"
 # MCG-8: the per-tenant LiteLLM virtual-key mapping (LiteLLMTenantKey) is written
 # only by llm_provisioning.service. The domain layer carries framework-free value
@@ -901,6 +972,26 @@ source_modules = [
     "pocketpaw_ee.cloud.projects.domain",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.project"]
+
+# Ship — the /ship managed-deploy entity (SHIP-2/SHIP-3). This entity's
+# doc-owning module is ``ship/store.py`` rather than ``service.py``: the SSH
+# private key on a ShipBox is Fernet-encrypted at rest, and the store is what
+# hides that envelope so no caller ever handles ciphertext. The contract pins
+# the same boundary every other entity has — the router, DTOs and domain value
+# objects must never reach a Beanie document. ``service.py`` / ``engine.py`` /
+# the two arq job modules stay off the docs too, but by review rather than by
+# contract: they annotate with the doc types under ``TYPE_CHECKING``, which
+# import-linter counts as a real import.
+[[tool.importlinter.contracts]]
+name = "Ship — Beanie writes only from store.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.ship.router",
+    "pocketpaw_ee.cloud.ship.dto",
+    "pocketpaw_ee.cloud.ship.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.ship"]
 
 [[tool.importlinter.contracts]]
 name = "Planner — Beanie writes only from service.py"

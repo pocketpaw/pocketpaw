@@ -1,0 +1,6 @@
+# transcript: `dokku domains:add demo demo.paw.example`.
+EXIT: 0
+--- stdout ---
+-----> Added demo.paw.example to demo
+       Reloading nginx
+--- stderr ---

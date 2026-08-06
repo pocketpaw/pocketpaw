@@ -1,5 +1,49 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-07-27 (integration/growth-v1) — G-6's ``WhatsAppSendLog`` is
+gone: it and G-5's ``MessageLog`` were the same send record built in parallel
+under two names, unified onto ``MessageLog`` (which gained the ``sending`` /
+``blocked`` outcomes, ``blocked_reason``, ``error_code`` and
+``opted_in_at_attempt``). The stale G-6 note below is kept for history.
+
+Superseded: 2026-07-27 (feat/growth-g6) — added ``WhatsAppSendLog`` (the /growth
+per-attempt outbound WhatsApp compliance record: one row per attempt, including
+the attempts the opt-in guard REFUSED) to the imports and
+``get_all_documents()`` so the ``growth_whatsapp_send_logs`` collection is wired
+into ``init_beanie``. Kept out of ``__all__`` like ``Prospect`` / ``Draft`` —
+only ``ee.cloud.growth.service`` imports the doc class directly (import-linter
+"Growth" contract).
+Updated: 2026-07-29 (feat/growth-discovery) — added ``Icp`` (the standing
+description of who a workspace wants, plus the discovery cadence) to the
+imports and ``get_all_documents()`` so the ``growth_icps`` collection is wired
+into ``init_beanie``. Kept out of ``__all__`` like the other growth docs.
+Updated: 2026-07-27 (feat/growth-g4 merge) — merged integration/ship-v1 into the
+growth stack so the ``_growth_send`` gate slice can wire the sixth gated kind on
+top of ship's instinct-router changes; both changelog blocks below retained.
+Updated: 2026-07-27 (feat/growth-g5) — added ``MessageLog`` (the /growth
+outbound audit row: one record per delivery ATTEMPT, ``sent`` | ``failed``) to
+the imports and ``get_all_documents()`` so the ``growth_message_logs``
+collection is wired into ``init_beanie``. Kept out of ``__all__`` like
+``Prospect`` / ``Draft`` — only ``ee.cloud.growth.service`` imports the doc
+class directly (import-linter "Growth" contract).
+Updated: 2026-07-27 (feat/growth-g3) — added ``Draft`` (the /growth per-channel
+outreach draft: workspace-scoped, attached to a prospect, status lifecycle
+enforced in the service) to the imports and ``get_all_documents()`` so the
+``growth_drafts`` collection is wired into ``init_beanie``. Kept out of
+``__all__`` like ``Prospect`` — only ``ee.cloud.growth.service`` imports the
+doc class directly (import-linter "Growth" contract).
+Updated: 2026-07-27 (feat/growth-g1) — added ``Prospect`` (the /growth
+outbound-engine prospect store: workspace-scoped, unique (workspace, domain)
+dedupe key) to the imports and ``get_all_documents()`` so the
+``growth_prospects`` collection is wired into ``init_beanie``. Kept out of
+``__all__`` so it can't be star-imported into routers/DTOs/domains — only
+``ee.cloud.growth.service`` imports the doc class directly (import-linter
+"Growth" contract).
+Updated: 2026-07-22 (SHIP-3, feat/ship-3-cloud-entity) — added ``ShipApp`` and
+``ShipDeploy`` (the /ship app + deploy-attempt docs) to the imports, ``__all__``
+and ``get_all_documents()`` so the ``ship_apps`` / ``ship_deploys`` collections
+are wired into ``init_beanie``. Only ``ee.cloud.ship.store`` imports the doc
+classes directly (import-linter "Ship" contract).
 Updated: 2026-07-15 (fix/workspace-vm-map-to-db) — added ``WorkspaceVm`` (the
 workspace→Daytona-VM mapping, moved out of the local
 ``~/.pocketpaw/daytona_workspace_vm_map.json`` file into the ``workspace_vms``
@@ -135,6 +179,7 @@ from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
 from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from pocketpaw_ee.cloud.models.deep_work_log import DeepWorkLog
+from pocketpaw_ee.cloud.models.draft import Draft
 from pocketpaw_ee.cloud.models.fabric_ingest_state import (
     FabricIngestConfig,
     FabricIngestState,
@@ -156,6 +201,7 @@ from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
     ForesightWorkspaceScenario,
 )
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
+from pocketpaw_ee.cloud.models.icp import Icp
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
 from pocketpaw_ee.cloud.models.instinct_workspace_config import InstinctWorkspaceConfig
@@ -170,6 +216,7 @@ from pocketpaw_ee.cloud.models.meeting import (
 )
 from pocketpaw_ee.cloud.models.member_ingest_state import MemberIngestState
 from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reaction
+from pocketpaw_ee.cloud.models.message_log import MessageLog
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
 from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
 from pocketpaw_ee.cloud.models.payment import Payment
@@ -177,12 +224,14 @@ from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.models.pocket_backend import PocketBackendCredential
 from pocketpaw_ee.cloud.models.project import Project
+from pocketpaw_ee.cloud.models.prospect import Prospect
 from pocketpaw_ee.cloud.models.push_subscription import PushSubscription
 from pocketpaw_ee.cloud.models.read_state import ReadState
 from pocketpaw_ee.cloud.models.request_log import RequestLog
 from pocketpaw_ee.cloud.models.sense_preference import WorkspaceSensePreference
 from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.session_transcript import SessionTranscriptDoc
+from pocketpaw_ee.cloud.models.ship import ShipApp, ShipBox, ShipDeploy
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
@@ -322,6 +371,9 @@ __all__ = [
     "Lead",
     "LeadSource",
     "LiteLLMTenantKey",
+    "ShipApp",
+    "ShipBox",
+    "ShipDeploy",
     "Meeting",
     "MeetingProviderCredentials",
     "MeetingsSettings",
@@ -423,6 +475,11 @@ def get_all_documents():
         # LiteLLM per-tenant virtual-key mapping (MCG-8). Only
         # ``ee.cloud.llm_provisioning.service`` writes this.
         LiteLLMTenantKey,
+        # Managed-deploy boxes + their apps and deploy attempts (SHIP-2/SHIP-3).
+        # Only ``ee.cloud.ship.store`` reads/writes these.
+        ShipBox,
+        ShipApp,
+        ShipDeploy,
         Invite,
         MeetingInvite,
         Group,
@@ -469,6 +526,23 @@ def get_all_documents():
         Lead,
         Site,
         SiteRateCounter,
+        # Growth prospect store (G-1) — the /growth outbound engine's
+        # workspace-scoped, domain-deduped prospect record. Only
+        # ``ee.cloud.growth.service`` imports this doc directly (import-linter
+        # "Growth" contract).
+        Prospect,
+        # Growth drafts (G-3) — per-channel outreach copy attached to a
+        # prospect, status lifecycle enforced in the service. Same import
+        # boundary as Prospect.
+        Draft,
+        # Growth message log (G-5) — one audit row per outbound delivery
+        # ATTEMPT (sent | failed) written by the dispatch worker through
+        # ``growth.service.record_message_log``. Same import boundary.
+        MessageLog,
+        # Growth ICP (feat/growth-discovery) — the standing description of who
+        # a workspace wants, and the cadence the discovery cron runs it on.
+        # Same import boundary as Prospect / Draft / MessageLog.
+        Icp,
         PushSubscription,
         VapidKeypair,
         WorkspaceSensePreference,
