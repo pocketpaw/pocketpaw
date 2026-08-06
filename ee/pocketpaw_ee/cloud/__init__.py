@@ -1,5 +1,10 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-08-06 (feat/coupling-alerts-to-bell, T-10) — Registers the
+    OSS operational-alert bridge (``notifications/bridges/alerts.py``):
+    SystemEvent(event_type="alert") on the OSS MessageBus now fans into
+    ``notifications_service.create`` for the default (operator)
+    workspace's admins, lighting the bell + Slack/webhook delivery.
 Modified: 2026-07-11 (feat/real-pipeline-s1) — Mounts the fabric_ingest
     transform-surface router (``/fabric/ingest/mappings`` CRUD +
     ``/fabric/ingest/run`` run-now) next to the fabric router under
@@ -920,6 +925,24 @@ def mount_cloud(app: FastAPI) -> None:
 
     register_meeting_notification_listeners()
     register_meeting_calendar_listeners()
+
+    # OSS operational alerts → workspace bell (T-10). The OSS AlertManager
+    # publishes SystemEvent(event_type="alert") on the in-process pocketpaw
+    # MessageBus (budget_exhausted / error_spike / channel_disconnect / …);
+    # without this bridge those events die in the OSS ring buffer and never
+    # become Notification rows — no bell, no Slack/webhook delivery. The
+    # bridge fans each alert to the DEFAULT (first-created / operator)
+    # workspace's admins only — instance-scoped alerts have no tenant
+    # attribution, see notifications/bridges/alerts.py for the full
+    # workspace-resolution rationale. Subscribes on the OSS bus (not the
+    # realtime EventBus), the same seam the session-title listener uses,
+    # so it has no init_realtime ordering constraint — kept with the other
+    # bridge registrations for locality.
+    from pocketpaw_ee.cloud.notifications.bridges.alerts import (
+        register_alert_notification_listeners,
+    )
+
+    register_alert_notification_listeners()
 
     # Push notifications fan-out (#1393) — v1 product events
     # (agent.stream_end / instinct.approval.created / meeting.started) →

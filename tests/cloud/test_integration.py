@@ -1,4 +1,9 @@
-"""Integration smoke test — verify all cloud routes mount correctly."""
+"""Integration smoke test — verify all cloud routes mount correctly.
+
+Updated 2026-08-06 (feat/coupling-alerts-to-bell, T-10): added
+test_alert_bridge_registered_on_mount — pins the OSS-alert → notification
+bridge registration inside mount_cloud().
+"""
 
 from __future__ import annotations
 
@@ -85,6 +90,23 @@ def test_cloud_error_handler_registered():
     app = FastAPI()
     mount_cloud(app)
     assert CloudError in app.exception_handlers
+
+
+def test_alert_bridge_registered_on_mount():
+    """mount_cloud() must subscribe the OSS-alert → notification bridge on
+    the OSS MessageBus (T-10). Deleting the register call in mount_cloud
+    fails this — the workspace bell would silently go dark for
+    budget_exhausted / error_spike / channel_disconnect."""
+    from pocketpaw.bus import get_message_bus
+    from pocketpaw.lifecycle import reset_all
+
+    reset_all()  # fresh bus so a prior test's registration can't mask a lost one
+    app = FastAPI()
+    mount_cloud(app)
+
+    from pocketpaw_ee.cloud.notifications.bridges.alerts import _on_system_event
+
+    assert get_message_bus()._system_subscribers.count(_on_system_event) == 1
 
 
 def test_total_route_count():
