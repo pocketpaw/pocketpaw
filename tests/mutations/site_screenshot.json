@@ -1,0 +1,47 @@
+[
+  {
+    "label": "screenshot: a broken scheduler takes the publish down with it",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    try:\n        from pocketpaw_ee.sites.screenshot import schedule_site_screenshot\n\n        schedule_site_screenshot(site)\n    except Exception:  # noqa: BLE001 — never fail a live publish over a screenshot\n        logger.warning(\n            \"sites.screenshot: could not schedule capture for site %s\",\n            getattr(site, \"id\", \"?\"),\n            exc_info=True,\n        )",
+    "replace": "    from pocketpaw_ee.sites.screenshot import schedule_site_screenshot\n\n    schedule_site_screenshot(site)",
+    "tests": [
+      "tests/ee/sites/test_screenshot_capture.py"
+    ]
+  },
+  {
+    "label": "screenshot: a Cloudflare failure escapes into the publish path",
+    "file": "ee/pocketpaw_ee/sites/screenshot.py",
+    "find": "    try:\n        return await take_site_screenshot(site, cloudflare=cloudflare)\n    except Exception:  # noqa: BLE001 — a screenshot is never a gate on a publish\n        logger.warning(\n            \"sites.screenshot: capture failed for site %s\",\n            getattr(site, \"id\", \"?\"),\n            exc_info=True,\n        )\n        return \"\"",
+    "replace": "    return await take_site_screenshot(site, cloudflare=cloudflare)",
+    "tests": [
+      "tests/ee/sites/test_screenshot_capture.py"
+    ]
+  },
+  {
+    "label": "screenshot: a Cloudflare error page is stored as the site's preview",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "        if resp.status_code // 100 == 2 and content_type.startswith(\"image/\") and resp.content:\n            return resp.content",
+    "replace": "        if True:\n            return resp.content",
+    "tests": [
+      "tests/ee/sites/test_screenshot_capture.py"
+    ]
+  },
+  {
+    "label": "screenshot: a site with no public url is photographed anyway",
+    "file": "ee/pocketpaw_ee/sites/screenshot.py",
+    "find": "    url = (getattr(site, \"url\", \"\") or \"\").strip()\n    if not url:",
+    "replace": "    url = (getattr(site, \"url\", \"\") or \"\").strip()\n    if False:",
+    "tests": [
+      "tests/ee/sites/test_screenshot_capture.py"
+    ]
+  },
+  {
+    "label": "screenshot: a draft publish photographs the unapproved page",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    _schedule_site_knowledge_sync(doc)\n    # SC-1: the page the gallery card shows is now a different page, so re-shoot\n    # it. Same placement and the same rule as the sync above — the site is\n    # already live, so a screenshot may never fail or delay the publish. A\n    # preview publish never reaches here, so a draft is never photographed.\n    _schedule_site_screenshot(doc)",
+    "replace": "    _schedule_site_knowledge_sync(doc)",
+    "tests": [
+      "tests/ee/sites/test_screenshot_capture.py"
+    ]
+  }
+]

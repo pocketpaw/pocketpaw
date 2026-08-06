@@ -118,6 +118,15 @@
 # validated in the service) and ImportFromUrlResponse ({site_id, pocket_id,
 # status:"queued"} — the 202 body; the crawler is the next stacked slice). The zip
 # import endpoint reuses SiteResponse (it publishes live through the html path).
+# Updated 2026-08-07 (SC-1 — a site's card shows its own screenshot):
+# ``SiteResponse`` (which IS the gallery list item — GET /sites is
+# ``response_model=list[SiteResponse]``) and ``SiteStatusResponse`` gain
+# ``preview_image_url`` — the stored URL of a screenshot of the site's live page,
+# resolved from the Site doc's own field. The sibling of ``pattern`` / ``engine``
+# in role: one more thing the card needs that would otherwise cost a per-card
+# fetch. None when no screenshot has landed (never deployed, no public url,
+# capture failed, Cloudflare unconfigured) — the card then falls back to its text
+# layout, so the field is optional, empty-safe and backward-compatible.
 
 from __future__ import annotations
 
@@ -191,6 +200,15 @@ class SiteResponse(BaseModel):
     # scripts, warnings} (from-url adds status/source_url). None for every
     # non-imported site, so the field is backward-compatible and empty-safe.
     import_report: dict[str, Any] | None = None
+    # SC-1: the stored URL of a screenshot of this site's live page (an uploads
+    # link, e.g. "/api/v1/uploads/{id}"), read from the Site doc. This is what
+    # turns a gallery card from a title and three pills into a picture of the
+    # actual page. Written by a best-effort background capture scheduled from the
+    # tail of a successful deploy, so it is None until one lands — and None
+    # whenever the capture failed, the site has no public url yet, or Cloudflare
+    # Browser Rendering is unconfigured. The card falls back to its text layout on
+    # None, so the field is optional and backward-compatible.
+    preview_image_url: str | None = None
 
 
 class SitePreviewResponse(BaseModel):
@@ -248,6 +266,11 @@ class SiteStatusResponse(BaseModel):
     # from Pocket.engine — the same field the list response carries, so a by-pocket
     # status read can badge the engine too. "" when unresolved / pre-engine row.
     engine: str = ""
+    # SC-1: the stored URL of a screenshot of the pocket's live site — the same
+    # field the list response carries, so a by-pocket status read can show the
+    # page too. None until a capture lands (and whenever one failed, the site has
+    # no public url, or Cloudflare Browser Rendering is unconfigured).
+    preview_image_url: str | None = None
 
 
 class SiteVersionResponse(BaseModel):
