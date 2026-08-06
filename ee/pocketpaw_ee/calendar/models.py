@@ -1,4 +1,7 @@
 # Calendar module — Beanie document models.
+# Updated: 2026-08-06 (feat/coupling-tasks-on-calendar) — added the
+#   (workspace, fabric_object_id) composite index: the tasks bridge
+#   resolves its linked event by fabric_object_id on every task.* emit.
 # Updated: 2026-05-19 (fix/calendar-security-hardening, #1142 H-NEW-1).
 #
 # Changes:
@@ -109,4 +112,9 @@ class _EventDoc(Document):
             # personal-view, modify-allowlist UI). Composite with workspace
             # to honour the tenant filter rule.
             IndexModel([("workspace", ASCENDING), ("created_by_user_id", ASCENDING)]),
+            # Task/meeting bridge linkage lookup — the tasks bridge resolves
+            # its event by fabric_object_id on EVERY task.* emit, so the
+            # query pattern deserves its own composite (tenant-first per the
+            # filter rule).
+            IndexModel([("workspace", ASCENDING), ("fabric_object_id", ASCENDING)]),
         ]

@@ -326,6 +326,76 @@ async def test_task_complete_survives_calendar_failure(real_bus, monkeypatch) ->
     assert done.status == "done"
 
 
+async def test_slim_payload_without_due_key_does_not_delete_event(real_bus) -> None:
+    """A task.updated whose payload OMITS the due_at key entirely (the
+    planner terminal's requeue emit, ``_plan_task_event_payload``) must
+    NOT delete the event of a still-live, still-due-dated task — key
+    absent means unknown, not cleared.
+
+    Mutation that breaks this: remove the slim-payload guard
+    ('treat an absent due_at key as cleared')."""
+
+    from pocketpaw_ee.cloud._core.realtime.events import TaskUpdated
+    from pocketpaw_ee.cloud.tasks.bridges.calendar import _on_task_updated
+
+    task = await _create_task()
+    assert len(await _events_in("ws-a")) == 1
+
+    # Planner-shaped slim payload: no due_at key, status back to proposed.
+    await _on_task_updated(
+        TaskUpdated(
+            data={
+                "task_id": task.id,
+                "workspace_id": "ws-a",
+                "project_id": "proj-1",
+                "task": {
+                    "id": task.id,
+                    "workspace_id": "ws-a",
+                    "project_id": "proj-1",
+                    "title": task.title,
+                    "summary": None,
+                    "status": "proposed",
+                    "assignee": {"kind": "agent", "id": "agent-1", "name": "planner"},
+                },
+            }
+        )
+    )
+
+    events = await _events_in("ws-a")
+    assert len(events) == 1  # event survived the slim emit
+    assert events[0].fabric_object_id == f"task:{task.id}"
+
+
+async def test_slim_payload_with_terminal_status_still_deletes(real_bus) -> None:
+    """The slim-payload guard only protects live tasks — a hand-built
+    payload with a terminal status (planner escalation → failed) still
+    deletes the event, due_at key or no due_at key."""
+
+    from pocketpaw_ee.cloud._core.realtime.events import TaskUpdated
+    from pocketpaw_ee.cloud.tasks.bridges.calendar import _on_task_updated
+
+    task = await _create_task()
+    assert len(await _events_in("ws-a")) == 1
+
+    await _on_task_updated(
+        TaskUpdated(
+            data={
+                "task_id": task.id,
+                "workspace_id": "ws-a",
+                "task": {
+                    "id": task.id,
+                    "workspace_id": "ws-a",
+                    "title": task.title,
+                    "status": "failed",
+                    "assignee": {"kind": "agent", "id": "agent-1", "name": "planner"},
+                },
+            }
+        )
+    )
+
+    assert await _events_in("ws-a") == []
+
+
 async def test_comment_emit_with_task_none_is_a_noop(real_bus) -> None:
     """task.updated fired for a task comment ships task=None — the
     bridge must treat it as a no-op, not a crash."""

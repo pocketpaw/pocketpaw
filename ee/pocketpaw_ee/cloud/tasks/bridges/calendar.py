@@ -1,4 +1,8 @@
 # bridges/calendar.py — Task → Calendar one-way bridge.
+# Updated: 2026-08-06 (review follow-up) — slim-payload guard: an emit
+#   whose task dict OMITS the due_at key (planner requeue's hand-built
+#   payload) no longer deletes a live event; absent != cleared. Also
+#   swapped the due_at assert for a real branch (-O strips asserts).
 # Created: 2026-08-06 (feat/coupling-tasks-on-calendar, coupling wave T-12).
 #   A task with a ``due_at`` now shows up on /calendar so the user plans
 #   their day against real deadlines instead of a separate task feed.
@@ -174,6 +178,20 @@ async def _sync_task_calendar(task: dict[str, Any]) -> None:
     if not (task_id and workspace_id):
         return
 
+    status = task.get("status") or ""
+
+    # Slim-payload guard: not every task.* emit ships the full DTO. The
+    # planner terminal's requeue path (``_plan_task_event_payload``)
+    # hand-builds ``data.task`` WITHOUT a ``due_at`` key while flipping a
+    # still-live, still-due-dated task back to ``proposed``. Key ABSENT
+    # means "unknown", not "cleared" — deleting on unknown would wrongly
+    # remove a live deadline. Leave the event untouched and let the next
+    # full-DTO emit reconcile. An explicit ``due_at: None`` (full DTO,
+    # deadline cleared) still falls through and deletes as intended, and
+    # terminal-status emits still delete regardless of the key.
+    if "due_at" not in task and status in _CALENDAR_ELIGIBLE_STATUSES:
+        return
+
     # Late imports — the calendar package is enterprise-only and its
     # absence must disable the bridge, not break task writes. Mirrors the
     # meetings bridge exactly.
@@ -190,7 +208,6 @@ async def _sync_task_calendar(task: dict[str, Any]) -> None:
         return
 
     due_at = _parse_due_at(task.get("due_at"))
-    status = task.get("status") or ""
     should_exist = due_at is not None and status in _CALENDAR_ELIGIBLE_STATUSES
 
     fabric_id = f"{_FABRIC_PREFIX}{task_id}"
@@ -213,7 +230,9 @@ async def _sync_task_calendar(task: dict[str, Any]) -> None:
             )
         return
 
-    assert due_at is not None  # narrowed by should_exist
+    if due_at is None:  # narrowed by should_exist already; never trips.
+        # Kept as a real branch, not an assert — asserts strip under -O.
+        return
     title = task.get("title") or "Untitled task"
     starts_at = due_at
     ends_at = due_at + _DEFAULT_DURATION

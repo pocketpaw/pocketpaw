@@ -42,6 +42,13 @@
     "tests": ["tests/cloud/tasks/test_tasks_calendar_bridge.py"]
   },
   {
+    "label": "treat an absent due_at key as cleared — slim planner payloads delete live events",
+    "file": "ee/pocketpaw_ee/cloud/tasks/bridges/calendar.py",
+    "find": "    if \"due_at\" not in task and status in _CALENDAR_ELIGIBLE_STATUSES:\n        return",
+    "replace": "    if False:\n        return",
+    "tests": ["tests/cloud/tasks/test_tasks_calendar_bridge.py"]
+  },
+  {
     "label": "drop the mount registration — bridge exists but is never wired",
     "file": "ee/pocketpaw_ee/cloud/__init__.py",
     "find": "    register_task_calendar_listeners()",
