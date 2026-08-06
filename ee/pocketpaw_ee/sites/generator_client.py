@@ -15,6 +15,19 @@
 # prerender. Comment-only; the default and the code are unchanged (see the
 # ``_DEFAULT_BUILD_TIMEOUT_SEC`` block for the measurement and the operator note).
 #
+# Updated 2026-08-07 (MT-1 — an interactive site keeps its own JavaScript):
+# build()/_build_one() gained an optional ``keeps_client_bundle: bool = False`` that
+# rides ``siteConfig.keepsClientBundle`` — ONLY when True, so a site that declares
+# nothing keeps byte-identical wire bytes (the SE-2b ``builderOrigin`` pattern, not the
+# DP0-1 always-present one, because the generator treats an absent flag as false).
+# A published site is generated with ``csr = false`` and, on ripple, has its emitted
+# hydration bundle deleted by prune-client, so the author's own client JS never runs
+# (no onMount, no ``use:`` action, no IntersectionObserver, no WebGL canvas). The
+# paw-sites generator reads this flag to emit ``csr = true`` and to mark the route
+# manifest. This is ONLY the pass-through: a caller CAN now declare it. Reading the
+# per-pocket fact at the caller (service.publish) is a LATER task — the same split
+# DP0-1 made for ``d1_database_id`` below.
+#
 # Updated 2026-07-17 (feat/sites-native-artifact-no-build): added ``artifact_home()``
 # (the ~/.pocketpaw/site-artifacts root for the native-artifact read-through cache,
 # mirroring build_home) and ``generator_version()`` (an artifact-format + dep epoch
@@ -1204,6 +1217,7 @@ class GeneratorClient:
         assets: dict[str, str] | None = None,
         builder_origin: str | None = None,
         d1_database_id: str = "",
+        keeps_client_bundle: bool = False,
         pocket_id: str | None = None,
         smoke: bool = True,
         static_build: bool = True,
@@ -1250,6 +1264,18 @@ class GeneratorClient:
         the right D1. This is only the pass-through — the real id is supplied by the
         provision job at the caller in a later task (DP0-3/DP0-4).
 
+        ``keeps_client_bundle`` (MT-1) declares that this site's own JavaScript is
+        load-bearing — an ``onMount``, a ``use:`` action, an IntersectionObserver
+        scroll-reveal, a raw-WebGL canvas. A published site is otherwise generated
+        with ``csr = false`` (and, on ripple, has its emitted hydration bundle deleted
+        after the build), so that code never runs in the browser. When True it rides
+        ``siteConfig.keepsClientBundle`` and the paw-sites generator emits
+        ``csr = true`` + marks the route manifest; the page stays PRERENDERED, so the
+        content is still in view-source and hydration only arms the motion on top. The
+        key is OMITTED when False, so a site that declares nothing keeps the exact
+        prior wire bytes. Pass-through only — reading the per-pocket fact at the caller
+        is a later task, mirroring ``d1_database_id`` above.
+
         ``pocket_id`` (PERF-3) builds into a STABLE per-pocket working dir under
         build_home() (``<build_home>/<pocket_id>/``) so node_modules persists and
         `bun install` is cached across builds (preview AND publish). When None,
@@ -1288,6 +1314,7 @@ class GeneratorClient:
                 assets=assets,
                 builder_origin=builder_origin,
                 d1_database_id=d1_database_id,
+                keeps_client_bundle=keeps_client_bundle,
                 pocket_id=None,
                 smoke=smoke,
                 static_build=static_build,
@@ -1305,6 +1332,7 @@ class GeneratorClient:
                 assets=assets,
                 builder_origin=builder_origin,
                 d1_database_id=d1_database_id,
+                keeps_client_bundle=keeps_client_bundle,
                 pocket_id=pocket_id,
                 smoke=smoke,
                 static_build=static_build,
@@ -1323,6 +1351,7 @@ class GeneratorClient:
         source: dict[str, Any] | None,
         builder_origin: str | None,
         d1_database_id: str,
+        keeps_client_bundle: bool,
         pocket_id: str | None,
         smoke: bool,
         static_build: bool = True,
@@ -1355,6 +1384,14 @@ class GeneratorClient:
         # non-editable publish's payload is byte-identical to before this change.
         if builder_origin:
             site_config["builderOrigin"] = builder_origin
+        # MT-1: only present when the site DECLARES that its own client JS is
+        # load-bearing. The generator then emits ``csr = true`` (the page stays
+        # prerendered) and marks the route manifest, so the hand-written onMount /
+        # ``use:`` action / IntersectionObserver / WebGL code actually runs and the
+        # ripple build's prune step leaves the hydration bundle alone. Omitted when
+        # False so a plain static site's payload is byte-identical to before.
+        if keeps_client_bundle:
+            site_config["keepsClientBundle"] = True
         input_json: dict[str, Any] = {
             "engine": engine,
             "theme": theme,
