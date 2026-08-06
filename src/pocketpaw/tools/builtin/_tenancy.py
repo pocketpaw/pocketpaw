@@ -39,11 +39,12 @@
 # backend without binding identity, the real mis-tenanting bug, still trips
 # the guard).
 #
-# EE→OSS boundary: this module lives in OSS core and imports ``pocketpaw_ee``
-# only lazily, inside try/except, exactly like the sibling ``library_verbs.py``
-# / ``edit_document.py`` resolvers. A community install without the enterprise
-# package resolves ``None`` for both signals and keeps its legacy unscoped
-# behavior.
+# EE→OSS boundary: this module lives in OSS core. Workspace resolution reads
+# the OSS-core ContextVar only — no EE import at all. The single EE reach is
+# ``is_tenant_scoped_run``'s lazy import of the run marker, inside a narrow
+# ``except ImportError``, exactly like the sibling ``library_verbs.py`` /
+# ``edit_document.py`` resolvers. A community install without the enterprise
+# package gets ``False`` there and keeps its legacy unscoped behavior.
 
 from __future__ import annotations
 
@@ -61,35 +62,22 @@ __all__ = [
 def current_workspace() -> str | None:
     """Resolve the active workspace for this run, or ``None``.
 
-    Resolution order — both sources are set together by
-    ``attach_agent_identity``, so they agree whenever a cloud chat stream is
-    live; the fallback covers a pure-OSS process (connector ingest, tests)
-    that sets only the core ContextVar:
+    Reads the OSS-core ``pocketpaw.stores.current_workspace`` ContextVar and
+    nothing else. This deliberately does NOT also consult EE's
+    ``current_workspace_id()``: ``attach_agent_identity`` is the only setter of
+    either var and it sets BOTH in one return tuple, so an EE branch here would
+    be unreachable-by-construction — no test could distinguish its presence from
+    its absence, which makes it untestable weight rather than defense in depth.
+    Reading the in-package var also keeps this function free of any EE import.
 
-        EE per-stream agent identity  →  OSS ``stores.current_workspace``
-
-    A blank / whitespace-only value from either source is treated as "no
-    workspace" so an empty string can never satisfy the fail-closed check nor
-    be stamped onto a row.
+    A blank / whitespace-only value is treated as "no workspace" so an empty
+    string can never satisfy the fail-closed check nor be stamped onto a row.
     """
-    try:
-        from pocketpaw_ee.cloud.chat.agent_service import current_workspace_id
+    from pocketpaw.stores import current_workspace as _oss_current_workspace
 
-        candidate = current_workspace_id()
-        if candidate and candidate.strip():
-            return candidate.strip()
-    except Exception:  # noqa: BLE001 — no EE package, or no live stream
-        pass
-
-    try:
-        from pocketpaw.stores import current_workspace as _oss_current_workspace
-
-        candidate = _oss_current_workspace.get()
-        if candidate and candidate.strip():
-            return candidate.strip()
-    except Exception:  # noqa: BLE001 — defensive; the import is in-package
-        logger.debug("OSS workspace ContextVar unreadable", exc_info=True)
-
+    candidate = _oss_current_workspace.get()
+    if candidate and candidate.strip():
+        return candidate.strip()
     return None
 
 
@@ -105,13 +93,19 @@ def is_tenant_scoped_run() -> bool:
 
     Absent the EE package or outside a chat run, this is ``False`` and the
     tools keep their legacy unscoped behavior.
+
+    The except is narrowed to ``ImportError`` on purpose: this default is
+    fail-OPEN (``False`` means "no workspace needed"), so it must only fire for
+    the one condition it is meant to cover — the enterprise package, or that
+    symbol, not being installed. Swallowing every exception here would turn an
+    unrelated bug inside ``current_cloud_chat_run`` into a silently disabled
+    guard.
     """
     try:
         from pocketpaw_ee.cloud.chat.agent_service import current_cloud_chat_run
-
-        return bool(current_cloud_chat_run())
-    except Exception:  # noqa: BLE001 — no EE package / older EE build
+    except ImportError:  # no EE package / older EE build without the marker
         return False
+    return bool(current_cloud_chat_run())
 
 
 def workspace_required_message(tool_name: str) -> str:

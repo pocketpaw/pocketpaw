@@ -469,7 +469,8 @@ CREATE TABLE IF NOT EXISTS instinct_corrections (
     patches TEXT NOT NULL,
     context_summary TEXT NOT NULL,
     action_title TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT DEFAULT (datetime('now')),
+    workspace_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS instinct_fabric_snapshots (
@@ -499,6 +500,7 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_object ON instinct_fabric_snapshots(obj
 _WORKSPACE_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_actions_workspace ON instinct_actions(workspace_id)",
     "CREATE INDEX IF NOT EXISTS idx_audit_workspace ON instinct_audit(workspace_id)",
+    "CREATE INDEX IF NOT EXISTS idx_corrections_workspace ON instinct_corrections(workspace_id)",
 )
 
 # Generic-scope index (BP-3). Created AFTER the ALTER that adds scope_type for
@@ -568,7 +570,10 @@ class InstinctStore:
             # (legacy/global; a scoped read still sees them — see the header).
             # The audit ALTER is a READ-FILTER column ONLY: workspace_id is not
             # part of the canonical hash payload, so the W2b chain is untouched.
-            for _tbl in ("instinct_actions", "instinct_audit"):
+            # C4-a adds ``instinct_corrections`` to the same list: the
+            # corrections table shipped without tenancy, so the agent-facing
+            # instinct_corrections tool read it with a pocket_id filter only.
+            for _tbl in ("instinct_actions", "instinct_audit", "instinct_corrections"):
                 try:
                     await db.execute(f"ALTER TABLE {_tbl} ADD COLUMN workspace_id TEXT")
                 except aiosqlite.OperationalError:
@@ -1636,15 +1641,25 @@ class InstinctStore:
 
     # --- Corrections ---
 
-    async def record_correction(self, correction: Correction) -> Correction:
-        """Persist a Correction and log the event to the audit table."""
+    async def record_correction(
+        self, correction: Correction, workspace_id: str | None = None
+    ) -> Correction:
+        """Persist a Correction and log the event to the audit table.
+
+        ``workspace_id`` (C4-a) stamps the owning tenant. It is load-bearing for
+        the read filter, not decorative: ``_workspace_scope`` treats a NULL row
+        as legacy/global and returns it to EVERY tenant's scoped read, so a
+        corrections table nobody stamps makes ``get_corrections_for_pocket``'s
+        scoping a no-op. ``None`` keeps the legacy unscoped write for OSS /
+        single-tenant callers.
+        """
         await self._ensure_schema()
         async with self._conn() as db:
             await db.execute(
                 "INSERT INTO instinct_corrections"
                 " (id, action_id, pocket_id, actor, patches,"
-                " context_summary, action_title, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " context_summary, action_title, created_at, workspace_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     correction.id,
                     correction.action_id,
@@ -1654,6 +1669,7 @@ class InstinctStore:
                     correction.context_summary,
                     correction.action_title,
                     correction.created_at.isoformat(),
+                    workspace_id,
                 ),
             )
             await db.commit()
@@ -1673,16 +1689,28 @@ class InstinctStore:
         return correction
 
     async def get_corrections_for_pocket(
-        self, pocket_id: str, limit: int = 100
+        self, pocket_id: str, limit: int = 100, workspace_id: str | None = None
     ) -> list[Correction]:
+        """Recent corrections on a pocket, optionally scoped to a tenant (C4-a).
+
+        ``workspace_id`` is a READ FILTER with the same semantics as ``pending``
+        / ``query_audit``: the caller's own rows plus legacy NULL-workspace
+        rows. Before C4-a this method filtered on ``pocket_id`` ALONE, so the
+        agent-facing ``instinct_corrections`` tool could read any pocket id's
+        corrections on a shared file with no tenant filter whatsoever.
+        """
+        sql = "SELECT * FROM instinct_corrections WHERE pocket_id = ?"
+        params: list[Any] = [pocket_id]
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
         await self._ensure_schema()
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT * FROM instinct_corrections"
-                " WHERE pocket_id = ? ORDER BY created_at DESC LIMIT ?",
-                (pocket_id, limit),
-            ) as cur:
+            async with db.execute(sql, params) as cur:
                 return [self._row_to_correction(row) async for row in cur]
 
     async def get_corrections_for_action(self, action_id: str) -> list[Correction]:

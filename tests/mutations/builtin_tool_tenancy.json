@@ -110,17 +110,62 @@
   {
     "label": "tenancy: a blank workspace counts as resolved identity",
     "file": "src/pocketpaw/tools/builtin/_tenancy.py",
-    "find": "        candidate = _oss_current_workspace.get()\n        if candidate and candidate.strip():\n            return candidate.strip()",
-    "replace": "        candidate = _oss_current_workspace.get()\n        if candidate is not None:\n            return candidate",
+    "find": "    candidate = _oss_current_workspace.get()\n    if candidate and candidate.strip():\n        return candidate.strip()",
+    "replace": "    candidate = _oss_current_workspace.get()\n    if candidate is not None:\n        return candidate",
     "tests": [
       "tests/test_builtin_tools_workspace_scope.py"
     ]
   },
   {
+    "label": "corrections: the seventh sibling reads unfiltered again",
+    "file": "src/pocketpaw/tools/builtin/instinct_corrections.py",
+    "find": "                limit=min(max(limit, 1), 50),\n                workspace_id=workspace,\n            )",
+    "replace": "                limit=min(max(limit, 1), 50),\n            )",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "corrections: the seventh sibling's fail-closed refusal is dropped",
+    "file": "src/pocketpaw/tools/builtin/instinct_corrections.py",
+    "find": "    workspace = current_workspace()\n    if workspace is None and is_tenant_scoped_run():",
+    "replace": "    workspace = current_workspace()\n    if False:",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "corrections: the store read ignores the workspace it is handed",
+    "file": "src/pocketpaw/instinct/store.py",
+    "find": "        ws_cond, ws_params = _workspace_scope(workspace_id)\n        if ws_cond:\n            sql += f\" AND {ws_cond}\"\n            params.extend(ws_params)\n        sql += \" ORDER BY created_at DESC LIMIT ?\"",
+    "replace": "        sql += \" ORDER BY created_at DESC LIMIT ?\"",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "corrections: the writer stops stamping the tenant (read filter becomes a no-op)",
+    "file": "src/pocketpaw/instinct/store.py",
+    "find": "                \" context_summary, action_title, created_at, workspace_id)\"\n                \" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\",",
+    "replace": "                \" context_summary, action_title, created_at, workspace_id)\"\n                \" VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)\",",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "bridge: the group/DM path stops marking itself a cloud chat run",
+    "file": "ee/pocketpaw_ee/cloud/shared/agent_bridge.py",
+    "find": "    cloud_run_marker = mark_cloud_chat_run()\n    cloud_run_marker.__enter__()\n",
+    "replace": "    class _NoMarker:\n        def __enter__(self):\n            return None\n\n        def __exit__(self, *a):\n            return False\n\n    cloud_run_marker = _NoMarker()\n    cloud_run_marker.__enter__()\n",
+    "tests": [
+      "tests/cloud/shared/test_agent_bridge_identity.py"
+    ]
+  },
+  {
     "label": "tenancy: the guard becomes a process-global that fires for every run (#1570)",
     "file": "src/pocketpaw/tools/builtin/_tenancy.py",
-    "find": "        return bool(current_cloud_chat_run())",
-    "replace": "        return True",
+    "find": "    return bool(current_cloud_chat_run())",
+    "replace": "    return True",
     "tests": [
       "tests/test_builtin_tools_workspace_scope.py"
     ]

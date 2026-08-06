@@ -3,12 +3,30 @@
 # a pocket before proposing its next action, so past human edits shape the draft.
 # Pairs with the correction_soul_bridge, which also feeds the same signal into
 # soul-protocol's automatic memory injection when a soul is loaded.
+# Updated: 2026-08-06 (C4-a — stop cross-tenant leakage) — this tool was the
+#   SEVENTH sibling in the same _EE_TOOLS registry as the Fabric/Instinct tools
+#   and the last one left unscoped. It read ``get_corrections_for_pocket`` with
+#   a caller-supplied ``pocket_id`` and NOTHING else: that store method filtered
+#   on pocket_id alone and took no workspace at all, so on the exact scenario
+#   this wave exists for — a cloud run with no resolvable workspace against the
+#   shared legacy file — six tools refused and this one walked through, handing
+#   back another tenant's human-edit history (which quotes the before/after text
+#   of their proposals). It now takes the same ``_resolve_scope`` guard and
+#   passes the resolved workspace into the (newly scoped) store read.
+#   Note the store side needed BOTH halves: ``record_correction`` now stamps the
+#   tenant too, because ``_workspace_scope`` returns NULL rows to every tenant,
+#   so filtering reads against a table nobody stamps would have been a no-op.
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 
+from pocketpaw.tools.builtin._tenancy import (
+    current_workspace,
+    is_tenant_scoped_run,
+    workspace_required_message,
+)
 from pocketpaw.tools.protocol import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -22,6 +40,21 @@ def _get_instinct_store():
         return get_instinct_store()
     except ImportError:
         return None
+
+
+def _resolve_scope(tool_name: str) -> tuple[str | None, str | None]:
+    """Resolve ``(workspace_id, refusal)`` for one tool invocation.
+
+    ``refusal`` is non-None when the run is tenant-scoped but no workspace
+    resolved — the caller returns it verbatim and performs NO store access.
+    """
+    workspace = current_workspace()
+    if workspace is None and is_tenant_scoped_run():
+        logger.warning(
+            "%s refused: tenant-scoped run with no resolvable workspace identity", tool_name
+        )
+        return None, workspace_required_message(tool_name)
+    return workspace, None
 
 
 class InstinctCorrectionsTool(BaseTool):
@@ -64,14 +97,21 @@ class InstinctCorrectionsTool(BaseTool):
         }
 
     async def execute(self, pocket_id: str, limit: int = 10) -> str:
+        workspace, refusal = _resolve_scope(self.name)
+        if refusal:
+            return refusal
+
         store = _get_instinct_store()
         if not store:
             return "Instinct is not available (enterprise feature)."
 
         try:
+            # C4-a: workspace-filtered read — a caller-supplied pocket_id can no
+            # longer reach another tenant's correction history.
             corrections = await store.get_corrections_for_pocket(
                 pocket_id=pocket_id,
                 limit=min(max(limit, 1), 50),
+                workspace_id=workspace,
             )
         except Exception as exc:
             logger.error("instinct_corrections lookup failed: %s", exc)

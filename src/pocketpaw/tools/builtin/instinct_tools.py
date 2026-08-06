@@ -11,9 +11,11 @@
 #       ``(workspace_id = ? OR workspace_id IS NULL)`` for W4a legacy
 #       compatibility, a NULL Action was ACTIVELY RETURNED to every tenant's
 #       scoped pending query on that file — it showed up in other tenants'
-#       approval queues. Now the resolved workspace is stamped on the row
-#       (and the calling user is recorded as the assignee), so the proposal is
-#       visible only to its own tenant.
+#       approval queues. Now the resolved workspace is stamped on the row, so
+#       the proposal is visible only to its own tenant. (Assignee is left
+#       untouched: it drives Mission Control's per-human filter, and defaulting
+#       it to the calling user would silently narrow queues that today show the
+#       whole tenant's unassigned work.)
 #     * ``instinct_pending`` / ``instinct_audit`` read unfiltered. Both now
 #       pass workspace_id, so a tenant's queue and decision trail never
 #       include another tenant's rows.

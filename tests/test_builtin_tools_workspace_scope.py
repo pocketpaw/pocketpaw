@@ -51,7 +51,11 @@ from pocketpaw_ee.cloud.chat.agent_service import (  # noqa: E402
 import pocketpaw.stores as stores  # noqa: E402
 from pocketpaw.fabric.store import FabricStore  # noqa: E402
 from pocketpaw.instinct.store import InstinctStore  # noqa: E402
-from pocketpaw.tools.builtin import fabric_tools, instinct_tools  # noqa: E402
+from pocketpaw.tools.builtin import (  # noqa: E402
+    fabric_tools,
+    instinct_corrections,
+    instinct_tools,
+)
 
 WS_A = "ws-alpha"
 WS_B = "ws-bravo"
@@ -98,6 +102,31 @@ def shared_fabric(tmp_path, monkeypatch) -> FabricStore:
     store = FabricStore(db_path=str(tmp_path / "shared_fabric.db"))
     monkeypatch.setattr(fabric_tools, "_get_fabric_store", lambda: store)
     return store
+
+
+@pytest.fixture
+def shared_corrections(tmp_path, monkeypatch) -> InstinctStore:
+    """ONE Instinct store for the corrections tool — shared-file condition."""
+    store = InstinctStore(db_path=str(tmp_path / "shared_corrections.db"))
+    monkeypatch.setattr(instinct_corrections, "_get_instinct_store", lambda: store)
+    return store
+
+
+async def _record_correction(store: InstinctStore, pocket_id: str, title: str, ws: str | None):
+    """Persist one Correction for ``ws`` (or unscoped when ws is None)."""
+    from pocketpaw.instinct.correction import Correction, CorrectionPatch
+
+    return await store.record_correction(
+        Correction(
+            action_id=f"act-{title}",
+            pocket_id=pocket_id,
+            actor="human",
+            patches=[CorrectionPatch(path="body", before="x", after="y")],
+            context_summary=f"summary-{title}",
+            action_title=title,
+        ),
+        workspace_id=ws,
+    )
 
 
 class _identity:
@@ -217,6 +246,91 @@ async def test_builtin_audit_read_is_workspace_filtered(
     with _identity(WS_B, user="u2"):
         seen = await instinct_tools.InstinctAuditTool().execute()
     assert "A-audit-marker" not in seen
+
+
+# ---------------------------------------------------------------------------
+# The SEVENTH sibling: instinct_corrections was the last unscoped tool
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_corrections_never_returns_another_tenants_history(
+    shared_corrections: InstinctStore,
+) -> None:
+    """WS_B cannot read WS_A's correction history by naming its pocket id.
+
+    Corrections quote the before/after text of a tenant's proposals, so this is
+    content leakage, not just metadata. The tool takes a caller-supplied
+    pocket_id, so the tenant filter is the only thing standing between B and A's
+    edits. Mutation that breaks this: drop ``workspace_id=workspace`` from the
+    ``store.get_corrections_for_pocket`` call.
+    """
+    await _record_correction(shared_corrections, "p-shared", "A-secret-edit", WS_A)
+
+    with _identity(WS_B, user="u2"):
+        seen = await instinct_corrections.InstinctCorrectionsTool().execute(pocket_id="p-shared")
+    assert "A-secret-edit" not in seen
+    assert "No corrections captured yet" in seen
+
+    with _identity(WS_A):
+        own = await instinct_corrections.InstinctCorrectionsTool().execute(pocket_id="p-shared")
+    assert "A-secret-edit" in own
+
+
+@pytest.mark.asyncio
+async def test_corrections_are_stamped_with_the_writing_tenant(
+    shared_corrections: InstinctStore,
+) -> None:
+    """record_correction persists the workspace.
+
+    Without the stamp every row is NULL, and ``_workspace_scope``'s NULL leg
+    hands NULL rows to EVERY tenant — so the read filter above would be a no-op.
+    The writer and the reader are one gate, not two. Mutation that breaks this:
+    drop ``workspace_id`` from the INSERT column list in record_correction.
+    """
+    import aiosqlite
+
+    await _record_correction(shared_corrections, "p1", "A-edit", WS_A)
+    await _record_correction(shared_corrections, "p1", "B-edit", WS_B)
+
+    async with aiosqlite.connect(shared_corrections._db_path) as db:
+        async with db.execute(
+            "SELECT action_title, workspace_id FROM instinct_corrections ORDER BY action_title"
+        ) as cur:
+            rows = await cur.fetchall()
+
+    assert [tuple(r) for r in rows] == [("A-edit", WS_A), ("B-edit", WS_B)]
+
+
+@pytest.mark.asyncio
+async def test_corrections_refuses_unresolvable_identity(monkeypatch) -> None:
+    """The seventh sibling fails closed like the other six.
+
+    This is the exact scenario the wave exists for: a cloud run with no
+    resolvable workspace. Six tools refused and this one used to walk through.
+    Mutation that breaks this: drop the ``if refusal: return refusal`` guard.
+    """
+
+    def _boom():
+        raise AssertionError("instinct_corrections reached the store unscoped")
+
+    monkeypatch.setattr(instinct_corrections, "_get_instinct_store", _boom)
+
+    with _identity(None):
+        out = await instinct_corrections.InstinctCorrectionsTool().execute(pocket_id="p1")
+
+    assert "requires workspace context" in out
+
+
+@pytest.mark.asyncio
+async def test_corrections_workspaceless_run_without_marker_still_works(
+    shared_corrections: InstinctStore,
+) -> None:
+    """OSS / CLI runs keep the legacy unscoped read."""
+    await _record_correction(shared_corrections, "p1", "local-edit", None)
+
+    out = await instinct_corrections.InstinctCorrectionsTool().execute(pocket_id="p1")
+    assert "local-edit" in out
 
 
 # ---------------------------------------------------------------------------
