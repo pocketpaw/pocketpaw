@@ -1,0 +1,37 @@
+[
+  {
+    "label": "hash material: fold the correlation id into the canonical payload",
+    "file": "src/pocketpaw/instinct/store.py",
+    "find": "            \"ai_recommendation\": ai_recommendation,\n            \"outcome\": outcome,\n        },",
+    "replace": "            \"ai_recommendation\": ai_recommendation,\n            \"outcome\": outcome,\n            \"correlation_id\": None,\n        },",
+    "tests": ["tests/instinct/test_audit_correlation.py"]
+  },
+  {
+    "label": "hash material: give the canonical payload a correlation parameter",
+    "file": "src/pocketpaw/instinct/store.py",
+    "find": "    ai_recommendation: str | None,\n    outcome: str | None,\n) -> str:",
+    "replace": "    ai_recommendation: str | None,\n    outcome: str | None,\n    correlation_id: str | None = None,\n) -> str:",
+    "tests": ["tests/instinct/test_audit_correlation.py"]
+  },
+  {
+    "label": "migration: drop the T-4 audit ALTER",
+    "file": "src/pocketpaw/instinct/store.py",
+    "find": "await db.execute(\"ALTER TABLE instinct_audit ADD COLUMN correlation_id TEXT\")",
+    "replace": "await db.execute(\"SELECT 1\")",
+    "tests": ["tests/instinct/test_audit_correlation.py"]
+  },
+  {
+    "label": "population: stop reading the action's correlation column",
+    "file": "src/pocketpaw/instinct/store.py",
+    "find": "correlation_id = await self._action_correlation_id(db, entry.action_id)",
+    "replace": "correlation_id = None",
+    "tests": ["tests/instinct/test_audit_correlation.py"]
+  },
+  {
+    "label": "read path: drop the correlation from the audit row mapper",
+    "file": "src/pocketpaw/instinct/store.py",
+    "find": "            correlation_id=(row[\"correlation_id\"] if \"correlation_id\" in row.keys() else None),",
+    "replace": "            correlation_id=None,",
+    "tests": ["tests/instinct/test_audit_correlation.py"]
+  }
+]

@@ -1,5 +1,40 @@
 # Instinct store — async SQLite operations for the decision pipeline.
 # Created: 2026-03-28 — Action lifecycle + audit log.
+# Updated: 2026-08-06 (T-4, coupling-gap wave) — the tamper-evident
+#   ``instinct_audit`` ledger now carries the Decision-Graph ``correlation_id``,
+#   so the LEGAL record ("action X was approved by Y at T") joins to the
+#   EXPLAINABILITY record ("…and here are the inputs, the policy evaluation and
+#   the precedents that produced it"). They were two disconnected chains over
+#   the same event.
+#   * ``instinct_audit`` gains ``correlation_id TEXT`` (additive ALTER, same
+#     swallow-the-duplicate pattern as prev_hash/entry_hash, workspace_id and
+#     the T-3 action columns) plus ``idx_audit_correlation``, created after the
+#     ALTER for the same pre-existing-DB reason as every other index here.
+#   * ``_append_audit_locked`` stamps it from the ACTION ROW'S OWN COLUMN (the
+#     T-3 first-class ``instinct_actions.correlation_id``) — never re-derived
+#     from the per-kind parameter blobs. One read at the single append
+#     chokepoint, so both writers (``_log`` and the in-transaction
+#     ``_update_status``) record it identically.
+#   * ``_row_to_audit`` key-checks it back onto the AuditEntry model, so every
+#     read path (``query_audit`` / ``get_audit_entry`` / ``export_audit``) and
+#     the EE audit views that serialize that model carry it with no change.
+#   Why COPY it instead of joining through ``action_id`` at read time: the
+#   ledger is the legal record and has to stand alone. An exported trail must
+#   carry the chain key even when the actions table has been purged, archived,
+#   or lives in another tenant's file.
+#   AUDIT-CHAIN INVARIANT (do not break): ``correlation_id`` is deliberately NOT
+#   part of ``_canonical_audit_payload`` and NOT folded into the hash — EXACTLY
+#   the treatment ``workspace_id`` gets (W4a, below). It is a JOIN column, not
+#   chain content: every ledger written before T-4 must keep verifying
+#   byte-for-byte, so the hash material is frozen. ``verify_audit_chain``'s
+#   explicit SELECT list omits the column for the same reason, and
+#   tests/instinct/test_audit_correlation.py pins a known-good canonical payload
+#   + digest so a refactor that folds it in fails loudly instead of silently
+#   invalidating every historical chain.
+#   The lookup is FAIL-QUIET (any error yields None). The chain append stays
+#   LOUD, but an explainability join must never be able to fail a human's
+#   approval — the pre-T-4 posture was no join at all, and degrading to that is
+#   always better than refusing the decision.
 # Updated: 2026-08-05 (T-3, coupling-gap wave) — the Decision-Graph chain ids
 #   become FIRST-CLASS columns on ``instinct_actions``:
 #   * ``correlation_id TEXT`` + ``proposed_event_id TEXT`` (additive ALTERs,
@@ -478,7 +513,14 @@ CREATE TABLE IF NOT EXISTS instinct_audit (
     -- Tenancy (W4a): owning workspace. This is a READ-FILTER column only — it
     -- is intentionally NOT part of the canonical hash payload, so the global
     -- W2b chain linkage and verify are unaffected. NULL = legacy/global.
-    workspace_id TEXT
+    workspace_id TEXT,
+    -- Chain join (T-4): the Decision-Graph correlation id, COPIED from the
+    -- action this row records so the legal ledger joins to the Decision that
+    -- explains WHY it happened. Like workspace_id above, a plain column ONLY —
+    -- NOT in the canonical hash payload, so every pre-T-4 chain still verifies
+    -- byte-for-byte. NULL = the action opened no chain, the row records no
+    -- action at all (a ``log()`` system event), or it predates the column.
+    correlation_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS instinct_corrections (
@@ -529,11 +571,14 @@ _SCOPE_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_actions_scope ON instinct_actions(scope_type, pocket_id)",
 )
 
-# Chain-id index (T-3). Created AFTER the ALTER that adds correlation_id, for
-# the same pre-existing-DB reason as the workspace/scope indexes. Serves the
-# governance-chain join: "which Action belongs to this Decision chain".
+# Chain-id indexes (T-3 actions, T-4 audit). Created AFTER the ALTERs that add
+# the correlation columns, for the same pre-existing-DB reason as the
+# workspace/scope indexes. They serve the two halves of the governance join:
+# "which Action belongs to this Decision chain" and "which audit rows record
+# it" — the second is what lets an auditor pull a chain's whole legal trail.
 _CHAIN_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_actions_correlation ON instinct_actions(correlation_id)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_correlation ON instinct_audit(correlation_id)",
 )
 
 
@@ -630,6 +675,20 @@ class InstinctStore:
                     await db.execute(f"ALTER TABLE instinct_actions ADD COLUMN {_col} TEXT")
                 except aiosqlite.OperationalError:
                     pass
+            # Additive migration (T-4): the Decision-Graph chain key on a
+            # pre-existing AUDIT ledger. Same swallow-the-duplicate pattern.
+            # Pre-existing rows keep NULL — deliberately NOT backfilled, for the
+            # same reason T-3 refused to: a guessed correlation in the legal
+            # record is worse than an honest blank. CRITICAL: this is a JOIN
+            # column only. It is not part of ``_canonical_audit_payload`` and
+            # never reaches ``compute_audit_hash``, so a ledger written before
+            # this ALTER still verifies byte-for-byte after it (see the header's
+            # AUDIT-CHAIN INVARIANT, and tests/instinct/test_audit_correlation.py
+            # which builds a pre-T-4 chain, migrates it, and re-verifies).
+            try:
+                await db.execute("ALTER TABLE instinct_audit ADD COLUMN correlation_id TEXT")
+            except aiosqlite.OperationalError:
+                pass
             # Tenancy indexes created only after the column is guaranteed to
             # exist — see _WORKSPACE_INDEX_SQL note above. Inside SCHEMA_SQL this
             # would fail on a pre-W4a DB. The scope + chain indexes follow the
@@ -1459,9 +1518,11 @@ class InstinctStore:
 
         CONTRACT: the caller MUST already hold ``self._log_lock`` so the chain
         read-head + insert stays serialized (REVIEW-1). The W2b canonical hash
-        is computed identically on both paths — ``workspace_id`` is appended as
-        a plain column ONLY and is deliberately absent from the canonical
-        payload and the hash (the chain is GLOBAL; tenancy is a read filter).
+        is computed identically on both paths — ``workspace_id`` (tenancy) and
+        ``correlation_id`` (T-4, the Decision-Graph join) are appended as plain
+        columns ONLY and are deliberately absent from the canonical payload and
+        the hash (the chain is GLOBAL; those two are a read filter and a join
+        key, not chain content).
         """
         # The SQLite ``timestamp`` column defaults to ``datetime('now')`` and is
         # what a reader sees, but the hash must be computed over a value we
@@ -1497,18 +1558,34 @@ class InstinctStore:
         prev_hash = prev_row[0] if prev_row else ""
         entry_hash = compute_audit_hash(canonical, prev_hash)
 
-        # ``workspace_id`` (W4a) is appended as a plain column ONLY. It is
-        # deliberately absent from ``canonical`` above and from
-        # ``compute_audit_hash`` — the W2b chain is GLOBAL and must hash
-        # identically on re-verification regardless of tenancy. Tenancy is a
-        # read filter, not chain content.
+        # T-4 — the Decision-Graph chain key, read from the ACTION ROW'S OWN
+        # COLUMN (T-3) rather than passed in by callers, so both append paths
+        # (``_log`` and the in-transaction ``_update_status``) stamp it
+        # identically and no proposer has to remember to thread it. Read AFTER
+        # the hash is computed, which is the point: it is not hash material.
+        # An entry that already carries one (a caller-supplied id on an
+        # action-less ``log()`` row) keeps it when the action lookup finds
+        # nothing — the action's column wins because it is the authoritative
+        # join, but a row with no action is not forced to lose its context.
+        correlation_id = await self._action_correlation_id(db, entry.action_id)
+        if correlation_id is None:
+            correlation_id = entry.correlation_id
+        entry.correlation_id = correlation_id
+
+        # ``workspace_id`` (W4a) and ``correlation_id`` (T-4) are appended as
+        # plain columns ONLY. Both are deliberately absent from ``canonical``
+        # above and from ``compute_audit_hash`` — the W2b chain is GLOBAL and
+        # must hash identically on re-verification regardless of tenancy, and
+        # must keep verifying on ledgers written before the join column
+        # existed. Tenancy is a read filter; the correlation is a join key.
+        # Neither is chain content.
         await db.execute(
             "INSERT INTO instinct_audit"
             " (id, action_id, pocket_id, timestamp, actor, event,"
             " category, description, context,"
             " ai_recommendation, outcome, prev_hash, entry_hash,"
-            " workspace_id)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " workspace_id, correlation_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 entry.id,
                 entry.action_id,
@@ -1524,8 +1601,48 @@ class InstinctStore:
                 prev_hash,
                 entry_hash,
                 workspace_id,
+                correlation_id,
             ),
         )
+
+    async def _action_correlation_id(
+        self, db: aiosqlite.Connection, action_id: str | None
+    ) -> str | None:
+        """Read an Action's Decision-Graph correlation id from its COLUMN (T-4).
+
+        Reads ``instinct_actions.correlation_id`` — the first-class column T-3
+        added — and NEVER the per-kind ``parameters`` blobs. The blobs still
+        carry their own copies for schema compat, but they were the old
+        best-effort record; parsing them here would re-import exactly the
+        fragility T-3 removed.
+
+        Runs on the CALLER'S connection so the in-transaction append path
+        (``_update_status``) sees its own uncommitted row. Timing is not a
+        problem in practice: a proposer that mints a chain passes the id to
+        ``propose``, so it is already on the row before the first audit entry
+        is written (only ``proposed_event_id`` genuinely arrives late, and that
+        one is not copied here).
+
+        FAIL-QUIET by design — any SQLite error yields ``None``. The audit
+        append itself stays LOUD (``AuditChainError``: a decision that cannot
+        be recorded must not silently succeed), but that posture is about the
+        legal trail. Refusing a human's approval because an explainability
+        JOIN column could not be read would be absurd; the honest degradation
+        is a blank correlation, which is exactly what every pre-T-4 row has.
+        """
+        if not action_id:
+            return None
+        try:
+            async with db.execute(
+                "SELECT correlation_id FROM instinct_actions WHERE id = ?", (action_id,)
+            ) as cur:
+                row = await cur.fetchone()
+        except aiosqlite.Error:
+            logger.debug("instinct audit: could not read correlation_id for action %s", action_id)
+            return None
+        if row is None:
+            return None
+        return row[0]
 
     async def log(self, *, actor: str, event: str, description: str, **kwargs: Any) -> AuditEntry:
         """Public audit log method for non-action events."""
@@ -1667,6 +1784,13 @@ class InstinctStore:
         await self._ensure_schema()
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
+            # The SELECT list is the hash material plus the chain links, and
+            # nothing else. ``workspace_id`` (W4a) and ``correlation_id`` (T-4)
+            # are deliberately absent: they are a read filter and a join key,
+            # never hashed, so a verify that pulled them could only tempt a
+            # future edit into folding them in. Adding a column here without
+            # adding it to ``_canonical_audit_payload`` is a no-op; adding it to
+            # both invalidates every ledger ever written.
             async with db.execute(
                 "SELECT rowid, id, action_id, pocket_id, timestamp, actor,"
                 " event, category, description, context, ai_recommendation,"
@@ -1950,6 +2074,10 @@ class InstinctStore:
             context=json.loads(row["context"]) if row["context"] else {},
             ai_recommendation=row["ai_recommendation"],
             outcome=row["outcome"],
+            # T-4 — the Decision-Graph join key. Key-checked like the action
+            # mapper's chain columns, so a row read from a DB that has not run
+            # the ALTER yet reads as chain-less rather than raising IndexError.
+            correlation_id=(row["correlation_id"] if "correlation_id" in row.keys() else None),
         )
 
     def _row_to_correction(self, row: Any) -> Correction:

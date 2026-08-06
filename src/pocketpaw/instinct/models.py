@@ -1,5 +1,17 @@
 # Instinct data models — decision pipeline types.
 # Created: 2026-03-28
+# Updated: 2026-08-06 (T-4, coupling-gap wave) — added an ADDITIVE, nullable
+#   ``AuditEntry.correlation_id`` (the INSTINCT AuditEntry below, not the
+#   unrelated class of the same name in ``pocketpaw/audit/models.py``). The
+#   tamper-evident ledger could prove "action X was approved by Y at T" but not
+#   WHY: the legal record and the Decision-Graph explainability record were two
+#   chains over the same event with no key between them. The store now copies
+#   the id off the action's own ``correlation_id`` column (T-3) at append time.
+#   ``None`` stays legal forever — an OSS proposal opens no chain, a ``log()``
+#   system event has no action at all, and pre-T-4 rows were never backfilled.
+#   The field is NOT hash material: it lives outside the store's
+#   ``_canonical_audit_payload``, exactly as tenancy does, so ledgers written
+#   before it existed still verify byte-for-byte.
 # Updated: 2026-08-05 (T-3, coupling-gap wave) — added ADDITIVE, nullable
 #   ``Action.correlation_id`` + ``Action.proposed_event_id``. Until now the
 #   Decision-Graph chain ids were smuggled inside the per-kind untyped JSON
@@ -226,3 +238,14 @@ class AuditEntry(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
     ai_recommendation: str | None = None
     outcome: str | None = None
+    # ``correlation_id`` (T-4) — the Decision-Graph chain key of the action this
+    # entry records, copied off ``instinct_actions.correlation_id`` (T-3) when
+    # the row is appended. It turns the legal ledger row into a joinable one:
+    # "approved by whom" now reaches the inputs, policy evaluation and
+    # precedents that explain the approval. Nullable and last in the field
+    # order so an existing export's key order is undisturbed.
+    # DO NOT hash it. The W2b chain hashes only the fields above it, via the
+    # store's ``_canonical_audit_payload``; this column sits outside that
+    # payload exactly as ``workspace_id`` does. Folding it in would make every
+    # ledger written before T-4 read as tampered.
+    correlation_id: str | None = None
