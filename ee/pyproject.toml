@@ -464,6 +464,10 @@ source_modules = [
     "pocketpaw_ee.cloud.instinct_approvals.router",
     "pocketpaw_ee.cloud.instinct_approvals.dto",
     "pocketpaw_ee.cloud.instinct_approvals.domain",
+    # T-5 — the approval-requested → notification bridge. It reads the wire
+    # dict off the bus and writes through ``notifications.service``; it must
+    # never reach for the approval Beanie doc itself.
+    "pocketpaw_ee.cloud.instinct_approvals.bridges.notifications",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.instinct_approval"]
 
