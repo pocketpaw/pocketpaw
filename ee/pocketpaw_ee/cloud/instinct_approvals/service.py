@@ -20,8 +20,11 @@
 #      ``agent.proposed`` (``chain.decided_by is None`` → "closed without
 #      proposed event — skipping"). Without the open, /decisions stays empty
 #      no matter what the decide path emits.
-#   2. DECIDE closes that same chain — ``human.corrected(accepted|rejected)``
-#      then ``decision.completed`` — and writes a workspace audit row
+#   2. DECIDE closes that same chain — ``human.corrected(accepted|rejected)``,
+#      on approve a ``policy.evaluated(passed=True)`` flip (the projection
+#      keeps the LAST policy event, so without it an approved Decision would
+#      forever read as blocked by the gate), then ``decision.completed`` —
+#      and writes a workspace audit row
 #      (``instinct_approval.approved`` / ``.rejected``) so the decision also
 #      lands on /activity. Same pair the row-level path fires, plus the
 #      terminal the row-level path owns on its reject side. There is no double
@@ -582,13 +585,28 @@ def _close_chain(
     new_status: str,
     note: str | None,
 ) -> None:
-    """Emit ``human.corrected`` then ``decision.completed`` for a decision.
+    """Emit ``human.corrected`` (+ the approve-side policy flip) then
+    ``decision.completed`` for a decision.
 
-    Both events are needed. ``human.corrected`` is what attributes the
+    Both bookends are needed. ``human.corrected`` is what attributes the
     decision to the human; ``decision.completed`` is the ONLY action in
     ``projection._TERMINAL_ACTIONS``, and until a terminal lands the chain
     accumulates in the projection's in-memory pending dict and never becomes
     a queryable Decision row.
+
+    On APPROVE a ``policy.evaluated(passed=True)`` fires between them. The
+    projection's ``_fold_policy`` keeps the LAST policy event seen before the
+    terminal, and the only one so far is create's honest ``passed=False``
+    ("template escalated to human") — without the flip an APPROVED Decision
+    permanently reads ``instinct_policy_passed=False``, the explain narrator
+    renders "the Instinct policy template_instinct_gate blocked at decision
+    time" for a decision a human explicitly cleared, and the outcome-hint
+    ranker files it under the rejected hint. fail→pass is the projection's
+    own encoding of "asked for human → human approved" (projection.py
+    ``_fold_policy`` docstring), and the row-level approve path emits the
+    same flip (``chain_emitters._emit_policy_evaluated_approved``). Reject
+    emits no policy event, so the ``passed=False`` from create stands — which
+    is the correct final state for a rejection.
 
     Unlike the row-level approve path — where the post-approval bridge owns
     the close — nothing runs after a template-level approval today (see
@@ -603,6 +621,7 @@ def _close_chain(
     from pocketpaw_ee.cloud.decisions.journal_writer import (
         record_decision_completed,
         record_human_corrected,
+        record_policy_evaluated,
     )
 
     approved = new_status == "approved"
@@ -624,6 +643,25 @@ def _close_chain(
         scope=scope,
         payload=corrected_payload,
     )
+
+    if approved:
+        # The approve-side policy flip — see the docstring. Fires AFTER
+        # human.corrected (its causation) and BEFORE the terminal, so
+        # _fold_policy's last-seen-wins lands on passed=True at close.
+        _safe_chain_emit(
+            record_policy_evaluated,
+            correlation_id=correlation_id,
+            actor=actor,
+            scope=scope,
+            payload={
+                "policy": "template_instinct_gate",
+                "passed": True,
+                "reason": "approved_by_human",
+                "approval_id": approval_id,
+                "evaluator": "instinct",
+            },
+            causation_id=human_event_id,
+        )
 
     terminal_payload: dict[str, Any] = {
         "passed": approved,
