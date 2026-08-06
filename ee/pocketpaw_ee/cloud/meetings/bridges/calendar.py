@@ -1,3 +1,7 @@
+# Updated: 2026-08-06 (feat/coupling-tasks-on-calendar) — the forward
+#   loop guard now also skips events whose ``fabric_object_id`` carries a
+#   ``task:`` link (minted by the tasks/bridges/calendar.py bridge), so a
+#   task titled with a Zoom/Meet URL can't spawn a phantom Meeting.
 """Calendar ↔ Meeting bidirectional bridge.
 
 Forward (calendar → meeting): when a calendar event lands with a
@@ -110,12 +114,15 @@ async def _on_calendar_event_created(data: dict[str, Any]) -> None:
     if doc is None:
         return
 
-    # Reverse-bridge loop guard: this calendar event was minted by us from
-    # a Meeting that already exists. Re-detecting the URL would create a
-    # second Meeting row pointing at the same call. ``getattr`` keeps the
-    # check forward-compatible with test doubles that omit the attribute.
+    # Reverse-bridge loop guard: this calendar event was minted by a
+    # bridge from an object that already exists — either our own reverse
+    # bridge (``meeting:``) or the tasks bridge (``task:``). Re-detecting
+    # a URL in its text would create a phantom Meeting row (for tasks: a
+    # task titled with a Zoom link would spawn a Meeting out of thin
+    # air). ``getattr`` keeps the check forward-compatible with test
+    # doubles that omit the attribute.
     fabric_link = getattr(doc, "fabric_object_id", None)
-    if isinstance(fabric_link, str) and fabric_link.startswith("meeting:"):
+    if isinstance(fabric_link, str) and fabric_link.startswith(("meeting:", "task:")):
         return
 
     haystack = " ".join(filter(None, [doc.description, doc.location, doc.title]))

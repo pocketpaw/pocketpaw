@@ -1,0 +1,58 @@
+[
+  {
+    "label": "drop the create — due dates never reach the calendar",
+    "file": "ee/pocketpaw_ee/cloud/tasks/bridges/calendar.py",
+    "find": "await create_event(ctx, body)",
+    "replace": "None",
+    "tests": ["tests/cloud/tasks/test_tasks_calendar_bridge.py"]
+  },
+  {
+    "label": "drop the update-on-change — moved due dates leave the event stale",
+    "file": "ee/pocketpaw_ee/cloud/tasks/bridges/calendar.py",
+    "find": "await update_event(ctx, str(doc.id), body)",
+    "replace": "None",
+    "tests": ["tests/cloud/tasks/test_tasks_calendar_bridge.py"]
+  },
+  {
+    "label": "drop the delete — resolved tasks and cleared due dates leave ghosts",
+    "file": "ee/pocketpaw_ee/cloud/tasks/bridges/calendar.py",
+    "find": "await delete_event(ctx, str(doc.id))",
+    "replace": "None",
+    "tests": ["tests/cloud/tasks/test_tasks_calendar_bridge.py"]
+  },
+  {
+    "label": "leak the workspace stamp — bridge ctx hardcodes another tenant",
+    "file": "ee/pocketpaw_ee/cloud/tasks/bridges/calendar.py",
+    "find": "return RequestContext(workspace_id=workspace_id, user_id=user_id)",
+    "replace": "return RequestContext(workspace_id=\"ws-b\", user_id=user_id)",
+    "tests": ["tests/cloud/tasks/test_tasks_calendar_bridge.py"]
+  },
+  {
+    "label": "terminal statuses stay calendar-eligible — done tasks keep their event",
+    "file": "ee/pocketpaw_ee/cloud/tasks/bridges/calendar.py",
+    "find": "_CALENDAR_ELIGIBLE_STATUSES = frozenset({\"proposed\", \"in_progress\", \"blocked\"})",
+    "replace": "_CALENDAR_ELIGIBLE_STATUSES = frozenset({\"proposed\", \"in_progress\", \"blocked\", \"awaiting_approval\", \"done\"})",
+    "tests": ["tests/cloud/tasks/test_tasks_calendar_bridge.py"]
+  },
+  {
+    "label": "drop the fabric linkage — re-emits duplicate instead of converging",
+    "file": "ee/pocketpaw_ee/cloud/tasks/bridges/calendar.py",
+    "find": "            fabric_object_id=fabric_id,",
+    "replace": "            fabric_object_id=None,",
+    "tests": ["tests/cloud/tasks/test_tasks_calendar_bridge.py"]
+  },
+  {
+    "label": "drop the mount registration — bridge exists but is never wired",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "    register_task_calendar_listeners()",
+    "replace": "    pass",
+    "tests": ["tests/cloud/test_integration.py::test_task_calendar_bridge_registered_at_mount"]
+  },
+  {
+    "label": "narrow the meetings loop guard — task-minted events get URL-scanned again",
+    "file": "ee/pocketpaw_ee/cloud/meetings/bridges/calendar.py",
+    "find": "if isinstance(fabric_link, str) and fabric_link.startswith((\"meeting:\", \"task:\")):",
+    "replace": "if isinstance(fabric_link, str) and fabric_link.startswith(\"meeting:\"):",
+    "tests": ["tests/cloud/meetings/test_bridges.py::test_calendar_event_skips_when_minted_by_task_bridge"]
+  }
+]
