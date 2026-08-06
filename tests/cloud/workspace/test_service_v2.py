@@ -7,6 +7,13 @@ Asserts on:
 - Event emission via recording_bus + monkey-patched event_bus
 - Cache invalidation via get_resolver().invalidate_workspace
 - Cross-module side effects (Notification creation on invite-to-existing-user)
+
+Updated 2026-08-05 (T-2, feat/coupling-person-freshness): ``create()`` now
+materializes the OWNER's Fabric Person too, so the accept-invite person
+tests expect two rows (owner + invitee) and select the invitee's row by its
+deterministic id; added ``test_create_materializes_owner_person``. The
+freshness paths themselves (role change / profile edit / lazy backfill) are
+covered in tests/cloud/people/test_person_freshness.py.
 """
 
 from __future__ import annotations
@@ -150,6 +157,26 @@ async def test_create_emits_member_added_and_invalidates_cache(
     assert ws.member_count == 1
     assert any(isinstance(e, WorkspaceMemberAdded) for e in recording_bus.events)
     resolver_mock.invalidate_workspace.assert_called_once_with(ws.id)
+
+
+async def test_create_materializes_owner_person(owner, person_store) -> None:
+    """T-2: the creator gets a Fabric Person (role=owner, source=membership)
+    at workspace-create — the owner is never invited, so without this the
+    guaranteed first member of every workspace had no identity spine."""
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="Acme", slug="acme")
+    )
+
+    people = await _materialized_people(person_store)
+    assert len(people) == 1
+    obj = people[0]
+    assert obj.id == f"person-{ws.id}-{owner.id}"
+    props = obj.properties
+    assert props["role"] == "owner"
+    assert props["name"] == "Owner"
+    assert props["email"] == "owner@x.c"
+    assert props["source"] == "membership"
+    assert props["invited_by"] == ""
 
 
 async def test_create_rejects_duplicate_slug(owner) -> None:
@@ -1051,9 +1078,9 @@ async def test_accept_invite_materializes_person(
     await workspace_service.accept_invite(_ctx(str(invitee.id)), invite.token)
 
     people = await _materialized_people(person_store)
-    assert len(people) == 1
-    obj = people[0]
-    assert obj.id == f"person-{ws.id}-{invitee.id}"
+    # Two rows since T-2: the owner (materialized at create) + the invitee.
+    assert len(people) == 2
+    obj = next(p for p in people if p.id == f"person-{ws.id}-{invitee.id}")
     props = obj.properties
     # Identity — from the member's own profile.
     assert props["name"] == "New Hire"
@@ -1088,8 +1115,10 @@ async def test_accept_invite_no_context_still_materializes_person(
     await workspace_service.accept_invite(_ctx(str(invitee.id)), invite.token)
 
     people = await _materialized_people(person_store)
-    assert len(people) == 1
-    props = people[0].properties
+    # Two rows since T-2: the owner (materialized at create) + the invitee.
+    assert len(people) == 2
+    obj = next(p for p in people if p.id == f"person-{ws.id}-{invitee.id}")
+    props = obj.properties
     assert props["name"] == "Plain Hire"
     assert props["focus"] == ""
     assert props["profile_pic"] == ""
@@ -1150,8 +1179,11 @@ async def test_accept_invite_person_is_idempotent_no_duplicate(
     )
 
     people = await _materialized_people(person_store)
-    assert len(people) == 1  # still one — not duplicated.
-    assert people[0].properties["focus"] == "Second focus"
+    # Still exactly ONE row for the invitee — not duplicated. (The owner's
+    # create-time Person is the second row in the store since T-2.)
+    invitee_rows = [p for p in people if p.id == f"person-{ws.id}-{invitee.id}"]
+    assert len(invitee_rows) == 1
+    assert invitee_rows[0].properties["focus"] == "Second focus"
 
 
 async def test_accept_invite_survives_person_materialization_failure(

@@ -51,6 +51,12 @@
 #   ``WebSandboxStatusChanged`` (type="websandbox.status_changed") for the Web
 #   Cursor sandbox registry. Emitted by ``websandbox.service`` on every
 #   state-mutating call per cloud rule 9.
+# Updated: 2026-08-05 (feat/coupling-person-freshness, T-2) — added
+#   ``ProfileUpdated`` (type="profile.updated"), emitted by
+#   ``auth.service.update_profile`` after a profile write. Payload carries
+#   ``user_id`` + ``changed`` (list of field names). Subscribed by
+#   ``people/listeners.py`` to re-materialize the member's Fabric Person in
+#   every workspace so agents never orient on a stale name/avatar.
 # Updated: 2026-07-22 (SHIP-3, feat/ship-3-cloud-entity) — added the six
 #   ship.* events (box.created, app.created, app.updated, deploy.queued,
 #   deploy.status_changed, destroy.proposed) for the /ship managed-deploy
@@ -151,6 +157,19 @@ class WorkspaceInviteAccepted(Event):
 @dataclass
 class WorkspaceInviteRevoked(Event):
     EVENT_TYPE: ClassVar[str] = "workspace.invite.revoked"
+
+
+# Auth / profile
+@dataclass
+class ProfileUpdated(Event):
+    """A user edited their auth profile (full_name / avatar / status).
+
+    Payload: ``{user_id, changed: [field, ...]}`` — field names only, not
+    values. Consumers that need the fresh values re-read the user record
+    (source of truth) rather than trusting an event snapshot.
+    """
+
+    EVENT_TYPE: ClassVar[str] = "profile.updated"
 
 
 # Groups

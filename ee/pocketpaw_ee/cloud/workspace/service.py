@@ -101,6 +101,14 @@ ALWAYS-ON (not behind ``billing_enforced``), unchanged from before; the Free
 ``max_seats`` == the model default (5) means a free tenant sees the identical
 limit. ``raise_seats_for_plan`` (upgrade-only) keeps the stored ``doc.seats`` in
 step with the plan on a subscription.active.
+2026-08-05 (feat/coupling-person-freshness, T-2): the workspace OWNER now gets
+a Fabric ``Person`` too. ``create()`` materializes one (role=owner) right after
+the owner membership write — BEST-EFFORT like the accept_invite materialization:
+a Fabric/journal hiccup logs and never fails workspace creation (the lazy
+``get_person`` backfill converges it later). Also exposed ``get_member_role``
+(public wrapper over ``_get_member_role``) so the people module's lazy backfill
+can check live membership without reaching into a private helper or the Beanie
+user model.
 """
 
 from __future__ import annotations
@@ -307,6 +315,17 @@ async def _get_member_role(workspace_id: str, user_id: str) -> str | None:
     return None
 
 
+async def get_member_role(workspace_id: str, user_id: str) -> str | None:
+    """Return ``user_id``'s role in ``workspace_id``, or ``None`` if not a member.
+
+    Public wrapper over the private membership lookup so cross-entity
+    callers (the people module's lazy Person backfill) can check live
+    membership through this service instead of touching ``models.user``
+    (Rule 2). Never raises — an unreadable user resolves to ``None``.
+    """
+    return await _get_member_role(workspace_id, user_id)
+
+
 async def _add_member(
     workspace_id: str,
     user_id: str,
@@ -373,6 +392,33 @@ async def create(ctx: RequestContext, body: CreateWorkspaceRequest) -> Workspace
     await doc.insert()
 
     await _add_member(str(doc.id), ctx.user_id, role="owner", set_active=True)
+
+    # Materialize the creator as a Fabric ``Person`` (role=owner) — T-2. The
+    # owner is never invited, so without this the one member every new
+    # workspace is guaranteed to have had no identity spine and agents
+    # answered "I don't know who you are". BEST-EFFORT like the
+    # accept_invite materialization: membership is the source of truth, the
+    # Person is a derived projection — a Fabric/journal hiccup must never
+    # fail workspace creation (the lazy get_person backfill converges it).
+    try:
+        creator = await _UserDoc.get(PydanticObjectId(ctx.user_id))
+        if creator is not None:
+            await people_service.materialize_person_from_membership(
+                workspace_id=str(doc.id),
+                user_id=ctx.user_id,
+                name=creator.full_name or "",
+                email=creator.email or "",
+                avatar=creator.avatar or "",
+                role="owner",
+            )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Fabric Person materialization skipped for owner=%s workspace=%s — "
+            "workspace create proceeds; the lazy backfill re-materializes later",
+            ctx.user_id,
+            doc.id,
+            exc_info=True,
+        )
 
     # Seed the default "pocketpaw" agent so the new workspace has a DM target
     # immediately. Idempotent; non-fatal — the boot-time back-fill is the
