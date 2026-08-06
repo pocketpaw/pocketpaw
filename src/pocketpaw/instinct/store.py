@@ -1,5 +1,23 @@
 # Instinct store — async SQLite operations for the decision pipeline.
 # Created: 2026-03-28 — Action lifecycle + audit log.
+# Updated: 2026-08-05 (T-3, coupling-gap wave) — the Decision-Graph chain ids
+#   become FIRST-CLASS columns on ``instinct_actions``:
+#   * ``correlation_id TEXT`` + ``proposed_event_id TEXT`` (additive ALTERs,
+#     same swallow-the-duplicate pattern as assignee / workspace_id /
+#     scope_type / actor_agent_id; NULL on legacy rows and OSS proposals).
+#   * ``propose`` gains keyword-only ``correlation_id`` / ``proposed_event_id``
+#     params (default None — every existing caller is untouched) and stamps
+#     the columns at INSERT; ``_row_to_action`` key-checks them back.
+#   * new ``set_chain_ids(action_id, ...)`` — a thin, status-preserving column
+#     write for the one id that is genuinely unknowable at insert time (the
+#     ``agent.proposed`` event id, emitted only after the row is durable).
+#     This replaces the EE proposers' raw-SQL blob back-writes as the joinable
+#     record: a failed back-write now only loses the event-id column, never
+#     the correlation join (that column landed at INSERT).
+#   * ``idx_actions_correlation`` index, created after the ALTER (same
+#     ordering rule as the workspace/scope indexes).
+#   The per-kind parameter blobs keep carrying their id copies for
+#   blob-schema compat; the columns are the source of truth for joins.
 # Updated: 2026-07-31 (AL-1, agent ledger spine) — two additions, one column and
 #   one emit:
 #   * ``instinct_actions`` gains ``actor_agent_id TEXT DEFAULT ''`` (additive
@@ -430,6 +448,11 @@ CREATE TABLE IF NOT EXISTS instinct_actions (
     -- unattributed, which stays legal forever — the proposer is not always
     -- knowable, and refusing the proposal over it would be absurd.
     actor_agent_id TEXT DEFAULT '',
+    -- Chain ids (T-3): the Decision-Graph correlation key + the chain-opening
+    -- ``agent.proposed`` event id, first-class instead of smuggled inside the
+    -- per-kind parameter blobs. NULL = no chain (OSS proposal or legacy row).
+    correlation_id TEXT,
+    proposed_event_id TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     executed_at TEXT
@@ -504,6 +527,13 @@ _WORKSPACE_INDEX_SQL = (
 # serves the scope-aware (scope_type, scope_id) read; scope_id reuses pocket_id.
 _SCOPE_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_actions_scope ON instinct_actions(scope_type, pocket_id)",
+)
+
+# Chain-id index (T-3). Created AFTER the ALTER that adds correlation_id, for
+# the same pre-existing-DB reason as the workspace/scope indexes. Serves the
+# governance-chain join: "which Action belongs to this Decision chain".
+_CHAIN_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_actions_correlation ON instinct_actions(correlation_id)",
 )
 
 
@@ -589,10 +619,22 @@ class InstinctStore:
                 )
             except aiosqlite.OperationalError:
                 pass
+            # Additive migration (T-3): the Decision-Graph chain-id columns on a
+            # pre-existing actions table. Same swallow-the-duplicate pattern.
+            # Pre-existing rows keep NULL (no chain recorded at insert; the ids
+            # may still live inside their parameter blobs from the old
+            # back-write era — the columns are only authoritative for rows
+            # written after this migration).
+            for _col in ("correlation_id", "proposed_event_id"):
+                try:
+                    await db.execute(f"ALTER TABLE instinct_actions ADD COLUMN {_col} TEXT")
+                except aiosqlite.OperationalError:
+                    pass
             # Tenancy indexes created only after the column is guaranteed to
             # exist — see _WORKSPACE_INDEX_SQL note above. Inside SCHEMA_SQL this
-            # would fail on a pre-W4a DB. The scope index follows the same rule.
-            for _idx in (*_WORKSPACE_INDEX_SQL, *_SCOPE_INDEX_SQL):
+            # would fail on a pre-W4a DB. The scope + chain indexes follow the
+            # same rule.
+            for _idx in (*_WORKSPACE_INDEX_SQL, *_SCOPE_INDEX_SQL, *_CHAIN_INDEX_SQL):
                 await db.execute(_idx)
             await db.commit()
         self._initialized = True
@@ -643,6 +685,9 @@ class InstinctStore:
         workspace_id: str | None = None,
         scope_type: str | None = None,
         actor_agent_id: str = "",
+        *,
+        correlation_id: str | None = None,
+        proposed_event_id: str | None = None,
     ) -> Action:
         """Raise a proposal for a human to decide.
 
@@ -650,10 +695,20 @@ class InstinctStore:
         optional and defaults to "" so every existing caller is unaffected;
         callers that know their agent should pass it, because propose time is
         the last moment that knowledge exists in the request.
+
+        ``correlation_id`` / ``proposed_event_id`` (T-3) are the Decision-Graph
+        chain ids, keyword-only and defaulting None so OSS callers are
+        untouched. The gated EE proposers mint the correlation_id BEFORE
+        calling propose, so it lands with the INSERT and the governance-chain
+        join can never be lost to a failed back-write. ``proposed_event_id`` is
+        usually unknown here (the ``agent.proposed`` event fires only after the
+        row is durable) — use :meth:`set_chain_ids` to fill it in.
         """
         action = Action(
             scope_type=scope_type,
             actor_agent_id=str(actor_agent_id or ""),
+            correlation_id=correlation_id,
+            proposed_event_id=proposed_event_id,
             pocket_id=pocket_id,
             title=title,
             description=description,
@@ -672,8 +727,8 @@ class InstinctStore:
                 " (id, pocket_id, title, description,"
                 " category, status, priority, trigger,"
                 " recommendation, parameters, context, assignee, workspace_id,"
-                " scope_type, actor_agent_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " scope_type, actor_agent_id, correlation_id, proposed_event_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     action.id,
                     pocket_id,
@@ -690,6 +745,8 @@ class InstinctStore:
                     workspace_id,
                     scope_type,
                     action.actor_agent_id,
+                    correlation_id,
+                    proposed_event_id,
                 ),
             )
             await db.commit()
@@ -1164,6 +1221,50 @@ class InstinctStore:
                 "UPDATE instinct_actions SET parameters = ?, "
                 "updated_at = datetime('now') WHERE id = ?",
                 (json.dumps(parameters or {}), action_id),
+            )
+            await db.commit()
+            if cur.rowcount == 0:
+                return None
+        return await self.get_action(action_id)
+
+    async def set_chain_ids(
+        self,
+        action_id: str,
+        *,
+        correlation_id: str | None = None,
+        proposed_event_id: str | None = None,
+    ) -> Action | None:
+        """Persist the Decision-Graph chain-id columns on an Action (T-3).
+
+        A thin, status-preserving column write, sibling of
+        :meth:`update_parameters`: it touches ``correlation_id`` /
+        ``proposed_event_id`` + ``updated_at`` and NEVER ``status`` /
+        ``approved_*`` / the parameter blobs. Exists for the one id that is
+        genuinely unknowable at INSERT time — the ``agent.proposed`` event id,
+        which is minted only after the row is durable (the correlation_id
+        itself should ride in through :meth:`propose` at insert). Only the
+        arguments passed non-None are written, so filling the event id later
+        can never blank an already-stored correlation. Returns the reloaded
+        Action, or ``None`` when the id doesn't resolve (or nothing was
+        given to write).
+        """
+        sets: list[str] = []
+        params: list[Any] = []
+        if correlation_id is not None:
+            sets.append("correlation_id = ?")
+            params.append(correlation_id)
+        if proposed_event_id is not None:
+            sets.append("proposed_event_id = ?")
+            params.append(proposed_event_id)
+        if not sets:
+            return None
+        sets.append("updated_at = datetime('now')")
+        params.append(action_id)
+        await self._ensure_schema()
+        async with self._conn() as db:
+            cur = await db.execute(
+                f"UPDATE instinct_actions SET {', '.join(sets)} WHERE id = ?",
+                params,
             )
             await db.commit()
             if cur.rowcount == 0:
@@ -1799,6 +1900,11 @@ class InstinctStore:
         # from a DB that has not run the ALTER yet reads as unattributed rather
         # than raising IndexError on every list.
         actor_agent_id = (row["actor_agent_id"] if "actor_agent_id" in row.keys() else "") or ""
+        # T-3 — the Decision-Graph chain-id columns. Key-checked like the three
+        # above so a pre-migration row reads as chain-less (None) rather than
+        # raising IndexError.
+        correlation_id = row["correlation_id"] if "correlation_id" in row.keys() else None
+        proposed_event_id = row["proposed_event_id"] if "proposed_event_id" in row.keys() else None
         # The SQLite layer stamps created_at/updated_at as ISO strings.
         # Forward them on the rebuilt Action so consumers (outcome window
         # filters, age sorting) see real history instead of "now". Old
@@ -1809,6 +1915,8 @@ class InstinctStore:
             id=row["id"],
             scope_type=scope_type,
             actor_agent_id=actor_agent_id,
+            correlation_id=correlation_id,
+            proposed_event_id=proposed_event_id,
             pocket_id=row["pocket_id"],
             title=row["title"],
             description=row["description"] or "",

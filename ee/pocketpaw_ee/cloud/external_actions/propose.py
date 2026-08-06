@@ -1,5 +1,14 @@
 # ee/cloud/external_actions/propose.py — propose a gated external-action call.
 # Created: 2026-06-11 (feat/external-action-proposal).
+# Updated: 2026-08-05 (T-3, coupling-gap wave) — the chain ids are now
+#   FIRST-CLASS columns on the Action row. ``store.propose`` is called with
+#   ``correlation_id=corr`` so the correlation join lands with the INSERT and
+#   can never be lost to a failed back-write. ``_persist_chain_ids`` no longer
+#   runs raw SQL: it writes the ``proposed_event_id`` column via the store's
+#   ``set_chain_ids`` and refreshes the blob copies via ``update_parameters``
+#   (the blob keeps carrying both ids for schema-1 compat — readers of the
+#   blob are unchanged). Still best-effort: a failure now only loses the
+#   event-id column + blob copies, never the correlation join.
 #
 # What this module does (the propose half of the external-action gate): an
 # agent (or any caller) proposes a call to an external system through a bound
@@ -166,22 +175,27 @@ async def _persist_chain_ids(
     correlation_id: str,
     proposed_event_id: str | None,
 ) -> None:
-    """Write ``correlation_id`` + ``proposed_event_id`` onto the persisted
-    Action's ``parameters._external_action`` blob after ``agent.proposed`` fired.
+    """Write ``proposed_event_id`` (+ refresh the blob's chain-id copies) onto
+    the persisted Action after ``agent.proposed`` fired.
 
-    The blob is built with ``correlation_id`` already set (minted before build);
-    ``proposed_event_id`` is the field this back-write fills in. Direct SQL
-    update — the same pattern belt.py's ``_persist_chain_ids`` and the
-    pocket-write bridge's ``_persist_parked_policy_event_id`` use. Best-effort:
-    a write failure leaves ``proposed_event_id`` None and the eventual
+    T-3: the ``correlation_id`` COLUMN already landed with the INSERT (propose
+    passes it), so the governance-chain join no longer depends on this
+    back-write at all. What still has to land late is the ``agent.proposed``
+    event id — unknowable before the row is durable. This writes it via the
+    store's ``set_chain_ids`` (a proper column write, no raw SQL) and keeps the
+    blob copies fresh via ``update_parameters`` for schema-1 blob compat.
+    Best-effort: a failure leaves the event-id column NULL and the eventual
     ``human.corrected`` emits without a causation_id (the chain still folds;
-    causation_id is optional on EventEntry).
+    causation_id is optional on EventEntry) — but the correlation join via the
+    column survives regardless.
     """
-    import json as _json
-
-    import aiosqlite
-
     try:
+        await store.set_chain_ids(
+            action_id,
+            correlation_id=correlation_id,
+            proposed_event_id=proposed_event_id,
+        )
+        # Blob-compat copies — schema-1 blob readers keep seeing both ids.
         action = await store.get_action(action_id)
         if action is None:
             return
@@ -193,14 +207,7 @@ async def _persist_chain_ids(
         blob["correlation_id"] = correlation_id
         blob["proposed_event_id"] = proposed_event_id
         params[EXTERNAL_ACTION_PARAM_KEY] = blob
-
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await store.update_parameters(action_id, params)
     except Exception:  # noqa: BLE001 — write-back is best-effort
         logger.warning(
             "external_action: failed to persist chain ids onto action %s — the "
@@ -334,6 +341,11 @@ async def propose_external_action(
         parameters={EXTERNAL_ACTION_PARAM_KEY: blob},
         assignee=assignee or requested_by or None,
         workspace_id=workspace_id,
+        # T-3 — the chain correlation id lands as a FIRST-CLASS column with the
+        # INSERT itself, so the Tray↔Decision join exists even if every
+        # best-effort emit / back-write below fails. The blob copy above stays
+        # for schema-1 compat.
+        correlation_id=corr,
     )
 
     logger.info(

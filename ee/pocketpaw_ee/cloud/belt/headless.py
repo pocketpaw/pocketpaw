@@ -1,6 +1,13 @@
 # ee/pocketpaw_ee/cloud/belt/headless.py — the HEADLESS develop runner.
 # Created: 2026-06-13 (feat/belt-headless-exec).
 #
+# Updated: 2026-08-05 (T-3, coupling-gap wave) — when ``_attach_diff`` mints the
+#   chain ``correlation_id`` for a queued run (the mandate dispatcher files it
+#   without one), the id is now ALSO written to the Action's first-class
+#   ``correlation_id`` COLUMN via ``store.set_chain_ids``, not just the blob.
+#   Otherwise a headless-produced run would carry a chain id the governance
+#   join can't see. The blob copy stays for schema-2 compat.
+#
 # Updated: 2026-06-13 (PR #1464 review) — store the produced diff VERBATIM (only
 #   normalizing a single trailing newline) instead of the leading/trailing-
 #   stripped value: stripping a real diff's trailing newline corrupts it for
@@ -243,6 +250,10 @@ class HeadlessDevelopRunner:
 
         import aiosqlite
 
+        # T-3 — the chain id mirrored onto the first-class column after the blob
+        # attach commits. Declared up here so the post-attach write below reads a
+        # bound name on every path.
+        chain_correlation_id = ""
         try:
             action = await store.get_action(action_id)
             if action is None:
@@ -269,6 +280,11 @@ class HeadlessDevelopRunner:
             if not blob.get("correlation_id"):
                 blob["correlation_id"] = str(uuid4())
             blob.setdefault("proposed_event_id", None)
+            # T-3 — the chain id also belongs on the first-class column, or the
+            # governance join can't see a headless-produced run's chain. Written
+            # after the blob update below (so a failed column write never blocks
+            # the diff attach); captured here while the value is in hand.
+            chain_correlation_id = str(blob["correlation_id"])
             # Provenance — record that this diff was produced headlessly.
             blob["headless"] = True
             blob.pop("headless_error", None)
@@ -291,6 +307,21 @@ class HeadlessDevelopRunner:
                 store, action_id, "headless failed to persist the produced diff"
             )
             return
+
+        # T-3 — mirror the minted chain id onto the first-class column. Written
+        # AFTER the blob attach committed so a column-write failure never costs
+        # the diff, and best-effort for the same reason: the run is applyable
+        # either way, the join is what degrades.
+        try:
+            if chain_correlation_id:
+                await store.set_chain_ids(action_id, correlation_id=chain_correlation_id)
+        except Exception:  # noqa: BLE001 — the chain-id column write is best-effort
+            logger.warning(
+                "headless: failed to persist correlation_id column on action %s "
+                "(the diff IS attached) — the Decision join falls back to the blob",
+                action_id,
+                exc_info=True,
+            )
 
         # Audit trail — this is the FIRST place LLM-produced content enters the
         # Instinct store without a human typing it, so leave an operator trail of
