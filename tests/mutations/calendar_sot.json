@@ -1,0 +1,51 @@
+[
+  {
+    "label": "ingest reconciliation ignores the workspace (cross-tenant update)",
+    "file": "ee/pocketpaw_ee/calendar/sync.py",
+    "find": "\"workspace\": workspace_id,",
+    "replace": "\"workspace\": {\"$exists\": true},",
+    "tests": ["tests/ee/calendar/test_sync.py"]
+  },
+  {
+    "label": "google-family matcher narrowed to composio only (native/composio dup)",
+    "file": "ee/pocketpaw_ee/calendar/sync.py",
+    "find": "\"source_connector\": {\"$in\": _GOOGLE_CONNECTOR_FAMILY},",
+    "replace": "\"source_connector\": SOURCE_CONNECTOR_COMPOSIO,",
+    "tests": ["tests/ee/calendar/test_sync.py", "tests/cloud/calendar/test_service.py"]
+  },
+  {
+    "label": "composio rows stamped with no connector (reconciliation keys dropped)",
+    "file": "ee/pocketpaw_ee/calendar/sync.py",
+    "find": "source_connector=SOURCE_CONNECTOR_COMPOSIO,",
+    "replace": "source_connector=None,",
+    "tests": ["tests/ee/calendar/test_sync.py"]
+  },
+  {
+    "label": "list_upcoming stops reading the store (old composio-only behaviour)",
+    "file": "ee/pocketpaw_ee/cloud/calendar/service.py",
+    "find": "events = await _upcoming_from_store(workspace_id, user_id, limit)",
+    "replace": "events = []",
+    "tests": ["tests/cloud/calendar/test_service.py"]
+  },
+  {
+    "label": "sync-on-read TTL removed (composio hit on every preamble build)",
+    "file": "ee/pocketpaw_ee/cloud/calendar/service.py",
+    "find": "if last is not None and (time.monotonic() - last) < _REFRESH_TTL_SECONDS:",
+    "replace": "if False:",
+    "tests": ["tests/cloud/calendar/test_service.py"]
+  },
+  {
+    "label": "google-family connectors stop collapsing to the google source slug",
+    "file": "ee/pocketpaw_ee/cloud/calendar/service.py",
+    "find": "if connector in _GOOGLE_CONNECTOR_FAMILY:",
+    "replace": "if False:",
+    "tests": ["tests/cloud/calendar/test_service.py"]
+  },
+  {
+    "label": "projection tags events with a fixed workspace (tenancy leak)",
+    "file": "ee/pocketpaw_ee/cloud/calendar/service.py",
+    "find": "workspace_id=workspace_id,\n        title=ev.title,",
+    "replace": "workspace_id=\"ws_leak\",\n        title=ev.title,",
+    "tests": ["tests/cloud/calendar/test_service.py"]
+  }
+]
