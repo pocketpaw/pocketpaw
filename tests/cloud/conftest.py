@@ -16,7 +16,14 @@ redirects the people service's default Fabric journal store at a per-test tmp
 journal so workspace create / invite accept / Person refresh paths never write
 into the developer's real ``~/.soul/journal.db``.
 
+Also installs, autouse, ``_isolated_bus_subscriptions`` (2026-08-06): snapshots
+and restores every process-global subscriber registry ``mount_cloud()`` writes
+into, so a test that mounts the app cannot leave handlers behind for the tests
+that run after it. See the fixture for the order-dependence it fixes.
+
 Also exposes:
+- ``clean_bus_slate`` — opt-in companion to the above. Clears the subscriber
+  registries so a mount-pin measures ONLY what ``mount_cloud()`` registers.
 - ``mongo_db`` — Beanie initialized against a fresh mongomock-motor DB
   for the test. Used by service-level tests that exercise real Beanie
   query paths instead of relying on a Protocol fake.
@@ -151,14 +158,141 @@ def recording_bus():
 
     Tests that don't care about events ignore the fixture; tests that
     do request it explicitly to inspect ``bus.events``.
+
+    Owns BOTH module globals in ``_core.realtime.bus``. ``_bus`` is what makes
+    the realtime (typed-event) side of ``mount_cloud`` already hermetic: the
+    mount calls ``init_realtime()``, which swaps in a real ``InProcessBus``,
+    and everything that subscribes to it afterwards (Task→Calendar, the People
+    listeners, the outcomes ledger) rides on that object — which this fixture
+    drops on teardown. ``_resolver`` is restored for the same reason; it was
+    previously left pointing at the last-mounted app's resolver.
     """
     from pocketpaw_ee.cloud._core.realtime import bus as bus_mod
 
     rec = RecordingBus()
     prev = bus_mod._bus  # type: ignore[attr-defined]
+    prev_resolver = bus_mod._resolver  # type: ignore[attr-defined]
     bus_mod._bus = rec  # type: ignore[attr-defined]
     yield rec
     bus_mod._bus = prev  # type: ignore[attr-defined]
+    bus_mod._resolver = prev_resolver  # type: ignore[attr-defined]
+
+
+def _snapshot_bus_subscriptions() -> dict:
+    """Capture every process-global subscriber registry ``mount_cloud`` writes.
+
+    Deliberately NOT including ``_core.realtime.bus._bus`` — ``recording_bus``
+    above already replaces-and-restores that whole object, so the typed-event
+    subscriptions die with it. Everything captured here outlives the test
+    unless something puts it back.
+    """
+    from pocketpaw_ee.cloud.shared.events import event_bus
+
+    import pocketpaw.lifecycle as lifecycle
+    from pocketpaw.bus import queue as oss_bus_mod
+
+    oss_bus = oss_bus_mod._bus  # may be None — captured as-is, see _restore
+    return {
+        "event_handlers": {topic: list(hs) for topic, hs in event_bus._handlers.items()},
+        "oss_bus": oss_bus,
+        "oss_system": list(oss_bus._system_subscribers) if oss_bus else None,
+        "oss_outbound": (
+            {ch: list(hs) for ch, hs in oss_bus._outbound_subscribers.items()} if oss_bus else None
+        ),
+        "lifecycle_registry": dict(lifecycle._registry),
+    }
+
+
+def _restore_bus_subscriptions(snap: dict) -> None:
+    from pocketpaw_ee.cloud.shared.events import event_bus
+
+    import pocketpaw.lifecycle as lifecycle
+    from pocketpaw.bus import queue as oss_bus_mod
+
+    event_bus._handlers.clear()
+    event_bus._handlers.update(snap["event_handlers"])
+
+    # Restore the singleton REFERENCE first: a test may have swapped or reset
+    # it (``lifecycle.reset_all()`` nulls it), in which case writing the
+    # subscriber lists onto the captured object is only correct once that
+    # object is the singleton again.
+    oss_bus_mod._bus = snap["oss_bus"]
+    if snap["oss_bus"] is not None:
+        snap["oss_bus"]._system_subscribers[:] = snap["oss_system"]
+        snap["oss_bus"]._outbound_subscribers.clear()
+        snap["oss_bus"]._outbound_subscribers.update(snap["oss_outbound"])
+
+    lifecycle._registry.clear()
+    lifecycle._registry.update(snap["lifecycle_registry"])
+
+
+@pytest.fixture(autouse=True)
+def _isolated_bus_subscriptions():
+    """Keep ``mount_cloud()``'s subscriber registrations inside one test.
+
+    Added 2026-08-06 after the coupling sprint merged. ``mount_cloud()``
+    registers roughly a dozen bridges onto PROCESS-GLOBAL singletons, and the
+    mount-pin tests that assert those registrations each call it for real. The
+    pins that predated this fixture snapshot-and-restored only their OWN topic,
+    so every pin left the other bridges subscribed for the rest of the session
+    — ``tests/cloud/test_integration.py`` alone mounted 15 times and left 15
+    copies of every ``shared.events`` handler behind.
+
+    That is invisible until a later test counts side effects. It cost four
+    failures in ``test_instinct_approvals_governance.py``, which passed alone
+    and failed after ``test_integration.py``: three counted notifications and
+    saw doubles, and ``test_create_does_not_notify_without_the_bridge_
+    registered`` — the control that asserts the UNregistered behaviour — got a
+    notification from a bridge a previous FILE had subscribed.
+
+    AUTOUSE, matching ``local_store_home`` / ``_isolated_person_store`` above:
+    the hazard is created by production code mutating a global, so opting in
+    would mean every one of the ~20 ``mount_cloud`` call sites under
+    ``tests/cloud/`` remembering to — and the next one that forgets
+    re-introduces exactly this bug. What a mount-pin DOES opt into is
+    ``clean_bus_slate``, which is about measurement, not hermeticity.
+
+    Three registries, all of which ``mount_cloud`` writes and none of which
+    reset themselves:
+
+    * ``shared.events.event_bus._handlers`` — the string-topic bus. Carries
+      the lead→notification, lead→growth, instinct-approval→notification and
+      meeting bridges, plus the pre-existing ``shared.event_handlers`` and
+      ``agent_bridge`` subscribers. This is the one that caused the failures.
+    * The OSS ``MessageBus`` (``pocketpaw.bus``) — where the alert→notification
+      bridge lands via ``subscribe_system``. Its ``register_*`` is
+      unsubscribe-first so it does not accumulate, but a test may still clear
+      or replace it (see ``clean_bus_slate``).
+    * ``pocketpaw.lifecycle._registry`` — not a bus, but the same class of
+      leak and reachable from the same tests: ``reset_all()`` CLEARS the whole
+      registry, so one call silently disarms ``reset_all()`` for every test
+      that runs later.
+    """
+    snap = _snapshot_bus_subscriptions()
+    yield
+    _restore_bus_subscriptions(snap)
+
+
+@pytest.fixture
+def clean_bus_slate():
+    """Blank subscriber registries, so a mount-pin measures only the mount.
+
+    The companion to ``_isolated_bus_subscriptions``: that one guarantees a
+    test cannot leak OUT, this one guarantees nothing leaked IN. A pin asserting
+    "``mount_cloud`` subscribed handler X" is only a pin if X is absent
+    beforehand — otherwise deleting the production ``register_*`` call leaves a
+    handler some earlier test subscribed, and the assertion passes on it.
+
+    Restoration is deliberately NOT this fixture's job; the autouse fixture
+    already puts everything back.
+    """
+    from pocketpaw_ee.cloud.shared.events import event_bus
+
+    from pocketpaw.bus import get_message_bus
+
+    event_bus._handlers.clear()
+    get_message_bus()._system_subscribers.clear()
+    return None
 
 
 @pytest_asyncio.fixture

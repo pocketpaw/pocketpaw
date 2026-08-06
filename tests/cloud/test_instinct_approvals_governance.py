@@ -25,6 +25,15 @@
 #   * wiring — ``mount_cloud`` actually subscribes the bridge. Without this a
 #     reviewer could delete the registration and the whole suite would stay
 #     green, because every other test in this file self-registers.
+#
+# Updated: 2026-08-06 (integration/coupling-sprint) — the wiring pin at the
+# bottom now takes ``clean_bus_slate`` and drops its own restore. Four tests in
+# this file (the three that count notifications, plus the control that asserts
+# the UNregistered behaviour) failed when tests/cloud/test_integration.py ran
+# first: its mount-pins each restored only their own topic, leaving this
+# bridge's handler — and every other bridge ``mount_cloud`` registers —
+# subscribed on the module-singleton bus. Restoration is now the autouse
+# ``_isolated_bus_subscriptions`` fixture's job for every mounting test at once.
 
 from __future__ import annotations
 
@@ -575,7 +584,9 @@ async def test_a_workspace_b_decider_cannot_decide_a_workspace_a_approval(journa
 # ---------------------------------------------------------------------------
 
 
-def test_mount_cloud_subscribes_the_approval_notification_bridge(journal, graph) -> None:
+def test_mount_cloud_subscribes_the_approval_notification_bridge(
+    journal, graph, clean_bus_slate
+) -> None:
     """Every other test here self-registers the bridge, so deleting the
     ``mount_cloud`` registration would leave the suite green and the feature
     dead in production. This asserts the real handler is subscribed to the real
@@ -590,16 +601,21 @@ def test_mount_cloud_subscribes_the_approval_notification_bridge(journal, graph)
     which without those fixtures replays the DEVELOPER'S real
     ``~/.soul/journal.db`` from seq 0 (this test measured 416s that way against
     5s with them — and it was reading a real machine's journal to do it).
+
+    ``clean_bus_slate`` empties the topic so the assertion measures THIS mount:
+    without it a handler left by an earlier test satisfies the ``in`` check and
+    the pin passes with the production registration deleted. Restoring the
+    subscribers is the autouse ``_isolated_bus_subscriptions`` fixture's job —
+    the local ``finally`` this replaces put back only ``CREATED_TOPIC`` and
+    left every other bridge ``mount_cloud`` registers subscribed for the rest
+    of the session.
     """
     from fastapi import FastAPI
     from pocketpaw_ee.cloud import mount_cloud
 
-    before = list(event_bus._handlers.get(approvals_service.CREATED_TOPIC, []))
-    try:
-        mount_cloud(FastAPI())
-        handlers = event_bus._handlers.get(approvals_service.CREATED_TOPIC, [])
-        assert approval_bridge._on_instinct_approval_created in handlers, (
-            "mount_cloud must subscribe the approval → notification bridge"
-        )
-    finally:
-        event_bus._handlers[approvals_service.CREATED_TOPIC] = before
+    mount_cloud(FastAPI())
+
+    handlers = event_bus._handlers.get(approvals_service.CREATED_TOPIC, [])
+    assert approval_bridge._on_instinct_approval_created in handlers, (
+        "mount_cloud must subscribe the approval → notification bridge"
+    )
