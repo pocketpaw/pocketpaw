@@ -50,6 +50,19 @@
 # false-dropping legitimate lead text (e.g. "act as a guarantor" scans MEDIUM
 # persona_hijack), and a lost lead is the worst failure here, so only HIGH-or-
 # above verdicts now drop.
+#
+# Updated 2026-08-06 (feat/coupling-lead-captured, T-6): ``capture`` now EMITS
+# ``lead.captured`` on the cross-domain bus after the insert, replacing the
+# "no-event, the Leads view polls" comment that sat here. A staffed Paw Site is
+# the front of the funnel, so a submitted form is the hottest signal the product
+# has — leaving it silent meant nobody heard it until someone happened to open
+# the Leads view. The payload carries workspace_id / lead_id / site_id /
+# form_type and NOTHING from the submitted form: the properties are untrusted
+# visitor PII, subscribers that need them read the tenant-scoped Lead by id. The
+# first subscriber is ``leads.bridges.notifications`` (owner/admin in-app
+# notification); the emit is deliberately fire-and-forget — ``EventBus.emit``
+# logs and swallows a failing handler, so a broken subscriber can never fail the
+# public capture endpoint or lose the persisted lead.
 
 from __future__ import annotations
 
@@ -68,6 +81,7 @@ from pocketpaw_ee.cloud.models.lead import Lead as _LeadDoc
 from pocketpaw_ee.cloud.models.lead import LeadSource as _LeadSourceDoc
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter as _RateCounterDoc
+from pocketpaw_ee.cloud.shared.events import event_bus
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +272,17 @@ async def capture(
         ),
     )
     await doc.insert()
-    # no-event: lead capture is a public ingest; the Leads view polls, no realtime subscriber yet
+    # Ring the workspace. Payload is identifiers only — never the form payload
+    # (untrusted visitor PII); a subscriber that needs the values reads the Lead.
+    await event_bus.emit(
+        "lead.captured",
+        {
+            "workspace_id": site.workspace,
+            "lead_id": str(doc.id),
+            "site_id": site.script_name,
+            "form_type": form_type,
+        },
+    )
     return _to_domain(doc)
 
 
