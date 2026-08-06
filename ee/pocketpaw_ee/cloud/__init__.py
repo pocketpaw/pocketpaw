@@ -982,6 +982,16 @@ def mount_cloud(app: FastAPI) -> None:
 
     register_lead_notification_listeners()
 
+    # Growth bridge — lead.captured → a Prospect in /growth, linked back to the
+    # submission that created it. The far end of the same funnel: the
+    # notification tells the workspace a lead arrived, this puts them in the
+    # outbound pipeline instead of a list somebody re-keys by hand.
+    from pocketpaw_ee.cloud.growth.bridges.leads import (
+        register_growth_lead_listeners,
+    )
+
+    register_growth_lead_listeners()
+
     # Push notifications fan-out (#1393) — v1 product events
     # (agent.stream_end / instinct.approval.created / meeting.started) →
     # ``dispatch.notify``, which forks WS-vs-Web-Push so a user with both the

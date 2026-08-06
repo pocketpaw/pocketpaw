@@ -379,7 +379,13 @@ async def test_facets_count_every_tier_status_and_source(w1_client):
         "replied": 2,
         "dead": 0,
     }
-    assert body["source"] == {"clay": 2, "directory": 1, "discovery": 0, "manual": 2}
+    assert body["source"] == {
+        "clay": 2,
+        "directory": 1,
+        "discovery": 0,
+        "manual": 2,
+        "site_lead": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -388,7 +394,7 @@ async def test_facets_include_zero_counts_for_a_stable_chip_row(w1_client):
     doesn't reshuffle as rows arrive."""
     body = (await w1_client.get(FACETS_URL)).json()
     assert set(body["tier"]) == {"a", "b", "c", "unqualified"}
-    assert set(body["source"]) == {"clay", "directory", "discovery", "manual"}
+    assert set(body["source"]) == {"clay", "directory", "discovery", "manual", "site_lead"}
     assert sum(body["status"].values()) == 0
 
 
@@ -399,7 +405,13 @@ async def test_tier_counts_respect_an_active_status_filter(w1_client):
     await _seed(w1_client, FACET_ROWS)
     body = (await w1_client.get(FACETS_URL, params={"status": "new"})).json()
     assert body["tier"] == {"a": 1, "b": 1, "c": 1, "unqualified": 0}
-    assert body["source"] == {"clay": 1, "directory": 1, "discovery": 0, "manual": 1}
+    assert body["source"] == {
+        "clay": 1,
+        "directory": 1,
+        "discovery": 0,
+        "manual": 1,
+        "site_lead": 0,
+    }
 
 
 @pytest.mark.asyncio

@@ -121,3 +121,28 @@ def test_lead_captured_bridge_subscribed_at_mount():
         assert _on_lead_captured in event_bus._handlers["lead.captured"]
     finally:
         event_bus._handlers["lead.captured"] = saved
+
+
+def test_lead_to_prospect_bridge_subscribed_at_mount():
+    """mount_cloud must WIRE the leads → growth bridge too.
+
+    Same blind spot as the notification bridge above, and the same cost if it
+    goes unnoticed: the bridge is a bus subscriber with no route, its own tests
+    self-register through a fixture, so deleting the production
+    ``register_growth_lead_listeners()`` call leaves the suite green while every
+    captured lead quietly stops reaching /growth.
+
+    Asserts the handler by identity rather than counting subscribers, so it
+    still means something when a third listener joins the topic.
+    """
+    from pocketpaw_ee.cloud.growth.bridges.leads import _on_lead_captured
+    from pocketpaw_ee.cloud.shared.events import event_bus
+
+    saved = list(event_bus._handlers["lead.captured"])
+    event_bus._handlers["lead.captured"].clear()
+    try:
+        app = FastAPI()
+        mount_cloud(app)
+        assert _on_lead_captured in event_bus._handlers["lead.captured"]
+    finally:
+        event_bus._handlers["lead.captured"] = saved

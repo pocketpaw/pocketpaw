@@ -74,25 +74,13 @@ from pocketpaw_ee.cloud.growth.domain import (
     ProspectSource,
     ProspectStatus,
     ProspectTier,
+    normalise_domain,
 )
 
-
-def _normalise_domain(v: str) -> str:
-    """Canonicalise a company-website domain for the dedupe key.
-
-    Lowercases, strips whitespace, drops an ``http(s)://`` scheme, a ``www.``
-    prefix, and any path/port suffix — so ``https://www.Acme.com/about`` and
-    ``acme.com`` dedupe to the same row.
-    """
-    v = v.strip().lower()
-    for scheme in ("https://", "http://"):
-        if v.startswith(scheme):
-            v = v[len(scheme) :]
-            break
-    v = v.split("/", 1)[0].split(":", 1)[0]
-    if v.startswith("www."):
-        v = v[len("www.") :]
-    return v
+# The domain canonicaliser moved to ``domain.py`` in T-7 (it canonicalises the
+# DEDUPE KEY, which the key logic there needs too). Re-exported under the old
+# private name so existing importers keep resolving.
+_normalise_domain = normalise_domain
 
 
 class CreateProspectRequest(BaseModel):
@@ -132,6 +120,9 @@ class CreateProspectRequest(BaseModel):
     # the DTO cannot re-check it, because by here an address is just a string.
     icp_id: str | None = None
     source_urls: list[str] = Field(default_factory=list, max_length=20)
+    # Inbound provenance (T-7): the site-form submission this row came from.
+    # Written only by the leads bridge; every other caller leaves it None.
+    lead_id: str | None = None
 
     @field_validator("domain")
     @classmethod
@@ -209,6 +200,9 @@ class ProspectResponse(BaseModel):
     status: str
     icp_id: str | None = None
     source_urls: list[str] = Field(default_factory=list)
+    # T-7 — the submission that created this row, so /growth can link a
+    # prospect back to what the visitor actually typed.
+    lead_id: str | None = None
     created_at: str | None
     updated_at: str | None
 

@@ -95,6 +95,12 @@
 # Also ``upsert_by_domain`` learned the two provenance fields, both SET-ONLY
 # like ``project_id``: an enrichment call carrying neither must not erase the
 # record of where a discovered row came from.
+# Updated 2026-08-06 (feat/coupling-lead-to-prospect, T-7): ``upsert_from_site_
+# lead`` — the inbound funnel's write seam, called by ``growth/bridges/leads``.
+# A THIRD upsert rather than a flag on ``upsert_by_domain`` because the update
+# semantics are opposite: the import seam overwrites, this one only ever adds.
+# See its docstring for why an inbound enquiry must never reset the row it
+# lands on. Also ``lead_id`` on the prospect mappers.
 # Updated 2026-07-27 (integration/growth-v1): G-5's ``MessageLog`` and G-6's
 # ``WhatsAppSendLog`` were the same record under two names (parallel branches,
 # neither could see the other). Unified onto ``MessageLog``: the WhatsApp
@@ -190,6 +196,7 @@ def _to_domain(doc: _ProspectDoc) -> Prospect:
         status=doc.status,
         icp_id=getattr(doc, "icp_id", None),
         source_urls=tuple(getattr(doc, "source_urls", None) or ()),
+        lead_id=getattr(doc, "lead_id", None),
         created_at=getattr(doc, "createdAt", None),
         updated_at=getattr(doc, "updatedAt", None),
     )
@@ -245,6 +252,7 @@ def _to_response(p: Prospect) -> ProspectResponse:
         status=p.status,
         icp_id=p.icp_id,
         source_urls=list(p.source_urls),
+        lead_id=p.lead_id,
         created_at=iso_utc(p.created_at),
         updated_at=iso_utc(p.updated_at),
     )
@@ -772,6 +780,65 @@ async def upsert_by_domain(
     if body.source_urls:
         doc.source_urls = list(body.source_urls)
     await doc.save()  # bumps updatedAt
+    # no-event: growth has no realtime subscriber in v1.
+    return _to_response(_to_domain(doc))
+
+
+async def upsert_from_site_lead(workspace_id: str, body: CreateProspectRequest) -> ProspectResponse:
+    """Create-or-ENRICH from an inbound site-form submission (T-7).
+
+    Deliberately NOT ``upsert_by_domain``. That seam overwrites every mutable
+    field, which is right for a human re-importing a list and wrong for an
+    inbound event, for the same reason ``prospect_exists_by_domain`` exists for
+    the discovery cron: a prospect sitting at ``in_sequence`` with two sent
+    drafts would be walked back to ``new``/``unqualified`` and have its research
+    brief replaced by a form fill. An enquiry from someone at a company you are
+    already working is the BEST thing that can happen to that row, so it must
+    not be the thing that resets it.
+
+    So an existing row is only ever ADDED to: a blank name or company gets
+    filled, a new address joins ``emails``, and nothing that a human or the
+    research engine decided (tier, status, research brief, project) is touched.
+    ``lead_id`` is set-only for the same reason ``icp_id`` is — it answers
+    "where did this prospect come from", and the second lead is not the answer.
+
+    Takes an explicit ``workspace_id`` rather than a RequestContext: the caller
+    is a bus subscriber running under system identity, like the discovery and
+    follow-up crons. That parameter is also the tenancy boundary — the lookup
+    filters on it, so a lead can only ever reach its own workspace's pipeline.
+    """
+    body = CreateProspectRequest.model_validate(body)
+    if body.project_id:
+        await _ensure_project_in_workspace(workspace_id, body.project_id)
+
+    doc = await _ProspectDoc.find_one({"workspace": workspace_id, "domain": body.domain})
+    if doc is None:
+        doc = _ProspectDoc(workspace=workspace_id, **body.model_dump())
+        await doc.insert()
+        # no-event: growth has no realtime subscriber in v1.
+        return _to_response(_to_domain(doc))
+
+    changed = False
+    # Fill only what is genuinely NOT YET KNOWN (``""`` is the store's word for
+    # that — see the doc class). A form fill never overwrites a name someone
+    # already researched or typed.
+    if body.name and not doc.name:
+        doc.name = body.name
+        changed = True
+    if body.company and not doc.company:
+        doc.company = body.company
+        changed = True
+    # Addresses accumulate: a second person at the same company is a second way
+    # to reach it, not a replacement for the first.
+    for address in body.emails:
+        if address not in doc.emails:
+            doc.emails.append(address)
+            changed = True
+    if body.lead_id and not getattr(doc, "lead_id", None):
+        doc.lead_id = body.lead_id
+        changed = True
+    if changed:
+        await doc.save()  # bumps updatedAt
     # no-event: growth has no realtime subscriber in v1.
     return _to_response(_to_domain(doc))
 
@@ -2075,4 +2142,5 @@ __all__ = [
     "transition",
     "update",
     "upsert_by_domain",
+    "upsert_from_site_lead",
 ]

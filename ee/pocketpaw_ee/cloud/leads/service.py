@@ -63,6 +63,11 @@
 # 24-char hex id, not something to show a human; a subscriber writing display
 # text needs the name at hand rather than a second query.
 #
+# Updated 2026-08-06 (feat/coupling-lead-to-prospect, T-7): ``get_in_workspace``
+# — the tenant-scoped read-by-id the emit's design assumed but never provided.
+# The growth bridge is the first subscriber that needs the submitted VALUES
+# (an email to key a prospect on), and this is the only door to them.
+#
 # The emit is AWAITED INLINE on the public capture request, not fire-and-forget:
 # ``EventBus.emit`` runs each handler in sequence, so the visitor's POST does not
 # return until every subscriber finishes (today: one admin query, N notification
@@ -77,6 +82,8 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from typing import Any
+
+from beanie import PydanticObjectId
 
 from pocketpaw.security.injection_scanner import (
     ThreatLevel,
@@ -298,6 +305,27 @@ async def capture(
     return _to_domain(doc)
 
 
+async def get_in_workspace(workspace_id: str, lead_id: str) -> Lead | None:
+    """Read ONE lead by id, scoped to a workspace. ``None`` when it is missing.
+
+    The read seam ``lead.captured`` subscribers need. The event carries
+    identifiers only — the submitted values are untrusted visitor PII and have
+    no business riding a bus every domain can listen on — so a subscriber that
+    needs the actual form fields comes back here for them, and comes back
+    holding the tenant it claims to be acting for.
+
+    A malformed id, a row that does not exist, and a row belonging to ANOTHER
+    workspace all return ``None`` and are indistinguishable: the caller learns
+    nothing about a lead outside its own tenant, not even that it exists.
+    """
+    try:
+        oid = PydanticObjectId(lead_id)
+    except Exception:  # noqa: BLE001 — a malformed id is simply not found
+        return None
+    doc = await _LeadDoc.find_one({"_id": oid, "workspace": workspace_id})
+    return _to_domain(doc) if doc is not None else None
+
+
 async def list_for_site(workspace_id: str, site_id: str, *, limit: int = 100) -> list[Lead]:
     cursor = (
         _LeadDoc.find({"workspace": workspace_id, "site_id": site_id})
@@ -311,4 +339,4 @@ async def count_for_site(workspace_id: str, site_id: str) -> int:
     return await _LeadDoc.find({"workspace": workspace_id, "site_id": site_id}).count()
 
 
-__all__ = ["Lead", "capture", "list_for_site", "count_for_site"]
+__all__ = ["Lead", "capture", "get_in_workspace", "list_for_site", "count_for_site"]

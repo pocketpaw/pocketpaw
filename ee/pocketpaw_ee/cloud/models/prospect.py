@@ -21,6 +21,11 @@
 # imported prospect. Plus a (workspace, source, createdAt) index: the monthly
 # discovery ceiling counts this workspace's discovered rows in the current
 # period, and that count runs on every discovery run.
+# Updated 2026-08-06 (feat/coupling-lead-to-prospect, T-7): ``lead_id`` — the
+# site-form submission that created this row, when one did. The inbound funnel's
+# provenance field, and the pointer /growth follows back to what the visitor
+# actually typed (the prospect row deliberately carries none of it). No index:
+# nothing queries by it, the link is followed in one direction only.
 
 from __future__ import annotations
 
@@ -61,6 +66,9 @@ class Prospect(TimestampedDocument):
     # The pages the research read to produce this row — the audit trail for a
     # prospect nobody typed. Empty on a manually created one.
     source_urls: list[str] = Field(default_factory=list)
+    # The captured Lead that created this row (T-7). None on every prospect
+    # that did not arrive through a site form. Set once, at creation.
+    lead_id: str | None = None
 
     class Settings:
         name = "growth_prospects"

@@ -47,6 +47,14 @@
 # (``approved`` via an approved ``_growth_send`` proposal, ``sent`` via the
 # dispatch worker), and ``GROWTH_DISPATCH_JOB_NAME`` names the arq job the
 # approve path enqueues on the ``growth`` queue.
+# Updated 2026-08-06 (feat/coupling-lead-to-prospect, T-7): the site-lead
+# funnel. ``ProspectSource`` gains ``site_lead`` and ``Prospect`` gains
+# ``lead_id`` (the submission that created the row). Plus the DEDUPE KEY rule —
+# ``normalise_domain`` (moved here from ``dto.py``; it is the canonicaliser for
+# the key, not a request-shape concern) and ``contact_dedupe_key``, which
+# decides whether a contact keys on a company domain or on their own address.
+# That decision is the whole guard against the person/company collapse — see
+# ``contact_dedupe_key``.
 
 from __future__ import annotations
 
@@ -68,7 +76,13 @@ GROWTH_QUEUE_NAME = "growth"
 # the workspace wants. It is its own source (not folded into ``directory``)
 # because provenance is the whole question a human asks about an auto-found
 # row: "who put this here, and can I see where it came from".
-ProspectSource = Literal["clay", "directory", "discovery", "manual"]
+#
+# ``site_lead`` is the INBOUND source: somebody filled in a form on a published
+# Paw Site. It is the warmest row in the pipeline and the only one that arrived
+# by the prospect's own choice, so it must be tellable apart from the cold ones
+# at a glance — a discovered row gets researched before anyone writes to it, an
+# inbound one is already waiting for a reply.
+ProspectSource = Literal["clay", "directory", "discovery", "manual", "site_lead"]
 
 # Qualification tier. ``unqualified`` until research triages it.
 ProspectTier = Literal["a", "b", "c", "unqualified"]
@@ -130,8 +144,208 @@ class Prospect:
     # nobody typed needs to open the source and check the claim. Empty on a
     # manually created prospect, which needs no such trail.
     source_urls: tuple[str, ...] = ()
+    # The site-form submission that CREATED this row, when one did. The same
+    # kind of provenance as ``icp_id``, pointing at the other end of the
+    # inbound funnel: the Lead carries what the visitor actually typed (which
+    # this row deliberately does not), so the pipeline row has to be able to
+    # say which submission it came from. Set once, at creation — a second lead
+    # landing on the same company enriches the row without rewriting the
+    # answer to "where did this prospect come from".
+    lead_id: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
+# The dedupe key — who counts as the same prospect (T-7)
+# ---------------------------------------------------------------------------
+
+
+def normalise_domain(v: str) -> str:
+    """Canonicalise a company-website domain for the dedupe key.
+
+    Lowercases, strips whitespace, drops an ``http(s)://`` scheme, a ``www.``
+    prefix, and any path/port suffix — so ``https://www.Acme.com/about`` and
+    ``acme.com`` dedupe to the same row.
+
+    Lived in ``dto.py`` until T-7 and moved here unchanged: it canonicalises the
+    KEY, which is a domain rule, and the key logic below needs it as much as the
+    request validator does. One implementation, two callers.
+    """
+    v = v.strip().lower()
+    for scheme in ("https://", "http://"):
+        if v.startswith(scheme):
+            v = v[len(scheme) :]
+            break
+    v = v.split("/", 1)[0].split(":", 1)[0]
+    if v.startswith("www."):
+        v = v[len("www.") :]
+    return v
+
+
+# Free/consumer mailbox providers. An address at one of these says NOTHING
+# about who the person works for — it is a personal mailbox, and the domain is
+# shared by hundreds of millions of unrelated people.
+#
+# This set is the whole reason the collapse guard exists. Growth fuses person
+# and company into ONE row keyed by company domain, which is right for the cold
+# path (two contacts at acme.com are one company to sell to) and catastrophic
+# for the inbound one: site visitors overwhelmingly submit personal addresses,
+# so keying them on the mail host would file every unrelated gmail lead the
+# workspace ever receives onto a single prospect called "gmail.com", each new
+# submission overwriting the last one's name.
+#
+# Deliberately a LIST OF KNOWN PROVIDERS rather than a cleverer test. The
+# alternatives — MX lookups, "does the domain host a website" — are network
+# calls on a path that must not make any, and they fail open (a timeout would
+# resume collapsing). A name that is not on this list is treated as a company
+# domain, which is the safe direction: the failure is one under-deduped row,
+# not a merged pile of strangers.
+CONSUMER_EMAIL_DOMAINS: frozenset[str] = frozenset(
+    {
+        # Google
+        "gmail.com",
+        "googlemail.com",
+        # Microsoft
+        "hotmail.com",
+        "hotmail.co.uk",
+        "hotmail.fr",
+        "hotmail.it",
+        "live.com",
+        "live.co.uk",
+        "msn.com",
+        "outlook.com",
+        "outlook.co.uk",
+        # Yahoo / AOL
+        "aol.com",
+        "aim.com",
+        "rocketmail.com",
+        "yahoo.com",
+        "yahoo.co.in",
+        "yahoo.co.jp",
+        "yahoo.co.uk",
+        "yahoo.fr",
+        "ymail.com",
+        # Apple
+        "icloud.com",
+        "mac.com",
+        "me.com",
+        # Privacy-first providers
+        "hushmail.com",
+        "pm.me",
+        "proton.me",
+        "protonmail.com",
+        "tuta.io",
+        "tutanota.com",
+        # Other global free providers
+        "fastmail.com",
+        "gmx.com",
+        "gmx.de",
+        "gmx.net",
+        "hey.com",
+        "mail.com",
+        "yandex.com",
+        "yandex.ru",
+        "zoho.com",
+        # Regional free providers
+        "163.com",
+        "126.com",
+        "bk.ru",
+        "daum.net",
+        "foxmail.com",
+        "free.fr",
+        "hanmail.net",
+        "inbox.ru",
+        "interia.pl",
+        "libero.it",
+        "list.ru",
+        "mail.ru",
+        "naver.com",
+        "onet.pl",
+        "orange.fr",
+        "qq.com",
+        "rediffmail.com",
+        "seznam.cz",
+        "sina.com",
+        "sohu.com",
+        "t-online.de",
+        "terra.com.br",
+        "uol.com.br",
+        "web.de",
+        "wp.pl",
+        # US ISP mailboxes — personal by construction
+        "att.net",
+        "btinternet.com",
+        "comcast.net",
+        "sbcglobal.net",
+        "verizon.net",
+    }
+)
+
+
+def is_consumer_email_domain(domain: str) -> bool:
+    """True when ``domain`` is a free/consumer mailbox host rather than a
+    company's own domain. See ``CONSUMER_EMAIL_DOMAINS``."""
+    return normalise_domain(domain) in CONSUMER_EMAIL_DOMAINS
+
+
+def email_domain(address: str) -> str:
+    """The host part of an email address, canonicalised. ``""`` when the value
+    is not shaped like an address (no ``@``, or nothing after it)."""
+    address = address.strip().lower()
+    if address.count("@") != 1:
+        return ""
+    return normalise_domain(address.rsplit("@", 1)[1])
+
+
+def _is_plausible_host(value: str) -> bool:
+    """A cheap sanity check on a would-be domain.
+
+    Form fields marked "website" collect ``n/a``, ``none``, ``-`` and the odd
+    sentence far more often than they collect a hostname, and any of those would
+    otherwise become a dedupe key that silently merges every lead that typed the
+    same non-answer. Requires a dot, no whitespace, and no ``@``; deliberately
+    not a full domain validator, because rejecting a real-but-unusual TLD costs
+    more than admitting a weird-but-unique string.
+    """
+    return bool(value) and "." in value and "@" not in value and not any(c.isspace() for c in value)
+
+
+def contact_dedupe_key(*, email: str = "", company_domain: str = "") -> str:
+    """The (workspace-local) key one inbound contact should dedupe on.
+
+    THE collapse guard. Growth stores one row per key and ``domain`` is that
+    key, so what this function returns decides whether two submissions become
+    two prospects or overwrite each other. The order is:
+
+    1. **The company domain the visitor gave us**, when they gave a real one.
+       A form that asks for a company website is answering the dedupe question
+       directly, and it beats the mail host — someone using a personal address
+       to enquire on behalf of acme.com is still acme.com.
+    2. **The email's own domain**, when it is not a consumer provider. This is
+       the ordinary B2B case (``sam@acme-dental.com``), and it is what keeps
+       the existing behaviour intact: two people at one real company still
+       collapse onto one prospect, because to an outbound pipeline they ARE
+       one company.
+    3. **The whole email address**, otherwise. A personal mailbox identifies a
+       PERSON and nothing else, so the person is the key. Two different gmail
+       addresses are two prospects; the same address twice is one.
+
+    Returns ``""`` when there is neither a usable address nor a usable domain —
+    a submission with no way to identify or contact anyone. The caller files no
+    prospect for those rather than inventing a key: a per-submission synthetic
+    id would file a fresh row every time the same visitor came back, which is
+    the same collapse bug wearing the opposite mask.
+    """
+    company = normalise_domain(company_domain)
+    if _is_plausible_host(company) and not is_consumer_email_domain(company):
+        return company
+
+    address = email.strip().lower()
+    host = email_domain(address)
+    if _is_plausible_host(host) and not is_consumer_email_domain(host):
+        return host
+    return address if host else ""
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +619,7 @@ class MessageLog:
 
 
 __all__ = [
+    "CONSUMER_EMAIL_DOMAINS",
     "DEFAULT_ICP_MAX_PER_RUN",
     "DRAFT_TRANSITIONS",
     "EMAIL_CONFIDENCE",
@@ -439,5 +654,9 @@ __all__ = [
     "ProspectSource",
     "ProspectStatus",
     "ProspectTier",
+    "contact_dedupe_key",
+    "email_domain",
+    "is_consumer_email_domain",
+    "normalise_domain",
     "recordable_emails",
 ]

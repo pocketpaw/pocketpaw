@@ -873,6 +873,12 @@ allow_indirect_imports = "true"
 # Beanie import would be least visible, so the contract is the check.
 source_modules = [
     "pocketpaw_ee.agent.mcp_servers.growth",
+    # feat/coupling-lead-to-prospect (T-7) — the leads bridge joins the
+    # boundary. It fills the pipeline from another domain's event, which is
+    # exactly the kind of module that would otherwise reach for the doc class
+    # to "just check whether the row exists"; it goes through
+    # ``growth.service.upsert_from_site_lead`` instead.
+    "pocketpaw_ee.cloud.growth.bridges.leads",
     "pocketpaw_ee.cloud.growth.router",
     "pocketpaw_ee.cloud.growth.dto",
     "pocketpaw_ee.cloud.growth.domain",

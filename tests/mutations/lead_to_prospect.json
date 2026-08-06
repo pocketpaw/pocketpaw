@@ -1,0 +1,119 @@
+[
+  {
+    "label": "collapse guard off: no domain is ever a consumer provider",
+    "file": "ee/pocketpaw_ee/cloud/growth/domain.py",
+    "find": "    return normalise_domain(domain) in CONSUMER_EMAIL_DOMAINS",
+    "replace": "    return False",
+    "tests": [
+      "tests/cloud/growth/test_lead_bridge.py"
+    ]
+  },
+  {
+    "label": "collapse guard inverted: every domain is a consumer provider, so nothing dedupes",
+    "file": "ee/pocketpaw_ee/cloud/growth/domain.py",
+    "find": "    return normalise_domain(domain) in CONSUMER_EMAIL_DOMAINS",
+    "replace": "    return True",
+    "tests": [
+      "tests/cloud/growth/test_lead_bridge.py"
+    ]
+  },
+  {
+    "label": "junk website answers ('n/a') become dedupe keys",
+    "file": "ee/pocketpaw_ee/cloud/growth/domain.py",
+    "find": "    return bool(value) and \".\" in value and \"@\" not in value and not any(c.isspace() for c in value)",
+    "replace": "    return bool(value)",
+    "tests": [
+      "tests/cloud/growth/test_lead_bridge.py"
+    ]
+  },
+  {
+    "label": "inbound rows are filed under the wrong source",
+    "file": "ee/pocketpaw_ee/cloud/growth/bridges/leads.py",
+    "find": "                source=\"site_lead\",",
+    "replace": "                source=\"manual\",",
+    "tests": [
+      "tests/cloud/growth/test_lead_bridge.py"
+    ]
+  },
+  {
+    "label": "the prospect loses its link back to the submission",
+    "file": "ee/pocketpaw_ee/cloud/growth/bridges/leads.py",
+    "find": "                lead_id=lead_id,",
+    "replace": "                lead_id=None,",
+    "tests": [
+      "tests/cloud/growth/test_lead_bridge.py"
+    ]
+  },
+  {
+    "label": "lead_id is dropped on the way out of the store",
+    "file": "ee/pocketpaw_ee/cloud/growth/service.py",
+    "find": "        lead_id=getattr(doc, \"lead_id\", None),",
+    "replace": "        lead_id=None,",
+    "tests": [
+      "tests/cloud/growth/test_lead_bridge.py"
+    ]
+  },
+  {
+    "label": "lead_id is dropped on the way to the wire",
+    "file": "ee/pocketpaw_ee/cloud/growth/service.py",
+    "find": "        lead_id=p.lead_id,",
+    "replace": "        lead_id=None,",
+    "tests": [
+      "tests/cloud/growth/test_lead_bridge.py"
+    ]
+  },
+  {
+    "label": "a second lead rewrites where the prospect came from",
+    "file": "ee/pocketpaw_ee/cloud/growth/service.py",
+    "find": "    if body.lead_id and not getattr(doc, \"lead_id\", None):",
+    "replace": "    if body.lead_id:",
+    "tests": [
+      "tests/cloud/growth/test_lead_bridge.py"
+    ]
+  },
+  {
+    "label": "an inbound form fill overwrites a name someone researched",
+    "file": "ee/pocketpaw_ee/cloud/growth/service.py",
+    "find": "    if body.name and not doc.name:",
+    "replace": "    if body.name:",
+    "tests": [
+      "tests/cloud/growth/test_lead_bridge.py"
+    ]
+  },
+  {
+    "label": "tenancy: the lead read stops filtering on the workspace",
+    "file": "ee/pocketpaw_ee/cloud/leads/service.py",
+    "find": "    doc = await _LeadDoc.find_one({\"_id\": oid, \"workspace\": workspace_id})",
+    "replace": "    doc = await _LeadDoc.find_one({\"_id\": oid})",
+    "tests": [
+      "tests/cloud/growth/test_lead_bridge.py"
+    ]
+  },
+  {
+    "label": "a growth failure escapes the bridge instead of being contained",
+    "file": "ee/pocketpaw_ee/cloud/growth/bridges/leads.py",
+    "find": "        logger.exception(\"Failed to file a prospect for lead=%s\", lead_id)",
+    "replace": "        raise",
+    "tests": [
+      "tests/cloud/growth/test_lead_bridge.py"
+    ]
+  },
+  {
+    "label": "a keyless submission falls through to the rescue and logs a stack trace",
+    "file": "ee/pocketpaw_ee/cloud/growth/bridges/leads.py",
+    "find": "    if not key or len(key) > _MAX_KEY:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/growth/test_lead_bridge.py"
+    ]
+  },
+  {
+    "label": "the mount registration is deleted (the reviewer's blind spot)",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "    register_growth_lead_listeners()",
+    "replace": "    pass  # register_growth_lead_listeners()",
+    "tests": [
+      "tests/cloud/test_integration.py"
+    ]
+  }
+]
