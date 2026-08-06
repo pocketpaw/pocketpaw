@@ -28,10 +28,17 @@
     "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
   },
   {
-    "label": "chain: a reject closes the chain as passed",
+    "label": "chain: a reject closes the chain as passed (and flips policy)",
     "file": "ee/pocketpaw_ee/cloud/instinct_approvals/service.py",
     "find": "    approved = new_status == \"approved\"",
     "replace": "    approved = True",
+    "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
+  },
+  {
+    "label": "chain: approve never flips policy to passed (approved reads blocked)",
+    "file": "ee/pocketpaw_ee/cloud/instinct_approvals/service.py",
+    "find": "        _safe_chain_emit(\n            record_policy_evaluated,",
+    "replace": "        _never = lambda **_k: _safe_chain_emit(\n            record_policy_evaluated,",
     "tests": ["tests/cloud/test_instinct_approvals_governance.py"]
   },
   {

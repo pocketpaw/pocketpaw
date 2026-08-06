@@ -190,6 +190,58 @@ async def test_approve_writes_a_journal_chain_joinable_by_correlation_id(journal
     assert any(a.actor.id == f"user:{DECIDER}" for a in decisions[0].approvers)
 
 
+async def test_approved_decision_reads_policy_passed(journal, graph) -> None:
+    """An APPROVED template approval must not read as blocked forever.
+
+    The projection keeps the LAST ``policy.evaluated`` before the terminal
+    (``_fold_policy``, last-seen-wins), and create's honest ``passed=False``
+    encodes "template escalated to human". Without the approve-side
+    ``passed=True`` flip, the explain narrator says the gate "blocked at
+    decision time" for a decision a human explicitly cleared, and the
+    outcome-hint ranker files it under the rejected hint. fail→pass is the
+    projection's own encoding of "asked for human → human approved", and the
+    row-level approve path emits the same flip.
+
+    Mutation: drop the ``record_policy_evaluated`` flip in ``_close_chain``.
+    """
+    wire = await approvals_service.create_approval(WS_A, USER, _create_body())
+    corr = UUID(wire["correlation_id"])
+    await approvals_service.approve(WS_A, DECIDER, wire["id"], {})
+
+    # The chain carries the full fail→pass arc for the narrator...
+    policy_events = [e for e in _chain(journal, corr) if e.action == "policy.evaluated"]
+    assert [bool(e.payload.get("passed")) for e in policy_events] == [False, True]
+    assert policy_events[-1].payload["policy"] == "template_instinct_gate"
+    assert policy_events[-1].payload["reason"] == "approved_by_human"
+
+    # ...and the folded Decision row reads as passed, not blocked.
+    decision = next(d for d in graph.store.iter_decisions() if d.correlation_id == corr)
+    assert decision.instinct_policy_passed is True, (
+        "an approved template approval must not read as policy-blocked"
+    )
+
+
+async def test_rejected_decision_reads_policy_failed(journal, graph) -> None:
+    """The flip is approve-only: on reject, create's ``passed=False`` stands,
+    which IS the correct final policy state for a rejection.
+
+    Mutation: make ``_close_chain`` emit the flip unconditionally (``approved
+    = True``) — this asserts a rejected Decision would then wrongly read
+    passed.
+    """
+    wire = await approvals_service.create_approval(WS_A, USER, _create_body())
+    corr = UUID(wire["correlation_id"])
+    await approvals_service.reject(WS_A, DECIDER, wire["id"], {"note": "no"})
+
+    policy_events = [e for e in _chain(journal, corr) if e.action == "policy.evaluated"]
+    assert [bool(e.payload.get("passed")) for e in policy_events] == [False]
+
+    decision = next(d for d in graph.store.iter_decisions() if d.correlation_id == corr)
+    assert decision.instinct_policy_passed is False, (
+        "a rejected template approval must keep reading as policy-blocked"
+    )
+
+
 async def test_reject_closes_the_chain_as_rejected(journal, graph) -> None:
     wire = await approvals_service.create_approval(WS_A, USER, _create_body())
     corr = UUID(wire["correlation_id"])
