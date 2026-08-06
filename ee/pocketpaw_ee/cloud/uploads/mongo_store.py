@@ -1,5 +1,13 @@
 """Mongo-backed metadata store, workspace-scoped.
 
+2026-08-05 (Coupling T-1 "prune KB on file delete"): added
+``get_doc_scoped_any`` — a tombstone-inclusive read the FileDeleted subscriber
+uses to recover ``kb_article_id``/``kb_scope`` from a row that
+``EEUploadService.delete`` has already soft-deleted (the event fires AFTER the
+tombstone lands, so the live-row readers can't see it). ``set_kb_article`` grew
+an ``include_deleted`` flag so the subscriber can clear the tracking on that
+tombstoned row after a successful purge. Workspace filter unchanged on both.
+
 2026-07-03 (FL-11b "hide-from-AI purge"): added ``set_kb_article`` — a
 workspace-scoped setter the FileReady listener uses to record the kb-go
 ``article_id`` + ``scope`` on a row after a successful ingest, and the PATCH
@@ -87,6 +95,20 @@ class MongoFileStore:
             FileUpload.deleted_at == None,  # noqa: E711
         )
 
+    async def get_doc_scoped_any(self, file_id: str, workspace: str) -> FileUpload | None:
+        """Like :meth:`get_doc_scoped` but tombstone-inclusive (Coupling T-1).
+
+        The FileDeleted subscriber needs the row's ``kb_article_id`` /
+        ``kb_scope`` AFTER the service has soft-deleted it — the event is
+        emitted post-tombstone, so the live-row read returns ``None``. The
+        workspace filter is always applied, so cross-tenant reads are
+        impossible through this API.
+        """
+        return await FileUpload.find_one(
+            FileUpload.file_id == file_id,
+            FileUpload.workspace == workspace,
+        )
+
     async def set_library_metadata(
         self,
         file_id: str,
@@ -122,6 +144,7 @@ class MongoFileStore:
         *,
         article_id: str | None,
         scope: str | None,
+        include_deleted: bool = False,
     ) -> FileUpload | None:
         """Record (or clear) the tracked kb-go article on one row (FL-11b).
 
@@ -132,8 +155,16 @@ class MongoFileStore:
         re-populates it). Both fields are always written to the given values.
         Returns the updated doc, or ``None`` if no live row matches
         ``(file_id, workspace)``.
+
+        ``include_deleted=True`` (Coupling T-1) also matches a tombstoned row —
+        the FileDeleted subscriber uses it to clear tracking after purging a
+        deleted file's article. Default stays live-only so the FL-11b callers
+        keep their exact semantics.
         """
-        doc = await self.get_doc_scoped(file_id, workspace)
+        if include_deleted:
+            doc = await self.get_doc_scoped_any(file_id, workspace)
+        else:
+            doc = await self.get_doc_scoped(file_id, workspace)
         if doc is None:
             return None
         doc.kb_article_id = article_id
