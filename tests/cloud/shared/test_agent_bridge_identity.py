@@ -119,3 +119,71 @@ async def test_run_agent_response_resets_contextvar_after_run() -> None:
 
     # Reset after the run — no leak into the surrounding context.
     assert current_workspace_id() is None
+
+
+@pytest.mark.asyncio
+async def test_run_agent_response_marks_the_run_as_a_cloud_chat_run() -> None:
+    """C4-a: the group/DM path must also set the per-run cloud-chat MARKER.
+
+    The builtin Fabric/Instinct tools key their fail-closed on
+    ``current_cloud_chat_run()``, deliberately NOT on a process-global (that
+    choice is the #1570 lesson). This path bound identity but never entered
+    ``mark_cloud_chat_run``, so the marker read False for the whole cloud
+    group/DM path and the guard was inert there. No live leak today — because
+    ``attach_agent_identity`` happens to raise on an empty workspace — but the
+    invariant held by a separate accident rather than by the guard, and the
+    OSS-side tools cannot see that accident.
+
+    Mutation that breaks this: remove the ``cloud_run_marker`` enter/exit pair
+    from ``_run_agent_response``.
+    """
+    from pocketpaw_ee.cloud.chat.agent_service import current_cloud_chat_run
+    from pocketpaw_ee.cloud.shared import agent_bridge
+
+    from pocketpaw.tools.builtin._tenancy import is_tenant_scoped_run
+
+    seen: dict[str, bool] = {}
+
+    async def fake_run(agent_id, user_message, session_key, history, **kwargs):
+        seen["marker"] = current_cloud_chat_run()
+        # The OSS-side view the tools actually consult.
+        seen["tenant_scoped"] = is_tenant_scoped_run()
+        yield SimpleNamespace(type="message", content="ok")
+        yield SimpleNamespace(type="done", content="")
+
+    pool = SimpleNamespace(
+        get=AsyncMock(return_value=SimpleNamespace(agent_name="PocketPaw")),
+        run=fake_run,
+        observe=AsyncMock(return_value=None),
+    )
+
+    assert current_cloud_chat_run() is False
+
+    with (
+        patch("pocketpaw.agents.pool.get_agent_pool", return_value=pool),
+        patch(
+            "pocketpaw_ee.cloud.chat.message_service.list_recent_for_group",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.chat.message_service.create_agent_message",
+            new=AsyncMock(return_value=SimpleNamespace(id="m1")),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.search_context",
+            new=AsyncMock(return_value=""),
+        ),
+        patch("pocketpaw_ee.cloud.shared.agent_bridge.emit", new=AsyncMock()),
+    ):
+        await agent_bridge._run_agent_response(
+            agent_id="agent-z",
+            group_id="group-z",
+            workspace_id="ws-z",
+            user_message="hi",
+            group_members=["user-1"],
+        )
+
+    assert seen["marker"] is True
+    assert seen["tenant_scoped"] is True
+    # Released in the finally — never leaks past the run.
+    assert current_cloud_chat_run() is False

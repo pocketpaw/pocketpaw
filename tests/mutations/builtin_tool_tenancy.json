@@ -1,0 +1,173 @@
+[
+  {
+    "label": "instinct: the proposal stops carrying its tenant (the reported leak)",
+    "file": "src/pocketpaw/tools/builtin/instinct_tools.py",
+    "find": "                priority=ActionPriority(priority),\n                workspace_id=workspace,\n            )",
+    "replace": "                priority=ActionPriority(priority),\n            )",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "instinct: the pending queue reads unfiltered again",
+    "file": "src/pocketpaw/tools/builtin/instinct_tools.py",
+    "find": "            pending = await store.pending(pocket_id, workspace_id=workspace)",
+    "replace": "            pending = await store.pending(pocket_id)",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "instinct: the audit trail reads unfiltered again",
+    "file": "src/pocketpaw/tools/builtin/instinct_tools.py",
+    "find": "                pocket_id=pocket_id, limit=min(limit, 50), workspace_id=workspace\n            )",
+    "replace": "                pocket_id=pocket_id, limit=min(limit, 50)\n            )",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "instinct: the fail-closed refusal is dropped",
+    "file": "src/pocketpaw/tools/builtin/instinct_tools.py",
+    "find": "    workspace = current_workspace()\n    if workspace is None and is_tenant_scoped_run():",
+    "replace": "    workspace = current_workspace()\n    if False:",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "fabric: the query reads unfiltered again",
+    "file": "src/pocketpaw/tools/builtin/fabric_tools.py",
+    "find": "                    limit=min(limit, 50),\n                ),\n                workspace_id=workspace,\n            )",
+    "replace": "                    limit=min(limit, 50),\n                ),\n            )",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "fabric: a defined type stops carrying its tenant",
+    "file": "src/pocketpaw/tools/builtin/fabric_tools.py",
+    "find": "                obj_type = await store.define_type(\n                    name=type_name, properties=prop_defs, workspace_id=workspace\n                )",
+    "replace": "                obj_type = await store.define_type(\n                    name=type_name, properties=prop_defs\n                )",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "fabric: a created object stops carrying its tenant",
+    "file": "src/pocketpaw/tools/builtin/fabric_tools.py",
+    "find": "                    source_id=source_id,\n                    workspace_id=workspace,\n                )",
+    "replace": "                    source_id=source_id,\n                )",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "fabric: create binds to another tenant's type id (unscoped lookup)",
+    "file": "src/pocketpaw/tools/builtin/fabric_tools.py",
+    "find": "                obj_type = await store.get_type_by_name(type_name, workspace_id=workspace)",
+    "replace": "                obj_type = await store.get_type_by_name(type_name)",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "fabric: the cross-tenant link endpoint check is removed",
+    "file": "src/pocketpaw/tools/builtin/fabric_tools.py",
+    "find": "                for field_name, obj_id in ((\"from_id\", from_id), (\"to_id\", to_id)):\n                    if await store.get_object(obj_id, workspace_id=workspace) is None:\n                        return f\"{field_name} '{obj_id}' was not found in this workspace.\"\n",
+    "replace": "",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "fabric: stats counts unfiltered again",
+    "file": "src/pocketpaw/tools/builtin/fabric_tools.py",
+    "find": "            stats = await store.stats(workspace_id=workspace)",
+    "replace": "            stats = await store.stats()",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "fabric: stats leaks another tenant's type NAMES",
+    "file": "src/pocketpaw/tools/builtin/fabric_tools.py",
+    "find": "            types = await store.list_types(workspace_id=workspace)",
+    "replace": "            types = await store.list_types()",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "fabric: the fail-closed refusal is dropped",
+    "file": "src/pocketpaw/tools/builtin/fabric_tools.py",
+    "find": "    workspace = current_workspace()\n    if workspace is None and is_tenant_scoped_run():",
+    "replace": "    workspace = current_workspace()\n    if False:",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "tenancy: a blank workspace counts as resolved identity",
+    "file": "src/pocketpaw/tools/builtin/_tenancy.py",
+    "find": "    candidate = _oss_current_workspace.get()\n    if candidate and candidate.strip():\n        return candidate.strip()",
+    "replace": "    candidate = _oss_current_workspace.get()\n    if candidate is not None:\n        return candidate",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "corrections: the seventh sibling reads unfiltered again",
+    "file": "src/pocketpaw/tools/builtin/instinct_corrections.py",
+    "find": "                limit=min(max(limit, 1), 50),\n                workspace_id=workspace,\n            )",
+    "replace": "                limit=min(max(limit, 1), 50),\n            )",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "corrections: the seventh sibling's fail-closed refusal is dropped",
+    "file": "src/pocketpaw/tools/builtin/instinct_corrections.py",
+    "find": "    workspace = current_workspace()\n    if workspace is None and is_tenant_scoped_run():",
+    "replace": "    workspace = current_workspace()\n    if False:",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "corrections: the store read ignores the workspace it is handed",
+    "file": "src/pocketpaw/instinct/store.py",
+    "find": "        ws_cond, ws_params = _workspace_scope(workspace_id)\n        if ws_cond:\n            sql += f\" AND {ws_cond}\"\n            params.extend(ws_params)\n        sql += \" ORDER BY created_at DESC LIMIT ?\"",
+    "replace": "        sql += \" ORDER BY created_at DESC LIMIT ?\"",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "corrections: the writer stops stamping the tenant (read filter becomes a no-op)",
+    "file": "src/pocketpaw/instinct/store.py",
+    "find": "                \" context_summary, action_title, created_at, workspace_id)\"\n                \" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\",",
+    "replace": "                \" context_summary, action_title, created_at, workspace_id)\"\n                \" VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)\",",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  },
+  {
+    "label": "bridge: the group/DM path stops marking itself a cloud chat run",
+    "file": "ee/pocketpaw_ee/cloud/shared/agent_bridge.py",
+    "find": "    cloud_run_marker = mark_cloud_chat_run()\n    cloud_run_marker.__enter__()\n",
+    "replace": "    class _NoMarker:\n        def __enter__(self):\n            return None\n\n        def __exit__(self, *a):\n            return False\n\n    cloud_run_marker = _NoMarker()\n    cloud_run_marker.__enter__()\n",
+    "tests": [
+      "tests/cloud/shared/test_agent_bridge_identity.py"
+    ]
+  },
+  {
+    "label": "tenancy: the guard becomes a process-global that fires for every run (#1570)",
+    "file": "src/pocketpaw/tools/builtin/_tenancy.py",
+    "find": "    return bool(current_cloud_chat_run())",
+    "replace": "    return True",
+    "tests": [
+      "tests/test_builtin_tools_workspace_scope.py"
+    ]
+  }
+]

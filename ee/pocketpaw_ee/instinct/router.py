@@ -2637,7 +2637,8 @@ async def approve_action(
                 context_summary=summarize_correction(before, patches),
                 action_title=before.title,
             )
-            await store.record_correction(correction)
+            # C4-a: stamp the tenant so the corrections read filter is real.
+            await store.record_correction(correction, workspace_id=workspace_id)
             await _persist_edits(store, after, edited_fields)
             await _forward_to_soul(correction, after, workspace_id)
 
@@ -3600,7 +3601,8 @@ async def edit_proposal(
             context_summary=summarize_correction(before, patches),
             action_title=before.title,
         )
-        await store.record_correction(correction)
+        # C4-a: stamp the tenant so the corrections read filter is real.
+        await store.record_correction(correction, workspace_id=workspace_id)
         await _forward_to_soul(correction, after, workspace_id)
 
     note = correction.context_summary if correction is not None else None
