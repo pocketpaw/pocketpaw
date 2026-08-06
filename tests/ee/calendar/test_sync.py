@@ -146,6 +146,98 @@ async def test_ingest_creates_rows_with_composio_connector(
     ]
 
 
+async def test_ingest_lands_on_private_per_user_calendar(
+    calendar_db: Any, db_ctx: RequestContext
+) -> None:
+    """The Composio connection is per-user, so its events are one
+    member's personal feed. The ingest must auto-create a PRIVATE
+    calendar owned by the syncing user and land rows on it — landing on
+    the synthetic workspace-public default would expose member A's
+    personal events to every other member."""
+    await sync.ingest_composio_events(db_ctx, [_google_item(id="gid-1")])
+
+    cals = await _CalendarDoc.find({"workspace": "ws-sync"}).to_list()
+    assert len(cals) == 1
+    cal = cals[0]
+    assert cal.visibility == "private"
+    assert cal.owner_user_id == "user-sync"
+
+    row = await _EventDoc.find_one({"workspace": "ws-sync"})
+    assert row is not None
+    assert row.calendar_id == str(cal.id)
+    assert row.calendar_id != "primary"
+
+
+async def test_ingest_reuses_the_private_calendar(calendar_db: Any, db_ctx: RequestContext) -> None:
+    """Repeat ingests (every TTL window, forever) must reuse the one
+    private calendar, not mint a new doc per refresh."""
+    await sync.ingest_composio_events(db_ctx, [_google_item(id="gid-1")])
+    await sync.ingest_composio_events(db_ctx, [_google_item(id="gid-2")])
+
+    cals = await _CalendarDoc.find({"workspace": "ws-sync"}).to_list()
+    assert len(cals) == 1
+    rows = await _EventDoc.find({"workspace": "ws-sync"}).to_list()
+    assert {r.calendar_id for r in rows} == {str(cals[0].id)}
+
+
+async def test_two_members_same_upstream_event_get_their_own_rows(
+    calendar_db: Any,
+) -> None:
+    """Two members of ONE workspace both invited to the same Google
+    meeting, both with Composio wired: each gets their own private row.
+    Deduping across users would strand member B's copy on member A's
+    private calendar, where B cannot see it."""
+    ctx_a = RequestContext(workspace_id="ws-sync", user_id="member-a")
+    ctx_b = RequestContext(workspace_id="ws-sync", user_id="member-b")
+
+    await sync.ingest_composio_events(ctx_a, [_google_item(id="gid-shared", summary="Team sync")])
+    await sync.ingest_composio_events(ctx_b, [_google_item(id="gid-shared", summary="Team sync")])
+
+    rows = await _EventDoc.find(
+        {"workspace": "ws-sync", "source_external_id": "gid-shared"}
+    ).to_list()
+    assert len(rows) == 2
+    assert {r.created_by_user_id for r in rows} == {"member-a", "member-b"}
+    # Each row sits on its owner's own private calendar.
+    assert len({r.calendar_id for r in rows}) == 2
+    cals = await _CalendarDoc.find({"workspace": "ws-sync"}).to_list()
+    assert {c.owner_user_id for c in cals} == {"member-a", "member-b"}
+    assert all(c.visibility == "private" for c in cals)
+
+
+async def test_ingest_captures_google_timezone(calendar_db: Any, db_ctx: RequestContext) -> None:
+    """Google's ``start.timeZone`` (IANA) is persisted so read paths can
+    render event-local wall time; absent or garbage zones keep the UTC
+    canonical stamp."""
+    start = datetime(2026, 8, 10, 5, 0, tzinfo=UTC)  # 10:30 IST
+    items = [
+        {
+            "id": "gid-ist",
+            "summary": "IST meeting",
+            "start": {"dateTime": start.isoformat(), "timeZone": "Asia/Kolkata"},
+            "end": {
+                "dateTime": (start + timedelta(hours=1)).isoformat(),
+                "timeZone": "Asia/Kolkata",
+            },
+        },
+        _google_item(id="gid-no-tz"),
+        {
+            "id": "gid-bad-tz",
+            "summary": "Garbage zone",
+            "start": {"dateTime": start.isoformat(), "timeZone": "Not/AZone"},
+            "end": {"dateTime": (start + timedelta(hours=1)).isoformat()},
+        },
+    ]
+    await sync.ingest_composio_events(db_ctx, items)
+
+    ist = await _EventDoc.find_one({"workspace": "ws-sync", "source_external_id": "gid-ist"})
+    no_tz = await _EventDoc.find_one({"workspace": "ws-sync", "source_external_id": "gid-no-tz"})
+    bad_tz = await _EventDoc.find_one({"workspace": "ws-sync", "source_external_id": "gid-bad-tz"})
+    assert ist is not None and ist.timezone == "Asia/Kolkata"
+    assert no_tz is not None and no_tz.timezone == "UTC"
+    assert bad_tz is not None and bad_tz.timezone == "UTC"
+
+
 async def test_ingest_twice_updates_in_place(calendar_db: Any, db_ctx: RequestContext) -> None:
     """Re-ingesting the same Google event id updates the one row —
     the preamble's sync-on-read must not grow the store per refresh."""

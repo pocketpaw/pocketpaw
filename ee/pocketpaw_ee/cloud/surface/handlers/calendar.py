@@ -95,9 +95,11 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         )
 
     if not events:
-        # No events AND no error. Two sub-states the agent needs to tell
-        # apart: Composio is on (calendar genuinely empty) vs Composio
-        # is off (no integration at all). Probe is_enabled() to pick.
+        # No events AND no raise. Two sub-states the agent needs to tell
+        # apart: Composio on — the store's upcoming window is empty (or,
+        # rarely, the store read failed and the service degraded to []) —
+        # vs Composio off AND nothing in the store (no integration at
+        # all). Probe is_enabled() to pick.
         # Lazy import mirrors the list_upcoming pattern above — keeps
         # the cold-path cheap and the test monkeypatch surface clean.
         try:

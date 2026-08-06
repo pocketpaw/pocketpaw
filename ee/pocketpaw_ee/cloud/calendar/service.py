@@ -31,6 +31,12 @@
 #      dicts. The dataclass stays the preamble's wire shape; only its
 #      construction source changed.
 #
+# Privacy (review round 2): the Composio connection is PER-USER, so the
+# ingest lands one member's personal feed — on a per-user PRIVATE
+# calendar (see calendar.sync._ensure_composio_calendar), which the
+# projection's policy filtering (list_events → can_read_calendar) keeps
+# out of every other member's preamble and /calendar.
+#
 # Field semantics that changed with T-13:
 #   * ``id`` is now the CANONICAL LOCAL event id (the /calendar row id),
 #     not the upstream Google id. The Google id lives on the store row as
@@ -40,6 +46,10 @@
 #   * ``source`` maps from the row's ``source_connector``:
 #     google-family connectors → "google"; other connectors pass through;
 #     no connector (native /calendar or bridge-minted rows) → "local".
+#   * ``start`` / ``end`` render EVENT-LOCAL (store UTC converted through
+#     the row's IANA timezone) so the preamble shows wall-clock time —
+#     matching the old Composio pass-through. All-day events render
+#     date-only, matching Google's ``start.date`` shape.
 #
 # Failure modes — all degrade to serving what the store has (or ``[]``):
 #   * Composio disabled                       → store contents (no refresh)
@@ -53,6 +63,7 @@ import asyncio
 import logging
 import time
 from datetime import UTC, datetime, timedelta
+from datetime import time as dt_time
 from typing import Any
 
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
@@ -95,6 +106,9 @@ _UPCOMING_WINDOW_DAYS = 30
 # (workspace_id, user_id) → monotonic timestamp of the last refresh
 # ATTEMPT. In-process only — a restart simply refreshes on first read.
 _last_refresh: dict[tuple[str, str], float] = {}
+
+# Local-midnight sentinel for the all-day rendering heuristic.
+_MIDNIGHT = dt_time(0, 0, 0)
 
 
 def _reset_refresh_cache() -> None:
@@ -191,16 +205,76 @@ async def _upcoming_from_store(workspace_id: str, user_id: str, limit: int) -> l
 def _event_from_response(ev: Any, *, workspace_id: str) -> CalendarEvent:
     """Map one ``calendar.dto.EventResponse`` onto the preamble's wire
     dataclass. Tenancy is re-tagged from the requesting workspace at
-    construction (the domain object refuses to build without it)."""
+    construction (the domain object refuses to build without it).
+
+    ``start`` / ``end`` render EVENT-LOCAL: the store keeps UTC datetimes
+    plus the event's IANA ``timezone``, and the preamble formats
+    time-of-day straight off the string — emitting UTC here would show a
+    10:30 IST meeting as "5:00 AM". This matches the old Composio
+    pass-through behaviour (Google sent local-offset dateTimes).
+    All-day events (midnight-to-midnight, whole-day multiples in the
+    event's zone) render date-only so the handler's date branch fires,
+    matching Google's ``start.date`` wire shape.
+    """
+    tz = _zone_for(getattr(ev, "timezone", None))
+    if _is_all_day(ev.starts_at, ev.ends_at, tz):
+        start = _as_utc(ev.starts_at).astimezone(tz).date().isoformat() if ev.starts_at else ""
+        end = _as_utc(ev.ends_at).astimezone(tz).date().isoformat() if ev.ends_at else ""
+    else:
+        start = _render_local_iso(ev.starts_at, tz)
+        end = _render_local_iso(ev.ends_at, tz)
     return CalendarEvent(
         id=str(ev.id),
         workspace_id=workspace_id,
         title=ev.title,
-        start=ev.starts_at.isoformat() if ev.starts_at else "",
-        end=ev.ends_at.isoformat() if ev.ends_at else "",
+        start=start,
+        end=end,
         source=_source_for_connector(ev.source_connector),
         attendees=[str(a.email) for a in (ev.attendees or [])],
     )
+
+
+def _zone_for(tz_name: Any) -> Any:
+    """Resolve the row's IANA timezone, falling back to UTC on anything
+    unresolvable — a bad zone must degrade the rendering, not the read."""
+    from zoneinfo import ZoneInfo
+
+    if isinstance(tz_name, str) and tz_name:
+        try:
+            return ZoneInfo(tz_name)
+        except Exception:  # noqa: BLE001 — zoneinfo raises several types
+            logger.debug("calendar.list_upcoming: unknown timezone %r", tz_name)
+    return UTC
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """Stamp naive datetimes as UTC (the store's canonical zone)."""
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+
+
+def _render_local_iso(dt: datetime | None, tz: Any) -> str:
+    """ISO string in the event's own timezone (UTC store → local wall time)."""
+    if dt is None:
+        return ""
+    return _as_utc(dt).astimezone(tz).isoformat()
+
+
+def _is_all_day(starts_at: datetime | None, ends_at: datetime | None, tz: Any) -> bool:
+    """Heuristic all-day detection: both bounds at local midnight and the
+    span a whole multiple of 24h. Google all-day events arrive as
+    ``{"date": ...}`` blocks and are stored as midnights, so this
+    round-trips them back to date-only strings. A genuinely timed
+    midnight-to-midnight event renders date-only too — acceptable, it IS
+    a whole-day block."""
+    if starts_at is None or ends_at is None:
+        return False
+    local_start = _as_utc(starts_at).astimezone(tz)
+    local_end = _as_utc(ends_at).astimezone(tz)
+    if local_start.time() != _MIDNIGHT or local_end.time() != _MIDNIGHT:
+        return False
+    span = local_end - local_start
+    day = timedelta(days=1)
+    return span >= day and span % day == timedelta(0)
 
 
 def _source_for_connector(connector: str | None) -> str:

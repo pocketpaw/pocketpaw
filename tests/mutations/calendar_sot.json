@@ -7,11 +7,18 @@
     "tests": ["tests/ee/calendar/test_sync.py"]
   },
   {
-    "label": "google-family matcher narrowed to composio only (native/composio dup)",
+    "label": "google-family matcher drops the native-gcalendar branch (dup across connectors)",
     "file": "ee/pocketpaw_ee/calendar/sync.py",
-    "find": "\"source_connector\": {\"$in\": _GOOGLE_CONNECTOR_FAMILY},",
-    "replace": "\"source_connector\": SOURCE_CONNECTOR_COMPOSIO,",
+    "find": "{\"source_connector\": SOURCE_CONNECTOR_GCALENDAR},",
+    "replace": "{\"source_connector\": \"__never__\"},",
     "tests": ["tests/ee/calendar/test_sync.py", "tests/cloud/calendar/test_service.py"]
+  },
+  {
+    "label": "composio reconcile loses its per-user scope (member B's copy lands on A's row)",
+    "file": "ee/pocketpaw_ee/calendar/sync.py",
+    "find": "                {\n                    \"source_connector\": SOURCE_CONNECTOR_COMPOSIO,\n                    \"created_by_user_id\": user_id,\n                },",
+    "replace": "                {\"source_connector\": SOURCE_CONNECTOR_COMPOSIO},",
+    "tests": ["tests/ee/calendar/test_sync.py"]
   },
   {
     "label": "composio rows stamped with no connector (reconciliation keys dropped)",
@@ -19,6 +26,20 @@
     "find": "source_connector=SOURCE_CONNECTOR_COMPOSIO,",
     "replace": "source_connector=None,",
     "tests": ["tests/ee/calendar/test_sync.py"]
+  },
+  {
+    "label": "composio calendar minted workspace-public (member A's feed leaks to member B)",
+    "file": "ee/pocketpaw_ee/calendar/sync.py",
+    "find": "visibility=\"private\",",
+    "replace": "visibility=\"public_to_workspace\",",
+    "tests": ["tests/ee/calendar/test_sync.py", "tests/cloud/calendar/test_service.py"]
+  },
+  {
+    "label": "per-user calendar collapsed back to the synthetic public primary",
+    "file": "ee/pocketpaw_ee/calendar/sync.py",
+    "find": "            if calendar_id is None:\n                calendar_id = await _ensure_composio_calendar(ctx)",
+    "replace": "            calendar_id = \"primary\"",
+    "tests": ["tests/ee/calendar/test_sync.py", "tests/cloud/calendar/test_service.py"]
   },
   {
     "label": "list_upcoming stops reading the store (old composio-only behaviour)",
@@ -46,6 +67,20 @@
     "file": "ee/pocketpaw_ee/cloud/calendar/service.py",
     "find": "workspace_id=workspace_id,\n        title=ev.title,",
     "replace": "workspace_id=\"ws_leak\",\n        title=ev.title,",
+    "tests": ["tests/cloud/calendar/test_service.py"]
+  },
+  {
+    "label": "wire times rendered in raw UTC instead of the event's zone (10:30 IST shows as 5:00 AM)",
+    "file": "ee/pocketpaw_ee/cloud/calendar/service.py",
+    "find": "return _as_utc(dt).astimezone(tz).isoformat()",
+    "replace": "return _as_utc(dt).isoformat()",
+    "tests": ["tests/cloud/calendar/test_service.py"]
+  },
+  {
+    "label": "all-day detection disabled (offsites render as 12:00 AM rows)",
+    "file": "ee/pocketpaw_ee/cloud/calendar/service.py",
+    "find": "if local_start.time() != _MIDNIGHT or local_end.time() != _MIDNIGHT:",
+    "replace": "if True:",
     "tests": ["tests/cloud/calendar/test_service.py"]
   }
 ]

@@ -433,3 +433,164 @@ async def test_limit_caps_results_sorted_by_start(
     assert [ev["id"] for ev in out] == ids[:3]
     starts = [ev["start"] for ev in out]
     assert starts == sorted(starts)
+
+
+# ---------------------------------------------------------------------------
+# Per-user privacy — composio feeds are personal data
+# ---------------------------------------------------------------------------
+
+
+async def test_member_b_never_sees_member_a_composio_events(
+    monkeypatch: pytest.MonkeyPatch, mongo_db: Any
+) -> None:
+    """CRITICAL (review round 2): the Composio connection is per-user, so
+    member A's refresh ingests A's PERSONAL Google feed. It must land on
+    A's private calendar — member B's preamble AND B's /calendar view
+    stay empty, while A keeps seeing their own events."""
+    # Member A's refresh ingests their personal feed.
+    _patch_composio(
+        monkeypatch,
+        enabled=True,
+        execute_return={
+            "data": {"items": [_google_event(id="gid-a", summary="A's 1:1 with therapist")]},
+            "successful": True,
+        },
+    )
+    out_a = await calendar_service.list_upcoming("ws_acme", "user_a", limit=10)
+    assert [ev["title"] for ev in out_a] == ["A's 1:1 with therapist"]
+
+    # Member B has no Composio connection — upstream refuses B's refresh.
+    _patch_composio(
+        monkeypatch,
+        enabled=True,
+        execute_side_effect=RuntimeError("composio: no connected account"),
+    )
+    out_b = await calendar_service.list_upcoming("ws_acme", "user_b", limit=10)
+    assert out_b == []
+    assert await _calendar_page_ids("ws_acme", "user_b") == set()
+
+    # Member A still sees their own event (store read, TTL suppresses
+    # the second upstream call).
+    out_a2 = await calendar_service.list_upcoming("ws_acme", "user_a", limit=10)
+    assert [ev["title"] for ev in out_a2] == ["A's 1:1 with therapist"]
+    assert await _calendar_page_ids("ws_acme", "user_a") == {out_a[0]["id"]}
+
+
+async def test_declared_private_calendar_respected_by_projection(
+    monkeypatch: pytest.MonkeyPatch, mongo_db: Any
+) -> None:
+    """A calendar explicitly declared private (real _CalendarDoc row, not
+    the synthetic default) must filter through ``list_upcoming``
+    specifically — the projection path, not just the /calendar router."""
+    from pocketpaw_ee.calendar.models import _CalendarDoc
+
+    _patch_composio(monkeypatch, enabled=False)
+
+    cal = _CalendarDoc(
+        workspace="ws_acme",
+        name="X's private calendar",
+        owner_user_id="user_x",
+        timezone="UTC",
+        visibility="private",
+    )
+    await cal.insert()
+    event_id = await _seed_event(
+        "ws_acme", "X's private event", user_id="user_x", calendar_id=str(cal.id)
+    )
+
+    out_x = await calendar_service.list_upcoming("ws_acme", "user_x", limit=10)
+    assert [ev["id"] for ev in out_x] == [event_id]
+
+    out_y = await calendar_service.list_upcoming("ws_acme", "user_y", limit=10)
+    assert out_y == []
+
+
+# ---------------------------------------------------------------------------
+# Rendering — event-local wall time + all-day dates
+# ---------------------------------------------------------------------------
+
+
+async def test_start_renders_event_local_wall_time(
+    monkeypatch: pytest.MonkeyPatch, mongo_db: Any
+) -> None:
+    """The store keeps UTC; the wire must render the event's OWN zone.
+    A 10:30 IST meeting rendered from raw UTC would show "5:00 AM" in
+    the preamble — the exact regression the old Composio pass-through
+    never had."""
+    from zoneinfo import ZoneInfo
+
+    ist = ZoneInfo("Asia/Kolkata")
+    start_local = (datetime.now(ist) + timedelta(days=1)).replace(
+        hour=10, minute=30, second=0, microsecond=0
+    )
+    _patch_composio(
+        monkeypatch,
+        enabled=True,
+        execute_return={
+            "data": {
+                "items": [
+                    {
+                        "id": "gid-ist",
+                        "summary": "IST meeting",
+                        "start": {
+                            "dateTime": start_local.isoformat(),
+                            "timeZone": "Asia/Kolkata",
+                        },
+                        "end": {
+                            "dateTime": (start_local + timedelta(hours=1)).isoformat(),
+                            "timeZone": "Asia/Kolkata",
+                        },
+                    }
+                ]
+            },
+            "successful": True,
+        },
+    )
+
+    out = await calendar_service.list_upcoming("ws_acme", "user_test", limit=5)
+    assert len(out) == 1
+    assert "T10:30:00" in out[0]["start"]
+    assert out[0]["start"].endswith("+05:30")
+
+    # And the preamble's own formatter renders the wall time the user
+    # would see on their Google Calendar.
+    from pocketpaw_ee.cloud.surface.handlers.calendar import _format_start_time
+
+    assert _format_start_time(out[0]["start"]) == "10:30 AM"
+
+
+async def test_all_day_events_render_date_only(
+    monkeypatch: pytest.MonkeyPatch, mongo_db: Any
+) -> None:
+    """Google all-day events arrive as ``{"date": ...}``; the wire must
+    round-trip them as date-only strings so the handler's date branch
+    fires instead of rendering "12:00 AM · Title"."""
+    tomorrow = (datetime.now(UTC) + timedelta(days=1)).date().isoformat()
+    day_after = (datetime.now(UTC) + timedelta(days=2)).date().isoformat()
+    _patch_composio(
+        monkeypatch,
+        enabled=True,
+        execute_return={
+            "data": {
+                "items": [
+                    {
+                        "id": "gid-allday",
+                        "summary": "Offsite",
+                        "start": {"date": tomorrow},
+                        "end": {"date": day_after},
+                    }
+                ]
+            },
+            "successful": True,
+        },
+    )
+
+    out = await calendar_service.list_upcoming("ws_acme", "user_test", limit=5)
+    assert len(out) == 1
+    assert out[0]["start"] == tomorrow
+    assert "T" not in out[0]["start"]
+
+    from pocketpaw_ee.cloud.surface.handlers.calendar import _format_start_time
+
+    # The handler's date-only branch surfaces the date itself.
+    assert _format_start_time(out[0]["start"]) == tomorrow
