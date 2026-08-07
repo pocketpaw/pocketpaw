@@ -296,9 +296,9 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     mark_cloud_chat_run,
     push_sse_event,
     register_stream_sink,
-    unregister_stream_sink,
     session_key_for,
     unbind_pawbar_run,
+    unregister_stream_sink,
 )
 from pocketpaw_ee.cloud.chat.agent_service import (
     resolve_scope_context as resolve_scope_context,

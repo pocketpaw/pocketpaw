@@ -545,7 +545,8 @@ def detach_sse_event_sink(token: Token) -> None:
 # posture this module holds itself to: "the correlation id is unguessable, but
 # tenancy that rests on unguessability is not tenancy". A caller must prove it
 # belongs to the tenant whose stream it is about to push into.
-_stream_sinks_by_session: dict[str, tuple[str | None, asyncio.Queue[tuple[str, dict[str, Any]]]]] = {}
+_StreamEntry = tuple[str | None, asyncio.Queue[tuple[str, dict[str, Any]]]]
+_stream_sinks_by_session: dict[str, _StreamEntry] = {}
 
 
 def register_stream_sink(
@@ -611,7 +612,11 @@ def stream_sink_for_session(
     if entry is None:
         return None
     owner_workspace_id, queue = entry
-    if workspace_id is not None and owner_workspace_id is not None and owner_workspace_id != workspace_id:
+    if (
+        workspace_id is not None
+        and owner_workspace_id is not None
+        and owner_workspace_id != workspace_id
+    ):
         return None
     return queue
 
