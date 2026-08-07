@@ -474,6 +474,40 @@ async def test_legacy_directory_soul_still_round_trips(mongo_db, soul_home, tmp_
     assert any("stood down" in line for line in recalled), recalled
 
 
+async def test_unwritable_soul_shape_is_refused_not_destroyed(mongo_db, soul_home, tmp_path):
+    """``MandateDoc.soul_path`` is FREE-FORM user input and ``Soul.awaken`` also
+    opens ``soul.json`` / ``soul.yaml`` / ``soul.md`` — shapes that have no
+    writer. Exporting a zip over one would leave a file ``awaken`` can never read
+    again: a harmless historical no-op turned into permanent data destruction.
+
+    Such a mandate could never write successfully anyway, so refusing costs
+    nothing. The file must come back BYTE-IDENTICAL.
+
+    MUTATION THAT BREAKS THIS: drop the suffix check and branch on ``is_dir()``
+    alone — the .json is overwritten with a zip and the byte compare fails."""
+    agent_id = await _seed_default_agent()
+    await agents_service.ensure_soul_materialized(agent_id)
+    archive = Path(soul_link.agent_soul_path(WS, "pocketpaw"))
+
+    # A legacy single-document soul, exactly what a free-form soul_path allows.
+    from soul_protocol import Soul
+
+    soul_dir = tmp_path / "legacy.soul"
+    soul = await Soul.awaken(archive)
+    await soul.save_local(soul_dir)
+    json_soul = tmp_path / "hand-written-soul.json"
+    json_soul.write_bytes((soul_dir / "soul.json").read_bytes())
+    before = json_soul.read_bytes()
+
+    wrote = await soul_link.remember_shift(str(json_soul), "Mandate shift 1: dispatched")
+    assert wrote is False, "an unwritable soul shape must be refused, not written"
+
+    # THE POINT: the user's file is untouched, and still readable.
+    assert json_soul.read_bytes() == before, "the legacy .json soul was corrupted"
+    reopened = await Soul.awaken(json_soul)
+    assert reopened is not None
+
+
 async def test_soul_disabled_agent_binds_no_soul(soul_home):
     """An agent with ``soul_enabled=False`` gets no soul file — the foreman
     honours the agent's own config rather than forcing a soul on it."""
@@ -671,6 +705,97 @@ async def test_agent_id_rides_onto_the_queued_station_run(
     blob = queued[-1].parameters["_code_change"]
     assert blob["station_pending"] is True
     assert blob["agent_id"] == agent_id
+
+
+async def _propose_code_change(store, blob: dict):
+    """File a real ``code_change`` Instinct Action carrying ``blob``."""
+    from pocketpaw.instinct.models import ActionCategory, ActionPriority, ActionTrigger
+
+    return await store.propose(
+        pocket_id=WS,
+        title="Station task — queued",
+        description="queued from a mandate shift",
+        recommendation="open the develop station",
+        trigger=ActionTrigger(type="agent", source="belt:mandate-dispatch", reason="test"),
+        category=ActionCategory.EXTERNAL,
+        priority=ActionPriority.HIGH,
+        parameters={"_code_change": blob},
+        assignee=USER,
+        workspace_id=WS,
+    )
+
+
+async def test_belt_executor_terminal_reads_the_agent_id(mongo_db, store, journal, graph):
+    """THE BELT EXECUTOR'S READ. ``mandates/executor`` writes ``agent_id`` onto
+    the code_change blob; ``belt/executor`` is what has to READ it. Those are
+    two different files and only the write side was gated — reverting the belt
+    executor's actor line alone escaped every test.
+
+    Drives the REAL ``execute_approved_change`` on a queued station run (the
+    exact blob shape the mandate dispatcher files), which the executor refuses
+    loud — a genuine terminal that closes the chain through ``_fail``.
+
+    MUTATION THAT BREAKS THIS: revert ``belt/executor._emit_chain_close``'s
+    actor id to ``f"user:{user_id}"``."""
+    from uuid import uuid4
+
+    from pocketpaw_ee.cloud.belt import executor as belt_executor
+
+    correlation_id = uuid4()
+    action = await _propose_code_change(
+        store,
+        {
+            "kind": "code_change",
+            "schema": 2,
+            "station_pending": True,
+            "repo": "",
+            "diff": "",
+            "workspace_id": WS,
+            "requested_by": USER,
+            "correlation_id": str(correlation_id),
+            "agent_id": "agent-abc123",
+        },
+    )
+
+    await belt_executor.execute_approved_change(action)
+
+    completed = _events(journal, "decision.completed")
+    assert completed, "the belt executor closed no chain"
+    terminal = completed[-1]
+    assert terminal.actor.kind == "agent"
+    assert terminal.actor.id == "agent:agent-abc123"
+    assert terminal.actor.id != f"user:{USER}"
+
+
+async def test_belt_executor_terminal_without_an_agent_keeps_user_attribution(
+    mongo_db, store, journal, graph
+):
+    """A HUMAN-filed station run carries no ``agent_id``. There is no agent to
+    name, so the legacy attribution stands — the fix must not fabricate an
+    identity for work a person did."""
+    from uuid import uuid4
+
+    from pocketpaw_ee.cloud.belt import executor as belt_executor
+
+    action = await _propose_code_change(
+        store,
+        {
+            "kind": "code_change",
+            "schema": 2,
+            "station_pending": True,
+            "repo": "",
+            "diff": "",
+            "workspace_id": WS,
+            "requested_by": USER,
+            "correlation_id": str(uuid4()),
+        },
+    )
+
+    await belt_executor.execute_approved_change(action)
+
+    completed = _events(journal, "decision.completed")
+    assert completed
+    assert completed[-1].actor.id == f"user:{USER}"
 
 
 async def test_legacy_plan_blob_without_an_agent_id_still_dispatches(
