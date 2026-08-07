@@ -388,6 +388,167 @@ async def test_create_engine_routing_diverges_by_engine() -> None:
     assert "create_svelte_site" not in ripple
 
 
+async def test_create_mode_engine_react_prefers_create_react_site_skill() -> None:
+    """RX-2: engine="react" routes the build step to the React-track skill.
+
+    It names `pocketpaw-create-react-site`, points at `create_react_site`, stamps
+    engine="react", and forbids the ripple-spec machinery — while STILL carrying
+    the shared clarity gate."""
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
+        )
+    ).text
+    lower = preamble.lower()
+
+    assert '<surface kind="sites"' in preamble
+    assert 'engine="react"' in preamble
+    assert 'mode="create"' in preamble
+    assert "phase 1" in lower
+
+    # The dedicated React-track authoring skill + the merged design-taste helper.
+    assert "pocketpaw-create-react-site" in preamble
+    assert "pocketpaw-design-taste" in preamble
+    assert "mcp__pocketpaw_sites_manager__create_react_site" in preamble
+    assert "mcp__pocketpaw_sites_manager__publish" in preamble
+
+    # It must NOT route to the other tracks' brains or tools.
+    assert "pocketpaw-create-paw-site" not in preamble
+    assert "pocketpaw-create-svelte-site" not in preamble
+    assert "create_html_site" not in preamble
+    assert "create_svelte_site" not in preamble
+    assert "mcp__pocketpaw_sites_manager__create_landing_site" not in preamble
+    # The react track forbids the ripple-spec machinery.
+    assert "no ripplespec" in lower
+
+
+async def test_react_create_states_the_interactivity_rule() -> None:
+    """The react default is the sharp edge of this engine: the site ships ZERO
+    JavaScript unless the create declares it, so a page authored with a menu
+    toggle or tabs is inert. React is usually chosen BECAUSE of interactivity, so
+    the preamble must state the rule — not leave it to the skill, which the model
+    may or may not load.
+
+    THE MUTATION THAT BREAKS THIS: delete the `interactive=true` sentence from the
+    react `build_step` in handlers/sites.py. Run: every other react assertion
+    still passes and this one fails. (Applied 2026-08-07.)"""
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
+        )
+    ).text
+    lower = preamble.lower()
+
+    assert "interactive=true" in lower
+    # It names what "needs the browser" concretely, so the agent can decide.
+    assert "useeffect" in lower or "onclick" in lower
+    # And it says what happens when the flag is absent.
+    assert "zero javascript" in lower or "no javascript" in lower
+
+
+async def test_react_create_states_the_prerender_rule() -> None:
+    """The prerender rule is engine-shaped, not taste: useEffect does not run at
+    prerender time, so a resting state produced only by an effect bakes the START
+    frame into the deployed HTML. The svelte track carries the same rule for the
+    same reason."""
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
+        )
+    ).text
+    lower = preamble.lower()
+
+    assert "prerender" in lower
+    assert "useeffect" in lower
+    assert "markup" in lower
+
+
+async def test_react_create_names_the_reserved_build_shell() -> None:
+    """The generator owns index.html / package.json / vite.config.ts /
+    paw-prerender.mjs and the src/paw/ namespace, and REJECTS a source map that
+    writes one. A preamble that doesn't say so sends the agent into a create error
+    it cannot predict — and those files are what hold the prerender contract."""
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
+        )
+    ).text
+
+    assert "src/App.tsx" in preamble
+    for reserved in ("index.html", "package.json", "vite.config.ts", "paw-prerender.mjs"):
+        assert reserved in preamble, f"the preamble does not name the reserved {reserved}"
+    assert "src/paw/" in preamble
+
+
+async def test_react_create_does_not_promise_a_submit_route() -> None:
+    """There is no server runtime on the react track, so the SvelteKit skeleton's
+    `/api/submit` endpoint does not exist here. Promising it would be the prompt
+    offering a capability the deployment lacks — the same class as naming an
+    absent tool — and the agent would wire a form that silently drops leads.
+
+    The preamble must say so EXPLICITLY rather than merely stay silent: the
+    authoring skill and the svelte track both teach `/api/submit`, so an agent
+    carrying that habit needs it revoked, not omitted."""
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
+        )
+    ).text
+    lower = preamble.lower()
+
+    assert "no `/api/submit` route" in lower
+    # And it names the alternative, so revoking the habit leaves somewhere to go.
+    assert "native `<form>`" in lower
+
+
+async def test_react_create_uses_ask_user_tool_not_ripple() -> None:
+    """react-create has inline ripple OFF (surface_registry._sites_profile), so the
+    ask mechanism must be the `ask_user` MCP tool, NOT a ```ui-spec ripple widget.
+
+    Telling a ripple-off agent to emit a ui-spec block is not an error — it
+    renders as a fenced block of raw JSON the user is expected to read. That is
+    the silent-improvisation failure mode, so the preamble and the profile must
+    agree. Guarded from the profile side by
+    test_sites_react_create_drops_ripple_and_denies."""
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
+        )
+    ).text
+
+    assert "mcp__pocketpaw_ask__ask_user" in preamble
+    assert "ask-user-questions" not in preamble
+
+
+async def test_unknown_engine_still_falls_back_to_html() -> None:
+    """An engine string this build predates (or a typo) must not render a
+    half-formed preamble — it falls back to the html default, the same policy
+    sites/engines.py::normalize_engine applies on the publish side."""
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="solid")
+        )
+    ).text
+
+    assert 'engine="html"' in preamble
+    assert "mcp__pocketpaw_sites_manager__create_html_site" in preamble
+
+
+async def test_html_default_routes_an_explicit_react_ask_to_the_react_tool() -> None:
+    """The html preamble's escape hatch previously sent 'explicitly asks for a
+    React/component build' to `create_svelte_site` — correct only while no react
+    engine existed. Now that it does, an explicit React request must reach the
+    react tool, or the user asks for React and gets Svelte."""
+    preamble = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
+
+    assert "mcp__pocketpaw_sites_manager__create_react_site" in preamble
+    # The react tool is named in the EXCEPTION context, after the mandated html
+    # one — html is still the default engine.
+    assert preamble.index("create_html_site") < preamble.index("create_react_site")
+
+
 async def test_engine_threads_through_meta_from_request() -> None:
     """The wire `engine` hint survives DTO→domain mapping so the handler can
     branch on it (mirrors how site_id is threaded)."""

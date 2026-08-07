@@ -28,6 +28,7 @@ class TestSitesMcpServerRegistration:
             CREATE_DYNAMIC_SITE_TOOL_ID,
             CREATE_HTML_SITE_TOOL_ID,
             CREATE_LANDING_SITE_TOOL_ID,
+            CREATE_REACT_SITE_TOOL_ID,
             CREATE_SVELTE_SITE_TOOL_ID,
             EDIT_SVELTE_COMPONENT_TOOL_ID,
             PUBLISH_TOOL_ID,
@@ -50,13 +51,19 @@ class TestSitesMcpServerRegistration:
         )
         assert CREATE_DYNAMIC_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__create_dynamic_site"
         assert CREATE_HTML_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__create_html_site"
+        # RX-2 — the react-track create tool, the 5th create tool on this server.
+        assert CREATE_REACT_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__create_react_site"
         assert PUBLISH_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_LANDING_SITE_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_SVELTE_SITE_TOOL_ID in SITES_TOOL_IDS
         assert EDIT_SVELTE_COMPONENT_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_DYNAMIC_SITE_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_HTML_SITE_TOOL_ID in SITES_TOOL_IDS
-        assert len(SITES_TOOL_IDS) == 6
+        assert CREATE_REACT_SITE_TOOL_ID in SITES_TOOL_IDS
+        # The count is deliberate: adding a tool here widens the /sites surface
+        # allow-list (SITES_TOOL_IDS feeds it), so a new id must be a decision,
+        # not a side effect. Bump it WITH an id assertion above — never alone.
+        assert len(SITES_TOOL_IDS) == 7
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk

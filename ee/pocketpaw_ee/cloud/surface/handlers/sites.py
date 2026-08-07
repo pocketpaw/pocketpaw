@@ -305,6 +305,9 @@ def _create_preamble(meta: SurfaceMeta) -> str:
       HTML/CSS bundle you hand-author → ``create_html_site``. No framework, no
       build step; publishing serves ``index.html`` directly on the edge.
     * ``"svelte"`` — hand-written SvelteKit components → ``create_svelte_site``.
+    * ``"react"`` — hand-written React components → ``create_react_site``. A Vite
+      SSG: the build prerenders ``<App />`` to static HTML, and the site ships no
+      JavaScript unless the create declares ``interactive``.
     * ``"ripple"`` — a ripple widget landing spec via the pocket specialist →
       ``create_landing_site``. The ONE engine that does not author markup by hand.
 
@@ -323,7 +326,14 @@ def _create_preamble(meta: SurfaceMeta) -> str:
     """
     route = meta.route_path or "/sites"
     engine = (meta.engine or "html").lower()
-    if engine not in ("html", "svelte", "ripple"):
+    # RX-2 adds "react". Every engine named here MUST have a create tool the
+    # /sites agent can actually reach — the build step below names one, and a
+    # preamble that commands an absent tool does not error, it makes the model
+    # improvise (pocketpaw/CLAUDE.md, "The prompt may not command a tool the agent
+    # doesn't have"). react's tool is ``create_react_site``, registered on the
+    # sites_manager server and carried into the surface allow-list by
+    # ``SITES_TOOL_IDS``. An unknown engine still falls back to html.
+    if engine not in ("html", "svelte", "ripple", "react"):
         engine = "html"
     engine_attr = f' engine="{engine}"'
 
@@ -348,6 +358,44 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "specialist. If the skill is unavailable, author the source map "
             "yourself and call `mcp__pocketpaw_sites_manager__create_svelte_site` "
             "(then STOP at the draft — publish only on explicit request)."
+        )
+    elif engine == "react":
+        engine_note = (
+            " On this track the page is authored as hand-written React components "
+            "and PRERENDERED to static HTML at build time — the copy is in "
+            "view-source before any JavaScript runs."
+        )
+        build_step = (
+            "BUILD via the `pocketpaw-create-react-site` skill — invoke it by "
+            "intent (no slash command). YOU write premium hand-written React "
+            "components (Hero, Pricing, Faq, …) at the design quality bar, "
+            "authoring them per the embedded `pocketpaw-design-taste` design "
+            "system for premium, non-generic styling on top of the design "
+            "system's tokens, THEME them with those tokens + your asset URLs, and "
+            "assemble a `source` map rooted at `src/App.tsx` (the composition "
+            "root; sections under `src/components/*.tsx`). The build shell is "
+            "GENERATED and reserved — your map may NOT write `index.html`, "
+            "`package.json`, `vite.config.ts`, `paw-prerender.mjs`, or anything "
+            "under `src/paw/`. The project has react, react-dom and vite and "
+            "NOTHING else — no router, no CSS framework, no state or animation "
+            "library, no way to add dependencies — and it is ONE page. Persist it "
+            "with `mcp__pocketpaw_sites_manager__create_react_site`, which stamps "
+            'the source pocket `type="site"` + `pattern="landing"` + '
+            '`engine="react"` as a reviewable DRAFT — it does NOT publish (see the '
+            "DRAFT-FIRST step). PASS `interactive=true` WHENEVER any component "
+            "needs the browser — a mobile-menu toggle, tabs, a counter, any "
+            "onClick/onChange or useEffect. The site ships ZERO JavaScript "
+            "otherwise, so an unflagged interactive component renders correctly "
+            "and then does nothing; the failure is silent. Leave it off only for a "
+            "purely static page (CSS-only hover/keyframe motion, anchors, a native "
+            "form POST — none of those need it). PRERENDER RULE: every component "
+            "must render its resting/final state in its RETURNED MARKUP — "
+            "`useEffect` does not run at prerender time, so a count-up initialized "
+            "to 0 bakes '0'; initialize it to the final value. There is NO "
+            "rippleSpec and NO widget catalog on this track — do not draft a "
+            "rippleSpec or call the pocket specialist, and there is no "
+            "`/api/submit` route (no server runtime), so a lead form is a native "
+            "`<form>` with flat named fields."
         )
     elif engine == "ripple":
         engine_note = " The page is rendered STATICALLY (no JavaScript runs for the visitor)."
@@ -397,11 +445,12 @@ def _create_preamble(meta: SurfaceMeta) -> str:
             "`create_svelte_site`, `create_landing_site`, or the "
             "`pocketpaw-create-svelte-site` / `pocketpaw-create-paw-site` skills, "
             "and do NOT reach for Svelte just because you want a premium result "
-            "(build premium HTML instead). The ONLY exception: if the user's "
-            "message LITERALLY contains the word 'Svelte' (or explicitly asks for "
-            "a React/component build), THEN use "
-            "`mcp__pocketpaw_sites_manager__create_svelte_site`; a request for a "
-            "live-data / dynamic app (dashboards, per-user data) uses "
+            "(build premium HTML instead). The ONLY exceptions, by what the user "
+            "literally asked for: the word 'Svelte' → "
+            "`mcp__pocketpaw_sites_manager__create_svelte_site`; the word 'React' "
+            "→ `mcp__pocketpaw_sites_manager__create_react_site` (and pass "
+            "`interactive=true` if any component you write needs the browser); a "
+            "live-data / dynamic app (dashboards, per-user data) → "
             "`mcp__pocketpaw_sites_manager__create_dynamic_site`. A described "
             "business, a desire for a 'nice' or 'modern' site, or the design "
             "direction the user picked is NOT such a request — stay on HTML."
@@ -409,11 +458,18 @@ def _create_preamble(meta: SurfaceMeta) -> str:
 
     # ASK MECHANISM — used ONLY when the agent genuinely needs a real-world FACT
     # it cannot infer (never for the visual theme, which it decides itself). On
-    # every engine except svelte-create, inline ripple is ON (surface_registry.
+    # the ripple/html engines inline ripple is ON (surface_registry.
     # _sites_profile), so it renders an `ask-user-questions` ripple widget (a
-    # ```ui-spec block whose completeActions emit chat.send); on the svelte track
-    # ripple is OFF, so it uses the `ask_user` MCP tool (chips).
-    ripple_on = engine != "svelte"
+    # ```ui-spec block whose completeActions emit chat.send); on the hand-authored
+    # component tracks ripple is OFF, so it uses the `ask_user` MCP tool (chips).
+    #
+    # This MUST agree with ``_sites_profile``: the branch below tells the agent
+    # which mechanism it has, and being wrong is the failure mode
+    # pocketpaw/CLAUDE.md describes — a ui-spec block emitted on a ripple-off
+    # surface is not an error, it is a fenced code block the user reads as raw
+    # JSON. react joins svelte here (RX-2) because it hand-authors markup and its
+    # profile drops ripple for the same reason svelte's does.
+    ripple_on = engine not in ("svelte", "react")
     if ripple_on:
         ask_mechanism = (
             "render an `ask-user-questions` ripple widget — a ```ui-spec fenced "
@@ -425,7 +481,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         )
     else:
         ask_mechanism = (
-            "call the `mcp__pocketpaw_ask__ask_user` tool (svelte-create has "
+            f"call the `mcp__pocketpaw_ask__ask_user` tool ({engine}-create has "
             "inline ripple OFF) with a one-line `question` and 3–5 short "
             "`options`, then STOP and wait for the click"
         )

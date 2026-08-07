@@ -1,6 +1,36 @@
 # sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
 # create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
 #
+# Updated: 2026-08-07 (RX-2 — the agent can select the react engine) — added a
+# FIFTH create tool ``create_react_site`` for the Paw Sites "react track" (the
+# engine RX-1 registered). It mirrors ``create_html_site`` (the agent IS the
+# author; a {relative_path: file_contents} source MAP is persisted verbatim via
+# ``agent_create(engine="react", source=<map>, type_="site", pattern="landing",
+# ripple_spec=None, trusted=True)`` — no ``assemble_*`` step, no rippleSpec, no
+# catalog gate) with two react-specific differences:
+#
+#   * VALIDATION is two-sided. The required key is the ``src/App.tsx``
+#     composition root (both generated entries import it by that exact path), and
+#     the map is ALSO rejected when it writes a generator-owned path — the build
+#     shell (index.html / package.json / vite.config.ts / paw-prerender.mjs) or
+#     the ``src/paw/`` namespace. paw-sites' react-scaffold.ts throws on the same
+#     collision; checking here turns a build-time throw far from the authoring
+#     turn into an actionable create error.
+#   * There is an ``interactive`` argument, the react spelling of MT-1's
+#     per-site ``keeps_client_bundle``. A react build strips the module script by
+#     default and ships pure prerendered HTML, so a component with client state is
+#     INERT unless the site declares the flag. The engine deliberately has no
+#     per-engine default (RX-1), which puts the decision here, in the authoring
+#     layer — and the failure is silent (the site builds, deploys, looks right,
+#     and the menu never opens), which is why the tool description states the rule
+#     rather than leaving it to the skill alone.
+#
+# This is OPT-IN like html was: the description steers the agent here ONLY on an
+# explicit React request or a genuine interactivity need; the default create stays
+# create_html_site. The authoring brain is the bundled
+# ``pocketpaw-create-react-site`` skill, which composes with (never restates)
+# ``pocketpaw-design-taste``.
+#
 # Updated: 2026-07-17 (fix/sites-draft-visible — a DRAFT lists in the gallery) —
 # every create handler (landing / svelte / html / dynamic) now mints a DRAFT Site
 # doc right after the pocket is persisted, via the shared best-effort helper
@@ -165,6 +195,7 @@ from __future__ import annotations
 
 import json
 import logging
+import posixpath
 from typing import Any
 
 from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
@@ -197,12 +228,19 @@ CREATE_DYNAMIC_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_dynamic_site"
 # False for html); the raw markup is materialized and served as-is.
 CREATE_HTML_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_html_site"
 
+# RX-2 — the react-track create tool. Same shape as the html id above; the
+# authoring hop is author a React source map → create_react_site → publish.
+# Publishing a react site DOES run a Node build (a Vite SSG) but deploys the
+# prerendered static output assets-only, with no server entry.
+CREATE_REACT_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_react_site"
+
 SITES_CREATE_TOOL_IDS = (
     CREATE_LANDING_SITE_TOOL_ID,
     CREATE_SVELTE_SITE_TOOL_ID,
     EDIT_SVELTE_COMPONENT_TOOL_ID,
     CREATE_DYNAMIC_SITE_TOOL_ID,
     CREATE_HTML_SITE_TOOL_ID,
+    CREATE_REACT_SITE_TOOL_ID,
 )
 
 
@@ -297,6 +335,56 @@ def _missing_html_keys(source: dict[str, Any]) -> list[str]:
     and the edge serves at the site root. Used to fail the create closed with an
     actionable message rather than persisting a site with no servable entry."""
     return [k for k in HTML_REQUIRED_KEYS if k not in source]
+
+
+# ── react-track source map (RX-2) ───────────────────────────────────────────
+# A react-engine ``source`` map is a {relative_path: file_contents} map of
+# hand-written React files. The generator (paw-sites react-scaffold.ts) owns the
+# build shell — index.html, package.json, vite.config.ts, paw-prerender.mjs and
+# the two ``src/paw/`` entries — and materializes this map on top of it.
+#
+# The only required key is the composition root ``src/App.tsx``: BOTH generated
+# entries (client and server) import it by that exact path, so a map without it
+# builds nothing. The generator asserts the same key, but failing here names it
+# before a build is ever started.
+REACT_REQUIRED_KEYS = ("src/App.tsx",)
+
+# Paths the generator owns and a source map may NOT write. Mirrors
+# ``RESERVED_FILES`` + ``RESERVED_NAMESPACE`` in paw-sites' react-scaffold.ts,
+# which throws on a collision — this is the same guard moved to create time, so
+# the agent gets an actionable message instead of a build failure at publish.
+#
+# Reserving them is not tidiness: an author who could overwrite ``index.html`` or
+# ``paw-prerender.mjs`` could remove the prerender outlet or the pass that fills
+# it, turning the site back into a shell that is blank with JavaScript disabled —
+# exactly what this engine exists to refuse to ship.
+REACT_RESERVED_FILES = ("index.html", "package.json", "vite.config.ts", "paw-prerender.mjs")
+REACT_RESERVED_PREFIX = "src/paw/"
+
+
+def _missing_react_keys(source: dict[str, Any]) -> list[str]:
+    """Return the required react keys absent from ``source`` (empty list = valid).
+
+    Only ``src/App.tsx`` is required — the composition root both generated entries
+    import. Everything else (the components it imports, its CSS, ``public/``
+    assets) is the author's business."""
+    return [k for k in REACT_REQUIRED_KEYS if k not in source]
+
+
+def _reserved_react_keys(source: dict[str, Any]) -> list[str]:
+    """Return the source-map keys that collide with a generator-owned path.
+
+    Normalizes backslashes and ``.``/``..`` segments so ``./index.html`` and
+    ``src\\paw\\x.tsx`` cannot slip past the check — the generator normalizes the
+    same way before it throws, and a guard that a trivial path spelling defeats is
+    not a guard. ``posixpath.normpath`` (not ``os.path``) because source-map keys
+    are always POSIX-style project-relative paths regardless of the host OS."""
+    hits: list[str] = []
+    for key in source:
+        norm = posixpath.normpath(key.replace("\\", "/"))
+        if norm in REACT_RESERVED_FILES or norm.startswith(REACT_RESERVED_PREFIX):
+            hits.append(key)
+    return sorted(hits)
 
 
 # ── Dynamic-track spec surface (RFC 12 A2) ──────────────────────────────────
@@ -1262,6 +1350,267 @@ def make_create_html_site_tool(tool: Any) -> Any:
     return create_html_site
 
 
+async def _create_react_site_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__create_react_site`` (the react track, RX-2).
+
+    Reads workspace/user identity from the per-stream ContextVars, validates the
+    ``source`` map (a {relative_path: file_contents} map of hand-written React
+    files that MUST carry the ``src/App.tsx`` composition root and MUST NOT write
+    a generator-owned path), and persists it DIRECTLY via ``agent_create``
+    (engine="react", source=<map>, type="site", pattern="landing",
+    ripple_spec=None, trusted=True). Returns ``{ok, pocket_id, pocket}`` on
+    success; sets ``is_error`` when identity is missing, ``source`` is
+    absent/malformed/incomplete, or the persist fails.
+
+    Like ``create_svelte_site`` and ``create_html_site`` there is no ``assemble_*``
+    step — the agent authored the components, so the map is persisted verbatim and
+    the generator materializes it at publish. Unlike html, a react publish DOES run
+    a per-site Node build (``needs_node_build("react")`` is True) — but that build
+    is an SSG that prerenders to a static ``dist/`` with no server entry, which is
+    why react deploys assets-only like html does (``emits_server_worker`` is False
+    for both — see ``sites/engines.py``).
+
+    ``interactive`` is the react-track spelling of the per-site
+    ``keeps_client_bundle`` declaration. It is a SEPARATE argument rather than an
+    inference over the source because "does this component need the browser?" is a
+    question about authorial intent that reading JSX cannot answer reliably: a
+    ``useState`` that never changes needs nothing, and a component that only
+    registers a ``matchMedia`` listener does. The authoring skill tells the agent
+    exactly when to set it. It defaults False, and the consequence of leaving it
+    off wrongly is silent — the site builds, deploys, and its menu never opens —
+    which is why the skill spends a section on it and the tool description repeats
+    the rule.
+
+    react has NO live-data binding siblings (that is the svelte/ripple dynamic
+    track), so the whole map is {path: str} and every value must be a content
+    string — no exemption list."""
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "create_react_site requires workspace and user context (call from a "
+            "cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_create_react_site",
+        status="ok",
+        ok=True,
+    )
+
+    args = coerce_json_object_args(args, ("source",))
+    source = args.get("source")
+    if not isinstance(source, dict) or not source:
+        return _error_response(
+            "create_react_site requires a `source` object — the React source map "
+            "{ relative_path: file_contents } you authored. It must include "
+            "`src/App.tsx` (the composition root); add your section components "
+            "under `src/components/` and your stylesheet as sibling entries. You "
+            "write the components; this tool persists them."
+        )
+    # The whole map is {path: contents} — every value is a file content string.
+    # react has no live-data binding siblings (that is the svelte/ripple dynamic
+    # track), so unlike create_svelte_site there is no exemption list.
+    bad = [k for k, v in source.items() if not isinstance(v, str)]
+    if bad:
+        return _error_response(
+            "create_react_site `source` file values must be content strings; these "
+            f"keys are not strings: {', '.join(sorted(bad)[:8])}."
+        )
+    missing = _missing_react_keys(source)
+    if missing:
+        return _error_response(
+            "create_react_site `source` is missing required files: "
+            f"{', '.join(missing)}. A react site needs a `src/App.tsx` composition "
+            "root — the generated client and server entries both import it, so "
+            "without it there is nothing to render or prerender."
+        )
+    # Fail here rather than at publish: the generator throws on a reserved-path
+    # collision, and a build-time throw names the path far from the authoring turn
+    # that caused it.
+    reserved = _reserved_react_keys(source)
+    if reserved:
+        return _error_response(
+            "create_react_site `source` may not write generator-owned paths: "
+            f"{', '.join(reserved)}. The build shell (index.html, package.json, "
+            "vite.config.ts, paw-prerender.mjs) and the `src/paw/` namespace are "
+            "generated — they carry the prerender contract that keeps the page "
+            "from shipping blank without JavaScript. Author under `src/` (outside "
+            "`src/paw/`) and `public/`."
+        )
+
+    # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
+    # create can't bypass the router's require_plan_feature("sites") gate.
+    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+        return gate
+
+    name_raw = args.get("name")
+    name = name_raw.strip() if isinstance(name_raw, str) and name_raw.strip() else "React site"
+    description_raw = args.get("description")
+    description = description_raw if isinstance(description_raw, str) else ""
+    icon_raw = args.get("icon")
+    icon = icon_raw if isinstance(icon_raw, str) else ""
+    color_raw = args.get("color")
+    color = color_raw if isinstance(color_raw, str) else ""
+    # RX-2: the authored "this site's own JavaScript is load-bearing" declaration,
+    # spelled ``interactive`` on the wire because that is the authoring question
+    # the agent can actually answer. Persisted as the engine-agnostic
+    # ``keeps_client_bundle`` (MT-1) so publish reads ONE field for every engine.
+    interactive = bool(args.get("interactive"))
+
+    # Persist DIRECTLY through the pockets service — NO pocket_specialist, NO
+    # rippleSpec, NO catalog gate (there is no spec to gate). ``engine="react"``
+    # + ``source`` stamp the react track so the generator materializes the map onto
+    # its Vite skeleton and prerenders it; ``type_="site"`` + ``pattern="landing"``
+    # keep the site identity the rest of the pipeline (publish, /sites listing)
+    # keys on. ``trusted=True`` short-circuits the strict catalog gate, which only
+    # runs on a non-null rippleSpec anyway — the react path passes
+    # ``ripple_spec=None``.
+    from pocketpaw_ee.cloud.pockets.service import agent_create
+
+    try:
+        view, new_pocket_id, err = await agent_create(
+            workspace_id=workspace_id,
+            owner_id=user_id,
+            name=name,
+            description=description,
+            type_="site",
+            pattern="landing",
+            icon=icon,
+            color=color,
+            ripple_spec=None,
+            engine="react",
+            source=source,
+            keeps_client_bundle=interactive,
+            trusted=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("create_react_site: persist raised", exc_info=True)
+        return _error_response(f"create failed: {exc}")
+
+    if err is not None or view is None or new_pocket_id is None:
+        return _error_response(f"create failed: {err or 'create returned no view'}")
+
+    # Mint the DRAFT Site doc so the new site lists in the /sites gallery right away
+    # (draft-first create persists the pocket but no Site doc; the gallery reads Site
+    # docs). Best-effort — a draft, NOT a publish, and it never fails the create.
+    await _mint_draft_site(workspace_id, user_id, new_pocket_id, name)
+
+    await _bind_session_and_emit(new_pocket_id, view, user_id)
+
+    return _success_response(
+        {
+            "ok": True,
+            "pocket_id": new_pocket_id,
+            "pocket": {
+                "id": new_pocket_id,
+                "name": view.get("name"),
+                "type": view.get("type"),
+                "pattern": view.get("pattern"),
+                "engine": view.get("engine"),
+            },
+        }
+    )
+
+
+def make_create_react_site_tool(tool: Any) -> Any:
+    """Build the ``create_react_site`` SDK tool object using the SDK's ``tool``
+    decorator (passed in by the caller that already imported it).
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as publish +
+    create_landing_site + create_svelte_site + create_html_site +
+    create_dynamic_site (see ``make_create_landing_site_tool`` for why one
+    server)."""
+
+    @tool(
+        "create_react_site",
+        (
+            "Create a Paw Site landing page on the REACT TRACK — hand-written React "
+            "components, PRERENDERED to static HTML at build time. Use this ONLY "
+            "when the user EXPLICITLY asks for React ('build it in React', 'a React "
+            "landing page') or the page genuinely needs React-shaped client "
+            "interactivity. For a normal marketing request the default is "
+            "create_html_site — do NOT pick this one by default. You AUTHOR the "
+            "components yourself and pass them as a `source` MAP { relative_path: "
+            "file_contents }; the tool persists the map and stamps the pocket "
+            "type='site', pattern='landing', engine='react'. You do NOT compose a "
+            "rippleSpec, do NOT call get_widget_spec, do NOT call pocket_specialist. "
+            "The map MUST include `src/App.tsx` (the composition root both generated "
+            "entries import); add section components under `src/components/*.tsx` "
+            "and a stylesheet App.tsx imports — every value is a content STRING. The "
+            "build shell is GENERATED and reserved: the map may NOT write "
+            "index.html, package.json, vite.config.ts, paw-prerender.mjs, or "
+            "anything under `src/paw/`. The project has react, react-dom and vite "
+            "and NOTHING else — no router, no CSS framework, no state or animation "
+            "library, and you cannot add dependencies; it is ONE page. CRITICAL "
+            "authoring rule: the page is PRERENDERED, so every component must render "
+            "its resting/final state in its RETURNED MARKUP — useEffect does not run "
+            "at prerender time (a count-up initialized to 0 bakes '0'; initialize it "
+            "to the final value). SECOND CRITICAL RULE: the site ships ZERO "
+            "JavaScript unless you pass `interactive=true` — a menu toggle, tabs, a "
+            "counter, any onClick or useEffect is INERT without it. Pass it whenever "
+            "a component needs the browser; leave it off for a purely static page "
+            "(CSS-only hover/keyframe motion does not need it). Returns {ok, "
+            "pocket_id, pocket}; hand `pocket_id` to "
+            "`mcp__pocketpaw_sites_manager__publish` to publish ONLY when the user "
+            "asks to go live (draft-first: a plain create stops at the draft for "
+            "in-app preview). ok=false with an error means relay the reason, do NOT "
+            "report a created pocket."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "object",
+                    "description": (
+                        "The React source map you authored — a { relative_path: "
+                        "file_contents } map, paths relative to the project root, "
+                        "every value a content STRING. MUST include `src/App.tsx` "
+                        "(the composition root, which imports your stylesheet and "
+                        "renders the sections). Add `src/components/*.tsx` sections "
+                        "and `public/*` assets as sibling entries. May NOT write "
+                        "index.html, package.json, vite.config.ts, paw-prerender.mjs "
+                        "or anything under `src/paw/` — those are generated."
+                    ),
+                    "additionalProperties": {"type": "string"},
+                },
+                "interactive": {
+                    "type": "boolean",
+                    "description": (
+                        "TRUE when this site's own JavaScript is load-bearing — any "
+                        "changing useState/useReducer, any onClick/onChange/onSubmit "
+                        "that does something, any useEffect, a canvas you draw into. "
+                        "The page is prerendered either way; this decides whether "
+                        "React HYDRATES on top of the baked markup. Defaults FALSE, "
+                        "which strips the script and ships pure static HTML — so an "
+                        "interactive component left unflagged renders correctly and "
+                        "then does nothing. Leave it off for a purely static page "
+                        "(CSS-only motion, anchors, a native form POST)."
+                    ),
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional pocket/site name. Defaults to 'React site'.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional one-line pocket description.",
+                },
+                "icon": {"type": "string", "description": "Optional lucide icon name."},
+                "color": {"type": "string", "description": "Optional accent color hex."},
+            },
+            "required": ["source"],
+            "additionalProperties": False,
+        },
+    )
+    async def create_react_site(args):  # type: ignore[no-untyped-def]
+        return await _create_react_site_handler(args)
+
+    return create_react_site
+
+
 async def _edit_svelte_component_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__edit_svelte_component``.
 
@@ -1526,9 +1875,13 @@ __all__ = [
     "CREATE_DYNAMIC_SITE_TOOL_ID",
     "CREATE_HTML_SITE_TOOL_ID",
     "CREATE_LANDING_SITE_TOOL_ID",
+    "CREATE_REACT_SITE_TOOL_ID",
     "CREATE_SVELTE_SITE_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "HTML_REQUIRED_KEYS",
+    "REACT_REQUIRED_KEYS",
+    "REACT_RESERVED_FILES",
+    "REACT_RESERVED_PREFIX",
     "SERVER_NAME",
     "SITES_CREATE_TOOL_IDS",
     "SVELTE_REQUIRED_EXACT_KEYS",
@@ -1536,6 +1889,7 @@ __all__ = [
     "make_create_dynamic_site_tool",
     "make_create_html_site_tool",
     "make_create_landing_site_tool",
+    "make_create_react_site_tool",
     "make_create_svelte_site_tool",
     "make_edit_svelte_component_tool",
 ]
