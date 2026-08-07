@@ -1,6 +1,19 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-08-07 (fix/code-delegate-pooled-context) — ``_drive_agent_loop`` now
+  PUBLISHES its side-channel queue under the run's ``session_mongo_id``
+  (``register_stream_sink``, beside the existing ``attach_sse_event_sink``)
+  and withdraws it in the same ``finally`` that detaches the sink. The sink
+  ContextVar alone was not reachable by Code Mode's file tools: they run in an
+  in-process MCP server owned by a POOLED SDK client whose task is created
+  during ``_prewarm_session``, i.e. before this function binds anything, so
+  they inherited a context carrying identity (bound at prewarm too, per ART-2
+  below) and no sink — and reported "no browser attached" for a browser that
+  was attached and streaming. Binding the sink at prewarm as ART-2 did for
+  identity is wrong here, because prewarm has no live stream and would publish
+  a queue belonging to no turn; publishing by session id makes the stream
+  findable regardless of which task calls the tool.
 - 2026-08-02 (PA-2, feat/prompt-assembler-seam) — ``_drive_agent_loop`` and
   ``_prewarm_session`` thread the resolved surface into ``pool.run`` /
   ``pool.prewarm`` as ``surface_preamble`` + ``surface_cache_key``. The
@@ -282,8 +295,10 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     detach_sse_event_sink,
     mark_cloud_chat_run,
     push_sse_event,
+    register_stream_sink,
     session_key_for,
     unbind_pawbar_run,
+    unregister_stream_sink,
 )
 from pocketpaw_ee.cloud.chat.agent_service import (
     resolve_scope_context as resolve_scope_context,
@@ -1222,6 +1237,19 @@ async def _drive_agent_loop(
     sup_session_id = ctx.scope_id
     sup_agent_id = ctx.target_agent_id
     try:
+        # Publish the same queue under this session's id, so a caller that
+        # cannot see the sink ContextVar can still find the stream. Code Mode's
+        # file tools are exactly that caller: they run in the POOLED SDK
+        # client's task, created during _prewarm_session before this function
+        # binds anything, so they inherit a context with identity bound (ART-2
+        # added the prewarm bind at ~1054) and no sink.
+        #
+        # Registered INSIDE the try, not beside attach_sse_event_sink above:
+        # everything between them — attach_agent_identity in particular, which
+        # rejects an unbound identity by design — can raise, and this entry is
+        # a process-level dict rather than a ContextVar, so a leak here would
+        # outlive the task and hand a dead queue to the next turn.
+        register_stream_sink(session_mongo_id, side_channel_queue, ctx.workspace_id)
         session_key = session_key_for(ctx)
         # Read the per-run tool policy from the PRE-RESOLVED, ENTITY-AWARE
         # profile (entity-rooms chunk ①). ``ctx.resolved_profile`` was resolved
@@ -1605,6 +1633,16 @@ async def _drive_agent_loop(
             await asyncio.gather(*pending, return_exceptions=True)
         try:
             detach_sse_event_sink(sink_token)
+        except Exception:
+            pass
+        # Must not outlive the sink: a stale entry is a queue nobody drains, so
+        # the next turn would park for the full delegate budget instead of
+        # refusing at once.
+        try:
+            # Identity-checked: nothing serializes runs per session, so a
+            # second concurrent run on the same session may already own the
+            # entry. Popping it here would break the run still streaming.
+            unregister_stream_sink(session_mongo_id, side_channel_queue)
         except Exception:
             pass
         try:

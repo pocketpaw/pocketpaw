@@ -1,5 +1,16 @@
 # delegates.py — The browser-delegate channel for Code Mode (CD-1).
 #
+# Modified 2026-08-07 (fix/code-delegate-pooled-context): the outbound half no
+# longer decides "is anyone listening" from the SSE sink ContextVar alone. The
+# file tools that call in here run inside an in-process MCP server owned by a
+# POOLED SDK client, and that client's task is created during prewarm — before
+# the stream loop binds its sink — so they inherited a context with identity
+# and no sink, and this module refused every call with ``no_client`` while the
+# browser was attached and streaming. It now tries the ContextVar first and
+# falls back to looking the stream up by ``session_mongo_id``. The fast refusal
+# is unchanged for callers that genuinely have no browser (a CLI run, a
+# background job, a test), which is the property the park budget depends on.
+#
 # Created 2026-07-22 (feat/code-delegate-channel). Reshaped 2026-07-24
 # (feat/code-mode-file-tools): the main chat agent no longer hands a whole
 # ``task`` to a browser sub-agent — that sub-agent is gone. It now drives the
@@ -328,11 +339,19 @@ async def delegate_call_to_browser(
     frame carrying ``{tool, input}``, park. The browser runs the matching
     ``CodeFileSession`` verb and resolves with ``{output, isError}``.
 
-    It FAILS FAST when there is no SSE stream in scope. ``push_sse_event`` is a
-    documented no-op outside a stream, so without that check a tool invoked from
-    a CLI handler, a background job, or a unit test would push into nothing and
-    then park for the full budget before reporting a timeout that was knowable
-    at once. The distinct ``no_client`` code also gives the model something true
+    It FAILS FAST when there is no stream to reach — but "no stream in scope" is
+    NOT the same question as "no stream". A sink in the caller's context is the
+    happy path; when it is absent the stream is looked up by
+    ``session_mongo_id`` (tenancy-checked), because the file tools calling here
+    run in a pooled SDK client's task created before the stream bound its sink,
+    and refusing on the ContextVar alone told users no browser was attached
+    while one was attached and streaming. Only when BOTH miss does this refuse.
+
+    That refusal still has to be immediate. ``push_sse_event`` is a documented
+    no-op outside a stream, so without the check a tool invoked from a CLI
+    handler, a background job, or a unit test would push into nothing and then
+    park for the full budget before reporting a timeout that was knowable at
+    once. The distinct ``no_client`` code also gives the model something true
     to say — "there is no browser attached" is a different problem from "the
     browser was slow".
 
@@ -345,19 +364,60 @@ async def delegate_call_to_browser(
         # Deferred import: every other cloud module reaches ``agent_service``
         # this way, because importing it at module scope pulls the chat stack
         # into anything that touches codeagent and reintroduces a cycle.
-        from pocketpaw_ee.cloud.chat.agent_service import has_sse_event_sink, push_sse_event
+        from pocketpaw_ee.cloud.chat.agent_service import (
+            current_session_mongo_id,
+            has_sse_event_sink,
+            push_sse_event,
+            stream_sink_for_session,
+        )
 
-        if not has_sse_event_sink():
-            logger.debug("codeagent.delegate refused: no SSE stream in scope")
-            return DelegateOutcome(
-                ok=False,
-                error=ERROR_NO_CLIENT,
-                message=(
-                    "No browser session is attached to this conversation, so the "
-                    "code cannot be reached."
-                ),
-            )
-        push = push_sse_event
+        if has_sse_event_sink():
+            # Same async context as the stream loop. Nothing to resolve.
+            push = push_sse_event
+        else:
+            # No sink in THIS context, which is not the same as no browser.
+            #
+            # The file tools calling us run inside an in-process MCP server
+            # owned by a POOLED SDK client, and that client's task is created
+            # during ``_prewarm_session`` — before the stream loop binds its
+            # sink. A task carries a copy of the context as it stood when it
+            # was created, so these callers see identity (bound during prewarm
+            # too, per ART-2) and never the sink. Refusing here reported "no
+            # browser attached" for a browser that was attached and streaming,
+            # which is what made every Code Mode file tool fail.
+            #
+            # Identity IS visible, so use it: find the stream by session id
+            # rather than by context inheritance.
+            session_mongo_id = current_session_mongo_id()
+            # workspace_id is passed so the lookup refuses a stream
+            # belonging to another tenant; see stream_sink_for_session.
+            queue = stream_sink_for_session(session_mongo_id, workspace_id)
+            if queue is None:
+                # Genuinely nobody listening — a CLI run, a background job, a
+                # test. Keep failing FAST rather than parking for the full
+                # budget to discover it.
+                logger.debug(
+                    "codeagent.delegate refused: no SSE stream in scope and none "
+                    "registered for session=%s",
+                    session_mongo_id,
+                )
+                return DelegateOutcome(
+                    ok=False,
+                    error=ERROR_NO_CLIENT,
+                    message=(
+                        "No browser session is attached to this conversation, so the "
+                        "code cannot be reached."
+                    ),
+                )
+
+            def push(name: str, data: dict[str, Any], _q: Any = queue) -> None:
+                """Push straight into the resolved stream's queue.
+
+                ``push_sse_event`` reads the ContextVar we just established is
+                empty here, so calling it would silently drop the frame and
+                park the caller for the full timeout.
+                """
+                _q.put_nowait((name, data))
 
     corr_id = reg.open(workspace_id)
     try:
