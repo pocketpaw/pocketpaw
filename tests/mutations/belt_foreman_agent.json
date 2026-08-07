@@ -111,6 +111,24 @@
     ]
   },
   {
+    "label": "drop agent_id from the queued station run's code_change blob",
+    "file": "ee/pocketpaw_ee/cloud/mandates/executor.py",
+    "find": "            \"agent_id\": str(task.get(\"agent_id\") or \"\"),",
+    "replace": "            \"agent_id\": \"\",",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_agent_id_rides_onto_the_queued_station_run"
+    ]
+  },
+  {
+    "label": "stop injecting the agent onto the dispatched task payload",
+    "file": "ee/pocketpaw_ee/cloud/mandates/executor.py",
+    "find": "            if agent_id:\n                task_payload[\"agent_id\"] = agent_id",
+    "replace": "            if False:\n                task_payload[\"agent_id\"] = agent_id",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_agent_id_rides_onto_the_queued_station_run"
+    ]
+  },
+  {
     "label": "read the plan blob's agent_id strictly, breaking a pre-deploy pending plan",
     "file": "ee/pocketpaw_ee/cloud/mandates/executor.py",
     "find": "    agent_id = str(blob.get(\"agent_id\") or \"\") or None",

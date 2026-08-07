@@ -568,6 +568,48 @@ async def test_chain_terminal_is_attributed_to_the_agent_not_the_user(
     )
 
 
+async def test_agent_id_rides_onto_the_queued_station_run(
+    tmp_path, mongo_db, monkeypatch, soul_home, store, journal, graph, recording_bus
+):
+    """The BELT executor's terminal can only name the agent if the agent rode
+    onto the ``code_change`` blob when the task was queued. This drives the REAL
+    ``StationTaskDispatcher`` (not the recorder) and asserts the handoff.
+
+    Without this the belt-executor half of the attribution fix would be dead
+    code: the read side would be correct and nothing would ever populate it.
+
+    MUTATION THAT BREAKS THIS: drop ``"agent_id"`` from the StationTaskDispatcher
+    blob, or stop injecting it into ``task_payload`` in ``execute_approved_plan``.
+    """
+    agent_id = await _seed_default_agent()
+    # The REAL station dispatcher — the default, pinned explicitly here.
+    monkeypatch.setenv("POCKETPAW_MANDATE_DISPATCHER", "station")
+
+    client = _make_client(monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    res = _create_mandate(client, repo)
+    mandate_id = res.json()["mandate"]["id"]
+    await _seed_sighting(client, mandate_id, "lodash CVE flagged by a customer")
+
+    res = client.post(f"/belt/mandates/{mandate_id}/shift")
+    plan_action_id = res.json()["shift"]["plan_action_id"]
+    res = client.post(f"/instinct/actions/{plan_action_id}/approve", json={})
+    assert res.status_code == 200, res.text
+
+    # Find the queued station run the dispatcher filed and read its blob.
+    actions = await store.list_actions()
+    queued = [
+        a
+        for a in actions
+        if isinstance(a.parameters, dict) and "_code_change" in (a.parameters or {})
+    ]
+    assert queued, "the station dispatcher filed no code_change run"
+    blob = queued[-1].parameters["_code_change"]
+    assert blob["station_pending"] is True
+    assert blob["agent_id"] == agent_id
+
+
 async def test_legacy_plan_blob_without_an_agent_id_still_dispatches(
     tmp_path, mongo_db, monkeypatch, soul_home, store, journal, graph, dispatcher, recording_bus
 ):
