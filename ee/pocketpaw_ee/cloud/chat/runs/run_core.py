@@ -1249,7 +1249,7 @@ async def _drive_agent_loop(
         # rejects an unbound identity by design — can raise, and this entry is
         # a process-level dict rather than a ContextVar, so a leak here would
         # outlive the task and hand a dead queue to the next turn.
-        register_stream_sink(session_mongo_id, side_channel_queue)
+        register_stream_sink(session_mongo_id, side_channel_queue, ctx.workspace_id)
         session_key = session_key_for(ctx)
         # Read the per-run tool policy from the PRE-RESOLVED, ENTITY-AWARE
         # profile (entity-rooms chunk ①). ``ctx.resolved_profile`` was resolved

@@ -538,12 +538,20 @@ def detach_sse_event_sink(token: Token) -> None:
 # Keyed by ``session_mongo_id`` rather than by workspace: one workspace can
 # have two streams open in two windows, and a workspace-keyed lookup would hand
 # a file write to whichever one it happened to find.
-_stream_sinks_by_session: dict[str, asyncio.Queue[tuple[str, dict[str, Any]]]] = {}
+# The workspace is stored BESIDE the queue, not just the queue, because this
+# dict is process-global and therefore cross-tenant. The ContextVar path could
+# not get tenancy wrong — the sink was the caller's own stream by construction —
+# but a lookup keyed on a session id can, and ``delegates._Pending`` states the
+# posture this module holds itself to: "the correlation id is unguessable, but
+# tenancy that rests on unguessability is not tenancy". A caller must prove it
+# belongs to the tenant whose stream it is about to push into.
+_stream_sinks_by_session: dict[str, tuple[str | None, asyncio.Queue[tuple[str, dict[str, Any]]]]] = {}
 
 
 def register_stream_sink(
     session_mongo_id: str | None,
     queue: asyncio.Queue[tuple[str, dict[str, Any]]],
+    workspace_id: str | None = None,
 ) -> None:
     """Publish ``queue`` as the live stream for ``session_mongo_id``.
 
@@ -552,7 +560,7 @@ def register_stream_sink(
     """
     if not session_mongo_id:
         return
-    _stream_sinks_by_session[session_mongo_id] = queue
+    _stream_sinks_by_session[session_mongo_id] = (workspace_id, queue)
 
 
 def unregister_stream_sink(
@@ -578,18 +586,34 @@ def unregister_stream_sink(
     """
     if not session_mongo_id:
         return
-    if queue is not None and _stream_sinks_by_session.get(session_mongo_id) is not queue:
-        return
+    if queue is not None:
+        entry = _stream_sinks_by_session.get(session_mongo_id)
+        if entry is None or entry[1] is not queue:
+            return
     _stream_sinks_by_session.pop(session_mongo_id, None)
 
 
 def stream_sink_for_session(
     session_mongo_id: str | None,
+    workspace_id: str | None = None,
 ) -> asyncio.Queue[tuple[str, dict[str, Any]]] | None:
-    """The live stream for ``session_mongo_id``, or None when none is open."""
+    """The live stream for ``session_mongo_id``, or None when none is open.
+
+    When ``workspace_id`` is given it must MATCH the tenant that registered the
+    stream, otherwise this returns None. Callers reaching a process-global dict
+    have to prove tenancy rather than rely on the session id being unguessable;
+    the inbound half (``PendingDelegates.resolve``) already holds that line and
+    the outbound half must too.
+    """
     if not session_mongo_id:
         return None
-    return _stream_sinks_by_session.get(session_mongo_id)
+    entry = _stream_sinks_by_session.get(session_mongo_id)
+    if entry is None:
+        return None
+    owner_workspace_id, queue = entry
+    if workspace_id is not None and owner_workspace_id is not None and owner_workspace_id != workspace_id:
+        return None
+    return queue
 
 
 # Legacy aliases retained for callers that were written against the

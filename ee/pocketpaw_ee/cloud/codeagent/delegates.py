@@ -381,7 +381,9 @@ async def delegate_call_to_browser(
             # Identity IS visible, so use it: find the stream by session id
             # rather than by context inheritance.
             session_mongo_id = current_session_mongo_id()
-            queue = stream_sink_for_session(session_mongo_id)
+            # workspace_id is passed so the lookup refuses a stream
+            # belonging to another tenant; see stream_sink_for_session.
+            queue = stream_sink_for_session(session_mongo_id, workspace_id)
             if queue is None:
                 # Genuinely nobody listening — a CLI run, a background job, a
                 # test. Keep failing FAST rather than parking for the full
