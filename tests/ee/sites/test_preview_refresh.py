@@ -144,7 +144,22 @@ def published_url(monkeypatch):
 @pytest.fixture
 def uploads_in_tmp(monkeypatch, tmp_path):
     """Land stored screenshots under the test's tmp dir rather than the developer's
-    real ~/.pocketpaw. Returns the storage root so a test can read the bytes back."""
+    real ~/.pocketpaw. Returns the storage root so a test can read the bytes back.
+
+    Patching ``Path.home`` alone is NOT enough, and the reason is worth knowing
+    because it makes these tests silently useless on a configured machine.
+    ``_store_screenshot`` builds its adapter through
+    ``pocketpaw.uploads.factory.build_adapter``, which calls ``load_dotenv()`` —
+    so a developer whose ``.env`` sets ``POCKETPAW_UPLOAD_ADAPTER=s3`` uploads the
+    screenshot to the REAL bucket. The bytes never touch ``tmp_path``, and the
+    read-back below fails with FileNotFoundError pointing at a path that looks
+    correct.
+
+    Worse, it fails in the direction that flatters us: the assertion is the only
+    thing distinguishing url rotation from an overwrite, so on an s3-configured box
+    the proof of this slice does not run at all. Pinning the adapter keeps the test
+    measuring the property it claims to measure, wherever it runs."""
+    monkeypatch.setenv("POCKETPAW_UPLOAD_ADAPTER", "local")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     return tmp_path / ".pocketpaw" / "uploads"
 
