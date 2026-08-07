@@ -1,6 +1,18 @@
 # ee/pocketpaw_ee/cloud/mandates/domain.py
 # Created: 2026-06-11 (feat/belt-mandates, slice 1 — models + CRUD).
 #
+# Updated: 2026-08-07 (feat/coupling-t17-foreman-agent) — added
+# ``MandateDoc.agent_id`` / ``MandateView.agent_id``: the AGENT whose identity
+# the foreman runs under. Before this the foreman was an anonymous LLM shell-out
+# whose accumulated shift memory landed in a free-form ``soul_path``; now the
+# mandate names an Agent, so the foreman inherits that agent's system_prompt +
+# scopes and its shift memory writes to THAT agent's soul (the AgentPool
+# convention ``~/.pocketpaw/souls/{workspace}/{slug}.soul``).
+# Additive + defaulted (``None``) → ZERO migration: an existing mandate loads
+# unchanged and resolves to the workspace's seeded default ``pocketpaw`` agent
+# at read time. ``soul_path`` is KEPT as an explicit override that still wins
+# over the agent's soul, so a pre-T-17 mandate keeps writing where it always did.
+#
 # Updated: 2026-06-11 (feat/belt-autopilot) — added the ``Autopilot`` embedded
 # value object + the ``autopilot`` field on ``MandateDoc``. Autopilot runs
 # Foresight-seeded simulated users against the mandate's surface on a background
@@ -124,9 +136,20 @@ class MandateDoc(TimestampedDocument):
     """A standing Belt mandate. One row per mandate; ``workspace`` tenancy key.
 
     The charter + surface ride as embedded subdocs. ``status`` gates whether
-    shifts may run (``paused`` mandates are inert). ``soul_path`` optionally
-    binds a soul file the foreman recalls before planning + appends a shift
-    summary to after.
+    shifts may run (``paused`` mandates are inert).
+
+    ``agent_id`` names the AGENT the foreman runs as — the mandate's judgment
+    seat has a real identity (it appears in ``/agents``, carries trust_level /
+    scopes / skill_refs, and its shift history accumulates on that agent's
+    soul). ``None`` means "unbound"; the read path resolves it to the
+    workspace's seeded default ``pocketpaw`` agent, so pre-T-17 mandates work
+    with no migration.
+
+    ``soul_path`` optionally binds a soul file the foreman recalls before
+    planning + appends a shift summary to after. It is now an OVERRIDE: when
+    set it still wins over the bound agent's soul (back-compat for mandates
+    created before ``agent_id`` existed). New mandates leave it ``None`` and
+    inherit the agent's soul.
     """
 
     workspace: Indexed(str)  # type: ignore[valid-type]
@@ -134,6 +157,9 @@ class MandateDoc(TimestampedDocument):
     surface: Surface
     charter: Charter
     status: MandateStatus = "active"
+    # The agent whose identity the foreman runs under. Additive + defaulted →
+    # no migration; resolved to the workspace default when unset.
+    agent_id: str | None = None
     soul_path: str | None = None
     # UI contract — the charter composer's senses toggles. Scopes which SENSE
     # patrols run on a shift trigger ("feedback" intake stays open as a human
@@ -207,6 +233,7 @@ class MandateView:
     surface: Surface
     charter: Charter
     status: MandateStatus
+    agent_id: str | None
     soul_path: str | None
     created_at: datetime
     updated_at: datetime
