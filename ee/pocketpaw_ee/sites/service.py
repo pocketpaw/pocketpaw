@@ -14,6 +14,24 @@
 # so nothing about it may fail, delay, or block the publish. On any failure the
 # field stays empty and the card falls back to its text layout.
 #
+# Updated 2026-08-07 (SC-2 — drafts get art too): ``create_draft_site`` now schedules
+# a capture of its own (``_schedule_draft_screenshot``). A draft has no url, so that
+# capture shoots the pocket's MARKUP rather than a page (``sites.draft_markup`` +
+# the Browser Rendering ``html`` body). It fires ONLY on a fresh mint — the mint is
+# idempotent, so a repeat create re-shoots nothing and an already-live doc never
+# gets a draft picture — and it is wrapped for a reason the live path does not have:
+# ``create_draft_site`` is called from the zip/from-url import tail WITHOUT a
+# swallow of its own, so an escaping error there would fail an import whose files
+# are already safely persisted.
+# The PREVIEW branch of ``publish`` schedules one too
+# (``_schedule_draft_screenshot_for_pocket``), for a cost reason: a preview has just
+# built the pocket, so the markup is on disk and the capture is a file read instead
+# of a ~16s build. That is what fills in a ripple/svelte draft's card, since the
+# create-time capture deliberately refuses to build one. It goes by POCKET because a
+# preview's return value is a transient doc nobody persists, and it is still not a
+# way to photograph a live site: the resolved doc has a url, which the draft capture
+# declines.
+#
 # Updated 2026-08-02 (draft render): the PREVIEW deploy in ``publish`` is now
 # engine-aware, closing the half of HE-4 that was missed. HE-4 taught the LIVE
 # deploy that a built site's servable files live somewhere different per engine
@@ -1629,6 +1647,13 @@ async def create_draft_site(
     # (search index, soul memory, ripple invalidation) keys on a draft Site doc;
     # publish emits SitePublished when the site actually goes live.
     await doc.insert()
+    # SC-2: this is the moment the draft becomes a card in the gallery, so it is the
+    # moment to try to give that card a picture. A draft has no url, so the capture
+    # shoots its MARKUP instead. Only on a fresh mint — the idempotent early return
+    # above means a repeat create never re-shoots, and a live doc never gets a draft
+    # picture. Wrapped like every other publish-tail side effect: a create must not
+    # fail because a thumbnail could not be taken.
+    _schedule_draft_screenshot(doc)
     return doc
 
 
@@ -1917,6 +1942,16 @@ async def publish(
                 pocket_id,
                 preview_url,
             )
+        # SC-2: this build just put the pocket's current markup on disk, so a draft
+        # capture here costs a file read rather than the 16s build the create-time
+        # capture declines to spend — this is what fills in a ripple/svelte draft's
+        # card at all. By POCKET, not by this object: a preview returns a transient,
+        # never-persisted doc with nothing to record a picture on, while the real
+        # draft doc is in Mongo under the stable per-pocket id. An already-LIVE site
+        # resolves a doc WITH a url, which the draft capture declines — so previewing
+        # a live site can never replace the picture of the page visitors see with a
+        # picture of an unapproved edit.
+        _schedule_draft_screenshot_for_pocket(workspace_id=workspace_id, pocket_id=pocket_id)
         return _SiteDoc(
             id=ObjectId(site_id),
             workspace=workspace_id,
@@ -2441,6 +2476,50 @@ def _schedule_site_screenshot(site: _SiteDoc) -> None:
         logger.warning(
             "sites.screenshot: could not schedule capture for site %s",
             getattr(site, "id", "?"),
+            exc_info=True,
+        )
+
+
+def _schedule_draft_screenshot(site: _SiteDoc) -> None:
+    """Fire the background screenshot of a freshly minted DRAFT site (SC-2). Non-async,
+    never blocks, never raises. Looked up through the module so tests can patch it,
+    mirroring ``_schedule_site_screenshot`` directly above.
+
+    The try/except matters just as much here as on the live path, for a different
+    reason: ``create_draft_site`` is called from the tail of a site CREATE and from
+    the tail of a zip/from-url IMPORT, and the import call site does NOT wrap it. An
+    escaping error would fail an import whose files are already safely persisted, in
+    exchange for a picture on a gallery card.
+    """
+    try:
+        from pocketpaw_ee.sites.screenshot import schedule_draft_screenshot
+
+        schedule_draft_screenshot(site)
+    except Exception:  # noqa: BLE001 — never fail a create over a thumbnail
+        logger.warning(
+            "sites.screenshot: could not schedule draft capture for site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
+
+
+def _schedule_draft_screenshot_for_pocket(*, workspace_id: str, pocket_id: str) -> None:
+    """Fire the background draft capture for a pocket's Site doc (SC-2), from the tail
+    of a PREVIEW build. Non-async, never blocks, never raises.
+
+    By pocket rather than by doc because a preview's return value is transient and
+    never persisted — the doc worth recording a picture on is the draft minted at
+    create, which the capture resolves for itself. The try/except keeps a preview
+    (the builder's inner loop, run on every edit) from ever failing over a thumbnail.
+    """
+    try:
+        from pocketpaw_ee.sites.screenshot import schedule_draft_screenshot_for_pocket
+
+        schedule_draft_screenshot_for_pocket(workspace_id=workspace_id, pocket_id=pocket_id)
+    except Exception:  # noqa: BLE001 — never fail a preview over a thumbnail
+        logger.warning(
+            "sites.screenshot: could not schedule draft capture for pocket %s",
+            pocket_id,
             exc_info=True,
         )
 

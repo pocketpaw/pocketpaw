@@ -74,6 +74,13 @@
 # body can never be stored as a site's preview. Callers must NOT pass a
 # ``quality`` in ``screenshot_options`` without also passing a ``type`` of jpeg /
 # webp — quality is incompatible with the default png and Cloudflare answers 400.
+# Updated 2026-08-07 (SC-2 — drafts get art too): ``capture_screenshot`` now takes
+# ``html`` as an alternative to ``url``. A DRAFT site has no address to point a
+# browser at — that is what makes it a draft — so it is rendered from its own
+# markup instead. Exactly one of the two is required; the method raises on both or
+# neither rather than letting Cloudflare answer 400. Note that an ``html`` body
+# renders at ``about:blank``, so nothing relative inside it resolves: assembling a
+# SELF-CONTAINED document is the caller's job (``sites.draft_markup``).
 
 from __future__ import annotations
 
@@ -297,16 +304,24 @@ class CloudflareClient:
     async def capture_screenshot(
         self,
         *,
-        url: str,
+        url: str = "",
+        html: str = "",
         viewport: dict | None = None,
         goto_options: dict | None = None,
         screenshot_options: dict | None = None,
     ) -> bytes:
-        """Screenshot a live page and return the raw image bytes (SC-1).
+        """Screenshot a page and return the raw image bytes (SC-1, SC-2).
 
         POSTs to the Browser Rendering screenshot endpoint
-        (POST /accounts/{acct}/browser-rendering/screenshot). ``url`` is the page
-        to render; the three option dicts ride through untouched as
+        (POST /accounts/{acct}/browser-rendering/screenshot). The endpoint takes
+        EITHER ``url`` (render the page at that address — a deployed site, SC-1) or
+        ``html`` (render this markup directly — a DRAFT, which by definition has no
+        address, SC-2); exactly one is required, and passing both or neither is a
+        caller bug, so it raises here rather than letting Cloudflare answer 400.
+
+        An ``html`` body renders at ``about:blank``, so NOTHING relative in it
+        resolves — the markup has to arrive self-contained (see
+        ``sites.draft_markup``). The three option dicts ride through untouched as
         ``viewport`` (width / height / deviceScaleFactor), ``gotoOptions``
         (waitUntil / timeout) and ``screenshotOptions`` (fullPage / type / ...).
         Omitted options are left off the body entirely so Cloudflare's own
@@ -324,8 +339,13 @@ class CloudflareClient:
         standard ValidationError), and a 2xx that is not an image (an error
         envelope, an empty body) raises too, so an HTML error page can never be
         persisted as a site's preview image."""
+        if bool(url) == bool(html):
+            raise ValidationError(
+                "sites.cloudflare_error",
+                "Browser Rendering needs exactly one of url or html.",
+            )
         api_url = f"{_CF_API}/accounts/{self._account_id}/browser-rendering/screenshot"
-        payload: dict = {"url": url}
+        payload: dict = {"url": url} if url else {"html": html}
         if screenshot_options:
             payload["screenshotOptions"] = screenshot_options
         if viewport:
