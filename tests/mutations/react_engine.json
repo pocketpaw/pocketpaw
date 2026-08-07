@@ -1,0 +1,59 @@
+[
+  {
+    "label": "react deploys as a SvelteKit worker (main points at a dist/_worker.js that no react build writes)",
+    "file": "ee/pocketpaw_ee/sites/engines.py",
+    "find": "_SERVER_WORKER_ENGINES: frozenset[str] = frozenset({\"ripple\", \"svelte\"})",
+    "replace": "_SERVER_WORKER_ENGINES: frozenset[str] = frozenset({\"ripple\", \"svelte\", \"react\"})",
+    "tests": [
+      "tests/ee/sites/test_workers_deploy.py",
+      "tests/ee/sites/test_engines.py"
+    ]
+  },
+  {
+    "label": "emits_server_worker answers the BUILD question instead (the exact conflation RX-1 exists to prevent)",
+    "file": "ee/pocketpaw_ee/sites/engines.py",
+    "find": "    return normalize_engine(engine) in _SERVER_WORKER_ENGINES",
+    "replace": "    return normalize_engine(engine) in _NODE_BUILD_ENGINES",
+    "tests": [
+      "tests/ee/sites/test_workers_deploy.py",
+      "tests/ee/sites/test_engines.py"
+    ]
+  },
+  {
+    "label": "react falls back to ripple's static output (the deploy uploads an empty .svelte-kit dir)",
+    "file": "ee/pocketpaw_ee/sites/engines.py",
+    "find": "    \"react\": \"dist\",",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_engines.py",
+      "tests/ee/sites/test_workers_deploy.py"
+    ]
+  },
+  {
+    "label": "react stops being a source-map engine (publish reads rippleSpec and finds nothing)",
+    "file": "ee/pocketpaw_ee/sites/engines.py",
+    "find": "_SOURCE_MAP_ENGINES: frozenset[str] = frozenset({\"svelte\", \"html\", \"react\"})",
+    "replace": "_SOURCE_MAP_ENGINES: frozenset[str] = frozenset({\"svelte\", \"html\"})",
+    "tests": [
+      "tests/ee/sites/test_engines.py"
+    ]
+  },
+  {
+    "label": "react skips its node build (nothing is ever built, so there is no dist to deploy)",
+    "file": "ee/pocketpaw_ee/sites/engines.py",
+    "find": "_NODE_BUILD_ENGINES: frozenset[str] = frozenset({\"ripple\", \"svelte\", \"react\"})",
+    "replace": "_NODE_BUILD_ENGINES: frozenset[str] = frozenset({\"ripple\", \"svelte\"})",
+    "tests": [
+      "tests/ee/sites/test_engines.py"
+    ]
+  },
+  {
+    "label": "the assets-only .assetsignore stops excluding itself (wrangler serves it as a public asset)",
+    "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
+    "find": "_ASSETS_ONLY_ASSETSIGNORE_LINES = (\"wrangler.jsonc\", \".assetsignore\")",
+    "replace": "_ASSETS_ONLY_ASSETSIGNORE_LINES = (\"wrangler.jsonc\",)",
+    "tests": [
+      "tests/ee/sites/test_workers_deploy.py"
+    ]
+  }
+]
