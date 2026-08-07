@@ -1178,13 +1178,6 @@ async def _drive_agent_loop(
     side_channel_queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
     sink_token = attach_sse_event_sink(side_channel_queue)
     session_mongo_id = ctx.scope_id if ctx.kind is ScopeKind.SESSION else None
-    # Publish the same queue under this session's id, so a caller that cannot
-    # see the ContextVar above can still find the stream. Code Mode's file
-    # tools are exactly that caller: they run in the POOLED SDK client's task,
-    # created during _prewarm_session before this line ever executes, so they
-    # inherit a context with identity bound (ART-2 added the prewarm bind at
-    # ~1054) and no sink. Torn down in the same finally that detaches the sink.
-    register_stream_sink(session_mongo_id, side_channel_queue)
     identity_tokens = attach_agent_identity(
         workspace_id=ctx.workspace_id,
         user_id=ctx.user_id,
@@ -1244,6 +1237,19 @@ async def _drive_agent_loop(
     sup_session_id = ctx.scope_id
     sup_agent_id = ctx.target_agent_id
     try:
+        # Publish the same queue under this session's id, so a caller that
+        # cannot see the sink ContextVar can still find the stream. Code Mode's
+        # file tools are exactly that caller: they run in the POOLED SDK
+        # client's task, created during _prewarm_session before this function
+        # binds anything, so they inherit a context with identity bound (ART-2
+        # added the prewarm bind at ~1054) and no sink.
+        #
+        # Registered INSIDE the try, not beside attach_sse_event_sink above:
+        # everything between them — attach_agent_identity in particular, which
+        # rejects an unbound identity by design — can raise, and this entry is
+        # a process-level dict rather than a ContextVar, so a leak here would
+        # outlive the task and hand a dead queue to the next turn.
+        register_stream_sink(session_mongo_id, side_channel_queue)
         session_key = session_key_for(ctx)
         # Read the per-run tool policy from the PRE-RESOLVED, ENTITY-AWARE
         # profile (entity-rooms chunk ①). ``ctx.resolved_profile`` was resolved
@@ -1633,7 +1639,10 @@ async def _drive_agent_loop(
         # the next turn would park for the full delegate budget instead of
         # refusing at once.
         try:
-            unregister_stream_sink(session_mongo_id)
+            # Identity-checked: nothing serializes runs per session, so a
+            # second concurrent run on the same session may already own the
+            # entry. Popping it here would break the run still streaming.
+            unregister_stream_sink(session_mongo_id, side_channel_queue)
         except Exception:
             pass
         try:

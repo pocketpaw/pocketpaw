@@ -555,14 +555,30 @@ def register_stream_sink(
     _stream_sinks_by_session[session_mongo_id] = queue
 
 
-def unregister_stream_sink(session_mongo_id: str | None) -> None:
+def unregister_stream_sink(
+    session_mongo_id: str | None,
+    queue: asyncio.Queue[tuple[str, dict[str, Any]]] | None = None,
+) -> None:
     """Remove the stream for ``session_mongo_id``.
 
     Idempotent, and must run in the same ``finally`` that detaches the sink. A
     leaked entry is a queue nobody drains, which would convert the next turn's
     honest fast refusal into a full-budget park.
+
+    ``queue`` makes the removal IDENTITY-CHECKED, and callers should always
+    pass it. Nothing serializes runs per session — a second tab on the same
+    conversation, or a second send while the first stream is still tailing,
+    gives two concurrent ``_drive_agent_loop`` runs with the same scope id, and
+    the later ``register_stream_sink`` overwrites the earlier entry. An
+    unconditional pop then lets whichever run finishes FIRST delete the entry
+    belonging to the one still streaming, which resurrects the exact
+    "no browser session is attached" failure this registry exists to fix, for
+    the rest of that run's turn. Popping only when the stored queue is still
+    ours makes a stale teardown a no-op.
     """
     if not session_mongo_id:
+        return
+    if queue is not None and _stream_sinks_by_session.get(session_mongo_id) is not queue:
         return
     _stream_sinks_by_session.pop(session_mongo_id, None)
 

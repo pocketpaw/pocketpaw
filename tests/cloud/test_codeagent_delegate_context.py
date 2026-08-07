@@ -159,3 +159,36 @@ async def test_delegate_still_refuses_when_no_stream_exists_at_all(
     assert outcome.ok is False
     assert outcome.error == ERROR_NO_CLIENT
     assert len(reg) == 0, "a refused delegate must not leak a registry slot"
+
+
+@pytest.mark.asyncio
+async def test_a_finished_run_does_not_unregister_a_concurrent_run_on_the_same_session() -> None:
+    """Teardown must not delete a stream that belongs to somebody else.
+
+    Nothing serializes runs per session: a second tab on the same conversation,
+    or a second send while the first stream is still tailing, gives two
+    concurrent `_drive_agent_loop` runs with the same scope id, and the later
+    `register_stream_sink` overwrites the earlier entry. If teardown popped by
+    key alone, whichever run finished FIRST would delete the entry belonging to
+    the run still streaming — resurrecting the exact "no browser session is
+    attached" failure this registry exists to fix, for the rest of that turn.
+    """
+    queue_a: asyncio.Queue[tuple[str, dict]] = asyncio.Queue()
+    queue_b: asyncio.Queue[tuple[str, dict]] = asyncio.Queue()
+
+    register_stream_sink(SESSION, queue_a)
+    register_stream_sink(SESSION, queue_b)  # run B overwrites run A's entry
+
+    # Run A finishes first and tears down. Its queue is no longer the
+    # registered one, so this must be a no-op.
+    unregister_stream_sink(SESSION, queue_a)
+
+    from pocketpaw_ee.cloud.chat.agent_service import stream_sink_for_session
+
+    assert stream_sink_for_session(SESSION) is queue_b, (
+        "run A's teardown deleted run B's live stream"
+    )
+
+    # B's own teardown still clears it.
+    unregister_stream_sink(SESSION, queue_b)
+    assert stream_sink_for_session(SESSION) is None
