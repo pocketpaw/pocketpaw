@@ -67,6 +67,12 @@ Updated 2026-07-24 (CX-3, feat/code-agent-exclusive-tools): added
 and its persona reuses ``CODE_SYSTEM_PROMPT``, so every run it does is capped to
 exactly those ids — no pocket/planner/widget grant. Idempotent, mirrors the
 default-agent seed + boot back-fill.
+Updated 2026-08-07 (C4-b, feat/coupling-c4b-agentconfig-parity): ``tool_mode`` is
+now honoured on the FLAT request branches too — ``_build_create_config`` and the
+``_apply_update`` flat-field loop. CX-2 only wired the config-dict path, so the
+new first-class ``CreateAgentRequest.tool_mode`` / ``UpdateAgentRequest.tool_mode``
+fields would have parsed and then been silently dropped. No behaviour change for
+callers that omit the field (None == "use the default" / "leave unchanged").
 """
 
 from __future__ import annotations
@@ -209,6 +215,8 @@ def _build_create_config(body: CreateAgentRequest) -> AgentConfigSpec:
         overrides["max_tokens"] = body.max_tokens
     if body.tools is not None:
         overrides["tools"] = tuple(body.tools)
+    if body.tool_mode is not None:
+        overrides["tool_mode"] = body.tool_mode
     if body.trust_level is not None:
         overrides["trust_level"] = body.trust_level
     if body.scopes is not None:
@@ -270,6 +278,7 @@ def _apply_update(current: AgentConfigSpec, body: UpdateAgentRequest) -> AgentCo
         ("system_prompt", body.system_prompt),
         ("temperature", body.temperature),
         ("max_tokens", body.max_tokens),
+        ("tool_mode", body.tool_mode),
         ("trust_level", body.trust_level),
         ("soul_enabled", body.soul_enabled),
         ("soul_archetype", body.soul_archetype),

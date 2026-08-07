@@ -22,6 +22,13 @@ Updated: 2026-07-24 (CX-2, feat/code-agent-exclusive-tools) — added
 Beanie ``AgentConfig.tool_mode``. An ``"exclusive"`` agent's ``tools`` become the
 run's MCP allow-list and suppress the universal pocket/widget/atlas grant
 (CX-1); ``"additive"`` (the default) is the unchanged legacy grant-union.
+
+Updated: 2026-08-07 (C4-b, feat/coupling-c4b-agentconfig-parity) — added the
+``TOOL_MODES`` / ``TOOL_MODE_PATTERN`` constants. The legal set was previously
+implicit: ``run_core._agent_tool_policy`` treats ANY value other than
+``"exclusive"`` as additive, so a typo'd ``"exlcusive"`` silently opened the tool
+surface back up. The request DTOs now validate against these constants, so a bad
+value is rejected at the wire boundary instead of fail-opening at run time.
 """
 
 from __future__ import annotations
@@ -30,6 +37,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from pocketpaw_ee.cloud.agents.defaults import CLOUD_DEFAULT_AGENT_BACKEND
+
+#: The legal ``AgentConfigSpec.tool_mode`` values. ``run_core._agent_tool_policy``
+#: only branches on ``"exclusive"`` — every other value falls through to the
+#: additive grant-union — so an unvalidated typo fails OPEN. Validate against this
+#: at every write boundary.
+TOOL_MODES: tuple[str, ...] = ("additive", "exclusive")
+
+#: Pydantic ``Field(pattern=...)`` form of ``TOOL_MODES``, derived so the two can
+#: never drift apart.
+TOOL_MODE_PATTERN: str = f"^({'|'.join(TOOL_MODES)})$"
 
 
 @dataclass(frozen=True)
@@ -81,4 +98,4 @@ class Agent:
     tags: tuple[str, ...] = ()  # free-form gallery tags (ASG-1)
 
 
-__all__ = ["Agent", "AgentConfigSpec"]
+__all__ = ["TOOL_MODE_PATTERN", "TOOL_MODES", "Agent", "AgentConfigSpec"]

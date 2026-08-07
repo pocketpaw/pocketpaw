@@ -15,6 +15,20 @@ excludes other members' public agents). ``CreateAgentRequest`` /
 (``welcome_message`` / ``conversation_starters`` / ``voice`` / ``appearance`` /
 ``tags``); ``agent_to_dict`` (+ ``_config_to_dict``) and ``AgentResponse`` now
 emit them on the wire.
+
+Updated: 2026-08-07 (C4-b, feat/coupling-c4b-agentconfig-parity) — ``tool_mode``
+reaches the wire. It shipped on the Beanie model, the domain spec and the run-time
+enforcement (``run_core._agent_tool_policy``) in CX-2, but ``_config_to_dict``
+never emitted it and neither request DTO declared it, so a locked-down
+(``tool_mode="exclusive"``) agent was indistinguishable from an open one in every
+API response and the only way to set it was smuggling a raw ``config`` dict
+through ``UpdateAgentRequest``. Now: ``_config_to_dict`` emits it,
+``CreateAgentRequest`` / ``UpdateAgentRequest`` declare it as a first-class
+pattern-validated field, and the ``config``-dict escape hatch validates
+``tool_mode`` too so the gate cannot be bypassed by the very route the gap
+created. ``tests/cloud/agents/test_config_wire_parity.py`` now pins the whole
+mirror so the NEXT field added to ``AgentConfigSpec`` cannot silently fail to
+reach the wire.
 """
 
 from __future__ import annotations
@@ -26,8 +40,30 @@ from pydantic import BaseModel, Field, field_validator
 
 from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.agents.defaults import CLOUD_DEFAULT_AGENT_BACKEND
-from pocketpaw_ee.cloud.agents.domain import Agent, AgentConfigSpec
+from pocketpaw_ee.cloud.agents.domain import (
+    TOOL_MODE_PATTERN,
+    TOOL_MODES,
+    Agent,
+    AgentConfigSpec,
+)
 from pocketpaw_ee.cloud.agents.scope_rules import normalise_and_validate_scopes
+
+
+def _validate_config_tool_mode(v: dict | None) -> dict | None:
+    """Reject an illegal ``tool_mode`` smuggled through the raw ``config`` dict.
+
+    ``UpdateAgentRequest.config`` is an untyped passthrough that
+    ``service._apply_update`` copies key-by-key onto the domain spec. Without
+    this, the ``Field(pattern=...)`` on the flat ``tool_mode`` field below would
+    be a gate with a door next to it — and the raw-dict route is exactly how
+    ``tool_mode`` had to be set before C4-b, so callers use it. Only
+    ``tool_mode`` is checked here; the rest of the dict keeps its legacy
+    passthrough behaviour.
+    """
+    if v is not None and "tool_mode" in v and v["tool_mode"] not in TOOL_MODES:
+        raise ValueError(f"config.tool_mode must be one of {list(TOOL_MODES)}")
+    return v
+
 
 # ---------------------------------------------------------------------------
 # Requests (preserved from schemas.py)
@@ -45,6 +81,10 @@ class CreateAgentRequest(BaseModel):
     temperature: float | None = None
     max_tokens: int | None = None
     tools: list[str] | None = None
+    # Tool-surface policy (C4-b). None == "use the default" (``additive``).
+    # ``exclusive`` makes ``tools`` the run's whole MCP allow-list — a security
+    # policy, so the legal set is pinned here rather than trusted from the wire.
+    tool_mode: str | None = Field(default=None, pattern=TOOL_MODE_PATTERN)
     trust_level: int | None = None
     system_prompt: str = ""
     scopes: list[str] | None = None
@@ -79,6 +119,10 @@ class UpdateAgentRequest(BaseModel):
     temperature: float | None = None
     max_tokens: int | None = None
     tools: list[str] | None = None
+    # Tool-surface policy (C4-b). None == "leave unchanged". Same pinned legal
+    # set as ``CreateAgentRequest``; the raw ``config`` dict below is validated
+    # by ``_check_config_tool_mode`` so neither route can widen the surface.
+    tool_mode: str | None = Field(default=None, pattern=TOOL_MODE_PATTERN)
     trust_level: int | None = None
     system_prompt: str | None = None
     scopes: list[str] | None = None
@@ -99,6 +143,11 @@ class UpdateAgentRequest(BaseModel):
     @classmethod
     def _clean_scopes(cls, v: list[str] | None) -> list[str] | None:
         return None if v is None else normalise_and_validate_scopes(v)
+
+    @field_validator("config")
+    @classmethod
+    def _check_config_tool_mode(cls, v: dict | None) -> dict | None:
+        return _validate_config_tool_mode(v)
 
 
 class ScopeAssignmentRequest(BaseModel):
@@ -138,6 +187,7 @@ def _config_to_dict(cfg: AgentConfigSpec) -> dict[str, Any]:
         "model": cfg.model,
         "system_prompt": cfg.system_prompt,
         "tools": list(cfg.tools),
+        "tool_mode": cfg.tool_mode,
         "trust_level": cfg.trust_level,
         "temperature": cfg.temperature,
         "max_tokens": cfg.max_tokens,

@@ -1,0 +1,72 @@
+[
+  {
+    "label": "tool_mode never reaches the wire (the original C4-b bug — a locked-down agent looks open to every client)",
+    "file": "ee/pocketpaw_ee/cloud/agents/dto.py",
+    "find": "        \"tool_mode\": cfg.tool_mode,\n",
+    "replace": "",
+    "tests": ["tests/cloud/agents/test_config_wire_parity.py", "tests/cloud/agents/test_agent_tool_mode.py"]
+  },
+  {
+    "label": "CreateAgentRequest.tool_mode parses but is dropped by _build_create_config (field is decorative)",
+    "file": "ee/pocketpaw_ee/cloud/agents/service.py",
+    "find": "    if body.tool_mode is not None:\n        overrides[\"tool_mode\"] = body.tool_mode\n",
+    "replace": "",
+    "tests": ["tests/cloud/agents/test_agent_tool_mode.py"]
+  },
+  {
+    "label": "UpdateAgentRequest.tool_mode dropped from the _apply_update flat-field loop",
+    "file": "ee/pocketpaw_ee/cloud/agents/service.py",
+    "find": "        (\"tool_mode\", body.tool_mode),\n",
+    "replace": "",
+    "tests": ["tests/cloud/agents/test_agent_tool_mode.py"]
+  },
+  {
+    "label": "tool_mode pattern loosened to anything (a typo'd \"exlcusive\" fails OPEN at run time)",
+    "file": "ee/pocketpaw_ee/cloud/agents/domain.py",
+    "find": "TOOL_MODE_PATTERN: str = f\"^({'|'.join(TOOL_MODES)})$\"",
+    "replace": "TOOL_MODE_PATTERN: str = \".*\"",
+    "tests": ["tests/cloud/agents/test_config_wire_parity.py"]
+  },
+  {
+    "label": "config-dict escape hatch stops validating tool_mode (the gate gets a door next to it)",
+    "file": "ee/pocketpaw_ee/cloud/agents/dto.py",
+    "find": "    if v is not None and \"tool_mode\" in v and v[\"tool_mode\"] not in TOOL_MODES:",
+    "replace": "    if False:",
+    "tests": ["tests/cloud/agents/test_config_wire_parity.py"]
+  },
+  {
+    "label": "config-dict validator over-fires and rejects legal values too (false positive)",
+    "file": "ee/pocketpaw_ee/cloud/agents/dto.py",
+    "find": "    if v is not None and \"tool_mode\" in v and v[\"tool_mode\"] not in TOOL_MODES:",
+    "replace": "    if v is not None:",
+    "tests": ["tests/cloud/agents/test_config_wire_parity.py", "tests/cloud/agents/test_agent_tool_mode.py"]
+  },
+  {
+    "label": "skill_refs stops reaching the wire (Studio could never read the agent's skill set)",
+    "file": "ee/pocketpaw_ee/cloud/agents/dto.py",
+    "find": "        \"skill_refs\": list(cfg.skill_refs),\n",
+    "replace": "",
+    "tests": ["tests/cloud/agents/test_config_wire_parity.py", "tests/cloud/agents/test_skill_plugin_fields.py"]
+  },
+  {
+    "label": "a mapper silently defaults a field instead of copying it (spec -> doc drops skill_refs)",
+    "file": "ee/pocketpaw_ee/cloud/agents/service.py",
+    "find": "        skill_refs=list(c.skill_refs),",
+    "replace": "        skill_refs=[],",
+    "tests": ["tests/cloud/agents/test_config_wire_parity.py"]
+  },
+  {
+    "label": "the Beanie doc leg drifts from the domain spec (field added to one side only)",
+    "file": "ee/pocketpaw_ee/cloud/models/agent.py",
+    "find": "    tool_mode: str = \"additive\"",
+    "replace": "    tool_mode: str = \"additive\"\n    drifted_field: str = \"\"",
+    "tests": ["tests/cloud/agents/test_config_wire_parity.py"]
+  },
+  {
+    "label": "run_core stops honouring exclusive (the wire advertises a cap the run never applies)",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    if mode != \"exclusive\":\n        return (False, frozenset())",
+    "replace": "    if True:\n        return (False, frozenset())",
+    "tests": ["tests/cloud/agents/test_config_wire_parity.py", "tests/cloud/runs/test_run_core_agent_tool_policy.py"]
+  }
+]
