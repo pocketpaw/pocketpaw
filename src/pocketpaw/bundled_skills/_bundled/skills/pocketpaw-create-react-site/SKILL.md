@@ -15,9 +15,11 @@ description: |
   src/App.tsx, and a deterministic tool persists the pocket stamped
   type="site" + pattern="landing" + engine="react". You do NOT compose a
   rippleSpec, do NOT call get_widget_spec, do NOT use the pocket specialist.
-  CRITICAL: a React page with client state (a menu toggle, tabs, a counter) is
-  INERT unless you pass interactive=true — the site ships zero JavaScript by
-  default. Loading this skill keeps the chat agent's always-on system prompt
+  Sites ship their client JavaScript by default, so a React page with client
+  state (a menu toggle, tabs, a counter) hydrates and works; still pass
+  interactive=true to record the intent, and interactive=false to opt a purely
+  static page out of shipping a bundle it never uses.
+  Loading this skill keeps the chat agent's always-on system prompt
   small while still delivering the full React authoring brain when a site
   actually needs React.
 ---
@@ -117,31 +119,40 @@ the returned markup.
 
 ## ⚠️ THE INTERACTIVITY FLAG — read this before you ship a menu toggle
 
-**A React site ships ZERO JavaScript unless you say otherwise.** The prerender
-pass strips the module script from the built HTML, so the page is pure static
-markup: fast, crawlable, and **inert**. `useState` never updates, `onClick`
-never fires, `useEffect` never runs.
+**Sites ship their client JavaScript by DEFAULT.** React hydrates on top of the
+prerendered markup, so a menu toggle, tabs or a counter work without you passing
+anything. (This is a deployment setting — `sites_keep_client_bundle_default` —
+so it can be turned off, which is why the rest of this section still matters.)
 
-That default is right for a brochure page and **wrong for most React sites** —
-React is usually chosen precisely BECAUSE something needs to be interactive.
-
-**So: pass `interactive=true` to `create_react_site` whenever any component you
-authored has behaviour that must run in the browser.** Concretely, if any of
-these appear anywhere in your source map, the site is interactive:
+**Pass `interactive=true` explicitly whenever any component you authored has
+behaviour that must run in the browser.** It is no longer the difference between
+working and inert on a default deployment, but it RECORDS the intent, and an
+explicit value beats the setting — so your interactive page keeps working even
+where the default is off. Concretely, if any of these appear anywhere in your
+source map, the site is interactive and you should say so:
 
 - `useState` / `useReducer` whose value **changes** after first render
 - any `onClick` / `onChange` / `onSubmit` handler that does something
 - `useEffect` (a scroll-reveal observer, an animation, a media-query listener)
 - a `<canvas>` you draw into, or any third-party widget you mount
 
-**Do NOT pass it** when the page is purely static — copy, images, CSS
+**Pass `interactive=false` when the page is purely static** — copy, images, CSS
 hover/keyframe motion, anchor links, and a native `<form method="POST">`. Those
-all work with no JavaScript at all, and leaving the flag off ships a smaller,
-faster page.
+work with no JavaScript at all, and an explicit `false` is now the ONLY way to
+ship the smaller, faster, bundle-free page: omitting the argument gets you the
+default, which ships the bundle. This is the one direction that changed — it
+used to be the do-nothing case and is now a decision worth making.
 
 CSS-only motion (the design system's Tier-0 default: hover states, keyframe
 drift, marquees, `@media (prefers-reduced-motion)`) does **NOT** need the flag —
 it runs at paint with no JavaScript.
+
+**The resting-visibility trade.** A build that ships JavaScript is no longer
+refused for hiding content at rest, because the gate assumes the JS can reveal
+it. That check was a real safety net against a page that renders blank until an
+effect fires, and on a default deployment it no longer fires for you. The
+prerender rule below is now the only thing standing between you and a
+blank-looking page — treat it as load-bearing, not advisory.
 
 **The flag never replaces the prerender rule.** With `interactive=true` the page
 is still prerendered and React *hydrates* on top of the baked markup. A
@@ -277,7 +288,9 @@ with no rippleSpec and no specialist.
 mcp__pocketpaw_sites_manager__create_react_site(
   source      = <the source map from STEP 2>,
   name        = "Bright Smile Dental",   // optional; defaults to "React site"
-  interactive = true                     // REQUIRED when any component needs the browser
+  interactive = true                     // declare it: true when any component
+                                         // needs the browser, false to opt a
+                                         // purely static page out of the bundle
 )
 ```
 
@@ -326,8 +339,9 @@ component that returns nothing at rest. Both are the prerender rule above.
   honours them — not a default clean house style.
 - With **all JavaScript disabled**, every section looks finished: real copy,
   real images, the first accordion panel open, counters at their real values.
-- `interactive=true` is passed **if and only if** something actually needs the
-  browser — and every interactive component still rests correctly in markup.
+- `interactive` is declared either way — `true` when something actually needs
+  the browser, `false` for a purely static page — rather than left to the
+  default. Every interactive component still rests correctly in markup.
 - Real copy throughout. No "TBD", no "Lorem ipsum", no invented testimonials or
   fabricated statistics.
 - Every CTA is an anchor; the lead form is a native `<form>` with flat named

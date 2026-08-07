@@ -3240,9 +3240,7 @@ async def publish_pocket(
 
     _declared = pocket.get("keepsClientBundle")
     keeps_client_bundle = (
-        get_settings().sites_keep_client_bundle_default
-        if _declared is None
-        else bool(_declared)
+        get_settings().sites_keep_client_bundle_default if _declared is None else bool(_declared)
     )
 
     # charge-first: a PREVIEW publish never persists a Site doc and never bills, so

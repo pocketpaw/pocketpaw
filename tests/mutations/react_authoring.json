@@ -45,12 +45,12 @@
     ]
   },
   {
-    "label": "interactive is forced ON, so every static brochure page ships a hydration bundle",
+    "label": "interactive is forced ON, overriding an author's explicit opt-out so a static brochure page cannot refuse the bundle",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
-    "find": "    interactive = bool(args.get(\"interactive\"))",
+    "find": "    interactive = None if _interactive_raw is None else bool(_interactive_raw)",
     "replace": "    interactive = True",
     "tests": [
-      "tests/ee/agent/test_sites_mcp_server/test_create_react_site.py::TestCreateReactSiteEndToEnd::test_static_site_does_not_keep_its_client_bundle"
+      "tests/ee/agent/test_sites_mcp_server/test_create_react_site.py::TestCreateReactSiteEndToEnd::test_explicit_false_is_recorded_as_an_opt_out"
     ]
   },
   {

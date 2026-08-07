@@ -11,8 +11,8 @@
   {
     "label": "publish ignores the setting and hardcodes the new default (passes the feature test, fails the it-is-a-setting test)",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        get_settings().sites_keep_client_bundle_default\n        if _declared is None",
-    "replace": "        True\n        if _declared is None",
+    "find": "        get_settings().sites_keep_client_bundle_default if _declared is None else bool(_declared)",
+    "replace": "        True if _declared is None else bool(_declared)",
     "tests": [
       "tests/cloud/sites/test_keeps_client_bundle_publish.py"
     ]
@@ -20,7 +20,7 @@
   {
     "label": "the resolution collapses to `declared or default`, silently stripping an author's explicit opt-out",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    _declared = pocket.get(\"keepsClientBundle\")\n    keeps_client_bundle = (\n        get_settings().sites_keep_client_bundle_default\n        if _declared is None\n        else bool(_declared)\n    )",
+    "find": "    _declared = pocket.get(\"keepsClientBundle\")\n    keeps_client_bundle = (\n        get_settings().sites_keep_client_bundle_default if _declared is None else bool(_declared)\n    )",
     "replace": "    _declared = pocket.get(\"keepsClientBundle\")\n    keeps_client_bundle = bool(_declared) or get_settings().sites_keep_client_bundle_default",
     "tests": [
       "tests/cloud/sites/test_keeps_client_bundle_publish.py"
