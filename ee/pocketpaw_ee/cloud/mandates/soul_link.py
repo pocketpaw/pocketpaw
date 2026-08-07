@@ -277,7 +277,18 @@ async def recall_for_planning(soul_path: str | None, query: str) -> list[str]:
 
 async def remember_shift(soul_path: str | None, summary: str) -> bool:
     """Append an episodic shift summary to the mandate's soul and save it
-    back in place. Returns True on success; False (logged) on any failure."""
+    back in place. Returns True on success; False (logged) on any failure.
+
+    WRITE BACK IN THE FORMAT WE READ. ``Soul.awaken`` accepts both shapes, but
+    the two writers do NOT: ``save_local`` builds a DIRECTORY (it ``mkdir``s the
+    path), while ``export`` writes a ``.soul`` ARCHIVE FILE. The AgentPool
+    materializes an agent's soul as an archive (``SoulManager.save`` →
+    ``soul.export``), so calling ``save_local`` on it raises FileExistsError and
+    — because this function is best-effort — the shift memory would vanish with
+    nothing but a log line to show for it. That is exactly the silent no-op this
+    whole path exists to prevent, so the writer is selected from what is
+    actually on disk. ``export`` matches the pool's own call, keys policy
+    included; changing that policy is a separate decision, not this one's."""
     if not soul_path or not summary.strip():
         return False
     path = Path(soul_path).expanduser()
@@ -289,7 +300,13 @@ async def remember_shift(soul_path: str | None, summary: str) -> bool:
 
         soul = await Soul.awaken(path)
         await soul.remember(summary.strip(), type=MemoryType.EPISODIC, importance=7)
-        await soul.save_local(path)
+        if path.is_dir():
+            # A legacy free-form ``.soul/`` project folder — the directory IS
+            # the soul.
+            await soul.save_local(path)
+        else:
+            # A ``.soul`` archive, which is what the AgentPool writes.
+            await soul.export(path)
         return True
     except Exception:  # noqa: BLE001 — soul failures must never wedge a shift
         logger.warning("mandate soul: remember failed for %s", soul_path, exc_info=True)

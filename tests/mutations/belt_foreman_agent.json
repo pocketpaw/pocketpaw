@@ -111,6 +111,24 @@
     ]
   },
   {
+    "label": "always save the soul as a directory (breaks the pool's .soul archive)",
+    "file": "ee/pocketpaw_ee/cloud/mandates/soul_link.py",
+    "find": "        if path.is_dir():",
+    "replace": "        if True:",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_agent_soul_round_trips_for_real"
+    ]
+  },
+  {
+    "label": "always export the soul as an archive (breaks a legacy directory soul)",
+    "file": "ee/pocketpaw_ee/cloud/mandates/soul_link.py",
+    "find": "        if path.is_dir():",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_legacy_directory_soul_still_round_trips"
+    ]
+  },
+  {
     "label": "drop agent_id from the queued station run's code_change blob",
     "file": "ee/pocketpaw_ee/cloud/mandates/executor.py",
     "find": "            \"agent_id\": str(task.get(\"agent_id\") or \"\"),",

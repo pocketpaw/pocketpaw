@@ -411,6 +411,69 @@ async def test_missing_agent_soul_is_materialized_on_the_write_path(soul_home, m
     assert calls == ["a1"]
 
 
+async def test_agent_soul_round_trips_for_real(mongo_db, soul_home):
+    """THE END-TO-END SOUL CLAIM, with NO spy anywhere.
+
+    Every other test in this file would stay green if the soul write silently
+    no-op'd: ``remember_shift`` is best-effort by design, so a failure logs a
+    warning and returns False while the shift still succeeds. That is exactly
+    the silent-no-op failure mode the materialization fix exists to prevent, so
+    it has to be proven directly.
+
+    It also crosses a seam nothing else checks: the file is CREATED by the
+    AgentPool (``SoulManager.initialize`` → ``shutdown``) but READ AND WRITTEN
+    by ``soul_link`` (``Soul.awaken`` → ``remember`` → ``save_local``). Two
+    different entry points into soul-protocol — if they don't round-trip, the
+    foreman's memory goes nowhere and every other test still passes."""
+    agent_id = await _seed_default_agent()
+
+    # 1. The seeded default agent starts with NO soul file — the gap this fix
+    #    exists to close.
+    expected = Path(soul_link.agent_soul_path(WS, "pocketpaw"))
+    assert not expected.exists()
+
+    # 2. Real materialization (no spy) creates it at the pool convention.
+    created = await agents_service.ensure_soul_materialized(agent_id)
+    assert created is True
+    assert expected.exists(), "the pool did not write the soul where soul_link looks"
+
+    # 3. A shift memory actually LANDS — the return value is the honest signal,
+    #    since a failure would degrade silently.
+    wrote = await soul_link.remember_shift(
+        str(expected), "Mandate shift 1: dispatched 2 task(s) as belt runs"
+    )
+    assert wrote is True, "the foreman's shift memory did not persist"
+
+    # 4. ...and comes back out, so the next shift's foreman can cite it.
+    recalled = await soul_link.recall_for_planning(str(expected), "mandate shift dispatched")
+    assert any("dispatched 2 task(s)" in line for line in recalled), recalled
+
+
+async def test_legacy_directory_soul_still_round_trips(mongo_db, soul_home, tmp_path):
+    """The OTHER writer branch. A pre-T-17 mandate could bind a free-form
+    ``.soul/`` PROJECT DIRECTORY, where the directory IS the soul. That shape
+    needs ``save_local``, not ``export`` — so both branches are gated and a
+    "just always use export" simplification cannot slip through."""
+    agent_id = await _seed_default_agent()
+    await agents_service.ensure_soul_materialized(agent_id)
+    archive = Path(soul_link.agent_soul_path(WS, "pocketpaw"))
+
+    # Build a DIRECTORY-shaped soul from the archive.
+    from soul_protocol import Soul
+
+    soul_dir = tmp_path / "legacy-mandate.soul"
+    soul = await Soul.awaken(archive)
+    await soul.save_local(soul_dir)
+    assert soul_dir.is_dir()
+
+    wrote = await soul_link.remember_shift(str(soul_dir), "Mandate shift 7: stood down")
+    assert wrote is True, "a legacy directory-shaped soul stopped accepting writes"
+    assert soul_dir.is_dir(), "the directory soul was clobbered into an archive"
+
+    recalled = await soul_link.recall_for_planning(str(soul_dir), "mandate shift stood down")
+    assert any("stood down" in line for line in recalled), recalled
+
+
 async def test_soul_disabled_agent_binds_no_soul(soul_home):
     """An agent with ``soul_enabled=False`` gets no soul file — the foreman
     honours the agent's own config rather than forcing a soul on it."""
