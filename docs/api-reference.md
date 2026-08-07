@@ -959,12 +959,18 @@ only this flag does, so never infer the policy from `tools` alone. The
 built-in `code` agent ships `exclusive`; every other agent defaults to
 `additive`, so existing agents behave exactly as before.
 
-Set it on `POST /agents` (create) or `PATCH /agents/{id}` (update), via
-either the flat top-level field or the nested `config` object. Both routes
-reject any value other than `additive` / `exclusive` with a `422` —
-deliberately, because the run-time gate treats *anything* that isn't
-exactly `exclusive` as additive, so an unvalidated typo would silently
-re-open the tool surface.
+Set it with the flat top-level `tool_mode` field on `POST /agents`
+(create) or `PATCH /agents/{id}` (update). The nested `config` object is
+**`PATCH`-only** — `POST /agents` has no `config` field, and a create body
+carrying one is **silently ignored**, not rejected. Sending
+`config: {"tool_mode": "exclusive"}` to create therefore yields an
+`additive` agent with no error, so use the flat field on create.
+
+Wherever it is accepted, any value other than `additive` / `exclusive` is
+rejected with a `422` — deliberately, because the run-time gate treats
+*anything* that isn't exactly `exclusive` as additive, so an unvalidated
+typo would silently re-open the tool surface. `null` is rejected too; omit
+the field instead to leave it alone.
 
 `tool_mode` is emitted in the `config` of every agent response, so a
 client can always tell a locked-down agent from an open one.

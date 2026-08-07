@@ -63,6 +63,34 @@
     "tests": ["tests/cloud/agents/test_config_wire_parity.py"]
   },
   {
+    "label": "CreateAgentRequest loses the tool_mode field entirely (settable only by raw dict — the original bug's other half)",
+    "file": "ee/pocketpaw_ee/cloud/agents/dto.py",
+    "find": "    # policy, so the legal set is pinned here rather than trusted from the wire.\n    tool_mode: str | None = Field(default=None, pattern=TOOL_MODE_PATTERN)\n",
+    "replace": "",
+    "tests": ["tests/cloud/agents/test_config_wire_parity.py"]
+  },
+  {
+    "label": "UpdateAgentRequest loses the tool_mode field entirely",
+    "file": "ee/pocketpaw_ee/cloud/agents/dto.py",
+    "find": "    # by ``_check_config_tool_mode`` so neither route can widen the surface.\n    tool_mode: str | None = Field(default=None, pattern=TOOL_MODE_PATTERN)\n",
+    "replace": "",
+    "tests": ["tests/cloud/agents/test_config_wire_parity.py"]
+  },
+  {
+    "label": "the soul_persona alias stops writing on create (an exemption that hides a real gap)",
+    "file": "ee/pocketpaw_ee/cloud/agents/service.py",
+    "find": "        soul_persona=body.persona,",
+    "replace": "        soul_persona=\"\",",
+    "tests": ["tests/cloud/agents/test_config_wire_parity.py"]
+  },
+  {
+    "label": "the soul_persona alias stops writing on update",
+    "file": "ee/pocketpaw_ee/cloud/agents/service.py",
+    "find": "    if body.persona is not None:\n        overrides[\"soul_persona\"] = body.persona\n",
+    "replace": "",
+    "tests": ["tests/cloud/agents/test_config_wire_parity.py"]
+  },
+  {
     "label": "run_core stops honouring exclusive (the wire advertises a cap the run never applies)",
     "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
     "find": "    if mode != \"exclusive\":\n        return (False, frozenset())",

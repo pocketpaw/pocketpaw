@@ -12,6 +12,17 @@
 #     sentinel values catch that; a default-valued round-trip passes either way.
 #   * tool_mode specifically: emitted on the wire, and its legal set matches what
 #     run_core._agent_tool_policy actually branches on.
+#   * SETTABILITY: every spec field is reachable through CreateAgentRequest AND
+#     UpdateAgentRequest. Readability and settability are separate halves of the
+#     original tool_mode bug — the field could be neither read nor set, and a
+#     test that only compares spec/doc/wire goes green on the settability half.
+#     One documented alias (soul_persona <- persona); the alias is exercised, not
+#     merely exempted, so it cannot become a place to hide a real gap.
+#
+# WHAT THIS DOES NOT GUARD: the FOURTH mirror leg, paw-enterprise's TypeScript
+# ``AgentConfig``, is unreachable from pytest — nothing here can stop it drifting.
+# Do not read a green run as "all four legs aligned"; it is three legs plus the
+# request DTOs.
 #
 # WHY HERE. It sits with the other agents tests but imports only ``domain`` +
 # ``dto`` (+ ``models.agent`` and ``service``'s pure mappers) — no Mongo fixture,
@@ -217,6 +228,87 @@ def test_config_dict_route_rejects_an_illegal_tool_mode():
     """
     with pytest.raises(Exception):  # pydantic ValidationError
         UpdateAgentRequest(config={"tool_mode": "anything-goes"})
+
+
+# ---------------------------------------------------------------------------
+# Settability — every spec field is reachable through the request DTOs
+# ---------------------------------------------------------------------------
+
+#: Spec field -> the request field that writes it, where the two names differ.
+#: ONLY legitimate renames belong here. Every entry is exercised by
+#: ``test_aliased_fields_actually_write_their_spec_field`` — an exemption that
+#: nothing proves is just a hole with a comment on it.
+_REQUEST_ALIASES: dict[str, str] = {
+    # The wire has called this "persona" since before the soul_* prefix existed.
+    "soul_persona": "persona",
+}
+
+
+@pytest.mark.parametrize("model", [CreateAgentRequest, UpdateAgentRequest])
+def test_every_spec_field_is_settable(model):
+    """A config field the client cannot SET is half a field.
+
+    ``tool_mode`` was readable nowhere and settable nowhere; the spec/doc/wire
+    comparison above only catches the readable half. This catches the other one,
+    so a new field cannot ship write-only-by-raw-dict the way ``tool_mode`` did.
+    """
+    available = set(model.model_fields)
+    missing = {
+        name for name in _spec_field_names() if _REQUEST_ALIASES.get(name, name) not in available
+    }
+    assert not missing, (
+        f"{model.__name__} cannot set {sorted(missing)} — add the field, or add a "
+        f"documented alias to _REQUEST_ALIASES if the wire name legitimately differs"
+    )
+
+
+def test_request_aliases_are_not_stale():
+    """Every alias names a real spec field and a real request field."""
+    spec = _spec_field_names()
+    for spec_name, wire_name in _REQUEST_ALIASES.items():
+        assert spec_name in spec, f"alias for unknown spec field {spec_name!r}"
+        assert wire_name in CreateAgentRequest.model_fields
+        assert wire_name in UpdateAgentRequest.model_fields
+        assert spec_name not in CreateAgentRequest.model_fields, (
+            f"{spec_name!r} is settable directly now — drop the alias"
+        )
+
+
+def test_aliased_fields_actually_write_their_spec_field():
+    """The alias is real: writing the wire name lands on the spec field.
+
+    Without this the alias map would be a rubber stamp — anyone could silence a
+    genuine settability gap by adding an entry.
+    """
+    created = agents_service._build_create_config(
+        CreateAgentRequest(name="A", slug="a", persona="written via the alias")
+    )
+    assert created.soul_persona == "written via the alias"
+
+    updated = agents_service._apply_update(
+        AgentConfigSpec(), UpdateAgentRequest(persona="updated via the alias")
+    )
+    assert updated.soul_persona == "updated via the alias"
+
+
+def test_create_ignores_a_nested_config_dict():
+    """``POST /agents`` has NO ``config`` field — it is PATCH-only.
+
+    Pydantic's default ``extra='ignore'`` means a create body carrying
+    ``config={"tool_mode": "exclusive"}`` is accepted and SILENTLY DROPPED: no
+    422, and the agent is created additive. A caller who believes otherwise
+    ships an open agent thinking it is locked down. Pinned so the behaviour is
+    documented rather than discovered, and so making create accept ``config``
+    later is a deliberate change that turns this test red.
+    """
+    body = CreateAgentRequest(name="A", slug="a", config={"tool_mode": "exclusive"})
+    assert not hasattr(body, "config")
+    assert body.tool_mode is None
+    assert _build_spec(body).tool_mode == "additive"
+
+
+def _build_spec(body: CreateAgentRequest) -> AgentConfigSpec:
+    return agents_service._build_create_config(body)
 
 
 def test_config_dict_route_still_accepts_legal_values():
