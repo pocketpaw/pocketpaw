@@ -1,0 +1,77 @@
+[
+  {
+    "label": "the default reverts to no-JS (config literal flipped back to False)",
+    "file": "src/pocketpaw/config.py",
+    "find": "    sites_keep_client_bundle_default: bool = Field(\n        default=True,",
+    "replace": "    sites_keep_client_bundle_default: bool = Field(\n        default=False,",
+    "tests": [
+      "tests/cloud/sites/test_keeps_client_bundle_publish.py"
+    ]
+  },
+  {
+    "label": "publish ignores the setting and hardcodes the new default (passes the feature test, fails the it-is-a-setting test)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        get_settings().sites_keep_client_bundle_default\n        if _declared is None",
+    "replace": "        True\n        if _declared is None",
+    "tests": [
+      "tests/cloud/sites/test_keeps_client_bundle_publish.py"
+    ]
+  },
+  {
+    "label": "the resolution collapses to `declared or default`, silently stripping an author's explicit opt-out",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    _declared = pocket.get(\"keepsClientBundle\")\n    keeps_client_bundle = (\n        get_settings().sites_keep_client_bundle_default\n        if _declared is None\n        else bool(_declared)\n    )",
+    "replace": "    _declared = pocket.get(\"keepsClientBundle\")\n    keeps_client_bundle = bool(_declared) or get_settings().sites_keep_client_bundle_default",
+    "tests": [
+      "tests/cloud/sites/test_keeps_client_bundle_publish.py"
+    ]
+  },
+  {
+    "label": "publish coerces the tri-state before resolving (MT-1 behaviour restored — undeclared never picks up the default)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    _declared = pocket.get(\"keepsClientBundle\")",
+    "replace": "    _declared = bool(pocket.get(\"keepsClientBundle\"))",
+    "tests": [
+      "tests/cloud/sites/test_keeps_client_bundle_publish.py"
+    ]
+  },
+  {
+    "label": "the wire DTO flattens undeclared to False, so publish can never tell it from an opt-out",
+    "file": "ee/pocketpaw_ee/cloud/pockets/dto.py",
+    "find": "        \"keepsClientBundle\": getattr(p, \"keeps_client_bundle\", None),",
+    "replace": "        \"keepsClientBundle\": bool(getattr(p, \"keeps_client_bundle\", False)),",
+    "tests": [
+      "tests/cloud/sites/test_keeps_client_bundle_publish.py",
+      "tests/ee/agent/test_sites_mcp_server/test_create_react_site.py"
+    ]
+  },
+  {
+    "label": "the doc->domain read flattens undeclared to False (the coercion furthest from publish, and the easiest to miss)",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        keeps_client_bundle=getattr(doc, \"keeps_client_bundle\", None),",
+    "replace": "        keeps_client_bundle=bool(getattr(doc, \"keeps_client_bundle\", False)),",
+    "tests": [
+      "tests/cloud/sites/test_keeps_client_bundle_publish.py",
+      "tests/ee/agent/test_sites_mcp_server/test_create_react_site.py"
+    ]
+  },
+  {
+    "label": "create_react_site records a decision the agent never made (omitted `interactive` persists False, holding react out of the default)",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
+    "find": "    _interactive_raw = args.get(\"interactive\")\n    interactive = None if _interactive_raw is None else bool(_interactive_raw)",
+    "replace": "    interactive = bool(args.get(\"interactive\"))",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_create_react_site.py"
+    ]
+  },
+  {
+    "label": "the stored field goes back to a two-state bool, so `None` is unrepresentable and every legacy pocket reads as an explicit opt-out",
+    "file": "ee/pocketpaw_ee/cloud/models/pocket.py",
+    "find": "    keeps_client_bundle: bool | None = None",
+    "replace": "    keeps_client_bundle: bool = False",
+    "tests": [
+      "tests/cloud/sites/test_keeps_client_bundle_publish.py",
+      "tests/ee/agent/test_sites_mcp_server/test_create_react_site.py"
+    ]
+  }
+]

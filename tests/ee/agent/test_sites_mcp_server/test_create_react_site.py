@@ -332,17 +332,53 @@ class TestCreateReactSiteEndToEnd:
         assert doc.keeps_client_bundle is True
 
     @pytest.mark.asyncio
-    async def test_static_site_does_not_keep_its_client_bundle(
+    async def test_omitting_interactive_records_no_declaration(
         self, beanie_test_db, recording_bus
     ) -> None:
-        """Omitting ``interactive`` leaves the flag FALSE, so a purely static page
-        ships no JavaScript. The default matters as much as the flag: a create
-        that set it unconditionally would ship a hydration bundle on every
-        brochure page."""
+        """Omitting ``interactive`` must persist ``None``, not ``False``.
+
+        Edited (feat/sites-js-by-default). This test used to assert ``False`` and
+        read "a purely static page ships no JavaScript" — that was an assertion
+        about the DEFAULT, and the default is what deliberately changed: sites now
+        keep their client bundle unless told otherwise. What survives the change
+        is the half that was never about the default — the create must not
+        FABRICATE a declaration the agent did not make. ``None`` is the honest
+        record of "the agent said nothing", and it is what lets publish apply
+        ``sites_keep_client_bundle_default`` here while still obeying an explicit
+        ``False`` (see the sibling test below).
+
+        THE MUTATION THAT BREAKS THIS: restore the old
+        ``interactive = bool(args.get("interactive"))`` coercion in
+        ``_create_react_site_handler``. The create still succeeds and every other
+        assertion in this class still passes — but the omitted case is recorded as
+        a decision, and no react site that skips the argument can ever pick up the
+        default."""
         from bson import ObjectId
         from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
 
         out = await _create(_sample_source(), name="Static")
+        assert not out.get("is_error"), out
+        pocket_id = json.loads(out["content"][0]["text"])["pocket_id"]
+
+        doc = await _PocketDoc.get(ObjectId(pocket_id))
+        assert doc is not None
+        assert doc.keeps_client_bundle is None
+
+    @pytest.mark.asyncio
+    async def test_explicit_false_is_recorded_as_an_opt_out(
+        self, beanie_test_db, recording_bus
+    ) -> None:
+        """``interactive=False`` is a real decision and must persist as ``False``.
+
+        This is the opt-out path, and it is the half of the tri-state that keeps
+        the new default from being a mandate: a brochure page that has no use for
+        a hydration bundle can still refuse one. Distinct from the test above —
+        the two inputs differ only in whether the argument was PASSED, and they
+        must land on different stored values."""
+        from bson import ObjectId
+        from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
+
+        out = await _create(_sample_source(), name="Opted out", interactive=False)
         assert not out.get("is_error"), out
         pocket_id = json.loads(out["content"][0]["text"])["pocket_id"]
 
