@@ -1,5 +1,16 @@
 # delegates.py — The browser-delegate channel for Code Mode (CD-1).
 #
+# Modified 2026-08-07 (fix/code-delegate-pooled-context): the outbound half no
+# longer decides "is anyone listening" from the SSE sink ContextVar alone. The
+# file tools that call in here run inside an in-process MCP server owned by a
+# POOLED SDK client, and that client's task is created during prewarm — before
+# the stream loop binds its sink — so they inherited a context with identity
+# and no sink, and this module refused every call with ``no_client`` while the
+# browser was attached and streaming. It now tries the ContextVar first and
+# falls back to looking the stream up by ``session_mongo_id``. The fast refusal
+# is unchanged for callers that genuinely have no browser (a CLI run, a
+# background job, a test), which is the property the park budget depends on.
+#
 # Created 2026-07-22 (feat/code-delegate-channel). Reshaped 2026-07-24
 # (feat/code-mode-file-tools): the main chat agent no longer hands a whole
 # ``task`` to a browser sub-agent — that sub-agent is gone. It now drives the

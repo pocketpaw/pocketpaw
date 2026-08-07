@@ -9,6 +9,16 @@ handles *what the agent sees*:
 * ``load_history_for_scope`` rehydrates prior chat turns from Mongo so the
   agent carries context across backend restarts and pool evictions.
 
+Changes: 2026-08-07 (fix/code-delegate-pooled-context) — added the session-keyed
+stream registry (``register_stream_sink`` / ``unregister_stream_sink`` /
+``stream_sink_for_session``) alongside the ``_sse_event_sink`` ContextVar. The
+ContextVar answers "is there a sink in MY context", which is right for an
+observability frame and wrong for a caller that WAITS on one: Code Mode's file
+tools run in a pooled SDK client's task created during prewarm, so they see
+identity and never the sink. The registry lets such a caller find the stream by
+session id instead. ``push_sse_event`` is unchanged and still a deliberate
+no-op outside a stream.
+
 Changes: 2026-07-14 (Paw Bar concierge seam, T2) — added ``ScopeKind.CONCIERGE``
 and ``_resolve_concierge``: a PUBLIC, anonymous Paw Bar concierge run resolves
 its ``ScopeContext`` from the server-authoritative spec (Site pocket + widget

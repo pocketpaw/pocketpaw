@@ -1,6 +1,19 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-08-07 (fix/code-delegate-pooled-context) — ``_drive_agent_loop`` now
+  PUBLISHES its side-channel queue under the run's ``session_mongo_id``
+  (``register_stream_sink``, beside the existing ``attach_sse_event_sink``)
+  and withdraws it in the same ``finally`` that detaches the sink. The sink
+  ContextVar alone was not reachable by Code Mode's file tools: they run in an
+  in-process MCP server owned by a POOLED SDK client whose task is created
+  during ``_prewarm_session``, i.e. before this function binds anything, so
+  they inherited a context carrying identity (bound at prewarm too, per ART-2
+  below) and no sink — and reported "no browser attached" for a browser that
+  was attached and streaming. Binding the sink at prewarm as ART-2 did for
+  identity is wrong here, because prewarm has no live stream and would publish
+  a queue belonging to no turn; publishing by session id makes the stream
+  findable regardless of which task calls the tool.
 - 2026-08-02 (PA-2, feat/prompt-assembler-seam) — ``_drive_agent_loop`` and
   ``_prewarm_session`` thread the resolved surface into ``pool.run`` /
   ``pool.prewarm`` as ``surface_preamble`` + ``surface_cache_key``. The
