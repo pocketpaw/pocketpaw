@@ -2206,8 +2206,9 @@ async def _deploy_site_doc(
         from pocketpaw_ee.sites import workers_deploy as workers_deploy_mod
 
         deploy_w = workers_deploy or workers_deploy_mod.deploy_workers
-        # HE-4: pass the engine so an html site deploys as an assets-only Worker
-        # (no server script), while ripple/svelte keep the SvelteKit-worker config.
+        # HE-4 / RX-1: pass the engine so an html OR react site deploys as an
+        # assets-only Worker (no server script — react builds, but to a prerendered
+        # static dist/), while ripple/svelte keep the SvelteKit-worker config.
         url = await deploy_w(site_id, build.project_dir, engine=engine)
     else:  # "wfp"
         cf = cloudflare or _cf_client()
