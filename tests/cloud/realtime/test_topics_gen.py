@@ -33,11 +33,14 @@ through a fixture that snapshots its mtime — that nothing here touches the
 sibling repo.
 """
 
+import importlib
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
 
+import pocketpaw_ee
 import pytest
 
 # The generator lives in THIS repo, so deriving its path from this test's own
@@ -116,7 +119,21 @@ def _render_in_clean_interpreter() -> str:
 
 
 def test_topics_gen_is_committed_state() -> None:
-    """The committed file matches what the generator would produce now."""
+    """The committed file matches what the generator would produce now.
+
+    EXPECTED RED on fix/topics-gen-collection, and deliberately not weakened.
+    That branch makes the generator collect the ten events it was missing, so
+    this now compares 146 rendered topics against a file paw-enterprise still
+    has at 136. The failure diff IS the defect, listed. It goes green when the
+    paired paw-enterprise PR lands the regenerated file on that repo's dev.
+
+    Not marked xfail: an xfail that flips to XPASS the moment another repo
+    merges is a second cross-repo timing bomb, and the whole point of this
+    thread is guards that report the wrong thing. A red test with an
+    explanation is honest; a green one that is green for a scheduling reason is
+    not. DEFAULT_OUT resolves to the working sibling checkout, which this test
+    may never write, so it cannot be made green from here.
+    """
     out = gen_topics.DEFAULT_OUT
     assert out.exists(), f"topics.gen.ts missing at {out} -- run scripts/gen_topics.py"
     # read_text normalises newlines, so this compares CONTENT and tolerates the
@@ -143,6 +160,83 @@ def test_render_covers_every_registered_event() -> None:
     assert EVENT_REGISTRY, "EVENT_REGISTRY is empty — this guard would prove nothing"
     for topic in EVENT_REGISTRY:
         assert f"  {topic!r}," in rendered, f"{topic!r} is registered but not in the output"
+
+
+# ── Completeness + determinism of the collection (fix/topics-gen-collection) ──
+# The generator renders EVENT_REGISTRY, which fills from Event.__init_subclass__
+# — so it holds only the events whose module was imported. That made the output a
+# function of the import chain rather than of the codebase, and ten events never
+# reached the frontend's Topic union at all. These two tests pin the fix from
+# both ends: nothing declared is missing, and the answer does not depend on who
+# is asking.
+
+_EVENT_TYPE_DECL = re.compile(r"""EVENT_TYPE\s*(?::\s*ClassVar\[str\]\s*)?=\s*["']([^"']+)["']""")
+
+
+def _declared_event_types() -> set[str]:
+    """Every EVENT_TYPE literal declared anywhere in the pocketpaw_ee package.
+
+    This IS a source scan, which this sprint has spent a while distrusting, so
+    it earns its place by pinning its own liveness: the test below asserts the
+    scan found known sentinels and a plausible floor. A refactor that changes
+    how EVENT_TYPE is declared therefore breaks the scan LOUDLY instead of
+    quietly finding nothing and reporting success — which is the exact failure
+    mode that made the other scans worthless.
+
+    The root is derived from the imported package, not from another parents[N]
+    walk, so it cannot drift the way the two output-path derivations did.
+    """
+    root = Path(pocketpaw_ee.__file__).resolve().parent
+    found: set[str] = set()
+    for path in root.rglob("*.py"):
+        found.update(_EVENT_TYPE_DECL.findall(path.read_text(encoding="utf-8", errors="ignore")))
+    return found
+
+
+def test_the_scan_that_checks_completeness_is_itself_alive() -> None:
+    """The completeness scan must actually be finding declarations."""
+    declared = _declared_event_types()
+    # Sentinels from three different modules: the core registry, the mandates
+    # module, and the meetings module. If a declaration-style change stops the
+    # regex matching, at least one of these disappears and this fails.
+    assert "pocket.created" in declared, "scan lost the core events"
+    assert "belt_plan" in declared, "scan lost the mandates events"
+    assert "meeting.transcript_ready" in declared, "scan lost the meetings events"
+    # A floor, so a scan that silently degrades to a handful of matches fails
+    # instead of vacuously passing the completeness test below.
+    assert len(declared) >= 140, f"scan found only {len(declared)} EVENT_TYPE declarations"
+
+
+def test_every_declared_event_reaches_the_generated_file() -> None:
+    """No event declared in the codebase is missing from the render.
+
+    This is the guard for the defect: the generator collects by importing, so an
+    event module nobody imports is invisible to it. Declaring events in a NEW
+    module fails here until that module is imported in gen_topics.py.
+    """
+    rendered = gen_topics.render()
+    missing = sorted(t for t in _declared_event_types() if f"  {t!r}," not in rendered)
+    assert not missing, (
+        f"{len(missing)} declared event(s) never reach topics.gen.ts: {missing}. "
+        "Import the module that declares them in scripts/gen_topics.py."
+    )
+
+
+def test_collection_does_not_depend_on_what_the_process_imported() -> None:
+    """The render is the same in a loaded process and in a clean one.
+
+    Before the explicit imports, these two differed: a process that had imported
+    the mandates or meetings modules rendered more topics than the generator's
+    own minimal chain did. Importing them here FORCES the divergence to exist if
+    collection is still lazy, so this does not depend on which other test
+    modules ran first.
+    """
+    importlib.import_module("pocketpaw_ee.cloud.mandates.events")
+    importlib.import_module("pocketpaw_ee.cloud.meetings.events")
+    assert gen_topics.render() == _render_in_clean_interpreter(), (
+        "the generated topics depend on what the calling process imported — "
+        "collection in scripts/gen_topics.py is not explicit"
+    )
 
 
 def test_main_writes_where_it_is_told(tmp_path: Path) -> None:

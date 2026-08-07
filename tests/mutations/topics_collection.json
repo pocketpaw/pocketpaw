@@ -1,0 +1,40 @@
+[
+  {
+    "label": "collection: the mandates events module is no longer imported, so belt_plan and five mandate.* vanish from the output",
+    "file": "scripts/gen_topics.py",
+    "find": "import pocketpaw_ee.cloud.mandates.events  # noqa: F401  (import registers the events)",
+    "replace": "",
+    "tests": [
+      "tests/cloud/realtime/test_topics_gen.py::test_every_declared_event_reaches_the_generated_file",
+      "tests/cloud/realtime/test_topics_gen.py::test_collection_does_not_depend_on_what_the_process_imported"
+    ]
+  },
+  {
+    "label": "collection: the meetings events module is no longer imported, so four meeting.* vanish from the output",
+    "file": "scripts/gen_topics.py",
+    "find": "import pocketpaw_ee.cloud.meetings.events  # noqa: F401  (import registers the events)",
+    "replace": "",
+    "tests": [
+      "tests/cloud/realtime/test_topics_gen.py::test_every_declared_event_reaches_the_generated_file",
+      "tests/cloud/realtime/test_topics_gen.py::test_collection_does_not_depend_on_what_the_process_imported"
+    ]
+  },
+  {
+    "label": "collection: the completeness scan silently matches nothing (the blindness class this whole thread is about)",
+    "file": "tests/cloud/realtime/test_topics_gen.py",
+    "find": "_EVENT_TYPE_DECL = re.compile(r\"\"\"EVENT_TYPE\\s*(?::\\s*ClassVar\\[str\\]\\s*)?=\\s*[\"']([^\"']+)[\"']\"\"\")",
+    "replace": "_EVENT_TYPE_DECL = re.compile(r\"\"\"EVENT_TYPE_RENAMED\\s*=\\s*[\"']([^\"']+)[\"']\"\"\")",
+    "tests": [
+      "tests/cloud/realtime/test_topics_gen.py::test_the_scan_that_checks_completeness_is_itself_alive"
+    ]
+  },
+  {
+    "label": "collection: the scan reads the wrong package root, so it finds no declarations to check",
+    "file": "tests/cloud/realtime/test_topics_gen.py",
+    "find": "    root = Path(pocketpaw_ee.__file__).resolve().parent",
+    "replace": "    root = Path(pocketpaw_ee.__file__).resolve().parent / \"cloud\" / \"composio\"",
+    "tests": [
+      "tests/cloud/realtime/test_topics_gen.py::test_the_scan_that_checks_completeness_is_itself_alive"
+    ]
+  }
+]

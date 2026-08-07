@@ -45,17 +45,43 @@ independent of whatever else the test session imported. The old guard got this
 isolation by accident, from running the script as a subprocess; losing it silently
 would have made the check order-dependent.
 
-(That the registry under-counts at all is a real defect in what this script
-generates — measured 2026-08-07: 136 topics here versus 146 after importing the
-whole ``pocketpaw_ee`` tree, the difference being the belt, mandate and meeting
-events. Fixing it changes the generated file in another repo, so it is filed as a
-follow-up rather than smuggled into a test-guard PR.)
+Updated 2026-08-07 (fix/topics-gen-collection). Collection is now EXPLICIT — see
+the imports below. The script used to render whatever its own import chain
+happened to register, which was 136 of the 146 events that exist; ten were
+missing from the frontend's ``Topic`` union entirely (``belt_plan``, five
+``mandate.*``, four ``meeting.*``). Two imports fix it, and the completeness test
+in ``tests/cloud/realtime/test_topics_gen.py`` fails if a declared event is ever
+missing from the render again.
+
+A full ``pkgutil.walk_packages`` over ``pocketpaw_ee`` would also work and was
+rejected: it takes 29 seconds, and 8 modules raise on import (the vendored oasis
+substrate, a worker), so it would need failures swallowed — which is how events
+went missing in the first place. Two named imports plus a test that checks every
+declared event reached the output is cheaper and fails louder.
 """
 
 import sys
 from pathlib import Path
 
+import pocketpaw_ee.cloud.mandates.events  # noqa: F401  (import registers the events)
+import pocketpaw_ee.cloud.meetings.events  # noqa: F401  (import registers the events)
 from pocketpaw_ee.cloud._core.realtime.events import EVENT_REGISTRY
+
+# COLLECTION IS EXPLICIT, and it has to be. ``EVENT_REGISTRY`` fills from
+# ``Event.__init_subclass__``, so importing the registry module alone yields only
+# the events declared in it. The two ``pocketpaw_ee.cloud.*.events`` imports above
+# are what add the ten that were simply absent from the generated file, and that
+# the frontend's ``Topic`` union never had: ``belt_plan`` and five ``mandate.*``
+# from the first, four ``meeting.*`` from the second.
+#
+# Those imports look unused. They are not — importing the module is what registers
+# its events, which is why they carry ``noqa: F401``. Deleting one silently
+# shrinks the generated file.
+#
+# ADDING AN EVENT MODULE: if you declare events in a new module, import it here.
+# ``test_every_declared_event_reaches_the_generated_file`` fails until you do,
+# naming the topic it could not find — nobody should have to learn this rule by
+# reading this comment.
 
 #: The generated file, in the paw-enterprise sibling repo. The single source of
 #: truth for this location — import it, never re-derive it.
@@ -102,11 +128,20 @@ def main(out: Path | None = None) -> Path:
 
 
 if __name__ == "__main__":
-    if "--print" in sys.argv[1:]:
+    args = sys.argv[1:]
+    if "--print" in args:
         # Render to stdout and write nothing. The staleness guard uses this so it
         # renders in a CLEAN interpreter (see the module docstring) without
         # touching a tracked file in the paw-enterprise repo.
+        #
+        # NOT a substitute for the write path: on Windows, text-mode stdout
+        # translates to CRLF, so `gen_topics.py --print > file` produces
+        # different bytes than `main()` does. Redirecting this is not a
+        # supported way to generate the file — pass a path instead.
         sys.stdout.write(render())
     else:
-        written = main()
+        # An explicit destination, for regenerating into a checkout that is not
+        # the sibling working copy DEFAULT_OUT resolves to.
+        positional = [a for a in args if not a.startswith("-")]
+        written = main(Path(positional[0]) if positional else None)
         print(f"wrote {len(EVENT_REGISTRY)} topics -> {written}")

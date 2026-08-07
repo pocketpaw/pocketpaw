@@ -5,7 +5,7 @@
     "find": "    Path(__file__).resolve().parents[2] / \"paw-enterprise/src/lib/core/shared/topics.gen.ts\"",
     "replace": "    Path(__file__).resolve().parents[3] / \"paw-enterprise/src/lib/core/shared/topics.gen.ts\"",
     "tests": [
-      "tests/cloud/realtime/test_topics_gen.py"
+      "tests/cloud/realtime/test_topics_gen.py::test_default_out_points_at_the_generated_file"
     ]
   },
   {
@@ -14,16 +14,17 @@
     "find": "    topics = sorted(EVENT_REGISTRY.keys())",
     "replace": "    topics = sorted(EVENT_REGISTRY.keys())[1:]",
     "tests": [
-      "tests/cloud/realtime/test_topics_gen.py"
+      "tests/cloud/realtime/test_topics_gen.py::test_render_covers_every_registered_event",
+      "tests/cloud/realtime/test_topics_gen.py::test_every_declared_event_reaches_the_generated_file"
     ]
   },
   {
-    "label": "topics: the rendered body drifts from the committed file",
+    "label": "topics: the rendered body drifts from the committed file (ONLY witness is the committed-state test, which is RED on this branch by design — verified caught on fix/test-guard-blindness where it is green)",
     "file": "scripts/gen_topics.py",
     "find": "    lines.append(\"] as const;\")",
     "replace": "    lines.append(\"] as const\")",
     "tests": [
-      "tests/cloud/realtime/test_topics_gen.py"
+      "tests/cloud/realtime/test_topics_gen.py::test_topics_gen_is_committed_state"
     ]
   },
   {
@@ -32,26 +33,16 @@
     "find": "    target = Path(out) if out is not None else DEFAULT_OUT",
     "replace": "    target = (Path(out).parent / \"elsewhere.ts\") if out is not None else DEFAULT_OUT",
     "tests": [
-      "tests/cloud/realtime/test_topics_gen.py"
+      "tests/cloud/realtime/test_topics_gen.py::test_main_writes_where_it_is_told"
     ]
   },
   {
-    "label": "topics: a test in the guard module writes the real file in the sibling repo again (the operational defect this rewrite removed)",
+    "label": "topics: a test in the guard module writes the real file in the sibling repo again (the operational defect the rewrite removed)",
     "file": "tests/cloud/realtime/test_topics_gen.py",
     "find": "    target = tmp_path / \"topics.gen.ts\"\n    gen_topics.main(target)\n    raw = target.read_bytes()",
     "replace": "    target = tmp_path / \"topics.gen.ts\"\n    gen_topics.main(target)\n    gen_topics.main()\n    raw = target.read_bytes()",
     "tests": [
-      "tests/cloud/realtime/test_topics_gen.py"
-    ]
-  },
-  {
-    "label": "topics: the staleness check renders IN-PROCESS, so it depends on what other tests imported (runs the composio suite first to create the pollution)",
-    "file": "tests/cloud/realtime/test_topics_gen.py",
-    "find": "    assert committed == _render_in_clean_interpreter(), (",
-    "replace": "    assert committed == gen_topics.render(), (",
-    "tests": [
-      "tests/cloud/composio/",
-      "tests/cloud/realtime/test_topics_gen.py"
+      "tests/cloud/realtime/test_topics_gen.py::test_generated_bytes_are_lf_on_every_platform"
     ]
   },
   {
@@ -60,7 +51,7 @@
     "find": "    target.write_text(render(), encoding=\"utf-8\", newline=\"\\n\")",
     "replace": "    target.write_text(render(), encoding=\"utf-8\")",
     "tests": [
-      "tests/cloud/realtime/test_topics_gen.py"
+      "tests/cloud/realtime/test_topics_gen.py::test_generated_bytes_are_lf_on_every_platform"
     ]
   }
 ]

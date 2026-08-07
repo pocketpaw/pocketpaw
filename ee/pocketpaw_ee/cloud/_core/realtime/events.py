@@ -1,6 +1,19 @@
 # events.py — Realtime Event dataclass registry for the cloud bus.
 # Each subclass pins an EVENT_TYPE literal that routes both the WebSocket
 # fan-out and any in-process bus subscribers.
+# Updated: 2026-08-07 (fix/topics-gen-collection) — REMOVED three dead duplicate
+#   classes: MeetingScheduled, MeetingStarted and MeetingCancelled were declared
+#   both here and in ``pocketpaw_ee.cloud.meetings.events``, each pair claiming the
+#   same EVENT_TYPE. EVENT_REGISTRY is a dict keyed on that literal, so whichever
+#   module imported LAST won and ``rebuild_event`` reconstructed a different class
+#   depending on import order. The copies here were the dead half — every emitter
+#   and test imports the documented classes from ``cloud.meetings.events``, and
+#   nothing imported these names from this module.
+#   This was ALREADY failing ``test_registry_includes_every_subclass_with_event_type``
+#   on dev whenever tests/cloud/meetings ran in the same session as
+#   tests/cloud/realtime; it looked green in narrower runs only because no session
+#   had imported both modules. ``MeetingUpdated`` stays — this is its only
+#   declaration. See the comment at the class for the full account.
 # Updated: 2026-05-22 (RFC 05 M2b.2) — added PocketOutcomeEvent
 #   (type="pocket.outcome"), emitted after a successful write action whose
 #   binding declared a named `outcome`. Feeds the outcomes JSONL ledger.
@@ -669,25 +682,27 @@ class CallParticipantLeft(Event):
     EVENT_TYPE: ClassVar[str] = "call.participant_left"
 
 
-# Meetings — scheduled group meeting lifecycle
-@dataclass
-class MeetingScheduled(Event):
-    EVENT_TYPE: ClassVar[str] = "meeting.scheduled"
-
-
+# Meetings — scheduled group meeting lifecycle.
+#
+# ONLY ``meeting.updated`` lives here. ``MeetingScheduled``, ``MeetingStarted``
+# and ``MeetingCancelled`` were declared here AND in
+# ``pocketpaw_ee.cloud.meetings.events``, both claiming the same EVENT_TYPE — so
+# ``EVENT_REGISTRY`` mapped each of those three to whichever module was imported
+# LAST, and ``rebuild_event`` reconstructed a different class depending on import
+# order. The stubs here were the dead half: every emitter and every test imports
+# the documented classes from ``cloud.meetings.events`` (livekit/service.py,
+# meetings/service.py, meetings/scheduling/service.py, push listeners), and
+# nothing anywhere imported these names from this module.
+#
+# The collision was invisible until 2026-08-07 because no test session had ever
+# imported both modules — ``test_registry_includes_every_subclass_with_event_type``
+# asserts exactly this invariant and passed only for want of an import. Removed
+# while fixing the topics generator, which imports the meetings module and so
+# made the conflict real. ``meeting.updated`` stays because this is its only
+# declaration; ``cloud.meetings.events`` has no counterpart for it.
 @dataclass
 class MeetingUpdated(Event):
     EVENT_TYPE: ClassVar[str] = "meeting.updated"
-
-
-@dataclass
-class MeetingCancelled(Event):
-    EVENT_TYPE: ClassVar[str] = "meeting.cancelled"
-
-
-@dataclass
-class MeetingStarted(Event):
-    EVENT_TYPE: ClassVar[str] = "meeting.started"
 
 
 # Foresight — RFC 08 scenario runs. ``ForesightRunCreated`` fires when a
