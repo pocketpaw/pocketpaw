@@ -29,6 +29,15 @@
 # build. Its id rides ``SITES_TOOL_IDS`` so the per-surface allowlist picks it up
 # automatically. Opt-in — the default marketing brain stays create_landing_site
 # (ripple); the default flip to html is HE-12.
+#
+# Updated 2026-08-07 (RX-2 — the agent can select the react engine): the
+# ``create_react_site`` tool also registers on this SAME server. A react site is a
+# {path: contents} map of hand-written React files; publish runs a Vite SSG build
+# that prerenders it to a static ``dist/`` and deploys it assets-only. Its id
+# rides ``SITES_TOOL_IDS``, so the per-surface allowlist picks it up automatically
+# — which is what makes the /sites react-create surface able to CALL the tool its
+# preamble names. Opt-in: the description steers the agent here only on an
+# explicit React request or a genuine interactivity need.
 """Agent-side MCP surface for publishing a PocketPaw pocket as a Paw Site.
 
 A site is published FROM a pocket: the chat agent identifies the pocket to
@@ -87,6 +96,10 @@ CREATE_DYNAMIC_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_dynamic_site"
 # sites_create.py). An html site is a raw {path: contents} HTML/CSS/JS map with no
 # framework; publish materializes it and skips the Node build.
 CREATE_HTML_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_html_site"
+# The react-track create tool (RX-2) also registers on this SAME server (see
+# sites_create.py). A react site is a {path: contents} map of hand-written React
+# files; publish runs a Vite SSG build that prerenders it to a static dist/.
+CREATE_REACT_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_react_site"
 
 SITES_TOOL_IDS = (
     PUBLISH_TOOL_ID,
@@ -95,6 +108,7 @@ SITES_TOOL_IDS = (
     EDIT_SVELTE_COMPONENT_TOOL_ID,
     CREATE_DYNAMIC_SITE_TOOL_ID,
     CREATE_HTML_SITE_TOOL_ID,
+    CREATE_REACT_SITE_TOOL_ID,
 )
 
 
@@ -263,6 +277,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
         make_create_dynamic_site_tool,
         make_create_html_site_tool,
         make_create_landing_site_tool,
+        make_create_react_site_tool,
         make_create_svelte_site_tool,
         make_edit_svelte_component_tool,
     )
@@ -282,6 +297,11 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     # create_html_site → publish hops sit on one allowlisted server. Opt-in: the
     # tool steers the agent to it only on an explicit raw-HTML request.
     create_html_site = make_create_html_site_tool(tool)
+    # The react-track create tool (RX-2) — same server, so the author-source-map →
+    # create_react_site → publish hops sit on one allowlisted server. Opt-in like
+    # html: the tool steers the agent to it only on an explicit React request or a
+    # genuine interactivity need.
+    create_react_site = make_create_react_site_tool(tool)
 
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
@@ -293,6 +313,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
             edit_svelte_component,
             create_dynamic_site,
             create_html_site,
+            create_react_site,
         ],
     )
     return SERVER_NAME, server
@@ -302,6 +323,7 @@ __all__ = [
     "CREATE_DYNAMIC_SITE_TOOL_ID",
     "CREATE_HTML_SITE_TOOL_ID",
     "CREATE_LANDING_SITE_TOOL_ID",
+    "CREATE_REACT_SITE_TOOL_ID",
     "CREATE_SVELTE_SITE_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "PUBLISH_TOOL_ID",
