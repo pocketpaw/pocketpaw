@@ -5,6 +5,19 @@ agent backend calls. It resolves the active user from per-stream
 contextvars, builds a Composio session via the documented provider for
 that backend, returns ``session.tools()``. Caching, fail-soft on errors,
 and namespace correctness are all tested here.
+
+Updated 2026-08-07 (fix/test-guard-blindness): the pocket-specialist regression
+guard is now BEHAVIOURAL. ``test_deep_agents_skips_composio_on_pocket_session``
+read ``deep_agents.py`` as text and asserted two substrings existed somewhere in
+it, while claiming in its docstring that one CONTAINED the other — a claim no
+assertion checked, and one that an ordinary refactor could falsify while leaving
+both substrings in place. It is replaced by
+``test_deep_agents_withholds_composio_from_pocket_sessions``, which compiles the
+agent twice and asserts on the tool list each mode actually receives. See that
+test's docstring for the specific refactor that used to slip through.
+``test_pockets_prompts_has_no_composio_imports`` below is still a text scan; it
+asserts the ABSENCE of an import, which is a property source text can honestly
+answer, so it is left alone.
 """
 
 from __future__ import annotations
@@ -436,18 +449,99 @@ def test_pockets_prompts_has_no_composio_imports() -> None:
     assert "build_tools_for_backend" not in source
 
 
-def test_deep_agents_skips_composio_on_pocket_session() -> None:
-    """The deep_agents backend gates Composio injection behind
-    ``not is_pocket_session`` — pocket runs are surgical and exclude
-    Composio. Static check guards against regressions."""
-    path = Path(__file__).resolve().parents[3] / "src" / "pocketpaw" / "agents" / "deep_agents.py"
-    source = path.read_text(encoding="utf-8")
-    # The injection block must live inside an ``if not is_pocket_session:`` guard.
-    assert "if not is_pocket_session:" in source
-    # And the call must go through the ``pocketpaw.composio_tools`` entry-point
-    # helper with the right backend key — the OSS core never imports the EE
-    # composio package directly.
-    assert 'composio_tools_for("deep_agents"' in source
+def _install_fake_deepagents(
+    monkeypatch: pytest.MonkeyPatch, captured: list[dict[str, object]]
+) -> None:
+    """Stand in for the optional ``deepagents`` package and record its kwargs.
+
+    ``deepagents`` is an extra (``pocketpaw[deep-agents]``) and is not installed
+    in the dev environment, so the compiled-graph path is unreachable without
+    this. Recording ``create_deep_agent``'s kwargs is what makes the assertion
+    behavioural: ``kwargs["tools"]`` is the exact tool surface the pocket
+    specialist would run with.
+    """
+    module = types.ModuleType("deepagents")
+
+    def create_deep_agent(**kwargs: object) -> object:
+        captured.append(kwargs)
+        return object()
+
+    module.create_deep_agent = create_deep_agent  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "deepagents", module)
+
+
+def test_deep_agents_withholds_composio_from_pocket_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pocket session's tool surface must not contain Composio tools.
+
+    REWRITTEN 2026-08-07 (fix/test-guard-blindness). This replaces a static
+    check that read ``deep_agents.py`` as TEXT and asserted two substrings
+    existed somewhere in it: ``"if not is_pocket_session:"`` and
+    ``'composio_tools_for("deep_agents"'``. Nothing tied the two together, while
+    the docstring and the inline comment both claimed the call lived INSIDE the
+    guard. There is a second ``is_pocket_session`` conditional a few lines below
+    (the shell/fs tool strip), so an ordinary tidy-up — hoist the call beside
+    ``all_tools`` and leave the guard wrapping only its log line — keeps both
+    substrings present, keeps the test green, and hands the pocket specialist
+    the exact Composio surface this test exists to withhold.
+
+    So: build the tool list twice off the one input that decides it (whether
+    ``<pocket-scope>`` is in the instructions) and assert the difference.
+
+    Two assertions, because the guard buys two different things. The tools must
+    not reach the agent, AND ``composio_tools_for`` must not be CALLED on a
+    pocket run — it builds a per-user Composio session over the network, which
+    is a cost the pocket path should never pay even if the result were dropped.
+    """
+    captured: list[dict[str, object]] = []
+    _install_fake_deepagents(monkeypatch, captured)
+
+    calls: list[str] = []
+    gmail = _named_tool("gmail_send_email")
+
+    def _composio_tools_for(backend: str, settings: object = None) -> list[object]:
+        calls.append(backend)
+        return [gmail]
+
+    from pocketpaw.agents import deep_agents as deep_agents_mod
+    from pocketpaw.agents import tool_bridge
+
+    # The guard imports this lazily, inside the branch, so patching the source
+    # module is what a real call would resolve.
+    monkeypatch.setattr(tool_bridge, "composio_tools_for", _composio_tools_for)
+
+    # _env_file=None: this box's .env must not decide what a guard test sees.
+    backend = deep_agents_mod.DeepAgentsBackend(Settings(_env_file=None))
+    # _build_custom_tools early-returns this cache, so the tool list under test
+    # is exactly what the Composio branch contributes and nothing else.
+    backend._custom_tools = []
+    # Unrelated to this guard: the tail of _get_or_create_agent patches a
+    # provider-specific message serializer. "google" matches no branch, so no
+    # optional langchain package gets imported here.
+    monkeypatch.setattr(backend, "_parse_provider_model", lambda: ("google", "gemini-2.0-flash"))
+
+    backend._get_or_create_agent(
+        model=object(), instructions="Help the user plan a trip.", mcp_tools=[]
+    )
+    backend._get_or_create_agent(
+        model=object(),
+        instructions="<pocket-scope>pocket_id=abc123</pocket-scope> Edit the widget.",
+        mcp_tools=[],
+    )
+
+    assert len(captured) == 2, "both builds must compile a graph (the cache key includes the mode)"
+    plain_tools = list(captured[0]["tools"])  # type: ignore[call-overload]
+    pocket_tools = list(captured[1]["tools"])  # type: ignore[call-overload]
+
+    assert [getattr(t, "name", None) for t in plain_tools] == ["gmail_send_email"], (
+        "a non-pocket session must receive the Composio tools"
+    )
+    assert pocket_tools == [], "a pocket session must receive NO Composio tools"
+    assert calls == ["deep_agents"], (
+        "composio_tools_for must be called once (the non-pocket build) and never "
+        "on a pocket build — building the session is itself the cost being avoided"
+    )
 
 
 # ---------------------------------------------------------------------------

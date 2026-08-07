@@ -1,0 +1,38 @@
+[
+  {
+    "label": "composio: the call is hoisted out of the guard, which keeps only its log line (the refactor the old text-scan could not see)",
+    "file": "src/pocketpaw/agents/deep_agents.py",
+    "find": "        if not is_pocket_session:\n            from pocketpaw.agents.tool_bridge import composio_tools_for\n\n            composio_tools = composio_tools_for(\"deep_agents\", self.settings)\n            if composio_tools:\n                all_tools = all_tools + list(composio_tools)\n                logger.info(\"Composio: appended %d langgraph tools\", len(composio_tools))",
+    "replace": "        from pocketpaw.agents.tool_bridge import composio_tools_for\n\n        composio_tools = composio_tools_for(\"deep_agents\", self.settings)\n        if composio_tools:\n            all_tools = all_tools + list(composio_tools)\n        if not is_pocket_session:\n            logger.info(\"Composio: appended %d langgraph tools\", len(composio_tools))",
+    "tests": [
+      "tests/cloud/composio/test_providers.py"
+    ]
+  },
+  {
+    "label": "composio: the guard is inverted — pocket sessions get the tools and everyone else does not",
+    "file": "src/pocketpaw/agents/deep_agents.py",
+    "find": "        if not is_pocket_session:\n            from pocketpaw.agents.tool_bridge import composio_tools_for",
+    "replace": "        if is_pocket_session:\n            from pocketpaw.agents.tool_bridge import composio_tools_for",
+    "tests": [
+      "tests/cloud/composio/test_providers.py"
+    ]
+  },
+  {
+    "label": "composio: the guard is removed entirely — every session gets the tools",
+    "file": "src/pocketpaw/agents/deep_agents.py",
+    "find": "        if not is_pocket_session:\n            from pocketpaw.agents.tool_bridge import composio_tools_for\n\n            composio_tools = composio_tools_for(\"deep_agents\", self.settings)",
+    "replace": "        if True:\n            from pocketpaw.agents.tool_bridge import composio_tools_for\n\n            composio_tools = composio_tools_for(\"deep_agents\", self.settings)",
+    "tests": [
+      "tests/cloud/composio/test_providers.py"
+    ]
+  },
+  {
+    "label": "composio: the pocket-session signal stops reading the prompt, so nothing is ever a pocket session",
+    "file": "src/pocketpaw/agents/deep_agents.py",
+    "find": "        is_pocket_session = \"<pocket-scope>\" in (instructions or \"\")",
+    "replace": "        is_pocket_session = False",
+    "tests": [
+      "tests/cloud/composio/test_providers.py"
+    ]
+  }
+]

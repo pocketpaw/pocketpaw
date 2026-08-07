@@ -1,0 +1,66 @@
+[
+  {
+    "label": "topics: DEFAULT_OUT is derived one level off, so the guard reads a path nothing writes",
+    "file": "scripts/gen_topics.py",
+    "find": "    Path(__file__).resolve().parents[2] / \"paw-enterprise/src/lib/core/shared/topics.gen.ts\"",
+    "replace": "    Path(__file__).resolve().parents[3] / \"paw-enterprise/src/lib/core/shared/topics.gen.ts\"",
+    "tests": [
+      "tests/cloud/realtime/test_topics_gen.py"
+    ]
+  },
+  {
+    "label": "topics: a registered event is dropped from the rendered output",
+    "file": "scripts/gen_topics.py",
+    "find": "    topics = sorted(EVENT_REGISTRY.keys())",
+    "replace": "    topics = sorted(EVENT_REGISTRY.keys())[1:]",
+    "tests": [
+      "tests/cloud/realtime/test_topics_gen.py"
+    ]
+  },
+  {
+    "label": "topics: the rendered body drifts from the committed file",
+    "file": "scripts/gen_topics.py",
+    "find": "    lines.append(\"] as const;\")",
+    "replace": "    lines.append(\"] as const\")",
+    "tests": [
+      "tests/cloud/realtime/test_topics_gen.py"
+    ]
+  },
+  {
+    "label": "topics: main() writes somewhere other than the path it was given",
+    "file": "scripts/gen_topics.py",
+    "find": "    target = Path(out) if out is not None else DEFAULT_OUT",
+    "replace": "    target = (Path(out).parent / \"elsewhere.ts\") if out is not None else DEFAULT_OUT",
+    "tests": [
+      "tests/cloud/realtime/test_topics_gen.py"
+    ]
+  },
+  {
+    "label": "topics: a test in the guard module writes the real file in the sibling repo again (the operational defect this rewrite removed)",
+    "file": "tests/cloud/realtime/test_topics_gen.py",
+    "find": "    target = tmp_path / \"topics.gen.ts\"\n    gen_topics.main(target)\n    raw = target.read_bytes()",
+    "replace": "    target = tmp_path / \"topics.gen.ts\"\n    gen_topics.main(target)\n    gen_topics.main()\n    raw = target.read_bytes()",
+    "tests": [
+      "tests/cloud/realtime/test_topics_gen.py"
+    ]
+  },
+  {
+    "label": "topics: the staleness check renders IN-PROCESS, so it depends on what other tests imported (runs the composio suite first to create the pollution)",
+    "file": "tests/cloud/realtime/test_topics_gen.py",
+    "find": "    assert committed == _render_in_clean_interpreter(), (",
+    "replace": "    assert committed == gen_topics.render(), (",
+    "tests": [
+      "tests/cloud/composio/",
+      "tests/cloud/realtime/test_topics_gen.py"
+    ]
+  },
+  {
+    "label": "topics: the newline pin is dropped, so the bytes follow os.linesep again (CATCHABLE ON WINDOWS ONLY — os.linesep is already LF elsewhere)",
+    "file": "scripts/gen_topics.py",
+    "find": "    target.write_text(render(), encoding=\"utf-8\", newline=\"\\n\")",
+    "replace": "    target.write_text(render(), encoding=\"utf-8\")",
+    "tests": [
+      "tests/cloud/realtime/test_topics_gen.py"
+    ]
+  }
+]
