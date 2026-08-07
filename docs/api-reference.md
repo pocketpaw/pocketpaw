@@ -944,6 +944,31 @@ the run). The agent set is UNIONed with any surface/entity skill subset, so
 both apply together. Per-agent MCP servers are **not** part of this — that
 is a separate, deferred slice.
 
+### Per-agent tool policy (`tool_mode`)
+
+An agent's `config.tools` can mean two different things, and `tool_mode`
+is what says which:
+
+| Value | Meaning |
+|-------|---------|
+| `additive` (default) | `tools` is UNIONed with the universal grant the run already gets. |
+| `exclusive` | `tools` is the run's **entire** MCP surface. The universal pocket / widget / atlas grant is suppressed, and this overrides any surface allow-list. |
+
+A non-empty `tools` list does **not** by itself make an agent exclusive —
+only this flag does, so never infer the policy from `tools` alone. The
+built-in `code` agent ships `exclusive`; every other agent defaults to
+`additive`, so existing agents behave exactly as before.
+
+Set it on `POST /agents` (create) or `PATCH /agents/{id}` (update), via
+either the flat top-level field or the nested `config` object. Both routes
+reject any value other than `additive` / `exclusive` with a `422` —
+deliberately, because the run-time gate treats *anything* that isn't
+exactly `exclusive` as additive, so an unvalidated typo would silently
+re-open the tool surface.
+
+`tool_mode` is emitted in the `config` of every agent response, so a
+client can always tell a locked-down agent from an open one.
+
 ## Pockets — Catalog-as-Allowlist Ingest Gate
 
 Increment 5. The Ripple renderer has a **closed widget registry**: a
