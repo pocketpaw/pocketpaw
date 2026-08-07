@@ -43,5 +43,50 @@
     "tests": [
       "tests/ee/sites/test_screenshot_capture.py"
     ]
+  },
+  {
+    "label": "readiness: the capture fires at a page that is not serving yet",
+    "file": "ee/pocketpaw_ee/sites/screenshot.py",
+    "find": "    if not await wait_until_serving(url, delays=ready_delays):\n        logger.warning(\n            \"sites.screenshot: %s was not serving within the readiness budget — no \"\n            \"preview captured for site %s (the card keeps its previous image; \"\n            \"POST /sites/%s/preview-refresh re-tries on demand)\",\n            url,\n            getattr(site, \"id\", \"?\"),\n            getattr(site, \"id\", \"?\"),\n        )\n        return \"\"",
+    "replace": "    pass",
+    "tests": [
+      "tests/ee/sites/test_capture_readiness.py"
+    ]
+  },
+  {
+    "label": "readiness: a 404 from the edge reads as a page worth photographing",
+    "file": "ee/pocketpaw_ee/sites/screenshot.py",
+    "find": "                return resp.status_code // 100 == 2",
+    "replace": "                return resp.status_code is not None",
+    "tests": [
+      "tests/ee/sites/test_capture_readiness.py"
+    ]
+  },
+  {
+    "label": "readiness: the gate gives up after one look instead of polling",
+    "file": "ee/pocketpaw_ee/sites/screenshot.py",
+    "find": "    for delay in schedule:\n        await asyncio.sleep(delay)\n        if await _url_is_serving(_shot_url(url), transport=transport):\n            return True\n    return False",
+    "replace": "    return False",
+    "tests": [
+      "tests/ee/sites/test_capture_readiness.py"
+    ]
+  },
+  {
+    "label": "readiness: a probe is answered from the edge's pre-deploy cache",
+    "file": "ee/pocketpaw_ee/sites/screenshot.py",
+    "find": "    if await _url_is_serving(_shot_url(url), transport=transport):\n        return True\n    for delay in schedule:\n        await asyncio.sleep(delay)\n        if await _url_is_serving(_shot_url(url), transport=transport):\n            return True",
+    "replace": "    if await _url_is_serving(url, transport=transport):\n        return True\n    for delay in schedule:\n        await asyncio.sleep(delay)\n        if await _url_is_serving(url, transport=transport):\n            return True",
+    "tests": [
+      "tests/ee/sites/test_capture_readiness.py"
+    ]
+  },
+  {
+    "label": "readiness: a manual refresh blames the site instead of the deploy",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        if not await wait_until_serving(url, delays=_READY_DELAYS_MANUAL):\n            raise ValidationError(\n                \"sites.preview_not_serving\",\n                \"The site isn't answering yet. A deploy can take a moment to go \"\n                \"live at the edge — try the refresh again shortly.\",\n            )",
+    "replace": "        pass",
+    "tests": [
+      "tests/ee/sites/test_capture_readiness.py"
+    ]
   }
 ]

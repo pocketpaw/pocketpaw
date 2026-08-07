@@ -26,11 +26,15 @@
 #
 # SOURCE — the site's own live URL. Unlike kb_ingest, which reads the pocket
 # precisely to avoid a server-side fetch of a customer hostname, a screenshot has
-# no other source: the point is a picture of the page as deployed. The fetch does
-# not happen on our network either — Cloudflare's browser does it — so this is
-# not the SSRF surface ``url_crawler`` had to be hardened against. A site with no
-# url (a WfP deploy with PAW_CF_SITES_DOMAIN unset) is skipped rather than
-# guessed at.
+# no other source: the point is a picture of the page as deployed. The RENDER does
+# not happen on our network — Cloudflare's browser does it — and the readiness
+# probe added below, which does, addresses a hostname WE composed
+# (``<site_id>.<PAW_CF_SITES_DOMAIN>``, or the local-mode base) rather than one a
+# customer supplied, so neither is the SSRF surface ``url_crawler`` had to be
+# hardened against. Every write of ``Site.url`` in ``sites.service`` builds it from
+# the site id plus operator configuration; a connected custom domain is appended to
+# ``allowed_origins`` and never becomes ``url``. A site with no url (a WfP deploy
+# with PAW_CF_SITES_DOMAIN unset) is skipped rather than guessed at.
 #
 # PERSISTENCE — ``site.set({...})``, never ``site.save()``. This runs seconds to
 # minutes after the publish that scheduled it, holding a Site instance
@@ -90,6 +94,56 @@
 # each shot addresses a URL the cache has never seen. That behaviour cannot be
 # proven from here — the tests pin that the param is sent and differs per capture,
 # not that Cloudflare honours it.
+#
+# Updated 2026-08-08 (a preview is never a photograph of a page that was not
+# serving yet). THE DEFECT: capture fired at the tail of a successful publish and
+# navigated IMMEDIATELY, but a deploy is live at Cloudflare before it is live at the
+# edge — for a few seconds the site's own address answers 404, or an edge
+# placeholder. Browser Rendering renders that page perfectly happily, and a
+# screenshot of a 404 is a valid PNG: 2xx, ``image/png``, non-empty. Every
+# fail-closed check SC-1 shipped passed, because all three ask whether the CAPTURE
+# succeeded and none asked whether the PAGE was worth capturing. The bytes landed on
+# the Site and stayed there — nothing re-captures on its own, so the card showed a
+# picture of nothing until somebody republished an unchanged site.
+#
+# THE GATE: ``take_site_screenshot`` now polls the site's own url until it answers
+# 2xx (``wait_until_serving``) before spending a Browser Rendering call. Shape, and
+# why each part is the way it is:
+#   * a plain GET from this process, not a rendered page. It costs no Browser
+#     Rendering quota, so the poll is free and the paid call happens once, against a
+#     page known to exist. The body is never read — ``_url_is_serving`` streams and
+#     looks only at the status.
+#   * READY IS 2xx AND NOTHING ELSE. 404 is the ordinary pre-live answer; a 5xx or
+#     Cloudflare's own 530 is the other; a connection that never opens (DNS for a
+#     brand-new subdomain) is the earliest form of the same thing. All read
+#     not-ready, none propagate.
+#   * each probe is cache-busted through ``_shot_url``, for the reason SC-3 added
+#     that helper: an un-busted probe could be answered 200 from the document the
+#     edge held BEFORE the deploy, and the gate would open on the strength of the
+#     old page.
+#   * ON TIMEOUT THE PREVIEW IS LEFT ABSENT, and one plain log line says so. A card
+#     with no image is honest, has a themed placeholder already (SC-2), and — the
+#     part that matters — does not overwrite a good picture from a previous deploy
+#     with a worse one. There is deliberately no re-schedule: a retry that outlives
+#     the poll is a second timer to reason about, and the recovery path already
+#     exists and is now reachable from the UI (POST /sites/{id}/preview-refresh,
+#     wired into the site card in paw-enterprise).
+#   * THE FOUNDING RULE IS INTACT. The poll runs inside the fire-and-forget capture
+#     — the same background task the render already ran in — so ``publish()`` gains
+#     no latency, and a probe that raises lands in the same swallow every other
+#     capture failure does. Nothing here is ever awaited on the publish's stack.
+#
+# The manual half runs the SAME gate on a SHORT schedule (``_READY_DELAYS_MANUAL``):
+# a person pressed a button and is watching a spinner, so holding the request for
+# the post-deploy budget would be worse than telling them the site is not up yet.
+# ``sites.service.refresh_site_preview`` probes first so it can answer with its own
+# ``sites.preview_not_serving`` — ``preview_unavailable`` advises "publish the site,
+# or open its preview once", which is exactly the wrong advice for a site that IS
+# published and is merely still coming up.
+#
+# The DRAFT path is deliberately ungated: it renders markup at ``about:blank``, so
+# there is no address that could be unready, and a gate there would poll nothing and
+# reject every draft.
 
 from __future__ import annotations
 
@@ -156,6 +210,93 @@ def _shot_url(url: str) -> str:
     return f"{url}{sep}{_SHOT_PARAM}={uuid.uuid4().hex}"
 
 
+# --------------------------------------------------------------------------- #
+# The readiness gate — is there a page here worth photographing?
+# --------------------------------------------------------------------------- #
+
+# How long ONE probe may take. Short: a serving edge answers in milliseconds, and a
+# request that hangs is itself the answer we are looking for.
+_READY_PROBE_TIMEOUT = 5.0
+
+# The waits BETWEEN probes on the post-deploy path, in seconds. A probe fires
+# immediately first, so this is five retries over ~59s — call it a ninety-second
+# ceiling once the probe timeouts are counted. Generous on purpose: it runs in a
+# background task nobody is waiting on, and the cost of waiting too long is a card
+# that fills in a minute late, while the cost of giving up too early is no card at
+# all until somebody presses refresh. Backed off rather than evenly spaced because
+# the overwhelming majority of deploys are live on the first or second look.
+_READY_DELAYS: tuple[float, ...] = (2.0, 4.0, 8.0, 15.0, 30.0)
+
+# The waits for the MANUAL path (``sites.service.refresh_site_preview``). A person is
+# watching a spinner, so two probes ~2s apart: enough to ride out a single blip,
+# short enough that "the site isn't up yet" arrives as an answer rather than a
+# timeout.
+_READY_DELAYS_MANUAL: tuple[float, ...] = (2.0,)
+
+# Identifies the probe in an operator's access logs, next to ``_paw_shot``.
+_PROBE_UA = "PocketPaw-SitePreview/1.0 (+readiness-probe)"
+
+
+async def _url_is_serving(url: str, *, transport: Any = None) -> bool:
+    """One probe: does this address answer 2xx right now?
+
+    A plain GET from this process — no Browser Rendering quota is spent deciding
+    whether a page is worth rendering. The response body is never read (the request
+    is streamed and the context closed on the status line), so a probe costs a
+    round trip, not a page download.
+
+    Everything that is not 2xx is NOT ready, and nothing raises: 404 is the ordinary
+    answer from an edge that has not finished going live, a 5xx or Cloudflare's 530
+    is the other, and a connection that never opens is DNS for a brand-new subdomain
+    not having propagated. All three are "come back in a moment", not errors to
+    report — the caller's only decision is capture or don't.
+
+    ``transport`` is the injectable httpx seam, so the probe's semantics are pinned
+    against a real client rather than a stubbed function.
+    """
+    import httpx
+
+    kwargs: dict[str, Any] = {
+        "timeout": _READY_PROBE_TIMEOUT,
+        # A site that redirects (http→https, bare→www) IS serving, and following the
+        # hop is what the browser about to photograph it will do.
+        "follow_redirects": True,
+    }
+    if transport is not None:
+        kwargs["transport"] = transport
+    try:
+        async with httpx.AsyncClient(**kwargs) as client:
+            async with client.stream("GET", url, headers={"user-agent": _PROBE_UA}) as resp:
+                return resp.status_code // 100 == 2
+    except Exception:  # noqa: BLE001 — an unreachable address is a NO, not a failure
+        return False
+
+
+async def wait_until_serving(url: str, *, delays: Any = None, transport: Any = None) -> bool:
+    """Poll ``url`` until it answers 2xx. True when it did, False when the budget ran
+    out.
+
+    ``delays`` is the schedule of waits BETWEEN probes; ``None`` means
+    :data:`_READY_DELAYS` (the post-deploy budget) and ``()`` means a single probe
+    with no retry. One probe always fires immediately, so an edge that is already
+    live costs one fast GET and no waiting at all — the common case pays nothing.
+
+    Each probe addresses a cache-busted url (:func:`_shot_url`, a fresh value every
+    time) for the reason SC-3 minted that helper: Cloudflare's edge caches by full
+    URL, so an unmodified probe could be answered 200 from the document that was
+    there before this deploy, and the gate would open on the strength of the page it
+    exists to stop us photographing.
+    """
+    schedule = _READY_DELAYS if delays is None else tuple(delays)
+    if await _url_is_serving(_shot_url(url), transport=transport):
+        return True
+    for delay in schedule:
+        await asyncio.sleep(delay)
+        if await _url_is_serving(_shot_url(url), transport=transport):
+            return True
+    return False
+
+
 async def _store_screenshot(site: Any, image: bytes) -> str:
     """Put the bytes in the tenant's blob storage, return the stable URL.
 
@@ -198,13 +339,21 @@ async def _store_screenshot(site: Any, image: bytes) -> str:
     return f"/api/v1/uploads/{rec.id}"
 
 
-async def take_site_screenshot(site: Any, *, cloudflare: Any | None = None) -> str:
+async def take_site_screenshot(
+    site: Any, *, cloudflare: Any | None = None, ready_delays: Any = None
+) -> str:
     """Screenshot the site's live page, store it, record it on the Site.
 
-    Returns the stored image's URL, or "" when there was nothing to shoot (no
-    live url yet) or the shot produced no bytes. Raises on a Cloudflare or
-    upload failure — callers on the publish path use
-    :func:`safe_take_site_screenshot`, which is the form that cannot.
+    Returns the stored image's URL, or "" when there was nothing worth shooting —
+    no live url yet, the page not serving before the readiness budget ran out, or a
+    shot that produced no bytes. Raises on a Cloudflare or upload failure — callers
+    on the publish path use :func:`safe_take_site_screenshot`, which is the form
+    that cannot.
+
+    ``ready_delays`` is the readiness poll's retry schedule, passed straight to
+    :func:`wait_until_serving`: ``None`` for the generous post-deploy budget, ``()``
+    for a single probe. There is no way to switch the gate OFF, deliberately — a
+    bypass parameter is a bypass somebody eventually passes.
 
     ``cloudflare`` is the injectable client seam; production resolves the
     configured one through ``sites.service._cf_client`` so screenshots read the
@@ -225,6 +374,23 @@ async def take_site_screenshot(site: Any, *, cloudflare: Any | None = None) -> s
         # There is no page to photograph, and guessing one would photograph
         # somebody else's.
         logger.debug("sites.screenshot: site %s has no url — nothing to capture", site.id)
+        return ""
+
+    # THE GATE. A deploy is live at Cloudflare before it is live at the edge, so the
+    # address can still be answering 404 when this runs. Browser Rendering would
+    # render that 404 into a perfectly valid PNG and it would sit on the card until
+    # somebody republished. Poll first; a page that never comes up is left with no
+    # picture, which is honest and — unlike a photograph of a 404 — does not
+    # overwrite a good preview from the previous deploy.
+    if not await wait_until_serving(url, delays=ready_delays):
+        logger.warning(
+            "sites.screenshot: %s was not serving within the readiness budget — no "
+            "preview captured for site %s (the card keeps its previous image; "
+            "POST /sites/%s/preview-refresh re-tries on demand)",
+            url,
+            getattr(site, "id", "?"),
+            getattr(site, "id", "?"),
+        )
         return ""
 
     from pocketpaw_ee.sites.service import _cf_client
@@ -447,4 +613,5 @@ __all__ = [
     "schedule_site_screenshot",
     "take_draft_screenshot",
     "take_site_screenshot",
+    "wait_until_serving",
 ]
