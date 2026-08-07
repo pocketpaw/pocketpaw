@@ -127,6 +127,16 @@
 # fetch. None when no screenshot has landed (never deployed, no public url,
 # capture failed, Cloudflare unconfigured) — the card then falls back to its text
 # layout, so the field is optional, empty-safe and backward-compatible.
+# Updated 2026-08-07 (SC-3 — the card stops lying after a republish): the refresh
+# POLICY is now written onto both ``preview_image_url`` fields instead of being
+# inferrable only from where the capture is called — re-captured on every
+# successful deploy (so a republish updates the card), plus an explicit refresh, no
+# TTL, and a different uploads link every capture. New DTO
+# ``SitePreviewRefreshResponse`` ({site_id, preview_image_url}) backs that explicit
+# path, POST /sites/{site_id}/preview-refresh. It is deliberately its own response
+# rather than a reused ``SiteResponse``: the call answers one question ("what is
+# the new picture"), and unlike every deploy-triggered capture it REPORTS failure
+# — a person asked for it and is waiting on the answer.
 
 from __future__ import annotations
 
@@ -208,7 +218,37 @@ class SiteResponse(BaseModel):
     # whenever the capture failed, the site has no public url yet, or Cloudflare
     # Browser Rendering is unconfigured. The card falls back to its text layout on
     # None, so the field is optional and backward-compatible.
+    #
+    # SC-3 — WHEN THIS CHANGES (the refresh policy, written down so a reader does
+    # not have to infer it from behaviour):
+    #   * on EVERY successful deploy, including a republish. A deploy is the only
+    #     moment the design is known to have changed, it is user-initiated and
+    #     already slow, and it is the only trigger with no staleness window. There
+    #     is no TTL and no "only if empty" guard — the republish case is exactly
+    #     the one where a picture exists and shows the wrong design.
+    #   * on an explicit request to POST /sites/{site_id}/preview-refresh, for the
+    #     cases a deploy cannot cover (a capture that failed, a deployment that was
+    #     unconfigured then, a draft whose markup only became buildable later).
+    # The value is a DIFFERENT uploads link every capture (each one mints its own
+    # uuid-keyed row), so a client may treat a changed value as new art and a
+    # cached one as unchanged — nothing ever overwrites bytes behind a stable URL.
     preview_image_url: str | None = None
+
+
+class SitePreviewRefreshResponse(BaseModel):
+    """The result of an explicit preview re-capture (SC-3) —
+    POST /sites/{site_id}/preview-refresh.
+
+    ``preview_image_url`` is the NEWLY stored image, never the previous one: the
+    endpoint only answers 200 once a capture has landed and been recorded on the
+    Site. Everything else (Cloudflare unconfigured or refusing, a draft with no
+    buildable markup) surfaces as an error, because unlike the deploy-triggered
+    capture this one was asked for by a person who is watching — the never-fail
+    rule protects publishes, not this call.
+    """
+
+    site_id: str
+    preview_image_url: str
 
 
 class SitePreviewResponse(BaseModel):
@@ -270,6 +310,11 @@ class SiteStatusResponse(BaseModel):
     # field the list response carries, so a by-pocket status read can show the
     # page too. None until a capture lands (and whenever one failed, the site has
     # no public url, or Cloudflare Browser Rendering is unconfigured).
+    #
+    # SC-3 — same refresh policy as ``SiteResponse.preview_image_url`` above, which
+    # is the fuller write-up: re-captured on every successful deploy (so a
+    # republish updates it), plus POST /sites/{site_id}/preview-refresh on demand,
+    # and the value is a different uploads link every capture.
     preview_image_url: str | None = None
 
 

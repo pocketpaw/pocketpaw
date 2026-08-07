@@ -165,7 +165,11 @@ async def test_a_capture_stores_the_image_and_records_it_on_the_site(monkeypatch
 
     url = await screenshot_mod.take_site_screenshot(site, cloudflare=cf)
 
-    assert cf.calls == ["https://brew.example.test/"]
+    # SC-3: the page is addressed with a per-capture cache-buster appended, so a
+    # republish is photographed as it is now rather than as the edge cached it.
+    # The base address is still the site's own — see test_preview_refresh.py.
+    assert len(cf.calls) == 1
+    assert cf.calls[0].startswith("https://brew.example.test/?_paw_shot=")
     assert url.startswith("/api/v1/uploads/")
     assert site.writes == [{"preview_image_url": url}]
 
@@ -319,8 +323,10 @@ async def test_publish_survives_a_cloudflare_that_refuses_to_screenshot(
         await task
 
     # The capture really was attempted and really did raise — otherwise this test
-    # would pass on a site that was simply never photographed.
-    assert cf.calls and cf.calls[0].endswith(".paw-sites.test")
+    # would pass on a site that was simply never photographed. (The url carries
+    # SC-3's cache-buster after the host, so this matches the host rather than the
+    # end of the string.)
+    assert cf.calls and ".paw-sites.test" in cf.calls[0]
     assert site.deployed is True
 
     rows = await sites_service.list_for_workspace("ws1")
