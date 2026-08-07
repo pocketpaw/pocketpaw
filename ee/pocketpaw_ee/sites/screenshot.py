@@ -55,12 +55,48 @@
 # never-built ripple pocket is deliberately not built just for a thumbnail — see
 # ``draft_markup.build_allowed``), which is why SC-2 also ships the card's themed
 # placeholder rather than relying on this landing.
+#
+# Updated 2026-08-07 (SC-3 — the card stops lying after a republish). THE POLICY,
+# now settled and written down here rather than inferred from where the calls sit:
+# **capture on every successful deploy, plus a manual refresh affordance.** A deploy
+# is the only moment the design is known to have changed; it is user-initiated and
+# already slow (a full build + smoke + upload), so one more remote render adds
+# nothing perceptible; and it is the only policy with no staleness window. A TTL was
+# considered and rejected — it would re-shoot unchanged sites forever AND still show
+# stale art for the length of the gap. The manual path
+# (``sites.service.refresh_site_preview``) covers the cases a deploy cannot: a
+# capture that failed, a deployment that was unconfigured at the time, a draft whose
+# markup only became buildable later.
+#
+# Two things had to be true for a REPUBLISH to actually change the card, and both
+# were checked rather than assumed:
+#   * nothing short-circuits on an existing picture. ``take_site_screenshot`` has no
+#     "already has a preview" guard and must not grow one — a republish is exactly
+#     the case where a preview exists and is wrong.
+#   * the recorded URL is NEW every capture, so no cache can serve the old bytes.
+#     ``_store_screenshot`` mints a fresh uploads row per call (``new_storage_key``
+#     is uuid4-tailed), so ``preview_image_url`` changes value on every capture and
+#     the card re-fetches a URL it has never seen. Nothing overwrites a stable key,
+#     which is the variant that WOULD need cache-busting headers.
+# The cost of that: each republish leaves the previous preview in the tenant's
+# ``/site-previews`` folder. Accumulation was accepted at SC-1 (that folder exists
+# precisely so the strays do not bury the owner's real files) and is left alone
+# here — a delete inside the never-fail capture tail would add failure surface to
+# the one path that may not have any, and buys the card nothing.
+#
+# The one staleness vector left is the PAGE, not the picture: Browser Rendering
+# fetches the site through Cloudflare's edge, which can still be holding the
+# pre-republish document. ``_shot_url`` appends a unique per-capture query param so
+# each shot addresses a URL the cache has never seen. That behaviour cannot be
+# proven from here — the tests pin that the param is sent and differs per capture,
+# not that Cloudflare honours it.
 
 from __future__ import annotations
 
 import asyncio
 import io
 import logging
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +131,29 @@ _GOTO_OPTIONS = {"waitUntil": "networkidle0", "timeout": 20_000}
 # Where the screenshot lands in the owner's Files panel. Its own folder so a
 # workspace that republishes often does not bury the owner's real files.
 _FOLDER = "/site-previews"
+
+# SC-3: the cache-busting parameter each capture addresses the page with. The name
+# is namespaced and obviously ours so an operator reading their access logs can tell
+# what it is, and so it cannot collide with a query param the site itself reads.
+_SHOT_PARAM = "_paw_shot"
+
+
+def _shot_url(url: str) -> str:
+    """Return the site url with a unique per-capture cache-buster appended (SC-3).
+
+    A republish ships new content at the SAME address. Cloudflare's edge caches by
+    full URL including the query string, so an unmodified request can be answered
+    with the document that was there before the deploy — and the card would show a
+    fresh screenshot of the old design, which is the exact failure this slice
+    exists to remove. A parameter no cache has seen forces the origin.
+
+    Deliberately additive and ignorable: every engine we deploy serves static
+    assets or routes on the PATH, so an unknown query param changes nothing about
+    what renders. Appended with the right separator so a url that already carries a
+    query string stays valid.
+    """
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}{_SHOT_PARAM}={uuid.uuid4().hex}"
 
 
 async def _store_screenshot(site: Any, image: bytes) -> str:
@@ -152,6 +211,12 @@ async def take_site_screenshot(site: Any, *, cloudflare: Any | None = None) -> s
     SAME account / token / configuration check every other Cloudflare call here
     does, and an unconfigured deployment raises a clean "Cloudflare is not
     configured" instead of a KeyError.
+
+    SC-3 — there is deliberately NO "this site already has a preview, skip"
+    branch. A republish is precisely the case where a preview exists and is a
+    picture of the wrong design; short-circuiting on one is what would make the
+    card lie. Every call captures, stores under a fresh uploads id, and records
+    the new URL over the old one.
     """
     url = (getattr(site, "url", "") or "").strip()
     if not url:
@@ -166,7 +231,9 @@ async def take_site_screenshot(site: Any, *, cloudflare: Any | None = None) -> s
 
     cf = cloudflare or _cf_client()
     image = await cf.capture_screenshot(
-        url=url,
+        # SC-3: cache-busted, so a republish is photographed as it is NOW and not
+        # as the edge last cached it. See ``_shot_url``.
+        url=_shot_url(url),
         viewport=dict(_VIEWPORT),
         goto_options=dict(_GOTO_OPTIONS),
         screenshot_options=dict(_SCREENSHOT_OPTIONS),

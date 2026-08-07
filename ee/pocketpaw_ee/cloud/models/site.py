@@ -170,6 +170,17 @@
 # card falls back to its text layout on empty — so it is always optional and never
 # a gate on publishing. Defaults "" so every existing row reads "no preview" — no
 # migration.
+#
+# Updated 2026-08-07 (SC-3 — the card stops lying after a republish): no schema
+# change, only the write POLICY for that field, recorded where the field lives.
+# ``preview_image_url`` is rewritten on EVERY successful deploy (a republish
+# included — there is no TTL and no "only if empty" guard, since a republish is
+# exactly the case where a value exists and is wrong) and by an explicit
+# POST /sites/{site_id}/preview-refresh. Every capture stores a NEW uploads row, so
+# the value changes each time and nothing overwrites bytes behind a stable URL —
+# a reader may treat an unchanged value as unchanged art. Written by targeted
+# ``set()``, never ``save()``: the capture lands seconds after the publish that
+# scheduled it, holding a doc snapshotted before it.
 
 from __future__ import annotations
 

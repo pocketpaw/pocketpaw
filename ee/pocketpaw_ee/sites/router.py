@@ -8,6 +8,13 @@
 # name) and RAISES NotFound when missing / access-denied (it does not return
 # None). theme is pulled from the rippleSpec subtree.
 #
+# Updated 2026-08-07 (SC-3 — the card stops lying after a republish): new
+# POST /sites/{site_id}/preview-refresh, the manual half of the preview policy
+# (automatic capture on every successful deploy + an explicit refresh). It is the
+# one capture in this subsystem that REPORTS failure rather than swallowing it —
+# every other one hangs off a publish, which it may never endanger; this one hangs
+# off a button press, whose whole value is the answer.
+#
 # Updated 2026-07-17 (fix/sites-prewarm-origin): ``publish_site`` and
 # ``apply_leaf_edits_by_pocket`` now thread the request ``Origin`` header into the
 # service as ``prewarm_origin`` so the background native-artifact pre-warm builds with
@@ -191,6 +198,7 @@ from pocketpaw_ee.sites.dto import (
     RequestPublishResponse,
     SiteDataRowsResponse,
     SiteDataTablesResponse,
+    SitePreviewRefreshResponse,
     SitePreviewResponse,
     SiteResponse,
     SiteStatusResponse,
@@ -658,6 +666,36 @@ async def revert_version_by_pocket(
         author=draft.author,
         created_at=draft.created_at.isoformat(),
     )
+
+
+@router.post("/sites/{site_id}/preview-refresh", response_model=SitePreviewRefreshResponse)
+async def refresh_site_preview(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SitePreviewRefreshResponse:
+    """Re-photograph the site's gallery card image on demand (SC-3).
+
+    Capture is automatic on every successful deploy, which handles the case that
+    matters — the design changed — so this exists for the ones a deploy cannot fix:
+    a capture that failed at the time (Cloudflare unconfigured, quota, a render that
+    timed out), or a draft whose markup only became buildable later. Without it, the
+    only way to correct a card was to republish an unchanged site.
+
+    A POST because it spends a paid remote render and rewrites the Site, and
+    ``fabric.write`` for the same reason. Named ``preview-refresh`` rather than
+    ``preview`` deliberately: on this router ``by-pocket/{id}/preview`` already means
+    the draft CONTENT the builder renders, and two different meanings of "preview"
+    one path segment apart is how a client ends up calling the wrong one.
+
+    SYNCHRONOUS, and it can fail. Every other capture in this subsystem is
+    fire-and-forget behind a swallow, because a picture may never cost anyone a
+    publish. This one was asked for by a person who is watching a spinner, so it
+    waits for the render (seconds) and surfaces a real error instead of a 200
+    carrying the same stale url they pressed the button to replace. A site in
+    another workspace is a 404; nothing renderable yet is a 422.
+    """
+    return await sites_service.refresh_site_preview(workspace_id=ctx.workspace_id, site_id=site_id)
 
 
 @router.post("/sites/{site_id}/domains", response_model=DomainStatusResponse)

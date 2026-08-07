@@ -32,6 +32,21 @@
 # way to photograph a live site: the resolved doc has a url, which the draft capture
 # declines.
 #
+# Updated 2026-08-07 (SC-3 — the card stops lying after a republish). The
+# deploy-time capture SC-1 added already fires on a republish, and the republish
+# path was verified end to end rather than assumed: ``_deploy_site_doc`` upserts the
+# EXISTING doc (so ``preview_image_url`` survives the republish and is overwritten,
+# not reset), nothing short-circuits on a preview already being present, and each
+# capture stores under a fresh uploads id — so the field takes a new value the card
+# has never fetched, and no cache can serve the old bytes behind it. New
+# ``refresh_site_preview`` adds the manual half of the policy: an explicit,
+# synchronous re-capture that ROUTES itself (live page vs draft markup) the same way
+# the automatic path does, and — unlike every deploy-triggered capture — reports
+# failure to its caller. That asymmetry is the point: ``safe_take_*`` exists so a
+# picture can never cost anyone a publish, while a person who pressed "refresh
+# preview" needs to be told when it did not work rather than handed back the stale
+# url they were trying to replace.
+#
 # Updated 2026-08-02 (draft render): the PREVIEW deploy in ``publish`` is now
 # engine-aware, closing the half of HE-4 that was missed. HE-4 taught the LIVE
 # deploy that a built site's servable files live somewhere different per engine
@@ -704,6 +719,7 @@ from pocketpaw_ee.sites.dto import (
     SiteDataRowsResponse,
     SiteDataTableInfo,
     SiteDataTablesResponse,
+    SitePreviewRefreshResponse,
     SitePreviewResponse,
     SiteResponse,
     SiteStatusResponse,
@@ -2522,6 +2538,54 @@ def _schedule_draft_screenshot_for_pocket(*, workspace_id: str, pocket_id: str) 
             pocket_id,
             exc_info=True,
         )
+
+
+async def refresh_site_preview(*, workspace_id: str, site_id: str) -> SitePreviewRefreshResponse:
+    """Re-capture a site's card image NOW, and report what happened (SC-3).
+
+    The manual half of the preview policy. Automatic capture fires on every
+    successful deploy, which covers the case that matters (the design changed), but
+    it cannot cover a capture that FAILED — Cloudflare unconfigured at the time,
+    quota exhausted, a render that timed out — or a draft whose markup only became
+    buildable after it was minted. Without this the only way to fix a card was to
+    republish an unchanged site.
+
+    Deliberately the mirror image of the deploy path on the one axis that matters:
+    **this one raises.** ``safe_take_*`` exists so a picture can never cost anybody
+    a publish; here a person pressed a button and is waiting, so a Cloudflare
+    failure must reach them as an error rather than a 200 carrying the same stale
+    url they were trying to replace. The unsafe forms are called on purpose.
+
+    Also deliberately SYNCHRONOUS. A remote browser render takes seconds, which is
+    too long to block a publish and exactly right for a request whose entire
+    purpose is the answer.
+
+    Routes itself the same way the automatic path does: a site with a url is
+    photographed live, a draft is photographed from its own markup. Tenant-scoped
+    via ``_load``, so another workspace's site is a 404, never a render.
+    """
+    from pocketpaw_ee.sites.screenshot import take_draft_screenshot, take_site_screenshot
+
+    site = await _load(workspace_id, site_id)
+
+    if (getattr(site, "url", "") or "").strip():
+        image_url = await take_site_screenshot(site)
+    else:
+        image_url = await take_draft_screenshot(site)
+
+    if not image_url:
+        # The capture declined rather than failed: a draft with nothing renderable
+        # yet, or a build this deployment has not opted into (see
+        # ``draft_markup.build_allowed``). Returning 200 with the previous url would
+        # report success for a refresh that did not happen, and a 500 would blame
+        # the server for a site that simply has no page to photograph.
+        raise ValidationError(
+            "sites.preview_unavailable",
+            "There's nothing to photograph yet — publish the site, or open its "
+            "preview once so there's a page to capture.",
+        )
+
+    return SitePreviewRefreshResponse(site_id=site_id, preview_image_url=image_url)
 
 
 # How long a Site may sit in ``provision_status="provisioning"`` before a new
