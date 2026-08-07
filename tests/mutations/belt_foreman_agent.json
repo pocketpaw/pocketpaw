@@ -111,6 +111,42 @@
     ]
   },
   {
+    "label": "C1: drop the unwritable-shape guard, letting export destroy a legacy .json soul",
+    "file": "ee/pocketpaw_ee/cloud/mandates/soul_link.py",
+    "find": "    if not path.is_dir() and path.suffix != \".soul\":",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_unwritable_soul_shape_is_refused_not_destroyed"
+    ]
+  },
+  {
+    "label": "C2: revert the BELT executor's journal terminal to the user id",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "        id=f\"agent:{agent_id}\" if agent_id else f\"user:{user_id or 'unknown'}\",",
+    "replace": "        id=f\"user:{user_id or 'unknown'}\",",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_belt_executor_terminal_reads_the_agent_id"
+    ]
+  },
+  {
+    "label": "C2: make the BELT executor ignore the blob's agent_id",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "    agent_id = str(blob.get(\"agent_id\") or \"\") or None",
+    "replace": "    agent_id = None",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_belt_executor_terminal_reads_the_agent_id"
+    ]
+  },
+  {
+    "label": "C2: fabricate an agent actor for a human-filed run",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "        id=f\"agent:{agent_id}\" if agent_id else f\"user:{user_id or 'unknown'}\",",
+    "replace": "        id=f\"agent:{agent_id}\",",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_belt_executor_terminal_without_an_agent_keeps_user_attribution"
+    ]
+  },
+  {
     "label": "always save the soul as a directory (breaks the pool's .soul archive)",
     "file": "ee/pocketpaw_ee/cloud/mandates/soul_link.py",
     "find": "        if path.is_dir():",

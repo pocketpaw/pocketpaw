@@ -279,21 +279,43 @@ async def remember_shift(soul_path: str | None, summary: str) -> bool:
     """Append an episodic shift summary to the mandate's soul and save it
     back in place. Returns True on success; False (logged) on any failure.
 
-    WRITE BACK IN THE FORMAT WE READ. ``Soul.awaken`` accepts both shapes, but
-    the two writers do NOT: ``save_local`` builds a DIRECTORY (it ``mkdir``s the
-    path), while ``export`` writes a ``.soul`` ARCHIVE FILE. The AgentPool
-    materializes an agent's soul as an archive (``SoulManager.save`` →
-    ``soul.export``), so calling ``save_local`` on it raises FileExistsError and
-    — because this function is best-effort — the shift memory would vanish with
-    nothing but a log line to show for it. That is exactly the silent no-op this
-    whole path exists to prevent, so the writer is selected from what is
-    actually on disk. ``export`` matches the pool's own call, keys policy
-    included; changing that policy is a separate decision, not this one's."""
+    WRITE BACK IN THE FORMAT WE READ — AND ONLY IN A FORMAT WE CAN WRITE.
+    ``Soul.awaken`` is deliberately permissive: it opens a ``.soul`` archive, a
+    directory, and also ``soul.json`` / ``soul.yaml`` / ``soul.md``. The WRITERS
+    are not: ``save_local`` builds a DIRECTORY (it ``mkdir``s the path), while
+    ``export`` writes a ``.soul`` ARCHIVE FILE. There is no writer for the
+    single-document shapes.
+
+    So the branch is on what we can safely WRITE, not merely on ``is_dir()``:
+
+      * directory        → ``save_local`` (the directory IS the soul)
+      * ``*.soul`` file  → ``export`` (what the AgentPool materializes, via
+                           ``SoulManager.save`` → ``soul.export``)
+      * anything else    → REFUSE, loudly, and change nothing on disk.
+
+    That last branch is the important one. ``MandateDoc.soul_path`` is free-form
+    user input, so a legacy mandate can point at ``~/foo/soul.json``. Exporting
+    a zip over it would leave a file that ``awaken`` can no longer read — a
+    harmless historical no-op turned into permanent data destruction. Such a
+    mandate could never write successfully anyway, so refusing costs nothing and
+    keeps the file intact for its owner.
+
+    ``export`` matches the pool's own call, keys policy included; changing that
+    policy is a separate decision, not this one's."""
     if not soul_path or not summary.strip():
         return False
     path = Path(soul_path).expanduser()
     if not path.exists():
         logger.warning("mandate soul: %s does not exist — remember skipped", soul_path)
+        return False
+    # Decide the writer BEFORE mutating anything — a shape we cannot write must
+    # never be opened, appended to, and then clobbered.
+    if not path.is_dir() and path.suffix != ".soul":
+        logger.warning(
+            "mandate soul: %s is neither a directory nor a .soul archive — remember "
+            "skipped (writing would destroy the file)",
+            soul_path,
+        )
         return False
     try:
         from soul_protocol import MemoryType, Soul
