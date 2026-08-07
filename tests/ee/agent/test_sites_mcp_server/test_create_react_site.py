@@ -23,14 +23,12 @@
 #      (ground truth in Mongo, NOT agent narration), NO rippleSpec, and that
 #      ``interactive`` lands as the pocket's ``keeps_client_bundle`` declaration.
 #
-# KNOWN RED (2026-08-07): the four ``TestCreateReactSiteEndToEnd`` cases that
-# reach ``agent_create`` fail with ``unexpected keyword argument
-# 'keeps_client_bundle'``. That parameter is MT-1's
-# (``feat/sites-keep-client-bundle``), a SIBLING branch of RX-1 that this branch
-# does not contain. The tests are deliberately left RED rather than xfailed or
-# deleted: they encode the acceptance contract ("a React site with client state
-# is not inert"), and the failure names its own cause. They go green with no edit
-# the moment MT-1 is in the history. Layers 1-3 are independent of it and pass.
+# The ``interactive`` -> ``keeps_client_bundle`` cases depend on MT-1's
+# ``agent_create`` parameter, which reached this branch by merging
+# ``feat/sites-keep-client-bundle``. RX-1 and MT-1 were siblings off dev on the
+# pocketpaw side while the paw-sites react generator was already stacked on MT-1's
+# generator commit — so the flag existed end to end everywhere EXCEPT the Python
+# create path. That is the gap this file's end-to-end layer pins shut.
 """Tests for the react-track create tool (create_react_site)."""
 
 from __future__ import annotations
