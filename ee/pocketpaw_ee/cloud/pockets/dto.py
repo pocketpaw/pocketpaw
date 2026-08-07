@@ -819,6 +819,10 @@ def pocket_to_wire_dict(p) -> dict:
         # ``source`` to ``None`` for legacy / ripple pockets.
         "engine": getattr(p, "engine", "ripple"),
         "source": getattr(p, "source", None),
+        # MT-1 — this site keeps its client bundle. camelCased like every other
+        # multi-word wire key, which also matches the generator's
+        # ``siteConfig.keepsClientBundle``. ``False`` for legacy pockets.
+        "keepsClientBundle": bool(getattr(p, "keeps_client_bundle", False)),
         # Entity-rooms chunk ② — optional per-entity surface-profile override
         # (JSON dict mirroring the surface-domain ``SurfaceProfile``), or
         # ``None`` for legacy pockets. Two-word key → camelCase wire form, like

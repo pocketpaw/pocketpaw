@@ -525,6 +525,9 @@ def _pocket_to_domain(doc: _PocketDoc) -> Pocket:
         # as ``engine="ripple"``, ``source=None``).
         engine=getattr(doc, "engine", "ripple"),
         source=getattr(doc, "source", None),
+        # MT-1 — the authored "my client JS is load-bearing" declaration.
+        # ``getattr`` for legacy docs that pre-date the field (read back False).
+        keeps_client_bundle=bool(getattr(doc, "keeps_client_bundle", False)),
         # Entity-rooms chunk ② — optional per-entity surface-profile override.
         # ``getattr`` for legacy docs that pre-date the field. Dumped to a plain
         # JSON dict so the domain layer carries the wire shape, not the Beanie
@@ -4484,6 +4487,7 @@ async def agent_create(
     ripple_spec: dict | None = None,
     engine: str = "ripple",
     source: dict[str, Any] | None = None,
+    keeps_client_bundle: bool = False,
     trusted: bool = False,
 ) -> tuple[dict | None, str | None, str | None]:
     """Insert a brand-new pocket owned by ``owner_id`` in ``workspace_id``.
@@ -4515,6 +4519,16 @@ async def agent_create(
     ride the versioned content and the generator extracts them at publish.
     Both keep today's defaults (``engine="ripple"``, ``source=None``) for
     ripple callers — additive, no Mongo migration.
+
+    ``keeps_client_bundle`` (MT-1) declares that the site's hand-written client
+    JavaScript is load-bearing — an ``onMount``, a ``use:`` action, an
+    IntersectionObserver scroll-reveal, a raw-WebGL canvas. A published site is
+    otherwise generated with ``csr = false`` (and, on ripple, has its emitted
+    hydration bundle pruned after the build), so that code never runs in the
+    browser. It sits beside ``engine`` because it describes the AUTHORED artifact
+    rather than the deploy, and it rides ``siteConfig.keepsClientBundle`` to the
+    generator at publish. Defaults ``False`` — an ordinary static site is
+    unchanged.
 
     ``trusted=True`` skips the STRICT catalog gate — use it ONLY for a
     code-assembled spec the caller fully controls (the deterministic Paw Site
@@ -4569,6 +4583,7 @@ async def agent_create(
             rippleSpec=normalized,
             engine=engine,
             source=source,
+            keeps_client_bundle=keeps_client_bundle,
             visibility="workspace",
         )
         await doc.insert()
