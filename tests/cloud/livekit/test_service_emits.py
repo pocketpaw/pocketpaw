@@ -12,6 +12,12 @@ an ephemeral JWT mint with no persistent state to broadcast.
 Tests mock the ``LiveKitAPI`` async context manager (no real HTTP),
 mock the agent subprocess spawn (no real child process), and assert on
 ``recording_bus.events``.
+
+Updated for T-18: the notes test pins the no-agent fallback explicitly
+(``_resolve_notes_agent_id`` patched to ``None``) so it keeps asserting on the
+pseudo-user writer it mocks now that meeting notes are normally authored by a
+real Agent. Agent authorship and the soul write are covered in
+test_meeting_notes_agent_identity.py.
 """
 
 from __future__ import annotations
@@ -114,6 +120,14 @@ async def test_post_meeting_notes_emits_call_notes_posted(recording_bus) -> None
     fake_msg.id = "msg_abc"
 
     with (
+        # T-18: pin the no-agent fallback so this event test keeps asserting on
+        # the pseudo-user writer it mocks. The agent-authored path has its own
+        # coverage in test_meeting_notes_agent_identity.py.
+        patch(
+            "pocketpaw_ee.cloud.livekit.service._resolve_notes_agent_id",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
         patch(
             "pocketpaw_ee.cloud.chat.message_service._create_group_message_doc",
             new_callable=AsyncMock,

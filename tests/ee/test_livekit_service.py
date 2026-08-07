@@ -7,6 +7,15 @@ _should_subscribe() decision (mic audio in, video / screenshare out).
 Added TestSpawnRace: covers the duplicate call-bot spawn race — concurrent
 create_room() for the same group must spawn exactly one agent (the per-group
 asyncio.Lock makes check→spawn→insert atomic).
+
+Updated for T-18: meeting notes are now authored by a real Agent, so
+TestMeetingNotesPosting's two cases pin the DEGRADED path explicitly — a group
+with no attached agent and a workspace with no default agent still posts the
+summary under the legacy CALL_BOT_USER_ID pseudo-user. The agent-authored path
+(and the soul write) is covered in
+tests/cloud/livekit/test_meeting_notes_agent_identity.py. Both cases patch the
+resolver rather than relying on an unavailable DB, so they keep testing the
+fallback on purpose instead of by accident.
 """
 
 from __future__ import annotations
@@ -403,13 +412,19 @@ class TestMeetingNotesAgent:
 
 
 class TestMeetingNotesPosting:
-    """Tests for posting meeting notes to groups."""
+    """Posting meeting notes to a group with NO resolvable agent (T-18's
+    degraded path): the summary still lands, under the legacy pseudo-user."""
 
     @pytest.mark.asyncio
     async def test_post_meeting_notes(self):
         from pocketpaw_ee.cloud.livekit.service import post_meeting_notes_to_group
 
         with (
+            patch(
+                "pocketpaw_ee.cloud.livekit.service._resolve_notes_agent_id",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
             patch(
                 "pocketpaw_ee.cloud.chat.message_service._create_group_message_doc",
                 new_callable=AsyncMock,
@@ -452,6 +467,11 @@ class TestMeetingNotesPosting:
         from pocketpaw_ee.cloud.livekit.service import post_meeting_notes_to_group
 
         with (
+            patch(
+                "pocketpaw_ee.cloud.livekit.service._resolve_notes_agent_id",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
             patch(
                 "pocketpaw_ee.cloud.chat.message_service._create_group_message_doc",
                 new_callable=AsyncMock,
