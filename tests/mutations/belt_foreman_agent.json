@@ -1,0 +1,122 @@
+[
+  {
+    "label": "drop the default-agent binding on mandate create (bind None instead)",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        agent_id = await _default_foreman_agent_id(workspace_id)",
+    "replace": "        agent_id = None",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_new_mandate_binds_the_workspace_default_agent"
+    ]
+  },
+  {
+    "label": "revert the mandate journal terminal to the user id",
+    "file": "ee/pocketpaw_ee/cloud/mandates/executor.py",
+    "find": "        id=f\"agent:{agent_id}\" if agent_id else f\"user:{user_id or 'unknown'}\",",
+    "replace": "        id=f\"user:{user_id or 'unknown'}\",",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_chain_terminal_is_attributed_to_the_agent_not_the_user"
+    ]
+  },
+  {
+    "label": "stop stamping agent_id onto the belt_plan blob",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        \"soul_path\": soul_path,\n        \"agent_id\": agent.id if agent else None,",
+    "replace": "        \"soul_path\": soul_path,\n        \"agent_id\": None,",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_chain_terminal_is_attributed_to_the_agent_not_the_user"
+    ]
+  },
+  {
+    "label": "break the deleted-agent fallback (return None instead of the default)",
+    "file": "ee/pocketpaw_ee/cloud/mandates/soul_link.py",
+    "find": "    return await _load_default_agent(workspace_id)",
+    "replace": "    return None",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_deleted_agent_falls_back_to_the_workspace_default",
+      "tests/cloud/test_belt_foreman_agent.py::test_disabled_agent_does_not_hold_the_judgment_seat",
+      "tests/cloud/test_belt_foreman_agent.py::test_cross_tenant_agent_never_binds"
+    ]
+  },
+  {
+    "label": "let a cross-tenant agent hold the judgment seat",
+    "file": "ee/pocketpaw_ee/cloud/mandates/soul_link.py",
+    "find": "        if agent_workspace != workspace_id:\n            return None",
+    "replace": "        if False:\n            return None",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_cross_tenant_agent_never_binds"
+    ]
+  },
+  {
+    "label": "let a soft-disabled agent keep running the foreman",
+    "file": "ee/pocketpaw_ee/cloud/mandates/soul_link.py",
+    "find": "        if getattr(agent, \"disabled\", False):\n            return None",
+    "replace": "        if False:\n            return None",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_disabled_agent_does_not_hold_the_judgment_seat"
+    ]
+  },
+  {
+    "label": "drop the ensure_can_use permission gate on an explicit agent_id",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        await agents_service.ensure_can_use(body.agent_id, workspace_id, user_id)",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_explicit_agent_id_is_permission_gated"
+    ]
+  },
+  {
+    "label": "stop honouring the legacy soul_path override",
+    "file": "ee/pocketpaw_ee/cloud/mandates/soul_link.py",
+    "find": "    if legacy_soul_path:\n        return legacy_soul_path",
+    "replace": "    if False:\n        return legacy_soul_path",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_legacy_soul_path_still_wins_over_the_agent_soul"
+    ]
+  },
+  {
+    "label": "stop materializing a missing agent soul on the write path",
+    "file": "ee/pocketpaw_ee/cloud/mandates/soul_link.py",
+    "find": "    if materialize and not Path(path).expanduser().exists():",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_missing_agent_soul_is_materialized_on_the_write_path"
+    ]
+  },
+  {
+    "label": "drop the agent identity block from the planning prompt",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "{_agent_block(context)}",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_prompt_inherits_system_prompt_and_scopes",
+      "tests/cloud/test_belt_foreman_agent.py::test_shift_threads_the_agent_identity_into_the_real_prompt"
+    ]
+  },
+  {
+    "label": "stop threading the agent identity from the shift into the foreman context",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        agent_system_prompt=agent.system_prompt if agent else \"\",",
+    "replace": "        agent_system_prompt=\"\",",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_shift_threads_the_agent_identity_into_the_real_prompt"
+    ]
+  },
+  {
+    "label": "remove the identity-failure guard so a bad resolve wedges the shift",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "    except Exception:  # noqa: BLE001 — identity must never wedge a shift",
+    "replace": "    except ZeroDivisionError:",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_identity_failure_never_wedges_the_shift"
+    ]
+  },
+  {
+    "label": "read the plan blob's agent_id strictly, breaking a pre-deploy pending plan",
+    "file": "ee/pocketpaw_ee/cloud/mandates/executor.py",
+    "find": "    agent_id = str(blob.get(\"agent_id\") or \"\") or None",
+    "replace": "    agent_id = blob[\"agent_id\"]",
+    "tests": [
+      "tests/cloud/test_belt_foreman_agent.py::test_legacy_plan_blob_without_an_agent_id_still_dispatches"
+    ]
+  }
+]

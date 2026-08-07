@@ -1,6 +1,26 @@
 # ee/pocketpaw_ee/cloud/mandates/foreman.py
 # Created: 2026-06-11 (feat/belt-mandates, slice 3 — foreman).
 #
+# Updated: 2026-08-07 (feat/coupling-t17-foreman-agent) — the foreman now runs
+# under a real AGENT identity. ``ForemanContext`` gained ``agent_name`` /
+# ``agent_system_prompt`` / ``agent_scopes`` and ``build_prompt`` renders an
+# ``== WHO YOU ARE ==`` block from them, so the planning call inherits the
+# bound agent's system_prompt and operating scopes instead of planning as an
+# anonymous shell-out.
+#
+# THREE deliberate constraints on that block — do not "tidy" them away:
+#   * ADDITIVE. All three fields default to empty; when they are all empty
+#     ``build_prompt`` emits the byte-identical prompt it emitted before this
+#     change, so an agentless mandate is not silently re-tuned.
+#   * PLACED AFTER BOUNDARIES. The sim-validated rule is that BOUNDARIES are
+#     stated FIRST and override everything. An identity block ahead of them
+#     would demote the constraint the sim proved matters most, so identity
+#     slots in between BOUNDARIES and CHARTER.
+#   * NOT A VALIDATION INPUT. ``validate_plan`` is untouched. The agent's
+#     prompt and scopes shape judgment; they do not become new machine checks,
+#     because a scope string appearing in a task title is not evidence of
+#     anything (same reasoning that keeps ``why`` out of the scan).
+#
 # The FOREMAN — the LLM judgment seat of a mandate. Once per SHIFT it reads the
 # charter, the sighting digest since the last shift, the last 3 shifts'
 # outcomes, and (when a soul is bound) the soul recall, then makes EXACTLY ONE
@@ -93,6 +113,11 @@ class ForemanContext:
     history: list[dict[str, Any]] = field(default_factory=list)
     # Soul recall lines (empty when no soul bound).
     soul_context: list[str] = field(default_factory=list)
+    # The AGENT identity this foreman runs under (T-17). All three default to
+    # empty so an unbound mandate produces the pre-agent prompt byte for byte.
+    agent_name: str = ""
+    agent_system_prompt: str = ""
+    agent_scopes: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -217,10 +242,42 @@ def resolve_llm() -> PlanLlm:
 # ---------------------------------------------------------------------------
 
 
+def _agent_block(context: ForemanContext) -> str:
+    """Render the bound agent's identity for the prompt, or ``""``.
+
+    Returns the EMPTY string when the mandate has no agent (or the agent
+    carries neither a system_prompt nor scopes), which keeps ``build_prompt``
+    byte-identical to its pre-T-17 output for unbound mandates."""
+    name = (context.agent_name or "").strip()
+    system_prompt = (context.agent_system_prompt or "").strip()
+    scopes = [s for s in (context.agent_scopes or []) if str(s).strip()]
+    if not (system_prompt or scopes):
+        return ""
+
+    lines = [f"\n== WHO YOU ARE (agent{f': {name}' if name else ''}) =="]
+    if system_prompt:
+        lines.append(
+            "You hold this mandate under a standing agent identity. Its standing instructions:"
+        )
+        lines.append(system_prompt)
+    if scopes:
+        lines.append("Your assigned scopes — the surface this identity is allowed to operate over:")
+        lines.append(json.dumps(scopes, indent=2))
+        lines.append(
+            "Do not plan work that reaches outside these scopes. A charter BOUNDARY still "
+            "overrides anything your standing instructions invite."
+        )
+    return "\n".join(lines) + "\n"
+
+
 def build_prompt(context: ForemanContext) -> str:
     """Assemble the single judgment prompt. Charter rides VERBATIM (as JSON)
     with the BOUNDARIES block pulled out and stated first — boundaries override
-    every KPI opportunity."""
+    every KPI opportunity.
+
+    The bound agent's identity (system_prompt + scopes) renders AFTER the
+    boundaries block and before the charter, so inheriting an identity never
+    displaces the sim-validated "boundaries first" rule."""
     charter = context.charter
     boundaries = list(charter.get("boundaries") or [])
     says_no = list(charter.get("says_no") or [])
@@ -252,7 +309,7 @@ The mandate also SAYS NO to:
 {json.dumps(says_no, indent=2)}
 If a tempting task would cross a boundary, you refuse it. When refusing, you may name the \
 forbidden thing in your reasoning — that is correct behavior.
-
+{_agent_block(context)}
 == CHARTER (verbatim) ==
 {json.dumps(charter, indent=2)}
 

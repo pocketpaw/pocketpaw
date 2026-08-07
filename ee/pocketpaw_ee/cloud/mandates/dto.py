@@ -16,6 +16,11 @@
 # Updated: 2026-06-11 (feat/belt-autopilot) — added AutopilotRequest (the
 # start/stop body) + AutopilotState (the persisted on/users wire object) and
 # wired ``autopilot`` onto the detail + summary responses.
+# Updated: 2026-08-07 (feat/coupling-t17-foreman-agent) — added the optional
+# ``agent_id`` on CreateMandateRequest (bind an explicit agent; omit to inherit
+# the workspace's seeded default ``pocketpaw`` agent) and the resolved
+# ``agent_id`` / ``agent_name`` / ``soul_path`` on MandateDetailResponse so the
+# console can show WHOSE judgment seat the mandate is. Additive + defaulted.
 
 from __future__ import annotations
 
@@ -72,6 +77,12 @@ class CreateMandateRequest(BaseModel):
     name: str = Field(min_length=1)
     surface: SurfaceRequest
     charter: CharterRequest
+    # The agent the foreman runs as. Omit to inherit the workspace's seeded
+    # default ``pocketpaw`` agent; an explicit id is checked against the
+    # caller's USE permission before it binds.
+    agent_id: str | None = None
+    # LEGACY override — a free-form soul file that still wins over the bound
+    # agent's soul. New mandates should leave this unset.
     soul_path: str | None = None
     patrols: list[str] = Field(default_factory=lambda: ["deps", "feedback"])
 
@@ -141,6 +152,11 @@ class MandateDetailResponse(BaseModel):
     status: MandateStatus
     surface: SurfaceRequest
     charter: CharterRequest
+    # The RESOLVED foreman agent — the mandate's stored ``agent_id`` when set,
+    # else the workspace default. ``None`` only when the workspace has no
+    # default agent at all (a degraded but still-runnable mandate).
+    agent_id: str | None = None
+    agent_name: str | None = None
     soul_path: str | None = None
     patrols: list[str] = Field(default_factory=lambda: ["deps", "feedback"])
     autopilot: AutopilotState = Field(default_factory=AutopilotState)

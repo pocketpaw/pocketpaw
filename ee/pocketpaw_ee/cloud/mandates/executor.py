@@ -223,6 +223,11 @@ class StationTaskDispatcher:
             "shift_no": shift_no,
             "plan_action_id": plan_action_id,
             "task_index": index,
+            # T-17: the foreman agent that planned this task. Carried onto the
+            # code_change blob so the BELT executor's own journal terminal can
+            # attribute the run to the agent rather than to whichever human
+            # approved it. Empty for a human-filed station run.
+            "agent_id": str(task.get("agent_id") or ""),
         }
 
         trigger = ActionTrigger(
@@ -358,6 +363,7 @@ def _emit_chain_close(
     workspace_id: str,
     user_id: str,
     causation_id: Any | None,
+    agent_id: str | None = None,
     task_count: int | None = None,
     run_refs: list[str] | None = None,
 ) -> None:
@@ -365,7 +371,17 @@ def _emit_chain_close(
 
     Mirrors the code-change executor's helper. No-ops on a missing
     correlation_id (the abandon-sweeper closes orphans). Best-effort: a
-    Decision-Graph wiring failure never breaks the approve response."""
+    Decision-Graph wiring failure never breaks the approve response.
+
+    ACTOR (T-17): the terminal is written by the mandate's FOREMAN, so when the
+    plan blob names an agent the actor is ``kind="agent", id="agent:<id>"``.
+    It used to be ``kind="agent", id="user:<user_id>"`` — an "agent" actor
+    carrying a USER id, which made a per-agent track record unassemblable from
+    the journal (every agent's terminals were filed under whichever human
+    approved them). ``agent_id`` is absent only on a plan proposed before this
+    change, and THAT case keeps the old string verbatim: a pending gate must
+    still dispatch, and rewriting its attribution to a made-up agent would be
+    worse than the honest legacy value."""
     if correlation_id is None:
         return
 
@@ -375,7 +391,7 @@ def _emit_chain_close(
 
     actor = Actor(
         kind="agent",
-        id=f"user:{user_id or 'unknown'}",
+        id=f"agent:{agent_id}" if agent_id else f"user:{user_id or 'unknown'}",
         scope_context=[f"workspace:{workspace_id}"],
     )
     payload: dict[str, Any] = {"passed": passed, "action_outcome": action_outcome}
@@ -464,6 +480,10 @@ async def execute_approved_plan(
     # so every terminal lands in the tenant's file, not the shared ledger.
     store = get_instinct_store(workspace_id=workspace_id or None)
     requested_by = str(blob.get("requested_by") or "")
+    # T-17: the foreman's agent identity. Read TOLERANTLY — a plan proposed
+    # before this change carries no ``agent_id`` and must still dispatch, so
+    # the schema is deliberately NOT bumped and ``None`` is a valid value.
+    agent_id = str(blob.get("agent_id") or "") or None
     mandate_id = str(blob.get("mandate_id") or "")
     shift_id = str(blob.get("shift_id") or "")
     shift_no = int(blob.get("shift_no") or 0)
@@ -481,6 +501,7 @@ async def execute_approved_plan(
             correlation_id=correlation_id,
             workspace_id=workspace_id,
             user_id=requested_by,
+            agent_id=agent_id,
             causation_id=causation,
         )
         await _mark_shift_safe(
@@ -544,6 +565,15 @@ async def execute_approved_plan(
         await _mark_shift_safe(workspace_id=workspace_id, shift_id=shift_id, state="executing")
         run_refs: list[str] = []
         for i, task in enumerate(tasks, start=1):
+            # Provenance rides on the task dict (the same channel
+            # ``StationTaskDispatcher`` already reads ``requested_by`` from)
+            # rather than a new ``dispatch()`` kwarg — the TaskDispatcher
+            # Protocol has third-party implementations (and test recorders)
+            # with fixed keyword lists, so widening the signature would break
+            # them for no gain.
+            task_payload = dict(task) if isinstance(task, dict) else {}
+            if agent_id:
+                task_payload["agent_id"] = agent_id
             try:
                 ref = await dispatch.dispatch(
                     workspace_id=workspace_id,
@@ -551,7 +581,7 @@ async def execute_approved_plan(
                     shift_no=shift_no,
                     plan_action_id=str(action.id),
                     index=i,
-                    task=dict(task) if isinstance(task, dict) else {},
+                    task=task_payload,
                 )
             except Exception as exc:  # noqa: BLE001
                 await _fail(
@@ -592,6 +622,7 @@ async def execute_approved_plan(
             correlation_id=correlation_id,
             workspace_id=workspace_id,
             user_id=requested_by,
+            agent_id=agent_id,
             causation_id=causation,
             task_count=len(run_refs),
             run_refs=run_refs,

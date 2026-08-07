@@ -1,6 +1,18 @@
 # executor.py — applies an approved Belt code-change Action and opens a PR.
 # Created: 2026-06-10 (feat/belt-gate, BS-3).
 #
+# Updated: 2026-08-07 (feat/coupling-t17-foreman-agent) — the Decision-Graph
+#   terminal is now attributed to the AGENT that dispatched the run. Every
+#   ``_emit_chain_close`` call site threads an ``agent_id`` read tolerantly off
+#   the ``_code_change`` blob (``StationTaskDispatcher`` stamps it when a
+#   mandate foreman queues the run), and the Actor becomes
+#   ``kind="agent", id="agent:<id>"`` instead of ``kind="agent",
+#   id="user:<user_id>"`` — an "agent" actor wearing a USER id, which made a
+#   per-agent track record unassemblable from the journal. A human-filed
+#   station run carries no ``agent_id`` and keeps the legacy string unchanged,
+#   so nothing that already works changes shape. No schema bump: a blob written
+#   before this deploy simply lacks the key.
+#
 # Updated: 2026-06-11 (feat/belt-autopilot) — refuses a QUEUED station run loud.
 #   A ``code_change`` blob carrying ``station_pending=True`` (filed by the
 #   mandate ``StationTaskDispatcher`` with the task text but NO diff) is a
@@ -288,6 +300,7 @@ def _emit_chain_close(
     workspace_id: str,
     user_id: str,
     causation_id: Any | None,
+    agent_id: str | None = None,
     pr_url: str | None = None,
     branch: str | None = None,
     commit_sha: str | None = None,
@@ -318,9 +331,16 @@ def _emit_chain_close(
 
     from pocketpaw_ee.cloud.decisions.journal_writer import record_decision_completed
 
+    # ACTOR (T-17): a run dispatched by a belt MANDATE carries the foreman's
+    # ``agent_id`` on its blob, so the terminal is attributed to that AGENT.
+    # The id used to be ``user:<user_id>`` under ``kind="agent"`` — an "agent"
+    # actor wearing a USER id, which made a per-agent track record
+    # unassemblable from the journal. A human-filed station run has no
+    # ``agent_id`` and keeps the legacy string: there is no agent to name, and
+    # inventing one would be worse than the honest legacy value.
     actor = Actor(
         kind="agent",
-        id=f"user:{user_id or 'unknown'}",
+        id=f"agent:{agent_id}" if agent_id else f"user:{user_id or 'unknown'}",
         scope_context=[f"workspace:{workspace_id}"],
     )
     payload: dict[str, Any] = {
@@ -502,6 +522,11 @@ async def execute_approved_change(
     # split-brains onto the shared file (flag unset) / raises (flag set).
     store = get_instinct_store(workspace_id=workspace_id or None)
     requested_by = str(blob.get("requested_by") or "")
+    # T-17: set only on a run the mandate foreman dispatched (see
+    # ``mandates/executor.StationTaskDispatcher``). Read tolerantly — a blob
+    # written before this change, or any human-filed station run, has no such
+    # key and falls back to the legacy user attribution.
+    agent_id = str(blob.get("agent_id") or "") or None
     causation = _coerce_uuid(human_event_id)
 
     async def _fail(reason: str, *, error_class: str) -> None:
@@ -519,6 +544,7 @@ async def execute_approved_change(
             correlation_id=correlation_id,
             workspace_id=workspace_id,
             user_id=requested_by,
+            agent_id=agent_id,
             causation_id=causation,
         )
         await _emit_run_updated(
@@ -707,6 +733,7 @@ async def execute_approved_change(
                 files_changed=files_changed,
                 workspace_id=workspace_id,
                 requested_by=requested_by,
+                agent_id=agent_id,
                 correlation_id=correlation_id,
                 causation=causation,
             )
@@ -776,6 +803,7 @@ async def execute_approved_change(
             correlation_id=correlation_id,
             workspace_id=workspace_id,
             user_id=requested_by,
+            agent_id=agent_id,
             causation_id=causation,
             pr_url=pr_url,
             branch=branch,
@@ -846,6 +874,7 @@ async def _land_local_only(
     requested_by: str,
     correlation_id: Any | None,
     causation: Any | None,
+    agent_id: str | None = None,
 ) -> None:
     """Land a local-only (no-origin) Belt code change.
 
@@ -918,6 +947,7 @@ async def _land_local_only(
         correlation_id=correlation_id,
         workspace_id=workspace_id,
         user_id=requested_by,
+        agent_id=agent_id,
         causation_id=causation,
         branch=branch,
         commit_sha=commit_sha,

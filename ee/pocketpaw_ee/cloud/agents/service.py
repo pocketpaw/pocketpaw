@@ -30,6 +30,17 @@ Public API:
 - ``is_visible_to_site_visitors(agent_id)`` — does a Paw Bar widget bind this
   agent to a published site, i.e. do anonymous visitors reach it?
 - ``legacy_ctx(user_id, workspace_id)`` — helper for the router
+- ``ensure_soul_materialized(agent_id)`` — create the agent's ``.soul`` file on
+  disk if it is missing, via the AgentPool convention
+
+Updated 2026-08-07 (feat/coupling-t17-foreman-agent): extracted the eager-soul
+mechanism into the public ``ensure_soul_materialized(agent_id)`` so callers
+outside the create path (the belt mandate foreman, which writes its shift
+memory to the bound agent's soul) can materialize a soul that the SEED path
+never created. ``seed_default_agent`` inserts the doc directly and never ran
+``_try_eager_soul``, so every workspace's default ``pocketpaw`` agent has a doc
+but no soul file — an agent-resolved soul write would have silently no-op'd
+forever without this.
 
 Updated 2026-07-30 (Paw Bar inbox D5): added ``is_visible_to_site_visitors``.
 A concierge run now reads its own ``agent:<id>`` knowledge scope, so knowledge
@@ -648,15 +659,34 @@ async def discover(
 
 async def _try_eager_soul(agent: Agent) -> None:
     """Best-effort eager soul materialization. Logs and continues on failure."""
+    await ensure_soul_materialized(agent.id)
+
+
+async def ensure_soul_materialized(agent_id: str) -> bool:
+    """Create the agent's ``.soul`` file on disk if it does not exist yet.
+
+    Delegates to ``AgentPool.ensure_soul`` — the SAME mechanism the create path
+    has always used — so the file lands at the pool's convention
+    ``~/.pocketpaw/souls/{workspace}/{slug}.soul`` and nobody invents a second
+    layout. Idempotent (``ensure_soul`` re-initializes and re-persists).
+
+    Public because ``seed_default_agent`` inserts its doc directly and never ran
+    the eager-soul step: the workspace default ``pocketpaw`` agent has a doc but
+    no soul file, so any caller that WRITES to an agent's soul (the belt mandate
+    foreman) has to be able to materialize it first or the write silently
+    no-ops. Best-effort by contract — returns ``False`` on any failure and never
+    raises, because a soul write must never wedge the caller's real work.
+    """
     try:
         from pocketpaw.agents.pool import get_agent_pool
 
-        doc = await _AgentDoc.get(PydanticObjectId(agent.id))
+        doc = await _AgentDoc.get(PydanticObjectId(agent_id))
         if doc is None:
-            return
-        await get_agent_pool().ensure_soul(doc)
+            return False
+        return bool(await get_agent_pool().ensure_soul(doc))
     except Exception:
-        logger.warning("Eager soul creation failed for agent %s", agent.id, exc_info=True)
+        logger.warning("Eager soul creation failed for agent %s", agent_id, exc_info=True)
+        return False
 
 
 async def suggest_for_mentions(workspace_id: str, q: str, *, limit: int = 8) -> list[dict]:

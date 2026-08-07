@@ -1,6 +1,30 @@
 # ee/pocketpaw_ee/cloud/mandates/service.py
 # Created: 2026-06-11 (feat/belt-mandates, slice 1 — models + CRUD).
 #
+# Updated: 2026-08-07 (feat/coupling-t17-foreman-agent) — a mandate now names
+#   the AGENT its foreman runs as.
+#     * ``create_mandate`` binds ``agent_id``: an explicit id is gated by
+#       ``agents_service.ensure_can_use`` (the canonical attach check — a leaked
+#       id for someone else's private agent is a 404, never a bind), and an
+#       omitted one defaults to the workspace's seeded ``pocketpaw`` agent via
+#       ``agents_service.get_by_slug`` — the SAME resolution
+#       ``chat/agent_service._get_default_workspace_agent_id`` uses and the same
+#       agent ``workspace/service.py`` seeds on workspace create. No third path.
+#     * ``_mandate_detail_wire`` returns the RESOLVED agent (id + name) so the
+#       console can show whose judgment seat a mandate is, including for
+#       pre-T-17 mandates that carry no stored ``agent_id``.
+#     * ``trigger_shift`` resolves the agent ONCE, inherits its system_prompt +
+#       scopes into the foreman prompt, resolves the soul through
+#       ``soul_link.resolve_soul_path`` (materializing on the write path), and
+#       stamps ``agent_id`` + the RESOLVED ``soul_path`` onto the belt_plan blob
+#       so the executor's journal terminal and soul append need no second
+#       lookup.
+#   DEGRADATION (rule: never let identity work break a running shift): every
+#   step above is best-effort. A deleted / disabled / cross-tenant agent falls
+#   back to the workspace default; no default agent at all resolves to ``None``
+#   and the shift plans with no inherited identity and no soul. The shift is the
+#   valuable thing; the soul write is the expendable half.
+#
 # Updated: 2026-06-13 (feat/patrol-engine) — added ``list_cadence_due(now)``, the
 #   cadence scheduler's read: all ACTIVE mandates whose charter cadence interval
 #   has elapsed since their last shift (or that never shifted). "manual" mandates
@@ -141,9 +165,53 @@ def _first_pydantic_msg(exc: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
+async def _default_foreman_agent_id(workspace_id: str) -> str | None:
+    """The workspace's seeded default ``pocketpaw`` agent id, or ``None``.
+
+    Goes through the agents service's public ``get_by_slug`` — the SAME
+    (workspace, slug="pocketpaw") lookup that
+    ``chat/agent_service._get_default_workspace_agent_id`` performs and that
+    ``agents_service.seed_default_agent`` writes on workspace create. Reusing
+    the public read keeps the Beanie doc inside its owning entity instead of
+    importing a private cross-entity helper.
+
+    ``None`` when the workspace has no default agent (a seed that never ran):
+    the mandate is created UNBOUND rather than refused — an identity gap must
+    not block making a mandate.
+    """
+    if not workspace_id:
+        return None
+    try:
+        from pocketpaw_ee.cloud.agents import service as agents_service
+
+        agent = await agents_service.get_by_slug(workspace_id, "pocketpaw")
+        return str(agent.id)
+    except Exception:  # noqa: BLE001 — no default agent is degraded, not fatal
+        logger.warning(
+            "mandate: workspace %s has no default 'pocketpaw' agent — creating the mandate unbound",
+            workspace_id,
+        )
+        return None
+
+
 async def create_mandate(workspace_id: str, user_id: str, body: Any) -> dict[str, Any]:
-    """Create a new standing mandate. Charter body validated at entry."""
+    """Create a new standing mandate. Charter body validated at entry.
+
+    ``agent_id`` binds the foreman's identity. An explicit id is checked with
+    ``ensure_can_use`` FIRST (raises NotFound for a private / cross-workspace
+    agent, so a leaked id can never be attached); an omitted one inherits the
+    workspace's seeded default agent."""
     body = CreateMandateRequest.model_validate(body)
+
+    if body.agent_id:
+        # Attach-permission gate — the same check the group / pocket attach
+        # paths use. A NotFound here is the correct, non-confirming answer.
+        from pocketpaw_ee.cloud.agents import service as agents_service
+
+        await agents_service.ensure_can_use(body.agent_id, workspace_id, user_id)
+        agent_id: str | None = body.agent_id
+    else:
+        agent_id = await _default_foreman_agent_id(workspace_id)
 
     doc = MandateDoc(
         workspace=workspace_id,
@@ -151,6 +219,7 @@ async def create_mandate(workspace_id: str, user_id: str, body: Any) -> dict[str
         surface=Surface(repo_id=body.surface.repo_id),
         charter=_charter_from_request(body),
         status="active",
+        agent_id=agent_id,
         soul_path=body.soul_path,
         patrols=list(body.patrols),
     )
@@ -251,12 +320,21 @@ async def _mandate_detail_wire(doc: MandateDoc) -> dict[str, Any]:
     for s in sightings:
         by_patrol[s.patrol] = by_patrol.get(s.patrol, 0) + 1
 
+    # The RESOLVED foreman identity — a pre-T-17 mandate stores no ``agent_id``
+    # but still runs under the workspace default, so the console must show what
+    # the shift will ACTUALLY use, not the (empty) stored field.
+    from pocketpaw_ee.cloud.mandates import soul_link
+
+    agent = await soul_link.resolve_foreman_agent(workspace_id, doc.agent_id)
+
     return {
         "id": mandate_id,
         "name": doc.name,
         "status": doc.status,
         "surface": {"repo_id": doc.surface.repo_id},
         "charter": _charter_to_wire(doc.charter),
+        "agent_id": agent.id if agent else None,
+        "agent_name": agent.name if agent else None,
         "soul_path": doc.soul_path,
         "patrols": list(doc.patrols),
         "autopilot": _autopilot_to_wire(doc),
@@ -627,9 +705,44 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         .to_list()
     )
     history = [{"no": h.no, "state": h.state, "outcome": h.outcome} for h in reversed(history_docs)]
-    soul_context = await soul_link.recall_for_planning(
-        doc.soul_path, f"{doc.name} {doc.charter.goal}"
-    )
+
+    # 3a. IDENTITY — resolve the agent whose seat this foreman occupies, ONCE
+    #     per shift. A deleted / disabled / cross-tenant binding falls back to
+    #     the workspace default inside the resolver; ``None`` (no default agent
+    #     at all) is a legitimate, still-runnable outcome: the shift plans with
+    #     no inherited prompt and no soul.
+    #
+    #     THE WHOLE BLOCK IS BEST-EFFORT AND THAT IS THE POINT. Identity is a
+    #     nice-to-have on a shift; the SHIFT is the valuable thing. The resolver
+    #     functions each degrade internally, and this belt-and-braces guard means
+    #     even a programming error in the identity path (a bad import, a
+    #     surprise from the agents service) costs the mandate its inherited
+    #     prompt and its soul memory — never its shift. Falls back to the
+    #     mandate's own legacy ``soul_path``, which is what a pre-T-17 shift
+    #     used.
+    agent = None
+    soul_path = doc.soul_path
+    try:
+        agent = await soul_link.resolve_foreman_agent(workspace_id, doc.agent_id)
+        # ``materialize=True``: this is the write path (every terminal below
+        # appends a shift summary), and a seeded default agent has no soul yet.
+        soul_path = await soul_link.resolve_soul_path(
+            workspace_id=workspace_id,
+            agent=agent,
+            legacy_soul_path=doc.soul_path,
+            materialize=True,
+        )
+    except Exception:  # noqa: BLE001 — identity must never wedge a shift
+        logger.warning(
+            "mandate: foreman identity resolution failed for mandate %s — the shift "
+            "runs without an inherited agent identity",
+            mandate_id,
+            exc_info=True,
+        )
+        agent = None
+        soul_path = doc.soul_path
+
+    soul_context = await soul_link.recall_for_planning(soul_path, f"{doc.name} {doc.charter.goal}")
 
     context = foreman_mod.ForemanContext(
         shift_no=shift_no,
@@ -637,6 +750,9 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         sightings=digest,
         history=history,
         soul_context=soul_context,
+        agent_name=agent.name if agent else "",
+        agent_system_prompt=agent.system_prompt if agent else "",
+        agent_scopes=list(agent.scopes) if agent else [],
     )
     try:
         plan = await foreman_mod.plan_shift(context)
@@ -694,7 +810,7 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
             outcome=outcome,
         )
         await soul_link.remember_shift(
-            doc.soul_path, f"Mandate '{doc.name}' shift {shift_no} {outcome}"
+            soul_path, f"Mandate '{doc.name}' shift {shift_no} {outcome}"
         )
         # UI contract — the shift response rides a ``shift`` envelope.
         return {
@@ -727,7 +843,14 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         # Budget snapshot — the executor re-validates it is UNCHANGED at
         # approval time.
         "budget_max_tasks": doc.charter.budget.max_tasks_per_shift,
-        "soul_path": doc.soul_path,
+        # The RESOLVED soul + the agent that owns it. The executor re-uses both
+        # at approve time (journal actor + shift-memory append) without a second
+        # lookup. NOTE: BELT_PLAN_SCHEMA is deliberately NOT bumped — a plan
+        # proposed before this deploy and approved after it carries neither key,
+        # and the executor reads both tolerantly, so a pending gate still
+        # dispatches.
+        "soul_path": soul_path,
+        "agent_id": agent.id if agent else None,
         "workspace_id": workspace_id,
         "requested_by": user_id,
         "correlation_id": str(correlation_id),
