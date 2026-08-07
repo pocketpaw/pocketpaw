@@ -1,4 +1,8 @@
 # test_knowledge_aggregator.py — Unit tests for the workspace KB aggregator.
+# Updated: 2026-08-04 — Living-wiki API: to_dict shape extended with wiki
+# metadata (summary, word_count, compiled_with, version, categories, concepts,
+# compiled_at); added a mapping test for the enriched rows including the
+# updated_at → compiled_at fallback.
 # Created: 2026-04-19 (Cluster C / PR1) — Pins the aggregator's merge and
 # scope-filter contract before it becomes the /knowledge/articles endpoint's
 # only test harness. See ee/cloud/kb/workspace_aggregator.py for the code
@@ -22,6 +26,7 @@ from __future__ import annotations
 import pytest
 from pocketpaw_ee.cloud.kb.workspace_aggregator import (
     AggregatedArticle,
+    _row_to_article,
     aggregate_workspace_articles,
 )
 
@@ -209,4 +214,40 @@ def test_aggregated_article_to_dict_shape():
         "scope": "workspace:ws1",
         "agent_id": None,
         "updated_at": "2026-04-19T00:00:00Z",
+        # Living-wiki metadata (2026-08-04) — defaults when the kb row
+        # doesn't carry them (orphan raw docs, older binaries).
+        "summary": "",
+        "word_count": 0,
+        "compiled_with": None,
+        "version": None,
+        "categories": [],
+        "concepts": [],
+        "compiled_at": None,
     }
+
+
+def test_row_wiki_metadata_maps_through():
+    """kb rows enriched with wiki frontmatter surface the full wiki row."""
+    row = {
+        "id": "art-1",
+        "title": "T",
+        "summary": "S.",
+        "word_count": 321,
+        "compiled_with": "claude-haiku-4-5",
+        "version": 2,
+        "categories": ["Ops"],
+        "concepts": ["deploys", "rollbacks"],
+        "compiled_at": "2026-08-01T00:00:00Z",
+    }
+    article = _row_to_article(row, scope="workspace:ws1", agent_id=None)
+    assert article is not None
+    assert article.summary == "S."
+    assert article.word_count == 321
+    assert article.compiled_with == "claude-haiku-4-5"
+    assert article.version == 2
+    assert article.categories == ["Ops"]
+    assert article.concepts == ["deploys", "rollbacks"]
+    assert article.compiled_at == "2026-08-01T00:00:00Z"
+    # No explicit updated_at on kb rows — falls back to compiled_at so the
+    # newest-first sort keeps working.
+    assert article.updated_at == "2026-08-01T00:00:00Z"

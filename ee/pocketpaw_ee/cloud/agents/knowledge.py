@@ -1,4 +1,11 @@
 # knowledge.py — Agent knowledge service via the kb-go binary.
+# Updated: 2026-08-04 (living-wiki review follow-up) — Added
+#   extract_ingest_article_id(): kb-go's finishIngest receipt keys the new
+#   article as "article" (not "id"), so callers that read result["id"] never
+#   saw it and FL-11b tracking writes silently never fired. The helper mirrors
+#   _check_ingest_result's key order (id, article_id, article) and is now the
+#   one place receipt-shape knowledge lives; the FileReady listener and the
+#   /knowledge reingest routes both use it.
 # Updated: 2026-08-04 — Ingest hardening (silent-poisoning fix). On boxes with
 #   no ANTHROPIC_API_KEY (the Claude Code agent backend deployment), kb's own
 #   LLM compile used to fail and kb silently stored every doc VERBATIM — a
@@ -241,6 +248,25 @@ def _check_ingest_result(
             f"and purge the article (kb delete {article_id} --scope {scope})."
         )
     return result
+
+
+def extract_ingest_article_id(result: dict | list | str | None) -> str | None:
+    """Article id from a kb ingest receipt, or ``None``.
+
+    kb-go's ``finishIngest`` emits ``{"article": "<id>", "title": ...,
+    "words": ..., "compiled_with": ...}`` — the id key is ``article``, not
+    ``id``. Older/other shapes used ``id``/``article_id``; mirror
+    ``_check_ingest_result``'s key order so every receipt shape resolves.
+    Callers that read ``result["id"]`` directly never saw the id (FL-11b
+    tracking silently never fired) — always go through this helper.
+    """
+    if not isinstance(result, dict):
+        return None
+    for key in ("id", "article_id", "article"):
+        value = result.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _parse_article_json(raw: str) -> dict:
