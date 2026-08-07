@@ -12,6 +12,11 @@ What these tests pin:
   the workspace-default ``pocketpaw`` agent (the same fallback
   ``chat.agent_service`` uses) — asserted through
   ``message_service.create_agent_message``, not the pseudo-user writer;
+* a revoked or deleted agent never gets the byline. Neither
+  ``agents.service.delete`` nor AW-4's soft ``_set_disabled`` detaches the
+  agent from ``group.agents``, so that list can hand back a dangling or
+  revoked id; authoring under one would put a revoked agent's name and avatar
+  on brand-new messages;
 * the notes still post when NO agent can be resolved, or when the group lookup
   itself fails — a meeting summary outranks its byline;
 * the meeting is observed into the authoring agent's soul, with the instance
@@ -51,8 +56,14 @@ def _notes_env(
     default_agent_id: str | None = None,
     group_lookup_error: Exception | None = None,
     pool: MagicMock | None = None,
+    revoked: frozenset[str] = frozenset(),
 ):
-    """Patch every collaborator ``post_meeting_notes_to_group`` reaches for."""
+    """Patch every collaborator ``post_meeting_notes_to_group`` reaches for.
+
+    ``revoked`` names agent ids that are disabled or deleted — for those,
+    ``agents.service.get_persona`` answers ``None``, exactly as it does for a
+    soft-disabled (AW-4) or missing agent.
+    """
     agent_msg = MagicMock()
     agent_msg.id = "msg_agent"
     legacy_msg = MagicMock()
@@ -64,7 +75,14 @@ def _notes_env(
     )
     pool = pool if pool is not None else _fake_pool()
 
+    async def _persona(agent_id: str) -> str | None:
+        return None if agent_id in revoked else f"persona of {agent_id}"
+
     with (
+        patch(
+            "pocketpaw_ee.cloud.agents.service.get_persona",
+            new=AsyncMock(side_effect=_persona),
+        ) as mock_persona,
         patch(
             "pocketpaw_ee.cloud.chat.group_service.get_for_dispatch",
             new=get_for_dispatch,
@@ -91,6 +109,7 @@ def _notes_env(
             agent_post=mock_agent_post,
             legacy_post=mock_legacy_post,
             default_agent=mock_default,
+            persona=mock_persona,
             bus=mock_bus,
             pool=pool,
         )
@@ -162,6 +181,74 @@ async def test_workspace_id_argument_is_used_when_the_group_has_no_agents() -> N
         await _post(workspace_id="ws_from_arg")
 
     env.default_agent.assert_awaited_once_with("ws_from_arg")
+
+
+# ---------------------------------------------------------------------------
+# Revocation — a dead or revoked agent must not author
+# ---------------------------------------------------------------------------
+
+
+async def test_a_revoked_first_agent_does_not_get_the_byline() -> None:
+    """AW-4's soft disable does not detach the agent from ``group.agents``, so
+    the notes path has to check liveness itself — otherwise a revoked agent's
+    name and avatar appear on brand-new messages.
+
+    Mutation that breaks this: return ``group.agents[0].agent_id`` without the
+    ``_agent_can_author`` check.
+    """
+    with _notes_env(
+        group=_group("agent_a"),
+        default_agent_id="ws_default",
+        revoked=frozenset({"agent_a"}),
+    ) as env:
+        await _post()
+
+    env.agent_post.assert_awaited_once()
+    assert env.agent_post.await_args.kwargs["agent_id"] == "ws_default"
+
+
+async def test_a_deleted_group_agent_does_not_get_the_byline() -> None:
+    """``agents.service.delete`` leaves the id in ``group.agents`` too, so the
+    list can hand back an id no Agent row answers to. ``get_persona`` returns
+    ``None`` for both cases — this pins the deleted one explicitly."""
+    with _notes_env(
+        group=_group("dangling_id"),
+        default_agent_id="ws_default",
+        revoked=frozenset({"dangling_id"}),
+    ) as env:
+        await _post()
+
+    assert env.agent_post.await_args.kwargs["agent_id"] == "ws_default"
+    env.persona.assert_any_await("dangling_id")
+
+
+async def test_a_revoked_workspace_default_falls_back_to_the_pseudo_user() -> None:
+    """The fallback candidate gets the same check as the first one.
+
+    Mutation that breaks this: return ``_get_default_workspace_agent_id``'s
+    answer unchecked.
+    """
+    with _notes_env(
+        group=_group(),
+        default_agent_id="ws_default",
+        revoked=frozenset({"ws_default"}),
+    ) as env:
+        await _post()
+
+    env.agent_post.assert_not_awaited()
+    env.legacy_post.assert_awaited_once()
+    env.pool.observe.assert_not_awaited()
+
+
+async def test_a_failing_liveness_check_does_not_hand_out_the_byline() -> None:
+    """The check fails closed: an unreadable agent row is treated as unusable,
+    not waved through."""
+    with _notes_env(group=_group("agent_a"), default_agent_id=None) as env:
+        env.persona.side_effect = RuntimeError("mongo is having a day")
+        await _post()
+
+    env.agent_post.assert_not_awaited()
+    env.legacy_post.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -330,8 +417,10 @@ async def test_a_failing_soul_write_never_breaks_the_notes() -> None:
     env.agent_post.assert_awaited_once()
 
 
-async def test_a_disabled_agent_costs_the_soul_write_not_the_notes() -> None:
-    """``pool.get`` raises ``AgentDisabled`` for a revoked agent."""
+async def test_an_agent_revoked_mid_flight_costs_the_soul_write_not_the_notes() -> None:
+    """An agent that passes the liveness check and is revoked before
+    ``pool.get`` runs raises ``AgentDisabled`` inside the observe helper. That
+    race window costs the soul write only — the notes are already posted."""
     from pocketpaw.agents.errors import AgentDisabled
 
     pool = _fake_pool(get_error=AgentDisabled("agent_a"))

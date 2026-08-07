@@ -20,8 +20,13 @@ Change log:
   ``CALL_BOT_USER_ID`` pseudo-user. After posting it best-effort
   ``pool.observe``s a transcript digest + summary into that agent's soul, so
   the agent chatting in the same group remembers the meeting it attended.
-  Groups with no agent AND no workspace default keep the pseudo-user sender:
-  a meeting summary is worth more than an identity, so the notes still land.
+  Each candidate is liveness-checked (``_agent_can_author``) before it gets
+  the byline — neither ``agents.service.delete`` nor AW-4's soft revoke
+  detaches an agent from its groups, so ``group.agents[0]`` can be dangling or
+  revoked, and a revoked agent authoring new messages would defeat the revoke.
+  Groups with no live agent AND no workspace default keep the pseudo-user
+  sender: a meeting summary is worth more than an identity, so the notes still
+  land.
   Two observable consequences, both intended: the message row is now
   ``sender_type="agent"``, which means (a) auto/smart-mode agents no longer
   auto-reply to the notes (the ``agent_bridge`` loop guard skips agent-authored
@@ -124,9 +129,11 @@ LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
 #   1. the degraded notes path, when a group has no attached agent AND the
 #      workspace has no default agent (notes still post, unattributed);
 #   2. ``_create_tasks_from_meeting_notes``' RequestContext.user_id, which
-#      lands in ``Task.creator_id`` — a field compared against real user ids
-#      in the tasks permission checks and rendered as a human by Mission
-#      Control, so putting an agent id there is a separate change;
+#      lands in ``Task.creator_id``. Kept for scope control, not because
+#      swapping it is hazardous: the constant already matches no real user in
+#      the tasks permission checks and Mission Control already renders it as a
+#      human named ``__livekit_call_bot__``, so an agent id would trade one
+#      wrong string for another. Task-creator identity is its own change;
 #   3. message rows already written with this sender before T-18.
 CALL_BOT_USER_ID = "__livekit_call_bot__"
 
@@ -923,6 +930,34 @@ async def get_room_info(group_id: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
+async def _agent_can_author(agent_id: str) -> bool:
+    """Whether ``agent_id`` is allowed to author a message right now.
+
+    An id sitting in ``group.agents`` is NOT proof the agent is live. Neither
+    ``agents.service.delete`` nor ``_set_disabled`` (AW-4's soft revoke)
+    detaches the agent from its groups, so that list can hold a dangling id or
+    a revoked one. Publishing under either is worse than having no byline: a
+    revoked agent's name and avatar would appear on brand-new messages, and a
+    deleted one renders as a generic "Agent".
+
+    ``agents.service.get_persona`` is the same revoke-aware lookup the agent
+    bridge's smart path uses — it returns ``None`` for a missing OR disabled
+    agent — so one read answers both questions and this path fails closed the
+    way ``pool.get`` does.
+    """
+    try:
+        from pocketpaw_ee.cloud.agents import service as agents_service
+
+        return await agents_service.get_persona(agent_id) is not None
+    except Exception:
+        logger.warning(
+            "Meeting notes: agent liveness check failed for %s",
+            agent_id,
+            exc_info=True,
+        )
+        return False
+
+
 async def _resolve_notes_agent_id(group_id: str, workspace_id: str) -> str | None:
     """Resolve the Agent that should author this group's meeting notes.
 
@@ -930,12 +965,15 @@ async def _resolve_notes_agent_id(group_id: str, workspace_id: str) -> str | Non
     ``pocketpaw`` agent — the same fallback ``chat.agent_service`` uses for
     pockets with no agent attached (``_get_default_workspace_agent_id``),
     reused rather than re-derived so both surfaces answer with the same agent.
+    Each candidate is checked for liveness (``_agent_can_author``) before it
+    gets the byline, so a revoked or deleted agent falls through to the next
+    candidate instead of authoring.
 
-    Returns ``None`` when neither exists. That is a real state (a group can
-    have its agents detached, and a workspace whose default agent was deleted
-    has no seed to fall back on), so callers must treat it as a normal branch,
-    not an error. Every lookup is guarded: a DB hiccup here must degrade the
-    notes' identity, never the notes.
+    Returns ``None`` when no live agent is reachable. That is a real state (a
+    group can have its agents detached or revoked, and a workspace whose
+    default agent was deleted has no seed to fall back on), so callers must
+    treat it as a normal branch, not an error. Every lookup is guarded: a DB
+    hiccup here must degrade the notes' identity, never the notes.
     """
     ws_id = workspace_id
     try:
@@ -945,7 +983,15 @@ async def _resolve_notes_agent_id(group_id: str, workspace_id: str) -> str | Non
         if group is not None:
             ws_id = ws_id or group.workspace_id
             if group.agents:
-                return group.agents[0].agent_id
+                candidate = group.agents[0].agent_id
+                if await _agent_can_author(candidate):
+                    return candidate
+                logger.info(
+                    "Meeting notes: group %s's first agent %s is revoked or gone; "
+                    "falling back to the workspace default agent",
+                    group_id,
+                    candidate,
+                )
     except Exception:
         logger.warning(
             "Meeting notes: group lookup failed for %s; falling back to the "
@@ -959,7 +1005,10 @@ async def _resolve_notes_agent_id(group_id: str, workspace_id: str) -> str | Non
     try:
         from pocketpaw_ee.cloud.chat.agent_service import _get_default_workspace_agent_id
 
-        return await _get_default_workspace_agent_id(ws_id)
+        default_id = await _get_default_workspace_agent_id(ws_id)
+        if default_id and await _agent_can_author(default_id):
+            return default_id
+        return None
     except Exception:
         logger.warning(
             "Meeting notes: default-agent lookup failed for workspace %s",
@@ -1103,10 +1152,16 @@ async def post_meeting_notes_to_group(
             )
             message_id = str(msg.id)
         else:
-            # Degraded path — no agent in the group, none default in the
+            # Degraded path — no live agent in the group, none default in the
             # workspace. Post under the legacy pseudo-user so the summary is
             # not lost, and keep the legacy event emit: on this path nothing
             # else bumps the group's stats.
+            #
+            # The asymmetry is deliberate: this branch stays
+            # ``sender_type="user"``, so auto/smart-mode agents DO still
+            # auto-reply to the notes here, while the agent branch above is
+            # skipped by the bridge's loop guard. Making a group with no agent
+            # of its own quieter would be a second, unrelated behavior change.
             from pocketpaw_ee.cloud.chat.message_service import _create_group_message_doc
             from pocketpaw_ee.cloud.shared.events import event_bus
 

@@ -9,8 +9,29 @@
   {
     "label": "the workspace-default agent fallback is dropped (group with no agents goes unattributed)",
     "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
-    "find": "        return await _get_default_workspace_agent_id(ws_id)",
-    "replace": "        return None",
+    "find": "        default_id = await _get_default_workspace_agent_id(ws_id)",
+    "replace": "        default_id = None",
+    "tests": ["tests/cloud/livekit/test_meeting_notes_agent_identity.py"]
+  },
+  {
+    "label": "the group's first agent skips the revoke check (a disabled or deleted agent authors)",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "                if await _agent_can_author(candidate):",
+    "replace": "                if True:",
+    "tests": ["tests/cloud/livekit/test_meeting_notes_agent_identity.py"]
+  },
+  {
+    "label": "the workspace-default agent skips the revoke check",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "        if default_id and await _agent_can_author(default_id):",
+    "replace": "        if default_id:",
+    "tests": ["tests/cloud/livekit/test_meeting_notes_agent_identity.py"]
+  },
+  {
+    "label": "the liveness check fails OPEN (an unreadable agent row still gets the byline)",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "            \"Meeting notes: agent liveness check failed for %s\",\n            agent_id,\n            exc_info=True,\n        )\n        return False",
+    "replace": "            \"Meeting notes: agent liveness check failed for %s\",\n            agent_id,\n            exc_info=True,\n        )\n        return True",
     "tests": ["tests/cloud/livekit/test_meeting_notes_agent_identity.py"]
   },
   {
