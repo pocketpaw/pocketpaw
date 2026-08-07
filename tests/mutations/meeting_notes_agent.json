@@ -1,0 +1,82 @@
+[
+  {
+    "label": "notes revert to the CALL_BOT_USER_ID pseudo-user sender (pre-T-18 behavior)",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "        if agent_id:\n            # Author the notes as a real Agent.",
+    "replace": "        if False:\n            # Author the notes as a real Agent.",
+    "tests": ["tests/cloud/livekit/test_meeting_notes_agent_identity.py"]
+  },
+  {
+    "label": "the workspace-default agent fallback is dropped (group with no agents goes unattributed)",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "        return await _get_default_workspace_agent_id(ws_id)",
+    "replace": "        return None",
+    "tests": ["tests/cloud/livekit/test_meeting_notes_agent_identity.py"]
+  },
+  {
+    "label": "the soul observe call is deleted (meeting never reaches the agent's memory)",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "        await pool.observe(agent_id, _meeting_soul_digest(transcript), summary)",
+    "replace": "        pass",
+    "tests": ["tests/cloud/livekit/test_meeting_notes_agent_identity.py"]
+  },
+  {
+    "label": "the agent instance is never materialized (pool.observe silently no-ops)",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "        await pool.get(agent_id)",
+    "replace": "        pass",
+    "tests": ["tests/cloud/livekit/test_meeting_notes_agent_identity.py"]
+  },
+  {
+    "label": "a soul-write failure escapes and kills the already-posted notes",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "    except Exception:\n        logger.warning(\n            \"Meeting notes: soul observe failed for agent %s (notes already posted)\",",
+    "replace": "    except ValueError:\n        logger.warning(\n            \"Meeting notes: soul observe failed for agent %s (notes already posted)\",",
+    "tests": ["tests/cloud/livekit/test_meeting_notes_agent_identity.py"]
+  },
+  {
+    "label": "a group-lookup failure escapes instead of falling back to the workspace default",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "    except Exception:\n        logger.warning(\n            \"Meeting notes: group lookup failed for %s; falling back to the \"",
+    "replace": "    except ValueError:\n        logger.warning(\n            \"Meeting notes: group lookup failed for %s; falling back to the \"",
+    "tests": ["tests/cloud/livekit/test_meeting_notes_agent_identity.py"]
+  },
+  {
+    "label": "the realtime payload keeps calling an agent-authored message a user message",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "                    \"senderType\": \"agent\" if agent_id else \"user\",",
+    "replace": "                    \"senderType\": \"user\",",
+    "tests": ["tests/cloud/livekit/test_meeting_notes_agent_identity.py"]
+  },
+  {
+    "label": "a raw PydanticObjectId leaks into the event payloads",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "            message_id = str(msg.id)",
+    "replace": "            message_id = msg.id",
+    "tests": ["tests/cloud/livekit/test_meeting_notes_agent_identity.py"]
+  },
+  {
+    "label": "the legacy message.sent emit is re-added on the agent path (double-counts group stats)",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "            msg = await message_service.create_agent_message(",
+    "replace": "            from pocketpaw_ee.cloud.shared.events import event_bus as _eb\n\n            await _eb.emit(\"message.sent\", {\"group_id\": group_id, \"content\": content})\n            msg = await message_service.create_agent_message(",
+    "tests": ["tests/cloud/livekit/test_meeting_notes_agent_identity.py"]
+  },
+  {
+    "label": "the transcript is dumped into the soul untruncated",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "        body = body[:_SOUL_DIGEST_TRANSCRIPT_CHARS] + \"\\n[... transcript truncated ...]\"",
+    "replace": "        body = body",
+    "tests": ["tests/cloud/livekit/test_meeting_notes_agent_identity.py"]
+  },
+  {
+    "label": "the no-agent fallback stops posting (a summary is lost when no agent exists)",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "            domain_msg = await _create_group_message_doc(",
+    "replace": "            raise RuntimeError(\"no agent to author the notes\")\n            domain_msg = await _create_group_message_doc(",
+    "tests": [
+      "tests/cloud/livekit/test_meeting_notes_agent_identity.py",
+      "tests/ee/test_livekit_service.py"
+    ]
+  }
+]

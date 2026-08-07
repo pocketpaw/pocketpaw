@@ -12,6 +12,22 @@ Change log:
   runs a single worker, so this in-process lock fully covers it; true
   cross-replica dedupe is out of scope here (see the LiveKit Agents migration
   design doc).
+- T-18 (meeting notes post as a real Agent): ``post_meeting_notes_to_group``
+  now resolves a real Agent (the group's first attached agent, else the
+  workspace-default ``pocketpaw`` agent) and posts through
+  ``message_service.create_agent_message`` so the notes carry an agent
+  identity — avatar, name, ``/agents`` visibility — instead of the
+  ``CALL_BOT_USER_ID`` pseudo-user. After posting it best-effort
+  ``pool.observe``s a transcript digest + summary into that agent's soul, so
+  the agent chatting in the same group remembers the meeting it attended.
+  Groups with no agent AND no workspace default keep the pseudo-user sender:
+  a meeting summary is worth more than an identity, so the notes still land.
+  Two observable consequences, both intended: the message row is now
+  ``sender_type="agent"``, which means (a) auto/smart-mode agents no longer
+  auto-reply to the notes (the ``agent_bridge`` loop guard skips agent-authored
+  messages) and (b) the legacy ``event_bus`` "message.sent" emit is dropped on
+  the agent path because ``create_agent_message`` already bumps group stats —
+  emitting it too would double-count ``message_count``.
 """
 
 from __future__ import annotations
@@ -102,8 +118,21 @@ LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "")
 LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "")
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
 
-# System agent used for bot posting
+# Legacy pseudo-user id for call-bot writes. NO LONGER the meeting-notes
+# author (T-18) — notes now post as a real Agent. It survives for three
+# narrow reasons, all of them backwards compatibility:
+#   1. the degraded notes path, when a group has no attached agent AND the
+#      workspace has no default agent (notes still post, unattributed);
+#   2. ``_create_tasks_from_meeting_notes``' RequestContext.user_id, which
+#      lands in ``Task.creator_id`` — a field compared against real user ids
+#      in the tasks permission checks and rendered as a human by Mission
+#      Control, so putting an agent id there is a separate change;
+#   3. message rows already written with this sender before T-18.
 CALL_BOT_USER_ID = "__livekit_call_bot__"
+
+# Transcript characters fed to the agent's soul on ``pool.observe``. The raw
+# transcript runs 14K+ chars; a soul memory wants a digest, not a dump.
+_SOUL_DIGEST_TRANSCRIPT_CHARS = 4000
 
 
 def _ensure_configured() -> None:
@@ -894,6 +923,92 @@ async def get_room_info(group_id: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
+async def _resolve_notes_agent_id(group_id: str, workspace_id: str) -> str | None:
+    """Resolve the Agent that should author this group's meeting notes.
+
+    Order: the group's first attached agent, then the workspace-default
+    ``pocketpaw`` agent — the same fallback ``chat.agent_service`` uses for
+    pockets with no agent attached (``_get_default_workspace_agent_id``),
+    reused rather than re-derived so both surfaces answer with the same agent.
+
+    Returns ``None`` when neither exists. That is a real state (a group can
+    have its agents detached, and a workspace whose default agent was deleted
+    has no seed to fall back on), so callers must treat it as a normal branch,
+    not an error. Every lookup is guarded: a DB hiccup here must degrade the
+    notes' identity, never the notes.
+    """
+    ws_id = workspace_id
+    try:
+        from pocketpaw_ee.cloud.chat import group_service
+
+        group = await group_service.get_for_dispatch(group_id)
+        if group is not None:
+            ws_id = ws_id or group.workspace_id
+            if group.agents:
+                return group.agents[0].agent_id
+    except Exception:
+        logger.warning(
+            "Meeting notes: group lookup failed for %s; falling back to the "
+            "workspace default agent",
+            group_id,
+            exc_info=True,
+        )
+
+    if not ws_id:
+        return None
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import _get_default_workspace_agent_id
+
+        return await _get_default_workspace_agent_id(ws_id)
+    except Exception:
+        logger.warning(
+            "Meeting notes: default-agent lookup failed for workspace %s",
+            ws_id,
+            exc_info=True,
+        )
+        return None
+
+
+async def _observe_meeting_in_agent_soul(agent_id: str, transcript: str, summary: str) -> None:
+    """Land the meeting in the authoring agent's soul. Never raises.
+
+    ``pool.observe`` is a no-op for an agent that has no live instance (it
+    looks the instance up in the pool's cache), so this materializes the
+    instance with ``pool.get`` first — that is also what builds the
+    ``SoulManager``. Both calls are guarded together: ``pool.get`` raises for a
+    disabled agent and on any DB error, and losing a soul write must never cost
+    the meeting summary that is already posted.
+    """
+    try:
+        from pocketpaw.agents.pool import get_agent_pool
+
+        pool = get_agent_pool()
+        await pool.get(agent_id)
+        await pool.observe(agent_id, _meeting_soul_digest(transcript), summary)
+        logger.info("Meeting notes: observed meeting into agent %s's soul", agent_id)
+    except Exception:
+        logger.warning(
+            "Meeting notes: soul observe failed for agent %s (notes already posted)",
+            agent_id,
+            exc_info=True,
+        )
+
+
+def _meeting_soul_digest(transcript: str) -> str:
+    """Build the ``user_input`` side of the soul observation.
+
+    A soul memory wants a digest, not a 14K-char dump, so the transcript is
+    truncated with a visible marker. The framing sentence matters: without it
+    the soul records a wall of dialogue with no clue where it came from.
+    """
+    body = (transcript or "").strip()
+    if not body:
+        return "We had a group call. No transcript was captured."
+    if len(body) > _SOUL_DIGEST_TRANSCRIPT_CHARS:
+        body = body[:_SOUL_DIGEST_TRANSCRIPT_CHARS] + "\n[... transcript truncated ...]"
+    return f"We had a group call. Transcript:\n{body}"
+
+
 async def post_meeting_notes_to_group(
     group_id: str,
     transcript: str,
@@ -906,11 +1021,20 @@ async def post_meeting_notes_to_group(
 ) -> None:
     """Post meeting notes to a group after a call ends.
 
-    Creates a system message directly (bypassing membership check since the
-    call-bot is not a group member) and emits a real-time event so all
-    group members see it. Also stores the transcript as a file and creates
-    a MeetingTranscript record so the meeting detail in /meetings can
-    display the transcript.
+    The notes are authored by a real Agent (T-18): the group's first attached
+    agent, else the workspace-default ``pocketpaw`` agent. Posting goes through
+    ``message_service.create_agent_message``, so the message carries
+    ``sender_type="agent"`` plus the agent id — the same shape the agent bridge
+    writes — and the agent's avatar/name resolve in the client. The meeting is
+    then observed into that agent's soul so it can recall the call it attended.
+
+    Degrades in two steps, because a meeting summary outranks both identity and
+    memory: a group with no agent and no workspace default falls back to the
+    legacy ``CALL_BOT_USER_ID`` pseudo-user sender, and a soul-observe failure
+    is logged and swallowed. Neither can stop the notes from posting.
+
+    Also stores the transcript as a file and creates a MeetingTranscript record
+    so the meeting detail in /meetings can display the transcript.
     """
     # Resolve participant identities to display names using participant_map
     # (which maps identity → name as sent by the agent).
@@ -957,36 +1081,66 @@ async def post_meeting_notes_to_group(
 
     content = "\n".join(lines)
 
+    agent_id = await _resolve_notes_agent_id(group_id, workspace_id)
+
     try:
-        # Use direct message creation to bypass membership check
+        if agent_id:
+            # Author the notes as a real Agent. ``create_agent_message`` writes
+            # ``sender=None, sender_type="agent", agent=<id>`` and bumps the
+            # group's message stats itself — which is why this path does NOT
+            # emit the legacy ``event_bus`` "message.sent": its handler
+            # (``shared.event_handlers._on_message_sent``) bumps the same stats
+            # again, so emitting both double-counts ``message_count``. The
+            # event's only other subscriber is the agent bridge, which skips
+            # agent-authored messages anyway (loop guard), and notes carry no
+            # mentions.
+            from pocketpaw_ee.cloud.chat import message_service
 
-        from pocketpaw_ee.cloud.chat.message_service import _create_group_message_doc
-        from pocketpaw_ee.cloud.shared.events import event_bus
+            msg = await message_service.create_agent_message(
+                group_id=group_id,
+                agent_id=agent_id,
+                content=content,
+            )
+            message_id = str(msg.id)
+        else:
+            # Degraded path — no agent in the group, none default in the
+            # workspace. Post under the legacy pseudo-user so the summary is
+            # not lost, and keep the legacy event emit: on this path nothing
+            # else bumps the group's stats.
+            from pocketpaw_ee.cloud.chat.message_service import _create_group_message_doc
+            from pocketpaw_ee.cloud.shared.events import event_bus
 
-        domain_msg = await _create_group_message_doc(
-            group_id=group_id,
-            sender=CALL_BOT_USER_ID,
-            sender_type="user",
-            sender_name="Meeting Notes",
-            content=content,
-        )
-        # Emit on internal event bus (group stats, mention notifications)
-        await event_bus.emit(
-            "message.sent",
-            {
-                "group_id": group_id,
-                "message_id": domain_msg.id,
-                "sender_id": CALL_BOT_USER_ID,
-                "sender_type": "user",
-                "content": content,
-                "mentions": [],
-            },
-        )
+            domain_msg = await _create_group_message_doc(
+                group_id=group_id,
+                sender=CALL_BOT_USER_ID,
+                sender_type="user",
+                sender_name="Meeting Notes",
+                content=content,
+            )
+            message_id = str(domain_msg.id)
+            logger.warning(
+                "Meeting notes for group %s posted without an agent identity "
+                "(group has no agents and the workspace has no default agent)",
+                group_id,
+            )
+            # Emit on internal event bus (group stats, mention notifications)
+            await event_bus.emit(
+                "message.sent",
+                {
+                    "group_id": group_id,
+                    "message_id": message_id,
+                    "sender_id": CALL_BOT_USER_ID,
+                    "sender_type": "user",
+                    "content": content,
+                    "mentions": [],
+                },
+            )
+
         await emit(
             CallNotesPosted(
                 data={
                     "group_id": group_id,
-                    "message_id": domain_msg.id,
+                    "message_id": message_id,
                     "duration_seconds": duration_seconds,
                     "participant_count": len(participants),
                 }
@@ -997,21 +1151,30 @@ async def post_meeting_notes_to_group(
                 data={
                     "group": group_id,
                     "group_id": group_id,
-                    "sender": CALL_BOT_USER_ID,
+                    # Agent messages carry no ``sender``; the client resolves
+                    # the avatar/name from ``agent``, falling back to
+                    # ``senderName`` when the agent isn't a known room contact.
+                    "sender": None if agent_id else CALL_BOT_USER_ID,
+                    "agent": agent_id,
                     "senderName": "Meeting Notes",
-                    "senderType": "user",
+                    "senderType": "agent" if agent_id else "user",
                     "created_at": datetime.now(UTC).isoformat(),
-                    "message_id": domain_msg.id,
-                    "_id": domain_msg.id,
+                    "message_id": message_id,
+                    "_id": message_id,
                     "content": content,
                     "mentions": [],
                 }
             )
         )
-        logger.info("Posted meeting notes to group %s (message %s)", group_id, domain_msg.id)
+        logger.info("Posted meeting notes to group %s (message %s)", group_id, message_id)
     except Exception as exc:
         logger.error("Failed to post meeting notes to group %s: %s", group_id, exc)
         raise
+
+    # The notes are posted and durable from here on. Everything below is
+    # enrichment and MUST NOT be able to undo that.
+    if agent_id:
+        await _observe_meeting_in_agent_soul(agent_id, transcript, summary)
 
     # Store transcript as a file and create MeetingTranscript doc.
     if workspace_id and transcript:
