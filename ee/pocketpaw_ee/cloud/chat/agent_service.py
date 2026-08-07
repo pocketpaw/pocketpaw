@@ -504,6 +504,68 @@ def detach_sse_event_sink(token: Token) -> None:
     _sse_event_sink.reset(token)
 
 
+# ── Session-keyed stream registry ───────────────────────────────────────────
+#
+# The ContextVar above answers "is there a sink in MY context", which is the
+# right question for an observability frame — a caller that has drifted out of
+# the stream's context simply should not emit one.
+#
+# It is the WRONG question for a caller that then WAITS on the frame. Code
+# Mode's file tools run inside an in-process MCP server owned by a POOLED SDK
+# client, and that client's task is created during ``_prewarm_session`` —
+# before the stream loop binds anything. A task inherits a copy of the context
+# as it stood at creation, so those tools read identity (bound during prewarm
+# as well; see ART-2 2026-06-26 and the two ``attach_agent_identity`` sites in
+# run_core) and never see the sink, which is bound only in the stream loop
+# afterwards. The tool then reports "no browser attached" about a browser that
+# is attached and streaming.
+#
+# Binding the sink during prewarm too — the shape ART-2 used for identity —
+# does NOT work here: prewarm has no live stream, so it would publish a queue
+# belonging to no turn, and a stale queue is worse than none. The fix is to
+# make the stream findable by IDENTITY instead of by inheritance.
+#
+# Keyed by ``session_mongo_id`` rather than by workspace: one workspace can
+# have two streams open in two windows, and a workspace-keyed lookup would hand
+# a file write to whichever one it happened to find.
+_stream_sinks_by_session: dict[str, asyncio.Queue[tuple[str, dict[str, Any]]]] = {}
+
+
+def register_stream_sink(
+    session_mongo_id: str | None,
+    queue: asyncio.Queue[tuple[str, dict[str, Any]]],
+) -> None:
+    """Publish ``queue`` as the live stream for ``session_mongo_id``.
+
+    A run whose scope is not a session has no id to publish under, and no Code
+    Mode surface to delegate to either, so it is skipped rather than refused.
+    """
+    if not session_mongo_id:
+        return
+    _stream_sinks_by_session[session_mongo_id] = queue
+
+
+def unregister_stream_sink(session_mongo_id: str | None) -> None:
+    """Remove the stream for ``session_mongo_id``.
+
+    Idempotent, and must run in the same ``finally`` that detaches the sink. A
+    leaked entry is a queue nobody drains, which would convert the next turn's
+    honest fast refusal into a full-budget park.
+    """
+    if not session_mongo_id:
+        return
+    _stream_sinks_by_session.pop(session_mongo_id, None)
+
+
+def stream_sink_for_session(
+    session_mongo_id: str | None,
+) -> asyncio.Queue[tuple[str, dict[str, Any]]] | None:
+    """The live stream for ``session_mongo_id``, or None when none is open."""
+    if not session_mongo_id:
+        return None
+    return _stream_sinks_by_session.get(session_mongo_id)
+
+
 # Legacy aliases retained for callers that were written against the
 # pocket-specific names. Both pairs operate on the same underlying sink.
 attach_pocket_event_sink = attach_sse_event_sink

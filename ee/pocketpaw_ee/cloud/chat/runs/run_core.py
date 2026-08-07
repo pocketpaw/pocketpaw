@@ -282,6 +282,8 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     detach_sse_event_sink,
     mark_cloud_chat_run,
     push_sse_event,
+    register_stream_sink,
+    unregister_stream_sink,
     session_key_for,
     unbind_pawbar_run,
 )
@@ -1163,6 +1165,13 @@ async def _drive_agent_loop(
     side_channel_queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
     sink_token = attach_sse_event_sink(side_channel_queue)
     session_mongo_id = ctx.scope_id if ctx.kind is ScopeKind.SESSION else None
+    # Publish the same queue under this session's id, so a caller that cannot
+    # see the ContextVar above can still find the stream. Code Mode's file
+    # tools are exactly that caller: they run in the POOLED SDK client's task,
+    # created during _prewarm_session before this line ever executes, so they
+    # inherit a context with identity bound (ART-2 added the prewarm bind at
+    # ~1054) and no sink. Torn down in the same finally that detaches the sink.
+    register_stream_sink(session_mongo_id, side_channel_queue)
     identity_tokens = attach_agent_identity(
         workspace_id=ctx.workspace_id,
         user_id=ctx.user_id,
@@ -1605,6 +1614,13 @@ async def _drive_agent_loop(
             await asyncio.gather(*pending, return_exceptions=True)
         try:
             detach_sse_event_sink(sink_token)
+        except Exception:
+            pass
+        # Must not outlive the sink: a stale entry is a queue nobody drains, so
+        # the next turn would park for the full delegate budget instead of
+        # refusing at once.
+        try:
+            unregister_stream_sink(session_mongo_id)
         except Exception:
             pass
         try:

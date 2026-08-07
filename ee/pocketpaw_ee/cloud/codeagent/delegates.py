@@ -345,19 +345,58 @@ async def delegate_call_to_browser(
         # Deferred import: every other cloud module reaches ``agent_service``
         # this way, because importing it at module scope pulls the chat stack
         # into anything that touches codeagent and reintroduces a cycle.
-        from pocketpaw_ee.cloud.chat.agent_service import has_sse_event_sink, push_sse_event
+        from pocketpaw_ee.cloud.chat.agent_service import (
+            current_session_mongo_id,
+            has_sse_event_sink,
+            push_sse_event,
+            stream_sink_for_session,
+        )
 
-        if not has_sse_event_sink():
-            logger.debug("codeagent.delegate refused: no SSE stream in scope")
-            return DelegateOutcome(
-                ok=False,
-                error=ERROR_NO_CLIENT,
-                message=(
-                    "No browser session is attached to this conversation, so the "
-                    "code cannot be reached."
-                ),
-            )
-        push = push_sse_event
+        if has_sse_event_sink():
+            # Same async context as the stream loop. Nothing to resolve.
+            push = push_sse_event
+        else:
+            # No sink in THIS context, which is not the same as no browser.
+            #
+            # The file tools calling us run inside an in-process MCP server
+            # owned by a POOLED SDK client, and that client's task is created
+            # during ``_prewarm_session`` — before the stream loop binds its
+            # sink. A task carries a copy of the context as it stood when it
+            # was created, so these callers see identity (bound during prewarm
+            # too, per ART-2) and never the sink. Refusing here reported "no
+            # browser attached" for a browser that was attached and streaming,
+            # which is what made every Code Mode file tool fail.
+            #
+            # Identity IS visible, so use it: find the stream by session id
+            # rather than by context inheritance.
+            session_mongo_id = current_session_mongo_id()
+            queue = stream_sink_for_session(session_mongo_id)
+            if queue is None:
+                # Genuinely nobody listening — a CLI run, a background job, a
+                # test. Keep failing FAST rather than parking for the full
+                # budget to discover it.
+                logger.debug(
+                    "codeagent.delegate refused: no SSE stream in scope and none "
+                    "registered for session=%s",
+                    session_mongo_id,
+                )
+                return DelegateOutcome(
+                    ok=False,
+                    error=ERROR_NO_CLIENT,
+                    message=(
+                        "No browser session is attached to this conversation, so the "
+                        "code cannot be reached."
+                    ),
+                )
+
+            def push(name: str, data: dict[str, Any], _q: Any = queue) -> None:
+                """Push straight into the resolved stream's queue.
+
+                ``push_sse_event`` reads the ContextVar we just established is
+                empty here, so calling it would silently drop the frame and
+                park the caller for the full timeout.
+                """
+                _q.put_nowait((name, data))
 
     corr_id = reg.open(workspace_id)
     try:
