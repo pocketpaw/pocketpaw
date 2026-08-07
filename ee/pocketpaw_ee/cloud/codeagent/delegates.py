@@ -339,11 +339,19 @@ async def delegate_call_to_browser(
     frame carrying ``{tool, input}``, park. The browser runs the matching
     ``CodeFileSession`` verb and resolves with ``{output, isError}``.
 
-    It FAILS FAST when there is no SSE stream in scope. ``push_sse_event`` is a
-    documented no-op outside a stream, so without that check a tool invoked from
-    a CLI handler, a background job, or a unit test would push into nothing and
-    then park for the full budget before reporting a timeout that was knowable
-    at once. The distinct ``no_client`` code also gives the model something true
+    It FAILS FAST when there is no stream to reach — but "no stream in scope" is
+    NOT the same question as "no stream". A sink in the caller's context is the
+    happy path; when it is absent the stream is looked up by
+    ``session_mongo_id`` (tenancy-checked), because the file tools calling here
+    run in a pooled SDK client's task created before the stream bound its sink,
+    and refusing on the ContextVar alone told users no browser was attached
+    while one was attached and streaming. Only when BOTH miss does this refuse.
+
+    That refusal still has to be immediate. ``push_sse_event`` is a documented
+    no-op outside a stream, so without the check a tool invoked from a CLI
+    handler, a background job, or a unit test would push into nothing and then
+    park for the full budget before reporting a timeout that was knowable at
+    once. The distinct ``no_client`` code also gives the model something true
     to say — "there is no browser attached" is a different problem from "the
     browser was slow".
 
