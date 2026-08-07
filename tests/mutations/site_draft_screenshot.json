@@ -1,0 +1,92 @@
+[
+  {
+    "label": "draft screenshot: a broken scheduler takes the site CREATE down with it",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    try:\n        from pocketpaw_ee.sites.screenshot import schedule_draft_screenshot\n\n        schedule_draft_screenshot(site)\n    except Exception:  # noqa: BLE001 — never fail a create over a thumbnail\n        logger.warning(\n            \"sites.screenshot: could not schedule draft capture for site %s\",\n            getattr(site, \"id\", \"?\"),\n            exc_info=True,\n        )",
+    "replace": "    from pocketpaw_ee.sites.screenshot import schedule_draft_screenshot\n\n    schedule_draft_screenshot(site)",
+    "tests": [
+      "tests/ee/sites/test_draft_screenshot.py"
+    ]
+  },
+  {
+    "label": "draft screenshot: a broken scheduler takes the PREVIEW down with it",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    try:\n        from pocketpaw_ee.sites.screenshot import schedule_draft_screenshot_for_pocket\n\n        schedule_draft_screenshot_for_pocket(workspace_id=workspace_id, pocket_id=pocket_id)\n    except Exception:  # noqa: BLE001 — never fail a preview over a thumbnail",
+    "replace": "    if True:\n        from pocketpaw_ee.sites.screenshot import schedule_draft_screenshot_for_pocket\n\n        schedule_draft_screenshot_for_pocket(workspace_id=workspace_id, pocket_id=pocket_id)\n    if False:",
+    "tests": [
+      "tests/ee/sites/test_draft_screenshot.py"
+    ]
+  },
+  {
+    "label": "draft screenshot: a Cloudflare failure escapes into the create path",
+    "file": "ee/pocketpaw_ee/sites/screenshot.py",
+    "find": "    try:\n        return await take_draft_screenshot(site, cloudflare=cloudflare)\n    except Exception:  # noqa: BLE001 — a screenshot is never a gate on a create\n        logger.warning(\n            \"sites.screenshot: draft capture failed for site %s\",\n            getattr(site, \"id\", \"?\"),\n            exc_info=True,\n        )\n        return \"\"",
+    "replace": "    return await take_draft_screenshot(site, cloudflare=cloudflare)",
+    "tests": [
+      "tests/ee/sites/test_draft_screenshot.py"
+    ]
+  },
+  {
+    "label": "draft screenshot: a slow draft shot lands on top of a live one",
+    "file": "ee/pocketpaw_ee/sites/screenshot.py",
+    "find": "    if not await _still_a_draft(site):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_draft_screenshot.py"
+    ]
+  },
+  {
+    "label": "draft screenshot: a LIVE site gets photographed as a draft",
+    "file": "ee/pocketpaw_ee/sites/screenshot.py",
+    "find": "    if (getattr(site, \"url\", \"\") or \"\").strip():\n        # A deployed site — ``take_site_screenshot`` photographs the real page.\n        return \"\"",
+    "replace": "    pass",
+    "tests": [
+      "tests/ee/sites/test_draft_screenshot.py"
+    ]
+  },
+  {
+    "label": "draft screenshot: every new ripple draft silently costs a 16s node build",
+    "file": "ee/pocketpaw_ee/sites/draft_markup.py",
+    "find": "    return (os.environ.get(\"PAW_SITES_DRAFT_CAPTURE_BUILD\", \"\") or \"\").strip().lower() in (\n        \"1\",\n        \"true\",\n        \"yes\",\n        \"on\",\n    )",
+    "replace": "    return True",
+    "tests": [
+      "tests/ee/sites/test_draft_screenshot.py"
+    ]
+  },
+  {
+    "label": "draft screenshot: local stylesheets are left dangling, so the shot is unstyled",
+    "file": "ee/pocketpaw_ee/sites/draft_markup.py",
+    "find": "        if not _STYLESHEET_REL_RE.search(tag):\n            return \"\"  # a local icon/preload/modulepreload — unresolvable, so gone",
+    "replace": "        if not _STYLESHEET_REL_RE.search(tag):\n            return tag",
+    "tests": [
+      "tests/ee/sites/test_draft_screenshot.py"
+    ]
+  },
+  {
+    "label": "draft screenshot: an oversized asset is inlined anyway",
+    "file": "ee/pocketpaw_ee/sites/draft_markup.py",
+    "find": "    def take(self, size: int) -> bool:\n        if size > self.left:\n            return False",
+    "replace": "    def take(self, size: int) -> bool:\n        if False:\n            return False",
+    "tests": [
+      "tests/ee/sites/test_draft_screenshot.py"
+    ]
+  },
+  {
+    "label": "draft screenshot: a traversal reference escapes the static root",
+    "file": "ee/pocketpaw_ee/sites/draft_markup.py",
+    "find": "        if part == \"..\":\n            if not out:\n                return \"\"  # climbs above the static root — refuse it\n            out.pop()\n            continue",
+    "replace": "        if part == \"..\":\n            out.append(part)\n            continue",
+    "tests": [
+      "tests/ee/sites/test_draft_screenshot.py"
+    ]
+  },
+  {
+    "label": "draft screenshot: the endpoint is sent both url and html",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "        if bool(url) == bool(html):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_draft_screenshot.py"
+    ]
+  }
+]

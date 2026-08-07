@@ -37,6 +37,24 @@
 # snapshotted at that moment, so a whole-document save would silently roll back
 # anything written in between (a connected domain, a stamped subscription). Same
 # reasoning as ``kb_ingest._record_sync``.
+#
+# Updated 2026-08-07 (SC-2 — drafts get art too): a second capture path for a site
+# that has NEVER been deployed. A draft has no url, so ``take_site_screenshot``
+# correctly skips it and its card stayed art-less forever; the Browser Rendering
+# endpoint also accepts ``html``, so a draft is photographed from its own MARKUP
+# (assembled by ``sites.draft_markup``) with nothing deployed anywhere. Same three
+# rules as the live path — never blocks, never raises, never a gate — plus two of
+# its own:
+#   * it refuses to run for a site that HAS a url. A live site's picture belongs to
+#     the live path, which shoots the page visitors actually see.
+#   * it re-reads the Site before recording, and drops the write if the site went
+#     live while the shutter was open. The import flow mints a draft and publishes
+#     it seconds later, so the two captures genuinely race; without this the slower
+#     draft shot could land on top of the live one.
+# A draft that cannot be captured is the NORMAL case, not the exotic one (a
+# never-built ripple pocket is deliberately not built just for a thumbnail — see
+# ``draft_markup.build_allowed``), which is why SC-2 also ships the card's themed
+# placeholder rather than relying on this landing.
 
 from __future__ import annotations
 
@@ -210,8 +228,156 @@ def schedule_site_screenshot(site: Any) -> None:
     _default_screenshot_scheduler(safe_take_site_screenshot(site))
 
 
+# --------------------------------------------------------------------------- #
+# SC-2 — the DRAFT path: no url, so shoot the markup instead.
+# --------------------------------------------------------------------------- #
+
+
+async def _still_a_draft(site: Any) -> bool:
+    """Re-read the Site and report whether it is STILL a draft.
+
+    Called immediately before recording a draft capture. The import flow mints a
+    draft Site and publishes it seconds later, so a draft capture and the live
+    capture that follows it genuinely overlap; without this re-read the slower draft
+    shot could land on top of the live one and the card would show the page as it
+    looked before it was published.
+
+    Fails OPEN — an unreadable / non-Beanie site (every unit-test double) reports
+    True and the write proceeds. The failure this guards is cosmetic; refusing to
+    write on a doubtful read would cost every draft its picture.
+    """
+    getter = getattr(type(site), "get", None)
+    if getter is None:
+        return True
+    try:
+        fresh = await getter(site.id)
+    except Exception:  # noqa: BLE001 — a re-read failure must not cost the capture
+        return True
+    if fresh is None:
+        return False  # deleted while the shutter was open — nothing to write to
+    return not (getattr(fresh, "url", "") or "").strip()
+
+
+async def take_draft_screenshot(site: Any, *, cloudflare: Any | None = None) -> str:
+    """Screenshot a DRAFT site from its own markup, store it, record it on the Site.
+
+    Returns the stored image's URL, or "" when there was nothing to shoot: the site
+    is live (the live path owns that picture), the draft has no renderable markup
+    yet, getting markup would cost a Node build this deployment has not opted into,
+    or the shot produced no bytes. Raises on a Cloudflare or upload failure —
+    :func:`safe_take_draft_screenshot` is the form that cannot.
+
+    The markup goes over as the endpoint's ``html`` body, which renders at
+    ``about:blank``: ``draft_markup`` is what makes that document self-contained.
+    """
+    if (getattr(site, "url", "") or "").strip():
+        # A deployed site — ``take_site_screenshot`` photographs the real page.
+        return ""
+
+    from pocketpaw_ee.sites.draft_markup import build_draft_markup
+
+    markup = await build_draft_markup(site)
+    if not markup:
+        return ""
+
+    from pocketpaw_ee.sites.service import _cf_client
+
+    cf = cloudflare or _cf_client()
+    image = await cf.capture_screenshot(
+        html=markup,
+        viewport=dict(_VIEWPORT),
+        goto_options=dict(_GOTO_OPTIONS),
+        screenshot_options=dict(_SCREENSHOT_OPTIONS),
+    )
+    if not image:
+        return ""
+
+    if not await _still_a_draft(site):
+        logger.debug(
+            "sites.screenshot: site %s went live while its draft was being captured "
+            "— leaving the live picture alone",
+            getattr(site, "id", "?"),
+        )
+        return ""
+
+    image_url = await _store_screenshot(site, image)
+    await site.set({"preview_image_url": image_url})
+    logger.info("sites.screenshot: captured draft preview for site %s", getattr(site, "id", "?"))
+    return image_url
+
+
+async def safe_take_draft_screenshot(site: Any, *, cloudflare: Any | None = None) -> str:
+    """:func:`take_draft_screenshot` that never raises — the form the draft-mint path
+    uses. A draft that cannot be photographed keeps the card's themed placeholder,
+    and the create/import that scheduled this is long since successful."""
+    try:
+        return await take_draft_screenshot(site, cloudflare=cloudflare)
+    except Exception:  # noqa: BLE001 — a screenshot is never a gate on a create
+        logger.warning(
+            "sites.screenshot: draft capture failed for site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
+        return ""
+
+
+def schedule_draft_screenshot(site: Any) -> None:
+    """Fire a background draft screenshot. Never blocks, never raises.
+
+    Shares ``_default_screenshot_scheduler`` (and its strong-ref task set) with the
+    live path, so a test that patches the scheduler to run inline governs both.
+    """
+    _default_screenshot_scheduler(safe_take_draft_screenshot(site))
+
+
+async def safe_take_draft_screenshot_for_pocket(*, workspace_id: str, pocket_id: str) -> str:
+    """Look the pocket's canonical Site doc up and capture it as a draft. Never raises.
+
+    The by-pocket form exists for the PREVIEW build. A preview returns a TRANSIENT,
+    never-persisted Site-shaped object, so there is nothing there to record a picture
+    on — but the real draft doc was minted at create and is sitting in Mongo under the
+    same stable per-(workspace, pocket) id ``publish`` upserts.
+
+    Why hang a capture off preview at all: a preview has just built the pocket, so the
+    markup is already on disk and the capture costs a millisecond (rung 1) instead of
+    the 16s build the create-time capture refuses to spend. It is what makes a
+    ripple/svelte draft's card fill in at all under the default policy. On an
+    already-LIVE site this resolves a doc with a url and ``take_draft_screenshot``
+    declines it, so previewing a live site can never replace the picture of the page
+    visitors actually see with a picture of an unapproved edit.
+    """
+    try:
+        from pocketpaw_ee.sites.service import _live_object_id
+        from pocketpaw_ee.sites.service import _SiteDoc as _Doc
+
+        doc = await _Doc.find_one(
+            {"_id": _live_object_id(workspace_id, pocket_id), "workspace": workspace_id}
+        )
+        if doc is None:
+            return ""
+        return await take_draft_screenshot(doc)
+    except Exception:  # noqa: BLE001 — a screenshot is never a gate on a preview
+        logger.warning(
+            "sites.screenshot: draft capture failed for pocket %s", pocket_id, exc_info=True
+        )
+        return ""
+
+
+def schedule_draft_screenshot_for_pocket(*, workspace_id: str, pocket_id: str) -> None:
+    """Fire a background draft capture for a pocket's Site doc. Never blocks, never
+    raises."""
+    _default_screenshot_scheduler(
+        safe_take_draft_screenshot_for_pocket(workspace_id=workspace_id, pocket_id=pocket_id)
+    )
+
+
 __all__ = [
+    "safe_take_draft_screenshot",
+    "safe_take_draft_screenshot_for_pocket",
     "safe_take_site_screenshot",
+    "schedule_draft_screenshot",
+    "schedule_draft_screenshot_for_pocket",
     "schedule_site_screenshot",
+    "take_draft_screenshot",
     "take_site_screenshot",
 ]
