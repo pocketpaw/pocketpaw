@@ -101,6 +101,27 @@ def local_store_home(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def inert_delegate_bridge():
+    """Keep the Code Mode delegate bridge off the network in unit tests.
+
+    ``get_delegate_bridge()`` auto-enables whenever ``POCKETPAW_REDIS_URL`` is
+    set — and this conftest sets it to the stub ``redis://test:6379/0`` purely so
+    the arq worker module imports (see the note at the top of this file).
+    Without this fixture that stub hands every test a LIVE Redis bridge pointed
+    at a host that does not resolve, so each delegate pays a connect timeout
+    before pushing its frame and any test that reads the pushed frame races it.
+
+    Tests covering the cross-process path inject their own bridge explicitly,
+    which is the honest way to test a two-process rendezvous anyway.
+    """
+    from pocketpaw_ee.cloud.codeagent import bridge as bridge_mod
+
+    bridge_mod.set_delegate_bridge(bridge_mod.NullDelegateBridge())
+    yield
+    bridge_mod._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def recording_bus():
     """Install a RecordingBus for every test.
 
