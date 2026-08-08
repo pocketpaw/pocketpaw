@@ -80,6 +80,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -109,6 +110,7 @@ def _to_domain(doc: _LeadDoc) -> Lead:
         form_type=doc.form_type,
         properties=doc.properties,
         submitter_ref=doc.source.submitter_ref if doc.source else "",
+        conversation_ref=getattr(doc.source, "conversation_ref", "") if doc.source else "",
         created_at=getattr(doc, "createdAt", None),
     )
 
@@ -238,6 +240,24 @@ def _passes_injection_screen(payload: dict[str, Any]) -> bool:
     return _THREAT_RANK[result.threat_level] < _THREAT_RANK[_INJECTION_DROP_THRESHOLD]
 
 
+# T-11 — the concierge conversation ref, relayed by the paw-bar loader as a
+# hidden form field. Shape MUST match ``paw_bar/router._CUSTOMER_REF_RE``: it is
+# the same value, and a ref this side accepts but that side rejects is a lead
+# whose transcript link 404s. ``test_conversation_ref_shape_matches_paw_bar``
+# pins the two together so drift fails a test rather than a click.
+_CONVERSATION_REF_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+
+
+def _clean_conversation_ref(raw: str | None) -> str:
+    """Accept a well-shaped ref, drop anything else.
+
+    Drops rather than raises: a malformed ref is a broken transcript link, not
+    a reason to lose the lead. The lead is the thing with revenue attached.
+    """
+    candidate = (raw or "").strip()
+    return candidate if _CONVERSATION_REF_RE.match(candidate) else ""
+
+
 async def capture(
     *,
     site: _SiteDoc,
@@ -245,6 +265,7 @@ async def capture(
     payload: dict[str, Any],
     submitter_ref: str,
     rate_key: str = "",
+    conversation_ref: str = "",
 ) -> Lead | None:
     """Harden + persist one submission as a tenant-scoped Lead. Returns None
     when the submission is dropped (honeypot / rate-limited / injection screen /
@@ -284,6 +305,7 @@ async def capture(
             site_id=site.script_name,
             submitter_ref=submitter_ref,
             rate_key=effective_rate_key,
+            conversation_ref=_clean_conversation_ref(conversation_ref),
         ),
     )
     await doc.insert()

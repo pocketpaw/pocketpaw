@@ -21,4 +21,6 @@ class Lead:
     form_type: str
     properties: dict[str, Any] = field(default_factory=dict)
     submitter_ref: str = ""
+    # T-11: the concierge conversation behind this lead, when there was one.
+    conversation_ref: str = ""
     created_at: datetime | None = None

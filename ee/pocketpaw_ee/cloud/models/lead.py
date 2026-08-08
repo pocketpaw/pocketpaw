@@ -32,6 +32,17 @@ class LeadSource(BaseModel):
     site_id: str
     submitter_ref: str = ""  # opaque, caller-supplied LABEL (not PII, not the limiter key)
     rate_key: str = ""  # server-derived host hash; the per-IP limiter buckets on this
+    # T-11: the concierge conversation this submitter was having when they filled
+    # the form, relayed by the paw-bar loader as a hidden ``paw_conversation_ref``
+    # field. Empty when the visitor never opened the concierge (the common case)
+    # or the site does not embed it.
+    #
+    # This is a SEPARATE field from ``submitter_ref`` on purpose. submitter_ref is
+    # a server-FORCED label — "anon" on the JSON path, "form:<page>" on the native
+    # path — so joining a transcript on it would map essentially every lead on a
+    # site to one key and surface one visitor's conversation behind another
+    # visitor's lead. Never overload submitter_ref for identity.
+    conversation_ref: str = ""
 
 
 class Lead(TimestampedDocument):

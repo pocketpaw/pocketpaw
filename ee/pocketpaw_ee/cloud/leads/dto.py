@@ -20,6 +20,10 @@ class CaptureRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     submitter_ref: str = ""
     signed_key: str  # per-site key; checked against Site.signed_key
+    # T-11: the concierge conversation this visitor was having, relayed by the
+    # paw-bar loader. Optional and shape-screened by the service — a malformed
+    # value costs the transcript link, never the lead.
+    conversation_ref: str = ""
 
 
 class CaptureResponse(BaseModel):
@@ -34,6 +38,11 @@ class LeadOut(BaseModel):
     form_type: str
     properties: dict[str, Any]
     created_at: str | None
+    # T-11: the concierge conversation behind this lead, "" when there was
+    # none. The FE renders a transcript link only when it is non-empty; the
+    # transcript itself is read from the authed owner-only endpoint, never
+    # from anything a visitor supplied.
+    conversation_ref: str = ""
 
 
 def lead_to_dto(lead: Lead) -> LeadOut:
@@ -43,6 +52,7 @@ def lead_to_dto(lead: Lead) -> LeadOut:
         form_type=lead.form_type,
         properties=lead.properties,
         created_at=iso_utc(lead.created_at),
+        conversation_ref=lead.conversation_ref,
     )
 
 
