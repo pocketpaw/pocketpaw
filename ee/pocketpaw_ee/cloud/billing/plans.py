@@ -44,13 +44,14 @@
 #   members), ``max_pockets`` (pockets per workspace), and ``max_connectors``
 #   (enabled connectors per workspace). Each is a tunable dict (``_MAX_SEATS`` /
 #   ``_MAX_POCKETS`` / ``_MAX_CONNECTORS``) mirroring ``_CEILING`` in shape, surfaced
-#   on ``PlanTier`` as ``int | None`` (None = uncapped, Enterprise only). The values
-#   are GENEROUS PLACEHOLDERS — the real per-tier numbers are a captain pricing
-#   open-question; the machinery is tier-agnostic and these ceilings are roomy
-#   enough that an active tenant under them never notices, while still protecting
-#   the shared PEE box from runaway growth. Free ``max_seats`` is pinned at 5 (==
-#   the ``Workspace.seats`` default) so no existing workspace regresses. The
-#   ``_build`` default for an unknown key FAILS CLOSED to the Free value, never None.
+#   on ``PlanTier`` as ``int | None`` (None = uncapped, Enterprise only).
+# Updated 2026-08-08 (feat/billing-rbac-member-caps) — LOCKED the approved CONSUMER
+#   member (seat) caps: Free = 0 (a Free workspace cannot invite ANY members),
+#   Paw Go = 5, Paw Pro = 10, Paw Pro Max = 50 total workspace members (owner
+#   included), Enterprise = None. These replace the earlier generous placeholders
+#   (5 / 10 / 25 / 100). The seat gate became plan-AUTHORITATIVE so Free=0 actually
+#   blocks invites (see ``workspace.service._effective_seat_limit``). The ``_build``
+#   default for an unknown key still FAILS CLOSED to the Free value, never None.
 
 from __future__ import annotations
 
@@ -114,27 +115,34 @@ _CEILING: dict[str, int | None] = {
 # ---------------------------------------------------------------------------
 #
 # Three per-plan caps enforced at CREATE / INVITE / ENABLE time (never
-# retroactively): the max workspace SEATS, the max POCKETS a workspace may hold,
-# and the max ENABLED CONNECTORS. Same shape as ``_CEILING`` — an ``int`` ceiling,
-# or ``None`` for the one uncapped (Enterprise) tier. The ``_build`` default for an
-# unknown key FAILS CLOSED to the Free value (never None/uncapped).
+# retroactively): the max workspace SEATS (workspace members, owner included),
+# the max POCKETS a workspace may hold, and the max ENABLED CONNECTORS. Same
+# shape as ``_CEILING`` — an ``int`` ceiling, or ``None`` for the one uncapped
+# (Enterprise) tier. The ``_build`` default for an unknown key FAILS CLOSED to
+# the Free value (never None/uncapped).
 #
-# IMPORTANT: these are GENEROUS PLACEHOLDERS. The real per-tier numbers are a
-# captain pricing open-question; the enforcement machinery is deliberately
-# tier-agnostic so only these constants change when pricing lands. They are roomy
-# enough that an active tenant under the ceiling never notices, while still
-# protecting the shared PEE box from a single tenant's runaway growth.
+# SEATS ARE THE ABAC/RBAC MEMBER GATE: the seat ceiling is the plan ATTRIBUTE
+# the invite gates enforce (see ``workspace.service._effective_seat_limit``),
+# so a Free workspace (``max_seats=0``) cannot invite ANY members, while the
+# paid tiers allow exactly their seat count (owner included — e.g. Paw Go = 5
+# total members, so 4 invitations on top of the owner). These are the approved
+# CONSUMER numbers, not placeholders:
+#   * free    =  0 seats — no invitations allowed (the owner alone)
+#   * go      =  5 seats —  5 total members (owner + 4 invited)
+#   * pro     = 10 seats — 10 total members (owner + 9 invited)
+#   * pro_max = 50 seats — 50 total members (owner + 49 invited)
+#   * enterprise = None  — uncapped; negotiated contracts set their own limit.
 #
-# Free ``max_seats`` is pinned at 5 to EQUAL the ``Workspace.seats`` model default
-# — the seat gate enforces ``max(doc.seats, max_seats)`` so a free workspace sees
-# byte-for-byte the same limit it has today (no regression). The paid tiers step
-# up from there; Enterprise is uncapped (None) — negotiated contracts set their
-# own limits.
+# The seat gate is plan-AUTHORITATIVE (not ``max(doc.seats, plan)``): the stored
+# ``Workspace.seats`` field is a legacy/display ceiling that never overrides the
+# plan on downgrade, so a workspace that cancels Pro → Free immediately loses
+# the ability to invite (existing members are never removed — the gate only
+# blocks NEW invites / acceptances).
 _MAX_SEATS: dict[str, int | None] = {
-    "free": 5,
-    "go": 10,
-    "pro": 25,
-    "pro_max": 100,
+    "free": 0,
+    "go": 5,
+    "pro": 10,
+    "pro_max": 50,
     "enterprise": None,
 }
 
@@ -243,9 +251,10 @@ class PlanTier:
     credit-quota enforcement caps spend against (allotment × 1.5 for paid tiers;
     Free is the explicit 1000 trial cap; Enterprise is None). ``max_seats`` /
     ``max_pockets`` / ``max_connectors`` are the SMB resource ceilings enforced at
-    create/invite/enable time (integer, or None = uncapped for Enterprise);
-    Free's ``max_seats`` == the ``Workspace.seats`` default so no workspace
-    regresses. These are GENEROUS PLACEHOLDERS pending the captain's pricing call.
+    create/invite/enable time (integer, or None = uncapped for Enterprise).
+    ``max_seats`` is the approved CONSUMER member cap (Free = 0 → no invites,
+    Go = 5, Pro = 10, Pro Max = 50 total members, owner included); it is
+    plan-AUTHORITATIVE at the invite gate, so Free blocks all new invitations.
     ``dodo_product_id`` is the recurring-product id, or None until BC-7 / config
     populates it.
 

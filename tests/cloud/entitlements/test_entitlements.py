@@ -137,7 +137,8 @@ async def test_unknown_plan_falls_back_to_free(patch_plan):
     # FAIL-CLOSED: an unknown plan caps at the Free ceiling, never None/uncapped.
     assert ent.monthly_ceiling == 1_000
     # FAIL-CLOSED on the SMB caps too: the Free values, never None/uncapped.
-    assert ent.max_seats == 5
+    # Free max_seats = 0 — a fallback workspace cannot invite any members.
+    assert ent.max_seats == 0
     assert ent.max_pockets == 200
     assert ent.max_connectors == 50
 
@@ -147,7 +148,7 @@ async def test_missing_workspace_falls_back_to_free_smb_caps(patch_plan):
     patch_plan(None)
     ent = await entitlements.resolve_entitlements(WS)
     assert ent.plan == "free"
-    assert ent.max_seats == 5
+    assert ent.max_seats == 0
     assert ent.max_pockets == 200
     assert ent.max_connectors == 50
 

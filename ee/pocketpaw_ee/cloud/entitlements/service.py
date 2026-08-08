@@ -31,6 +31,10 @@
 #   three SMB caps (``max_seats`` / ``max_pockets`` / ``max_connectors``), populated
 #   from the resolved tier exactly as ``monthly_ceiling`` is. The defensive
 #   base-floor branch sets the Free values (5 / 200 / 50) so every path fails closed.
+# Updated 2026-08-08 (feat/billing-rbac-member-caps): the Free base-floor
+#   ``max_seats`` is now 0 — a workspace with no/unknown plan resolves to the Free
+#   tier, which cannot invite ANY members (Paw Go = 5, Paw Pro = 10, Paw Pro Max
+#   = 50; Enterprise = None). Fails closed to the most restrictive tier.
 
 from __future__ import annotations
 
@@ -74,9 +78,9 @@ async def resolve_entitlements(workspace_id: str) -> Entitlements:
                 # Fail closed: the Free trial cap, never None/uncapped — even when
                 # the catalog itself is somehow missing the base tier.
                 monthly_ceiling=1_000,
-                # Fail closed on the SMB caps too: the Free values (max_seats == the
-                # Workspace.seats default so no workspace regresses), never uncapped.
-                max_seats=5,
+                # Fail closed on the SMB caps too: the Free values (max_seats = 0
+                # → a fallback workspace cannot invite any members), never uncapped.
+                max_seats=0,
                 max_pockets=200,
                 max_connectors=50,
                 features=frozenset(),

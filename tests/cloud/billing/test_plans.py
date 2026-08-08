@@ -30,6 +30,11 @@
 #   The numbers under test are the GENEROUS PLACEHOLDERS pending the captain's
 #   pricing call — these tests lock the machinery (present on every tier, uncapped
 #   Enterprise, fail-closed default), not the exact figures.
+# Updated 2026-08-08 (feat/billing-rbac-member-caps): the CONSUMER member caps are
+#   now LOCKED — Free ``max_seats`` = 0 (a Free workspace cannot invite ANY
+#   members), Paw Go = 5, Paw Pro = 10, Paw Pro Max = 50 total workspace members
+#   (owner included), Enterprise = None. The seat gate is plan-authoritative, so
+#   Free = 0 is an actual block, not a no-op. These tests lock the exact numbers.
 
 from __future__ import annotations
 
@@ -68,14 +73,15 @@ EXPECTED_USAGE_LABELS = {
     "pro_max": "20× the usage",
     "enterprise": "Custom",
 }
-# The three SMB resource caps (feat/billing-smb-caps) — GENEROUS PLACEHOLDERS
-# pending the captain's pricing call. Enterprise is None (uncapped). Free
-# ``max_seats`` MUST equal the Workspace.seats default (5) so no workspace regresses.
+# The three SMB resource caps (feat/billing-smb-caps). ``max_seats`` is the
+# APPROVED CONSUMER member cap — Free = 0 (no invitations allowed), Paw Go = 5,
+# Paw Pro = 10, Paw Pro Max = 50 total workspace members (owner included),
+# Enterprise = None (uncapped). Pockets + connectors remain their tier ceilings.
 EXPECTED_MAX_SEATS: dict[str, int | None] = {
-    "free": 5,
-    "go": 10,
-    "pro": 25,
-    "pro_max": 100,
+    "free": 0,
+    "go": 5,
+    "pro": 10,
+    "pro_max": 50,
     "enterprise": None,
 }
 EXPECTED_MAX_POCKETS: dict[str, int | None] = {
@@ -193,19 +199,27 @@ def test_every_tier_carries_the_three_smb_caps():
         assert by_key[key].max_connectors == EXPECTED_MAX_CONNECTORS[key], key
 
 
-def test_free_max_seats_is_at_least_the_workspace_default():
-    """Free max_seats MUST be >= the Workspace.seats model default (5) — no regression.
+def test_free_max_seats_is_zero_no_invites():
+    """Free max_seats is 0 — a Free workspace cannot invite ANY members.
 
-    The seat gate enforces max(doc.seats, plan.max_seats); if Free's cap dropped
-    below 5 a default free workspace would be blocked below the seats it already
-    has. This is the CRITICAL non-regression invariant.
+    The ABAC/RBAC member gate (``workspace.service._effective_seat_limit``) is
+    plan-authoritative and blocks an invite once ``member_count >= max_seats``;
+    a Free workspace's owner alone already fills a 0-seat cap, so every invite
+    raises SeatLimitError. This is the CRITICAL consumer-pricing invariant.
     """
-    from pocketpaw_ee.cloud.models.workspace import Workspace
-
-    default_seats = Workspace.model_fields["seats"].default
-    assert default_seats == 5
     assert plans.get_plan("free").max_seats is not None
-    assert plans.get_plan("free").max_seats >= default_seats
+    assert plans.get_plan("free").max_seats == 0
+
+
+def test_paid_tier_seats_are_the_consumer_ladder():
+    """The paid tiers carry the approved total-member caps: Go=5, Pro=10, ProMax=50.
+
+    Each number counts TOTAL workspace members (owner included), so Paw Go allows
+    the owner + 4 invited members, Paw Pro + 9, Paw Pro Max + 49.
+    """
+    assert plans.get_plan("go").max_seats == 5
+    assert plans.get_plan("pro").max_seats == 10
+    assert plans.get_plan("pro_max").max_seats == 50
 
 
 def test_enterprise_smb_caps_are_uncapped():
@@ -216,12 +230,17 @@ def test_enterprise_smb_caps_are_uncapped():
     assert ent.max_connectors is None
 
 
-def test_non_enterprise_smb_caps_are_positive_ints():
-    """Every non-Enterprise tier carries a concrete positive cap on all three."""
+def test_non_enterprise_smb_caps_are_non_negative_ints():
+    """Every non-Enterprise tier carries a concrete int cap on all three.
+
+    ``max_seats`` may be 0 (Free — the "no member invites" cap is a valid
+    ceiling); pockets + connectors are always positive on the consumer tiers.
+    """
     by_key = {p.key: p for p in plans.list_plans()}
     for key in ("free", "go", "pro", "pro_max"):
-        for cap in (by_key[key].max_seats, by_key[key].max_pockets, by_key[key].max_connectors):
-            assert isinstance(cap, int) and cap > 0, key
+        assert isinstance(by_key[key].max_seats, int) and by_key[key].max_seats >= 0, key
+        assert isinstance(by_key[key].max_pockets, int) and by_key[key].max_pockets > 0, key
+        assert isinstance(by_key[key].max_connectors, int) and by_key[key].max_connectors > 0, key
 
 
 def test_build_unknown_key_fails_closed_to_free_smb_caps():
