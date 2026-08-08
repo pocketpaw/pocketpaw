@@ -1,5 +1,11 @@
 # tests/ee/sites/conftest.py
 # Created: 2026-06-18 (feat/sites-dedupe-migration, PERF-2).
+# Updated 2026-08-08 (capture readiness): added the autouse ``_site_pages_are_serving``
+#   fixture. Screenshot capture now polls the site's url before rendering it, so
+#   without this every existing capture test would fire a real request at a hostname
+#   that does not resolve and then wait out the retry schedule. It defaults the probe
+#   to ready and zeroes both delay schedules; test_capture_readiness.py patches the
+#   same attributes to exercise the gate itself.
 # Updated 2026-07-17 (feat/sites-native-artifact-no-build): added two autouse fixtures
 #   for the native-artifact read-through cache — ``_artifact_store_tmp`` points
 #   PAW_SITES_ARTIFACT_DIR at a temp dir so a cache MISS never writes the real home, and
@@ -113,6 +119,32 @@ def _captured_prewarms(monkeypatch):
     yield captured
     for coro in captured:
         coro.close()
+
+
+@pytest.fixture(autouse=True)
+def _site_pages_are_serving(monkeypatch):
+    """Default the screenshot readiness probe to "the page is up", with no waits.
+
+    A capture now polls the site's own url before spending a Browser Rendering call
+    (a deploy is live at Cloudflare before it is live at the edge, and a screenshot
+    of the 404 in between is a valid PNG that lands on the card forever). Left
+    un-stubbed, every existing capture test would make a REAL request to
+    ``brew.example.test`` / ``*.paw-sites.test``, get nothing, and then sit through
+    the retry schedule before failing — slow, flaky, and offline-hostile.
+
+    Defaulting the gate OPEN is the right default here: these tests are about what
+    happens once there is a page. The tests that are about the GATE
+    (test_capture_readiness.py) patch the same two attributes themselves, and an
+    inner patch of the same target wins while it is active."""
+    from pocketpaw_ee.sites import screenshot as screenshot_mod
+
+    async def _serving(_url: str, **_kw) -> bool:
+        return True
+
+    monkeypatch.setattr(screenshot_mod, "_url_is_serving", _serving)
+    monkeypatch.setattr(screenshot_mod, "_READY_DELAYS", ())
+    monkeypatch.setattr(screenshot_mod, "_READY_DELAYS_MANUAL", ())
+    yield
 
 
 @pytest.fixture(autouse=True)

@@ -122,6 +122,37 @@ def inert_delegate_bridge():
 
 
 @pytest.fixture(autouse=True)
+def _site_pages_are_serving(monkeypatch):
+    """Never let a cloud test's site capture make a REAL request to the internet.
+
+    A site screenshot polls the site's own url before rendering it (a deploy is live
+    at Cloudflare before it is live at the edge, and a picture of the 404 in between
+    lands on the card permanently). Publish-driven tests live in this tree too, and
+    the poll's retry schedule runs to ~90s — so one test that happens to await after
+    a publish would stall CI on a DNS lookup for a hostname that does not exist,
+    which is a miserable thing to diagnose.
+
+    Nothing in this tree reaches the probe today (the capture is a detached task and
+    these tests end before it runs), so this is insurance, not a fix. It defaults the
+    probe to ready and zeroes both delay schedules; the gate's own tests live in
+    tests/ee/sites/test_capture_readiness.py and patch these same attributes.
+    """
+    try:
+        from pocketpaw_ee.sites import screenshot as screenshot_mod
+    except Exception:  # noqa: BLE001 — OSS-only install: nothing to stub
+        yield
+        return
+
+    async def _serving(_url: str, **_kw) -> bool:
+        return True
+
+    monkeypatch.setattr(screenshot_mod, "_url_is_serving", _serving)
+    monkeypatch.setattr(screenshot_mod, "_READY_DELAYS", ())
+    monkeypatch.setattr(screenshot_mod, "_READY_DELAYS_MANUAL", ())
+    yield
+
+
+@pytest.fixture(autouse=True)
 def recording_bus():
     """Install a RecordingBus for every test.
 
