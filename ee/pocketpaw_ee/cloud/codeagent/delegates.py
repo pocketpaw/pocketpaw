@@ -1,5 +1,18 @@
 # delegates.py — The browser-delegate channel for Code Mode (CD-1).
 #
+# Modified 2026-08-07 (fix/code-delegate-cross-process): the rendezvous now
+# spans PROCESSES. This module's registry is in-process by construction, which
+# the deployed stack violates on every single delegate: the Coolify compose runs
+# `backend` (serves POST /codeagent/resolve) and `worker` (runs the turn, parks
+# the future) as two containers with POCKETPAW_CLOUD_RUN_EXECUTOR=arq. The
+# browser's answer therefore reached a process whose registry was empty, the
+# resolve 404'd, and the parked turn burned the full 180s — so every Code Mode
+# file tool "timed out" against a browser that had answered instantly. The park
+# now also announces itself through ``bridge.py`` (Redis) and a relay feeds a
+# cross-process answer into the same local future; ``resolve_pending_anywhere``
+# tries the local registry first and the bridge only on a miss. Single-process
+# deployments are byte-for-byte unchanged: without Redis the bridge is inert.
+#
 # Modified 2026-08-07 (fix/code-delegate-pooled-context): the outbound half no
 # longer decides "is anyone listening" from the SSE sink ContextVar alone. The
 # file tools that call in here run inside an in-process MCP server owned by a
@@ -51,8 +64,21 @@ from typing import Any
 from uuid import uuid4
 
 from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
+from pocketpaw_ee.cloud.codeagent.bridge import DelegateBridge, get_delegate_bridge
 
 logger = logging.getLogger(__name__)
+
+# Extra life on the bridge's pending record beyond the park it describes, so a
+# browser answering at the very edge of the budget meets a clean timeout rather
+# than being told the correlation id never existed.
+_BRIDGE_TTL_SLACK_SECONDS = 30
+
+# Ceiling on the announce, which is the one bridge call on the critical path
+# between minting a correlation id and pushing the frame. A local Redis SET is
+# sub-millisecond; this only ever fires when Redis is unreachable or sick, and
+# it keeps that fault costing one bounded pause instead of a connect timeout per
+# file tool call.
+_BRIDGE_ANNOUNCE_TIMEOUT_SECONDS = 2.0
 
 # ── The park budget ─────────────────────────────────────────────────────────
 # How long the backend will hold a turn open waiting for the browser.
@@ -331,6 +357,7 @@ async def delegate_call_to_browser(
     timeout: float = CODE_DELEGATE_TIMEOUT_SECONDS,
     registry: PendingDelegates | None = None,
     push: Callable[[str, dict[str, Any]], None] | None = None,
+    bridge: DelegateBridge | None = None,
 ) -> DelegateOutcome:
     """Hand one file tool call to the browser and wait for its result.
 
@@ -420,6 +447,34 @@ async def delegate_call_to_browser(
                 _q.put_nowait((name, data))
 
     corr_id = reg.open(workspace_id)
+
+    # Announce the park to the OTHER process before the frame goes out. In the
+    # deployed stack the turn runs in the arq worker while POST
+    # /codeagent/resolve is served by the web container, so without this record
+    # the browser's answer reaches a process whose registry is empty and this
+    # future runs the full budget. Ordered before the push for the same reason
+    # ``open`` precedes it: the browser can answer faster than our next await.
+    # Inert when no Redis is configured (single-process dev).
+    active_bridge = get_delegate_bridge() if bridge is None else bridge
+    if active_bridge.enabled:
+        try:
+            # Bounded: this await sits BETWEEN minting the correlation id and
+            # pushing the frame, so an unreachable or slow Redis would otherwise
+            # add its full connect timeout to EVERY file tool call before the
+            # browser even hears about the work. A couple of seconds is orders of
+            # magnitude more than a local SET needs and far below anything a user
+            # would read as a stall.
+            await asyncio.wait_for(
+                active_bridge.announce(
+                    corr_id, workspace_id, ttl_seconds=int(timeout) + _BRIDGE_TTL_SLACK_SECONDS
+                ),
+                timeout=_BRIDGE_ANNOUNCE_TIMEOUT_SECONDS,
+            )
+        except Exception:  # noqa: BLE001 — a broken bridge must not kill the turn
+            # Degrade to in-process only: same-process resolves still work and a
+            # cross-process one times out as it did before this existed.
+            logger.warning("codeagent.bridge announce failed corr=%s", corr_id, exc_info=True)
+
     try:
         push(DELEGATE_EVENT, {"corrId": corr_id, "tool": tool, "input": tool_input})
     except Exception:  # noqa: BLE001 — a failed push must not kill the turn
@@ -427,6 +482,7 @@ async def delegate_call_to_browser(
         # Nobody is parked on this future yet, so drop the slot rather than
         # settling it — an abort here would wake a waiter that does not exist.
         reg.discard(corr_id)
+        await _forget_quietly(active_bridge, corr_id)
         return DelegateOutcome(
             ok=False,
             error=ERROR_NO_CLIENT,
@@ -440,7 +496,59 @@ async def delegate_call_to_browser(
         tool,
         timeout,
     )
-    return await reg.wait(corr_id, timeout=timeout)
+
+    # The relay feeds a cross-process answer into the SAME local future the
+    # in-process path settles, so ``wait`` keeps one wake-up mechanism and its
+    # anti-leak ``finally`` unchanged.
+    relay: asyncio.Task[None] | None = None
+    if active_bridge.enabled:
+        relay = asyncio.create_task(
+            _relay_bridge_result(active_bridge, reg, corr_id, workspace_id, timeout)
+        )
+    try:
+        return await reg.wait(corr_id, timeout=timeout)
+    finally:
+        if relay is not None:
+            relay.cancel()
+        await _forget_quietly(active_bridge, corr_id)
+
+
+async def _forget_quietly(bridge: DelegateBridge, corr_id: str) -> None:
+    """Drop the bridge's records. Never raises: this runs on the teardown path
+    of a turn that has already produced its outcome, and a Redis blip must not
+    turn a completed delegation into an exception."""
+    try:
+        await bridge.forget(corr_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("codeagent.bridge forget failed corr=%s", corr_id, exc_info=True)
+
+
+async def _relay_bridge_result(
+    bridge: DelegateBridge,
+    reg: PendingDelegates,
+    corr_id: str,
+    workspace_id: str,
+    timeout: float,
+) -> None:
+    """Wait for a result delivered by another process and settle it locally.
+
+    Deliberately routed through ``reg.resolve`` rather than touching the future
+    directly: that keeps the duplicate-resolve and workspace checks in ONE
+    place, so a cross-process answer cannot bypass a guard the in-process path
+    enforces.
+    """
+    try:
+        result = await bridge.listen(corr_id, timeout=timeout)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        logger.warning("codeagent.bridge listen failed corr=%s", corr_id, exc_info=True)
+        return
+    if result is None:
+        return
+    if not reg.resolve(corr_id, result, workspace_id=workspace_id):
+        # Already settled in-process, or the park is gone. Both are benign.
+        logger.debug("codeagent.bridge result arrived with nobody parked corr=%s", corr_id)
 
 
 def resolve_pending(
@@ -463,6 +571,49 @@ def resolve_pending(
     reg = get_pending_delegates() if registry is None else registry
     if not reg.resolve(corr_id, result, workspace_id=workspace_id):
         raise NotFound("code_delegate", corr_id)
+
+
+async def resolve_pending_anywhere(
+    workspace_id: str,
+    corr_id: str,
+    result: dict,
+    *,
+    registry: PendingDelegates | None = None,
+    bridge: DelegateBridge | None = None,
+) -> None:
+    """Deliver the browser's answer to the parked caller, in THIS process or another.
+
+    The HTTP entry point for a resolve. In the deployed stack the request lands
+    on the web container while the turn is parked in the arq worker, so a purely
+    in-process lookup misses every time and the worker times out — see
+    ``bridge.py`` for the full account.
+
+    Order matters: the local registry is tried FIRST, so a single-process
+    deployment (the ``inprocess`` executor, and every test) behaves exactly as it
+    did, and the bridge is only consulted on a miss.
+
+    Raises ``NotFound`` when neither path has a park on record. The four cases
+    the sync version folds together stay folded, and the bridge adds no fifth:
+    an id it does not know, and one whose workspace does not match, are both
+    misses there too.
+    """
+    _guard_result_size(result)
+    reg = get_pending_delegates() if registry is None else registry
+    if reg.resolve(corr_id, result, workspace_id=workspace_id):
+        return
+
+    active_bridge = get_delegate_bridge() if bridge is None else bridge
+    if active_bridge.enabled:
+        try:
+            if await active_bridge.deliver(corr_id, workspace_id, result):
+                return
+        except Exception:  # noqa: BLE001
+            # A broken bridge must not turn into a 500 for the browser. Fall
+            # through to NotFound: the parked caller will time out cleanly,
+            # which is the behaviour this deployment had before the bridge.
+            logger.warning("codeagent.bridge deliver failed corr=%s", corr_id, exc_info=True)
+
+    raise NotFound("code_delegate", corr_id)
 
 
 def _guard_result_size(result: dict) -> None:
@@ -498,4 +649,5 @@ __all__ = [
     "delegate_call_to_browser",
     "get_pending_delegates",
     "resolve_pending",
+    "resolve_pending_anywhere",
 ]
