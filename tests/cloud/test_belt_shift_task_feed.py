@@ -349,3 +349,222 @@ async def test_mirrored_tasks_land_in_the_mandates_workspace_only(
 
     assert ours, "the mandate's own workspace sees no mirrored rows"
     assert theirs == [], "a mirrored row leaked into another tenant"
+
+
+# ---------------------------------------------------------------------------
+# 5. The run lands → the mirrored task is done
+# ---------------------------------------------------------------------------
+#
+# The mirror's other half. Without it every row T-14 files sits in ``proposed``
+# forever — a feed that fills and never drains, which is worse than the empty
+# feed the mirror was added to fix.
+#
+# The join is ``source.metadata.run_ref == <landing action id>``. That holds
+# because ``headless.develop`` clears ``station_pending`` by updating the SAME
+# action's blob in place, so the id the mandate dispatcher returned as the run
+# ref is the id that later lands here — the tests below propose FIRST and mirror
+# against the real id rather than asserting that equality by hand.
+
+
+def _git(cwd: Path, *args: str) -> None:
+    import subprocess
+
+    subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=True,
+        env={
+            "GIT_AUTHOR_NAME": "Belt Test",
+            "GIT_AUTHOR_EMAIL": "belt@test.local",
+            "GIT_COMMITTER_NAME": "Belt Test",
+            "GIT_COMMITTER_EMAIL": "belt@test.local",
+            "PATH": __import__("os").environ.get("PATH", ""),
+            "HOME": str(cwd),
+        },
+    )
+
+
+def _seed_repo(tmp_path: Path, *, with_remote: bool) -> Path:
+    """A seeded working clone. ``with_remote`` picks which of the executor's
+    TWO success terminals the landing takes."""
+    work = tmp_path / ("work_remote" if with_remote else "work_local")
+    if with_remote:
+        bare = tmp_path / "origin.git"
+        _git(tmp_path, "init", "--bare", str(bare))
+        _git(tmp_path, "clone", str(bare), str(work))
+    else:
+        work.mkdir()
+        _git(work, "init")
+    _git(work, "config", "user.name", "Belt Test")
+    _git(work, "config", "user.email", "belt@test.local")
+    (work / "app.py").write_text("def hello():\n    return 'hi'\n", encoding="utf-8")
+    _git(work, "add", "app.py")
+    _git(work, "commit", "-m", "init")
+    _git(work, "branch", "-M", "main")
+    if with_remote:
+        _git(work, "push", "-u", "origin", "main")
+    return work
+
+
+def _allow_repo_root(monkeypatch, root: Path) -> None:
+    """Authorize ``root`` for the belt executor's repo-path guard.
+
+    The executor refuses any repo outside ``belt_repo_allowlist`` (default: the
+    cwd's parent), so a tmp_path repo lands as a FAILED run with no terminal —
+    and a completion test would silently assert against a run that never landed.
+    Same shim shape as ``test_belt_console.settings_allowlist``.
+    """
+    from pocketpaw.config import get_settings
+
+    real = get_settings()
+
+    class _S:
+        belt_repo_allowlist = [str(root)]
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    monkeypatch.setattr("pocketpaw.config.get_settings", lambda: _S())
+
+
+def _good_diff() -> str:
+    return (
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " def hello():\n"
+        "-    return 'hi'\n"
+        "+    return 'hello world'\n"
+    )
+
+
+class _FakePrOpener:
+    async def open_pr(self, *, repo_path, branch, base_branch, title, body) -> str:
+        return "https://github.com/acme/repo/pull/1"
+
+
+async def _propose_developed_run(store, repo: Path):
+    """A code_change Action in the DEVELOPED shape — station_pending cleared and
+    a real diff attached, exactly what ``headless.develop`` leaves behind on the
+    queued run's own blob."""
+    from pocketpaw.instinct.models import ActionCategory, ActionPriority, ActionTrigger
+
+    return await store.propose(
+        pocket_id=WS,
+        title="Station task — developed",
+        description="developed from a mandate shift",
+        recommendation="land it",
+        trigger=ActionTrigger(type="agent", source="belt:mandate-dispatch", reason="test"),
+        category=ActionCategory.EXTERNAL,
+        priority=ActionPriority.HIGH,
+        parameters={
+            "_code_change": {
+                "kind": "code_change",
+                "schema": 2,
+                "station_pending": False,
+                "repo": str(repo),
+                "diff": _good_diff(),
+                "base_branch": "main",
+                "workspace_id": WS,
+                "requested_by": USER,
+            }
+        },
+        assignee=USER,
+        workspace_id=WS,
+    )
+
+
+async def _mirror_task_for(run_ref: str, workspace: str = WS) -> str:
+    """File the Task T-14's mirror would have filed for this run."""
+    from datetime import UTC, datetime
+
+    from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+    from pocketpaw_ee.cloud.tasks.dto import AssigneeDTO, CreateTaskRequest, SourceDTO
+
+    ctx = RequestContext(
+        user_id=USER,
+        workspace_id=workspace,
+        request_id="test",
+        scope=ScopeKind.WORKSPACE,
+        started_at=datetime.now(UTC),
+    )
+    created = await tasks_service.agent_create_task(
+        ctx,
+        CreateTaskRequest(
+            title="Bump lodash",
+            summary="",
+            assignee=AssigneeDTO(kind="human", id=USER, name=""),
+            source=SourceDTO(
+                type="belt_shift",
+                ref_id="shift-1",
+                metadata={"mandate_id": "m1", "shift_no": 1, "run_ref": run_ref},
+            ),
+        ),
+    )
+    return str(created.id)
+
+
+@pytest.mark.parametrize("with_remote", [True, False], ids=["pr-landing", "local-only-landing"])
+async def test_landed_run_completes_its_mirrored_feed_task(
+    tmp_path, mongo_db, store, journal, graph, monkeypatch, with_remote
+):
+    """A landed belt run flips its mirrored feed row to ``done``.
+
+    Parametrised across BOTH of the executor's success terminals. The
+    with-remote path ends at the PR ``mark_executed``; a repo with no origin
+    ends at a separate local-only terminal ~150 lines later. Hooking only the
+    first leaves every local landing's row stuck in ``proposed`` — which is why
+    this is a parametrised test and not one happy-path case.
+
+    MUTATION THAT BREAKS THIS: remove either ``_close_mirrored_feed_tasks``
+    call site in ``belt/executor`` — the matching param fails on status."""
+    from pocketpaw_ee.cloud.belt import executor as belt_executor
+
+    _allow_repo_root(monkeypatch, tmp_path)
+    repo = _seed_repo(tmp_path, with_remote=with_remote)
+    action = await _propose_developed_run(store, repo)
+    task_id = await _mirror_task_for(str(action.id))
+
+    before = await _TaskDoc.get(task_id)
+    assert before is not None and before.status != "done"
+
+    await belt_executor.execute_approved_change(action, pr_opener=_FakePrOpener())
+
+    after = await _TaskDoc.get(task_id)
+    assert after is not None
+    assert after.status == "done", "the landed run left its feed row open"
+    assert "Landed" in (after.summary or ""), "the landing outcome never reached the row"
+
+
+async def test_a_landed_run_never_completes_another_runs_task(
+    tmp_path, mongo_db, store, journal, graph, monkeypatch
+):
+    """The join must be by run ref, not "any belt_shift row in the workspace".
+
+    Two mirrored tasks, one landing: only the landing run's own row closes.
+    Without this a single landed task would mark a whole shift's work done.
+
+    MUTATION THAT BREAKS THIS: drop the ``source.metadata.run_ref`` clause from
+    ``complete_tasks_for_source_ref``'s query — the sibling closes too."""
+    from pocketpaw_ee.cloud.belt import executor as belt_executor
+
+    _allow_repo_root(monkeypatch, tmp_path)
+    repo = _seed_repo(tmp_path, with_remote=True)
+    action = await _propose_developed_run(store, repo)
+    mine = await _mirror_task_for(str(action.id))
+    sibling = await _mirror_task_for("some-other-run-ref")
+    # A NEIGHBOURING TENANT holding a row with the SAME run ref. Without a
+    # workspace clause on the query this closes too — a cross-tenant write from
+    # a background executor, the exact shape the mirror's own tenancy test
+    # guards on the create side.
+    other_tenant = await _mirror_task_for(str(action.id), workspace=OTHER_WS)
+
+    await belt_executor.execute_approved_change(action, pr_opener=_FakePrOpener())
+
+    assert (await _TaskDoc.get(mine)).status == "done"
+    assert (await _TaskDoc.get(sibling)).status != "done", "a sibling run's task was closed"
+    assert (
+        await _TaskDoc.get(other_tenant)
+    ).status != "done", "another tenant's task was closed"

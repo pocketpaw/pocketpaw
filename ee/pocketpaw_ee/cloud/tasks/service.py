@@ -515,6 +515,61 @@ async def agent_block_task(
     return task_to_dto(task)
 
 
+async def complete_tasks_for_source_ref(
+    ctx: RequestContext,
+    *,
+    source_type: str,
+    metadata_key: str,
+    metadata_value: str,
+    result_summary: str = "",
+) -> list[str]:
+    """Complete every task whose ``source.metadata[key]`` names this value (T-14).
+
+    The completing side of a mirrored task usually lives in another module —
+    the belt executor knows a run landed but must not import ``_TaskDoc``
+    (Rule 2), and it holds a RUN reference, not a task id. This is the
+    lookup + write it calls instead.
+
+    The query is tenant-scoped on ``ctx.workspace_id`` and additionally
+    filtered by ``source.type``, so a metadata key reused by another source
+    kind can never complete a row this caller does not own.
+
+    Already-terminal rows are skipped rather than raising: a re-delivered
+    completion must be a no-op, not an error. Returns the ids actually
+    flipped, so a caller can log how many rows a run closed.
+    """
+
+    if not ctx.workspace_id:
+        raise ValidationError("task.no_workspace", "completing tasks requires an active workspace")
+    if not metadata_value:
+        return []
+
+    docs = await _TaskDoc.find(
+        {
+            "workspace_id": ctx.workspace_id,
+            "source.type": source_type,
+            f"source.metadata.{metadata_key}": metadata_value,
+        }
+    ).to_list()
+
+    completed: list[str] = []
+    for doc in docs:
+        if doc.status in {"done", "reverted", "failed"}:
+            continue
+        doc.status = "done"
+        if result_summary:
+            doc.summary = (
+                (doc.summary + "\n\n" + result_summary).strip()
+                if doc.summary
+                else result_summary
+            )
+        await doc.save()
+        task = _to_domain(doc)
+        await emit(TaskResolved(data=_event_payload(doc, task)))
+        completed.append(str(doc.id))
+    return completed
+
+
 async def agent_revert_task(ctx: RequestContext, task_id: str) -> TaskResponse:
     """Revert a task from a terminal status back to in_progress.
 

@@ -43,5 +43,41 @@
     "tests": [
       "tests/cloud/test_belt_shift_task_feed.py"
     ]
+  },
+  {
+    "label": "T-14: drop the feed close from the PR (with-remote) terminal",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "        # T-14 \u2014 the mirrored feed task for this run is now done.\n        await _close_mirrored_feed_tasks(",
+    "replace": "        # T-14 \u2014 the mirrored feed task for this run is now done.\n        await _noop_close_mirrored_feed_tasks(",
+    "tests": [
+      "tests/cloud/test_belt_shift_task_feed.py"
+    ]
+  },
+  {
+    "label": "T-14: drop the feed close from the local-only terminal",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "    await _close_mirrored_feed_tasks(\n        workspace_id=workspace_id,\n        requested_by=requested_by,\n        action_id=str(action.id),\n        outcome=f\"Landed on branch",
+    "replace": "    await _noop_close_local(\n        workspace_id=workspace_id,\n        requested_by=requested_by,\n        action_id=str(action.id),\n        outcome=f\"Landed on branch",
+    "tests": [
+      "tests/cloud/test_belt_shift_task_feed.py"
+    ]
+  },
+  {
+    "label": "T-14: complete ANY belt_shift row, not just this run's",
+    "file": "ee/pocketpaw_ee/cloud/tasks/service.py",
+    "find": "            f\"source.metadata.{metadata_key}\": metadata_value,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_shift_task_feed.py"
+    ]
+  },
+  {
+    "label": "T-14: complete across tenants (drop the workspace filter)",
+    "file": "ee/pocketpaw_ee/cloud/tasks/service.py",
+    "find": "            \"workspace_id\": ctx.workspace_id,\n            \"source.type\": source_type,",
+    "replace": "            \"source.type\": source_type,",
+    "tests": [
+      "tests/cloud/test_belt_shift_task_feed.py"
+    ]
   }
 ]
