@@ -378,6 +378,63 @@ def _emit_chain_close(
         )
 
 
+async def _close_mirrored_feed_tasks(
+    *,
+    workspace_id: str,
+    requested_by: str,
+    action_id: str,
+    outcome: str,
+) -> None:
+    """Flip the T-14 feed mirror of this run to ``done`` when the run lands.
+
+    T-14 files a workspace Task per dispatched mandate-shift task so the work
+    is visible in /deep-work. Without this half those rows sit in ``proposed``
+    forever — a feed that fills up and never drains, which is worse than the
+    empty feed the mirror was added to fix.
+
+    The join is ``source.metadata.run_ref == <this action's id>``: the mandate
+    dispatcher's ``run_ref`` IS the queued Action id, and that queued Action is
+    what lands here on approval. A run with no mirrored row (a human-filed
+    station run, or one dispatched before T-14) completes zero tasks and logs
+    nothing — the lookup is a normal empty result, not an error.
+
+    Best-effort, matching ``_emit_run_updated`` beside it: the code change is
+    already applied and marked executed by the time this runs, so a tasks-side
+    failure must never turn a landed run into a failed one.
+    """
+    if not workspace_id:
+        return
+    try:
+        from datetime import UTC, datetime
+
+        from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+        from pocketpaw_ee.cloud.tasks import service as tasks_service
+
+        ctx = RequestContext(
+            user_id=requested_by,
+            workspace_id=workspace_id,
+            request_id=f"belt-run-{action_id}",
+            scope=ScopeKind.WORKSPACE,
+            started_at=datetime.now(UTC),
+        )
+        closed = await tasks_service.complete_tasks_for_source_ref(
+            ctx,
+            source_type="belt_shift",
+            metadata_key="run_ref",
+            metadata_value=action_id,
+            result_summary=outcome,
+        )
+        if closed:
+            logger.info(
+                "belt: run %s closed %d mirrored feed task(s)", action_id, len(closed)
+            )
+    except Exception:  # noqa: BLE001 — the run has landed; the feed is a mirror
+        logger.exception(
+            "belt: could not close mirrored feed tasks for run %s — run is unaffected",
+            action_id,
+        )
+
+
 async def _emit_run_updated(
     *,
     workspace_id: str,
@@ -790,6 +847,13 @@ async def execute_approved_change(
             stage="done",
             pr_url=pr_url,
         )
+        # T-14 — the mirrored feed task for this run is now done.
+        await _close_mirrored_feed_tasks(
+            workspace_id=workspace_id,
+            requested_by=requested_by,
+            action_id=str(action.id),
+            outcome=f"Landed: {pr_url}",
+        )
         # BS-4 — close the chain on the SUCCESS path. ``action_outcome="landed"``
         # + the PR url / branch / file count ride on the payload for the explain
         # narrator. This is the ONLY terminal on the happy path (every failure
@@ -936,6 +1000,14 @@ async def _land_local_only(
         action_id=str(action.id),
         status="landed",
         stage="done",
+    )
+    # T-14 — same close as the with-remote terminal. Hooking only the PR path
+    # would leave every local-only landing's feed row stuck in ``proposed``.
+    await _close_mirrored_feed_tasks(
+        workspace_id=workspace_id,
+        requested_by=requested_by,
+        action_id=str(action.id),
+        outcome=f"Landed on branch '{branch}' ({commit_sha[:12] or 'unknown'})",
     )
     # Close the Decision-Graph chain once on the success path — branch + sha
     # ride the payload (no pr_url) for the explain narrator.

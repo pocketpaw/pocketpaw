@@ -191,6 +191,11 @@ class ShiftDoc(TimestampedDocument):
     state: ShiftState = "planning"
     plan_action_id: str | None = None
     outcome: str | None = None
+    # T-14: ids of the workspace Tasks mirroring this shift's dispatched work,
+    # so the console can join a shift to its feed rows without re-deriving them
+    # from the code_change blobs. Additive and defaulted — a shift filed before
+    # T-14 (or one whose mirror failed) reads an empty list, never a KeyError.
+    task_ids: list[str] = Field(default_factory=list)
 
     class Settings:
         name = "mandate_shifts"

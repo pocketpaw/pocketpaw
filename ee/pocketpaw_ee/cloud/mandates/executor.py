@@ -271,6 +271,102 @@ class StationTaskDispatcher:
         return run_ref
 
 
+async def _mirror_task_to_feed(
+    *,
+    workspace_id: str,
+    shift_id: str,
+    mandate_id: str,
+    shift_no: int,
+    plan_action_id: str,
+    run_ref: str,
+    task: dict[str, Any],
+    agent_id: str,
+) -> str | None:
+    """File a workspace Task mirroring one dispatched shift task (T-14).
+
+    ``TaskSource.type`` is documented as an extensible discriminator, so this
+    rides ``belt_shift`` without touching the union. ``ref_id`` is the SHIFT id
+    (not the run) so every task from one shift groups; the run and plan ids sit
+    in ``metadata`` for the drill-in.
+
+    Assignee is the foreman agent when the mandate is bound to one, else the
+    task is unassigned-to-agent and the crew's human owner picks it up — a
+    mandate with no agent must still show its work.
+
+    Returns the new task id, or ``None`` when the mirror failed. Never raises:
+    the belt run is already filed and is the artefact that matters; a feed row
+    that did not land is a visibility miss, not lost work.
+    """
+    try:
+        from datetime import UTC, datetime
+
+        from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+        from pocketpaw_ee.cloud.tasks import service as tasks_service
+        from pocketpaw_ee.cloud.tasks.dto import AssigneeDTO, CreateTaskRequest, SourceDTO
+
+        title = str(task.get("title") or "Belt station task")
+        why = str(task.get("why") or "")
+        expected = str(task.get("expected_outcome") or "")
+        requested_by = str(task.get("requested_by") or "")
+
+        # A background executor has no request to inherit from, so the envelope
+        # is built here — the same shape ``admin_proposals/executor`` uses. All
+        # five fields are required; a two-arg construction raises a TypeError
+        # the mirror's own except would swallow, leaving it silently dead.
+        ctx = RequestContext(
+            user_id=requested_by,
+            workspace_id=workspace_id,
+            request_id=f"belt-shift-{shift_id}",
+            scope=ScopeKind.WORKSPACE,
+            started_at=datetime.now(UTC),
+        )
+        assignee = (
+            AssigneeDTO(kind="agent", id=agent_id, name="")
+            if agent_id
+            else AssigneeDTO(kind="human", id=requested_by, name="")
+        )
+        created = await tasks_service.agent_create_task(
+            ctx,
+            CreateTaskRequest(
+                title=title[:200],
+                summary=(expected or why or "")[:2000],
+                assignee=assignee,
+                source=SourceDTO(
+                    type="belt_shift",
+                    ref_id=shift_id,
+                    metadata={
+                        "mandate_id": mandate_id,
+                        "shift_no": shift_no,
+                        "plan_action_id": plan_action_id,
+                        "run_ref": run_ref,
+                    },
+                ),
+            ),
+        )
+        return str(created.id)
+    except Exception:  # noqa: BLE001 — a feed mirror must never fail a shift
+        logger.exception(
+            "mandate: task-feed mirror failed for run %s (shift=%s) — belt run is unaffected",
+            run_ref,
+            shift_id,
+        )
+        return None
+
+
+async def _record_shift_task_ids(
+    *, workspace_id: str, shift_id: str, task_ids: list[str]
+) -> None:
+    """Stamp the mirrored task ids onto the shift row. Best-effort (T-14)."""
+    try:
+        from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+        await mandate_service.record_shift_task_ids(
+            workspace_id=workspace_id, shift_id=shift_id, task_ids=task_ids
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("mandate: recording shift task ids failed (non-fatal)", exc_info=True)
+
+
 async def _repo_for_mandate(workspace_id: str, mandate_id: str) -> str | None:
     """Best-effort read of a mandate's bound repo path (the surface ``repo_id``).
 
@@ -564,6 +660,7 @@ async def execute_approved_plan(
         # 3. Dispatch each approved task as a normal Belt run.
         await _mark_shift_safe(workspace_id=workspace_id, shift_id=shift_id, state="executing")
         run_refs: list[str] = []
+        feed_task_ids: list[str] = []
         for i, task in enumerate(tasks, start=1):
             # Provenance rides on the task dict (the same channel
             # ``StationTaskDispatcher`` already reads ``requested_by`` from)
@@ -590,6 +687,32 @@ async def execute_approved_plan(
                 )
                 return
             run_refs.append(ref)
+            # T-14: mirror the dispatched task into the workspace task feed.
+            # Until now a mandate shift's work existed ONLY as a code_change
+            # Instinct Action, so /deep-work and Mission Control could not see
+            # that an agent crew was mid-shift and cycle burnup under-counted
+            # real agent work. Best-effort by design: the belt run is the
+            # valuable artefact and it is already filed — a task-feed mirror
+            # must never fail the shift.
+            task_id = await _mirror_task_to_feed(
+                workspace_id=workspace_id,
+                shift_id=shift_id,
+                mandate_id=mandate_id,
+                shift_no=shift_no,
+                plan_action_id=str(action.id),
+                run_ref=ref,
+                task=task_payload,
+                agent_id=agent_id,
+            )
+            if task_id:
+                feed_task_ids.append(task_id)
+
+        # 4a. Record the mirrored task ids on the shift so the console can join
+        #     a shift to its feed rows without re-deriving them from the blob.
+        if feed_task_ids:
+            await _record_shift_task_ids(
+                workspace_id=workspace_id, shift_id=shift_id, task_ids=feed_task_ids
+            )
 
         # 4. Success terminal — one mark_executed, one shift transition, one
         #    soul append, ONE chain close.
