@@ -62,6 +62,18 @@
 # undeclared sites, and the "content hidden until JS reveals it" class of bug is
 # no longer caught before deploy.
 #
+# Updated 2026-08-08 (a preview is never a photograph of a page that was not serving
+# yet). ``refresh_site_preview`` gained the READINESS branch: a deploy is live at
+# Cloudflare before it is live at the edge, so the capture path now polls the site's
+# url before spending a render (see ``sites.screenshot`` — that module's header holds
+# the full reasoning). This function runs the same gate on a SHORT budget, because
+# unlike the deploy-time capture it has somebody waiting on it, and raises its own
+# ``sites.preview_not_serving`` rather than reusing ``preview_unavailable``: the two
+# declines need opposite advice ("publish it" vs "it is published, try again in a
+# moment"), and the wrong one surfaces verbatim in the dashboard. This endpoint is
+# also the recovery path when the deploy-time gate times out and deliberately leaves
+# the card without a picture.
+#
 # Updated 2026-08-07 (MT-1 — an interactive site keeps its own JavaScript):
 # ``publish_pocket`` now reads the pocket's ``keepsClientBundle`` declaration and
 # threads it through ``publish`` -> ``_deploy_site_doc`` -> ``generator.build``, so a
@@ -2603,13 +2615,40 @@ async def refresh_site_preview(*, workspace_id: str, site_id: str) -> SitePrevie
     Routes itself the same way the automatic path does: a site with a url is
     photographed live, a draft is photographed from its own markup. Tenant-scoped
     via ``_load``, so another workspace's site is a 404, never a render.
+
+    Runs the same readiness gate the deploy path does, on a SHORT budget, and reports
+    a page that is not serving as its own ``sites.preview_not_serving`` — see the
+    comment at the branch. This is also the recovery path for a capture the deploy
+    path DECLINED: when an edge takes longer than the post-deploy budget to come up,
+    the card is deliberately left without a picture, and this is what fills it in.
     """
-    from pocketpaw_ee.sites.screenshot import take_draft_screenshot, take_site_screenshot
+    from pocketpaw_ee.sites.screenshot import (
+        _READY_DELAYS_MANUAL,
+        take_draft_screenshot,
+        take_site_screenshot,
+        wait_until_serving,
+    )
 
     site = await _load(workspace_id, site_id)
 
-    if (getattr(site, "url", "") or "").strip():
-        image_url = await take_site_screenshot(site)
+    url = (getattr(site, "url", "") or "").strip()
+    if url:
+        # The readiness gate, run HERE as well as inside the capture, purely so this
+        # path can name what went wrong. ``take_site_screenshot`` reports every
+        # decline the same way — with "" — and the two declines need opposite
+        # advice: a site with nothing renderable yet should be published, while a
+        # site that IS published and merely still coming up should just be retried.
+        # On a short budget, because a person is watching a spinner: the deploy
+        # path's minute is right for a background task and wrong for a request.
+        if not await wait_until_serving(url, delays=_READY_DELAYS_MANUAL):
+            raise ValidationError(
+                "sites.preview_not_serving",
+                "The site isn't answering yet. A deploy can take a moment to go "
+                "live at the edge — try the refresh again shortly.",
+            )
+        # A single confirming probe immediately before the paid render, so the gate
+        # has no bypass path: every call into ``take_site_screenshot`` is gated.
+        image_url = await take_site_screenshot(site, ready_delays=())
     else:
         image_url = await take_draft_screenshot(site)
 
