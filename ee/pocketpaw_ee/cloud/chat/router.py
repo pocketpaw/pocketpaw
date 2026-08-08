@@ -54,6 +54,7 @@ from pocketpaw_ee.cloud.chat.agent_router import router as agent_router
 from pocketpaw_ee.cloud.chat.schemas import (
     AddGroupAgentRequest,
     AddGroupMembersRequest,
+    BindChannelRequest,
     CreateGroupRequest,
     CreateThreadRequest,
     EditMessageRequest,
@@ -258,6 +259,45 @@ async def remove_group_agent(
     user_id: str = Depends(current_user_id),
 ):
     await group_service.remove_agent(group_id, user_id, agent_id)
+
+
+# ---------------------------------------------------------------------------
+# Channel binding (T-9) — mirror an external conversation into this room
+# ---------------------------------------------------------------------------
+
+
+@_licensed.put(
+    "/groups/{group_id}/channel-binding",
+    dependencies=[Depends(require_group_action("group.admin"))],
+)
+async def bind_group_channel(
+    group_id: str,
+    body: BindChannelRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+):
+    """Bind this room to a Telegram/WhatsApp/… conversation.
+
+    PUT rather than POST: binding is idempotent — re-binding the same room to
+    the same conversation must succeed, and only a claim by a DIFFERENT room
+    is a conflict.
+    """
+    return await group_service.bind_group_to_channel(
+        workspace_id, user_id, group_id, channel=body.channel, chat_id=body.chat_id
+    )
+
+
+@_licensed.delete(
+    "/groups/{group_id}/channel-binding",
+    dependencies=[Depends(require_group_action("group.admin"))],
+)
+async def unbind_group_channel(
+    group_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+):
+    """Stop mirroring. Idempotent, so a retry after a partial failure is safe."""
+    return await group_service.unbind_group_from_channel(workspace_id, user_id, group_id)
 
 
 # ---------------------------------------------------------------------------

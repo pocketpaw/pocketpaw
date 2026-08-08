@@ -42,6 +42,18 @@ class UpdateMemberRoleRequest(BaseModel):
     role: Literal["edit", "post_no_media", "view"]
 
 
+class BindChannelRequest(BaseModel):
+    """Bind a room to one external conversation (T-9).
+
+    ``channel`` is an OSS ``Channel`` value ("telegram", "whatsapp", …) and
+    ``chat_id`` is that channel's conversation id. The service normalises and
+    rejects blanks; the pair must be unclaimed by another room.
+    """
+
+    channel: str = Field(min_length=1, max_length=32)
+    chat_id: str = Field(min_length=1, max_length=256)
+
+
 class AddGroupAgentRequest(BaseModel):
     agent_id: str
     role: str = "assistant"

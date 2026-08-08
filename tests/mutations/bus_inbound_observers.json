@@ -1,0 +1,37 @@
+[
+  {
+    "label": "T-9: the observer fan-out consumes instead of observing",
+    "file": "src/pocketpaw/bus/queue.py",
+    "find": "        await self._inbound.put(message)\n        await self._notify_inbound_observers(message)",
+    "replace": "        await self._inbound.put(message)\n        await self._inbound.get()\n        await self._notify_inbound_observers(message)",
+    "tests": ["tests/test_bus_inbound_observers.py"]
+  },
+  {
+    "label": "T-9: a raising observer escapes into the adapter's receive path",
+    "file": "src/pocketpaw/bus/queue.py",
+    "find": "            except Exception:\n                logger.exception(\"inbound observer failed (message was still delivered)\")",
+    "replace": "            except KeyError:\n                logger.exception(\"inbound observer failed (message was still delivered)\")",
+    "tests": ["tests/test_bus_inbound_observers.py"]
+  },
+  {
+    "label": "T-9: observers share one mutable message (no isolation copy)",
+    "file": "src/pocketpaw/bus/queue.py",
+    "find": "                isolated = (\n                    replace(",
+    "replace": "                isolated = message if True else (\n                    replace(",
+    "tests": ["tests/test_bus_inbound_observers.py"]
+  },
+  {
+    "label": "T-9: unsubscribe silently fails to remove the observer",
+    "file": "src/pocketpaw/bus/queue.py",
+    "find": "        try:\n            self._inbound_observers.remove(callback)\n        except ValueError:\n            pass",
+    "replace": "        try:\n            pass\n        except ValueError:\n            pass",
+    "tests": ["tests/test_bus_inbound_observers.py"]
+  },
+  {
+    "label": "T-9: the observer is notified BEFORE the queue put (delivery can be lost)",
+    "file": "src/pocketpaw/bus/queue.py",
+    "find": "        await self._inbound.put(message)\n        await self._notify_inbound_observers(message)",
+    "replace": "        await self._notify_inbound_observers(message)\n        await self._inbound.put(message)\n        await self._inbound.get()",
+    "tests": ["tests/test_bus_inbound_observers.py"]
+  }
+]
