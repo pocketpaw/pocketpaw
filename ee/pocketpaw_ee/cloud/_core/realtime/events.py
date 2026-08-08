@@ -693,25 +693,15 @@ class CallParticipantLeft(Event):
     EVENT_TYPE: ClassVar[str] = "call.participant_left"
 
 
-# Meetings — scheduled group meeting lifecycle
-@dataclass
-class MeetingScheduled(Event):
-    EVENT_TYPE: ClassVar[str] = "meeting.scheduled"
-
-
-@dataclass
-class MeetingUpdated(Event):
-    EVENT_TYPE: ClassVar[str] = "meeting.updated"
-
-
-@dataclass
-class MeetingCancelled(Event):
-    EVENT_TYPE: ClassVar[str] = "meeting.cancelled"
-
-
-@dataclass
-class MeetingStarted(Event):
-    EVENT_TYPE: ClassVar[str] = "meeting.started"
+# Meetings — the whole lifecycle lives in ``cloud.meetings.events``, which is
+# the module every emitter and test imports. Bare duplicates of scheduled /
+# cancelled / started used to sit here too, purely so ``scripts/gen_topics.py``
+# would see *some* meeting topics; because ``__init_subclass__`` registers by
+# EVENT_TYPE and last import wins, the meetings module silently shadowed them,
+# and the four meeting events declared ONLY there (ended, reminder,
+# recording_ready, transcript_ready) never reached TOPICS at all. gen_topics
+# now imports the domain module directly, so the duplicates are gone and
+# ``cloud.meetings.events`` is the single owner.
 
 
 # Foresight — RFC 08 scenario runs. ``ForesightRunCreated`` fires when a

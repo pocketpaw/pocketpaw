@@ -32,6 +32,18 @@ class MeetingScheduled(Event):
 
 
 @dataclass
+class MeetingUpdated(Event):
+    """Fired when a scheduled meeting is rescheduled or otherwise modified.
+
+    ``data``: ``{workspace_id, meeting_id, source, group_id}``. Moved here
+    from ``_core.realtime.events`` so the whole meeting lifecycle has one
+    owner — see the note left at the old site.
+    """
+
+    EVENT_TYPE: ClassVar[str] = "meeting.updated"
+
+
+@dataclass
 class MeetingStarted(Event):
     """Fired when a meeting transitions to ``active`` — either explicitly
     via ``start_meeting`` or implicitly by the reminder loop at the exact

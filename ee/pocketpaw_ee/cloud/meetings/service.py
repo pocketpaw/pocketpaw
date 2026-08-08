@@ -34,6 +34,45 @@ from pocketpaw_ee.cloud.shared.events import event_bus
 logger = logging.getLogger(__name__)
 
 
+async def _emit_meeting_realtime(kind: str, workspace_id: str, doc: _MeetingDoc) -> None:
+    """Put a meeting lifecycle event on the realtime bus so open tabs react.
+
+    ``create_meeting`` has always done this for ``meeting.scheduled``; cancel,
+    update and recording-ready only ever reached the in-process cross-domain
+    bus, so the frontend dispatcher's handlers for them could never fire.
+
+    ``group_id`` is load-bearing: ``_core.realtime.audience`` fans meeting
+    events to the group's members and returns nobody when the key is absent.
+    The Meeting document has no ``group_id`` column — ``create_meeting`` stows
+    it in ``raw_provider_payload`` — so read it back from there.
+
+    Best-effort by design: a realtime failure must never fail the state change
+    that already committed, which is why every caller is past its ``save()``.
+    """
+    from pocketpaw_ee.cloud.meetings import events as meeting_events
+
+    cls = {
+        "cancelled": meeting_events.MeetingCancelled,
+        "updated": meeting_events.MeetingUpdated,
+        "recording_ready": meeting_events.MeetingRecordingReady,
+    }[kind]
+    try:
+        from pocketpaw_ee.cloud._core.realtime.emit import emit as _emit_realtime
+
+        await _emit_realtime(
+            cls(
+                data={
+                    "workspace_id": workspace_id,
+                    "meeting_id": str(doc.id),
+                    "source": doc.source,
+                    "group_id": (doc.raw_provider_payload or {}).get("group_id"),
+                }
+            )
+        )
+    except Exception:
+        logger.exception("Failed to emit realtime meeting.%s for %s", kind, doc.id)
+
+
 # Bump when the VTT → KB pipeline changes shape (extractor strips cue tags,
 # mime is text/vtt, etc). The startup migration re-emits FileReady for
 # every transcript whose stored ``kb_indexed_version`` is below this so
@@ -518,6 +557,16 @@ async def cancel_meeting(workspace_id: str, meeting_id: str, user_id: str = "") 
             "provider": doc.provider,
         },
     )
+
+    # ...and onto the realtime bus, so the open /meetings tab drops the row
+    # without a refresh. The cross-domain emit above only reaches in-process
+    # subscribers; the frontend dispatcher has handled `meeting.cancelled`
+    # since it was written, but nothing ever put the event on the socket.
+    # The audience resolver keys meeting fan-out on `group_id`, which the
+    # Meeting document does not carry — it lives in the provider payload
+    # (set in create_meeting), so recover it from there.
+    await _emit_meeting_realtime("cancelled", workspace_id, doc)
+
     return _doc_to_response(doc, transcript_available=False)
 
 

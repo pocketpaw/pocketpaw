@@ -333,7 +333,17 @@ class AudienceResolver:
             return await self._group(gid)
 
         # --- Meetings ----------------------------------------------------------
-        if t in {"meeting.scheduled", "meeting.updated", "meeting.cancelled", "meeting.started"}:
+        if t in {
+            "meeting.scheduled",
+            "meeting.updated",
+            "meeting.cancelled",
+            "meeting.started",
+            # recording_ready / transcript_ready were handled by the frontend
+            # dispatcher but absent from this set, so even once emitted they
+            # resolved to no audience and went nowhere.
+            "meeting.recording_ready",
+            "meeting.transcript_ready",
+        }:
             # Fan out to all group members so they see meeting schedule/updates
             gid = d.get("group_id")
             if not gid:
