@@ -492,3 +492,30 @@ async def test_calendar_event_skips_when_minted_by_reverse_bridge(mongo_db, fake
     )
 
     assert await _MeetingDoc.find({"workspace": "ws-1"}).count() == 0
+
+
+async def test_calendar_event_skips_when_minted_by_task_bridge(mongo_db, fake_event_doc_class):
+    """Cross-bridge loop guard: calendar events carrying a ``task:``
+    fabric link were minted by the tasks bridge (tasks/bridges/calendar).
+    A task titled with a Zoom URL must NOT spawn a phantom Meeting."""
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud.models.meeting import Meeting as _MeetingDoc
+
+    starts_at = datetime.now(UTC) + timedelta(hours=1)
+    fake_event_doc_class["evt-task"] = SimpleNamespace(
+        id="evt-task",
+        title="Prep https://zoom.us/j/42 talking points",
+        description="Task due\n— Synced from Tasks",
+        location=None,
+        starts_at=starts_at,
+        ends_at=starts_at + timedelta(minutes=30),
+        created_by_user_id="user-1",
+        fabric_object_id="task:65f0aa000000000000000001",
+    )
+
+    await calendar_bridge._on_calendar_event_created(
+        {"event_id": "evt-task", "workspace_id": "ws-1"}
+    )
+
+    assert await _MeetingDoc.find({"workspace": "ws-1"}).count() == 0
