@@ -1,0 +1,101 @@
+[
+  {
+    "label": "T-9: the inbound mirror never writes into the room",
+    "file": "ee/pocketpaw_ee/cloud/chat/bridges/channels.py",
+    "find": "        await _mirror_into_room(\n            group_id=group_id,\n            workspace_id=workspace_id,\n            content=content,\n            sender_type=_EXTERNAL_SENDER_TYPE,",
+    "replace": "        return\n        await _mirror_into_room(\n            group_id=group_id,\n            workspace_id=workspace_id,\n            content=content,\n            sender_type=_EXTERNAL_SENDER_TYPE,",
+    "tests": [
+      "tests/cloud/test_channel_chat_mirror.py"
+    ]
+  },
+  {
+    "label": "T-9: LOOP 1 \u2014 the bridge marker check is removed (room post echoes back)",
+    "file": "ee/pocketpaw_ee/cloud/chat/bridges/channels.py",
+    "find": "        if (message.metadata or {}).get(_BRIDGE_MARKER):\n            return",
+    "replace": "        if False:\n            return",
+    "tests": [
+      "tests/cloud/test_channel_chat_mirror.py"
+    ]
+  },
+  {
+    "label": "T-9: LOOP 1 \u2014 the outbound publish stops carrying the marker",
+    "file": "ee/pocketpaw_ee/cloud/chat/bridges/channels.py",
+    "find": "                metadata={_BRIDGE_MARKER: True, \"group_id\": str(group_id)},",
+    "replace": "                metadata={\"group_id\": str(group_id)},",
+    "tests": [
+      "tests/cloud/test_channel_chat_mirror.py"
+    ]
+  },
+  {
+    "label": "T-9: LOOP 2/3 \u2014 the mirror emits message.sent (customer gets their own words back, agents double-reply)",
+    "file": "ee/pocketpaw_ee/cloud/chat/bridges/channels.py",
+    "find": "    wire = message_to_wire_dict(domain_msg)",
+    "replace": "    from pocketpaw_ee.cloud.shared.events import event_bus as _eb\n\n    await _eb.emit(\n        \"message.sent\",\n        {\"group_id\": group_id, \"content\": content, \"message_id\": domain_msg.id},\n    )\n    wire = message_to_wire_dict(domain_msg)",
+    "tests": [
+      "tests/cloud/test_channel_chat_mirror.py"
+    ]
+  },
+  {
+    "label": "T-9: an unbound conversation is mirrored anyway",
+    "file": "ee/pocketpaw_ee/cloud/chat/bridges/channels.py",
+    "find": "        binding = await _resolve_binding(str(message.channel.value), message.chat_id)\n        if binding is None:\n            return  # unbound conversation \u2014 the overwhelming default",
+    "replace": "        binding = await _resolve_binding(str(message.channel.value), message.chat_id)\n        if binding is None:\n            from pocketpaw_ee.cloud.chat import group_service as _gs\n\n            _any = await _gs._GroupDoc.find_all().to_list()\n            if not _any:\n                return\n            binding = (str(_any[0].id), _any[0].workspace)",
+    "tests": [
+      "tests/cloud/test_channel_chat_mirror.py"
+    ]
+  },
+  {
+    "label": "T-9: the room \u2192 channel send is dropped",
+    "file": "ee/pocketpaw_ee/cloud/chat/bridges/channels.py",
+    "find": "        await get_message_bus().publish_outbound(",
+    "replace": "        return\n        await get_message_bus().publish_outbound(",
+    "tests": [
+      "tests/cloud/test_channel_chat_mirror.py"
+    ]
+  },
+  {
+    "label": "T-9: an unbound room's posts are sent to a channel anyway",
+    "file": "ee/pocketpaw_ee/cloud/chat/bridges/channels.py",
+    "find": "        if binding is None:\n            return  # an ordinary room \u2014 the overwhelming default",
+    "replace": "        if binding is None:\n            from pocketpaw_ee.cloud.models.group import ChannelBinding as _CB\n\n            binding = _CB(channel=\"telegram\", chat_id=\"leaked\")",
+    "tests": [
+      "tests/cloud/test_channel_chat_mirror.py"
+    ]
+  },
+  {
+    "label": "T-9: two rooms may claim the same conversation (double mirror)",
+    "file": "ee/pocketpaw_ee/cloud/chat/group_service.py",
+    "find": "    if existing is not None and existing[0] != group_id:",
+    "replace": "    if False and existing is not None and existing[0] != group_id:",
+    "tests": [
+      "tests/cloud/test_channel_chat_mirror.py"
+    ]
+  },
+  {
+    "label": "T-9: a non-member can bind a room to a channel",
+    "file": "ee/pocketpaw_ee/cloud/chat/group_service.py",
+    "find": "    if doc.owner != user_id and user_id not in doc.members:",
+    "replace": "    if False and doc.owner != user_id and user_id not in doc.members:",
+    "tests": [
+      "tests/cloud/test_channel_chat_mirror.py"
+    ]
+  },
+  {
+    "label": "T-9: the binding lookup ignores chat_id (any chat resolves one room)",
+    "file": "ee/pocketpaw_ee/cloud/chat/group_service.py",
+    "find": "        {\"channel_binding.channel\": channel, \"channel_binding.chat_id\": chat_id}",
+    "replace": "        {\"channel_binding.channel\": channel}",
+    "tests": [
+      "tests/cloud/test_channel_chat_mirror.py"
+    ]
+  },
+  {
+    "label": "T-9: an external sender is filed as a workspace user",
+    "file": "ee/pocketpaw_ee/cloud/chat/bridges/channels.py",
+    "find": "_EXTERNAL_SENDER_TYPE = \"external\"",
+    "replace": "_EXTERNAL_SENDER_TYPE = \"user\"",
+    "tests": [
+      "tests/cloud/test_channel_chat_mirror.py"
+    ]
+  }
+]

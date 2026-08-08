@@ -20,6 +20,7 @@ from typing import Any, Literal
 
 from beanie import PydanticObjectId
 
+from pocketpaw_ee.cloud._core.errors import ConflictError
 from pocketpaw_ee.cloud.chat.domain import Group as _GroupDomain
 from pocketpaw_ee.cloud.chat.domain import GroupAgent as _GroupAgentDomain
 from pocketpaw_ee.cloud.chat.schemas import (
@@ -28,6 +29,7 @@ from pocketpaw_ee.cloud.chat.schemas import (
     UpdateGroupAgentRequest,
     UpdateGroupRequest,
 )
+from pocketpaw_ee.cloud.models.group import ChannelBinding as _ChannelBindingDoc
 from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
 from pocketpaw_ee.cloud.models.group import GroupAgent as _GroupAgentDoc
 from pocketpaw_ee.cloud.models.group import MemberRole
@@ -83,6 +85,11 @@ def _group_doc_to_domain(doc: _GroupDoc) -> _GroupDomain:
         archived=doc.archived,
         last_message_at=doc.last_message_at,
         message_count=doc.message_count,
+        channel_binding=(
+            (doc.channel_binding.channel, doc.channel_binding.chat_id)
+            if getattr(doc, "channel_binding", None)
+            else None
+        ),
         created_at=getattr(doc, "createdAt", None),  # type: ignore[arg-type]
         updated_at=getattr(doc, "updatedAt", None),  # type: ignore[arg-type]
     )
@@ -654,6 +661,98 @@ async def bump_message_stats(group_id: str, *, last_message_at: datetime) -> Non
             "$inc": {"message_count": 1},
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Channel binding (T-9) — a room that mirrors one external conversation
+# ---------------------------------------------------------------------------
+
+
+async def find_group_id_by_channel_binding(channel: str, chat_id: str) -> tuple[str, str] | None:
+    """Resolve ``(group_id, workspace_id)`` for a bound external conversation.
+
+    Returns ``None`` when nothing is bound — the overwhelmingly common case,
+    since an unbound deployment has zero bindings and every message takes this
+    branch.
+    """
+    # global-read: an inbound external message carries a channel + chat_id and
+    # NO workspace attribution — resolving the owning workspace is the whole
+    # point of this lookup, so it cannot itself be workspace-filtered. The
+    # binding pair is the tenancy key: ``bind_group_to_channel`` enforces that
+    # only one group in the deployment may claim a given pair, and the
+    # workspace this returns is then used to scope everything downstream.
+    doc = await _GroupDoc.find_one(
+        {"channel_binding.channel": channel, "channel_binding.chat_id": chat_id}
+    )
+    if doc is None:
+        return None
+    return str(doc.id), doc.workspace
+
+
+async def bind_group_to_channel(
+    workspace_id: str, user_id: str, group_id: str, *, channel: str, chat_id: str
+) -> dict:
+    """Bind a group to an external conversation so messages mirror both ways.
+
+    Refuses a pair another group already claims. Two rooms bound to one
+    conversation would mirror every inbound message twice and send every
+    reply twice — a duplicate that is invisible in the room that caused it
+    and obvious to the customer receiving it.
+    """
+    from pocketpaw_ee.cloud.chat.dto import group_to_wire_dict
+
+    channel = (channel or "").strip().lower()
+    chat_id = (chat_id or "").strip()
+    if not channel or not chat_id:
+        raise ValidationError(
+            "group.binding_incomplete", "binding a channel requires both channel and chat_id"
+        )
+
+    group = await _fetch_group_for_admin(workspace_id, user_id, group_id)
+
+    existing = await find_group_id_by_channel_binding(channel, chat_id)
+    if existing is not None and existing[0] != group_id:
+        raise ConflictError(
+            "group.channel_already_bound",
+            f"{channel}:{chat_id} is already mirrored by another room",
+        )
+
+    group.channel_binding = _ChannelBindingDoc(channel=channel, chat_id=chat_id)
+    await group.save()
+    await emit(GroupUpdated(data={"group_id": group_id, "workspace_id": workspace_id}))
+    return group_to_wire_dict(_group_doc_to_domain(group))
+
+
+async def unbind_group_from_channel(workspace_id: str, user_id: str, group_id: str) -> dict:
+    """Stop mirroring. Idempotent — unbinding an unbound room is not an error,
+    so a retry after a partial failure is safe."""
+    from pocketpaw_ee.cloud.chat.dto import group_to_wire_dict
+
+    group = await _fetch_group_for_admin(workspace_id, user_id, group_id)
+    group.channel_binding = None
+    await group.save()
+    await emit(GroupUpdated(data={"group_id": group_id, "workspace_id": workspace_id}))
+    return group_to_wire_dict(_group_doc_to_domain(group))
+
+
+async def _fetch_group_for_admin(workspace_id: str, user_id: str, group_id: str) -> _GroupDoc:
+    """Load a group for a binding write: tenant-scoped, owner-or-member only.
+
+    Binding wires a room to an outside conversation, so it is not a read —
+    a non-member must not be able to point a room they cannot see at a
+    conversation they can.
+    """
+    try:
+        doc = await _GroupDoc.find_one(
+            _GroupDoc.id == PydanticObjectId(group_id), _GroupDoc.workspace == workspace_id
+        )
+    except Exception:  # noqa: BLE001 — a malformed id is a 404, not a 500
+        doc = None
+    if doc is None:
+        raise NotFound("group", group_id)
+    if doc.owner != user_id and user_id not in doc.members:
+        raise Forbidden("group.binding_denied", "Only a member can bind this room to a channel")
+    return doc
 
 
 # ---------------------------------------------------------------------------

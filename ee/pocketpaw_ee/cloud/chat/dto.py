@@ -169,6 +169,13 @@ def group_to_wire_dict(
         "archived": group.archived,
         "lastMessageAt": iso_utc(group.last_message_at),
         "messageCount": group.message_count,
+        # T-9: null for an ordinary room; the rooms rail renders a channel
+        # badge when present.
+        "channelBinding": (
+            {"channel": group.channel_binding[0], "chatId": group.channel_binding[1]}
+            if group.channel_binding
+            else None
+        ),
         "createdAt": iso_utc(group.created_at),
     }
 

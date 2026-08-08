@@ -28,6 +28,28 @@ class GroupAgent(BaseModel):
     respond_mode: str = "mention_only"  # mention_only | auto | silent | smart
 
 
+class ChannelBinding(BaseModel):
+    """Binds a group to one external conversation (T-9).
+
+    ``channel`` is an OSS ``Channel`` value (``"telegram"``, ``"whatsapp"``,
+    …) and ``chat_id`` is that channel's conversation id. Together they are
+    exactly the OSS ``InboundMessage.session_key`` — ``f"{channel}:{chat_id}"``
+    — which is why the mirror can resolve a room from a message with no
+    workspace attribution on it.
+
+    The pair is UNIQUE across the deployment: two groups bound to one external
+    conversation would double-mirror every message and double-send every
+    reply, so the bind path rejects a second claim rather than allowing it.
+    """
+
+    channel: str
+    chat_id: str
+
+    @property
+    def session_key(self) -> str:
+        return f"{self.channel}:{self.chat_id}"
+
+
 class Group(TimestampedDocument):
     """Chat group/channel — like Slack channels with AI agents."""
 
@@ -56,9 +78,18 @@ class Group(TimestampedDocument):
     archived: bool = False
     last_message_at: datetime | None = None
     message_count: int = 0
+    # T-9: when set, this room mirrors an external channel conversation.
+    # Additive + defaulted None → zero migration; an unbound group (every
+    # existing row) reads None and no mirroring happens.
+    channel_binding: ChannelBinding | None = None
 
     class Settings:
         name = "groups"
         indexes = [
             [("workspace", 1), ("slug", 1)],
+            # T-9: the mirror resolves a room from (channel, chat_id) on every
+            # inbound message, and that read is deployment-wide (an external
+            # message carries no workspace). Indexed so the hot path is a
+            # lookup rather than a collection scan.
+            [("channel_binding.channel", 1), ("channel_binding.chat_id", 1)],
         ]

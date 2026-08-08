@@ -1011,6 +1011,17 @@ def mount_cloud(app: FastAPI) -> None:
 
     register_lead_notification_listeners()
 
+    # Channel ↔ chat mirror (T-9) — a group with a channel_binding renders its
+    # external conversation (Telegram/WhatsApp/…) as a workspace room, and
+    # replies posted in the room go back out to the customer. Registers three
+    # seams: an OSS inbound OBSERVER (not a consumer — the agent loop is the
+    # consumer of record), an OSS outbound subscriber per channel, and the
+    # legacy message.sent subscriber. Same after-init_realtime constraint as
+    # every other bus bridge.
+    from pocketpaw_ee.cloud.chat.bridges.channels import register_channel_chat_listeners
+
+    register_channel_chat_listeners()
+
     # Growth bridge — lead.captured → a Prospect in /growth, linked back to the
     # submission that created it. The far end of the same funnel: the
     # notification tells the workspace a lead arrived, this puts them in the

@@ -84,6 +84,10 @@ class Group:
     updated_at: datetime
     visibility: str = "public"  # "public" | "private" — for channels
     active_threads: tuple[str, ...] = ()
+    # T-9: ``(channel, chat_id)`` when this room mirrors an external
+    # conversation, else None. Trailing + defaulted so every existing
+    # construction site keeps working untouched.
+    channel_binding: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True)
