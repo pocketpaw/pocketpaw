@@ -921,6 +921,10 @@ def mount_cloud(app: FastAPI) -> None:
     register_meeting_notification_listeners()
     register_meeting_calendar_listeners()
 
+    from pocketpaw_ee.cloud.mail.bridge import register_meeting_mail_listeners
+
+    register_meeting_mail_listeners()
+
     # Push notifications fan-out (#1393) — v1 product events
     # (agent.stream_end / instinct.approval.created / meeting.started) →
     # ``dispatch.notify``, which forks WS-vs-Web-Push so a user with both the

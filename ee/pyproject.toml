@@ -137,6 +137,8 @@ dependencies = [
     # ``OASIS_RECSYS_AVAILABLE`` in
     # ``ee/pocketpaw_ee/foresight/substrate/oasis/__init__.py``.
     "igraph>=0.11",
+    # --- Email (Mailtrap transactional + sandbox for dev/test) ---
+    "mailtrap>=2.0.0",
     # --- Daytona SDK — VM/container workspaces for cloud project compute ---
     # Used by ee/pocketpaw_ee/cloud/daytona/ to provision, sync, and
     # manage sandboxes. Pinned to 0.190.x API surface.
