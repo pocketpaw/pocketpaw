@@ -620,3 +620,45 @@ async def test_a_growth_failure_costs_neither_the_lead_nor_the_notification(mong
     assert len(notes) == 1
     assert notes[0].type == "lead_captured"
     assert await _prospects() == []
+
+
+@pytest.mark.asyncio
+async def test_a_named_lead_fills_a_blank_name_on_an_existing_prospect(
+    mongo_db, registered_bridge
+):
+    """A prospect discovered bare (domain only, no name) gets its name filled by
+    the first lead that carries one.
+
+    This is the ADD half of the merge contract the docstring promises — an
+    existing row is never reset, but a genuinely-unknown field is filled. It was
+    broken in the shipped code: ``doc.name = doc.name`` assigned the blank to
+    itself and set ``changed = True``, so the row saved reporting a fill that
+    never happened. The company line beside it was correct, which is why the
+    pair read fine.
+
+    Found by re-running the mutation plan on the merged tree: the plan's anchor
+    (``doc.name = body.name``) no longer existed, because the code was already
+    sitting in the mutated state.
+
+    MUTATION THAT BREAKS THIS: put ``doc.name = doc.name`` back — the name
+    assert fails while every other assertion here still passes."""
+    site = await _site()
+
+    # A bare row, as the discovery engine files one: domain known, name not.
+    await growth_service.upsert_from_site_lead(
+        workspace_id="ws1",
+        body={
+            "domain": "acme-dental.com",
+            "name": "",
+            "company": "",
+            "source": "discovery",
+        },
+    )
+    bare = await _prospects()
+    assert len(bare) == 1 and bare[0].name == ""
+
+    await _capture(site, full_name="Sam Founder", email="sam@acme-dental.com", rate_key="rk1")
+
+    rows = await _prospects()
+    assert len(rows) == 1, "the lead should merge into the bare row, not fork one"
+    assert rows[0].name == "Sam Founder", "a blank name was never filled"

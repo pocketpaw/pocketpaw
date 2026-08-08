@@ -823,6 +823,11 @@ async def upsert_from_site_lead(workspace_id: str, body: CreateProspectRequest) 
     # that — see the doc class). A form fill never overwrites a name someone
     # already researched or typed.
     if body.name and not doc.name:
+        # ``body.name``, not ``doc.name``. The self-assignment this replaces
+        # (introduced collaterally in 4b3b9d47) left the row blank while still
+        # flipping ``changed``, so the save reported a fill that never happened
+        # — the company line right below always did it correctly, which is what
+        # made the pair look right at a glance.
         doc.name = body.name
         changed = True
     if body.company and not doc.company:
