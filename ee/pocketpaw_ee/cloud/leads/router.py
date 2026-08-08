@@ -94,6 +94,7 @@ async def capture_lead(site_id: str, body: CaptureRequest, request: Request) -> 
         form_type=body.form_type,
         payload=body.payload,
         submitter_ref=body.submitter_ref or "anon",
+        conversation_ref=body.conversation_ref,
         rate_key=_rate_key(request),  # server-derived; the real per-IP limiter key
     )
     if lead is None:
@@ -172,6 +173,11 @@ async def capture_form(request: Request) -> Response:
         # Opaque provenance label (mirrors submitter_ref on the JSON path — never
         # a limiter key). Truncated: paw_page is caller-controlled text.
         submitter_ref=f"form:{page}"[:256] if page else "form",
+        # T-11 — the paw-bar loader stamps this hidden field. It is a paw_* name
+        # so the payload comprehension above already excludes it from the lead
+        # properties: a visitor-facing record must not carry an internal join key
+        # as if it were something the visitor typed.
+        conversation_ref=str(form.get("paw_conversation_ref") or ""),
         rate_key=_rate_key(request),  # server-derived; the real per-IP limiter key
     )
 

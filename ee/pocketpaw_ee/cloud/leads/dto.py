@@ -20,6 +20,10 @@ class CaptureRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     submitter_ref: str = ""
     signed_key: str  # per-site key; checked against Site.signed_key
+    # T-11: the concierge conversation this visitor was having, relayed by the
+    # paw-bar loader. Optional and shape-screened by the service — a malformed
+    # value costs the transcript link, never the lead.
+    conversation_ref: str = ""
 
 
 class CaptureResponse(BaseModel):
