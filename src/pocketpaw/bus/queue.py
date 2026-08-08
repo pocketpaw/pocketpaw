@@ -43,15 +43,84 @@ class MessageBus:
             Channel, list[Callable[[OutboundMessage], Awaitable[None]]]
         ] = {}
         self._system_subscribers: list[Callable[[SystemEvent], Awaitable[None]]] = []
+        # Inbound OBSERVERS — fan-out copies, never consumers. See
+        # ``subscribe_inbound_observer`` for why inbound needs a separate
+        # mechanism from ``subscribe_outbound``.
+        self._inbound_observers: list[Callable[[InboundMessage], Awaitable[None]]] = []
 
     # =========================================================================
     # Inbound (Channel → Agent)
     # =========================================================================
 
+    def subscribe_inbound_observer(
+        self, callback: Callable[[InboundMessage], Awaitable[None]]
+    ) -> None:
+        """Watch inbound messages WITHOUT consuming them.
+
+        ``consume_inbound`` pops from a queue, so a second consumer would
+        *steal* messages from the agent loop rather than observe them. An
+        observer instead receives a fan-out copy after the message is safely
+        queued: the agent still gets every message, and interested parties
+        (the EE channel↔chat mirror) get to see it go by.
+
+        Observers are best-effort and MUST NOT be relied on for delivery.
+        """
+        self._inbound_observers.append(callback)
+        logger.info("📡 Subscribed inbound observer")
+
+    def unsubscribe_inbound_observer(
+        self, callback: Callable[[InboundMessage], Awaitable[None]]
+    ) -> None:
+        """Remove an inbound observer. Silent when absent, so callers can
+        unsubscribe-then-subscribe for idempotent registration."""
+        try:
+            self._inbound_observers.remove(callback)
+        except ValueError:
+            pass
+
     async def publish_inbound(self, message: InboundMessage) -> None:
         """Publish a message from a channel adapter."""
         logger.debug(f"📥 Inbound: {message.channel.value}:{message.sender_id[:8]}...")
+        # Queue FIRST. This is the adapter's hot receive path and the agent's
+        # only delivery route — an observer must never be able to delay or
+        # prevent it by being slow or by raising.
         await self._inbound.put(message)
+        await self._notify_inbound_observers(message)
+
+    async def _notify_inbound_observers(self, message: InboundMessage) -> None:
+        """Fan a queued inbound message out to observers, isolated per callback.
+
+        Mirrors ``publish_outbound``'s isolation: each observer gets its own
+        deep copy of the mutable fields so one observer cannot mutate what the
+        next one sees, and an observer that raises is logged rather than
+        propagated to the adapter.
+        """
+        if not self._inbound_observers:
+            return
+
+        async def _safe_notify(
+            callback: Callable[[InboundMessage], Awaitable[None]],
+        ) -> None:
+            try:
+                isolated = (
+                    replace(
+                        message,
+                        metadata=copy.deepcopy(message.metadata),
+                        media=[copy.deepcopy(m) for m in message.media],
+                    )
+                    if (message.metadata or message.media)
+                    else message
+                )
+                await callback(isolated)
+            except Exception:
+                logger.exception("inbound observer failed (message was still delivered)")
+
+        # Deliberately NOT ``return_exceptions=True``. ``_safe_notify`` already
+        # wraps its whole body, so gather can never see an exception — and a
+        # second net here made the first one untestable: narrowing that except
+        # let a RuntimeError through and every test still passed, because
+        # gather swallowed it. One guard, and it is exercised.
+        await asyncio.gather(*(_safe_notify(cb) for cb in list(self._inbound_observers)))
 
     async def consume_inbound(self, timeout: float = 1.0) -> InboundMessage | None:
         """Consume the next inbound message (used by agent loop)."""
