@@ -1,5 +1,10 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-08-06 (feat/coupling-lead-captured, T-6) — Registers the leads
+    notification bridge (``leads.bridges.notifications``) alongside the meeting
+    bridges, after ``init_realtime``. It subscribes to the new ``lead.captured``
+    event and notifies the workspace owner/admins, so a form submitted on a
+    published Paw Site is heard instead of waiting to be polled for.
 Modified: 2026-07-11 (feat/real-pipeline-s1) — Mounts the fabric_ingest
     transform-surface router (``/fabric/ingest/mappings`` CRUD +
     ``/fabric/ingest/run`` run-now) next to the fabric router under
@@ -920,6 +925,16 @@ def mount_cloud(app: FastAPI) -> None:
 
     register_meeting_notification_listeners()
     register_meeting_calendar_listeners()
+
+    # Leads bridge — lead.captured → an in-app notification for the workspace
+    # owner/admins. A form submitted on a published Paw Site used to be silent
+    # (the Leads view polled and nobody was told); this is the first link in the
+    # site-lead → outreach funnel.
+    from pocketpaw_ee.cloud.leads.bridges.notifications import (
+        register_lead_notification_listeners,
+    )
+
+    register_lead_notification_listeners()
 
     # Push notifications fan-out (#1393) — v1 product events
     # (agent.stream_end / instinct.approval.created / meeting.started) →

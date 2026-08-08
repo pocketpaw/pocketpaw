@@ -50,6 +50,27 @@
 # false-dropping legitimate lead text (e.g. "act as a guarantor" scans MEDIUM
 # persona_hijack), and a lost lead is the worst failure here, so only HIGH-or-
 # above verdicts now drop.
+#
+# Updated 2026-08-06 (feat/coupling-lead-captured, T-6): ``capture`` now EMITS
+# ``lead.captured`` on the cross-domain bus after the insert, replacing the
+# "no-event, the Leads view polls" comment that sat here. A staffed Paw Site is
+# the front of the funnel, so a submitted form is the hottest signal the product
+# has — leaving it silent meant nobody heard it until someone happened to open
+# the Leads view. The payload carries workspace_id / lead_id / site_id /
+# site_name / form_type and NOTHING from the submitted form: the properties are
+# untrusted visitor PII, subscribers that need them read the tenant-scoped Lead
+# by id. ``site_name`` rides along because ``site_id`` is ``script_name`` — a
+# 24-char hex id, not something to show a human; a subscriber writing display
+# text needs the name at hand rather than a second query.
+#
+# The emit is AWAITED INLINE on the public capture request, not fire-and-forget:
+# ``EventBus.emit`` runs each handler in sequence, so the visitor's POST does not
+# return until every subscriber finishes (today: one admin query, N notification
+# inserts, their WS emits, and any configured outbound webhook POSTs). Bounded
+# and small at present, and worth knowing before adding a slow subscriber — this
+# is the request path, not a background queue. Failures are contained, though:
+# ``emit`` logs and swallows a raising handler, so a broken subscriber can never
+# fail the capture endpoint or lose the persisted lead.
 
 from __future__ import annotations
 
@@ -68,6 +89,7 @@ from pocketpaw_ee.cloud.models.lead import Lead as _LeadDoc
 from pocketpaw_ee.cloud.models.lead import LeadSource as _LeadSourceDoc
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter as _RateCounterDoc
+from pocketpaw_ee.cloud.shared.events import event_bus
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +280,21 @@ async def capture(
         ),
     )
     await doc.insert()
-    # no-event: lead capture is a public ingest; the Leads view polls, no realtime subscriber yet
+    # Ring the workspace. Payload is identifiers only — never the form payload
+    # (untrusted visitor PII); a subscriber that needs the values reads the Lead.
+    await event_bus.emit(
+        "lead.captured",
+        {
+            "workspace_id": site.workspace,
+            "lead_id": str(doc.id),
+            "site_id": site.script_name,
+            # The site's DISPLAY name. site_id is the deploy script name (a hex
+            # id), so anything user-facing needs this; "" when the site was never
+            # named, and subscribers fall back to the id.
+            "site_name": site.name,
+            "form_type": form_type,
+        },
+    )
     return _to_domain(doc)
 
 
