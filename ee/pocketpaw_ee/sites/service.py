@@ -47,6 +47,21 @@
 # preview" needs to be told when it did not work rather than handed back the stale
 # url they were trying to replace.
 #
+# Updated 2026-08-08 (feat/sites-js-by-default): ``publish_pocket`` is now the ONE
+# place the tri-state ``keepsClientBundle`` collapses to a bool. The pocket field
+# became ``bool | None``, so publish can finally tell "the author declared
+# nothing" (``None`` — every legacy pocket) from an explicit ``False``. Undeclared
+# resolves to the ``sites_keep_client_bundle_default`` setting, which ships TRUE:
+# a Paw Site now keeps its own JavaScript by default. An explicit declaration
+# still wins in BOTH directions, so a site that says ``False`` gets no bundle
+# regardless of the setting. Everything downstream (``publish``,
+# ``_deploy_site_doc``, ``generator.build``, the deferred-activation snapshot)
+# still receives a plain resolved ``bool`` — no other signature moved. Note the
+# cost this buys: the build-time resting-visibility smoke gate keys off whether
+# the built artifact ships JS, so with the default on it stops firing for
+# undeclared sites, and the "content hidden until JS reveals it" class of bug is
+# no longer caught before deploy.
+#
 # Updated 2026-08-08 (a preview is never a photograph of a page that was not serving
 # yet). ``refresh_site_preview`` gained the READINESS branch: a deploy is live at
 # Cloudflare before it is live at the edge, so the capture path now polls the site's
@@ -3245,8 +3260,27 @@ async def publish_pocket(
     # load-bearing. Rides ``siteConfig.keepsClientBundle`` to the generator, which
     # then emits ``csr = true`` instead of the static default. camelCase because
     # that is the pocket WIRE dict (``keeps_client_bundle`` is the Beanie/domain
-    # name). Absent on every legacy pocket → False → today's behaviour.
-    keeps_client_bundle = bool(pocket.get("keepsClientBundle"))
+    # name).
+    #
+    # THIS IS THE ONE PLACE the tri-state collapses to a bool
+    # (feat/sites-js-by-default). ``None`` — the author declared nothing, which
+    # includes every legacy pocket — resolves to the
+    # ``sites_keep_client_bundle_default`` setting, ``True`` by default: sites
+    # ship their own JavaScript unless told otherwise. An EXPLICIT ``True`` or
+    # ``False`` is an authorial decision and beats the setting in both
+    # directions, so a site that declares ``False`` still gets no bundle no
+    # matter how the default is set. Everything downstream — ``publish``,
+    # ``generator_client.build``, the deferred-activation snapshot — keeps
+    # receiving a plain resolved ``bool``, so no other signature changes.
+    # Local import, matching this module's existing ``get_settings`` use in
+    # ``_billing_provider`` — the top of the file deliberately imports no
+    # ``pocketpaw.config``.
+    from pocketpaw.config import get_settings
+
+    _declared = pocket.get("keepsClientBundle")
+    keeps_client_bundle = (
+        get_settings().sites_keep_client_bundle_default if _declared is None else bool(_declared)
+    )
 
     # charge-first: a PREVIEW publish never persists a Site doc and never bills, so
     # it stays the unchanged Branch-primitive preview path — build + smoke-gate +

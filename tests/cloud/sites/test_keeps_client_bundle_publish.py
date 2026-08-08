@@ -2,6 +2,20 @@
 # "my client JavaScript is load-bearing" declaration survives every publish path.
 # Created 2026-08-07 (feat/sites-keep-client-bundle).
 #
+# Edited 2026-08-08 (feat/sites-js-by-default): the declaration is now TRI-STATE,
+# and ``publish_pocket`` is the one place it collapses to a bool. ``None`` — the
+# author declared nothing, which covers every pocket written before MT-1 —
+# resolves from ``sites_keep_client_bundle_default``, which ships True: a Paw Site
+# keeps its client bundle by default. Four tests were ADDED for that: undeclared
+# takes the default, the default is a setting (flip it and the same undeclared
+# input inverts, which is what proves it is not a hardcoded literal), and the
+# declaration beats the default in BOTH directions. One existing test was renamed
+# from ``..._of_a_plain_pocket_does_not_declare`` to ``..._honours_an_explicit_
+# opt_out`` with its input and assertion untouched — it always passed an explicit
+# ``False`` while describing itself as "declares nothing", a distinction that did
+# not exist until now. The deferred/paid tests are UNCHANGED and still pass: the
+# snapshot stores the RESOLVED bool, so activation never sees the tri-state.
+#
 # A published Paw Site is generated with ``csr = false`` and, on ripple, has its
 # emitted hydration bundle pruned after the build — so an author's own onMount /
 # ``use:`` action / IntersectionObserver / WebGL code never runs. ``Pocket``
@@ -94,8 +108,10 @@ async def _make_workspace() -> str:
     return str(ws.id)
 
 
-async def _make_pocket(*, workspace_id: str, keeps_client_bundle: bool) -> str:
-    """A site pocket that either declares its client JS is load-bearing, or doesn't."""
+async def _make_pocket(*, workspace_id: str, keeps_client_bundle: bool | None) -> str:
+    """A site pocket that declares its client JS is load-bearing (``True``),
+    explicitly declares it is NOT (``False``), or declares nothing at all
+    (``None`` — the legacy/undeclared state that publish resolves from config)."""
     from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
 
     doc = _PocketDoc(
@@ -171,9 +187,19 @@ async def test_live_publish_forwards_the_declared_flag(mongo_db, recording_bus):
     assert gen.build_calls[0]["keeps_client_bundle"] is True
 
 
-async def test_live_publish_of_a_plain_pocket_does_not_declare(mongo_db, recording_bus):
-    """REGRESSION: a pocket that declares nothing publishes exactly as before —
-    the generator is told False, so csr stays off and the prune still runs."""
+async def test_live_publish_honours_an_explicit_opt_out(mongo_db, recording_bus):
+    """A pocket that explicitly declares ``False`` is told False, so csr stays off
+    and the prune still runs.
+
+    Renamed + re-described (feat/sites-js-by-default), NOT weakened — the
+    assertion and the input are byte-identical to the MT-1 original. It was named
+    ``..._of_a_plain_pocket_does_not_declare`` and called "a pocket that declares
+    nothing", but it always passed an explicit ``False``. Under the old two-state
+    bool those were the same value and the sloppiness was invisible; under the
+    tri-state they are the two different halves of the feature, and the
+    genuinely-undeclared case is now covered separately below. This test is the
+    OPT-OUT path and must keep passing untouched no matter what the default is —
+    that is what stops the new default being a mandate."""
     ws = await _make_workspace()
     pocket_id = await _make_pocket(workspace_id=ws, keeps_client_bundle=False)
     gen = _RecordingGenerator()
@@ -189,6 +215,122 @@ async def test_live_publish_of_a_plain_pocket_does_not_declare(mongo_db, recordi
 
     assert len(gen.build_calls) == 1
     assert gen.build_calls[0]["keeps_client_bundle"] is False
+
+
+# ---------------------------------------------------------------------------
+# feat/sites-js-by-default — the UNDECLARED pocket resolves from config, and an
+# explicit declaration beats that config in BOTH directions.
+# ---------------------------------------------------------------------------
+
+
+async def _publish_undeclared(ws: str, gen: _RecordingGenerator) -> None:
+    pocket_id = await _make_pocket(workspace_id=ws, keeps_client_bundle=None)
+    await sites_service.publish_pocket(
+        workspace_id=ws,
+        user_id="u1",
+        pocket_id=pocket_id,
+        _generator=gen,
+        _cloudflare=_RecordingCF(),
+        _bundle_reader=lambda d: b"x",
+    )
+
+
+async def test_undeclared_pocket_takes_the_default_which_ships_js(mongo_db, recording_bus):
+    """THE FEATURE. A pocket that declares NOTHING — which is every pocket
+    authored before MT-1 — now publishes WITH its client bundle, because
+    ``sites_keep_client_bundle_default`` ships True.
+
+    The input here is ``None``, not ``False``: that distinction is the entire
+    mechanism, and it is why the field had to become tri-state rather than just
+    having its default flipped."""
+    from pocketpaw.config import get_settings
+
+    assert get_settings().sites_keep_client_bundle_default is True, (
+        "the shipped default is what this test is about — if it is not True the "
+        "feature is off and the assertion below is meaningless"
+    )
+    ws = await _make_workspace()
+    gen = _RecordingGenerator()
+
+    await _publish_undeclared(ws, gen)
+
+    assert len(gen.build_calls) == 1
+    assert gen.build_calls[0]["keeps_client_bundle"] is True
+
+
+async def test_the_default_is_a_setting_not_a_hardcode(mongo_db, recording_bus, monkeypatch):
+    """Turning ``sites_keep_client_bundle_default`` OFF must send an undeclared
+    pocket back to the historical no-JS behaviour.
+
+    This is what proves the flip is a SETTING and not a literal: the same
+    undeclared input that produced True above produces False here with nothing
+    changed but config. Without this, a hardcoded ``True`` would pass the test
+    above just as well."""
+    from pocketpaw.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "sites_keep_client_bundle_default", False)
+    ws = await _make_workspace()
+    gen = _RecordingGenerator()
+
+    await _publish_undeclared(ws, gen)
+
+    assert len(gen.build_calls) == 1
+    assert gen.build_calls[0]["keeps_client_bundle"] is False
+
+
+async def test_an_explicit_opt_out_beats_a_default_that_says_ship_it(mongo_db, recording_bus):
+    """BOTH DIRECTIONS. With the default ON, a pocket that explicitly declares
+    ``False`` still gets no bundle.
+
+    The captain asked for a default, not a mandate. This is the test that holds
+    the difference: it fails the moment anyone "simplifies" the resolution at
+    ``publish_pocket`` into ``declared or default``, which reads identically for
+    every other input and silently strips the author's veto."""
+    from pocketpaw.config import get_settings
+
+    assert get_settings().sites_keep_client_bundle_default is True
+    ws = await _make_workspace()
+    pocket_id = await _make_pocket(workspace_id=ws, keeps_client_bundle=False)
+    gen = _RecordingGenerator()
+
+    await sites_service.publish_pocket(
+        workspace_id=ws,
+        user_id="u1",
+        pocket_id=pocket_id,
+        _generator=gen,
+        _cloudflare=_RecordingCF(),
+        _bundle_reader=lambda d: b"x",
+    )
+
+    assert len(gen.build_calls) == 1
+    assert gen.build_calls[0]["keeps_client_bundle"] is False
+
+
+async def test_an_explicit_declaration_beats_a_default_that_says_dont(
+    mongo_db, recording_bus, monkeypatch
+):
+    """BOTH DIRECTIONS, the other way. With the default OFF, a pocket that
+    declares ``True`` still ships its bundle — the MT-1 guarantee survives however
+    the new setting is configured."""
+    from pocketpaw.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "sites_keep_client_bundle_default", False)
+    ws = await _make_workspace()
+    pocket_id = await _make_pocket(workspace_id=ws, keeps_client_bundle=True)
+    gen = _RecordingGenerator()
+
+    await sites_service.publish_pocket(
+        workspace_id=ws,
+        user_id="u1",
+        pocket_id=pocket_id,
+        _generator=gen,
+        _cloudflare=_RecordingCF(),
+        _bundle_reader=lambda d: b"x",
+    )
+
+    assert len(gen.build_calls) == 1
+    assert gen.build_calls[0]["keeps_client_bundle"] is True
 
 
 # ---------------------------------------------------------------------------

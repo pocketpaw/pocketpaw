@@ -526,8 +526,11 @@ def _pocket_to_domain(doc: _PocketDoc) -> Pocket:
         engine=getattr(doc, "engine", "ripple"),
         source=getattr(doc, "source", None),
         # MT-1 — the authored "my client JS is load-bearing" declaration.
-        # ``getattr`` for legacy docs that pre-date the field (read back False).
-        keeps_client_bundle=bool(getattr(doc, "keeps_client_bundle", False)),
+        # ``getattr`` for legacy docs that pre-date the field, which read back
+        # ``None`` = undeclared. NOT coerced to a bool: that would flatten
+        # undeclared into an explicit ``False`` here, before publish gets the
+        # chance to apply ``sites_keep_client_bundle_default``.
+        keeps_client_bundle=getattr(doc, "keeps_client_bundle", None),
         # Entity-rooms chunk ② — optional per-entity surface-profile override.
         # ``getattr`` for legacy docs that pre-date the field. Dumped to a plain
         # JSON dict so the domain layer carries the wire shape, not the Beanie
@@ -4487,7 +4490,7 @@ async def agent_create(
     ripple_spec: dict | None = None,
     engine: str = "ripple",
     source: dict[str, Any] | None = None,
-    keeps_client_bundle: bool = False,
+    keeps_client_bundle: bool | None = None,
     trusted: bool = False,
 ) -> tuple[dict | None, str | None, str | None]:
     """Insert a brand-new pocket owned by ``owner_id`` in ``workspace_id``.
@@ -4527,8 +4530,12 @@ async def agent_create(
     hydration bundle pruned after the build), so that code never runs in the
     browser. It sits beside ``engine`` because it describes the AUTHORED artifact
     rather than the deploy, and it rides ``siteConfig.keepsClientBundle`` to the
-    generator at publish. Defaults ``False`` — an ordinary static site is
-    unchanged.
+    generator at publish. TRI-STATE: it defaults to ``None`` — "the author
+    declared nothing" — and publish then resolves that from the
+    ``sites_keep_client_bundle_default`` setting (``True`` by default since
+    feat/sites-js-by-default). Pass an explicit ``True``/``False`` only to record
+    a real authorial decision; both override the setting, so ``False`` is how a
+    pure-static page opts out of shipping a bundle.
 
     ``trusted=True`` skips the STRICT catalog gate — use it ONLY for a
     code-assembled spec the caller fully controls (the deterministic Paw Site

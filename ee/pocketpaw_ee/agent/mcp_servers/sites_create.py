@@ -17,13 +17,15 @@
 #     collision; checking here turns a build-time throw far from the authoring
 #     turn into an actionable create error.
 #   * There is an ``interactive`` argument, the react spelling of MT-1's
-#     per-site ``keeps_client_bundle``. A react build strips the module script by
-#     default and ships pure prerendered HTML, so a component with client state is
-#     INERT unless the site declares the flag. The engine deliberately has no
-#     per-engine default (RX-1), which puts the decision here, in the authoring
-#     layer — and the failure is silent (the site builds, deploys, looks right,
-#     and the menu never opens), which is why the tool description states the rule
-#     rather than leaving it to the skill alone.
+#     per-site ``keeps_client_bundle``. Edited (feat/sites-js-by-default): it is
+#     now TRI-STATE. Omitting it persists ``None`` — no declaration — and publish
+#     resolves that from ``sites_keep_client_bundle_default`` (True by default),
+#     so an unflagged interactive component now HYDRATES instead of silently
+#     doing nothing. It is still forwarded explicitly when the agent passes it,
+#     because an explicit True/False beats the setting in both directions and
+#     ``False`` is the only way to ship a page with no bundle at all. Coercing
+#     the omitted case to ``False`` here (the pre-edit behaviour) would record a
+#     decision the agent never made and hold every react site out of the default.
 #
 # This is OPT-IN like html was: the description steers the agent here ONLY on an
 # explicit React request or a genuine interactivity need; the default create stays
@@ -1375,11 +1377,16 @@ async def _create_react_site_handler(args: dict) -> dict:
     inference over the source because "does this component need the browser?" is a
     question about authorial intent that reading JSX cannot answer reliably: a
     ``useState`` that never changes needs nothing, and a component that only
-    registers a ``matchMedia`` listener does. The authoring skill tells the agent
-    exactly when to set it. It defaults False, and the consequence of leaving it
-    off wrongly is silent — the site builds, deploys, and its menu never opens —
-    which is why the skill spends a section on it and the tool description repeats
-    the rule.
+    registers a ``matchMedia`` listener does.
+
+    It is TRI-STATE (feat/sites-js-by-default). OMITTING it records NO decision
+    and lets publish apply ``sites_keep_client_bundle_default`` — ``True`` by
+    default, so an omitted ``interactive`` now ships the bundle rather than
+    withholding it. That inverts the old failure mode: leaving it off used to
+    silently break an interactive page (built, deployed, menu never opens), and
+    now the silent cost is the opposite and much cheaper — a purely static page
+    ships a bundle it never needed. Pass ``interactive=False`` EXPLICITLY to opt
+    such a page out; an explicit value beats the default in both directions.
 
     react has NO live-data binding siblings (that is the svelte/ripple dynamic
     track), so the whole map is {path: str} and every value must be a content
@@ -1458,7 +1465,13 @@ async def _create_react_site_handler(args: dict) -> dict:
     # spelled ``interactive`` on the wire because that is the authoring question
     # the agent can actually answer. Persisted as the engine-agnostic
     # ``keeps_client_bundle`` (MT-1) so publish reads ONE field for every engine.
-    interactive = bool(args.get("interactive"))
+    # TRI-STATE (feat/sites-js-by-default): an OMITTED ``interactive`` persists as
+    # ``None`` — no declaration — which publish resolves from
+    # ``sites_keep_client_bundle_default``. Coercing the absent case to ``False``
+    # here would record a decision the agent never made and lock every react site
+    # that skips the argument out of the default.
+    _interactive_raw = args.get("interactive")
+    interactive = None if _interactive_raw is None else bool(_interactive_raw)
 
     # Persist DIRECTLY through the pockets service — NO pocket_specialist, NO
     # rippleSpec, NO catalog gate (there is no spec to gate). ``engine="react"``
@@ -1548,11 +1561,14 @@ def make_create_react_site_tool(tool: Any) -> Any:
             "authoring rule: the page is PRERENDERED, so every component must render "
             "its resting/final state in its RETURNED MARKUP — useEffect does not run "
             "at prerender time (a count-up initialized to 0 bakes '0'; initialize it "
-            "to the final value). SECOND CRITICAL RULE: the site ships ZERO "
-            "JavaScript unless you pass `interactive=true` — a menu toggle, tabs, a "
-            "counter, any onClick or useEffect is INERT without it. Pass it whenever "
-            "a component needs the browser; leave it off for a purely static page "
-            "(CSS-only hover/keyframe motion does not need it). Returns {ok, "
+            "to the final value). SECOND RULE: sites ship their client JavaScript by "
+            "DEFAULT, so React hydrates and a menu toggle, tabs or a counter work "
+            "without any extra argument. Still pass `interactive=true` explicitly "
+            "whenever a component needs the browser — it records the intent and "
+            "survives a deployment that turns the default off. Pass "
+            "`interactive=false` for a purely static page (CSS-only hover/keyframe "
+            "motion, anchors, a native form POST) to opt out of shipping a bundle it "
+            "never uses. Returns {ok, "
             "pocket_id, pocket}; hand `pocket_id` to "
             "`mcp__pocketpaw_sites_manager__publish` to publish ONLY when the user "
             "asks to go live (draft-first: a plain create stops at the draft for "
@@ -1583,11 +1599,15 @@ def make_create_react_site_tool(tool: Any) -> Any:
                         "changing useState/useReducer, any onClick/onChange/onSubmit "
                         "that does something, any useEffect, a canvas you draw into. "
                         "The page is prerendered either way; this decides whether "
-                        "React HYDRATES on top of the baked markup. Defaults FALSE, "
-                        "which strips the script and ships pure static HTML — so an "
-                        "interactive component left unflagged renders correctly and "
-                        "then does nothing. Leave it off for a purely static page "
-                        "(CSS-only motion, anchors, a native form POST)."
+                        "React HYDRATES on top of the baked markup. OMIT it and the "
+                        "deployment's default decides — which ships the bundle and "
+                        "hydrates, so an interactive component left unflagged still "
+                        "works. Pass TRUE anyway when the browser is genuinely "
+                        "needed: it records the intent instead of relying on a "
+                        "setting. Pass FALSE for a purely static page (CSS-only "
+                        "motion, anchors, a native form POST) — an explicit value "
+                        "wins over the default, so this is the way to ship no "
+                        "JavaScript at all."
                     ),
                 },
                 "name": {
