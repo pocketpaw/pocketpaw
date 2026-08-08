@@ -921,6 +921,19 @@ def mount_cloud(app: FastAPI) -> None:
     register_meeting_notification_listeners()
     register_meeting_calendar_listeners()
 
+    # Instinct-approval bridge (T-5) — instinct.approval.created → a PERSISTED
+    # in-app notification for the workspace owner + admins, so a decision that
+    # authorises a whole class of future writes reaches an owner who was
+    # offline when it was requested. Distinct from the push listener below,
+    # which notifies the REQUESTER over web-push/WS and persists nothing.
+    # Pinned by tests/cloud/test_instinct_approvals_governance.py — deleting
+    # this call fails that test rather than silently unwiring the bridge.
+    from pocketpaw_ee.cloud.instinct_approvals.bridges.notifications import (
+        register_instinct_approval_notification_listeners,
+    )
+
+    register_instinct_approval_notification_listeners()
+
     # Push notifications fan-out (#1393) — v1 product events
     # (agent.stream_end / instinct.approval.created / meeting.started) →
     # ``dispatch.notify``, which forks WS-vs-Web-Push so a user with both the
