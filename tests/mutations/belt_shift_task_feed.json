@@ -1,0 +1,47 @@
+[
+  {
+    "label": "T-14: drop the feed mirror from the dispatch loop",
+    "file": "ee/pocketpaw_ee/cloud/mandates/executor.py",
+    "find": "            task_id = await _mirror_task_to_feed(",
+    "replace": "            task_id = None and await _mirror_task_to_feed(",
+    "tests": [
+      "tests/cloud/test_belt_shift_task_feed.py"
+    ]
+  },
+  {
+    "label": "T-14: stop recording the task ids on the shift",
+    "file": "ee/pocketpaw_ee/cloud/mandates/executor.py",
+    "find": "            await _record_shift_task_ids(\n                workspace_id=workspace_id, shift_id=shift_id, task_ids=feed_task_ids",
+    "replace": "            await _record_shift_task_ids(\n                workspace_id=workspace_id, shift_id=shift_id, task_ids=[]",
+    "tests": [
+      "tests/cloud/test_belt_shift_task_feed.py"
+    ]
+  },
+  {
+    "label": "T-14: let a mirror failure escape and kill the shift",
+    "file": "ee/pocketpaw_ee/cloud/mandates/executor.py",
+    "find": "    except Exception:  # noqa: BLE001 \u2014 a feed mirror must never fail a shift",
+    "replace": "    except KeyError:  # MUTATION: narrowed \u2014 a RuntimeError now escapes",
+    "tests": [
+      "tests/cloud/test_belt_shift_task_feed.py"
+    ]
+  },
+  {
+    "label": "T-14: file the mirror against the wrong source ref (run, not shift)",
+    "file": "ee/pocketpaw_ee/cloud/mandates/executor.py",
+    "find": "                    ref_id=shift_id,",
+    "replace": "                    ref_id=run_ref,",
+    "tests": [
+      "tests/cloud/test_belt_shift_task_feed.py"
+    ]
+  },
+  {
+    "label": "T-14: drop the workspace from the mirror's request envelope",
+    "file": "ee/pocketpaw_ee/cloud/mandates/executor.py",
+    "find": "            workspace_id=workspace_id,\n            request_id=f\"belt-shift-{shift_id}\",",
+    "replace": "            workspace_id=None,\n            request_id=f\"belt-shift-{shift_id}\",",
+    "tests": [
+      "tests/cloud/test_belt_shift_task_feed.py"
+    ]
+  }
+]

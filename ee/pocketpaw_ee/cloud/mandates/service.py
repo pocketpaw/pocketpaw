@@ -1571,6 +1571,33 @@ async def executor_revalidate(workspace_id: str, mandate_id: str) -> dict[str, A
     }
 
 
+async def record_shift_task_ids(
+    *, workspace_id: str, shift_id: str, task_ids: list[str]
+) -> None:
+    """Stamp the workspace Task ids mirroring this shift's work (T-14).
+
+    Tenant-scoped like ``mark_shift``, and deliberately the same
+    logged-no-op-on-missing shape: the Instinct outcome remains the source of
+    truth for what a shift dispatched, so a shift row that vanished mid-flight
+    must not raise into the executor. Appends rather than replaces, so a
+    partially-mirrored shift keeps the ids it already recorded.
+    """
+    if not task_ids:
+        return
+    try:
+        doc = await ShiftDoc.find_one(
+            ShiftDoc.workspace == workspace_id, ShiftDoc.id == _as_object_id(shift_id)
+        )
+    except Exception:  # noqa: BLE001
+        doc = None
+    if doc is None:
+        logger.warning("mandate: shift %s not found for task-id write", shift_id)
+        return
+    existing = list(doc.task_ids or [])
+    doc.task_ids = existing + [t for t in task_ids if t not in existing]
+    await doc.save()
+
+
 async def mark_shift(
     *,
     workspace_id: str,
