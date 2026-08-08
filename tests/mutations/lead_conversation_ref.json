@@ -4,34 +4,53 @@
     "file": "ee/pocketpaw_ee/cloud/leads/service.py",
     "find": "            conversation_ref=_clean_conversation_ref(conversation_ref),",
     "replace": "            conversation_ref=\"\",",
-    "tests": ["tests/cloud/leads/test_conversation_ref.py"]
+    "tests": [
+      "tests/cloud/leads/test_conversation_ref.py"
+    ]
   },
   {
     "label": "T-11: the ref is stored unscreened (malformed values reach the doc)",
     "file": "ee/pocketpaw_ee/cloud/leads/service.py",
     "find": "    candidate = (raw or \"\").strip()\n    return candidate if _CONVERSATION_REF_RE.match(candidate) else \"\"",
     "replace": "    return (raw or \"\").strip()",
-    "tests": ["tests/cloud/leads/test_conversation_ref.py"]
+    "tests": [
+      "tests/cloud/leads/test_conversation_ref.py"
+    ]
   },
   {
     "label": "T-11: a malformed ref DROPS the lead instead of just the link",
     "file": "ee/pocketpaw_ee/cloud/leads/service.py",
     "find": "    candidate = (raw or \"\").strip()\n    return candidate if _CONVERSATION_REF_RE.match(candidate) else \"\"",
     "replace": "    candidate = (raw or \"\").strip()\n    if candidate and not _CONVERSATION_REF_RE.match(candidate):\n        raise ValueError(\"bad conversation ref\")\n    return candidate",
-    "tests": ["tests/cloud/leads/test_conversation_ref.py"]
+    "tests": [
+      "tests/cloud/leads/test_conversation_ref.py"
+    ]
   },
   {
     "label": "T-11: the ref shape drifts from paw-bar (transcript links 404)",
     "file": "ee/pocketpaw_ee/cloud/leads/service.py",
     "find": "_CONVERSATION_REF_RE = re.compile(r\"^[A-Za-z0-9_-]{8,128}$\")",
     "replace": "_CONVERSATION_REF_RE = re.compile(r\"^[A-Za-z0-9_.-]{4,256}$\")",
-    "tests": ["tests/cloud/leads/test_conversation_ref.py"]
+    "tests": [
+      "tests/cloud/leads/test_conversation_ref.py"
+    ]
   },
   {
     "label": "T-11 PRIVACY: the join falls back to submitter_ref (one visitor's transcript behind another's lead)",
     "file": "ee/pocketpaw_ee/cloud/leads/service.py",
     "find": "            conversation_ref=_clean_conversation_ref(conversation_ref),",
     "replace": "            conversation_ref=_clean_conversation_ref(conversation_ref or submitter_ref),",
-    "tests": ["tests/cloud/leads/test_conversation_ref.py"]
+    "tests": [
+      "tests/cloud/leads/test_conversation_ref.py"
+    ]
+  },
+  {
+    "label": "T-11: the ref is dropped by the DTO mapper (invisible to the FE)",
+    "file": "ee/pocketpaw_ee/cloud/leads/dto.py",
+    "find": "        conversation_ref=lead.conversation_ref,",
+    "replace": "",
+    "tests": [
+      "tests/cloud/leads/test_conversation_ref.py"
+    ]
   }
 ]

@@ -38,6 +38,11 @@ class LeadOut(BaseModel):
     form_type: str
     properties: dict[str, Any]
     created_at: str | None
+    # T-11: the concierge conversation behind this lead, "" when there was
+    # none. The FE renders a transcript link only when it is non-empty; the
+    # transcript itself is read from the authed owner-only endpoint, never
+    # from anything a visitor supplied.
+    conversation_ref: str = ""
 
 
 def lead_to_dto(lead: Lead) -> LeadOut:
@@ -47,6 +52,7 @@ def lead_to_dto(lead: Lead) -> LeadOut:
         form_type=lead.form_type,
         properties=lead.properties,
         created_at=iso_utc(lead.created_at),
+        conversation_ref=lead.conversation_ref,
     )
 
 

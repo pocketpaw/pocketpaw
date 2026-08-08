@@ -213,3 +213,20 @@ async def test_a_lead_with_no_conversation_never_borrows_submitter_ref(mongo_db)
     assert d1.source.submitter_ref == d2.source.submitter_ref == shared
     assert d1.source.conversation_ref == "", "a lead borrowed submitter_ref as its conversation"
     assert d2.source.conversation_ref == ""
+
+
+async def test_the_conversation_ref_survives_onto_the_wire(mongo_db):
+    """The field-by-field DTO mapper drops anything it does not name, so a ref
+    that reaches Mongo can still be invisible to the FE. Pinned end to end.
+
+    MUTATION THAT BREAKS THIS: remove ``conversation_ref`` from
+    ``lead_to_dto`` — the wire row comes back empty while the doc is correct,
+    which is exactly the failure that looks like a frontend bug."""
+    from pocketpaw_ee.cloud.leads.dto import lead_to_dto
+
+    site = await _site()
+    await _capture(site, conversation_ref=REF)
+
+    leads = await leads_service.list_for_site(WS, site.script_name, limit=10)
+    assert leads, "the lead did not come back from the list read"
+    assert lead_to_dto(leads[0]).conversation_ref == REF
