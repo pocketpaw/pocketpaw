@@ -35,12 +35,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
+import os
 import shlex
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from pocketpaw_ee.sites.engines import normalize_engine, static_output_rel
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # The sentinel
@@ -98,6 +102,55 @@ TIMEOUT_FLOOR_SECONDS = 600
 #: Multiplier over measured p95. A cold sandbox has no page cache and may hit a
 #: busier registry than the machine the measurement was taken on.
 TIMEOUT_SAFETY_FACTOR = 1.5
+
+
+#: Shared env knob for the build timeout. Deliberately the SAME name SG-P2 is about
+#: (``PAW_SITES_BUILD_TIMEOUT_SEC``, read by ``generator_client._build_timeout_sec``):
+#: one constant serves the local builder and this lane, so an operator tuning a slow
+#: deploy does not have to discover two names. Set nowhere in deploy config today.
+_TIMEOUT_ENV = "PAW_SITES_BUILD_TIMEOUT_SEC"
+
+#: Per-engine override, checked before the shared knob:
+#: ``PAW_SITES_BUILD_TIMEOUT_SEC_REACT`` / ``..._SVELTE``. Engines differ by more than
+#: a constant factor — react installs 4 direct deps, svelte pulls the whole
+#: SvelteKit + adapter-cloudflare toolchain — so a single number is either wasteful for
+#: one or fatal for the other.
+_TIMEOUT_ENV_PER_ENGINE = "PAW_SITES_BUILD_TIMEOUT_SEC_{engine}"
+
+
+def resolve_build_timeout_seconds(engine: str | None) -> int:
+    """The timeout to use for ``engine`` right now, with no measured inputs.
+
+    Resolution order: per-engine env → shared env → :data:`TIMEOUT_FLOOR_SECONDS`.
+
+    Both engines currently land on the 600s floor, because measurement was descoped and
+    :func:`build_timeout_seconds` has nothing to compute from. That is deliberately
+    LOOSE rather than tight — a timeout is a wedge detector, and the cost of one that is
+    too generous is a slow failure, while the cost of one that is too tight is a healthy
+    build reported to the user as broken. When real p95s exist, feed them to
+    :func:`build_timeout_seconds` and set these env vars from its output; the shape is
+    already here so nothing needs restructuring.
+
+    A malformed value falls back rather than raising: the timeout is a safety net and
+    must never itself be the thing that breaks a build.
+    """
+    names = [
+        _TIMEOUT_ENV_PER_ENGINE.format(engine=normalize_engine(engine).upper()),
+        _TIMEOUT_ENV,
+    ]
+    for name in names:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning("sites: ignoring non-int %s=%r", name, raw)
+            continue
+        if value > 0:
+            return value
+        logger.warning("sites: ignoring non-positive %s=%r", name, raw)
+    return TIMEOUT_FLOOR_SECONDS
 
 
 def build_timeout_seconds(
@@ -520,4 +573,5 @@ __all__ = [
     "build_timeout_seconds",
     "build_wrapper_script",
     "classify_build",
+    "resolve_build_timeout_seconds",
 ]

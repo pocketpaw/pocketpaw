@@ -334,3 +334,52 @@ class TestWrapperScript:
         )
         assert "bun install --frozen-lockfile" in script
         assert "bun run build:prod" in script
+
+
+class TestResolveBuildTimeout:
+    """The shipped default, with measurement descoped. Both engines land on the floor,
+    and the floor is deliberately loose: a too-generous timeout costs a slow failure,
+    a too-tight one reports a healthy build as broken."""
+
+    def _clear(self, mp: pytest.MonkeyPatch) -> None:
+        for name in (
+            "PAW_SITES_BUILD_TIMEOUT_SEC",
+            "PAW_SITES_BUILD_TIMEOUT_SEC_REACT",
+            "PAW_SITES_BUILD_TIMEOUT_SEC_SVELTE",
+        ):
+            mp.delenv(name, raising=False)
+
+    def test_defaults_to_the_floor_for_both_engines(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear(monkeypatch)
+        assert db.resolve_build_timeout_seconds("react") == db.TIMEOUT_FLOOR_SECONDS
+        assert db.resolve_build_timeout_seconds("svelte") == db.TIMEOUT_FLOOR_SECONDS
+
+    def test_shared_env_knob_is_the_same_name_sg_p2_uses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One constant serves the local builder and this lane, so an operator tuning a
+        slow deploy does not have to find two names."""
+        self._clear(monkeypatch)
+        monkeypatch.setenv("PAW_SITES_BUILD_TIMEOUT_SEC", "1200")
+        assert db.resolve_build_timeout_seconds("react") == 1200
+
+    def test_per_engine_override_beats_the_shared_knob(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Engines differ by more than a constant factor — react installs 4 direct deps,
+        svelte pulls the whole SvelteKit toolchain — so one number is either wasteful for
+        one or fatal for the other."""
+        self._clear(monkeypatch)
+        monkeypatch.setenv("PAW_SITES_BUILD_TIMEOUT_SEC", "1200")
+        monkeypatch.setenv("PAW_SITES_BUILD_TIMEOUT_SEC_SVELTE", "2400")
+        assert db.resolve_build_timeout_seconds("svelte") == 2400
+        assert db.resolve_build_timeout_seconds("react") == 1200
+
+    @pytest.mark.parametrize("bad", ["", "abc", "0", "-5", "  "])
+    def test_malformed_values_fall_back_rather_than_raise(
+        self, monkeypatch: pytest.MonkeyPatch, bad: str
+    ) -> None:
+        """The timeout is a safety net and must never itself break a build."""
+        self._clear(monkeypatch)
+        monkeypatch.setenv("PAW_SITES_BUILD_TIMEOUT_SEC", bad)
+        assert db.resolve_build_timeout_seconds("react") == db.TIMEOUT_FLOOR_SECONDS
