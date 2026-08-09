@@ -28,30 +28,50 @@
 # │ INVARIANT — THIS LANE NEVER SNAPSHOTS THE SANDBOX.                                │
 # └───────────────────────────────────────────────────────────────────────────────────┘
 #
-# HISTORY, because the reason CHANGED and the rule did not. This invariant was
-# originally load-bearing for a specific secret: a svelte project carried
-# ``__CAPTURE_SIGNED_KEY__`` substituted into ``src/routes/api/submit/+server.ts``
-# (verified 2026-08-09 — it was the only file in a generated svelte project containing
-# it), so a per-site secret was uploaded INTO the sandbox on that track. React never had
-# it, having no server route at all. The decision that the exposure was acceptable
-# rested entirely on the key living only in a container that is then destroyed.
+# THE PRIMARY REASON IS LIVE. A svelte project carries ``__CAPTURE_SIGNED_KEY__``
+# substituted into ``src/routes/api/submit/+server.ts`` — a real per-site secret, minted at
+# ``sites/service.py:1068`` and substituted by ``paw-sites/src/scaffold.ts:71`` (and again
+# for the dynamic track at ``dynamic-scaffold.ts:232``). React has no server route and so
+# no key. The decision that this exposure is acceptable rests ENTIRELY on the key living
+# only in a container that is then destroyed. A snapshot would make it durable.
 #
-# Lead capture was then dropped (2026-08-09, captain: do not serve ``/api/submit``), so
-# no route and no key enters any sandbox on either engine, and that specific
-# justification is gone.
+# ── CORRECTION, 2026-08-09. This header previously said the opposite. ────────────────
 #
-# THE RULE STAYS ANYWAY, on two grounds that do not depend on it:
+# It read: *"Lead capture was then dropped (captain: do not serve ``/api/submit``), so no
+# route and no key enters any sandbox on either engine, and that specific justification is
+# gone."* Quoted rather than deleted, because a reader one ``git blame`` away should be able
+# to see the correction happened rather than assume the header was always right.
+#
+# THAT WAS FALSE, and the distinction is the whole lesson. The captain's ruling was about
+# SERVING ``/api/submit``, not about GENERATING it, and it was never implemented in the
+# generator: the route template still exists and the key is still substituted into every
+# svelte build. What WAS true is narrower — no key enters a DAYTONA sandbox today, but only
+# because NOTHING does, since this lane has no callers yet. That narrow truth was
+# generalised into a claim about "either engine", which is false about the path that
+# actually runs.
+#
+# THE GAP WORTH REMEMBERING: the distance between "the captain decided X" and "X is true of
+# the artifact" was ONE GREP, and nobody ran it for several turns — including the author of
+# this header, while writing this header. A decision reported as made arrives formatted as a
+# fact about the code. It is not one until you have looked.
+#
+# TWO FURTHER GROUNDS, now ADDITIONAL rather than replacements:
 #   1. Build inputs are customer content. A snapshot moves them from an ephemeral
 #      container into durable blob storage, which is a different data-residency
 #      question than the one this lane was cleared for (SG-0 conditions 4 and 6).
 #   2. Lead capture is "we will see what we can do about leads" — not deleted forever.
-#      If a server route returns, the secret returns with it, and an invariant quietly
-#      dropped in the meantime would not come back on its own.
+#      Even once the generator does stop emitting the route, a returning server route
+#      brings the secret back with it.
+#
+# WIRING CONTRACT THIS IMPLIES: the moment this lane gets callers, the key enters the
+# sandbox unless the wiring strips it — substitute the tokens after the artifact returns,
+# or inject them at deploy via wrangler ``[vars]``. Today's protection is the accident that
+# nothing calls ``run_build``.
 #
 # CACHING ``node_modules`` IN A SNAPSHOT IS THE OBVIOUS OPTIMISATION HERE, and it is the
-# thing that would undo this. If you are reading this because you were about to do it:
-# re-make the decision on the two grounds above rather than noting that the signed key
-# is gone.
+# thing that would undo this. If you are reading this because you were about to do it: the
+# primary reason above is live, so re-make the security decision first — do not reason from
+# the retracted claim that the signed key is gone.
 from __future__ import annotations
 
 import logging
