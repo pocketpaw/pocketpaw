@@ -205,7 +205,12 @@ class BuildClassification:
     outcome: BuildOutcome
     #: Short machine-readable reason, for logs and metrics. Never user-facing prose.
     reason: str
-    #: May the lane retry (and then fall back to the local builder)?
+    #: May the lane attempt this build again? Corrected 2026-08-10 (SG-7): this used to
+    #: read "and then fall back to the local builder", which describes a fallback the
+    #: captain overrode — the ruling is Daytona-ONLY, so a lane that runs out of retries
+    #: fails loudly rather than building somewhere else. Nothing retries yet either; no
+    #: caller consumes this flag, so it is a contract for the wiring phase, not a
+    #: description of current behaviour.
     retryable: bool
     #: Is this the user's build being wrong? Only ever True for ``build_failed``.
     blames_user: bool
@@ -215,7 +220,17 @@ class BuildClassification:
 
     @property
     def deployable(self) -> bool:
-        """True only when there is a verified artifact to deploy."""
+        """True when the CLASSIFICATION cleared the build — not when its bytes were checked.
+
+        Corrected 2026-08-10 (SG-7): this used to claim "there is a verified artifact to
+        deploy", which overpromised in a way that matters. It is derived from the sentinel
+        alone, so it stays True when the download afterwards returns zero bytes or a
+        truncated payload — nothing here has seen the artifact.
+
+        A caller must therefore gate a deploy on ``BuildRunResult.ok`` (which also requires
+        bytes to have arrived), never on this flag by itself. Whoever wires this lane owns
+        the download verification; see the SG-7 wiring contracts.
+        """
         return self.outcome == "completed_ok"
 
 
@@ -394,6 +409,21 @@ def classify_build(
 # ---------------------------------------------------------------------------
 
 
+#: Excluded from the artifact even though the include-list already scopes the tar to the
+#: output dir. NOT redundant — SG-7 measured the gap: ``-C <project>/dist .`` cannot reach a
+#: ``node_modules`` that sits BESIDE the output dir (the shape ``bun install`` produces), but
+#: it packs one NESTED INSIDE it without complaint. Neither engine emits that shape today,
+#: so this closes a latent 500 MB-artifact path rather than a live bug.
+#:
+#: Written as the member name the tar actually produces. Under ``-C <dir> .`` members are
+#: recorded as ``./x``, so the pattern has to match that form. Verified against bsdtar 3.8.4,
+#: where it prunes the directory and everything under it and leaves an innocently-named
+#: ``node_modules_report.html`` alone. The Daytona image is ``debian_slim``, i.e. GNU tar —
+#: whose exclude-anchoring differs in the deeper-nesting case, so the real-sandbox round-trip
+#: is what confirms behaviour beyond the top level.
+_EXCLUDED_MEMBER = "./node_modules"
+
+
 def artifact_tar_command(
     engine: str | None,
     project_dir: str,
@@ -408,9 +438,11 @@ def artifact_tar_command(
 
     Two properties follow, and both are the reason for the choice:
 
-    * ``node_modules`` is excluded **by construction** for every engine whose output
-      is a subdirectory (``dist``, ``.svelte-kit/cloudflare``). There is no filter to
-      get wrong, so the 500 MB-on-the-wire failure cannot occur.
+    * ``node_modules`` is excluded for every engine whose output is a subdirectory
+      (``dist``, ``.svelte-kit/cloudflare``) — by the ``-C`` scope for a SIBLING copy, and
+      by :data:`_EXCLUDED_MEMBER` for one nested inside the output dir. The second half is
+      not redundant: SG-7 measured that ``-C dist .`` packs ``dist/node_modules/``, so the
+      scope alone did not make the 500 MB-on-the-wire failure impossible.
     * The failure mode inverts usefully. A wrong exclude-list ships junk SILENTLY; a
       wrong include-list ships NOTHING, LOUDLY — caught by ``artifact_bytes <= 0`` in
       :func:`classify_build` before anything is deployed.
@@ -428,7 +460,10 @@ def artifact_tar_command(
             "lane is for engines whose build writes a subdirectory"
         )
     output_dir = f"{project_dir.rstrip('/')}/{rel}"
-    return f"tar -czf {shlex.quote(dest_path)} -C {shlex.quote(output_dir)} ."
+    return (
+        f"tar -czf {shlex.quote(dest_path)} -C {shlex.quote(output_dir)} "
+        f"--exclude={shlex.quote(_EXCLUDED_MEMBER)} ."
+    )
 
 
 # ---------------------------------------------------------------------------

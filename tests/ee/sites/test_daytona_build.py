@@ -253,7 +253,16 @@ class TestArtifactIncludeList:
     def test_react_tars_only_dist(self) -> None:
         cmd = db.artifact_tar_command("react", "/home/daytona/proj", "/tmp/a.tgz")
         assert "/home/daytona/proj/dist" in cmd
-        assert "node_modules" not in cmd  # excluded by construction, not by a filter
+        # Updated 2026-08-10 (SG-7): this used to assert ``"node_modules" not in cmd``,
+        # commented "excluded by construction, not by a filter". SG-7 measured that the
+        # ``-C`` scope excludes a SIBLING node_modules but packs one NESTED inside the
+        # output dir, so the command now carries an explicit ``--exclude`` and the old
+        # string check fails on the very mention of the word. What the assertion was
+        # protecting — that node_modules is not part of what gets packed — is checked
+        # properly in test_fault_ladder_build.py by running the real tar over a real tree.
+        assert "--exclude=./node_modules" in cmd
+        # node_modules must appear ONLY as the exclusion, never as a packed path.
+        assert cmd.count("node_modules") == 1
 
     def test_svelte_tars_only_the_adapter_output(self) -> None:
         cmd = db.artifact_tar_command("svelte", "/home/daytona/proj", "/tmp/a.tgz")
