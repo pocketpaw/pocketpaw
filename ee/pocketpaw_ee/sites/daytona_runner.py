@@ -68,6 +68,12 @@
 # or inject them at deploy via wrangler ``[vars]``. Today's protection is the accident that
 # nothing calls ``run_build``.
 #
+# Recorded as an OBLIGATION, not a note, in the proving-phase findings record — see §9a of
+# ``docs/design/drafts/2026-08-09-sites-proving-SG12-findings.md`` in paw-workspace, which
+# also carries the three options and why patching the built output is the worst of them.
+# Cross-referenced deliberately: whoever finds this header while about to add a caller
+# should land on the obligation, not just on the history of a corrected claim.
+#
 # CACHING ``node_modules`` IN A SNAPSHOT IS THE OBVIOUS OPTIMISATION HERE, and it is the
 # thing that would undo this. If you are reading this because you were about to do it: the
 # primary reason above is live, so re-make the security decision first — do not reason from
