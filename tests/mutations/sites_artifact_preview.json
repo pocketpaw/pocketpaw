@@ -1,0 +1,188 @@
+[
+  {
+    "label": "svelte's server bundle is written into the preview tree, so the file that has carried a per-site signed key sits inside a directory we serve",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "            if any(seg in _SERVER_ENTRY_NAMES for seg in segments):\n                server.append(\"/\".join(segments))",
+    "replace": "            if False:\n                server.append(\"/\".join(segments))",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "a request for _worker.js is answered from disk, handing the server bundle's source to anyone who can open the preview",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    if any(seg in _SERVER_ENTRY_NAMES for seg in segments):\n        # 404, not 403",
+    "replace": "    if False:\n        # 404, not 403",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py",
+      "tests/ee/sites/test_artifact_preview_server.py"
+    ]
+  },
+  {
+    "label": "a form POST to /api/submit falls through to the static tree, so a visitor's message is silently dropped by a response that looks like success",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    if segments and segments[0] == \"api\":",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py",
+      "tests/ee/sites/test_artifact_preview_server.py"
+    ]
+  },
+  {
+    "label": "a form with no action posts to the page itself and gets the page back with a 200, which reads as a submission that worked",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    if method.upper() not in (\"GET\", \"HEAD\"):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py",
+      "tests/ee/sites/test_artifact_preview_server.py"
+    ]
+  },
+  {
+    "label": "an absolute path inside a build artifact is extracted, so a hostile or broken build writes files outside the preview root",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    if not name or name.startswith(\"/\") or name.startswith(\"\\\\\"):",
+    "replace": "    if not name:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "a '..' member in a build artifact is extracted, so the artifact overwrites files above the preview root",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    for raw in name.split(\"/\"):\n        if raw in (\"\", \".\"):\n            continue\n        if raw == \"..\":",
+    "replace": "    for raw in name.split(\"/\"):\n        if raw in (\"\", \".\"):\n            continue\n        if False:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "link members are extracted instead of refused, so a tarball reaches a file the extraction directory never contained",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "            if not (member.isfile() or member.isdir()):",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "a crafted preview URL reads outside the preview root, so one tenant's URL fetches another site's files",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    for raw in decoded.split(\"/\"):\n        if raw in (\"\", \".\"):\n            continue\n        if raw == \"..\" or (len(raw) > 1 and raw[1] == \":\"):",
+    "replace": "    for raw in decoded.split(\"/\"):\n        if raw in (\"\", \".\"):\n            continue\n        if False:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "any site id is accepted as a path segment, so a preview URL walks out of the previews directory",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "_SAFE_SITE_ID = re.compile(r\"^[A-Za-z0-9_-]{1,64}$\")",
+    "replace": "_SAFE_SITE_ID = re.compile(r\"^.*$\")",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "the site's JavaScript is typed from the Windows registry, which serves it as text/plain, so the browser refuses to run it and the previewed page never hydrates",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    explicit = _CONTENT_TYPES.get(suffix)",
+    "replace": "    explicit = None",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "the preview is cacheable, so after a rebuild the customer keeps being shown the previous build and reports the edit as lost",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    (\"Cache-Control\", \"no-store\"),",
+    "replace": "    (\"Cache-Control\", \"public, max-age=3600\"),",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py",
+      "tests/ee/sites/test_artifact_preview_server.py"
+    ]
+  },
+  {
+    "label": "the entry ceiling is gone, so an artifact with a million files fills the disk the tenant box runs on",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "            if entries > MAX_ENTRIES:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "the size ceiling is gone, so a compression bomb in a build artifact fills the disk",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "            if written > MAX_TOTAL_BYTES:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "an engine that runs no build is previewed anyway, hiding a routing bug behind a preview built from the wrong tree",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    if static_output_rel(engine) == \".\":",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "a refused artifact is unpacked over the live preview, so a rejected build replaces a good preview with a half-written tree",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    incoming = root.parent / f\".{site_id}.incoming-{os.getpid()}-{uuid.uuid4().hex[:8]}\"",
+    "replace": "    incoming = root",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "a preview that cannot be stored raises into the caller, so a publish that already succeeded is reported to the customer as failed",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    except Exception:  # noqa: BLE001 — a preview must never cost anybody a publish",
+    "replace": "    except SystemExit:  # mutated: the swallow is gone",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py",
+      "tests/ee/sites/test_artifact_preview_server.py"
+    ]
+  },
+  {
+    "label": "deploy metadata is served as site content, so _routes.json and .assetsignore are readable at a public preview URL",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    if any(seg in _DEPLOY_METADATA_NAMES or seg.startswith(\".\") for seg in segments):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "the slashless preview URL serves the page instead of redirecting, so it opens with no CSS and no JS and the customer reads a working build as broken",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "        if not subpath.endswith(\"/\"):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py",
+      "tests/ee/sites/test_artifact_preview_server.py"
+    ]
+  },
+  {
+    "label": "preview trees land inside the deploy root, so the plain static branch serves them without any of the refusals, _worker.js included",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    raw = os.environ.get(\"PAW_SITES_PREVIEW_DIR\")",
+    "replace": "    raw = os.environ.get(\"PAW_SITES_LOCAL_DIR\")",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview_server.py"
+    ]
+  },
+  {
+    "label": "an error while answering a preview escapes onto the server thread, so one bad preview interrupts the live local deploys the same server is serving",
+    "file": "ee/pocketpaw_ee/sites/local_server.py",
+    "find": "        except Exception:  # noqa: BLE001 — contain it to this one request",
+    "replace": "        except SystemExit:  # mutated: containment removed",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview_server.py"
+    ]
+  }
+]

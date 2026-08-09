@@ -5,6 +5,29 @@
 # that tree over HTTP so the published site has a real openable localhost URL
 # (what the cmux smoke + Phase 5 open).
 #
+# Updated 2026-08-10 (SG-10 — serve the built ARTIFACT as a preview): the one
+# handler now has a second branch. `/<site_id>/...` is unchanged — plain static
+# serving of a local DEPLOY. `/_preview/<site_id>/...` routes through
+# `artifact_preview.resolve`, which answers from a tree unpacked out of the
+# ephemeral build lane's artifact tarball.
+#
+# ONE SERVER, TWO BRANCHES, on purpose. The established in-app preview pattern in
+# this codebase is already "a localhost HTTP server, iframed by the builder"
+# (`dev_server.py` does exactly that with Vite), so the artifact preview rides the
+# server that exists rather than standing up a second one. It needs no Node, no dev
+# server and no COOP/COEP: the artifact is already built.
+#
+# THE TWO ROOTS ARE DISJOINT, and that is load-bearing. Deploys live under
+# `sites_home()`, which this server hands out as plain static files; previews live
+# under `artifact_preview.previews_home()`, which it never serves directly. If a
+# preview tree sat inside `sites_home()`, the static branch would serve it without
+# passing `resolve`'s guards and the `_worker.js` refusal would have a bypass.
+#
+# A FAILING PREVIEW CANNOT TAKE A DEPLOY WITH IT. The preview branch catches
+# everything and answers 500 for that ONE request; the static branch and the server
+# thread are untouched, and `serve_artifact_preview` swallows a store failure and
+# returns None so a publish tail can call it safely.
+#
 # Updated 2026-06-19 (fix/sites-preview-fresh-build, P1a — fail soft on a missing
 # build dir): ``deploy_local`` no longer lets a missing ``.svelte-kit/cloudflare/``
 # escape as a bare FileNotFoundError → 500. If the build dir is absent but a PRIOR
@@ -41,7 +64,9 @@ import threading
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
+from pocketpaw_ee.sites import artifact_preview
 from pocketpaw_ee.sites.engines import static_output_rel
 
 logger = logging.getLogger(__name__)
@@ -93,10 +118,111 @@ _lock = threading.Lock()
 
 
 class _QuietHandler(SimpleHTTPRequestHandler):
-    """SimpleHTTPRequestHandler that doesn't spam stderr with a line per GET."""
+    """SimpleHTTPRequestHandler that doesn't spam stderr with a line per GET, plus the
+    `/_preview/<site_id>/...` branch that serves an unpacked build artifact.
+
+    The preview branch answers the request itself rather than going through
+    ``translate_path``, so it never resolves inside ``sites_home()`` — the preview
+    tree lives outside the served root by design (see the module header)."""
 
     def log_message(self, *args: object) -> None:  # noqa: D401 - silence access log
         pass
+
+    # --- the preview branch ------------------------------------------------
+
+    def _preview_target(self) -> tuple[str, str] | None:
+        """``(site_id, subpath)`` when this request is for a preview, else ``None``.
+
+        ``subpath`` keeps its leading slash — and keeps the difference between ``""``
+        (``/_preview/<id>``) and ``"/"`` (``/_preview/<id>/``), which is what lets
+        ``resolve`` redirect the first to the second. Without that redirect the page
+        loads and its relative asset URLs resolve one level too high, so it renders
+        with no CSS and no JS.
+        """
+        raw = urlsplit(self.path).path
+        prefix = f"/{artifact_preview.PREVIEW_URL_PREFIX}"
+        if raw != prefix and not raw.startswith(prefix + "/"):
+            return None
+        rest = raw[len(prefix) :].lstrip("/")
+        site_id, separator, tail = rest.partition("/")
+        # The separator, not the tail, is what distinguishes `/_preview/<id>` from
+        # `/_preview/<id>/` — both leave `tail` empty.
+        return site_id, (f"/{tail}" if separator else "")
+
+    def _serve_preview(self, site_id: str, subpath: str) -> None:
+        """Write one resolved preview response.
+
+        Catches EVERYTHING. A preview is a best-effort read of a tree built from
+        customer content; an exception escaping here would surface as a broken
+        connection on this request and, worse, put a traceback between the server
+        thread and every OTHER site it is serving — including live local deploys.
+        """
+        try:
+            result = artifact_preview.resolve(site_id, subpath, method=self.command)
+        except Exception:  # noqa: BLE001 — contain it to this one request
+            logger.warning(
+                "sites.artifact_preview: resolve failed for site %s (%s)",
+                site_id,
+                subpath,
+                exc_info=True,
+            )
+            self.send_error(500, "preview could not be served")
+            return
+
+        self.send_response(result.status)
+        if result.location is not None:
+            mount = f"/{artifact_preview.PREVIEW_URL_PREFIX}/{site_id}"
+            self.send_header("Location", f"{mount}{result.location}")
+        for name, value in result.headers:
+            self.send_header(name, value)
+        if result.body:
+            self.send_header("Content-Type", result.content_type)
+            self.send_header("Content-Length", str(len(result.body)))
+        else:
+            self.send_header("Content-Length", "0")
+        self.end_headers()
+        if result.body and self.command != "HEAD":
+            self.wfile.write(result.body)
+
+    def do_GET(self) -> None:
+        target = self._preview_target()
+        if target is None:
+            super().do_GET()
+            return
+        self._serve_preview(*target)
+
+    def do_HEAD(self) -> None:
+        target = self._preview_target()
+        if target is None:
+            super().do_HEAD()
+            return
+        self._serve_preview(*target)
+
+    def do_POST(self) -> None:
+        """A POST is only ever answered for a preview path, and only ever refused.
+
+        A site's form posts to ``/api/submit``, which this deployment does not serve
+        (lead capture is deferred). Letting the request fall through to static serving
+        would return the page itself with a 200 — indistinguishable from a successful
+        submission, and the message would be silently lost. ``resolve`` answers 501
+        with a page that says so. Any other path keeps the stock 501, which is what
+        this server already did for every POST."""
+        # Drain the body before answering. The server speaks HTTP/1.0 and closes after
+        # each response, so an unread body would be discarded anyway — but on Windows
+        # closing a socket with unread data can reach the client as a reset instead of
+        # the 501 page it needs to see.
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length > 0:
+            self.rfile.read(min(length, 1024 * 1024))
+
+        target = self._preview_target()
+        if target is None:
+            self.send_error(501, f"Unsupported method ({self.command})")
+            return
+        self._serve_preview(*target)
 
 
 def ensure_server() -> str:
@@ -157,11 +283,52 @@ def deploy_local(site_id: str, project_dir: str, *, engine: str = "ripple") -> s
     return local_url_for(site_id)
 
 
+# --- the artifact preview -------------------------------------------------
+
+
+def preview_url_for(site_id: str) -> str:
+    """The localhost URL a site's unpacked build artifact is previewed at.
+
+    Trailing slash on purpose: the page's own asset links are relative (``./_app/...``,
+    ``./assets/...``) and resolve one level too high without it, so the preview would
+    open with no CSS and no JS. ``resolve`` also redirects the slashless form, but the
+    URL we hand out should not need the redirect."""
+    return f"{ensure_server()}/{artifact_preview.PREVIEW_URL_PREFIX}/{site_id}/"
+
+
+def serve_artifact_preview(site_id: str, artifact: bytes | None, *, engine: str) -> str | None:
+    """Store a build artifact as this site's preview and return its URL, or ``None``.
+
+    The artifact-lane peer of :func:`deploy_local`, and the one call a publish tail
+    would make. NEVER RAISES — a preview that could not be unpacked, or a server that
+    could not start, returns ``None`` and is logged. That is the whole difference
+    between the two functions: ``deploy_local`` is the publish itself and must report
+    its failures, while a preview is a convenience and must not be able to fail a
+    publish that already succeeded.
+
+    ``engine`` selects nothing about the LAYOUT — the lane tars from
+    ``static_output_rel(engine)``, so every artifact already arrives rooted at its
+    deployable root. It is passed through for the ``emits_server_worker`` cross-check
+    in ``store_artifact``."""
+    try:
+        snapshot = artifact_preview.safe_store_artifact(site_id, artifact, engine=engine)
+        if snapshot is None:
+            return None
+        return preview_url_for(site_id)
+    except Exception:  # noqa: BLE001 — ensure_server() is the remaining raiser
+        logger.warning(
+            "sites: could not serve an artifact preview for site %s", site_id, exc_info=True
+        )
+        return None
+
+
 __all__ = [
     "sites_home",
     "persist_site",
     "ensure_server",
     "local_url_for",
     "deploy_local",
+    "preview_url_for",
+    "serve_artifact_preview",
     "MissingBuildOutput",
 ]
