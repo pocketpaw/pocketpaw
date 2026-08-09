@@ -28,25 +28,30 @@
 # │ INVARIANT — THIS LANE NEVER SNAPSHOTS THE SANDBOX.                                │
 # └───────────────────────────────────────────────────────────────────────────────────┘
 #
-# Load-bearing, and specifically load-bearing FOR SVELTE — not a general principle.
+# HISTORY, because the reason CHANGED and the rule did not. This invariant was
+# originally load-bearing for a specific secret: a svelte project carried
+# ``__CAPTURE_SIGNED_KEY__`` substituted into ``src/routes/api/submit/+server.ts``
+# (verified 2026-08-09 — it was the only file in a generated svelte project containing
+# it), so a per-site secret was uploaded INTO the sandbox on that track. React never had
+# it, having no server route at all. The decision that the exposure was acceptable
+# rested entirely on the key living only in a container that is then destroyed.
 #
-# A svelte project carries ``__CAPTURE_SIGNED_KEY__`` substituted into
-# ``src/routes/api/submit/+server.ts`` (verified 2026-08-09: it is the only file in a
-# generated svelte project containing it). So on the svelte track a per-site secret is
-# uploaded INTO the sandbox. React does not have this problem at all — it has no server
-# route, so no key ever enters its sandbox.
+# Lead capture was then dropped (2026-08-09, captain: do not serve ``/api/submit``), so
+# no route and no key enters any sandbox on either engine, and that specific
+# justification is gone.
 #
-# The decision that this exposure is acceptable (SR-3) rests entirely on the key living
-# only in an ephemeral container that is then destroyed. A snapshot would persist it
-# into blob storage and convert a bounded, transient exposure into a durable one —
-# which is the exact case the condition was written to prevent (compare
-# ``websandbox/provision.py:51``, where a credential in a VM's git config persists into
-# snapshots).
+# THE RULE STAYS ANYWAY, on two grounds that do not depend on it:
+#   1. Build inputs are customer content. A snapshot moves them from an ephemeral
+#      container into durable blob storage, which is a different data-residency
+#      question than the one this lane was cleared for (SG-0 conditions 4 and 6).
+#   2. Lead capture is "we will see what we can do about leads" — not deleted forever.
+#      If a server route returns, the secret returns with it, and an invariant quietly
+#      dropped in the meantime would not come back on its own.
 #
-# CACHING ``node_modules`` IN A SNAPSHOT IS THE OBVIOUS OPTIMISATION HERE, and it is
-# the thing that would silently undo the reasoning above. If you are reading this
-# because you were about to do that: the security decision has to be re-made first, not
-# inherited.
+# CACHING ``node_modules`` IN A SNAPSHOT IS THE OBVIOUS OPTIMISATION HERE, and it is the
+# thing that would undo this. If you are reading this because you were about to do it:
+# re-make the decision on the two grounds above rather than noting that the signed key
+# is gone.
 from __future__ import annotations
 
 import logging
