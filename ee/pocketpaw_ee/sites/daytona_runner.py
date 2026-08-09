@@ -68,6 +68,23 @@
 # or inject them at deploy via wrangler ``[vars]``. Today's protection is the accident that
 # nothing calls ``run_build``.
 #
+# WHAT WOULD ENTER IS NO LONGER AN INFERENCE — it has a filename. A canary build on
+# 2026-08-10 (a real generated svelte project built with a marked
+# ``capture_signed_key``, run by SG-7) found the key in
+# ``src/routes/api/submit/+server.ts`` — i.e. in the source map this runner UPLOADS — and
+# compiled into ``.svelte-kit/output/server/entries/endpoints/api/submit/_server.ts.js``.
+# The contract above is therefore checkable rather than merely cautionary: the file is
+# known by name before anyone writes the wiring.
+#
+# THE SAME CANARY FOUND THE KEY NOWHERE IN THE DEPLOYABLE ARTIFACT
+# (``.svelte-kit/cloudflare/``), including under ``_app/`` on the widest client-bundle
+# setting. DO NOT read that as reassurance about this lane. The key is absent from the
+# artifact because the compiled server route is absent from it — and that same missing file
+# is what the shipped ``_worker.js`` imports (``./../output/server/index.js``, verified on
+# a local adapter-cloudflare build). So the svelte artifact this lane tars CANNOT EXECUTE.
+# The security pass and the correctness bug are one fact; see §8 item 14 of the findings
+# record cited below.
+#
 # Recorded as an OBLIGATION, not a note, in the proving-phase findings record — see §9a of
 # ``docs/design/drafts/2026-08-09-sites-proving-SG12-findings.md`` in paw-workspace, which
 # also carries the three options and why patching the built output is the worst of them.
