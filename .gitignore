@@ -99,3 +99,9 @@ output.txt
 
 # Load-test artifacts (scripts/loadtest)
 out/
+
+# SG-1 sites proving harness — build outputs, not source.
+# .build/ holds a machine-resolved package.json, node_modules, and the ~6.5MB
+# SSR bundle; evidence/ holds generated reports and rendered HTML artifacts.
+tests/harness/sites_proving/node/.build/
+tests/harness/sites_proving/evidence/
