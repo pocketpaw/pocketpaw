@@ -49,7 +49,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import psutil
+try:
+    import psutil
+except ImportError:  # pragma: no cover - exercised by the no-psutil path
+    # psutil is NOT a base dependency of pocketpaw — it lives in the `desktop`,
+    # `recommended`, `all-tools`, `all` and `dev` extras (and the `dev` dependency
+    # group), so it resolves in a dev checkout but must not be assumed present.
+    # Guarded import matching the convention four shipped modules already use
+    # (api/v1/metrics.py, tools/status.py, tools/builtin/sysinfo.py,
+    # daemon/context.py all degrade rather than crash). Here the consequence is
+    # narrower: the TIMINGS still measure fine without psutil, only the
+    # RSS/CPU/core figures go unavailable — so degrade to timings-only rather than
+    # losing the whole measurement.
+    psutil = None  # type: ignore[assignment]
+
+HAVE_PSUTIL = psutil is not None
 
 HERE = Path(__file__).resolve().parent
 GENERATE_JS = HERE / "node" / "generate.mjs"
@@ -94,6 +108,19 @@ class ResourceSample:
     # Highest simultaneous process count seen — how much parallelism the phase
     # actually spawned, which matters for sizing a concurrency cap.
     peak_process_count: int = 0
+    # Highest INSTANTANEOUS core usage: CPU-seconds consumed between two ticks,
+    # divided by the wall time between them. The AVERAGE (cpu_seconds / wall_s)
+    # understates a burst — a build that pegs 4 cores for 5s then idles 45s
+    # averages 0.4 but needs 4 while it runs. A concurrency cap derived from the
+    # average would over-admit and thrash, so the peak is measured separately and
+    # is the figure to divide by.
+    peak_cores_instant: float = 0.0
+    # Every instantaneous core reading, so the report can carry a PERCENTILE and
+    # not just a max. A max over 100ms deltas can be inflated by a single noisy
+    # tick (Windows' CPU clock is coarse, ~15.6ms, so one short interval can
+    # over-attribute CPU), while p95 is robust to one bad sample and still
+    # describes sustained demand. A cap sized off a noisy max under-admits.
+    cores_instant_samples: list[float] = field(default_factory=list)
 
     def as_dict(self, wall_s: float) -> dict[str, Any]:
         return {
@@ -102,12 +129,31 @@ class ResourceSample:
             if self.peak_uss_bytes
             else None,
             "cpu_seconds": round(self.cpu_seconds, 2),
-            # CPU-seconds / wall-seconds = average cores saturated. 1.0 means one
-            # core pegged for the whole phase; 4.0 means four cores' worth.
+            # CPU-seconds / wall-seconds = AVERAGE cores over the phase. Useful for
+            # total CPU cost; NOT the right divisor for a concurrency cap.
             "cores_saturated_avg": round(self.cpu_seconds / wall_s, 2) if wall_s > 0 else None,
+            # The worst single 100ms window. Reported, but see cores_p95_instant —
+            # a max can ride on one noisy tick.
+            "cores_peak_instant": round(self.peak_cores_instant, 2)
+            if self.peak_cores_instant
+            else None,
+            # The ROBUST divisor for a concurrency cap: sustained high demand,
+            # immune to a single over-attributed interval.
+            "cores_p95_instant": self._percentile(95),
+            "cores_p50_instant": self._percentile(50),
             "peak_process_count": self.peak_process_count,
             "samples": self.samples,
+            "cores_instant_samples": len(self.cores_instant_samples),
+            "sample_interval_s": SAMPLE_INTERVAL_S,
         }
+
+    def _percentile(self, pct: int) -> float | None:
+        """Nearest-rank percentile of the instantaneous core readings."""
+        values = sorted(self.cores_instant_samples)
+        if not values:
+            return None
+        index = min(len(values) - 1, int(round((pct / 100) * len(values) + 0.5)) - 1)
+        return round(values[max(0, index)], 2)
 
 
 class _TreeMonitor:
@@ -126,8 +172,13 @@ class _TreeMonitor:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.result = ResourceSample()
+        # Previous tick's (monotonic time, tree cpu_seconds), for the instantaneous
+        # core-usage delta. None until the first tick establishes a baseline.
+        self._prev: tuple[float, float] | None = None
 
     def _tick(self) -> None:
+        if psutil is None:
+            return
         try:
             root = psutil.Process(self._pid)
         except psutil.NoSuchProcess:
@@ -158,6 +209,21 @@ class _TreeMonitor:
                 alive += 1
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
+
+        # Instantaneous core usage from the CPU delta between consecutive ticks.
+        # Guarded on a positive elapsed AND a non-negative delta: the tree's total
+        # can appear to DROP when a child exits (its cpu_times leave the sum), and
+        # a negative delta must not register as a peak.
+        now = time.monotonic()
+        if self._prev is not None:
+            prev_t, prev_cpu = self._prev
+            elapsed = now - prev_t
+            delta = cpu - prev_cpu
+            if elapsed > 0 and delta >= 0:
+                cores = delta / elapsed
+                self.result.peak_cores_instant = max(self.result.peak_cores_instant, cores)
+                self.result.cores_instant_samples.append(cores)
+        self._prev = (now, cpu)
 
         self.result.peak_rss_bytes = max(self.result.peak_rss_bytes, rss)
         self.result.peak_uss_bytes = max(self.result.peak_uss_bytes, uss)
@@ -328,14 +394,20 @@ def measure_engine(engine: str, work_root: Path, *, warm_runs: int = 1) -> dict[
     install_footprint = _dir_footprint(project_dir / "node_modules")
 
     cold_total = cold_install.wall_s + cold_build.wall_s
-    warm_totals = [s["total_s"] for s in warm_samples]
-    warm_median = statistics.median(warm_totals) if warm_totals else None
-    warm_build_median = (
-        statistics.median([s["build"]["wall_s"] for s in warm_samples]) if warm_samples else None
-    )
-    warm_install_median = (
-        statistics.median([s["install"]["wall_s"] for s in warm_samples]) if warm_samples else None
-    )
+
+    # Typed as float | None throughout: with warm_runs=0 there is no warm arm at
+    # all, so every warm figure is genuinely absent rather than zero. `_share_pct`
+    # below is the single place that decides what an absent value reports, so the
+    # percentage arithmetic can never reach a None operand — a TypeError here
+    # would crash the run at exactly the point of reporting the install-vs-build
+    # split, which is the figure the build-location decision turns on.
+    warm_median: float | None = None
+    warm_build_median: float | None = None
+    warm_install_median: float | None = None
+    if warm_samples:
+        warm_median = statistics.median([s["total_s"] for s in warm_samples])
+        warm_build_median = statistics.median([s["build"]["wall_s"] for s in warm_samples])
+        warm_install_median = statistics.median([s["install"]["wall_s"] for s in warm_samples])
 
     artifact = _describe_artifact(project_dir, generated)
 
@@ -346,12 +418,8 @@ def measure_engine(engine: str, work_root: Path, *, warm_runs: int = 1) -> dict[
             "install": cold_install.as_dict(),
             "build": cold_build.as_dict(),
             "total_s": round(cold_total, 2),
-            "install_share_pct": round(100 * cold_install.wall_s / cold_total, 1)
-            if cold_total
-            else None,
-            "build_share_pct": round(100 * cold_build.wall_s / cold_total, 1)
-            if cold_total
-            else None,
+            "install_share_pct": _share_pct(cold_install.wall_s, cold_total),
+            "build_share_pct": _share_pct(cold_build.wall_s, cold_total),
         },
         "warm": {
             "runs": warm_samples,
@@ -362,12 +430,8 @@ def measure_engine(engine: str, work_root: Path, *, warm_runs: int = 1) -> dict[
             "median_build_s": round(warm_build_median, 2)
             if warm_build_median is not None
             else None,
-            "install_share_pct": round(100 * warm_install_median / warm_median, 1)
-            if warm_median
-            else None,
-            "build_share_pct": round(100 * warm_build_median / warm_median, 1)
-            if warm_median
-            else None,
+            "install_share_pct": _share_pct(warm_install_median, warm_median),
+            "build_share_pct": _share_pct(warm_build_median, warm_median),
         },
         "cold_to_warm_saving_s": round(cold_total - warm_median, 2)
         if warm_median is not None
@@ -390,7 +454,8 @@ def measure_engine(engine: str, work_root: Path, *, warm_runs: int = 1) -> dict[
             ),
             default=None,
         ),
-        "cores_saturated_peak": max(
+        # Highest AVERAGE across phases — total CPU cost, not peak demand.
+        "cores_saturated_avg_max": max(
             filter(
                 None,
                 [
@@ -401,9 +466,50 @@ def measure_engine(engine: str, work_root: Path, *, warm_runs: int = 1) -> dict[
             ),
             default=None,
         ),
+        # Worst single 100ms window in any phase. Strictly >= the average, and the
+        # two differ a lot for a bursty build — but a max can ride on one noisy
+        # tick, so prefer cores_p95_instant below when sizing a cap.
+        "cores_peak_instant": max(
+            filter(
+                None,
+                [
+                    cold_install.resources.get("cores_peak_instant"),
+                    cold_build.resources.get("cores_peak_instant"),
+                    *[s["build"].get("cores_peak_instant") for s in warm_samples],
+                ],
+            ),
+            default=None,
+        ),
+        # THE RECOMMENDED DIVISOR: sustained high core demand, robust to a single
+        # over-attributed sampling interval.
+        "cores_p95_instant": max(
+            filter(
+                None,
+                [
+                    cold_install.resources.get("cores_p95_instant"),
+                    cold_build.resources.get("cores_p95_instant"),
+                    *[s["build"].get("cores_p95_instant") for s in warm_samples],
+                ],
+            ),
+            default=None,
+        ),
         "install_footprint": install_footprint,
         "artifact": artifact,
     }
+
+
+def _share_pct(part: float | None, whole: float | None) -> float | None:
+    """``part`` as a percentage of ``whole``, or ``None`` when it is undefined.
+
+    The one place percentage arithmetic happens, so a missing measurement can
+    never reach a multiply or a divide. ``None`` means "not measured" (no warm arm
+    was run) and is deliberately NOT reported as ``0`` — a zero share would read
+    as "install was free", which is a different and false claim. A zero
+    denominator likewise reports ``None`` rather than dividing.
+    """
+    if part is None or whole is None or whole <= 0:
+        return None
+    return round(100 * part / whole, 1)
 
 
 def _dir_footprint(path: Path) -> dict[str, Any]:
@@ -496,22 +602,46 @@ def measure_all(
             "rss_note": (
                 "peak RSS is a 100ms-sampled maximum over the process tree, not an exact peak"
             ),
+            "cores_note": (
+                "cores_saturated_avg is CPU-seconds/wall over the phase (total CPU "
+                "cost). cores_p95_instant is the RECOMMENDED divisor for a "
+                "concurrency cap: sustained demand, robust to one over-attributed "
+                "sampling window. cores_peak_instant is the worst single 100ms "
+                "delta and can ride on sampling noise. All are sampled at 100ms, so "
+                "a sub-100ms spike is invisible and every peak is a LOWER BOUND."
+            ),
+            "cores_sample_count_caveat": (
+                "A fast build yields few samples: react's build is ~1.5s, so its "
+                "percentiles rest on ~11 readings and its p95 is effectively its "
+                "max. Treat react's core figure as indicative, not a stable "
+                "percentile; ripple (400+ readings) is well sampled."
+            ),
+            "psutil_available": HAVE_PSUTIL,
+            "resource_figures_measured": HAVE_PSUTIL,
         },
     }
 
 
 def host_info() -> dict[str, Any]:
     """The box these numbers describe. Without it they don't transfer."""
-    memory = psutil.virtual_memory()
-    return {
-        "logical_cores": psutil.cpu_count(logical=True),
-        "physical_cores": psutil.cpu_count(logical=False),
-        "total_ram_gb": round(memory.total / (1024**3), 1),
-        "available_ram_gb": round(memory.available / (1024**3), 1),
+    info: dict[str, Any] = {
+        # os.cpu_count() is stdlib, so the core count survives without psutil.
+        "logical_cores": os.cpu_count(),
+        "physical_cores": None,
+        "total_ram_gb": None,
+        "available_ram_gb": None,
         "bun_version": _tool_version(["bun", "--version"]),
         "node_version": _tool_version(["node", "--version"]),
         "platform": f"{os.name} {os.environ.get('OS', '')}".strip(),
+        "psutil_available": HAVE_PSUTIL,
     }
+    if psutil is not None:
+        memory = psutil.virtual_memory()
+        info["logical_cores"] = psutil.cpu_count(logical=True)
+        info["physical_cores"] = psutil.cpu_count(logical=False)
+        info["total_ram_gb"] = round(memory.total / (1024**3), 1)
+        info["available_ram_gb"] = round(memory.available / (1024**3), 1)
+    return info
 
 
 def _tool_version(argv: list[str]) -> str | None:

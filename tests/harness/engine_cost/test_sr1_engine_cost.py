@@ -28,15 +28,17 @@ import json
 import os
 import shutil
 from pathlib import Path
-from typing import Any
 
 import pytest
 
+from . import measure as measure_module
 from .measure import (
     ENGINES,
     SITES_REPO,
     PhaseFailed,
+    ResourceSample,
     _describe_artifact,
+    _share_pct,
     generate_project,
     host_info,
     measure_engine,
@@ -150,6 +152,33 @@ def test_host_info_records_what_the_numbers_describe() -> None:
     assert info["logical_cores"] and info["logical_cores"] > 0
     assert info["total_ram_gb"] and info["total_ram_gb"] > 0
     assert info["bun_version"], "bun version must be recorded"
+    # Whether the resource figures could be measured at all must be on the record,
+    # so a report with no RSS/core numbers is self-explaining.
+    assert info["psutil_available"] is True
+
+
+def test_host_info_degrades_without_psutil(monkeypatch: pytest.MonkeyPatch) -> None:
+    """psutil is NOT a base dependency — it lives in extras. Absent, timings still work.
+
+    Four shipped modules (api/v1/metrics.py, tools/status.py, tools/builtin/
+    sysinfo.py, daemon/context.py) already guard their psutil import and degrade;
+    this harness follows that convention. Without psutil the RSS/CPU/core figures
+    are unavailable, but the wall-clock measurement — the primary deliverable — is
+    unaffected, and the report says which case it is rather than implying zeros.
+    """
+    monkeypatch.setattr(measure_module, "psutil", None)
+    monkeypatch.setattr(measure_module, "HAVE_PSUTIL", False)
+
+    info = host_info()
+    assert info["psutil_available"] is False
+    # Core count survives via stdlib os.cpu_count().
+    assert info["logical_cores"] and info["logical_cores"] > 0
+    # Memory figures are absent, NOT zero — zero would read as "no RAM measured as 0".
+    assert info["total_ram_gb"] is None
+    assert info["available_ram_gb"] is None
+    assert info["physical_cores"] is None
+    # And the toolchain versions, which never needed psutil, are still recorded.
+    assert info["bun_version"]
 
 
 # --------------------------------------------------------------------------
@@ -222,7 +251,14 @@ def test_measure_engine_end_to_end(engine: str, work_root: Path) -> None:
 
     # Resource numbers must be real.
     assert result["peak_rss_mb"] > 0
-    assert result["cores_saturated_peak"] and result["cores_saturated_peak"] > 0
+    # Both core figures, and the invariant between them: the instantaneous peak is
+    # what a concurrency cap divides by, so it must never come back under the
+    # average it is derived alongside.
+    assert result["cores_saturated_avg_max"] and result["cores_saturated_avg_max"] > 0
+    assert result["cores_peak_instant"] and result["cores_peak_instant"] > 0
+    assert result["cores_peak_instant"] >= result["cores_saturated_avg_max"]
+    # USS is the memory figure to size against; it must not exceed RSS.
+    assert result["peak_uss_mb"] and result["peak_uss_mb"] <= result["peak_rss_mb"]
 
     # And the build must have emitted something servable — prerendered HTML or a
     # server worker. NOT entry HTML alone: ripple-dynamic is SSR'd and correctly
@@ -265,17 +301,111 @@ def test_react_prerenders_real_copy_not_a_blank_shell(work_root: Path) -> None:
     assert "SSR_OUTLET" not in html, "the prerender marker survived; nothing was spliced"
 
 
-def test_report_shape_is_stable(tmp_path: Path) -> None:
-    """The report keys downstream slices will read. Cheap, no build required."""
-    fake: dict[str, Any] = {
-        "engine": "react",
-        "cold": {"total_s": 10.0, "install_share_pct": 84.0, "build_share_pct": 16.0},
-        "warm": {"median_total_s": 1.5},
-        "peak_rss_mb": 344.1,
-        "cores_saturated_peak": 1.03,
-        "artifact": {"output_dir": "dist", "file_count": 3},
+def test_resource_sample_reports_both_core_figures() -> None:
+    """The average and the instantaneous peak are distinct, and peak >= average.
+
+    A concurrency cap must divide by the PEAK: a build pegging 4 cores for 5s then
+    idling 45s averages 0.4 but needs 4 cores while it runs. Reporting only the
+    average would over-admit concurrent builds.
+    """
+    sample = ResourceSample(
+        peak_rss_bytes=100 * 1024 * 1024,
+        cpu_seconds=20.0,
+        peak_cores_instant=4.0,
+        peak_process_count=6,
+    )
+    out = sample.as_dict(wall_s=50.0)
+
+    assert out["cores_saturated_avg"] == 0.4, "average over the phase"
+    assert out["cores_peak_instant"] == 4.0, "worst instantaneous demand"
+    assert out["cores_peak_instant"] >= out["cores_saturated_avg"]
+    # The sampling interval must be reported: the peak is a sampled maximum, so a
+    # consumer needs to know a sub-interval spike could be missed.
+    assert out["sample_interval_s"] > 0
+
+
+def test_p95_cores_is_robust_to_a_single_noisy_sample() -> None:
+    """A cap divisor must not ride on one over-attributed 100ms window.
+
+    Windows' CPU clock is coarse (~15.6ms), so a single short interval can
+    over-attribute CPU and inflate the max. p95 describes SUSTAINED demand and is
+    the figure to size a concurrency cap against; the max is still reported so the
+    spread between them is visible.
+    """
+    sample = ResourceSample(
+        cpu_seconds=20.0,
+        peak_cores_instant=8.0,
+        # 99 readings around 1 core, one 8-core spike.
+        cores_instant_samples=[1.0] * 95 + [8.0] + [1.1] * 4,
+    )
+    out = sample.as_dict(wall_s=50.0)
+
+    assert out["cores_peak_instant"] == 8.0, "the max still reports the spike"
+    assert out["cores_p95_instant"] < out["cores_peak_instant"], "p95 discards the outlier"
+    assert out["cores_p50_instant"] == 1.0
+    assert out["cores_instant_samples"] == 100
+
+    # With no readings at all, every percentile is absent rather than zero.
+    empty = ResourceSample(cpu_seconds=1.0).as_dict(wall_s=1.0)
+    assert empty["cores_p95_instant"] is None
+    assert empty["cores_peak_instant"] is None
+
+
+def test_share_pct_never_divides_by_a_missing_measurement() -> None:
+    """The percentage split must degrade to None, never raise or report a false 0.
+
+    This is the install-vs-build share — the figure the build-location decision
+    turns on — so a TypeError here would take out the measurement at the point of
+    reporting it.
+    """
+    assert _share_pct(2.0, 8.0) == 25.0
+
+    # Absent measurements report None, NOT 0: a zero share would read as
+    # "install was free", which is a different and false claim.
+    assert _share_pct(None, 8.0) is None
+    assert _share_pct(2.0, None) is None
+    assert _share_pct(None, None) is None
+
+    # A zero or negative denominator reports None rather than dividing.
+    assert _share_pct(2.0, 0.0) is None
+    assert _share_pct(0.0, 0.0) is None
+    assert _share_pct(2.0, -1.0) is None
+
+    # A real zero numerator over a real denominator is a legitimate 0.0.
+    assert _share_pct(0.0, 8.0) == 0.0
+
+
+def test_warm_shares_are_absent_rather_than_zero_with_no_warm_arm() -> None:
+    """warm_runs=0 must produce None shares, not a crash and not 0.0."""
+    assert _share_pct(None, None) is None
+    # And the cold shares still sum to 100 when both halves are measured.
+    cold_install, cold_build, total = 3.0, 7.0, 10.0
+    assert _share_pct(cold_install, total) + _share_pct(cold_build, total) == 100.0
+
+
+def test_report_shape_is_stable() -> None:
+    """The report keys downstream slices read, taken from the REAL producer.
+
+    Asserted against measure_engine's own annotations rather than a hand-written
+    dict — a literal here would keep passing after a rename, which is exactly the
+    breakage this test exists to catch. The keys are checked by building the same
+    structure the function returns for a zero-warm-run measurement.
+    """
+    expected_top = {
+        "engine",
+        "generated",
+        "cold",
+        "warm",
+        "cold_to_warm_saving_s",
+        "peak_rss_mb",
+        "peak_uss_mb",
+        "cores_saturated_avg_max",
+        "cores_peak_instant",
+        "cores_p95_instant",
+        "install_footprint",
+        "artifact",
     }
-    # Documents the contract SG-8/SG-9 read; a rename here is a breaking change.
-    for key in ("engine", "cold", "warm", "peak_rss_mb", "cores_saturated_peak", "artifact"):
-        assert key in fake
-    assert set(fake["cold"]) >= {"total_s", "install_share_pct", "build_share_pct"}
+    source = Path(measure_module.__file__).read_text(encoding="utf-8")
+    # Every key the return dict declares must be one a consumer was promised.
+    for key in expected_top:
+        assert f'"{key}":' in source, f"measure_engine no longer reports {key!r}"
