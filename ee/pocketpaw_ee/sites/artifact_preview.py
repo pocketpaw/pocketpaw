@@ -36,7 +36,7 @@
 # (``static_output_rel`` == "." means it has no build subdir) and whether a
 # ``_worker.js`` in the artifact is expected (``emits_server_worker``).
 #
-# THREE DECISIONS WORTH READING BEFORE CHANGING ANYTHING HERE:
+# FOUR DECISIONS WORTH READING BEFORE CHANGING ANYTHING HERE:
 #
 #   * ``_worker.js`` IS NEITHER EXECUTED NOR SERVED, AND NEVER LANDS ON DISK. svelte
 #     emits one even with no server routes — confirmed by deleting ``src/routes/api/``,
@@ -55,6 +55,20 @@
 #   * NO SPA FALLBACK. A missing asset is a 404, never a rewrite to ``index.html``.
 #     Rewriting would make a broken build look finished, which is the one failure mode
 #     a preview whose job is verification must not have.
+#   * PATH TRAVERSAL IS GUARDED AT BOTH ENDS, because this is a static file server over
+#     an extracted archive and that is two attack surfaces, not one.
+#       - AT EXTRACT TIME (:func:`_normalized_member_path`): a member named
+#         ``../../etc/passwd``, an absolute path, a drive letter, a backslash, a NUL, or
+#         a symlink/hardlink escapes regardless of how careful the request side is.
+#         ``tarfile`` has historically been unsafe by default here, which is why nothing
+#         in this module calls ``extractall`` — members are written one at a time after
+#         their names have been validated, with archive permissions discarded.
+#       - AT REQUEST TIME (:func:`_request_segments` then :func:`_contained`): the path
+#         is percent-decoded and validated, and then — the part that matters — RESOLVED
+#         and checked against the resolved root. A prefix check on the raw string is
+#         defeated by encoding and by symlinks; a check on the real path is not.
+#     Every one of those guards has a mutation in ``tests/mutations`` proving it fires.
+#     A traversal guard nobody has watched break is not a guard.
 #
 # Storage lives at ``previews_home()`` — deliberately NOT under
 # ``local_server.sites_home()``. That server serves its root as plain static files, so
@@ -265,12 +279,23 @@ def _normalized_member_path(name: str) -> tuple[str, ...] | None:
 
     ``tar -C <dir> .`` names every member ``./x/y``, so the leading ``.`` is normal and
     stripped. Everything else here is a refusal: an absolute path, a ``..`` segment, a
-    backslash (a path separator on Windows and a legal filename character on POSIX —
-    treating it as either is a way to be surprised), or a NUL.
+    backslash, a drive letter, or a NUL.
+
+    EACH REFUSAL IS ITS OWN STATEMENT rather than one combined condition, so a mutation
+    can remove exactly one of them and be seen to break exactly one test. A single
+    ``if a or b or c`` guard reads as verified when only one of the three is.
     """
-    if not name or name.startswith("/") or name.startswith("\\"):
+    if not name or name.startswith("/"):
         return None
-    if "\x00" in name or "\\" in name:
+    if "\x00" in name:
+        # A NUL truncates the name for any C-level consumer, so a member called
+        # "index.html\x00/../../evil" can pass a suffix or prefix check and land
+        # somewhere else entirely.
+        return None
+    if "\\" in name:
+        # A path separator on Windows and a legal filename character on POSIX.
+        # Treating it as either means the same artifact writes to two different
+        # places depending on where it is unpacked.
         return None
     if len(name) > 1 and name[1] == ":":  # a Windows drive-qualified path
         return None
@@ -521,18 +546,61 @@ def _request_segments(subpath: str) -> tuple[str, ...] | None:
     ``C:/Windows`` and the join silently leaves the preview root. On POSIX the same
     segment is an ordinary filename, so the check costs nothing and closes a hole that
     exists on the platform this is developed on.
+
+    Refusals are separate statements for the same reason as in
+    :func:`_normalized_member_path`: so each one can be mutated on its own and shown
+    to be load-bearing. Refusing here is not the last line of defence — the caller
+    still resolves and contains (:func:`_contained`) — but it is the layer that sees
+    the request as the client wrote it, before any join has happened.
     """
     decoded = unquote(subpath or "")
-    if "\x00" in decoded or "\\" in decoded:
+    if "\x00" in decoded:
+        # A NUL truncates the path for any C-level consumer, so it can make a
+        # suffix or extension check agree with a different file than the one opened.
+        return None
+    if "\\" in decoded:
         return None
     segments: list[str] = []
     for raw in decoded.split("/"):
         if raw in ("", "."):
             continue
-        if raw == ".." or (len(raw) > 1 and raw[1] == ":"):
+        if raw == "..":
+            return None
+        if len(raw) > 1 and raw[1] == ":":
             return None
         segments.append(raw)
     return tuple(segments)
+
+
+def _contained(root: Path, target: Path) -> Path | None:
+    """``target``'s real path when it is inside ``root``, else ``None``.
+
+    RESOLVE, THEN CONTAIN — in that order, and on the REAL path rather than the string.
+    Sanitising the request and trusting the result is the version of this that fails: a
+    prefix check on the raw string is defeated by percent-encoding (handled a layer up)
+    and by a SYMLINK, which no amount of string inspection can see. Only comparing the
+    resolved path against the resolved root catches a link inside the tree that points
+    out of it. Both sides are resolved because the root itself can sit under a link —
+    a temp dir on macOS does (``/tmp`` → ``/private/tmp``), and comparing a resolved
+    target against an unresolved root would then refuse every legitimate request.
+
+    Returning the path rather than a bool is deliberate: the caller cannot end up
+    holding a path it never contained, and there is no branch where the containment
+    check is skipped but a resolved path exists. An earlier version set ``inside =
+    False`` in an ``except OSError`` and left ``resolved`` unassigned — safe only
+    because that branch happened to return, which is exactly the coupling that breaks
+    when someone adds a branch later. pyright flagged it as possibly-unbound; on a
+    path-resolution routine that reads as a containment bug waiting to happen, not a
+    lint.
+    """
+    try:
+        real_root = root.resolve()
+        real = target.resolve()
+    except OSError:  # pragma: no cover - an unresolvable path is refused, not raised
+        return None
+    if real == real_root or real.is_relative_to(real_root):
+        return real
+    return None
 
 
 def resolve(site_id: str, subpath: str, *, method: str = "GET") -> PreviewResponse:
@@ -599,18 +667,14 @@ def resolve(site_id: str, subpath: str, *, method: str = "GET") -> PreviewRespon
             404, "metadata_refused", "Not found", "There's no such page in this preview."
         )
 
-    target = root.joinpath(*segments) if segments else root
-    try:
-        resolved = target.resolve()
-        inside = resolved == root.resolve() or resolved.is_relative_to(root.resolve())
-    except OSError:  # pragma: no cover - unresolvable path
-        inside = False
-    if not inside:
-        # DEFENCE IN DEPTH, and deliberately unreachable while ``_request_segments`` is
-        # correct — every way a joined path can leave the root (``..``, an anchor, a
-        # separator) is refused up there. It stays because "the parser is correct" is an
-        # assumption, and a containment check after the join costs one stat.
-        return _refusal(404, "unsafe_path", "No preview here", "That path isn't valid.")
+    resolved = _contained(root, root.joinpath(*segments) if segments else root)
+    if resolved is None:
+        # A DISTINCT reason from the parser's ``unsafe_path``, though the client sees the
+        # same 404 and the same page. The two layers refuse for different reasons, and
+        # with one shared reason string a mutation that disabled the parser would still
+        # look caught — the containment check would refuse the same request and the test
+        # would pass. Separate reasons are what make each layer independently provable.
+        return _refusal(404, "escaped_root", "No preview here", "That path isn't valid.")
 
     if resolved.is_dir():
         if not subpath.endswith("/"):

@@ -41,8 +41,62 @@
   {
     "label": "an absolute path inside a build artifact is extracted, so a hostile or broken build writes files outside the preview root",
     "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
-    "find": "    if not name or name.startswith(\"/\") or name.startswith(\"\\\\\"):",
+    "find": "    if not name or name.startswith(\"/\"):",
     "replace": "    if not name:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "a NUL in a member name is accepted, so a name that passes a suffix check opens a different file than the one checked",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    if \"\\x00\" in name:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "a backslash in a member name is accepted, so the same artifact writes to two different places depending on the host OS",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    if \"\\\\\" in name:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "a drive-qualified member name is accepted, so extraction writes to the drive root instead of the preview directory",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    if len(name) > 1 and name[1] == \":\":  # a Windows drive-qualified path",
+    "replace": "    if False:  # a Windows drive-qualified path",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "a NUL in a request path is accepted, so an extension check agrees with a different file than the one served",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    if \"\\x00\" in decoded:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "a backslash in a request path is accepted, so a Windows-separator traversal reaches the containment check instead of being refused as written",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    if \"\\\\\" in decoded:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
+    ]
+  },
+  {
+    "label": "the post-join containment check trusts the path, so a symlink inside the preview tree reads any file the process can open",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    if real == real_root or real.is_relative_to(real_root):",
+    "replace": "    if True:",
     "tests": [
       "tests/ee/sites/test_artifact_preview.py"
     ]
@@ -68,7 +122,7 @@
   {
     "label": "a crafted preview URL reads outside the preview root, so one tenant's URL fetches another site's files",
     "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
-    "find": "    for raw in decoded.split(\"/\"):\n        if raw in (\"\", \".\"):\n            continue\n        if raw == \"..\" or (len(raw) > 1 and raw[1] == \":\"):",
+    "find": "    for raw in decoded.split(\"/\"):\n        if raw in (\"\", \".\"):\n            continue\n        if raw == \"..\":",
     "replace": "    for raw in decoded.split(\"/\"):\n        if raw in (\"\", \".\"):\n            continue\n        if False:",
     "tests": [
       "tests/ee/sites/test_artifact_preview.py"
@@ -183,6 +237,15 @@
     "replace": "        except SystemExit:  # mutated: containment removed",
     "tests": [
       "tests/ee/sites/test_artifact_preview_server.py"
+    ]
+  },
+  {
+    "label": "a drive-qualified request segment is accepted, so joining it anchors the path at the drive root and the read leaves the preview entirely",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "        if len(raw) > 1 and raw[1] == \":\":\n            return None",
+    "replace": "        if False:\n            return None",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py"
     ]
   }
 ]
