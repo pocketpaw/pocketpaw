@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 from pocketpaw_ee.sites import daytona_build as db
 from pocketpaw_ee.sites import daytona_runner as dr
+from tests.ee.sites.faults import clean_artifact
 
 REACT_FILES = {"src/App.tsx": "export default function App() { return <p>hi</p>; }"}
 
@@ -45,9 +46,15 @@ class FakeClient:
         *,
         sentinel: dict[str, Any] | None,
         exec_raises: bool = False,
-        artifact: bytes = b"tgz-bytes",
+        artifact: bytes | None = None,
         delete_raises: bool = False,
     ) -> None:
+        # Updated 2026-08-10 (SG-7): the default was the placeholder ``b"tgz-bytes"``.
+        # ``run_build`` now verifies the DOWNLOADED bytes against the size the sentinel
+        # promised, and a 9-byte placeholder beside a promised 4096 reads as a truncated
+        # transfer. The fake was always asserting against a fiction; a real tar whose length
+        # matches the sentinel (see ``_ok_sentinel``) is what it should have carried.
+        artifact = clean_artifact() if artifact is None else artifact
         self.calls: list[str] = []
         self.create_kwargs: dict[str, Any] = {}
         self.exec_timeout: int | None = None
@@ -97,7 +104,8 @@ def _ok_sentinel(**over: Any) -> dict[str, Any]:
         "install_exit": 0,
         "build_exit": 0,
         "artifact_rel": "dist",
-        "artifact_bytes": 4096,
+        # Must equal what FakeClient actually returns — see its __init__ comment.
+        "artifact_bytes": len(clean_artifact()),
         "stderr_tail": "",
     }
     base.update(over)
@@ -114,7 +122,7 @@ class TestTheFourRowsThroughTheDriver:
         got = await dr.run_build(REACT_FILES, engine="react", timeout_seconds=600, client=c)
         assert got.classification.outcome == "completed_ok"
         assert got.ok is True
-        assert got.artifact_bytes == len(b"tgz-bytes")
+        assert got.artifact_bytes == len(clean_artifact())
 
     async def test_row2_build_failed_surfaces_stderr_and_no_artifact(self) -> None:
         c = FakeClient(sentinel=_ok_sentinel(build_exit=1, stderr_tail="TS2304"))
@@ -138,8 +146,13 @@ class TestTheFourRowsThroughTheDriver:
 
     async def test_row4_infra_lost_when_no_sentinel_before_the_budget(self) -> None:
         """Induced: the exec blows up and no sentinel survives, well inside the budget.
-        This is the row that must NOT reach the user as a build failure — if it does,
-        the local-builder fallback never fires."""
+        This is the row that must NOT reach the user as a build failure.
+
+        Corrected 2026-08-10 (SG-7): this used to end "if it does, the local-builder
+        fallback never fires", which describes a fallback the captain overrode. The
+        ruling is Daytona-only. What actually goes wrong when this row is misclassified
+        is that the user is told their site is broken when we lost the container — the
+        mis-report the whole sentinel design exists to prevent."""
         c = FakeClient(sentinel=None, exec_raises=True)
         got = await dr.run_build(REACT_FILES, engine="react", timeout_seconds=100_000, client=c)
         assert got.classification.outcome == "infra_lost"
