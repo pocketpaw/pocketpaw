@@ -7,6 +7,7 @@ Default image includes:
   - Python 3.12 + pip + venv + UV
   - GCC / G++ / build-essential (for C, C++, Rust compilation)
   - Node.js 20 LTS + npm
+  - bun >= 1.2 (required by the Paw Sites source-lane build)
   - Docker CE + Compose plugin
   - Git, curl, wget, and other common CLI utilities
 
@@ -64,6 +65,8 @@ def build_paw_dev_image() -> Image:
 
     Adds:
       * Node.js 20 LTS (via NodeSource)
+      * bun >= 1.2 (the Paw Sites source-lane build runs ``bun install`` +
+        ``bun run build``; see the block below for why npm is not a substitute)
       * Docker CE + docker-compose-plugin
       * UV (fast Python package installer, from Astral)
       * Git, curl, wget, unzip, and other CLI essentials
@@ -84,6 +87,27 @@ def build_paw_dev_image() -> Image:
             "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
             "apt-get install -y nodejs",
             "corepack enable",
+        )
+        # ── bun (Paw Sites source-lane builds) ──────────────────────
+        # REQUIRED, not a convenience: the sites build pipeline is bun-shaped
+        # (``bun install`` + ``bun run build`` in ``sites/generator_client.py``),
+        # and ``corepack`` shims yarn/pnpm only — it does NOT provide bun.
+        #
+        # WHY NOT SUBSTITUTE npm, which is already here: every lockfile in the
+        # workspace is the TEXT format (bun >= 1.2), and npm ignores a
+        # ``bun.lock`` entirely and resolves independently. That would forfeit
+        # pinned resolution and make a sandbox build's dependency tree differ
+        # from the local builder's — the exact artifact parity the offload lane
+        # exists to establish. So bun goes in the image.
+        #
+        # Pinned to a MINIMUM (>= 1.2) rather than an exact version because the
+        # text lockfile format is the hard requirement; ``BUN_INSTALL`` +
+        # ``/usr/local/bin`` symlink puts it on PATH for non-login shells, which
+        # is how ``execute_command`` runs.
+        .run_commands(
+            "curl -fsSL https://bun.sh/install | BUN_INSTALL=/opt/bun bash",
+            "ln -sf /opt/bun/bin/bun /usr/local/bin/bun",
+            "bun --version",
         )
         # ── Docker CE (Docker-in-Docker style) ──────────────────────
         .run_commands(
