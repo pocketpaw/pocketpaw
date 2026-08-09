@@ -105,3 +105,6 @@ out/
 # SSR bundle; evidence/ holds generated reports and rendered HTML artifacts.
 tests/harness/sites_proving/node/.build/
 tests/harness/sites_proving/evidence/
+
+# SR-1 per-engine cost measurement — generated evidence, not source.
+tests/harness/engine_cost/evidence/
