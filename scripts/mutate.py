@@ -37,6 +37,21 @@ once up front, every apply is wrapped in try/finally, SIGINT is trapped, and a
 final pass restores everything again on the way out. A crashed run that left a
 mutated file behind would be a far worse bug than any it could find.
 
+A SWEEP IS INVISIBLE TO EVERYONE ELSE, WHICH BURNED US. Mutations are applied
+IN PLACE, so for the seconds each one is live the working tree genuinely
+contains broken code. Anyone who runs the suite or reads the tree during a
+sweep sees a real failure of code that is about to be restored — and nothing
+distinguishes it from a regression. That happened on 2026-08-09: a reviewer ran
+the tests mid-sweep, saw a bun-PATH assertion fail, and reported it as a
+regression. It was this script, working correctly.
+
+So a sweep now leaves ``.mutation-sweep-active`` at the repo root for its
+duration, naming the plan, the PID and the mutation currently applied. It is
+deliberately NOT gitignored: the point is that ``git status`` surfaces it, so a
+second reader has something to see. It is removed by the same ``finally`` that
+restores the files, and a leftover marker from a crashed run is reported on the
+next start rather than silently overwritten.
+
 PLAN FORMAT — a JSON list of objects:
 
     [
@@ -57,13 +72,74 @@ meaningless result that still looks like a pass.
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
+import os
 import signal
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: Written for the duration of a sweep so a CONCURRENT reader can tell that a test
+#: failure is a live mutation rather than a regression. Not gitignored on purpose —
+#: ``git status`` surfacing it is the entire mechanism.
+MARKER_PATH = REPO_ROOT / ".mutation-sweep-active"
+
+
+def _write_marker(plan: Path, current: str | None) -> None:
+    """Stamp the marker with what is mutated RIGHT NOW.
+
+    Rewritten per mutation rather than once per sweep, because "a sweep is running"
+    is much less useful to a reader than "this exact line in this exact file is
+    currently broken on purpose". Best-effort: a marker that cannot be written must
+    never take down the sweep, since the sweep is the thing with real value.
+    """
+    body = [
+        "A mutation sweep is running in this worktree RIGHT NOW.",
+        "",
+        "Test failures and unexpected file contents are EXPECTED while this file",
+        "exists — mutate.py applies each mutation in place and restores it seconds",
+        "later. Do not report them as regressions; re-run once this file is gone.",
+        "",
+        f"plan    : {plan}",
+        f"pid     : {os.getpid()}",
+        f"started : {datetime.now(UTC).isoformat(timespec='seconds')}",
+        f"current : {current or '(validating the plan)'}",
+        "",
+        "If this file outlived its sweep, a run crashed hard. Check `git status`/",
+        "`git diff` for a file left mutated, then delete this file.",
+    ]
+    try:
+        MARKER_PATH.write_text("\n".join(body) + "\n", encoding="utf-8")
+    except OSError:  # pragma: no cover - best effort by design
+        pass
+
+
+def _clear_marker() -> None:
+    """Remove the marker. Called from the same ``finally`` that restores files."""
+    try:
+        MARKER_PATH.unlink(missing_ok=True)
+    except OSError:  # pragma: no cover - best effort by design
+        pass
+
+
+def _warn_if_stale_marker() -> None:
+    """Report a marker left behind by a crashed run instead of overwriting it.
+
+    Silently reusing it would hide the one case where a file may STILL be mutated on
+    disk — which is the failure mode this script's restoration discipline exists to
+    prevent, so it must be loud.
+    """
+    if not MARKER_PATH.exists():
+        return
+    print(
+        f"WARNING: {MARKER_PATH.name} already exists — a previous sweep did not clean up.\n"
+        "         A file may still be mutated on disk. Check `git diff` before trusting\n"
+        "         this run's results.\n"
+    )
 
 
 class Mutation:
@@ -121,6 +197,15 @@ def main() -> int:
             print(f"  {m.label}  ->  {m.file.relative_to(REPO_ROOT)}")
         return 0
 
+    _warn_if_stale_marker()
+    _write_marker(args.plan, None)
+    # Registered IMMEDIATELY after the marker exists, and via atexit rather than the
+    # try/finally below, because the upfront plan validation raises SystemExit — which
+    # happens BEFORE that try block is entered. Without this, a plan with a bad anchor
+    # would abort correctly and leave a marker claiming a sweep is running forever,
+    # which would then warn on every subsequent run and train people to ignore it.
+    atexit.register(_clear_marker)
+
     # Read every original ONCE, before touching anything. If a file is missing
     # or an anchor is bad, fail before the first mutation rather than half way
     # through a run that then has to unwind.
@@ -142,6 +227,7 @@ def main() -> int:
     def _restore_all(*_signal_args: object) -> None:
         for path, data in originals.items():
             path.write_bytes(data)
+        _clear_marker()
 
     signal.signal(signal.SIGINT, lambda *a: (_restore_all(), sys.exit(130)))
 
@@ -150,6 +236,7 @@ def main() -> int:
         for m in mutations:
             original = originals[m.file]
             mutated = original.decode("utf-8").replace(m.find, m.replace, 1)
+            _write_marker(args.plan, f"{m.label}  [{m.file.relative_to(REPO_ROOT)}]")
             try:
                 m.file.write_bytes(mutated.encode("utf-8"))
                 passed = _run_tests(m.tests)
