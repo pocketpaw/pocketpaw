@@ -226,3 +226,97 @@ class TestPytestSeesTheMarker:
             assert "some-mutation" in header
         finally:
             MARKER.unlink(missing_ok=True)
+
+
+class TestAPreExistingMarkerRefusesTheRun:
+    """The serious one, from a real incident on 2026-08-09.
+
+    Two files were found permanently mutated with NO marker to explain them. The
+    mechanism: sweep A is killed leaving a file mutated and the marker behind. Sweep B
+    starts, snapshots its "originals" FROM DISK — now containing A's mutation — runs, and
+    faithfully restores the mutation as though it were the original. B's cleanup then
+    deletes the marker, destroying the only evidence.
+
+    Warning was not enough, because CONTINUING is the step that bakes the mutation in.
+    So a pre-existing marker now refuses, and refusing must not destroy the evidence.
+    """
+
+    def _plan(self, tmp_path: Path) -> Path:
+        return _write_plan(
+            tmp_path,
+            [
+                {
+                    "label": "queued stops counting as in-flight",
+                    "file": _target(),
+                    "find": _ANCHOR,
+                    "replace": 'IN_FLIGHT_STATUSES: frozenset[str] = frozenset({"building"})',
+                    "tests": ["tests/ee/sites/test_build_state.py"],
+                }
+            ],
+        )
+
+    def test_refuses_and_exits_non_zero(self, tmp_path: Path) -> None:
+        MARKER.write_text("started : 2026-08-09T10:00:00+00:00\ncurrent : x\n", encoding="utf-8")
+        try:
+            proc = _run(self._plan(tmp_path))
+            assert proc.returncode != 0
+            assert "REFUSING TO RUN" in (proc.stdout + proc.stderr)
+        finally:
+            MARKER.unlink(missing_ok=True)
+
+    def test_refusing_preserves_the_evidence(self, tmp_path: Path) -> None:
+        """The marker is the only thing that explains a mutated file. Deleting it on
+        refusal would reproduce the exact incident this guard exists to stop."""
+        MARKER.write_text("started : 2026-08-09T10:00:00+00:00\ncurrent : x\n", encoding="utf-8")
+        try:
+            _run(self._plan(tmp_path))
+            assert MARKER.exists(), "refusal must preserve the marker for inspection"
+        finally:
+            MARKER.unlink(missing_ok=True)
+
+    def test_refusing_applies_no_mutation(self, tmp_path: Path) -> None:
+        target = REPO_ROOT / _target()
+        before = target.read_bytes()
+        MARKER.write_text("started : 2026-08-09T10:00:00+00:00\ncurrent : x\n", encoding="utf-8")
+        try:
+            _run(self._plan(tmp_path))
+            assert target.read_bytes() == before
+        finally:
+            MARKER.unlink(missing_ok=True)
+
+    def test_force_proceeds_past_the_marker(self, tmp_path: Path) -> None:
+        """The escape hatch, for a marker whose files are already verified clean.
+        Deliberately explicit — the default must be refusal."""
+        MARKER.write_text("started : 2026-08-09T10:00:00+00:00\ncurrent : x\n", encoding="utf-8")
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(MUTATE), "--plan", str(self._plan(tmp_path)), "--force"],
+                capture_output=True,
+                text=True,
+                cwd=REPO_ROOT,
+            )
+            assert proc.returncode == 0, proc.stdout + proc.stderr
+            assert "caught" in proc.stdout
+        finally:
+            MARKER.unlink(missing_ok=True)
+
+
+class TestTheMarkerTellsReadersNotToTrustThePid:
+    def test_pid_is_labelled_informational(self) -> None:
+        """A reviewer used the pid to decide "live or stranded", found it not running,
+        and was about to restore a file from under a healthy sweep. Any pid check is racy
+        by construction — the process can exit between reading the file and looking it up
+        — so the file's presence has to be the authority."""
+        import sys as _sys
+
+        _sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import mutate
+
+        mutate._write_marker(Path("some/plan.json"), "a-mutation")
+        try:
+            text = MARKER.read_text(encoding="utf-8")
+            assert "INFORMATIONAL ONLY" in text
+            assert "PRESENCE OF THIS FILE IS THE AUTHORITATIVE SIGNAL" in text
+            assert "racy" in text
+        finally:
+            MARKER.unlink(missing_ok=True)
