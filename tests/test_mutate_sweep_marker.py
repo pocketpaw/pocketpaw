@@ -146,3 +146,83 @@ class TestABadAnchorIsLoud:
         # Validation is upfront, so NOTHING ran — not even the valid first mutation.
         assert "caught" not in proc.stdout
         assert "ESCAPED" not in proc.stdout
+
+
+class TestMarkerAgeDecidesLiveVsAbandoned:
+    """A pre-existing marker is always reported, but the age changes WHAT it says:
+    recent means another sweep may be racing this one, old means a crashed run left it.
+    Biased toward "possibly live" because that is the cheap mistake — calling a live
+    sweep stale tells a reader to trust results taken while a file was mutated."""
+
+    def test_our_own_stamp_format_parses(self) -> None:
+        """Pinned because the stamp is an ISO timestamp full of colons and the parser
+        splits on the first one. It works because the writer emits ``started : <iso>``
+        with a space before the colon — a formatting change would silently break dating
+        and every marker would read as undatable."""
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        from datetime import UTC, datetime
+
+        import mutate
+
+        line = f"started : {datetime.now(UTC).isoformat(timespec='seconds')}"
+        age = mutate.marker_age(line)
+        assert age is not None
+        assert age.total_seconds() < 60
+
+    def test_an_undatable_marker_is_not_treated_as_stale(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import mutate
+
+        assert mutate.marker_age("no start line here") is None
+
+    def test_a_recent_marker_warns_about_a_concurrent_sweep(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        from datetime import UTC, datetime, timedelta
+
+        import mutate
+
+        recent = datetime.now(UTC) - timedelta(minutes=2)
+        age = mutate.marker_age(f"started : {recent.isoformat(timespec='seconds')}")
+        assert age is not None and age < mutate.STALE_MARKER_AFTER
+
+    def test_an_old_marker_is_past_the_abandoned_threshold(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        from datetime import UTC, datetime, timedelta
+
+        import mutate
+
+        old = datetime.now(UTC) - timedelta(hours=3)
+        age = mutate.marker_age(f"started : {old.isoformat(timespec='seconds')}")
+        assert age is not None and age > mutate.STALE_MARKER_AFTER
+
+
+class TestPytestSeesTheMarker:
+    """The compensating channel for gitignoring the marker: pytest's own report header,
+    which fires on the path a reader actually takes."""
+
+    def test_report_header_is_silent_when_no_sweep_is_running(self) -> None:
+        from tests.conftest import pytest_report_header
+
+        assert not MARKER.exists()
+        assert pytest_report_header() is None
+
+    def test_report_header_shouts_when_a_marker_exists(self) -> None:
+        from tests.conftest import pytest_report_header
+
+        MARKER.write_text("current : some-mutation [a/b.py]\n", encoding="utf-8")
+        try:
+            header = pytest_report_header()
+            assert header is not None
+            assert "MUTATION SWEEP IS RUNNING" in header
+            assert "NOT regressions" in header
+            assert "some-mutation" in header
+        finally:
+            MARKER.unlink(missing_ok=True)

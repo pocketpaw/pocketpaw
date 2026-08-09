@@ -11,6 +11,7 @@ YAMLs on a dev machine can't leak into test registries.
 import asyncio
 import os
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -23,6 +24,44 @@ from pocketpaw.security.audit import AuditLogger
 # we relax the check so Settings() instantiates cleanly. Tests that need the
 # strict behaviour monkeypatch POCKETPAW_ALLOW_INTERNAL_URLS=false themselves.
 os.environ.setdefault("POCKETPAW_ALLOW_INTERNAL_URLS", "true")
+
+
+def pytest_report_header() -> str | None:
+    """Say so, loudly, when a mutation sweep is running in this worktree.
+
+    Added 2026-08-09 after this cost real time twice in one day. ``scripts/mutate.py``
+    applies each mutation IN PLACE, so while one is live the tree genuinely contains
+    broken code and any test run against it fails for a reason that looks exactly like a
+    regression. It happened to a reviewer, and then to me while verifying the fix.
+
+    This hook is the reader's ACTUAL path — someone investigating a failure runs the
+    suite; they do not necessarily run ``git status``. So the warning belongs in pytest's
+    own header, where it is impossible to miss and where it still works with the marker
+    gitignored.
+
+    A header, deliberately, not a hard failure: a sweep runs the suite itself, over and
+    over, and erroring out would make the tool unable to do its job.
+    """
+    marker = Path(__file__).resolve().parents[1] / ".mutation-sweep-active"
+    if not marker.exists():
+        return None
+    current = ""
+    try:
+        for line in marker.read_text(encoding="utf-8").splitlines():
+            if line.startswith("current"):
+                current = line.partition(":")[2].strip()
+                break
+    except OSError:  # pragma: no cover - best effort
+        pass
+    return (
+        "\n"
+        "  ****************************************************************\n"
+        "  *  A MUTATION SWEEP IS RUNNING IN THIS WORKTREE.               *\n"
+        "  *  Failures below are EXPECTED and are NOT regressions.        *\n"
+        "  *  Re-run once .mutation-sweep-active is gone.                 *\n"
+        "  ****************************************************************\n"
+        f"  currently mutated: {current or '(unknown)'}\n"
+    )
 
 
 @pytest.fixture(scope="session", autouse=True)

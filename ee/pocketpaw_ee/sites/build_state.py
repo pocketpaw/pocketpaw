@@ -28,10 +28,30 @@
 # WHY ``queued`` IS A SEPARATE STATE FROM ``building``: without it, a publish waiting
 # behind the concurrency cap looks identical to one that is stuck, and the cap converts
 # a crash into a support ticket. This is the state that makes a cap safe to turn on.
+#
+# ┌───────────────────────────────────────────────────────────────────────────────────┐
+# │ ADDING A NEW IN-FLIGHT STATE HAS A DEPLOY-ORDERING CONSTRAINT.                     │
+# └───────────────────────────────────────────────────────────────────────────────────┘
+#
+# The two halves of this feature resolve an UNKNOWN status in opposite directions, and
+# both are right on their own axis:
+#
+#   * the wire (``SiteResponse``) tells clients to treat an unrecognised status as
+#     IN-PROGRESS, so growing the vocabulary never shows a user a spurious error;
+#   * ``should_enqueue`` here treats an unrecognised status as TERMINAL and enqueues,
+#     because a redundant build costs one sandbox while a stuck guard costs the site
+#     every future publish.
+#
+# The consequence: a new in-flight state must be present in ``IN_FLIGHT_STATUSES`` on
+# EVERY READER before any writer is allowed to emit it. Get that backwards during a
+# rolling deploy and an old reader sees a new writer's in-flight row as terminal and
+# starts a second sandbox on top of a live build — two bills and two artifacts racing to
+# deploy, which is precisely the case this guard exists to prevent. Deploy readers first,
+# writers second.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 #: none     — never built.
 #: queued   — enqueued, no sandbox yet. Waiting on the concurrency cap.
@@ -41,10 +61,16 @@ from typing import Any, Literal
 BuildStatus = Literal["none", "queued", "building", "built", "failed"]
 
 #: The states a build can be in while still in flight. Anything else is terminal, and a
-#: terminal row never blocks a new publish.
+#: terminal row never blocks a new publish. This is the SOLE authority — ``should_enqueue``
+#: gates on it directly.
 IN_FLIGHT_STATUSES: frozenset[str] = frozenset({"queued", "building"})
 
-TERMINAL_STATUSES: frozenset[str] = frozenset({"none", "built", "failed"})
+#: DERIVED, never hand-listed. Written out by hand it was decorative and nothing read it,
+#: which made it a latent lie: add a state to ``BuildStatus`` and forget one of the two
+#: sets and the exported constant starts misdescribing the machine. Deriving makes them
+#: impossible to desync, and the subtraction fails loudly if a state is ever in
+#: IN_FLIGHT but missing from the Literal.
+TERMINAL_STATUSES: frozenset[str] = frozenset(get_args(BuildStatus)) - IN_FLIGHT_STATUSES
 
 #: Added to the build timeout to get the staleness window. Covers the parts of a build
 #: attempt that sit OUTSIDE the in-sandbox timeout — sandbox create, upload, artifact
