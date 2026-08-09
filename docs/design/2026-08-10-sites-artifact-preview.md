@@ -2,7 +2,12 @@
      BUILT STATIC ARTIFACT, with no runtime. Written 2026-08-10 alongside
      ee/pocketpaw_ee/sites/artifact_preview.py. Records what the static path covers,
      what it does not, why the in-browser Node runtime is parked rather than solved,
-     and the licence trap that must not be repeated. -->
+     and the licence trap that must not be repeated.
+     Revised 2026-08-10, same day, for two things that landed after the first draft:
+     the captain's ruling that Daytona is a BUILD host only (so dev_server.py stays and
+     the footprint question is unanswered rather than solved), and path traversal, which
+     the original brief omitted and which nothing else in the program covers -- SG-11's
+     checklist does not include it. -->
 
 # Previewing a built site artifact
 
@@ -88,6 +93,45 @@ like both measured artifacts (4 entries and 24 entries with a worker) rather tha
 because a preview that only ever saw react's shape would pass while being wrong about
 svelte's.
 
+### Path traversal, at both ends
+
+A static file server over an extracted archive has two traversal surfaces, not one, and
+both are guarded.
+
+**At extract time.** A member named `../../etc/passwd`, or an absolute path, a drive
+letter, a backslash, or a symlink, escapes when it is written, regardless of how careful
+the request side is. `tarfile` has historically been unsafe by default here, so nothing in
+this module calls `extractall`: members are written one at a time after their names are
+validated, and archive permissions are discarded so nothing can arrive executable. Links
+are refused rather than followed, hardlinks included — a hardlink to a member that *is* in
+the archive extracts to real content, so without a member-type check it would be written
+like any other file.
+
+**At request time.** The path is percent-decoded first (`..%2f..%2f` only looks safe
+before decoding), validated segment by segment, and then — the part that matters —
+resolved and compared against the resolved root. A prefix check on the raw string is
+defeated by encoding and, more importantly, by a symlink, which no amount of string
+inspection can see. Both sides are resolved, because the root itself can sit under a link:
+a temp dir on macOS does (`/tmp` → `/private/tmp`), and comparing a resolved target
+against an unresolved root would refuse every legitimate request there.
+
+Two details worth writing down.
+
+The parser and the containment check return **different reasons** (`unsafe_path` versus
+`escaped_root`) for the same 404. That is not cosmetic. The first version of the traversal
+tests asserted only the status, and a mutation that disabled the parser's `..` check still
+passed, because containment refused the same request afterwards. The suite would have
+shipped a broken parser guard. Asserting the specific reason is what makes each layer
+independently provable.
+
+And the NUL-byte case landed somewhere unexpected. A NUL in a member name **cannot ride a
+tar archive at all** — the format's name field is NUL-terminated, so writing a member
+called `./safe.html\0/../../escaped.txt` and reading the archive back yields
+`./safe.html`; the tail is gone before any of our code sees it. The guard is kept because
+refusing a NUL is a property of a name parser rather than of tar, but it is asserted
+against the parser directly. A test that packed such a tarball would have looked like
+proof and been none.
+
 ### Publish does not depend on preview
 
 Demonstrated by test rather than asserted here. A local deploy is served, the preview is
@@ -145,15 +189,37 @@ previews would have to opt into a fallback explicitly.
 **No directory listings.** A directory with no `index.html` is a 404. A listing would hand
 out the build tree's shape to anyone holding the URL.
 
-## Live-edit preview is parked, not solved
+## Live-edit preview is parked, not solved — and `dev_server.py` stays
 
-The one case this does not replace is a preview that reflects edits without a rebuild —
-hot module reload against a running dev server. That needs a Node runtime somewhere. Today
-it is `dev_server.py`, a Vite process on the box. Moving it into the browser is what
-WebContainer would be for, and that decision is blocked on a question nobody has asked
-yet.
+The one case this does not replace is a preview that reflects edits without a rebuild:
+hot module reload against a running dev server. That needs a Node runtime somewhere, and
+right now the only place it can be is the box.
 
-**The blocker is procurement, not engineering.** A commercial WebContainer plan carries a
+**`dev_server.py` stays. It is not being retired, and nothing here proposes retiring it.**
+The original slice promised a verdict that would gate its retirement; that retirement is
+off the table. Two independent doors closed. Daytona is a **build host only** — the captain
+ruled it cannot host a dev environment, and the ruling is structurally forced rather than a
+preference: a dev server is long-lived by definition, while the Daytona lane makes every
+sandbox ephemeral, strict-timeout and self-deleting in a `finally`. Hosting a dev env there
+means either abandoning the self-delete rule, which reinstates the `auto_stop_interval`
+billing landmine that rule exists to kill, or a dev server that vanishes mid-edit. No
+configuration is both. And WebContainer, the other candidate, is parked on procurement
+(below). With both closed, the on-box Vite process is the only live editing path, and it is
+load-bearing.
+
+**What moved and what did not.** *Viewing* a built site moved off the box — that is what
+this slice did, and it is real. *Editing* did not move at all. Keeping `dev_server.py` is
+the status quo rather than a regression, and edits are already fast: P2a replaced per-edit
+rebuilds with HMR, so a hot reload is milliseconds.
+
+What stays on the box is the **footprint**. Live editing means N long-lived Vite processes
+plus N `node_modules` trees on a 4-CPU / 6G api container, at 100–200 users per tenant.
+Moving that to the client was WebContainer's entire value, so **that question is now
+unanswered, not solved** — and it is a capacity question, not a latency one. Anyone reading
+this as "preview cost left the box" has it right for viewing and wrong for the half that
+actually constrains scaling.
+
+**The WebContainer blocker is procurement, not engineering.** A commercial plan carries a
 session cap. The case that matters here is sessions booted by tenants' own end visitors
 rather than by our authenticated seats, and that is exactly the kind vendors price
 separately. Until someone asks StackBlitz and gets an answer in writing, in-tab live-edit
@@ -166,15 +232,23 @@ permission to ship — not in code, not in a comment, not in a doc, not in a PR 
 not in a customer conversation. Reading the manifest as a licence for the service is the
 specific mistake this paragraph exists to prevent.
 
+**There is no server-side preview fallback, of any kind.** The earlier spec routed
+"in-tab WebContainer when the project qualifies, Daytona VM otherwise". The VM half is
+gone with the ruling, and nothing in this slice reintroduces it: the preview path contains
+no Daytona call and no VM concept. Daytona appears in this subsystem only as the place the
+artifact was *built*, before it arrived.
+
 ## Verification
 
 Unit rules in `tests/ee/sites/test_artifact_preview.py`; HTTP behaviour and the
 publish-isolation proof in `tests/ee/sites/test_artifact_preview_server.py`. Mutation plan
-at `tests/mutations/sites_artifact_preview.json`, covering the refusals, both traversal
-guards, the link-member guard, the content-type table, the size ceilings, the disjoint
-roots, and the two failure-containment paths.
+at `tests/mutations/sites_artifact_preview.json` — 27 mutations, all caught.
 
-One guard is deliberately not mutation-covered. The post-join containment check in
-`resolve` is unreachable while the path parser is correct — every way a joined path can
-leave the root is refused before the join. It stays because "the parser is correct" is an
-assumption, and the check costs one stat.
+Every traversal guard has its own mutation, deliberately one per guard rather than one per
+condition: a combined `if a or b or c` reads as verified when only one of the three is, so
+each refusal is a separate statement that can be removed on its own and watched to break
+exactly one test. That covers the `..`, absolute-path, drive-letter, backslash and NUL
+checks on both the member-name and request-path sides, the link-member refusal, and the
+post-join containment check. The containment check is exercised by a real symlink planted
+inside a preview tree; that test skips only where the OS refuses to create symlinks, which
+is worth knowing because on such a platform its mutation would escape rather than fail.

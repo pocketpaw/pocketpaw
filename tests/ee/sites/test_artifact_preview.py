@@ -13,11 +13,19 @@
 # Three things here are security assertions rather than behaviour checks, and should be
 # read as such: `_worker.js` never lands on disk and never comes back over the wire (it
 # has carried a per-site signed key), a tarball member cannot write outside the preview
-# root, and a request path cannot read outside it — including percent-encoded.
+# root, and a request path cannot read outside it.
+#
+# Updated 2026-08-10: path traversal covered end to end after the lead flagged it as
+# missing from the brief. Both surfaces, since a static server over an extracted archive
+# has two: MEMBER names at extract time (`..`, absolute, drive letter, backslash, NUL,
+# symlink, hardlink) and REQUEST paths at read time (the same, plus percent-encoded
+# forms, plus a symlink planted inside the tree — the case no string check can see, and
+# the reason containment runs on the RESOLVED path).
 
 from __future__ import annotations
 
 import io
+import os
 import tarfile
 
 import pytest
@@ -277,6 +285,53 @@ def test_a_backslash_member_is_refused():
     assert snap.unpacked.rejected == ("..\\..\\escaped.txt",)
 
 
+def test_a_nul_byte_member_name_is_refused():
+    """Asserted against the name parser directly, and here is why that is the honest
+    place for it: the tar format's name field is NUL-TERMINATED, so an embedded NUL
+    cannot ride an archive at all. Verified — writing a member called
+    ``./safe.html\\x00/../../escaped.txt`` and reading the archive back yields
+    ``./safe.html``; the tail is gone before any of our code sees it.
+
+    So this guard is unreachable through a tarball, and a test that packed one would
+    prove nothing while looking like it proved something. It is kept because
+    ``_normalized_member_path`` is a name parser and refusing a NUL is a property of the
+    parser, not of tar — a NUL truncates the name for any C-level consumer, which is how
+    a name passes a suffix check and opens a different file."""
+    assert ap._normalized_member_path("./safe.html\x00/../../escaped.txt") is None
+    assert ap._normalized_member_path("./a\x00b") is None
+    assert ap._normalized_member_path("./safe.html") == ("safe.html",)
+
+
+def test_a_drive_qualified_member_name_is_refused():
+    """Asserted at the parser rather than by packing one, deliberately: with the guard
+    removed, ``C:/evil.txt`` joins to an ANCHORED path and the unpacker would attempt a
+    real write to the drive root. A test that has to succeed at writing outside the
+    sandbox to prove a guard works is a test that damages the machine when the guard
+    breaks."""
+    assert ap._normalized_member_path("C:/evil.txt") is None
+    assert ap._normalized_member_path("d:/evil.txt") is None
+    assert ap._normalized_member_path("./assets/app.js") == ("assets", "app.js")
+
+
+def test_a_nul_truncated_member_still_cannot_escape(_preview_home):
+    """The consequence of the truncation above: what actually lands is the truncated
+    name, which must still be a safe single segment inside the root."""
+    snap = ap.store_artifact(
+        "eve6",
+        _tar(
+            {
+                "./index.html": b"<title>x</title>ok",
+                "./safe.html\x00/../../escaped.txt": b"pwned",
+            }
+        ),
+        engine="react",
+    )
+
+    assert (snap.root / "safe.html").read_bytes() == b"pwned"
+    assert not (_preview_home.parent / "escaped.txt").exists()
+    assert not (_preview_home / "escaped.txt").exists()
+
+
 def test_too_many_entries_is_refused_and_leaves_no_partial_tree(monkeypatch, _preview_home):
     monkeypatch.setattr(ap, "MAX_ENTRIES", 2)
 
@@ -313,6 +368,79 @@ def test_percent_encoded_traversal_cannot_read_outside_the_root(_preview_home):
         got = ap.resolve("eve4", path)
         assert got.status == 404, path
         assert b"tenant secret" not in got.body, path
+        # `unsafe_path`, so the PARSER refused it. Asserting only the 404 was not
+        # enough: with the parser's `..` check disabled, the post-join containment
+        # check refuses the same request with `escaped_root` and a status-only
+        # assertion still passes. That is a mutation this suite would have shipped.
+        assert got.reason == "unsafe_path", path
+
+
+def test_a_nul_byte_in_a_request_path_is_refused(_preview_home):
+    """A NUL can make an extension or suffix check agree with a different file than the
+    one that ends up opened."""
+    ap.store_artifact("eve7", _tar(_REACT_ARTIFACT), engine="react")
+    (_preview_home / "secret.txt").write_bytes(b"tenant secret")
+
+    for path in ("/index.html\x00.png", "/\x00../secret.txt", "/index.html%00.png"):
+        got = ap.resolve("eve7", path)
+        assert got.status == 404, path
+        assert got.reason == "unsafe_path", path
+        assert b"tenant secret" not in got.body, path
+
+
+def test_a_backslash_in_a_request_path_is_refused():
+    ap.store_artifact("eve8", _tar(_REACT_ARTIFACT), engine="react")
+
+    for path in ("\\index.html", "/..\\..\\secret.txt", "/%5c..%5csecret.txt"):
+        got = ap.resolve("eve8", path)
+        assert got.status == 404, path
+        assert got.reason == "unsafe_path", path
+
+
+def test_a_symlink_inside_the_tree_cannot_read_outside_it(tmp_path, _preview_home):
+    """The case a string check cannot see. Every segment here is innocent — no ``..``,
+    no encoding, no separator — and the path still leaves the root, because one segment
+    on disk is a link. Only comparing the RESOLVED path against the resolved root
+    refuses it.
+
+    A link cannot arrive via an artifact (link members are refused at unpack), so this
+    plants one directly. That is the point: the containment check is what holds when the
+    tree contains something the unpacker did not put there.
+    """
+    snap = ap.store_artifact("eve9", _tar(_REACT_ARTIFACT), engine="react")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_bytes(b"tenant secret")
+    try:
+        os.symlink(outside, snap.root / "shared", target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - platform-gated
+        pytest.skip(f"cannot create a symlink on this platform: {exc}")
+
+    got = ap.resolve("eve9", "/shared/secret.txt")
+    assert got.status == 404
+    # `escaped_root`, not `unsafe_path` — this refusal came from containment after the
+    # join, which is the only layer that can see a link. Asserting the specific reason is
+    # what stops a broken parser guard from looking verified because this check caught it.
+    assert got.reason == "escaped_root"
+    assert b"tenant secret" not in got.body
+
+
+def test_containment_resolves_both_sides(tmp_path):
+    """A root that itself sits under a link must still contain its own children —
+    otherwise the guard refuses every legitimate request on a platform whose temp dir
+    is a link (macOS: /tmp -> /private/tmp)."""
+    real_root = tmp_path / "real"
+    (real_root / "assets").mkdir(parents=True)
+    (real_root / "assets" / "app.js").write_bytes(b"x")
+    try:
+        os.symlink(real_root, tmp_path / "via-link", target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - platform-gated
+        pytest.skip(f"cannot create a symlink on this platform: {exc}")
+
+    linked_root = tmp_path / "via-link"
+    assert ap._contained(linked_root, linked_root / "assets" / "app.js") is not None
+    assert ap._contained(linked_root, linked_root) is not None
+    assert ap._contained(linked_root, tmp_path / "elsewhere.txt") is None
 
 
 def test_a_drive_qualified_request_path_cannot_read_outside_the_root(_preview_home):
@@ -330,6 +458,9 @@ def test_a_drive_qualified_request_path_cannot_read_outside_the_root(_preview_ho
         got = ap.resolve("eve5", path)
         assert got.status == 404, path
         assert b"tenant secret" not in got.body, path
+        # Refused by the parser, not merely contained after the join — same reason as
+        # in the `..` case above.
+        assert got.reason == "unsafe_path", path
 
 
 def test_an_unsafe_site_id_cannot_climb_out_of_the_preview_root():
