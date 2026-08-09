@@ -1,0 +1,37 @@
+[
+  {
+    "label": "bun is dropped from the sandbox image, so every source-lane build dies in-sandbox with a command-not-found buried in a build log",
+    "file": "ee/pocketpaw_ee/cloud/daytona/image.py",
+    "find": "            \"curl -fsSL https://bun.sh/install | BUN_INSTALL=/opt/bun bash\",\n",
+    "replace": "",
+    "tests": ["tests/cloud/test_daytona_image.py"]
+  },
+  {
+    "label": "the bun PATH symlink is dropped, so bun is installed but invisible to execute_command (which runs no login shell)",
+    "file": "ee/pocketpaw_ee/cloud/daytona/image.py",
+    "find": "            \"ln -sf /opt/bun/bin/bun /usr/local/bin/bun\",\n",
+    "replace": "",
+    "tests": ["tests/cloud/test_daytona_image.py"]
+  },
+  {
+    "label": "the image-build-time bun verification is dropped, so a broken install becomes one failed build per site instead of one failed image build",
+    "file": "ee/pocketpaw_ee/cloud/daytona/image.py",
+    "find": "            \"bun --version\",\n",
+    "replace": "",
+    "tests": ["tests/cloud/test_daytona_image.py"]
+  },
+  {
+    "label": "node is substituted away by bun, breaking the generated project's `node scripts/prune-client.mjs` build step and the vendored paw-sites CLI",
+    "file": "ee/pocketpaw_ee/cloud/daytona/image.py",
+    "find": "            \"curl -fsSL https://deb.nodesource.com/setup_20.x | bash -\",\n",
+    "replace": "",
+    "tests": ["tests/cloud/test_daytona_image.py"]
+  },
+  {
+    "label": "a blank DAYTONA_SANDBOX_IMAGE is treated as a real image reference instead of meaning 'use the prebuilt one'",
+    "file": "ee/pocketpaw_ee/cloud/daytona/image.py",
+    "find": "    if not val or val.lower() in (\"standard\", \"default\"):",
+    "replace": "    if val.lower() in (\"standard\", \"default\"):",
+    "tests": ["tests/cloud/test_daytona_image.py"]
+  }
+]
