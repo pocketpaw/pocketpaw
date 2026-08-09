@@ -24,12 +24,29 @@
 # act on. Deleting after the read costs exactly the same and keeps the stderr. The
 # auto-delete backstop still guarantees no sandbox outlives us if THIS process dies.
 #
-# INVARIANT — THIS LANE NEVER SNAPSHOTS THE SANDBOX. Not an oversight and not merely
-# unnecessary: the SR-3 decision (that a per-site signed key in the build inputs is an
-# acceptable, bounded exposure) rests on the key living only in an ephemeral container
-# that is then destroyed. A snapshot would persist it into blob storage and turn a
-# transient exposure into a durable one. If anyone later wants to cache node_modules
-# in a snapshot to cut install time, that decision has to be re-made first.
+# ┌───────────────────────────────────────────────────────────────────────────────────┐
+# │ INVARIANT — THIS LANE NEVER SNAPSHOTS THE SANDBOX.                                │
+# └───────────────────────────────────────────────────────────────────────────────────┘
+#
+# Load-bearing, and specifically load-bearing FOR SVELTE — not a general principle.
+#
+# A svelte project carries ``__CAPTURE_SIGNED_KEY__`` substituted into
+# ``src/routes/api/submit/+server.ts`` (verified 2026-08-09: it is the only file in a
+# generated svelte project containing it). So on the svelte track a per-site secret is
+# uploaded INTO the sandbox. React does not have this problem at all — it has no server
+# route, so no key ever enters its sandbox.
+#
+# The decision that this exposure is acceptable (SR-3) rests entirely on the key living
+# only in an ephemeral container that is then destroyed. A snapshot would persist it
+# into blob storage and convert a bounded, transient exposure into a durable one —
+# which is the exact case the condition was written to prevent (compare
+# ``websandbox/provision.py:51``, where a credential in a VM's git config persists into
+# snapshots).
+#
+# CACHING ``node_modules`` IN A SNAPSHOT IS THE OBVIOUS OPTIMISATION HERE, and it is
+# the thing that would silently undo the reasoning above. If you are reading this
+# because you were about to do that: the security decision has to be re-made first, not
+# inherited.
 from __future__ import annotations
 
 import logging

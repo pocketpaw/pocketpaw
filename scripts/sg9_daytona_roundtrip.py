@@ -10,12 +10,24 @@
 #
 # Usage (from the repo root, with DAYTONA_* in .env):
 #
-#     uv run python scripts/sg9_daytona_roundtrip.py <path-to-generated-react-project>
+#     uv run python scripts/sg9_daytona_roundtrip.py <project-dir> [engine] [out.tgz]
+#
+# ``out.tgz`` writes the extracted artifact to disk so it can be inspected — the point
+# of this slice is evidence, and "artifact_bytes > 0" is weaker evidence than a tarball
+# you can list.
+#
+# ``engine`` is react (default) or svelte. Both run bun install + Vite, and extraction
+# is parameterised on ``static_output_rel(engine)`` — react's ``dist`` and svelte's
+# ``.svelte-kit/cloudflare`` — so the build path is identical for both. What is NOT
+# identical is the DEPLOY shape: ``emits_server_worker()`` is False for react and True
+# for svelte, so svelte's output carries a ``_worker.js`` server entry that has to be
+# deployed as a Worker script rather than as static files. Deploy is out of scope here.
 #
 # The project directory should be REAL generator output — produce it with
-# ``materializeReact`` from paw-sites rather than hand-writing one, so the dependency
-# set and the build script are the ones production actually uses (notably the build
-# runs ``bun paw-prerender.mjs``, which is why bun is not optional).
+# ``materializeReact`` (react) or ``scaffoldProject`` + ``materializeSource`` (svelte)
+# from paw-sites rather than hand-writing one, so the dependency set and the build
+# script are the ones production actually uses (notably react's build runs
+# ``bun paw-prerender.mjs``, which is why bun is not optional).
 from __future__ import annotations
 
 import asyncio
@@ -37,7 +49,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 # Text extensions only: the generated react project is all source. A binary asset would
 # need bytes, and bulk_upload accepts them — this probe just does not need it.
-_SKIP_DIRS = {"node_modules", ".git", "dist", ".paw-ssr"}
+_SKIP_DIRS = {"node_modules", ".git", "dist", ".paw-ssr", ".svelte-kit"}
 
 #: Teardown is eventually consistent (see the verification block), so poll rather than
 #: check once. ~30s total is well past the few seconds observed in practice.
@@ -55,6 +67,30 @@ def collect(project: Path) -> dict[str, str | bytes]:
             continue
         files[rel] = path.read_text(encoding="utf-8")
     return files
+
+
+def _describe_artifact(blob: bytes) -> None:
+    """List what actually came back, and check the two things that matter.
+
+    ``node_modules`` absent is the include-list working (it is excluded by construction
+    because the output dir is a subdirectory, not by any filter). ``_worker.js`` present
+    is svelte's server entry — the shape difference react does not have, and the reason
+    svelte cannot be deployed as pure static assets.
+    """
+    import io
+    import tarfile
+
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
+        names = tar.getnames()
+    workers = [n for n in names if n.endswith("_worker.js")]
+    node_modules = [n for n in names if "node_modules" in n]
+    print(f"  entries: {len(names)}")
+    for name in sorted(names)[:12]:
+        print(f"    {name}")
+    if len(names) > 12:
+        print(f"    ... and {len(names) - 12} more")
+    print(f"  _worker.js       : {workers or 'absent (expected for react)'}")
+    print(f"  node_modules     : {len(node_modules)} entries (must be 0)")
 
 
 def load_env() -> None:
@@ -85,7 +121,11 @@ async def main() -> int:
         print(f"not a directory: {project}")
         return 2
 
-    timeout_seconds = int(os.environ.get("SG9_TIMEOUT_SECONDS", "900"))
+    engine = (sys.argv[2] if len(sys.argv) > 2 else "react").strip().lower()
+
+    from pocketpaw_ee.sites.daytona_build import resolve_build_timeout_seconds
+
+    timeout_seconds = resolve_build_timeout_seconds(engine)
 
     print("=== credentials ===")
     load_env()
@@ -106,19 +146,21 @@ async def main() -> int:
     # closed even when reporting blows up. The first run of this probe leaked one
     # because the close sat after a print that raised.
     try:
-        return await _run_and_report(client, files, timeout_seconds)
+        return await _run_and_report(client, files, timeout_seconds, engine)
     finally:
         await client.close()
 
 
-async def _run_and_report(client: Any, files: dict[str, str | bytes], timeout_seconds: int) -> int:
+async def _run_and_report(
+    client: Any, files: dict[str, str | bytes], timeout_seconds: int, engine: str
+) -> int:
     from pocketpaw_ee.sites.daytona_runner import run_build
 
     print(f"\n=== running (timeout {timeout_seconds}s) ===")
     try:
         result = await run_build(
             files,
-            engine="react",
+            engine=engine,
             timeout_seconds=timeout_seconds,
             client=client,
         )
@@ -137,6 +179,15 @@ async def _run_and_report(client: Any, files: dict[str, str | bytes], timeout_se
     if result.classification.stderr_tail:
         tail = result.classification.stderr_tail[-1500:]
         print(f"\n  --- stderr tail ---\n{tail}")
+
+    # Land the artifact somewhere inspectable. "artifact_bytes > 0" is weaker evidence
+    # than a tarball whose entries can be listed — for svelte in particular, the thing
+    # worth confirming is that ``_worker.js`` came through and ``node_modules`` did not.
+    out_path = sys.argv[3] if len(sys.argv) > 3 else None
+    if out_path and result.artifact:
+        Path(out_path).write_bytes(result.artifact)
+        print(f"\n  artifact written to {out_path}")
+        _describe_artifact(result.artifact)
 
     print("\n=== measured timings (seconds) ===")
     for k, v in result.timings.as_dict().items():
