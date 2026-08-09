@@ -46,9 +46,17 @@ the tests mid-sweep, saw a bun-PATH assertion fail, and reported it as a
 regression. It was this script, working correctly.
 
 So a sweep now leaves ``.mutation-sweep-active`` at the repo root for its
-duration, naming the plan, the PID and the mutation currently applied. It is
-removed by the same ``finally`` that restores the files, and a pre-existing
-marker is reported on the next start rather than silently overwritten.
+duration, naming the plan and the mutation currently applied. It is removed by
+the same ``finally`` that restores the files.
+
+AND A PRE-EXISTING MARKER REFUSES THE RUN, rather than warning and continuing.
+That is not caution for its own sake — continuing is the step that makes a
+crashed sweep's damage permanent. This script snapshots each file's CURRENT bytes
+as "the original", so if a previous run died with a file mutated, the next run
+adopts the mutation as the original and faithfully restores it forever, then
+deletes the marker that was the only evidence. Two files in this repo were found
+in exactly that state. ``--force`` is the escape hatch, for a marker whose files
+have already been verified clean.
 
 The marker IS gitignored — a sweep artifact must never be committable. Discovery
 therefore does not rely on ``git status``: ``tests/conftest.py`` prints a loud
@@ -110,9 +118,15 @@ def _write_marker(plan: Path, current: str | None) -> None:
         "later. Do not report them as regressions; re-run once this file is gone.",
         "",
         f"plan    : {plan}",
-        f"pid     : {os.getpid()}",
+        f"pid     : {os.getpid()}   (INFORMATIONAL ONLY - see below)",
         f"started : {datetime.now(UTC).isoformat(timespec='seconds')}",
         f"current : {current or '(validating the plan)'}",
+        "",
+        "THE PRESENCE OF THIS FILE IS THE AUTHORITATIVE SIGNAL. Do not decide",
+        '"live vs stranded" from the pid: checking it is racy (the process can exit',
+        "between reading this file and looking the pid up), and a dead-looking pid",
+        "on a live sweep is exactly the combination that gets someone to clobber a",
+        "running job. Treat this file as busy until it disappears.",
         "",
         "If this file outlived its sweep, a run crashed hard. Check `git status`/",
         "`git diff` for a file left mutated, then delete this file.",
@@ -159,37 +173,69 @@ def marker_age(text: str, *, now: datetime | None = None) -> timedelta | None:
     return None
 
 
-def _warn_if_stale_marker() -> None:
-    """Report a pre-existing marker instead of silently overwriting it.
+def _refuse_on_existing_marker(*, force: bool) -> None:
+    """REFUSE to run when a marker already exists, unless explicitly forced.
 
-    Silently reusing it would hide the one case where a file may STILL be mutated on
-    disk — the failure mode this script's restoration discipline exists to prevent — so
-    it is always loud. The AGE only changes which of two very different things it says:
+    This used to only warn, and warning is not enough — the failure it must stop is both
+    worse than a confusing test run and completely silent.
 
-    * recent (or undatable) -> another sweep may be running RIGHT NOW, in which case
-      this run would fight it over the same files and both results are worthless.
-    * older than ``STALE_MARKER_AFTER`` -> abandoned by a crashed run, safe to proceed,
-      but a file may have been left mutated so the diff is worth a look.
+    THE FAILURE, observed for real on 2026-08-09. Sweep A is killed hard, leaving a file
+    mutated and the marker behind. Sweep B starts and reads its ``originals`` snapshot
+    FROM DISK — which now contains A's mutation — runs, and on the way out faithfully
+    "restores" that mutation as though it were the original. B's cleanup then deletes the
+    marker, destroying the only remaining evidence. The mutation is now permanent,
+    indistinguishable from real code, and nothing will ever warn about it again. Two
+    files in this repo were found in exactly that state with no marker left to explain
+    them.
+
+    So a second run must not proceed on its own judgement: PROCEEDING IS THE STEP THAT
+    BAKES THE MUTATION IN. The operator has to look at the diff first — seconds of work,
+    and the only thing that distinguishes "a crashed sweep left junk" from "this is real
+    code".
+
+    Refusing also must not delete the marker: it is the only thing that explains a
+    mutated file, so destroying it here would reproduce the incident.
+
+    ``--force`` covers the one legitimate case — a marker whose files are already
+    verified clean — and is deliberately awkward to reach for.
     """
     if not MARKER_PATH.exists():
         return
     try:
-        age = marker_age(MARKER_PATH.read_text(encoding="utf-8"))
+        text = MARKER_PATH.read_text(encoding="utf-8")
     except OSError:
-        age = None
+        text = ""
+    age = marker_age(text)
+    age_note = (
+        f"{int(age.total_seconds() // 60)}m old"
+        if age is not None
+        else "undatable (treat as possibly live)"
+    )
+    live_or_dead = (
+        "A PREVIOUS SWEEP CRASHED without cleaning up."
+        if age is not None and age > STALE_MARKER_AFTER
+        else "ANOTHER SWEEP MAY BE RUNNING RIGHT NOW."
+    )
 
-    if age is not None and age > STALE_MARKER_AFTER:
-        print(
-            f"NOTE: {MARKER_PATH.name} is {int(age.total_seconds() // 60)}m old — a previous\n"
-            "      sweep crashed without cleaning up. Proceeding, but check `git diff`:\n"
-            "      that run may have left a file mutated.\n"
-        )
+    if force:
+        print(f"NOTE: proceeding past {MARKER_PATH.name} ({age_note}) because --force was given.\n")
         return
 
-    print(
-        f"WARNING: {MARKER_PATH.name} exists and is recent — ANOTHER SWEEP MAY BE RUNNING.\n"
-        "         Two sweeps mutating the same files produce meaningless results for both.\n"
-        "         Check for a live run before trusting anything this prints.\n"
+    raise SystemExit(
+        f"REFUSING TO RUN: {MARKER_PATH.name} already exists ({age_note}).\n"
+        f"  {live_or_dead}\n"
+        "\n"
+        "  Running now is not safe. This script snapshots each file's CURRENT bytes as\n"
+        "  the original, so if a crashed sweep left a file mutated, this run would treat\n"
+        "  that mutation as the original and restore it permanently.\n"
+        "\n"
+        "  Do this instead:\n"
+        "    1. git status / git diff     <- look for a file left mutated\n"
+        "    2. git checkout -- <file>   <- restore anything that is a mutation\n"
+        f"    3. rm {MARKER_PATH.name}\n"
+        "    4. re-run\n"
+        "\n"
+        "  If you have already verified the tree is clean, pass --force.\n"
     )
 
 
@@ -235,6 +281,11 @@ def main() -> int:
     parser.add_argument("--plan", required=True, type=Path, help="path to a JSON mutation plan")
     parser.add_argument("--only", default="", help="run only mutations whose label contains this")
     parser.add_argument("--list", action="store_true", help="print the plan's mutations and exit")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="run despite an existing sweep marker (only after verifying the tree is clean)",
+    )
     args = parser.parse_args()
 
     mutations = _load_plan(args.plan if args.plan.is_absolute() else REPO_ROOT / args.plan)
@@ -248,7 +299,7 @@ def main() -> int:
             print(f"  {m.label}  ->  {m.file.relative_to(REPO_ROOT)}")
         return 0
 
-    _warn_if_stale_marker()
+    _refuse_on_existing_marker(force=args.force)
     _write_marker(args.plan, None)
     # Registered IMMEDIATELY after the marker exists, and via atexit rather than the
     # try/finally below, because the upfront plan validation raises SystemExit — which
