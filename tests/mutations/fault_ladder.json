@@ -1,0 +1,173 @@
+[
+  {
+    "label": "the artifact is packed from the project root, so node_modules ships to the edge and a 30 KB site becomes a 500 MB upload",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    output_dir = f\"{project_dir.rstrip('/')}/{rel}\"",
+    "replace": "    output_dir = project_dir.rstrip('/')",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "the include-list becomes an exclude-list that forgets node_modules, which is the regression that silently ships the whole dependency tree",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    return (\n        f\"tar -czf {shlex.quote(dest_path)} -C {shlex.quote(output_dir)} \"\n        f\"--exclude={shlex.quote(_EXCLUDED_MEMBER)} .\"\n    )",
+    "replace": "    return (\n        f\"tar -czf {shlex.quote(dest_path)} --exclude=.git \"\n        f\"-C {shlex.quote(project_dir.rstrip('/'))} .\"\n    )",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "an engine whose output is the project root is packed anyway, so an html site's node_modules is uploaded with it",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    rel = static_output_rel(engine)\n    if rel == \".\":",
+    "replace": "    rel = static_output_rel(engine)\n    if False:",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a lost sandbox counts as deployable, so a publish ships from an artifact no build ever proved it produced",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        return self.outcome == \"completed_ok\"",
+    "replace": "        return self.outcome != \"build_failed\"",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "an OOM kill is read as a broken build, so a capacity problem is reported to the user as their fault",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "_INFRA_EXIT_CODES = frozenset({_EXIT_SIGKILL, _EXIT_SIGTERM})",
+    "replace": "_INFRA_EXIT_CODES: frozenset[int] = frozenset()",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "an in-sandbox timeout is reported as a build failure, so a slow site is told its code is broken",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        if code == _EXIT_TIMEOUT:",
+    "replace": "        if False and code == _EXIT_TIMEOUT:",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a build that left no proof is blamed on the user, which is the exact mis-report the sentinel design exists to prevent",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        return BuildClassification(\n            outcome=\"infra_lost\",\n            reason=\"no_sentinel_before_timeout\",\n            retryable=True,\n            blames_user=False,\n        )",
+    "replace": "        return BuildClassification(\n            outcome=\"build_failed\",\n            reason=\"no_sentinel_before_timeout\",\n            retryable=True,\n            blames_user=True,\n        )",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a sentinel written by an unknown future version is trusted anyway, so field meanings are guessed and a failed build can read as a success",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    if parsed.get(\"schema\") != SENTINEL_SCHEMA:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a missing exit code reads as a success, so a build that never ran deploys an empty site",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    if install_exit is None or build_exit is None:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "an unconfigured Daytona returns a result instead of raising, so a missing credential is reported to the user as a failed build",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "        if client is None:\n            raise RuntimeError(\n                \"Daytona is not configured (DAYTONA_API_URL / DAYTONA_API_KEY unset)\"\n            )",
+    "replace": "        if client is None:\n            raise RuntimeError(\"build unavailable\")",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a build row with no stamp reads as fresh, so a half-completed enqueue makes the site permanently unpublishable",
+    "file": "ee/pocketpaw_ee/sites/build_state.py",
+    "find": "    if stamp is None:\n        return True",
+    "replace": "    if stamp is None:\n        return False",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "the staleness window becomes a constant, so a healthy long build gets a second billed sandbox opened on top of it",
+    "file": "ee/pocketpaw_ee/sites/build_state.py",
+    "find": "    return timedelta(seconds=max(0, timeout_seconds)) + STALE_MARGIN",
+    "replace": "    return STALE_MARGIN",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a terminal failure keeps blocking new builds, so one bad build wedges the site until someone edits the database",
+    "file": "ee/pocketpaw_ee/sites/build_state.py",
+    "find": "    if status not in IN_FLIGHT_STATUSES:\n        return True",
+    "replace": "    if status == \"none\":\n        return True",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "a Cloudflare outage is swallowed, so the row flips to deployed and the dashboard claims a deploy that never uploaded",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        await cf.put_worker(script_name=site_id, bundle=bundle, bindings=bindings)",
+    "replace": "        try:\n            await cf.put_worker(script_name=site_id, bundle=bundle, bindings=bindings)\n        except Exception:\n            pass",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_deploy.py"
+    ]
+  },
+  {
+    "label": "a failed workers deploy is swallowed, so the site's URL is re-stamped for a deploy that never happened",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        url = await deploy_w(site_id, build.project_dir, engine=engine)",
+    "replace": "        try:\n            url = await deploy_w(site_id, build.project_dir, engine=engine)\n        except Exception:\n            url = \"\"",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_deploy.py"
+    ]
+  },
+  {
+    "label": "a failed thumbnail render fails the whole publish, so a site that is already live and serving reports an error to its owner",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    try:\n        from pocketpaw_ee.sites.screenshot import schedule_site_screenshot\n\n        schedule_site_screenshot(site)\n    except Exception:  # noqa: BLE001 \u2014 never fail a live publish over a screenshot",
+    "replace": "    if True:\n        from pocketpaw_ee.sites.screenshot import schedule_site_screenshot\n\n        schedule_site_screenshot(site)\n    if False:  # noqa: BLE001 \u2014 never fail a live publish over a screenshot",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_deploy.py"
+    ]
+  },
+  {
+    "label": "the node_modules exclusion is dropped, so a build that copies dependencies into its output ships them to the edge",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        f\"--exclude={shlex.quote(_EXCLUDED_MEMBER)} .\"",
+    "replace": "        \".\"",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "the exclusion pattern stops matching what tar actually records, so it silently protects nothing",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "_EXCLUDED_MEMBER = \"./node_modules\"",
+    "replace": "_EXCLUDED_MEMBER = \"./nodemodules\"",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  },
+  {
+    "label": "the exclusion is widened to a substring, so a site with a legitimately-named node_modules_report.html silently loses that file",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "_EXCLUDED_MEMBER = \"./node_modules\"",
+    "replace": "_EXCLUDED_MEMBER = \"*node_modules*\"",
+    "tests": [
+      "tests/ee/sites/test_fault_ladder_build.py"
+    ]
+  }
+]
