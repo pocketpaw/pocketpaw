@@ -276,9 +276,149 @@ def _run_tests(targets: list[str]) -> bool:
     return proc.returncode == 0
 
 
+def _marker_field(text: str, name: str) -> str:
+    """Value of a ``name : value`` line in the marker, or ``""``."""
+    for line in text.splitlines():
+        if line.startswith(name):
+            return line.partition(":")[2].strip()
+    return ""
+
+
+def _git(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args], capture_output=True, text=True, cwd=REPO_ROOT, encoding="utf-8"
+    )
+
+
+def restore_from_marker() -> int:
+    """``--restore``: undo what a hard-killed sweep left behind.
+
+    WHY THIS HAS TO EXIST AND CANNOT BE SOLVED IN-PROCESS. A hard kill bypasses both
+    cleanup paths BY CONSTRUCTION — the ``finally`` never runs and neither does the
+    ``atexit`` handler. An agent interrupt is a hard kill; one was observed on
+    2026-08-09, a second after a sweep started, leaving ``daytona_build.py`` carrying the
+    "timeout floor is dropped" mutation and the marker stranded. So in-place restore can
+    never be made crash-safe, and the durable protection can only ever be
+    DETECT-AND-RECOVER. The marker was already the detect half; this is the recover half.
+
+    Restores from GIT, never from an in-memory or on-disk copy — a copy is one more thing
+    that dies with the process, while ``git checkout --`` is idempotent and survives
+    anything.
+
+    REFUSES rather than guesses in the two cases where guessing is destructive:
+
+    * the marker looks LIVE — recovering a running sweep is worse than not recovering a
+      dead one, so the age logic is reused and the bias is toward "leave it alone";
+    * the file carries changes BEYOND the mutation — someone's real edits are mixed in,
+      and this cannot know which lines were theirs. Blowing them away to save three
+      manual steps is a bad trade, so it explains and stops.
+
+    Safe to run blind: no marker means nothing to do and exit 0.
+    """
+    if not MARKER_PATH.exists():
+        print("Nothing to restore: no sweep marker.")
+        return 0
+
+    try:
+        text = MARKER_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"Cannot read {MARKER_PATH.name}: {exc}")
+        return 1
+
+    age = marker_age(text)
+    if age is None or age <= STALE_MARKER_AFTER:
+        age_note = "undatable" if age is None else f"{int(age.total_seconds() // 60)}m old"
+        print(
+            f"REFUSING: {MARKER_PATH.name} looks LIVE ({age_note}).\n"
+            "  A sweep may be running right now, and restoring under a live sweep would\n"
+            "  fight it over the same file. Wait for the marker to disappear.\n"
+            f"  If you are certain it is abandoned, delete {MARKER_PATH.name} and re-run."
+        )
+        return 1
+
+    current = _marker_field(text, "current")
+    plan_field = _marker_field(text, "plan")
+    if not current or "[" not in current:
+        print(
+            f"Marker names no applied mutation (current: {current!r}).\n"
+            "  The sweep died before applying one, so nothing was mutated. Clearing."
+        )
+        _clear_marker()
+        return 0
+
+    label = current.split("[")[0].strip()
+    rel = current.split("[")[-1].rstrip("]").strip().replace("\\", "/")
+    target = REPO_ROOT / rel
+    print(f"Marker says the live mutation was:\n  {label}\n  in {rel}\n")
+
+    if not target.exists():
+        print(f"REFUSING: {rel} does not exist.")
+        return 1
+
+    head = _git("show", f"HEAD:{rel}")
+    if head.returncode != 0:
+        print(f"REFUSING: cannot read {rel} from HEAD ({head.stderr.strip()}).")
+        return 1
+    head_text = head.stdout
+    current_text = target.read_text(encoding="utf-8")
+
+    if current_text == head_text:
+        print(f"  {rel} already matches HEAD — nothing to restore.")
+        _clear_marker()
+        print(f"\nCleared {MARKER_PATH.name}. Re-run the plan to confirm the gate still fires.")
+        return 0
+
+    # Is the ONLY difference the mutation itself? Un-apply it and compare to HEAD. This is
+    # what distinguishes "sweep debris" from "someone's real edit", and it is exact rather
+    # than heuristic — no line counting, no diff parsing.
+    mutation = None
+    if plan_field:
+        plan_path = Path(plan_field)
+        plan_path = plan_path if plan_path.is_absolute() else REPO_ROOT / plan_path
+        try:
+            for raw in json.loads(plan_path.read_text(encoding="utf-8")):
+                if raw.get("label") == label:
+                    mutation = raw
+                    break
+        except (OSError, json.JSONDecodeError, TypeError):
+            mutation = None
+
+    if mutation is None:
+        print(
+            f"REFUSING: could not find the mutation {label!r} in plan {plan_field!r},\n"
+            f"  so there is no way to prove {rel}'s only change is the mutation.\n"
+            f"  Inspect it yourself: git diff -- {rel}"
+        )
+        return 1
+
+    unapplied = current_text.replace(mutation["replace"], mutation["find"], 1)
+    if unapplied != head_text:
+        print(
+            f"REFUSING: {rel} has changes BEYOND the mutation.\n"
+            "  Someone's real edits are mixed in with sweep debris, and this cannot tell\n"
+            "  which lines are theirs. Restoring would delete real work.\n"
+            f"  Do it by hand: git diff -- {rel}, keep what is yours, drop the mutation."
+        )
+        return 1
+
+    checkout = _git("checkout", "--", rel)
+    if checkout.returncode != 0:
+        print(f"REFUSING: git checkout failed ({checkout.stderr.strip()}).")
+        return 1
+
+    print(f"  RESTORED {rel} from HEAD (the mutation was its only change).")
+    _clear_marker()
+    print(
+        f"  CLEARED  {MARKER_PATH.name}\n"
+        "\nRe-run the plan now. A restore is not proof the gate still catches:\n"
+        f"  uv run python scripts/mutate.py --plan {plan_field}"
+    )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--plan", required=True, type=Path, help="path to a JSON mutation plan")
+    parser.add_argument("--plan", type=Path, help="path to a JSON mutation plan")
     parser.add_argument("--only", default="", help="run only mutations whose label contains this")
     parser.add_argument("--list", action="store_true", help="print the plan's mutations and exit")
     parser.add_argument(
@@ -286,7 +426,19 @@ def main() -> int:
         action="store_true",
         help="run despite an existing sweep marker (only after verifying the tree is clean)",
     )
+    parser.add_argument(
+        "--restore",
+        action="store_true",
+        help="undo what a hard-killed sweep left behind, then clear the marker",
+    )
     args = parser.parse_args()
+
+    # --restore reads the plan path out of the marker, so it needs no --plan. Checked
+    # here rather than with argparse groups so the error names the actual requirement.
+    if args.restore:
+        return restore_from_marker()
+    if args.plan is None:
+        parser.error("--plan is required (or use --restore)")
 
     mutations = _load_plan(args.plan if args.plan.is_absolute() else REPO_ROOT / args.plan)
     if args.only:

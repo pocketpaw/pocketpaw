@@ -320,3 +320,126 @@ class TestTheMarkerTellsReadersNotToTrustThePid:
             assert "racy" in text
         finally:
             MARKER.unlink(missing_ok=True)
+
+
+# --- --restore --------------------------------------------------------------------
+#
+# A hard kill bypasses BOTH cleanup paths by construction: the ``finally`` never runs and
+# neither does ``atexit``. An agent interrupt is a hard kill, and one on 2026-08-09 left
+# a source file carrying a mutation with the marker stranded. So in-place restore can
+# never be made crash-safe and the durable protection has to be detect-and-recover. The
+# marker was the detect half; ``--restore`` is the recover half.
+#
+# These use an inert TRACKED fixture rather than a real module: ``--restore`` recovers via
+# ``git checkout --``, so a tmp-dir file cannot exercise the path at all, and mutating a
+# module another agent owns to test recovery would be its own hazard.
+
+RESTORE_TARGET_REL = "tests/fixtures/mutate_restore_target.txt"
+RESTORE_PLAN_REL = "tests/mutations/_restore_fixture.json"
+_STALE_STAMP = "2026-08-09T01:00:00+00:00"
+_MUTATED = 'RESTORE_TARGET_SENTINEL = "mutated"'
+_ORIGINAL = 'RESTORE_TARGET_SENTINEL = "original"'
+
+
+def _write_marker_file(stamp: str, current: str) -> None:
+    MARKER.write_text(
+        f"plan    : {RESTORE_PLAN_REL}\nstarted : {stamp}\ncurrent : {current}\n",
+        encoding="utf-8",
+    )
+
+
+def _restore() -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(MUTATE), "--restore"],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+    )
+
+
+def _current_marker_line() -> str:
+    return f"flip the restore fixture sentinel  [{RESTORE_TARGET_REL}]"
+
+
+class TestRestoreRecoversFromAHardKill:
+    def _target(self) -> Path:
+        return REPO_ROOT / RESTORE_TARGET_REL
+
+    def _mutate_fixture(self) -> None:
+        t = self._target()
+        t.write_text(t.read_text(encoding="utf-8").replace(_ORIGINAL, _MUTATED), encoding="utf-8")
+
+    def teardown_method(self) -> None:
+        MARKER.unlink(missing_ok=True)
+        subprocess.run(["git", "checkout", "--", RESTORE_TARGET_REL], cwd=REPO_ROOT, check=False)
+
+    def test_no_marker_does_nothing_and_exits_zero(self) -> None:
+        """Safe to run blind — that is the point of a recovery command."""
+        MARKER.unlink(missing_ok=True)
+        proc = _restore()
+        assert proc.returncode == 0
+        assert "Nothing to restore" in proc.stdout
+
+    def test_restores_a_file_whose_only_change_is_the_mutation(self) -> None:
+        self._mutate_fixture()
+        _write_marker_file(_STALE_STAMP, _current_marker_line())
+        proc = _restore()
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert _ORIGINAL in self._target().read_text(encoding="utf-8")
+        assert not MARKER.exists()
+
+    def test_tells_the_operator_to_re_run_the_plan(self) -> None:
+        """A restore is not proof the gate still catches — the whole point of the tool is
+        that a passing-looking state can be a lie."""
+        self._mutate_fixture()
+        _write_marker_file(_STALE_STAMP, _current_marker_line())
+        proc = _restore()
+        assert "Re-run the plan" in proc.stdout
+        assert RESTORE_PLAN_REL in proc.stdout
+
+    def test_refuses_when_the_marker_looks_live(self) -> None:
+        """Recovering a RUNNING sweep is worse than not recovering a dead one, so the bias
+        is toward leaving it alone."""
+        from datetime import UTC, datetime
+
+        self._mutate_fixture()
+        _write_marker_file(datetime.now(UTC).isoformat(timespec="seconds"), _current_marker_line())
+        proc = _restore()
+        assert proc.returncode != 0
+        assert "looks LIVE" in proc.stdout
+        assert _MUTATED in self._target().read_text(encoding="utf-8"), "must not touch the file"
+        assert MARKER.exists(), "must not destroy the evidence"
+
+    def test_refuses_when_real_edits_are_mixed_in_with_the_mutation(self) -> None:
+        """The case where guessing is destructive. This cannot tell which lines are
+        someone's real work, so it stops rather than deleting them to save three manual
+        steps."""
+        self._mutate_fixture()
+        target = self._target()
+        target.write_text(
+            target.read_text(encoding="utf-8") + "# a real edit that must survive\n",
+            encoding="utf-8",
+        )
+        _write_marker_file(_STALE_STAMP, _current_marker_line())
+        proc = _restore()
+        assert proc.returncode != 0
+        assert "BEYOND the mutation" in proc.stdout
+        body = target.read_text(encoding="utf-8")
+        assert "# a real edit that must survive" in body
+        assert MARKER.exists()
+
+    def test_clears_a_stale_marker_when_the_file_is_already_clean(self) -> None:
+        """A crash between restoring the file and clearing the marker leaves exactly this
+        state, and it must resolve to "nothing to do" rather than an error."""
+        _write_marker_file(_STALE_STAMP, _current_marker_line())
+        proc = _restore()
+        assert proc.returncode == 0
+        assert "already matches HEAD" in proc.stdout
+        assert not MARKER.exists()
+
+    def test_clears_a_marker_that_died_before_applying_a_mutation(self) -> None:
+        _write_marker_file(_STALE_STAMP, "(validating the plan)")
+        proc = _restore()
+        assert proc.returncode == 0
+        assert "no applied mutation" in proc.stdout
+        assert not MARKER.exists()
