@@ -84,7 +84,15 @@ class SiteTokens:
     capture_api_base: str = ""
     signed_key: str = ""
     d1_database_id: str = ""
-    csr: bool = False
+    # Defaults to True to match production: `sites_keep_client_bundle_default` is
+    # True (ee/pocketpaw_ee/cloud/models/pocket.py:53), so csr=true is the NORM
+    # and widgets hydrate. An earlier draft of this harness defaulted to False,
+    # reasoning from the pre-2026-08-08 static-only world that
+    # `feat/sites-js-by-default` replaced. `staticSafe` now governs how the page
+    # looks BEFORE hydration, not whether a widget functions — a quality bar, not
+    # a functionality blocker. SG-1 renders server-side either way; the flag is
+    # here so no later slice inherits the stale assumption from this default.
+    csr: bool = True
     form_action: str = "/api/submit"
 
     def as_dict(self) -> dict[str, Any]:
@@ -297,11 +305,14 @@ class _BaseRenderer:
         manifest = BundleManifest(
             entry_html=ENTRY_HTML_NAME,
             asset_paths=tuple(sorted(self._assets)),
-            # csr=False is the static path: prerendered HTML, zero client JS, and
-            # the lead form POSTs natively. A worker is needed only to accept that
-            # POST — which is a capture concern, not a render concern, so it is
-            # driven by whether a capture endpoint was configured.
-            needs_server_worker=bool(tokens.capture_api_base) or tokens.csr,
+            # A worker is needed to ACCEPT THE FORM POST, which is a capture
+            # concern rather than a render one — so this is driven by whether a
+            # capture endpoint was configured, not by csr. Under csr=true (the
+            # production default) the page also ships client JS, and under
+            # csr=false the same form still POSTs natively with JS off; either way
+            # the POST needs a server, and a site with no capture endpoint needs
+            # none. Shipping the client bundle is SG-2's scope, not this slice's.
+            needs_server_worker=bool(tokens.capture_api_base),
             lane=LANE_RIPPLE,
             renderer_version=self.renderer_version,
             fallback_rung=RUNG_PREBUILT_SSR,

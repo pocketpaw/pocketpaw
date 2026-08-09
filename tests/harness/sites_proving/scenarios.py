@@ -74,7 +74,11 @@ A1_TOKENS = SiteTokens(
     capture_api_base="https://capture.example.test",
     signed_key="test-signing-key-not-a-real-secret",
     d1_database_id="00000000-0000-0000-0000-000000000000",
-    csr=False,
+    # csr=True matches production (`sites_keep_client_bundle_default` is True), so
+    # A1 proves the SERVER render of a site that WILL hydrate. SG-1 asserts only
+    # on server-rendered markup, so the flag does not change this scenario's
+    # output — it is set correctly so no later slice inherits a stale default.
+    csr=True,
     form_action="/api/submit",
 )
 
@@ -110,7 +114,7 @@ MALFORMED_SPECS: dict[str, Any] = {
     "ui-empty-container": {"ui": {"type": "container", "children": []}},
 }
 
-A8_TOKENS = SiteTokens(site_id="sg1-a8-malformed", title="Malformed", csr=False)
+A8_TOKENS = SiteTokens(site_id="sg1-a8-malformed", title="Malformed")
 
 
 class DeployReached(AssertionError):

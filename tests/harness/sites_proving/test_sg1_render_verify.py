@@ -124,6 +124,11 @@ def test_bundle_manifest_contract_is_complete(sidecar: Any) -> None:
 
     # A1's tokens configure a capture base, so the site needs a worker for the POST.
     assert manifest.needs_server_worker is True
+
+    # And it tracks the CAPTURE endpoint, not csr: a site with nowhere to POST
+    # needs no worker even under csr=true (the production default).
+    no_capture = sidecar.render(MINIMAL_HERO_SPEC, SiteTokens(site_id="nc", title="NC", csr=True))
+    assert no_capture.manifest.needs_server_worker is False
     # And the signed key must never leak into the recorded manifest.
     serialized = json.dumps(manifest.as_dict())
     assert A1_TOKENS.signed_key not in serialized
@@ -410,6 +415,55 @@ def test_no_installer_runs_during_a_render(report: Any, sidecar: Any) -> None:
     evidence["install_state_unchanged"] = True
     evidence["one_time_install_s_for_comparison"] = 15
     report.measure("no_installer_in_render_path", evidence)
+
+
+def test_motion_stays_out_of_the_server_bundle(report: Any, build_info: dict[str, Any]) -> None:
+    """motion.dev must never be bundled into the SSR artifact.
+
+    ripple lazy-loads it client-side from ONE allowlisted module
+    (``dist/motion/load-tier1.js``), whose dynamic ``import('motion')`` sits
+    behind a ``typeof window === 'undefined'`` guard because motion.dev touches
+    window/document at import time and would throw on an SSR pass. Keeping it
+    lazy is a hard constraint for SG-2.
+
+    This guard exists because the current bundle satisfies it BY LUCK, not by
+    design: this harness builds with ``ssr.noExternal: true``, which asks Vite to
+    bundle everything, and ``motion`` is absent only because the server-side
+    branch made ``loadAnimate``/``loadInView`` dead code that Rollup tree-shook
+    (neither symbol survives in entry.js). A future ripple change that reaches
+    motion from a live server path — or a build tweak that disables tree-shaking
+    — would silently hoist a window-touching library into the SSR bundle. The
+    assertion below fails loudly if that happens.
+    """
+    entry = (BUILD_DIR / "dist" / "entry.js").read_text(encoding="utf-8", errors="replace")
+
+    # motion.dev's own internals. Their absence is the fact under test; matching
+    # the bare word 'motion' would false-positive on ripple's motion SCHEMA
+    # (spec fields, data-ripple-motion attributes, tailwind's motion-safe:).
+    for symbol in ("motionValue", "createAnimationsFromSequence", "loadAnimate", "loadInView"):
+        assert symbol not in entry, (
+            f"motion.dev symbol {symbol!r} is in the SSR bundle — it must stay "
+            "lazy and client-only. Do NOT 'fix' a missing-motion warning by "
+            "hoisting it into the server bundle."
+        )
+
+    # And no static import of the package from any emitted server chunk.
+    for chunk in (BUILD_DIR / "dist").rglob("*.js"):
+        source = chunk.read_text(encoding="utf-8", errors="replace")
+        for forbidden in ('from "motion"', "from 'motion'", 'require("motion")'):
+            assert forbidden not in source, f"{chunk.name} statically imports motion"
+
+    report.measure(
+        "motion_stays_lazy",
+        {
+            "motion_symbols_in_ssr_bundle": [],
+            "motion_package_installed": (BUILD_DIR / "node_modules" / "motion").exists(),
+            "absent_because": (
+                "server-side window guard made the loader dead code; Rollup tree-shook it"
+            ),
+            "guard": "asserted, not assumed — noExternal:true would otherwise bundle it",
+        },
+    )
 
 
 def _lockfile_state() -> dict[str, Any]:
