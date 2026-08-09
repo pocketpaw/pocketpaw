@@ -47,10 +47,14 @@ regression. It was this script, working correctly.
 
 So a sweep now leaves ``.mutation-sweep-active`` at the repo root for its
 duration, naming the plan, the PID and the mutation currently applied. It is
-deliberately NOT gitignored: the point is that ``git status`` surfaces it, so a
-second reader has something to see. It is removed by the same ``finally`` that
-restores the files, and a leftover marker from a crashed run is reported on the
-next start rather than silently overwritten.
+removed by the same ``finally`` that restores the files, and a pre-existing
+marker is reported on the next start rather than silently overwritten.
+
+The marker IS gitignored — a sweep artifact must never be committable. Discovery
+therefore does not rely on ``git status``: ``tests/conftest.py`` prints a loud
+banner in pytest's own report header whenever the marker exists, which is the
+path a reader actually takes. Someone chasing a failure runs the suite; they may
+never run ``git status`` at all.
 
 PLAN FORMAT — a JSON list of objects:
 
@@ -78,14 +82,15 @@ import os
 import signal
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: Written for the duration of a sweep so a CONCURRENT reader can tell that a test
-#: failure is a live mutation rather than a regression. Not gitignored on purpose —
-#: ``git status`` surfacing it is the entire mechanism.
+#: failure is a live mutation rather than a regression. Gitignored (a sweep artifact
+#: must never be committable); the reader-facing signal is the pytest report-header
+#: banner in ``tests/conftest.py``, which fires on the path a reader actually takes.
 MARKER_PATH = REPO_ROOT / ".mutation-sweep-active"
 
 
@@ -126,19 +131,65 @@ def _clear_marker() -> None:
         pass
 
 
+#: Past this age a marker is treated as definitely abandoned rather than possibly live.
+#: A sweep is bounded by (mutations x test-suite time) and the plans in this repo finish
+#: in seconds to a couple of minutes, so an hour is already far outside any real run.
+#: Erring LONG is deliberate: calling a live sweep "stale" is the expensive mistake,
+#: because it tells a reader to trust results taken while a file was mutated. Calling an
+#: abandoned one "possibly live" only costs someone a wait.
+STALE_MARKER_AFTER = timedelta(hours=1)
+
+
+def marker_age(text: str, *, now: datetime | None = None) -> timedelta | None:
+    """Age of a marker from its ``started :`` line, or ``None`` if undatable.
+
+    Undatable reads as ``None`` and callers treat that as POSSIBLY LIVE, not as stale —
+    a marker we cannot date is exactly when we should be most cautious.
+    """
+    for line in text.splitlines():
+        if line.startswith("started"):
+            _, _, stamp = line.partition(":")
+            try:
+                started = datetime.fromisoformat(stamp.strip())
+            except ValueError:
+                return None
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            return (now or datetime.now(UTC)) - started
+    return None
+
+
 def _warn_if_stale_marker() -> None:
-    """Report a marker left behind by a crashed run instead of overwriting it.
+    """Report a pre-existing marker instead of silently overwriting it.
 
     Silently reusing it would hide the one case where a file may STILL be mutated on
-    disk — which is the failure mode this script's restoration discipline exists to
-    prevent, so it must be loud.
+    disk — the failure mode this script's restoration discipline exists to prevent — so
+    it is always loud. The AGE only changes which of two very different things it says:
+
+    * recent (or undatable) -> another sweep may be running RIGHT NOW, in which case
+      this run would fight it over the same files and both results are worthless.
+    * older than ``STALE_MARKER_AFTER`` -> abandoned by a crashed run, safe to proceed,
+      but a file may have been left mutated so the diff is worth a look.
     """
     if not MARKER_PATH.exists():
         return
+    try:
+        age = marker_age(MARKER_PATH.read_text(encoding="utf-8"))
+    except OSError:
+        age = None
+
+    if age is not None and age > STALE_MARKER_AFTER:
+        print(
+            f"NOTE: {MARKER_PATH.name} is {int(age.total_seconds() // 60)}m old — a previous\n"
+            "      sweep crashed without cleaning up. Proceeding, but check `git diff`:\n"
+            "      that run may have left a file mutated.\n"
+        )
+        return
+
     print(
-        f"WARNING: {MARKER_PATH.name} already exists — a previous sweep did not clean up.\n"
-        "         A file may still be mutated on disk. Check `git diff` before trusting\n"
-        "         this run's results.\n"
+        f"WARNING: {MARKER_PATH.name} exists and is recent — ANOTHER SWEEP MAY BE RUNNING.\n"
+        "         Two sweeps mutating the same files produce meaningless results for both.\n"
+        "         Check for a live run before trusting anything this prints.\n"
     )
 
 

@@ -99,3 +99,9 @@ output.txt
 
 # Load-test artifacts (scripts/loadtest)
 out/
+
+# scripts/mutate.py writes this while a sweep is live so a concurrent reader
+# knows a test failure is a deliberate mutation, not a regression. Ignored because
+# a sweep artifact must never be committable; discovery is via pytest's report
+# header (tests/conftest.py), which is the path a reader actually takes anyway.
+.mutation-sweep-active
