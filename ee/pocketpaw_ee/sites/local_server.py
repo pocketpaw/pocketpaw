@@ -76,12 +76,16 @@ from pocketpaw_ee.sites.engines import resolve_static_output_rel
 
 logger = logging.getLogger(__name__)
 
-# The deployable static-output dir, relative to the project dir, is resolved per
-# engine via ``static_output_rel`` (HE-4): ripple/svelte serve the adapter-cloudflare
-# output (``.svelte-kit/cloudflare``), html serves the raw static tree at the project
-# root (``.``). Without this an html site published in local mode looked for a
-# SvelteKit build that never exists and failed with MissingBuildOutput.
-# Retained for readability + back-compat; the ripple/svelte value.
+# The deployable static-output dir, relative to the project dir, is resolved off the
+# ARTIFACT via ``resolve_static_output_rel`` (HE-4 engine-awareness, SL-1 artifact-
+# awareness): ripple and DYNAMIC svelte serve the adapter-cloudflare output
+# (``.svelte-kit/cloudflare``), a STATIC svelte landing site serves ``build``, and html
+# serves the raw static tree at the project root (``.``). Without engine-awareness an
+# html site published in local mode looked for a SvelteKit build that never exists and
+# failed with MissingBuildOutput; without artifact-awareness a static svelte site does
+# the same, because after the adapter fork the engine name no longer determines the dir.
+# The constant below is retained for readability + back-compat; it is the
+# ripple/dynamic-svelte value only, and is NOT what the call sites read.
 _CLOUDFLARE_BUILD_REL = ".svelte-kit/cloudflare"
 
 
@@ -260,9 +264,11 @@ def deploy_local(site_id: str, project_dir: str, *, engine: str = "ripple") -> s
     """Persist the built site and return its served localhost URL. The one call
     the service makes in local mode in place of cf.put_worker().
 
-    ``engine`` selects the static-output dir (``static_output_rel``): ripple/svelte
-    serve ``.svelte-kit/cloudflare``; html serves the project root (its raw static
-    tree). The default (``"ripple"``) preserves the exact prior behaviour.
+    ``engine`` plus the artifact on disk select the static-output dir
+    (``resolve_static_output_rel``): ripple and DYNAMIC svelte serve
+    ``.svelte-kit/cloudflare``; a STATIC svelte landing site serves ``build``; html
+    serves the project root (its raw static tree). The default (``"ripple"``) preserves
+    the exact prior behaviour.
 
     Fails SOFT on a missing build dir (P1a): if the static output is not present (a
     build that produced no output), this does NOT raise a bare FileNotFoundError →
@@ -312,10 +318,15 @@ def serve_artifact_preview(site_id: str, artifact: bytes | None, *, engine: str)
     its failures, while a preview is a convenience and must not be able to fail a
     publish that already succeeded.
 
-    ``engine`` selects nothing about the LAYOUT — the lane tars from
-    ``static_output_rel(engine)``, so every artifact already arrives rooted at its
-    deployable root. It is passed through for the ``emits_server_worker`` cross-check
-    in ``store_artifact``."""
+    ``engine`` selects nothing about the LAYOUT — the lane tars from the resolved
+    static-output dir, so every artifact already arrives rooted at its deployable root.
+    It is passed through for the ``emits_server_worker`` cross-check in
+    ``store_artifact``.
+
+    SL-1 caveat for whoever wires the lane: that cross-check still asks the ENGINE
+    whether a worker is expected, and a static svelte site emits none. Once the lane
+    has a caller, it should ask ``resolve_emits_server_worker`` against the build dir
+    instead — the answer is a property of the artifact, not of the engine name."""
     try:
         snapshot = artifact_preview.safe_store_artifact(site_id, artifact, engine=engine)
         if snapshot is None:
