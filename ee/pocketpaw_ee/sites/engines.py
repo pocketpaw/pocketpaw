@@ -51,6 +51,21 @@ The five predicates split the engine question into orthogonal capabilities:
   entry that must be deployed as a Worker *script* (ripple, svelte), or is it a
   purely static asset tree deployed as an assets-only Worker (html, react)?
 
+SL-1 added ARTIFACT-RESOLVING siblings for the last two, and they are the ones to
+reach for when a generated project dir is in hand:
+
+* :func:`resolve_static_output_rel` — where did THIS build's output actually land?
+* :func:`resolve_emits_server_worker` — did THIS build actually emit a worker?
+
+Both exist because the svelte track no longer has one output shape. A static landing
+site builds on ``adapter-static`` (``build``, no worker); a dynamic/auth site builds
+on ``adapter-cloudflare`` (``.svelte-kit/cloudflare``, worker load-bearing). That is a
+property of the SITE, not of the engine string, so the name-only predicates above
+cannot answer it and the two resolvers read the artifact instead. They are also the
+only functions in this module that touch the filesystem — see
+:func:`resolve_static_output_rel` for why that exception is narrower than threading a
+flag through every caller would be.
+
 Unknown-engine policy — **fall back to ripple, never raise.** The codebase reads
 ``pocket.get("engine") or "ripple"`` in roughly a dozen places: an empty or missing
 engine has ALWAYS meant ripple, and these predicates sit on hot read/publish paths
@@ -64,6 +79,9 @@ validation should validate the engine string at their own entry point.
 """
 
 from __future__ import annotations
+
+import os
+from pathlib import Path
 
 _DEFAULT_ENGINE = "ripple"
 
@@ -105,6 +123,22 @@ _STATIC_OUTPUT_REL: dict[str, str] = {
     "html": ".",
     "react": "dist",
 }
+
+# SL-1 — where a STATIC svelte site's output lands instead. adapter-static's default.
+#
+# THIS IS WHY THE MAP ABOVE STOPPED BEING SUFFICIENT FOR SVELTE. The svelte track now
+# builds on one of two adapters, chosen by a property of the SITE (does it read a
+# per-tenant D1?) rather than of the engine:
+#
+#   * static landing site  → adapter-static      → ``build``, and NO ``_worker.js``
+#   * dynamic / auth site  → adapter-cloudflare  → ``.svelte-kit/cloudflare``
+#
+# adapter-cloudflare emitted a ``_worker.js`` Server shell for EVERY build, including
+# one with zero server routes, and that shell imports two files that sit OUTSIDE the
+# deployable dir — so a static site shipped a worker that could not start. Dropping
+# the adapter for static sites removed the worker; it also moved the output dir, which
+# is what these two resolvers exist to absorb.
+_SVELTE_STATIC_OUTPUT_REL = "build"
 
 
 def normalize_engine(engine: str | None) -> str:
@@ -181,5 +215,76 @@ def static_output_rel(engine: str | None) -> str:
       generator's prerender pass rewrites in place to carry the server-rendered
       markup. Explicitly NOT the SvelteKit path: nothing on the react track produces
       ``.svelte-kit/cloudflare``.
+
+    NOT AUTHORITATIVE FOR SVELTE SINCE SL-1. The svelte row is the DYNAMIC shape; a
+    static landing site writes ``build``. Whenever a generated project dir is in hand,
+    call :func:`resolve_static_output_rel` instead. This function stays for callers
+    that legitimately want the nominal per-engine value with no filesystem in scope
+    (config templates, docs, tests) and for the three engines that still have exactly
+    one output shape each.
     """
     return _STATIC_OUTPUT_REL[normalize_engine(engine)]
+
+
+def resolve_static_output_rel(project_dir: str | os.PathLike[str], engine: str | None) -> str:
+    """Where THIS build's deployable output actually landed, relative to ``project_dir``.
+
+    Prefer this over :func:`static_output_rel` wherever a generated project dir exists.
+    Since SL-1 the svelte track spans two adapters with two different output dirs, and
+    which one ran is not recoverable from the engine name — so this reads the answer
+    off disk rather than predicting it.
+
+    ONLY svelte is probed. ripple / html / react each still have exactly one output
+    shape, so they fall straight through to the nominal map and their behaviour is
+    byte-for-byte unchanged.
+
+    PROBE ORDER IS LOAD-BEARING: ``build`` first, so a project dir carrying a stale
+    ``.svelte-kit/cloudflare`` tree from a pre-SL-1 build cannot shadow what the
+    current build emitted. Reversing these two silently serves the old artifact.
+
+    When NEITHER exists we return the nominal map value rather than raising. The caller
+    is then reporting a missing build against a concrete path, which is a truer error
+    than ``engines.py`` refusing to decide — and it keeps this predicate total, the way
+    every other one in this module is.
+
+    NOTE: this and :func:`resolve_emits_server_worker` are the ONLY functions here that
+    touch the filesystem. Every other predicate is pure. That is a deliberate, narrow
+    exception: the fact being resolved is a property of an artifact on disk, and the
+    alternative — threading a static/dynamic flag through six call sites, two of which
+    reconstruct a path from a pocket id with no generate in scope — creates a second
+    source of truth that can disagree with the artifact. Reading the artifact cannot.
+    """
+    normalized = normalize_engine(engine)
+    if normalized != "svelte":
+        return _STATIC_OUTPUT_REL[normalized]
+    root = Path(project_dir)
+    for candidate in (_SVELTE_STATIC_OUTPUT_REL, _STATIC_OUTPUT_REL["svelte"]):
+        if (root / candidate).is_dir():
+            return candidate
+    return _STATIC_OUTPUT_REL["svelte"]
+
+
+def resolve_emits_server_worker(
+    project_dir: str | os.PathLike[str], engine: str | None
+) -> bool:
+    """Whether THIS build actually emitted a ``_worker.js`` server entry.
+
+    The deploy-shape half of the same SL-1 problem, and the half with teeth. A static
+    svelte site emits NO worker, so :func:`emits_server_worker` — which answers from
+    the engine name and therefore still says True — would have ``workers_deploy``
+    point ``main`` at a ``build/_worker.js`` that does not exist and pick the
+    server-entry ``.assetsignore`` over the assets-only one. That fails the deploy
+    outright, which is the exact failure mode RX-1 introduced this predicate to
+    prevent; SL-1 just reopened it from the other side.
+
+    A static svelte site must deploy assets-only, the same way react already does.
+
+    ``_worker.js`` is tested for EXISTENCE, not for being a file: adapter-cloudflare
+    emits it as a DIRECTORY (``_worker.js/chunks/0.js``) once an app is large enough,
+    so an ``is_file()`` check would report "no worker" for a big dynamic site and
+    silently deploy it assets-only — a working site replaced by a broken one.
+    """
+    if normalize_engine(engine) not in _SERVER_WORKER_ENGINES:
+        return False
+    out_dir = Path(project_dir) / resolve_static_output_rel(project_dir, engine)
+    return (out_dir / "_worker.js").exists()

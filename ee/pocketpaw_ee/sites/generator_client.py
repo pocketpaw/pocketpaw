@@ -1450,6 +1450,10 @@ class GeneratorClient:
         # rewrite). ripple + svelte (``needs_node_build`` True) fall through to the
         # unchanged generate → install → build_static → gate chain.
         if not needs_node_build(engine):
+            # Deliberately the NOMINAL predicate, not SL-1's resolver: this branch is
+            # reached only when ``not needs_node_build(engine)``, i.e. html, whose
+            # output dir is the project dir itself and has exactly one shape. The
+            # resolver would return the same value. Only svelte is ambiguous.
             static_dir = Path(project_dir, static_output_rel(engine))
             _html_static_smoke(static_dir)
             return BuildResult(project_dir=project_dir, ripple_version=gen.get("rippleVersion"))

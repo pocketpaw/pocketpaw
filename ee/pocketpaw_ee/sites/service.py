@@ -2404,7 +2404,7 @@ async def _embed_concierge_bar(
     """
     try:
         from pocketpaw_ee.paw_bar import embed
-        from pocketpaw_ee.sites.engines import static_output_rel
+        from pocketpaw_ee.sites.engines import resolve_static_output_rel
 
         doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
         concierge_enabled = True if doc is None else bool(doc.concierge_enabled)
@@ -2457,8 +2457,11 @@ async def _embed_concierge_bar(
             return
 
         # HE-4: where the deployable pages live differs by engine — the SvelteKit
-        # adapter output for ripple/svelte, the project dir itself for html.
-        root = Path(project_dir, static_output_rel(engine))
+        # adapter output for ripple and dynamic svelte, ``build`` for a STATIC svelte
+        # site (SL-1, adapter-static), the project dir itself for html. Resolved off
+        # the artifact because the svelte answer is a property of the site, not the
+        # engine name — and injecting into the wrong root silently embeds nothing.
+        root = Path(project_dir, resolve_static_output_rel(project_dir, engine))
         changed = embed.inject_into_tree(root, snippet)
         logger.info(
             "sites: embedded the concierge bar into %d page(s) of site %s",

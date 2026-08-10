@@ -67,7 +67,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from pocketpaw_ee.sites import artifact_preview
-from pocketpaw_ee.sites.engines import static_output_rel
+from pocketpaw_ee.sites.engines import resolve_static_output_rel
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +99,10 @@ def sites_home() -> Path:
 def persist_site(site_id: str, project_dir: str, engine: str = "ripple") -> Path:
     """Copy the built static site into the stable per-site dir <home>/<site_id>/
     and return that dir. Replaces any prior deploy of the same site so a re-publish
-    serves fresh content. The source tree is ``static_output_rel(engine)`` —
-    ``.svelte-kit/cloudflare`` for ripple/svelte, the project root for html."""
-    src = Path(project_dir, static_output_rel(engine))
+    serves fresh content. The source tree is ``resolve_static_output_rel(...)`` —
+    ``.svelte-kit/cloudflare`` for ripple and dynamic svelte, ``build`` for a STATIC
+    svelte site (SL-1), the project root for html."""
+    src = Path(project_dir, resolve_static_output_rel(project_dir, engine))
     if not src.is_dir():
         raise FileNotFoundError(f"no built static site at {src}")
     dest = sites_home() / site_id
@@ -264,7 +265,7 @@ def deploy_local(site_id: str, project_dir: str, *, engine: str = "ripple") -> s
     and returns its URL with a logged warning (serve the last-good site rather than
     break the page); only when there is no prior deploy EITHER does it raise
     ``MissingBuildOutput`` — a clear, typed error the caller can surface."""
-    src = Path(project_dir, static_output_rel(engine))
+    src = Path(project_dir, resolve_static_output_rel(project_dir, engine))
     if not src.is_dir():
         dest = sites_home() / site_id
         if dest.is_dir():

@@ -81,7 +81,10 @@ from pathlib import Path
 
 from pocketpaw_ee.cloud._core.errors import Internal, ValidationError
 from pocketpaw_ee.sites._wrangler import wrangler_argv as _wrangler_argv
-from pocketpaw_ee.sites.engines import emits_server_worker, static_output_rel
+from pocketpaw_ee.sites.engines import (
+    resolve_emits_server_worker,
+    resolve_static_output_rel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,21 +162,29 @@ def _worker_name(site_id: str) -> str:
     return f"paw-site-{_sanitize(site_id)}"
 
 
-def _wrangler_jsonc(name: str, engine: str = "ripple", d1_database_id: str | None = None) -> str:
+def _wrangler_jsonc(
+    name: str,
+    engine: str = "ripple",
+    d1_database_id: str | None = None,
+    *,
+    project_dir: str | os.PathLike[str],
+) -> str:
     """The clean wrangler config for a workers.dev deploy (the proven recipe).
 
-    HE-4 — the config is ENGINE-AWARE. RX-1 — it keys on ``emits_server_worker``,
-    NOT ``needs_node_build``:
+    HE-4 — the config is ENGINE-AWARE. RX-1 — it keys on whether a server entry was
+    emitted, NOT on ``needs_node_build``. SL-1 — it now asks that of the ARTIFACT
+    (``resolve_emits_server_worker``) rather than of the engine name, because a static
+    svelte site emits no worker while a dynamic one does:
 
-    * html / react (``not emits_server_worker``) → an ASSETS-ONLY Worker. The build
-      output is a static tree with no ``_worker.js``, so the config drops ``main``
-      and ``nodejs_compat`` and just serves ``assets.directory``
-      (``static_output_rel`` → ``"."`` for html, ``"dist"`` for react). An
+    * html / react / STATIC svelte (no worker emitted) → an ASSETS-ONLY Worker. The
+      build output is a static tree with no ``_worker.js``, so the config drops
+      ``main`` and ``nodejs_compat`` and just serves ``assets.directory``
+      (``"."`` for html, ``"dist"`` for react, ``build`` for static svelte). An
       assets-only Worker with no ``main`` is legal — ``assets.directory`` is the only
       required key — and it ships ZERO bytes of JavaScript for a form-less brochure.
-    * ripple / svelte (``emits_server_worker``) → the SvelteKit Cloudflare worker,
+    * ripple / DYNAMIC svelte (worker emitted) → the SvelteKit Cloudflare worker,
       UNCHANGED. ``main`` points at the worker entry adapter-cloudflare emits INSIDE
-      the asset dir (``static_output_rel`` → ``.svelte-kit/cloudflare``), and
+      the asset dir (``.svelte-kit/cloudflare``), and
       ``assets.directory`` points at that SAME dir (the ``.assetsignore`` we write
       keeps wrangler from uploading the worker entry as an asset). ``nodejs_compat``
       is what the SvelteKit worker needs at runtime.
@@ -199,12 +210,18 @@ def _wrangler_jsonc(name: str, engine: str = "ripple", d1_database_id: str | Non
     gracefully on a missing binding (``api/submit`` forwards straight to the capture
     API; ``writeback.ts`` warns and skips), so omitting them costs durability
     buffering, never a dropped lead."""
-    output_rel = static_output_rel(engine)
-    # html / react: an assets-only Worker — no server script, so no ``main`` /
-    # ``nodejs_compat`` and no D1 (dynamic sites on these tracks are out of scope,
-    # since neither has a server runtime to read a binding). Just serve the static
-    # tree the build left behind.
-    if not emits_server_worker(engine):
+    # SL-1 — ``project_dir`` is REQUIRED and keyword-only rather than defaulted. Both
+    # facts below are now properties of the emitted artifact, not of the engine string
+    # (a static svelte site has no worker and a different output dir), so a default
+    # would let a caller silently get the pre-SL-1 answer. Keyword-only because it is
+    # not the subject of this function — the name is — and a positional would read as
+    # the output path rather than the project root.
+    output_rel = resolve_static_output_rel(project_dir, engine)
+    # html / react — and, since SL-1, a STATIC svelte site: an assets-only Worker. No
+    # server script, so no ``main`` / ``nodejs_compat`` and no D1 (a site with no
+    # server runtime has nothing to read a binding). Just serve the static tree the
+    # build left behind.
+    if not resolve_emits_server_worker(project_dir, engine):
         config: dict[str, object] = {
             "name": name,
             "compatibility_date": "2024-09-23",
@@ -260,21 +277,29 @@ def _write_deploy_files(
     dir + the clean ``wrangler.jsonc`` at the project root. Both are overwritten on a
     re-publish so a stale config can never linger.
 
-    HE-4 — engine-aware. The asset dir is ``static_output_rel(engine)``
-    (``.svelte-kit/cloudflare`` for ripple/svelte, ``"."`` for html, ``"dist"`` for
-    react). The ``.assetsignore`` differs by whether the engine emits a server entry
-    (RX-1 — ``emits_server_worker``, not ``needs_node_build``):
+    HE-4 — engine-aware. SL-1 — ARTIFACT-aware: the asset dir is
+    ``resolve_static_output_rel(project_dir, engine)`` (``.svelte-kit/cloudflare`` for
+    ripple and dynamic svelte, ``build`` for static svelte, ``"."`` for html, ``"dist"``
+    for react). The ``.assetsignore`` differs by whether a server entry was actually
+    emitted (RX-1 — not ``needs_node_build``; SL-1 — resolved, not predicted):
 
-    * ripple/svelte → drops the Pages worker entry (``_worker.js`` + friends) so
-      wrangler does not upload the server entry as a static asset.
-    * html/react → there is no server entry to hide; what must not be served is the
+    * ripple / dynamic svelte → drops the Pages worker entry (``_worker.js`` + friends)
+      so wrangler does not upload the server entry as a static asset.
+    * html / react / static svelte → there is no server entry to hide; what must not be
+      served is the
       deploy scaffold itself (``wrangler.jsonc`` + ``.assetsignore``). For html the
       asset dir IS the project root, so both files sit in it; for react only
       ``.assetsignore`` does, and naming the other is a harmless no-op.
 
     ``d1_database_id`` adds the dynamic site's D1 binding to the emitted config
     (ripple/svelte only)."""
-    output_rel = static_output_rel(engine)
+    # SL-1 — RESOLVED against the artifact, not predicted from the engine name. A
+    # static svelte site builds on adapter-static: its output is ``build`` and it emits
+    # no ``_worker.js``, so it must deploy assets-only exactly as react does. Answering
+    # either question from ``engine`` alone would point ``main`` at a nonexistent
+    # ``build/_worker.js`` AND pick the server-entry .assetsignore — a failed deploy,
+    # which is the same class of bug RX-1 added ``emits_server_worker`` to prevent.
+    output_rel = resolve_static_output_rel(project_dir, engine)
     out_dir = Path(project_dir, output_rel)
     if not out_dir.is_dir():
         # The static output must exist before this runs — generator.build() emits it.
@@ -284,10 +309,14 @@ def _write_deploy_files(
             "The static build output is missing — the site must be built before a workers deploy.",
         )
     ignore_lines = (
-        _ASSETSIGNORE_LINES if emits_server_worker(engine) else _ASSETS_ONLY_ASSETSIGNORE_LINES
+        _ASSETSIGNORE_LINES
+        if resolve_emits_server_worker(project_dir, engine)
+        else _ASSETS_ONLY_ASSETSIGNORE_LINES
     )
     (out_dir / ".assetsignore").write_text("\n".join(ignore_lines) + "\n")
-    Path(project_dir, _CONFIG_FILENAME).write_text(_wrangler_jsonc(name, engine, d1_database_id))
+    Path(project_dir, _CONFIG_FILENAME).write_text(
+        _wrangler_jsonc(name, engine, d1_database_id, project_dir=project_dir)
+    )
 
 
 def _cf_env() -> dict[str, str]:
@@ -323,7 +352,8 @@ async def deploy_workers(
     provision job does both before calling this.
 
     The project MUST already carry the engine's static output
-    (``static_output_rel(engine)`` — generator.build() emits it before this is called).
+    (``resolve_static_output_rel(project_dir, engine)`` — generator.build() emits it
+    before this is called, which is what makes resolving it off disk possible).
     On a non-zero wrangler exit this raises ``Internal`` with the stderr tail so the
     failure surfaces as a clean 5xx envelope, not an opaque crash."""
     name = _worker_name(site_id)
