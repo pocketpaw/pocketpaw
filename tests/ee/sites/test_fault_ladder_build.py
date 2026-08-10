@@ -12,15 +12,34 @@
 # fault for real and watching where the blame lands. An untested rung is a rung that
 # does not exist.
 #
-# WHAT IS DELIBERATELY NOT ASSERTED HERE, so nobody reads a green file as more than it
-# is. On this branch the lane has NO production callers: ``run_build`` is called by
-# tests only, ``build_state``'s guards are called by tests only, ``Site.build_status`` is
-# written by nothing, and there is no arq job for site builds — ``service._deploy_site_doc``
-# still builds through the local generator. So the parts of F2/F3 that need an
-# orchestrator (retry with backoff, a terminal ``failed`` row carrying a reason, an
-# enqueue that can fail) are NOT proven here, because there is nothing to inject into.
-# ``TestTheWiringGapIsRealAndTemporary`` pins that absence as a tripwire: when the lane
-# gets wired, those tests fail and name the rungs that must then be proven for real.
+# WHAT WAS DELIBERATELY NOT ASSERTED HERE WHEN THIS FILE WAS WRITTEN, and what has
+# changed since. At creation the lane had NO production callers: ``run_build`` was called
+# by tests only, ``build_state``'s guards by tests only, ``Site.build_status`` was written
+# by nothing, and there was no arq job. So the parts of F2/F3 that need an orchestrator
+# were unprovable, and ``TestTheWiringGapIsRealAndTemporary`` pinned that absence as a
+# tripwire — each pin failing on the day the gap closed, and naming the rung that then had
+# to be proven for real.
+#
+# ── UPDATED 2026-08-10 (SL-2 slice 2). TWO OF THE FOUR PINS FIRED, AS DESIGNED. ───────
+#
+# ``sites/build_job.py`` now exists: an arq job (registered in the deployed worker) that
+# scaffolds, builds in an ephemeral sandbox, settles via ``build_state.settle`` and writes
+# ``build_status`` + ``build_reason`` through the ``sites.service`` seams, plus the enqueue
+# helper a publish will call. So the two pins about "nothing writes the lifecycle fields"
+# and "there is no enqueue" were TRUE statements that stopped being true, and the rungs
+# they named are proven below rather than deleted:
+#
+#   * F2's "a terminal failure carries a reason naming its rung" and F7's "the RECORDED
+#     row names its rung" → ``TestF2AndF7TheRecordedRowNamesItsRung``, which walks the
+#     whole classifier table through the wiring rather than checking a case at a time.
+#   * F3's enqueue injection → ``TestF3AnUnconsumableBuildRow`` gained the fault it was
+#     waiting for; the mechanics live in ``test_build_job.py``.
+#
+# TWO PINS REMAIN, and they are still true: PUBLISH does not consult the lane (that flip
+# is a later slice, gated on a frontend that can render a queued build), and NOTHING
+# RETRIES (``attempts_left`` is 0 on every real enqueue, so ``settle``'s stay-in-flight
+# branch is exercised only by a forced test). Do not delete a pin to make red go green —
+# a pin that fires is an invitation to prove its rung.
 #
 # NO NEW PRODUCTION LOGIC WAS ADDED FOR THIS LADDER, on purpose. The captain's constraint
 # on this program is to build the test scenarios first and wire the lane afterwards, so a
@@ -65,6 +84,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from pocketpaw_ee.sites import build_job
 from pocketpaw_ee.sites import build_state as bs
 from pocketpaw_ee.sites import daytona_build as db
 from pocketpaw_ee.sites import daytona_runner as dr
@@ -278,10 +298,11 @@ class TestF3AnUnconsumableBuildRow:
     consume it. Status alone is a ONE-WAY DOOR, so every later publish becomes a silent
     no-op and the site is permanently unpublishable with no error to see.
 
-    The enqueue itself cannot be fault-injected on this branch — there is no enqueue (see
-    the wiring-gap tests). What IS injectable, and is the property that actually protects
-    the user, is the recovery: whatever state a failed enqueue leaves behind, the site
-    must still be republishable afterwards.
+    UPDATED 2026-08-10 (SL-2 slice 2): the enqueue now exists, so the fault this class
+    could only reason about is injectable — see
+    ``test_a_failed_enqueue_leaves_a_row_that_can_still_be_republished`` at the end. The
+    pure recovery tests below are unchanged and still carry most of the weight: they cover
+    the shapes a DEAD WORKER leaves, which no enqueue-side fault can produce.
     """
 
     class _Row:
@@ -361,6 +382,45 @@ class TestF3AnUnconsumableBuildRow:
         row = self._Row("building", datetime.now(UTC) - timedelta(minutes=20))
         assert bs.should_enqueue(row, 1800) is False
 
+    async def test_a_failed_enqueue_leaves_a_row_that_can_still_be_republished(
+        self, beanie_test_db
+    ) -> None:
+        """THE FAULT THIS CLASS WAS WRITTEN WITHOUT (SL-2 slice 2 made it injectable).
+
+        Redis is down at the moment of the enqueue, AFTER the row has been stamped
+        ``queued`` — which is the order the stamp has to happen in, or a worker that
+        claimed the job first would have its terminal status overwritten by a late stamp.
+        So the failing enqueue is precisely the case that can strand a row.
+
+        The assertion is the RECOVERY, not the error: the publish is allowed to fail
+        loudly (the caller turns it into a 5xx the user sees), but the site must not be
+        left unpublishable behind it. Both predicates are checked, because they diverge on
+        purpose — the guard must free the site AND the row must not still claim a build is
+        running.
+        """
+        from pocketpaw_ee.cloud.models.site import Site
+        from pocketpaw_ee.sites import build_job
+
+        class _DeadPool:
+            async def enqueue_job(self, *_a, **_kw):
+                raise RuntimeError("redis is down")
+
+        site = Site(workspace="ws-f3", pocket_id="pk-f3", owner="u1")
+        await site.insert()
+
+        with pytest.raises(RuntimeError, match="redis is down"):
+            await build_job.enqueue_site_build(
+                site,
+                engine="react",
+                generator_input={"engine": "react", "siteConfig": {}},
+                _pool_override=_DeadPool(),
+            )
+
+        fresh = await Site.get(site.id)
+        assert fresh is not None
+        assert bs.should_enqueue(fresh, 600) is True, fresh.build_status
+        assert bs.is_in_flight(fresh) is False, fresh.build_status
+
 
 # ---------------------------------------------------------------------------
 # F5 — verification fails
@@ -421,6 +481,13 @@ class TestF5VerificationFailsSoNothingDeploys:
         adding production code to close it is the wiring phase's call. The contract for
         whoever wires this lane is "gate on ``.ok``", and this test fails if the
         discrepancy is closed — at which point the contract can be relaxed.
+
+        UPDATED 2026-08-10 (SL-2 slice 2): the contract now has a live consumer.
+        ``build_job.resolve_build_settlement`` gates on ``.ok`` and gives this exact case
+        its own retryable rung (``artifact_missing``) instead of the classifier's
+        ``completed_ok``. The discrepancy itself is UNCHANGED — ``deployable`` still reads
+        True here — so this test's assertion stands as written, and it is still the thing
+        that would tell you if someone closed it upstream.
         """
         client = FaultyDaytonaClient(artifact=b"")
         got = await dr.run_build(REACT_FILES, engine="react", timeout_seconds=600, client=client)
@@ -661,6 +728,115 @@ class TestF7EveryDegradedPathNamesItsRung:
 
 
 # ---------------------------------------------------------------------------
+# F2 + F7, at the ROW — what a pin demanded when it fired
+# ---------------------------------------------------------------------------
+
+
+class TestF2AndF7TheRecordedRowNamesItsRung:
+    """The half of F2/F7 that needed an orchestrator, proven now that one exists.
+
+    F7 above proves the CLASSIFIER names its rung. That is not the same claim as "the row
+    an operator reads names its rung": between them sit the settlement and the write, and a
+    reason that is correct in the classifier and generic on the row is not a reason. This
+    walks the WHOLE classifier table through the wiring, as a property of the set rather
+    than case by case — the same reason ``_all_classifications`` is a table.
+
+    ``resolve_build_settlement`` is used directly rather than through the job, because what
+    is under test is the mapping from a verdict to a row, and driving fifteen conditions
+    through a fake sandbox would test the fake. The job's own persistence is proven in
+    ``test_build_job.py``.
+    """
+
+    @staticmethod
+    def _settlements() -> dict[str, object]:
+        from pocketpaw_ee.sites.daytona_runner import BuildRunResult, BuildTimings
+
+        out = {}
+        for name, classification in _all_classifications().items():
+            # A cleared build is given real bytes so it settles on its own merits; every
+            # other rung never reaches a download.
+            size = 64 if classification.deployable else 0
+            result = BuildRunResult(
+                classification=classification,
+                timings=BuildTimings(0.0, 0.0, 0.0, 0.0, 0.0),
+                artifact=b"x" * size or None,
+                artifact_bytes=size,
+                sandbox_id="sb-1",
+                sandbox_deleted=True,
+            )
+            out[name] = build_job.resolve_build_settlement(result)
+        return out
+
+    def test_no_condition_settles_without_naming_its_rung(self) -> None:
+        for name, settled in self._settlements().items():
+            rung, _, cause = settled.reason.partition(":")
+            assert rung, f"{name} recorded a status with no rung"
+            assert cause, f"{name} recorded a rung with no cause"
+
+    def test_every_recorded_reason_is_machine_readable(self) -> None:
+        """These ride logs, metrics, and a status the user will eventually read. A reason
+        with spaces or capitals is a dashboard nobody can group by."""
+        for name, settled in self._settlements().items():
+            assert settled.reason.replace("_", "").replace(":", "").isalnum(), (
+                name,
+                settled.reason,
+            )
+            assert settled.reason == settled.reason.lower(), (name, settled.reason)
+
+    def test_the_row_can_tell_the_users_build_from_our_infrastructure(self) -> None:
+        """The harm this rung exists for: ``failed`` alone cannot distinguish "your code
+        broke" from "we lost the container", and those need opposite handling. The row's
+        STATUS is the same for both, so the rung is the only thing carrying it."""
+        for name, classification in _all_classifications().items():
+            settled = self._settlements()[name]
+            rung = settled.reason.partition(":")[0]
+            if classification.blames_user:
+                assert rung == "build_failed", (name, settled.reason)
+            else:
+                assert rung != "build_failed", (name, settled.reason)
+
+    def test_no_recorded_reason_can_carry_build_stderr(self) -> None:
+        """``build_reason`` is surfaceable; a build's stderr is the user's own code and can
+        carry a token pasted into a config. Every rung is driven with a marked value in the
+        tail, so a settlement that interpolated it would show up here rather than in
+        production.
+
+        The marker is deliberately NOT shaped like a real credential. Writing one that looks
+        like a live provider key is the instinct this test's own subject invites, and it
+        fails the repo's secret scan — a scanner reading a diff cannot tell a fixture from a
+        committed key. The assertion needs uniqueness, not realism."""
+        from pocketpaw_ee.sites.daytona_runner import BuildRunResult, BuildTimings
+
+        secret = "LADDER_CANARY_MUST_NOT_PERSIST"
+        for name, base in _all_classifications().items():
+            poisoned = db.BuildClassification(
+                outcome=base.outcome,
+                reason=base.reason,
+                retryable=base.retryable,
+                blames_user=base.blames_user,
+                stderr_tail=f"error near {secret}",
+            )
+            result = BuildRunResult(
+                classification=poisoned,
+                timings=BuildTimings(0.0, 0.0, 0.0, 0.0, 0.0),
+                artifact=None,
+                artifact_bytes=0,
+                sandbox_id="sb-1",
+                sandbox_deleted=True,
+            )
+            settled = build_job.resolve_build_settlement(result)
+            assert secret not in settled.reason, name
+
+    def test_no_condition_can_leave_the_row_in_flight_when_nothing_retries(self) -> None:
+        """The one-way door, at the settlement. With no attempt loop, every rung must
+        settle terminal — a condition that returned "stay in flight" today would pin the
+        row with nothing coming to consume it."""
+        for name, settled in self._settlements().items():
+            assert settled.status is not None, f"{name} left the row in flight"
+            assert settled.status in bs.TERMINAL_STATUSES, (name, settled.status)
+
+
+# ---------------------------------------------------------------------------
 # The gap — pinned so it cannot close silently
 # ---------------------------------------------------------------------------
 
@@ -668,51 +844,47 @@ class TestF7EveryDegradedPathNamesItsRung:
 class TestTheWiringGapIsRealAndTemporary:
     """Tripwires, not assertions that the gap is GOOD.
 
-    These pin the fact that the lane has no production callers on this branch, which is
-    why parts of F2/F3 are unproven. Each one FAILS the day someone wires the lane —
-    which is exactly when the rung it names becomes injectable and must be proven for
-    real. Deleting a failing test here instead of proving its rung is the one wrong
-    response.
+    These pin what the lane does NOT yet reach, which is why some rungs are unproven. Each
+    one FAILS the day someone closes the gap it names — which is exactly when the rung
+    becomes injectable and must be proven for real. Deleting a failing test here instead of
+    proving its rung is the one wrong response.
+
+    UPDATED 2026-08-10 (SL-2 slice 2). Two of these fired and were replaced by the proofs
+    they demanded, not removed: the lifecycle fields ARE written now and there IS an
+    enqueue, so see ``TestF2AndF7TheRecordedRowNamesItsRung`` and
+    ``TestF3AnUnconsumableBuildRow``'s last test. The two below are still true statements
+    about this branch and stay armed.
     """
 
     def test_publish_does_not_consult_the_daytona_lane_yet(self) -> None:
         """When this fails: F1's publish half is now provable — a publish with Daytona
-        unconfigured must report unavailable and leave the site's row untouched."""
+        unconfigured must report unavailable and leave the site's row untouched.
+
+        FOUR markers now, not one. SL-2 slice 2 built the job and the enqueue helper and
+        deliberately did NOT call either from publish, so "does publish reach the lane" can
+        no longer be answered by looking for the runner alone: a publish that flips to
+        async will call ``enqueue_site_build`` and may never name ``daytona_runner`` at all.
+        The two import forms are matched as well, because a wiring could route through a
+        local alias and name neither.
+
+        Deliberately matched on IMPORT FORMS rather than on the bare module name: this
+        module's own header refers to ``sites/build_job.py`` in prose (it documents which
+        module writes through its seams), and a marker that a comment can trip is a marker
+        that gets deleted rather than investigated.
+        """
         from pocketpaw_ee.sites import service
 
         source = Path(service.__file__).read_text(encoding="utf-8")
-        assert "daytona_runner" not in source, (
-            "the Daytona lane is now wired into publish — prove F1's publish half "
-            "(unavailable + site unchanged) and F2's terminal failed-with-reason"
-        )
-
-    def test_nothing_writes_the_build_lifecycle_fields_yet(self) -> None:
-        """When this fails: F2's "terminal ``failed`` carrying a reason" and F7's
-        "the recorded status names its rung" become provable, and must be proven. Note
-        there is no ``build_reason`` field on the model today — a rung name has nowhere
-        to be recorded, which is itself a finding for whoever wires this."""
-        from pocketpaw_ee.sites import service
-
-        source = Path(service.__file__).read_text(encoding="utf-8")
-        assert "build_status" not in source, (
-            "something now writes Site.build_status — prove that a terminal failure "
-            "records a reason naming its rung, and that a failed enqueue cannot pin "
-            "the row in queued"
-        )
-
-    def test_there_is_no_enqueue_for_site_builds_yet(self) -> None:
-        """When this fails: F3's enqueue injection becomes real — patch the arq pool to
-        raise and assert the row does not end up pinned in ``queued``."""
-        from pocketpaw_ee.sites import service
-
-        source = Path(service.__file__).read_text(encoding="utf-8")
-        # Two markers because either alone is evadable: a wiring that goes through a
-        # helper never names ``enqueue_job``, and one that skips the polling handle never
-        # names ``build_job_id``. Any enqueue a client can poll writes at least one.
-        for marker in ("enqueue_job", "build_job_id"):
+        for marker in (
+            "daytona_runner",
+            "enqueue_site_build",
+            "import build_job",
+            "build_job import",
+        ):
             assert marker not in source, (
-                f"site builds now reach an enqueue ({marker!r}) — inject an arq/Redis "
-                "failure at the enqueue and prove the site is still republishable"
+                f"publish now reaches the build lane ({marker!r}) — prove F1's publish "
+                "half (unavailable + site unchanged) and that a publish whose enqueue "
+                "fails still returns an error the user can see"
             )
 
     def test_the_lane_still_classifies_one_attempt_at_a_time(self) -> None:

@@ -1,6 +1,24 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-08-10 (SL-2 slice 2 — the ephemeral-build lane gets a job): added the
+# four seams the site-build arq job (``sites/build_job.py``) writes its lifecycle
+# through — ``load_build_site``, ``mark_build_queued``, ``mark_build_running``,
+# ``record_build_outcome`` — at the bottom of the DP0-3 seam block, which they are
+# modelled on. This module stays the sole owner of Site writes; the build lane never
+# touches the Beanie doc.
+#
+# THE PUBLISH PATH IS UNCHANGED BY THAT SLICE, deliberately. ``publish`` /
+# ``_deploy_site_doc`` still build synchronously through the local generator and do not
+# enqueue anything. Flipping publish to enqueue-and-return is a later slice, gated on a
+# frontend that can render a queued build — ship the flip first and every publisher sees
+# a finished-looking page for a site that has not built yet.
+#
+# Unlike every other write in this module, the four build seams use a TARGETED ``set``
+# rather than ``save()``: a build runs for minutes next to a publish that may be writing
+# ``url`` / ``deployed`` on the same row, and a full save from a stale doc would roll
+# those back. See the seam block for the full note.
+#
 # Updated 2026-08-07 (SC-1 — a site's card shows its own screenshot): the tail of
 # a SUCCESSFUL deploy now also schedules a screenshot of the page it just put
 # live (``_schedule_site_screenshot``, next to the knowledge sync it is modelled
@@ -3086,6 +3104,82 @@ async def build_provision_bundle(
     )
     bundle = _default_bundle_reader(build.project_dir)
     return build.project_dir, bundle
+
+
+# ---------------------------------------------------------------------------
+# SL-2 — the ephemeral-build lane's Site-doc seams.
+#
+# ``sites/build_job.py`` owns the build (scaffold → sandbox → classify → settle); this
+# module owns the Site document, the same split DP0-3's seams above make for the provision
+# job. The build lane never imports the Beanie doc.
+#
+# EVERY WRITE HERE IS A TARGETED ``set``, NOT A ``save()``, and that is the one thing not
+# to change. A build runs for minutes alongside a publish that may be writing ``url`` /
+# ``deployed`` / ``name`` on the same row; a full ``save()`` from a doc loaded before that
+# publish would silently roll those fields back to their pre-publish values. The build
+# lane has no business writing anything but its own four fields. (``preview_image_url``
+# is written the same way, for the same reason.)
+# ---------------------------------------------------------------------------
+
+
+async def load_build_site(workspace_id: str, site_id: str) -> _SiteDoc | None:
+    """The Site row a build job operates on, or ``None``.
+
+    Scoped to ``workspace_id`` like ``_load``: the job is handed an id, and a read that
+    ignored the workspace would let a bad payload move another tenant's row. Returns None
+    rather than raising for a deleted site or a malformed id — the job then no-ops, which
+    is the only sane response to "there is nothing to record on".
+    """
+    try:
+        oid = ObjectId(site_id)
+    except (InvalidId, TypeError):
+        return None
+    return await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+
+
+async def mark_build_queued(site: _SiteDoc, *, job_id: str) -> None:
+    """Stamp a site as having a build ENQUEUED: status, clock, and polling handle.
+
+    One write, all four fields. ``build_started_at`` is what bounds the single-flight
+    guard — without it the row reads as stale immediately and a second publish opens a
+    second sandbox. ``build_job_id`` is persisted (not a transient PrivateAttr like
+    DP0-4's) because a queued build is exactly when a user reloads. ``build_reason`` is
+    cleared so a new attempt never shows the previous attempt's rung.
+    """
+    await site.set(
+        {
+            "build_status": "queued",
+            "build_started_at": datetime.now(UTC),
+            "build_job_id": job_id,
+            "build_reason": None,
+        }
+    )
+
+
+async def mark_build_running(site: _SiteDoc) -> None:
+    """Flip a queued build to ``building`` and RE-STAMP the clock.
+
+    Re-stamping is deliberate: ``build_started_at`` means "when the current attempt
+    started", and the attempt's real clock begins when a worker picks the job up. Leaving
+    the enqueue's stamp would spend the site's staleness window on queue wait, so a build
+    that waited behind the cap could be declared stale while it was still running — and
+    re-enqueued on top of itself, which is the expensive direction.
+    """
+    await site.set({"build_status": "building", "build_started_at": datetime.now(UTC)})
+
+
+async def record_build_outcome(site: _SiteDoc, *, status: str, reason: str) -> None:
+    """Record a finished attempt's terminal status and the rung that produced it.
+
+    ``reason`` is a fixed ``"<rung>:<cause>"`` identifier from ``build_job``, NEVER build
+    stderr — see ``Site.build_reason`` and ``build_job``'s header. This seam does not
+    enforce that (a string is a string); the vocabulary is owned and tested where it is
+    produced, and the mutation plan is what keeps stderr out of it.
+
+    ``build_job_id`` is left in place: a client that polled with that handle must still
+    find the row it was watching once the build ends.
+    """
+    await site.set({"build_status": status, "build_reason": reason})
 
 
 async def add_domain(

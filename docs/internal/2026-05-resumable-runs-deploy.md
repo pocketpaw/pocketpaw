@@ -129,3 +129,19 @@ Env vars (all also documented in `backend/CLAUDE.md` → Key Conventions):
 | `CLOUD_MONGODB_URI` | `mongodb://localhost:27017/paw-enterprise` | Web + worker must share |
 | `POCKETPAW_CLOUD_RUN_STREAM_TTL` | `3600` | Redis Stream retention after a run terminates |
 | `POCKETPAW_CLOUD_STREAM_TRANSPORT` | `redis` | Future hook for non-Redis backends |
+| `PAW_SITES_BUILD_TIMEOUT_SEC[_<ENGINE>]` | `600` (floor) | Per-build sandbox budget for the site-build function. Read at worker **import**, so a change takes effect on the worker restart a deploy performs — see below |
+
+### The worker runs three functions, each with its own timeout
+
+`WorkerSettings.functions` carries `execute_run_job` (chat runs),
+`execute_workspace_job` (workspace jobs, 900s) and `run_site_build` (site builds,
+`sites/build_job.site_build_job_timeout_seconds()` — 1020s at the defaults). The three
+budgets are deliberately independent: a long build must not be clipped by the chat-run
+timeout and vice versa.
+
+The site-build timeout is derived from `PAW_SITES_BUILD_TIMEOUT_SEC*` rather than fixed,
+because the in-sandbox `timeout(1)` has to be the thing that fires first. If arq cancels
+the job first, the build's result sentinel is never written and the lane records a
+healthy-but-slow build as lost infrastructure. So when you lengthen a build budget on the
+web service, lengthen it on the worker too — they are the same env vars, and the worker
+reads them once at import.

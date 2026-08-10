@@ -48,7 +48,9 @@
 # The engine is still consulted — via ``engines`` predicates, never a string compare —
 # for two things it genuinely decides: whether the engine belongs in this lane at all
 # (``static_output_rel`` == "." means it has no build subdir) and whether a
-# ``_worker.js`` in the artifact is expected (``emits_server_worker``).
+# ``_worker.js`` in the artifact is expected (``expects_server_worker`` — the TRI-STATE
+# predicate, because since SL-1 the svelte track spans two adapters and the engine name
+# genuinely cannot say; see ``store_artifact``).
 #
 # FOUR DECISIONS WORTH READING BEFORE CHANGING ANYTHING HERE:
 #
@@ -103,7 +105,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import unquote
 
-from pocketpaw_ee.sites.engines import emits_server_worker, normalize_engine, static_output_rel
+from pocketpaw_ee.sites.engines import (
+    expects_server_worker,
+    normalize_engine,
+    static_output_rel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -419,19 +425,26 @@ def store_artifact(
     produces an artifact, and one arriving here means a routing bug that should be
     loud rather than previewed.
 
-    Cross-checks the artifact against ``emits_server_worker(engine)`` and WARNS on a
-    mismatch — a react artifact carrying a server entry, or a svelte one missing it,
+    Cross-checks the artifact against ``expects_server_worker(engine)`` and WARNS on a
+    mismatch — a react artifact carrying a server entry, or a ripple one missing it,
     means the build lane changed shape underneath us. It is a warning and not a
     refusal because either way the static tree is still previewable, and a preview
     that refused to open would hide the discrepancy instead of surfacing it.
 
-    ``expect_server_worker`` OVERRIDES that engine-name expectation, and exists because
-    since SL-1 the engine name cannot answer it: engine ``"svelte"`` spans a static
-    landing build (``adapter-static``, no worker) and a dynamic one
-    (``adapter-cloudflare``, worker), so the name-only predicate warns "the artifact may
-    be incomplete" on every healthy static svelte preview. A caller that has resolved
-    the answer off the artifact passes it here. ``None`` keeps the historical
-    engine-name behaviour, so every existing call site is unchanged.
+    SVELTE IS UNCHECKED BY DEFAULT on the missing-worker side (changed 2026-08-10, SL-2
+    slice 2). This used to ask ``emits_server_worker``, which answers from the engine NAME
+    and still says svelte always emits one — but SL-1 split that track across two adapters,
+    and a static landing site correctly emits none. So every healthy static svelte build
+    logged "the artifact may be incomplete". A warning that fires on correct builds is
+    worse than no warning: it is the same line a genuinely truncated artifact produces, and
+    people learn to scroll past it. Hence ``expects_server_worker``, which returns ``None``
+    for svelte to mean "either shape is legitimate, do not cross-check".
+
+    ``expect_server_worker`` OVERRIDES that, and is the stricter path rather than a
+    looser one: a caller that has resolved the shape off the ARTIFACT knows what the
+    engine name cannot, so passing ``False`` for a static svelte build restores a real
+    cross-check on the one track the name has to stay silent about. ``None`` — the
+    default — defers to the predicate, so every existing call site is unchanged.
 
     Unpacks into a temporary sibling and swaps it in, so a failure part-way through
     leaves the PREVIOUS preview intact rather than a half-written tree serving a
@@ -459,10 +472,18 @@ def store_artifact(
         shutil.rmtree(incoming, ignore_errors=True)
         raise
 
-    expected_worker = (
-        emits_server_worker(engine) if expect_server_worker is None else expect_server_worker
+    # An explicit ``expect_server_worker`` wins: the caller resolved the shape off the
+    # ARTIFACT, which is knowledge the engine name does not have. Otherwise fall back to
+    # the tri-state predicate, where None = the name cannot say (svelte spans two
+    # adapters), so neither shape is an anomaly and there is nothing to cross-check.
+    #
+    # Compared with ``is``, not truthiness: ``None`` and ``False`` mean opposite things
+    # here, and ``not expected`` would fold "either shape is fine" into "a worker is an
+    # anomaly" — reinstating the false warning on every healthy static svelte build.
+    expected = (
+        expects_server_worker(engine) if expect_server_worker is None else expect_server_worker
     )
-    if unpacked.server_entries and not expected_worker:
+    if expected is False and unpacked.server_entries:
         logger.warning(
             "sites.artifact_preview: %s artifact for site %s carried a server entry (%s) "
             "even though this engine emits none — the build lane may have changed shape",
@@ -470,7 +491,7 @@ def store_artifact(
             site_id,
             ", ".join(unpacked.server_entries),
         )
-    elif expected_worker and not unpacked.server_entries:
+    elif expected is True and not unpacked.server_entries:
         logger.warning(
             "sites.artifact_preview: %s artifact for site %s carried NO server entry, "
             "though this engine always emits one — the artifact may be incomplete",

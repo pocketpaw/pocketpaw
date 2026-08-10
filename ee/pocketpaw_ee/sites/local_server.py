@@ -328,8 +328,7 @@ def serve_artifact_preview(site_id: str, artifact: bytes | None, *, engine: str)
 
     ``engine`` selects nothing about the LAYOUT — the lane tars from the resolved
     static-output dir, so every artifact already arrives rooted at its deployable root.
-    It is passed through for the ``emits_server_worker`` cross-check in
-    ``store_artifact``.
+    It is passed through for the server-entry cross-check in ``store_artifact``.
 
     ┌─────────────────────────────────────────────────────────────────────────────────┐
     │ NOT THE TRUTH LANE. ``truth_lane.open_preview`` is the wired entry point (SG-10  │
@@ -350,9 +349,20 @@ def serve_artifact_preview(site_id: str, artifact: bytes | None, *, engine: str)
     ``tests/ee/sites/test_truth_lane.py::test_the_gate_refuses_what_the_ungated_store_serves``
     pins the difference between the two so it cannot drift into a surprise.
 
-    The SL-1 caveat this docstring used to carry is discharged in ``truth_lane``: the
-    previewability question there is resolved off the ARTIFACT
-    (``resolve_emits_server_worker`` / a tar scan), never from the engine name."""
+    SL-1's caveat here said the server-entry cross-check should ask
+    ``resolve_emits_server_worker`` against the build dir once the lane had a caller. IT
+    NOW HAS ONE (``sites/build_job.py``, SL-2 slice 2) and the resolver turned out to be
+    the wrong instrument FOR THIS PATH: on the Daytona lane the build happens inside a
+    sandbox that deletes itself, so no local process ever holds the built project dir to
+    resolve against. All that comes back is the artifact.
+
+    So the two halves answer it from different evidence, and both are resolved off the
+    ARTIFACT rather than from an engine name. ``truth_lane`` scans the tar's member names.
+    ``store_artifact`` asks ``engines.expects_server_worker``, a tri-state returning
+    ``None`` for svelte because the name genuinely cannot say which adapter ran — "either
+    shape is legitimate" being the honest answer rather than a warning on every healthy
+    static build. The ``resolve_*`` form stays right for the LOCAL builder path, which
+    does hold a project dir (see ``workers_deploy``)."""
     try:
         snapshot = artifact_preview.safe_store_artifact(site_id, artifact, engine=engine)
         if snapshot is None:

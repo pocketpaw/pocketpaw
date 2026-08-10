@@ -611,11 +611,45 @@ def test_an_unexpected_server_entry_is_reported(caplog):
     assert ap.resolve("mix1", "/").status == 200
 
 
-def test_a_missing_server_entry_is_reported_for_svelte(caplog):
+def test_a_missing_server_entry_is_reported_for_ripple(caplog):
+    """ripple builds on adapter-cloudflare and always emits a worker, so an artifact
+    without one really may be incomplete.
+
+    WAS ``..._for_svelte`` until 2026-08-10 (SL-2 slice 2), and the rename is the point:
+    the old test pinned a warning that fires on every HEALTHY static svelte build. SL-1
+    moved the svelte track onto two adapters, adapter-static emits no worker, and the
+    cross-check was still asking the engine NAME. ripple is the engine the assertion was
+    actually describing, so the coverage moves here rather than disappearing."""
     with caplog.at_level("WARNING"):
-        ap.store_artifact("mix2", _tar(_REACT_ARTIFACT), engine="svelte")
+        ap.store_artifact("mix2", _tar(_REACT_ARTIFACT), engine="ripple")
 
     assert "carried NO server entry" in caplog.text
+
+
+def test_a_static_svelte_artifact_is_not_reported_as_incomplete(caplog):
+    """The other half, and the reason the rename above is not just bookkeeping. A static
+    svelte site legitimately emits no ``_worker.js``, and a warning that fires on correct
+    builds is worse than none: it is the SAME line a truncated artifact produces, so it
+    trains whoever is on call to scroll past the real one."""
+    with caplog.at_level("WARNING"):
+        snap = ap.store_artifact("svelte-static1", _tar(_REACT_ARTIFACT), engine="svelte")
+
+    assert snap.unpacked.server_entries == ()
+    assert "carried NO server entry" not in caplog.text
+    # Not vacuous: the preview still works, so the absence of a warning is not the
+    # absence of a stored artifact.
+    assert ap.resolve("svelte-static1", "/").status == 200
+
+
+def test_a_dynamic_svelte_artifact_is_not_reported_either(caplog):
+    """The same engine with the OTHER adapter's output. Both shapes are legitimate, so
+    neither may warn — and a check that warned on this one would fire on every dynamic
+    site instead of every static one."""
+    with caplog.at_level("WARNING"):
+        snap = ap.store_artifact("svelte-dyn1", _tar(_SVELTE_ARTIFACT), engine="svelte")
+
+    assert snap.unpacked.server_entries == ("_worker.js",)
+    assert "even though this engine emits none" not in caplog.text
 
 
 # --- the publish-safe wrapper ---------------------------------------------

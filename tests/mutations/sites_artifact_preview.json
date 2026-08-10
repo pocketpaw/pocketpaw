@@ -247,5 +247,33 @@
     "tests": [
       "tests/ee/sites/test_artifact_preview.py"
     ]
+  },
+  {
+    "label": "SL-2: expects_server_worker answers svelte from the engine name again, so EVERY healthy static svelte build logs 'the artifact may be incomplete' — the same line a genuinely truncated artifact produces, which is how a real warning gets scrolled past",
+    "file": "ee/pocketpaw_ee/sites/engines.py",
+    "find": "    if normalized == \"svelte\":\n        return None",
+    "replace": "    if normalized == \"svelte\":\n        return normalized in _SERVER_WORKER_ENGINES",
+    "tests": [
+      "tests/ee/sites/test_engines.py::TestExpectsServerWorker",
+      "tests/ee/sites/test_artifact_preview.py::test_a_static_svelte_artifact_is_not_reported_as_incomplete"
+    ]
+  },
+  {
+    "label": "SL-2: the server-entry cross-check compares by truthiness instead of identity, so 'either shape is legitimate' (None) folds into 'a worker is an anomaly' and every DYNAMIC svelte artifact is reported as having changed shape",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    if expected is False and unpacked.server_entries:",
+    "replace": "    if not expected and unpacked.server_entries:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py::test_a_dynamic_svelte_artifact_is_not_reported_either"
+    ]
+  },
+  {
+    "label": "SL-2: the missing-worker branch treats the unanswerable case as 'a worker was required', so a static svelte site is reported incomplete on the other branch instead",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    elif expected is True and not unpacked.server_entries:",
+    "replace": "    elif expected is not False and not unpacked.server_entries:",
+    "tests": [
+      "tests/ee/sites/test_artifact_preview.py::test_a_static_svelte_artifact_is_not_reported_as_incomplete"
+    ]
   }
 ]
