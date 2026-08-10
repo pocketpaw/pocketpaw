@@ -535,10 +535,10 @@ async def test_effective_seat_limit_is_plan_authoritative(owner, monkeypatch) ->
     # Free plan (max_seats=0): a fresh free workspace can't invite anyone.
     assert await workspace_service._effective_seat_limit(doc) == 0
 
-    # Upgrade to pro (max_seats=10): the ceiling rises to exactly 10.
+    # Upgrade to pro (max_seats=25): the ceiling rises to exactly 25.
     doc.plan = "pro"
     await doc.save()
-    assert await workspace_service._effective_seat_limit(doc) == 10
+    assert await workspace_service._effective_seat_limit(doc) == 25
 
     # A workspace whose custom doc.seats already exceeds the plan cap does NOT
     # override the plan on a downgrade — Free = 0 blocks all new invites.
@@ -560,14 +560,14 @@ async def test_create_invite_uses_plan_seat_limit_not_flat_seats(owner, monkeypa
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
     )
-    # Restore the real plan-sourced gate so the pro cap (10) is enforced.
+    # Restore the real plan-sourced gate so the pro cap (25) is enforced.
     monkeypatch.setattr(workspace_service, "_effective_seat_limit", _REAL_EFFECTIVE_SEAT_LIMIT)
     from pocketpaw_ee.cloud.models.workspace import Workspace as _WSDoc
 
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
     )
-    # Move to pro (max_seats=10) while doc.seats stays the default 5.
+    # Move to pro (max_seats=25) while doc.seats stays the default 5.
     doc = await _WSDoc.get(ws.id)
     doc.plan = "pro"
     await doc.save()
@@ -577,7 +577,7 @@ async def test_create_invite_uses_plan_seat_limit_not_flat_seats(owner, monkeypa
         u = await _seed_user(email=f"seat{i}@x.c")
         await workspace_service._add_member(ws.id, str(u.id), role="member")
 
-    # Under the flat-seats rule this would raise; under the plan cap (10) it succeeds.
+    # Under the flat-seats rule this would raise; under the plan cap (25) it succeeds.
     invite = await workspace_service.create_invite(
         _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="x@y.z")
     )
@@ -591,26 +591,26 @@ async def test_raise_seats_for_plan_lifts_on_upgrade_only(owner) -> None:
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
     )
-    # Default seats == 5. Upgrade to pro (max_seats=10) lifts the stored cap.
+    # Default seats == 5. Upgrade to pro (max_seats=25) lifts the stored cap.
     new_seats = await workspace_service.raise_seats_for_plan(ws.id, "pro")
-    assert new_seats == 10
-    assert (await _WSDoc.get(ws.id)).seats == 10
+    assert new_seats == 25
+    assert (await _WSDoc.get(ws.id)).seats == 25
 
-    # A "downgrade" to free (cap 0) must NOT strip the 10 seats it already has —
+    # A "downgrade" to free (cap 0) must NOT strip the 25 seats it already has —
     # the plan-AUTHORITATIVE seat gate blocks NEW invites, but the persisted
     # display ceiling is upgrade-only.
     unchanged = await workspace_service.raise_seats_for_plan(ws.id, "free")
-    assert unchanged == 10
-    assert (await _WSDoc.get(ws.id)).seats == 10
+    assert unchanged == 25
+    assert (await _WSDoc.get(ws.id)).seats == 25
 
     # An uncapped plan (enterprise) is a no-op — returns None, leaves seats as-is.
     ent_result = await workspace_service.raise_seats_for_plan(ws.id, "enterprise")
     assert ent_result is None
-    assert (await _WSDoc.get(ws.id)).seats == 10
+    assert (await _WSDoc.get(ws.id)).seats == 25
 
     # An unknown plan key is a safe no-op (None), seats untouched.
     assert await workspace_service.raise_seats_for_plan(ws.id, "bogus_tier") is None
-    assert (await _WSDoc.get(ws.id)).seats == 10
+    assert (await _WSDoc.get(ws.id)).seats == 25
 
 
 async def test_create_invite_rejects_duplicate_pending(owner, monkeypatch) -> None:
@@ -1594,23 +1594,23 @@ async def test_bulk_create_invites_rejects_over_seats(owner, monkeypatch) -> Non
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
     )
-    # Restore the REAL plan-sourced gate so the pro cap (10) is enforced.
+    # Restore the REAL plan-sourced gate so the pro cap (25) is enforced.
     monkeypatch.setattr(workspace_service, "_effective_seat_limit", _REAL_EFFECTIVE_SEAT_LIMIT)
 
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
     )
-    # Move to pro (max_seats=10) and fill to the cap: owner + 9 members = 10.
+    # Move to pro (max_seats=25) and fill to the cap: owner + 24 members = 25.
     ws_doc = await workspace_service._WorkspaceDoc.get(PydanticObjectId(ws.id))
     assert ws_doc is not None
     ws_doc.plan = "pro"
     await ws_doc.save()
-    for i in range(9):
+    for i in range(24):
         u = await _seed_user(email=f"seat{i}@x.c")
         await workspace_service._add_member(ws.id, str(u.id), role="member")
 
     invite_count_before = await _InviteDoc.find({"workspace": ws.id}).count()
-    # 10 members already fill the pro cap — a bulk batch of 3 must be refused.
+    # 25 members already fill the pro cap — a bulk batch of 3 must be refused.
     with pytest.raises(SeatLimitError):
         await workspace_service.bulk_create_invites(
             _ctx(str(owner.id)),

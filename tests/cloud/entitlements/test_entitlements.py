@@ -28,8 +28,8 @@
 # Updated 2026-07-08 (feat/billing-smb-caps): proves the resolver also surfaces the
 #   three SMB caps (``max_seats`` / ``max_pockets`` / ``max_connectors``) from the
 #   plan catalog for every known tier (incl. enterprise=None uncapped), and that an
-#   unknown / missing plan FAILS CLOSED to the Free values (5 / 200 / 50), never
-#   None/uncapped.
+#   unknown / missing plan FAILS CLOSED to the Free values (0 / 200 / 50), never
+#   None/uncapped. Pro Max is uncapped on seats only.
 
 from __future__ import annotations
 
@@ -112,10 +112,15 @@ async def test_every_known_plan_resolves_its_catalog_smb_caps(patch_plan, plan):
     assert ent.max_pockets == tier.max_pockets
     assert ent.max_connectors == tier.max_connectors
     if plan == "enterprise":
-        # The one uncapped tier — all three surface as None.
+        # The fully uncapped tier — all three surface as None.
         assert ent.max_seats is None
         assert ent.max_pockets is None
         assert ent.max_connectors is None
+    elif plan == "pro_max":
+        # Pro Max is uncapped on SEATS only; pockets + connectors stay capped.
+        assert ent.max_seats is None
+        assert isinstance(ent.max_pockets, int)
+        assert isinstance(ent.max_connectors, int)
     else:
         assert isinstance(ent.max_seats, int)
         assert isinstance(ent.max_pockets, int)

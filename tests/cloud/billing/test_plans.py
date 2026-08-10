@@ -32,9 +32,9 @@
 #   Enterprise, fail-closed default), not the exact figures.
 # Updated 2026-08-08 (feat/billing-rbac-member-caps): the CONSUMER member caps are
 #   now LOCKED — Free ``max_seats`` = 0 (a Free workspace cannot invite ANY
-#   members), Paw Go = 5, Paw Pro = 10, Paw Pro Max = 50 total workspace members
-#   (owner included), Enterprise = None. The seat gate is plan-authoritative, so
-#   Free = 0 is an actual block, not a no-op. These tests lock the exact numbers.
+#   members), Paw Go = 5, Paw Pro = 25 total workspace members (owner included),
+#   Paw Pro Max + Enterprise = None (uncapped). The seat gate is plan-authoritative,
+#   so Free = 0 is an actual block, not a no-op. These tests lock the exact numbers.
 
 from __future__ import annotations
 
@@ -75,13 +75,13 @@ EXPECTED_USAGE_LABELS = {
 }
 # The three SMB resource caps (feat/billing-smb-caps). ``max_seats`` is the
 # APPROVED CONSUMER member cap — Free = 0 (no invitations allowed), Paw Go = 5,
-# Paw Pro = 10, Paw Pro Max = 50 total workspace members (owner included),
+# Paw Pro = 25 total workspace members (owner included), Paw Pro Max +
 # Enterprise = None (uncapped). Pockets + connectors remain their tier ceilings.
 EXPECTED_MAX_SEATS: dict[str, int | None] = {
     "free": 0,
     "go": 5,
-    "pro": 10,
-    "pro_max": 50,
+    "pro": 25,
+    "pro_max": None,
     "enterprise": None,
 }
 EXPECTED_MAX_POCKETS: dict[str, int | None] = {
@@ -212,32 +212,40 @@ def test_free_max_seats_is_zero_no_invites():
 
 
 def test_paid_tier_seats_are_the_consumer_ladder():
-    """The paid tiers carry the approved total-member caps: Go=5, Pro=10, ProMax=50.
+    """The paid tiers carry the approved caps: Go=5, Pro=25, ProMax=Unlimited.
 
-    Each number counts TOTAL workspace members (owner included), so Paw Go allows
-    the owner + 4 invited members, Paw Pro + 9, Paw Pro Max + 49.
+    Each count is TOTAL workspace members (owner included), so Paw Go allows the
+    owner + 4 invited members, Paw Pro + 24; Paw Pro Max is uncapped (None).
     """
     assert plans.get_plan("go").max_seats == 5
-    assert plans.get_plan("pro").max_seats == 10
-    assert plans.get_plan("pro_max").max_seats == 50
+    assert plans.get_plan("pro").max_seats == 25
+    assert plans.get_plan("pro_max").max_seats is None
 
 
 def test_enterprise_smb_caps_are_uncapped():
-    """Enterprise is the one uncapped tier on every SMB cap (None, never a number)."""
+    """Enterprise is fully uncapped on every SMB cap (None, never a number)."""
     ent = plans.get_plan("enterprise")
     assert ent.max_seats is None
     assert ent.max_pockets is None
     assert ent.max_connectors is None
 
 
+def test_pro_max_seats_are_uncapped_but_other_caps_concrete():
+    """Paw Pro Max is uncapped on SEATS only; pockets + connectors stay capped."""
+    pro_max = plans.get_plan("pro_max")
+    assert pro_max.max_seats is None
+    assert isinstance(pro_max.max_pockets, int) and pro_max.max_pockets > 0
+    assert isinstance(pro_max.max_connectors, int) and pro_max.max_connectors > 0
+
+
 def test_non_enterprise_smb_caps_are_non_negative_ints():
-    """Every non-Enterprise tier carries a concrete int cap on all three.
+    """Every tier below Pro Max carries a concrete int cap on all three.
 
     ``max_seats`` may be 0 (Free — the "no member invites" cap is a valid
-    ceiling); pockets + connectors are always positive on the consumer tiers.
+    ceiling); pockets + connectors are always positive on the capped tiers.
     """
     by_key = {p.key: p for p in plans.list_plans()}
-    for key in ("free", "go", "pro", "pro_max"):
+    for key in ("free", "go", "pro"):
         assert isinstance(by_key[key].max_seats, int) and by_key[key].max_seats >= 0, key
         assert isinstance(by_key[key].max_pockets, int) and by_key[key].max_pockets > 0, key
         assert isinstance(by_key[key].max_connectors, int) and by_key[key].max_connectors > 0, key
