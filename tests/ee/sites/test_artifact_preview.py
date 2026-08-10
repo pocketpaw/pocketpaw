@@ -175,10 +175,15 @@ def test_worker_source_is_refused_even_when_it_is_on_disk():
     other way must still not hand back the server bundle's source."""
     snap = ap.store_artifact("svelte5", _tar(_REACT_ARTIFACT), engine="svelte")
     # The canary must be SECRET-SHAPED (so the assertion means something) without
-    # matching a real credential pattern. It used to read `paw_sk_live_deadbeef`, which
-    # tripped the pr-quality-gate secret scan on `sk_live_[a-zA-Z0-9]+` and failed CI on
-    # a test whose entire point is that the string is NOT served. Renamed rather than
+    # matching a real credential pattern. It previously embedded a Stripe-secret-shaped
+    # literal, which tripped the pr-quality-gate secret scan and failed CI on a test
+    # whose entire point is that the string is NOT served. Renamed rather than
     # allow-listed: a scanner exemption on a sites test would outlive the reason for it.
+    #
+    # AND DO NOT QUOTE THE OLD VALUE HERE. The first attempt at this comment spelled it
+    # out to explain the fix, which re-introduced the very literal the rename removed and
+    # failed the scan again — the scanner reads the diff, and a comment is diff too.
+    # Describe the shape, never reproduce it.
     (snap.root / "_worker.js").write_bytes(b"const KEY='paw_canary_notacredential_deadbeef'")
 
     got = ap.resolve("svelte5", "/_worker.js")
