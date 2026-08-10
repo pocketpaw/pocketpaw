@@ -7,6 +7,22 @@
 # to blame) is testable without a sandbox, and this part is testable with a fake
 # client.
 #
+# Edited 2026-08-10 (SL-3 — the install-time supply-chain floor): the upload step now
+# writes a ``bunfig.toml`` into the sandbox project (see :data:`SANDBOX_BUNFIG`).
+#
+# WHY IT BELONGS HERE rather than in the generated project or the image: this
+# workspace's install protections live in the DEVELOPER'S HOME DIR (``~/.npmrc``,
+# ``~/.bunfig.toml``) and are in no repo, so a fresh container inherited none of them.
+# The captain's ruling that Daytona is ALWAYS the build host is what turns that from a
+# footnote into the whole exposure — the build box was weaker than the runtime image
+# beside it. Injecting at this boundary means a template change cannot silently drop it,
+# and it keeps a build-host control out of the customer's source tree.
+#
+# NOT DONE, and deliberately not faked: ``--frozen-lockfile``. The generator emits no
+# lockfile — verified, nothing under paw-sites writes one — so the flag would fail every
+# build rather than harden it. Enforcing it needs a vetted lockfile for the allowlisted
+# dependency set, which is its own design and is recorded as owed rather than pretended.
+#
 # THE ORDER OF STEPS IS THE CONTRACT, not an implementation detail:
 #
 #   1. Our clock starts BEFORE ``create_sandbox``. It is the only timing signal that
@@ -125,6 +141,39 @@ SANDBOX_PROJECT_DIR = "/home/daytona/paw-build"
 #: accidentally pick them up.
 SANDBOX_WRAPPER_PATH = "/tmp/paw-build.sh"
 SANDBOX_ARTIFACT_PATH = "/tmp/paw-artifact.tgz"
+
+#: SL-3 — the install-time supply-chain floor, uploaded INTO the sandbox project.
+#:
+#: WHY THIS FILE HAS TO EXIST HERE AT ALL. This workspace's protections live in the
+#: DEVELOPER'S HOME DIR (``~/.npmrc``, ``~/.bunfig.toml``) and are not in any repo, so a
+#: fresh container inherits NONE of them: no release-age floor, no ``ignore-scripts``. A
+#: build box that resolves from the open registry with lifecycle scripts enabled is
+#: strictly weaker than the runtime image beside it, and once Daytona is the ONLY build
+#: host that inversion is the whole exposure rather than a note.
+#:
+#: ``minimumReleaseAge`` is the same 7-day floor the dev machines enforce, expressed in
+#: SECONDS because that is bun's unit — 604800. It is the control that would have caught
+#: a compromised fresh publish of an already-vetted package, which the allowlist cannot:
+#: the allowlist pins WHICH packages and a caret pin still floats the VERSION.
+#:
+#: ``ignore-scripts`` matters more here than on a laptop. A postinstall script in a build
+#: container runs with the sandbox's network and its filesystem, next to the artifact we
+#: are about to deploy. Nothing in the vetted set needs one.
+#:
+#: DELIBERATELY UPLOADED, NOT TEMPLATED INTO THE GENERATED PROJECT. Two reasons: it is a
+#: property of the BUILD HOST, not of the customer's site, so it has no business in their
+#: source tree; and injecting it at this boundary means a template change cannot silently
+#: drop it. It lands in the project dir because that is where bun looks.
+SANDBOX_BUNFIG_REL = "bunfig.toml"
+SANDBOX_BUNFIG = """# Written by pocketpaw's build lane — NOT part of your site's source.
+# Install-time supply-chain floor for this sandbox. See daytona_runner.SANDBOX_BUNFIG.
+[install]
+# 7 days, in seconds. Matches the floor the dev machines enforce via ~/.bunfig.toml.
+minimumReleaseAge = 604800
+# No lifecycle scripts. Nothing in the vetted dependency set needs one, and a
+# postinstall here would run beside the artifact we are about to deploy.
+ignoreScripts = true
+"""
 
 #: Seconds added to the in-sandbox timeout for our own ``execute_command`` budget.
 #: The inner ``timeout(1)`` should always fire first, because that path still runs the
@@ -285,6 +334,31 @@ async def run_build(
             )
             for rel, contents in files.items()
         ]
+        # SL-3 — the supply-chain floor. OURS WINS, and the conflict is resolved HERE
+        # rather than by upload ordering.
+        #
+        # ``bulk_upload`` hands the whole list to the Daytona SDK in ONE batch call, so
+        # which write survives for a duplicate destination is the SDK's business and is
+        # not specified by anything we control. Relying on "later overwrites earlier"
+        # would be a guess dressed as a guarantee, so the caller's copy is dropped
+        # explicitly instead — deterministic, and visible in the log when it happens.
+        #
+        # Ours wins because this is a FLOOR: a control the built project can override is
+        # not one. The trade is that a legitimate project-level bun setting would be
+        # discarded, which is why the drop is logged at WARNING rather than passed over in
+        # silence. No generated project emits a bunfig.toml today, so this is a guard
+        # against a future template or a hostile source map, not a live collision.
+        bunfig_dst = f"{SANDBOX_PROJECT_DIR}/{SANDBOX_BUNFIG_REL}"
+        displaced = [u for u in uploads if u[1] == bunfig_dst]
+        if displaced:
+            logger.warning(
+                "sites: dropped a project-supplied %s in favour of the lane's "
+                "supply-chain floor (sandbox %s)",
+                SANDBOX_BUNFIG_REL,
+                sandbox_id,
+            )
+            uploads = [u for u in uploads if u[1] != bunfig_dst]
+        uploads.append((SANDBOX_BUNFIG.encode(), bunfig_dst))
         uploads.append((wrapper.encode(), SANDBOX_WRAPPER_PATH))
         await client.bulk_upload(sandbox_id, uploads)
         t_uploaded = time.monotonic()

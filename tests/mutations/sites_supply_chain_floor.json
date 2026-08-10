@@ -1,0 +1,37 @@
+[
+  {
+    "label": "SL-3: the release-age floor is removed, so a compromised fresh publish of an already-vetted package installs in the build container",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "minimumReleaseAge = 604800",
+    "replace": "minimumReleaseAge = 0",
+    "tests": ["tests/ee/sites/test_daytona_runner.py::TestTheSupplyChainFloorReachesTheSandbox"]
+  },
+  {
+    "label": "SL-3: lifecycle scripts are re-enabled, so a postinstall runs with the sandbox's network and filesystem next to the artifact about to be deployed",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "ignoreScripts = true",
+    "replace": "ignoreScripts = false",
+    "tests": ["tests/ee/sites/test_daytona_runner.py::TestTheSupplyChainFloorReachesTheSandbox"]
+  },
+  {
+    "label": "SL-3: a project-supplied bunfig is no longer dropped, so the floor's survival depends on the SDK's unspecified duplicate-destination ordering — a guess dressed as a guarantee",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "            uploads = [u for u in uploads if u[1] != bunfig_dst]",
+    "replace": "            pass",
+    "tests": ["tests/ee/sites/test_daytona_runner.py::TestTheSupplyChainFloorReachesTheSandbox"]
+  },
+  {
+    "label": "SL-3: the floor is never uploaded at all, so the container installs with no release-age gate and scripts enabled",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "        uploads.append((SANDBOX_BUNFIG.encode(), bunfig_dst))",
+    "replace": "        pass",
+    "tests": ["tests/ee/sites/test_daytona_runner.py::TestTheSupplyChainFloorReachesTheSandbox"]
+  },
+  {
+    "label": "SL-3: the drop happens silently, so someone whose project bun config appears not to apply has nothing in the log to explain it",
+    "file": "ee/pocketpaw_ee/sites/daytona_runner.py",
+    "find": "            logger.warning(\n                \"sites: dropped a project-supplied %s in favour of the lane's \"\n                \"supply-chain floor (sandbox %s)\",\n                SANDBOX_BUNFIG_REL,\n                sandbox_id,\n            )",
+    "replace": "            pass",
+    "tests": ["tests/ee/sites/test_daytona_runner.py::TestTheSupplyChainFloorReachesTheSandbox"]
+  }
+]
