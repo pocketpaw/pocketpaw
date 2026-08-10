@@ -246,6 +246,48 @@ class TestEmitsServerWorker:
         assert engines.emits_server_worker(value) is True
 
 
+class TestExpectsServerWorker:
+    """SL-2 slice 2's sixth predicate: is a worker's ABSENCE a problem?
+
+    Not the same question as ``emits_server_worker``, and the difference is svelte. That
+    one answers the DEPLOY-SHAPE question from the engine name and still says svelte emits
+    a worker; this one answers "should a finished artifact have one" and says the name
+    cannot tell. Both are right about their own question, which is why this is a new
+    predicate rather than an edit to that one.
+    """
+
+    def test_ripple_must_have_a_worker(self) -> None:
+        assert engines.expects_server_worker("ripple") is True
+
+    @pytest.mark.parametrize("engine", ["react", "html"])
+    def test_a_static_engine_must_not(self, engine: str) -> None:
+        assert engines.expects_server_worker(engine) is False
+
+    def test_svelte_is_unanswerable_from_the_name(self) -> None:
+        """The load-bearing case. Since SL-1 a static landing site builds on
+        adapter-static (no worker) and a dynamic one on adapter-cloudflare (a worker), and
+        which ran is a property of the SITE. ``None``, not False: False would make a
+        dynamic site's worker read as an anomaly instead."""
+        assert engines.expects_server_worker("svelte") is None
+
+    @pytest.mark.parametrize("value", [None, "", "unknown"])
+    def test_the_default_expects_a_worker(self, value: str | None) -> None:
+        """Unknown → ripple, the least-capable shape, same as every other predicate."""
+        assert engines.expects_server_worker(value) is True
+
+    def test_it_disagrees_with_the_name_only_predicate_on_exactly_one_engine(self) -> None:
+        """Pins the scope of the divergence. If these two ever agree everywhere again,
+        either svelte stopped spanning two adapters (then this predicate can go) or someone
+        collapsed the tri-state back into a bool (then static svelte builds are warning
+        again)."""
+        differs = {
+            engine
+            for engine in ("ripple", "svelte", "react", "html")
+            if engines.expects_server_worker(engine) is not engines.emits_server_worker(engine)
+        }
+        assert differs == {"svelte"}
+
+
 def test_source_and_build_are_distinct_capabilities() -> None:
     # The whole point of the module: html is source-map-backed but needs NO build.
     # Guard against a future refactor collapsing the two into one flag.

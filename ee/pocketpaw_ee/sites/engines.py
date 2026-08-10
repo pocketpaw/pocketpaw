@@ -15,6 +15,15 @@
 # new engine that combines them in a new way adds a predicate rather than overloading
 # one.
 #
+# Edited 2026-08-10 (SL-2 slice 2 — the build lane got its first caller): added
+# :func:`expects_server_worker`, a SIXTH predicate, for the question a caller holding only
+# a finished ARTIFACT has to ask: not "would a worker be deployed" but "is its absence a
+# problem". Those were one question until SL-1 split the svelte track across two adapters,
+# and a cross-check that keeps conflating them warns on every healthy static svelte build.
+# It returns a tri-state — ``None`` means the engine name genuinely cannot say — which is
+# the honest shape and the reason it is a new predicate rather than an edit to either
+# existing one.
+#
 # Edited 2026-08-10 (SL-1 — the static svelte landing lane): added
 # :func:`resolve_static_output_rel` and :func:`resolve_emits_server_worker`, the
 # ARTIFACT-resolving siblings of the last two predicates. The svelte track now builds
@@ -65,6 +74,9 @@ The five predicates split the engine question into orthogonal capabilities:
 * :func:`emits_server_worker` — does that output include a ``_worker.js`` server
   entry that must be deployed as a Worker *script* (ripple, svelte), or is it a
   purely static asset tree deployed as an assets-only Worker (html, react)?
+* :func:`expects_server_worker` — a tri-state sibling of the above, for a caller holding
+  only a finished artifact: is a worker's ABSENCE an anomaly (ripple), is its PRESENCE one
+  (react, html), or is either shape legitimate (svelte, since SL-1 split its adapters)?
 
 SL-1 added ARTIFACT-RESOLVING siblings for the last two, and they are the ones to
 reach for when a generated project dir is in hand:
@@ -216,6 +228,35 @@ def emits_server_worker(engine: str | None) -> bool:
     ``main`` at a ``dist/_worker.js`` that does not exist and fail the deploy.
     """
     return normalize_engine(engine) in _SERVER_WORKER_ENGINES
+
+
+def expects_server_worker(engine: str | None) -> bool | None:
+    """Whether a build of ``engine`` SHOULD have emitted a ``_worker.js`` — or ``None``
+    when the engine name cannot say, because either answer is legitimate.
+
+    * ripple → ``True``. adapter-cloudflare, always a worker.
+    * react / html → ``False``. Purely static trees; a worker turning up is an anomaly.
+    * svelte → ``None``. Since SL-1 the track spans two adapters chosen by a property of
+      the SITE: a static landing site emits none, a dynamic/auth one emits one. Both are
+      correct builds.
+
+    ADDED 2026-08-10 (SL-2 slice 2) for the one question :func:`emits_server_worker`
+    cannot answer: not "would a worker be deployed" but "is its ABSENCE a problem". Those
+    were the same question until SL-1 split the svelte track, and conflating them makes a
+    cross-check warn on every healthy static svelte build — which is worse than not
+    checking, because a warning that fires on correct builds is one people learn to
+    ignore, and it is the same warning that would fire on a genuinely truncated artifact.
+
+    A THIRD PREDICATE RATHER THAN A CHANGE TO THE OTHER TWO, per this module's design:
+    :func:`emits_server_worker` still honestly answers the deploy-shape question from the
+    name, and :func:`resolve_emits_server_worker` still answers it from an artifact on
+    disk. This one is for a caller that holds NEITHER a project dir nor a deploy decision
+    — only an artifact and a question about whether it looks complete.
+    """
+    normalized = normalize_engine(engine)
+    if normalized == "svelte":
+        return None
+    return normalized in _SERVER_WORKER_ENGINES
 
 
 def static_output_rel(engine: str | None) -> str:
