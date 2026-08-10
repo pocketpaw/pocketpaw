@@ -428,9 +428,7 @@ async def _build_static_dir(
         pocket_id=getattr(site, "pocket_id", None),
         smoke=False,
     )
-    static_dir = Path(
-        build.project_dir, resolve_static_output_rel(build.project_dir, engine)
-    )
+    static_dir = Path(build.project_dir, resolve_static_output_rel(build.project_dir, engine))
     return static_dir if (static_dir / "index.html").is_file() else None
 
 
