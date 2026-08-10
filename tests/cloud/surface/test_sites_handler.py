@@ -1,6 +1,15 @@
 # tests/cloud/surface/test_sites_handler.py — Sites surface handler.
 #
 # Created: 2026-06-03 — Guards the /sites surface preamble.
+# Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — four tests at the BOTTOM
+# of this file pin the two preambles that route to the new react edit tool: the
+# react create step now says a follow-up change is
+# `edit_react_component`, NOT a second `create_react_site` (the re-create is what
+# minted a SECOND site pocket), and a react refine routes to
+# `_react_refine_preamble` instead of the rippleSpec merge path a react pocket has
+# nothing to merge into. The fourth test pins that ripple/svelte/no-engine refine is
+# byte-for-byte unchanged, so the fork cannot leak into the engine it was not
+# written for.
 # Updated: 2026-06-03 (pm) — Bundled skills now load on the SDK backend (local
 # plugin via the SDK `plugins=` option), so the preamble PREFERS the
 # `pocketpaw-create-site` skill and keeps the raw MCP tools only as a fallback.
@@ -1091,3 +1100,128 @@ async def test_concierge_awareness_does_not_depend_on_the_mcp_tool_id_import() -
         assert "concierge" in preamble.lower()
     finally:
         registry._MCP_TOOL_IDS_CACHE = original
+
+
+# ---------------------------------------------------------------------------
+# RX-3 — the react EDIT lane reaches the preambles that route to it
+# ---------------------------------------------------------------------------
+
+
+async def test_react_create_step_routes_follow_up_changes_to_the_edit_tool() -> None:
+    """The reported bug in prompt form: with no edit tool named, a follow-up
+    "shorten the hero headline" left the agent one available move — a second
+    ``create_react_site`` — which mints a SECOND site pocket and leaves the site the
+    user is looking at unchanged. The react build step now names the edit tool and
+    forbids the re-create.
+
+    THE MUTATION THAT BREAKS THIS: delete the CHANGES-GO-THROUGH-THE-EDIT-TOOL
+    paragraph from the react ``build_step``.
+    """
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
+        )
+    ).text
+
+    assert "mcp__pocketpaw_sites_manager__edit_react_component" in preamble
+    lower = preamble.lower()
+    # It says the re-create is wrong, and says WHY (a second site).
+    assert "second `create_react_site`" in preamble or "second create_react_site" in lower
+    assert "second site" in lower
+    # And it teaches the two-call add-a-section shape the tool actually needs.
+    assert "create=true" in lower
+    assert "src/app.tsx" in lower
+
+
+async def test_react_refine_names_the_edit_tool_and_not_the_ripple_merge() -> None:
+    """A react site's refine chat must route to ``edit_react_component``.
+
+    The default refine preamble names ``mcp__pocketpaw_pocket_specialist__edit``,
+    which merges a rippleSpec — and a react pocket has no rippleSpec, so that is an
+    instruction with nothing to act on. Per pocketpaw/CLAUDE.md, naming an
+    existing-but-WRONG tool is the same defect as naming an absent one: the model
+    does not error, it improvises.
+
+    THE MUTATION THAT BREAKS THIS: drop the ``engine == "react"`` fork from
+    ``_refine_preamble`` so react falls through to the ripple preamble.
+    """
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE,
+            USER,
+            SurfaceMeta(
+                route_path="/sites/site-abc",
+                pocket_id=REFINE_POCKET,
+                site_id="site-abc",
+                engine="react",
+            ),
+        )
+    ).text
+
+    assert "mcp__pocketpaw_sites_manager__edit_react_component" in preamble
+    # The pocket the agent must edit is named, so it cannot address the wrong one.
+    assert REFINE_POCKET in preamble
+    # The ripple merge path is named ONLY as a prohibition — naming it at all is
+    # deliberate (the agent has the tool, so silence would leave it as a plausible
+    # move), but it must never read as the instruction.
+    assert "do NOT call `mcp__pocketpaw_pocket_specialist__edit`" in preamble
+    # The ripple WIDGET vocabulary is absent: those rules are about a spec this
+    # engine does not have, and carrying them would teach a react author to look
+    # for widgets that are not there.
+    assert "pricing-table" not in preamble
+    assert "accordion" not in preamble
+    # Re-creating is explicitly refused.
+    assert "create_react_site" in preamble
+
+
+async def test_react_refine_carries_the_prerender_and_write_scope_rules() -> None:
+    """The two rules that replace the ripple widget rules on this engine.
+
+    The prerender rule is the same hazard in React spelling (``useEffect`` does not
+    run at prerender time, so a resting state set only in an effect bakes as the
+    initial value), and the write scope is what the tool actually enforces — an edit
+    naming a reserved path is rejected, so the preamble must not let the agent
+    discover that by trial."""
+    preamble = (
+        await sites_handler.build_preamble(
+            WORKSPACE,
+            USER,
+            SurfaceMeta(
+                route_path="/sites/site-abc",
+                pocket_id=REFINE_POCKET,
+                site_id="site-abc",
+                engine="react",
+            ),
+        )
+    ).text
+    lower = preamble.lower()
+
+    assert "prerender" in lower
+    assert "useeffect" in lower
+    # The write scope + the reserved shell, spelled out.
+    assert "src/" in preamble and "public/" in preamble
+    assert "package.json" in preamble
+    assert "src/paw/" in preamble
+    # And that the edit is a DRAFT, so the agent does not announce a live change.
+    assert "draft" in lower
+    assert "does not publish" in lower
+
+
+async def test_non_react_refine_is_unchanged() -> None:
+    """The fork must not disturb the engine it was not written for: a refine with no
+    engine hint, or a ripple one, still gets the rippleSpec merge preamble."""
+    for engine in (None, "ripple", "svelte"):
+        preamble = (
+            await sites_handler.build_preamble(
+                WORKSPACE,
+                USER,
+                SurfaceMeta(
+                    route_path="/sites/site-abc",
+                    pocket_id=REFINE_POCKET,
+                    site_id="site-abc",
+                    engine=engine,
+                ),
+            )
+        ).text
+        assert "mcp__pocketpaw_pocket_specialist__edit" in preamble, engine
+        assert "edit_react_component" not in preamble, engine

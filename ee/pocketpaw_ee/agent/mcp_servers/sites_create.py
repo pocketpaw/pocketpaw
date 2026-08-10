@@ -1,6 +1,32 @@
 # sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
 # create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
 #
+# Updated: 2026-08-11 (RX-3 — the react track gets an EDIT lane) — added a SEVENTH
+# tool ``edit_react_component`` plus its handler, mirroring
+# ``make_edit_svelte_component_tool``'s shape (identity → record_tool_call →
+# input validation → plan gate → service → draft-framed success body). It closes a
+# hole this file was half of: ``edit_svelte_component`` was the ONLY edit tool
+# registered, so on a react site the agent's only move for "shorten the hero
+# headline" was to call ``create_react_site`` again, minting a SECOND site pocket.
+# Three things about it differ from the svelte edit tool, all deliberate:
+#   * DRAFT-ONLY, with no ``SmokeGateFailed`` branch to map. Nothing is built, so
+#     nothing can fail a smoke gate — and a react publish enqueues its build and
+#     returns before any outcome exists, so there would be nothing to roll back to
+#     anyway. The success body says draft and publishing stays the user's call.
+#   * A ``create`` flag, because ``set_react_source_file`` (like its svelte peer)
+#     refuses a path that is not already in the map, and "add a testimonials
+#     section" needs a NEW file plus an ``src/App.tsx`` edit. It requires
+#     ``new_source`` and requires the path to be ABSENT, so it cannot overwrite a
+#     real component.
+#   * It runs ``_require_sites_plan_or_error``. ``edit_svelte_component`` does not,
+#     which is an asymmetry in that tool rather than a precedent for this one.
+# The reserved-path guard is the load-bearing part: without the same normalization
+# create uses, ``edit_react_component(component_path="package.json", create=true)``
+# writes the dependency manifest, defeating the generator's dependency allowlist
+# and with it the supply-chain release-age floor. So the policy moved OUT of this
+# file into ``pocketpaw_ee.sites.react_paths`` and both writers call it — the
+# constants below are now re-exports.
+#
 # Updated: 2026-08-07 (RX-2 — the agent can select the react engine) — added a
 # FIFTH create tool ``create_react_site`` for the Paw Sites "react track" (the
 # engine RX-1 registered). It mirrors ``create_html_site`` (the agent IS the
@@ -197,10 +223,10 @@ from __future__ import annotations
 
 import json
 import logging
-import posixpath
 from typing import Any
 
 from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
+from pocketpaw_ee.sites import react_paths
 
 from ._audit import record_tool_call
 
@@ -236,6 +262,12 @@ CREATE_HTML_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_html_site"
 # prerendered static output assets-only, with no server entry.
 CREATE_REACT_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_react_site"
 
+# RX-3 — the react-track EDIT tool. Same server again. Without it the agent's only
+# response to "shorten the hero headline" on a react site was to call
+# ``create_react_site`` a second time, which mints a SECOND site pocket instead of
+# changing the one the user is looking at.
+EDIT_REACT_COMPONENT_TOOL_ID = f"mcp__{SERVER_NAME}__edit_react_component"
+
 SITES_CREATE_TOOL_IDS = (
     CREATE_LANDING_SITE_TOOL_ID,
     CREATE_SVELTE_SITE_TOOL_ID,
@@ -243,6 +275,7 @@ SITES_CREATE_TOOL_IDS = (
     CREATE_DYNAMIC_SITE_TOOL_ID,
     CREATE_HTML_SITE_TOOL_ID,
     CREATE_REACT_SITE_TOOL_ID,
+    EDIT_REACT_COMPONENT_TOOL_ID,
 )
 
 
@@ -359,9 +392,16 @@ REACT_REQUIRED_KEYS = ("src/App.tsx",)
 # Reserving them is not tidiness: an author who could overwrite ``index.html`` or
 # ``paw-prerender.mjs`` could remove the prerender outlet or the pass that fills
 # it, turning the site back into a shell that is blank with JavaScript disabled —
-# exactly what this engine exists to refuse to ship.
-REACT_RESERVED_FILES = ("index.html", "package.json", "vite.config.ts", "paw-prerender.mjs")
-REACT_RESERVED_PREFIX = "src/paw/"
+# exactly what this engine exists to refuse to ship. And an author who could
+# overwrite ``package.json`` would be writing the dependency manifest, which is
+# where the supply-chain release-age floor is enforced.
+#
+# RX-3: the policy itself now lives in ``pocketpaw_ee.sites.react_paths`` because
+# the EDIT lane is a second writer of the same map and two copies of a guard drift.
+# These names are re-exported here (and stay in ``__all__``) so every importer of
+# the create-time spelling keeps working.
+REACT_RESERVED_FILES = react_paths.REACT_RESERVED_FILES
+REACT_RESERVED_PREFIX = react_paths.REACT_RESERVED_PREFIX
 
 
 def _missing_react_keys(source: dict[str, Any]) -> list[str]:
@@ -376,17 +416,11 @@ def _missing_react_keys(source: dict[str, Any]) -> list[str]:
 def _reserved_react_keys(source: dict[str, Any]) -> list[str]:
     """Return the source-map keys that collide with a generator-owned path.
 
-    Normalizes backslashes and ``.``/``..`` segments so ``./index.html`` and
-    ``src\\paw\\x.tsx`` cannot slip past the check — the generator normalizes the
-    same way before it throws, and a guard that a trivial path spelling defeats is
-    not a guard. ``posixpath.normpath`` (not ``os.path``) because source-map keys
-    are always POSIX-style project-relative paths regardless of the host OS."""
-    hits: list[str] = []
-    for key in source:
-        norm = posixpath.normpath(key.replace("\\", "/"))
-        if norm in REACT_RESERVED_FILES or norm.startswith(REACT_RESERVED_PREFIX):
-            hits.append(key)
-    return sorted(hits)
+    A thin alias for ``react_paths.reserved_react_keys`` (RX-3), which normalizes
+    backslashes and ``.``/``..`` segments so ``./index.html`` and
+    ``src\\paw\\x.tsx`` cannot slip past the check. Kept under this name because
+    the create handler and its tests call it."""
+    return react_paths.reserved_react_keys(source)
 
 
 # ── Dynamic-track spec surface (RFC 12 A2) ──────────────────────────────────
@@ -1891,12 +1925,283 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
     return edit_svelte_component
 
 
+async def _edit_react_component_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__edit_react_component`` (RX-3).
+
+    Reads workspace/user identity from the per-stream ContextVars, runs the same
+    plan gate the create handlers run, validates the inputs, and delegates to
+    ``sites_service.edit_react_component`` — which resolves the edit and persists
+    the one file as a reviewable DRAFT.
+
+    It does NOT republish and does NOT enqueue a build, so unlike the svelte edit
+    handler there is no ``SmokeGateFailed`` case to map: nothing is built, so
+    nothing can fail a smoke gate, and there would be nothing to roll back if it
+    could (a react publish enqueues its build and returns before any outcome
+    exists). The success body says draft, and publishing stays the user's call.
+
+    Returns ``{ok, status:"draft", is_live:false, pocket_id, component_path,
+    created, message}``; sets ``is_error`` when identity is missing, the plan lacks
+    Sites, the inputs are malformed, or the service rejects the edit (a reserved
+    path, a wrong-engine pocket, a missing/colliding component, an ambiguous
+    ``old_string``) — each relayed by code so the agent can fix and retry rather
+    than report a change that did not happen.
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "edit_react_component requires workspace and user context (call from a "
+            "cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_edit_react_component",
+        status="ok",
+        ok=True,
+    )
+
+    pocket_id = args.get("pocket_id")
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return _error_response(
+            "edit_react_component requires a `pocket_id` — the id of the react site "
+            "pocket whose component you are editing."
+        )
+    component_path = args.get("component_path")
+    if not isinstance(component_path, str) or not component_path:
+        return _error_response(
+            "edit_react_component requires a `component_path` — the relative path of "
+            "the file to write (e.g. 'src/components/Hero.tsx'). It must already "
+            "exist in the site's source map unless you pass `create=true`."
+        )
+    args = coerce_json_object_args(args, ("edits",))
+    edits = args.get("edits")
+    new_source = args.get("new_source")
+    has_edits = edits is not None
+    has_new_source = new_source is not None
+    if has_edits == has_new_source:
+        return _error_response(
+            "edit_react_component requires exactly one of `edits` (a targeted "
+            "search/replace diff — PREFERRED for small changes) or `new_source` "
+            "(the FULL new file contents — for large rewrites and for `create`). "
+            "Provide one, not both and not neither."
+        )
+    if has_new_source and not isinstance(new_source, str):
+        return _error_response(
+            "edit_react_component `new_source` must be the FULL new contents of the "
+            "file as a string (the tool replaces the whole file, not a patch)."
+        )
+    if has_edits:
+        # Validate the diff SHAPE here so a malformed payload gets a clear error
+        # before the service runs. The MATCH-uniqueness contract belongs to the
+        # service's apply_edits (relayed below as a ValidationError).
+        if not isinstance(edits, list) or not edits:
+            return _error_response(
+                "edit_react_component `edits` must be a non-empty list of "
+                "{old_string, new_string} blocks (like the built-in Edit tool)."
+            )
+        for i, block in enumerate(edits):
+            if (
+                not isinstance(block, dict)
+                or not isinstance(block.get("old_string"), str)
+                or not isinstance(block.get("new_string"), str)
+            ):
+                return _error_response(
+                    f"edit_react_component `edits` block {i} must be an object with "
+                    "string `old_string` and `new_string`."
+                )
+    create = bool(args.get("create"))
+    if create and not has_new_source:
+        return _error_response(
+            "edit_react_component `create=true` needs `new_source` — the full "
+            "contents of the new file. There is nothing for `edits` to search "
+            "against in a file that does not exist yet."
+        )
+
+    # Plan gate (Sites = "sites"): an edit mutates a site pocket, so it is gated on
+    # the same feature the create tools are. Without this a workspace that lost the
+    # plan could keep editing a site its own /sites list 403s.
+    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+        return gate
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        result = await sites_service.edit_react_component(
+            user_id=user_id,
+            pocket_id=pocket_id,
+            component_path=component_path,
+            new_source=new_source if has_new_source else None,
+            edits=edits if has_edits else None,
+            create=create,
+        )
+    except CloudError as exc:
+        # ValidationError (reserved path / outside src+public / not a react site /
+        # already exists / a bad diff) or NotFound (unknown pocket or component).
+        # Relay the code + message so the agent knows WHICH guard rejected it.
+        return _error_response(f"{exc.code}: {exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("edit_react_component failed", exc_info=True)
+        return _error_response(f"edit failed: {exc}")
+
+    # The edit is a DRAFT. The chat agent narrates this payload, so — exactly like
+    # the svelte edit tool — it must not contain a completed-state publish claim.
+    return _success_response(
+        {
+            "ok": True,
+            "status": "draft",
+            "is_live": False,
+            "pocket_id": result["pocket_id"],
+            "component_path": result["component_path"],
+            "created": result["created"],
+            "message": (
+                "Saved to the site's draft — it is NOT online yet, and no build was "
+                "started. Tell the user the change is in the draft they can preview "
+                "under /sites, and offer to publish it; only call the publish tool "
+                "when they ask."
+            ),
+        }
+    )
+
+
+def make_edit_react_component_tool(tool: Any) -> Any:
+    """Build the ``edit_react_component`` SDK tool object using the SDK's ``tool``
+    decorator (passed in by the caller that already imported it).
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as create + publish +
+    ``edit_svelte_component`` (see ``make_create_landing_site_tool`` for why one
+    server)."""
+
+    @tool(
+        "edit_react_component",
+        (
+            "Change an EXISTING react Paw Site. Use this WHENEVER the user asks to "
+            "alter a react site that already exists — 'shorten the hero headline', "
+            "'make the pricing cards darker', 'fix the typo in the FAQ', 'add a "
+            "testimonials section'. NEVER call `create_react_site` again for a "
+            "change: that mints a SECOND site pocket and leaves the one the user is "
+            "looking at untouched. The change is saved to the site's DRAFT — it is "
+            "NOT published, nothing is built, and nothing goes live.\n"
+            "Give the change ONE of two ways (exactly one, not both):\n"
+            "  * `edits` — PREFER THIS for small/targeted changes. A list of "
+            "search/replace blocks [{old_string, new_string}, ...], exactly like "
+            "the built-in Edit tool: each `old_string` is copied VERBATIM from the "
+            "current file and must match EXACTLY ONCE (include enough surrounding "
+            "context to be unique), and `new_string` is what it becomes. You send "
+            "ONLY the change, not the whole file — far fewer tokens and faster. If "
+            "you have not read the file this turn, read it first so old_string "
+            "matches.\n"
+            "  * `new_source` — the FULL new file contents as a string (REPLACES "
+            "the whole file). For large rewrites, and the only form `create` "
+            "accepts.\n"
+            "To ADD a section: call this twice — once with `create=true` and "
+            "`new_source` for the new `src/components/<Name>.tsx`, then once with "
+            "`edits` on `src/App.tsx` to import and render it. `create=true` "
+            "REQUIRES the path to be new; editing an existing file with it is "
+            "rejected so you cannot overwrite a component by accident. Without "
+            "`create` the path must already exist, so a typo is an error and never "
+            "a stray new file.\n"
+            "You may only write under `src/` (outside `src/paw/`) and `public/`. "
+            "`index.html`, `package.json`, `vite.config.ts`, `paw-prerender.mjs` "
+            "and `src/paw/` are GENERATED and rejected — they carry the prerender "
+            "contract and the dependency list, and there is no way to add a "
+            "dependency. PRERENDER RULE (same as create_react_site): every "
+            "component must render its resting/final state in its RETURNED MARKUP, "
+            "because `useEffect` does not run at prerender time.\n"
+            "Args: `pocket_id` (the react site pocket), `component_path`, and one "
+            "of `edits` / `new_source`, plus optional `create`. Returns {ok, "
+            "status:'draft', is_live:false, pocket_id, component_path, created, "
+            "message}. Relay the `message`: the change is in the DRAFT the user can "
+            "preview under /sites, and publishing is their call — do NOT tell them "
+            "it is live. ok=false with an error means NOTHING was saved: an "
+            "old_string that matched 0 or >1 times means make it more specific and "
+            "retry; a reserved-path, wrong-engine, already-exists or not-found "
+            "error means relay the reason. Do NOT report a successful edit when "
+            "ok=false."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Id of the react site pocket to edit.",
+                },
+                "component_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Relative path of the file to write (e.g. "
+                        "'src/components/Hero.tsx'). Must already exist in the "
+                        "site's source map unless `create` is true. Only `src/` "
+                        "(outside `src/paw/`) and `public/` may be written."
+                    ),
+                },
+                "edits": {
+                    "type": "array",
+                    "description": (
+                        "PREFERRED for small changes: a list of search/replace "
+                        "blocks applied to the file's CURRENT contents. Each "
+                        "`old_string` must match exactly once. Send this INSTEAD of "
+                        "`new_source` so you emit only the diff. Not valid with "
+                        "`create`."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": {
+                                "type": "string",
+                                "description": (
+                                    "Exact text to replace, copied verbatim from the "
+                                    "current file; must match exactly once."
+                                ),
+                            },
+                            "new_string": {
+                                "type": "string",
+                                "description": "Replacement text (may be empty to delete).",
+                            },
+                        },
+                        "required": ["old_string", "new_string"],
+                        "additionalProperties": False,
+                    },
+                },
+                "new_source": {
+                    "type": "string",
+                    "description": (
+                        "The FULL new contents of the file as a string (REPLACES the "
+                        "whole file — not a diff). Use for large rewrites, and "
+                        "always with `create`."
+                    ),
+                },
+                "create": {
+                    "type": "boolean",
+                    "description": (
+                        "Create a NEW file at `component_path` instead of editing an "
+                        "existing one. Requires `new_source`, and the path must NOT "
+                        "already exist. Use it to add a section, then edit "
+                        "`src/App.tsx` to render it."
+                    ),
+                },
+            },
+            "required": ["pocket_id", "component_path"],
+            "additionalProperties": False,
+        },
+    )
+    async def edit_react_component(args):  # type: ignore[no-untyped-def]
+        return await _edit_react_component_handler(args)
+
+    return edit_react_component
+
+
 __all__ = [
     "CREATE_DYNAMIC_SITE_TOOL_ID",
     "CREATE_HTML_SITE_TOOL_ID",
     "CREATE_LANDING_SITE_TOOL_ID",
     "CREATE_REACT_SITE_TOOL_ID",
     "CREATE_SVELTE_SITE_TOOL_ID",
+    "EDIT_REACT_COMPONENT_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "HTML_REQUIRED_KEYS",
     "REACT_REQUIRED_KEYS",
@@ -1911,5 +2216,6 @@ __all__ = [
     "make_create_landing_site_tool",
     "make_create_react_site_tool",
     "make_create_svelte_site_tool",
+    "make_edit_react_component_tool",
     "make_edit_svelte_component_tool",
 ]

@@ -361,9 +361,23 @@ def validate_plans(plans: list[Path], *, force: bool = False) -> int:
     texts: dict[Path, str | None] = {}
 
     def _text(path: Path) -> str | None:
+        """The file as the SWEEP will see it — ``read_bytes().decode()``, not
+        ``read_text()``.
+
+        The difference is line endings, and it is not cosmetic. ``read_text``
+        opens in universal-newlines mode, so a CRLF file arrives with ``\\n``;
+        the sweep reads ``read_bytes()`` (it must, to restore byte-for-byte) and
+        decodes, so CRLF stays CRLF. A multi-line anchor into a CRLF file
+        therefore matched here and then aborted the sweep with "anchor not
+        found" — validation passing a plan the sweep refuses to run, which is
+        exactly the disagreement :func:`anchor_problem`'s single definition
+        exists to prevent. Found 2026-08-11 on
+        ``ee/pocketpaw_ee/cloud/surface/handlers/sites.py``, which is CRLF in
+        the repo; the CI ``mutation-anchors`` job would have stayed green while
+        every local sweep touching that file died on arrival."""
         if path not in texts:
             try:
-                texts[path] = path.read_text(encoding="utf-8")
+                texts[path] = path.read_bytes().decode("utf-8")
             except OSError:
                 texts[path] = None
         return texts[path]
