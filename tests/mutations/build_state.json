@@ -4,55 +4,98 @@
     "file": "ee/pocketpaw_ee/sites/build_state.py",
     "find": "    if stamp is None:\n        return True",
     "replace": "    if stamp is None:\n        return False",
-    "tests": ["tests/ee/sites/test_build_state.py"]
+    "tests": [
+      "tests/ee/sites/test_build_state.py"
+    ]
   },
   {
     "label": "the staleness window becomes a constant again, so a healthy long build gets a second sandbox enqueued on top of it",
     "file": "ee/pocketpaw_ee/sites/build_state.py",
     "find": "    return timedelta(seconds=max(0, timeout_seconds)) + STALE_MARGIN",
     "replace": "    return STALE_MARGIN",
-    "tests": ["tests/ee/sites/test_build_state.py"]
+    "tests": [
+      "tests/ee/sites/test_build_state.py"
+    ]
   },
   {
     "label": "a non-positive timeout yields a zero window, so every in-flight build reads as stale and the guard stops guarding",
     "file": "ee/pocketpaw_ee/sites/build_state.py",
     "find": "    return timedelta(seconds=max(0, timeout_seconds)) + STALE_MARGIN",
     "replace": "    return timedelta(seconds=timeout_seconds)",
-    "tests": ["tests/ee/sites/test_build_state.py"]
+    "tests": [
+      "tests/ee/sites/test_build_state.py"
+    ]
   },
   {
     "label": "queued stops counting as in-flight, so a publish waiting behind the cap enqueues a second build and spends twice",
     "file": "ee/pocketpaw_ee/sites/build_state.py",
     "find": "IN_FLIGHT_STATUSES: frozenset[str] = frozenset({\"queued\", \"building\"})",
     "replace": "IN_FLIGHT_STATUSES: frozenset[str] = frozenset({\"building\"})",
-    "tests": ["tests/ee/sites/test_build_state.py"]
+    "tests": [
+      "tests/ee/sites/test_build_state.py"
+    ]
   },
   {
     "label": "a terminal 'failed' status blocks a new build, so one bad build wedges the site until someone edits the database",
     "file": "ee/pocketpaw_ee/sites/build_state.py",
     "find": "    if status not in IN_FLIGHT_STATUSES:\n        return True",
     "replace": "    if status in TERMINAL_STATUSES and status != \"failed\":\n        return True",
-    "tests": ["tests/ee/sites/test_build_state.py"]
+    "tests": [
+      "tests/ee/sites/test_build_state.py"
+    ]
   },
   {
     "label": "a naive datetime is rejected as unreadable, so every row from an older writer looks stale and the guard silently stops blocking",
     "file": "ee/pocketpaw_ee/sites/build_state.py",
     "find": "    if value.tzinfo is None:\n        return value.replace(tzinfo=UTC)",
     "replace": "    if value.tzinfo is None:\n        return None",
-    "tests": ["tests/ee/sites/test_build_state.py"]
+    "tests": [
+      "tests/ee/sites/test_build_state.py"
+    ]
   },
   {
-    "label": "is_in_flight is aliased to the spend decision, so a stale row renders as idle to a viewer while a build may still be running",
+    "label": "is_in_flight is aliased to the spend decision, so a stale row renders as idle to a viewer while a build may still be running [anchor de-coupled from __all__ 2026-08-10: it pinned to the last function before __all__, and inserting settle() between them broke it]",
     "file": "ee/pocketpaw_ee/sites/build_state.py",
-    "find": "    return getattr(doc, \"build_status\", None) in IN_FLIGHT_STATUSES\n\n\n__all__",
-    "replace": "    return not should_enqueue(doc, 600)\n\n\n__all__",
-    "tests": ["tests/ee/sites/test_build_state.py"]
+    "find": "    return getattr(doc, \"build_status\", None) in IN_FLIGHT_STATUSES",
+    "replace": "    return not should_enqueue(doc, 600)",
+    "tests": [
+      "tests/ee/sites/test_build_state.py"
+    ]
   },
   {
     "label": "build_job_id becomes transient like DP0-4's, so a client that reloads during a queued build loses its polling handle",
     "file": "ee/pocketpaw_ee/cloud/models/site.py",
     "find": "    build_job_id: str | None = None",
     "replace": "    _build_job_id: str | None = PrivateAttr(default=None)",
-    "tests": ["tests/ee/sites/test_build_state.py"]
+    "tests": [
+      "tests/ee/sites/test_build_state.py"
+    ]
+  },
+  {
+    "label": "SL-2: a SUCCESSFUL build settles as failed, so a working site reports broken",
+    "file": "ee/pocketpaw_ee/sites/build_state.py",
+    "find": "    if outcome == \"completed_ok\":\n        return \"built\"",
+    "replace": "    if outcome == \"completed_ok\":\n        return \"failed\"",
+    "tests": [
+      "tests/ee/sites/test_build_state.py::TestSettle"
+    ]
+  },
+  {
+    "label": "SL-2: the attempts-left guard is dropped, so a retryable failure NEVER settles and the row is stuck in flight forever \u2014 permanently unpublishable with no error to see",
+    "file": "ee/pocketpaw_ee/sites/build_state.py",
+    "find": "    if retryable and attempts_left > 0:\n        return None",
+    "replace": "    if retryable:\n        return None",
+    "tests": [
+      "tests/ee/sites/test_build_state.py::TestSettle"
+    ]
+  },
+  {
+    "label": "SL-2: a retryable failure settles immediately even with attempts left, so a transient infra loss becomes terminal and the retry budget is dead code",
+    "file": "ee/pocketpaw_ee/sites/build_state.py",
+    "find": "    if retryable and attempts_left > 0:\n        return None\n    return \"failed\"",
+    "replace": "    if retryable and attempts_left > 0:\n        pass\n    return \"failed\"",
+    "tests": [
+      "tests/ee/sites/test_build_state.py::TestSettle"
+    ]
   }
 ]
