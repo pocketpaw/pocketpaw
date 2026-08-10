@@ -137,8 +137,8 @@
   {
     "label": "a failed thumbnail render fails the whole publish, so a site that is already live and serving reports an error to its owner",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    try:\n        from pocketpaw_ee.sites.screenshot import schedule_site_screenshot\n\n        schedule_site_screenshot(site)\n    except Exception:  # noqa: BLE001 \u2014 never fail a live publish over a screenshot",
-    "replace": "    if True:\n        from pocketpaw_ee.sites.screenshot import schedule_site_screenshot\n\n        schedule_site_screenshot(site)\n    if False:  # noqa: BLE001 \u2014 never fail a live publish over a screenshot",
+    "find": "    try:\n        from pocketpaw_ee.sites.screenshot import schedule_site_screenshot\n\n        schedule_site_screenshot(site)\n    except Exception:  # noqa: BLE001 — never fail a live publish over a screenshot",
+    "replace": "    if True:\n        from pocketpaw_ee.sites.screenshot import schedule_site_screenshot\n\n        schedule_site_screenshot(site)\n    if False:  # noqa: BLE001 — never fail a live publish over a screenshot",
     "tests": [
       "tests/ee/sites/test_fault_ladder_deploy.py"
     ]
@@ -155,8 +155,8 @@
   {
     "label": "the exclusion pattern stops matching what tar actually records, so it silently protects nothing",
     "file": "ee/pocketpaw_ee/sites/daytona_build.py",
-    "find": "_EXCLUDED_MEMBER = \"./node_modules\"",
-    "replace": "_EXCLUDED_MEMBER = \"./nodemodules\"",
+    "find": "_EXCLUDED_MEMBER = \"node_modules\"",
+    "replace": "_EXCLUDED_MEMBER = \"nodemodules\"",
     "tests": [
       "tests/ee/sites/test_fault_ladder_build.py"
     ]
@@ -164,7 +164,7 @@
   {
     "label": "the exclusion is widened to a substring, so a site with a legitimately-named node_modules_report.html silently loses that file",
     "file": "ee/pocketpaw_ee/sites/daytona_build.py",
-    "find": "_EXCLUDED_MEMBER = \"./node_modules\"",
+    "find": "_EXCLUDED_MEMBER = \"node_modules\"",
     "replace": "_EXCLUDED_MEMBER = \"*node_modules*\"",
     "tests": [
       "tests/ee/sites/test_fault_ladder_build.py"

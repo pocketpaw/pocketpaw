@@ -20,8 +20,8 @@
   {
     "label": "preview refresh: the manual path swallows the failure it was asked to report",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    from pocketpaw_ee.sites.screenshot import take_draft_screenshot, take_site_screenshot",
-    "replace": "    from pocketpaw_ee.sites.screenshot import (\n        safe_take_draft_screenshot as take_draft_screenshot,\n    )\n    from pocketpaw_ee.sites.screenshot import (\n        safe_take_site_screenshot as take_site_screenshot,\n    )",
+    "find": "        image_url = await take_site_screenshot(site, ready_delays=())",
+    "replace": "        from pocketpaw_ee.sites.screenshot import safe_take_site_screenshot\n\n        image_url = await safe_take_site_screenshot(site)",
     "tests": [
       "tests/ee/sites/test_preview_refresh.py"
     ]
@@ -38,8 +38,8 @@
   {
     "label": "preview refresh: a cross-tenant site id is photographed instead of 404ing",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    site = await _load(workspace_id, site_id)\n\n    if (getattr(site, \"url\", \"\") or \"\").strip():\n        image_url = await take_site_screenshot(site)",
-    "replace": "    from bson import ObjectId as _Oid\n\n    site = await _SiteDoc.find_one({\"_id\": _Oid(site_id)})\n    if site is None:\n        raise NotFound(\"site\", site_id)\n\n    if (getattr(site, \"url\", \"\") or \"\").strip():\n        image_url = await take_site_screenshot(site)",
+    "find": "    site = await _load(workspace_id, site_id)\n\n    url = (getattr(site, \"url\", \"\") or \"\").strip()",
+    "replace": "    site = await _SiteDoc.find_one({\"_id\": ObjectId(site_id)})\n    if site is None:\n        raise NotFound(\"site\", site_id)\n\n    url = (getattr(site, \"url\", \"\") or \"\").strip()",
     "tests": [
       "tests/ee/sites/test_preview_refresh.py"
     ]

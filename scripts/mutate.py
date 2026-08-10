@@ -32,6 +32,22 @@ escaped, so it works in CI.
     uv run python scripts/mutate.py --plan tests/mutations/entity_rows.json
     uv run python scripts/mutate.py --plan <plan> --only "positional"
 
+A PLAN IS ONLY WORTH WHAT ITS LAST RUN PROVED, AND A ROTTED PLAN IS SILENT.
+An anchor is a substring of source, so any refactor can invalidate one. When that
+happens this script does the right thing — it aborts before the first mutation and
+names the offender — but nobody hears it unless somebody runs it, so the plan sits
+at ZERO applied mutations while reading as covered. ``fault_ladder.json`` was found
+in exactly that state, a 245-line plan proving nothing for an unknown period, and
+``site_preview_refresh.json`` beside it. Neither was caught by anything automatic.
+
+    uv run python scripts/mutate.py --validate     # every plan, every anchor
+
+``--validate`` checks that each ``find`` resolves EXACTLY ONCE in its target file and
+stops. It applies nothing, runs no tests and writes no marker, so it costs
+milliseconds and is safe to run anywhere — which is what makes it cheap enough to
+put on every PR (`.github/workflows/ci.yml`, the `mutation-anchors` job) while a full
+sweep stays a deliberate, local act.
+
 RESTORATION IS THE ONE THING IT MUST NEVER GET WRONG. Original bytes are read
 once up front, every apply is wrapped in try/finally, SIGINT is trapped, and a
 final pass restores everything again on the way out. A crashed run that left a
@@ -100,6 +116,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 #: must never be committable); the reader-facing signal is the pytest report-header
 #: banner in ``tests/conftest.py``, which fires on the path a reader actually takes.
 MARKER_PATH = REPO_ROOT / ".mutation-sweep-active"
+
+#: Where the plans live. ``--validate`` reads every ``*.json`` here by default, including
+#: ``_restore_fixture.json`` — that one drives ``test_mutate_sweep_marker.py``, so its
+#: anchor rotting would break a test rather than a sweep, which is no less worth catching.
+PLANS_DIR = REPO_ROOT / "tests" / "mutations"
 
 
 def _write_marker(plan: Path, current: str | None) -> None:
@@ -251,6 +272,141 @@ class Mutation:
         self.find: str = raw["find"]
         self.replace: str = raw["replace"]
         self.tests: list[str] = list(raw["tests"])
+
+
+def _rel(path: Path) -> str:
+    """``path`` relative to the repo root when it is inside it, else the path itself.
+
+    ``relative_to`` RAISES for a path outside the root, and a plan legitimately can be:
+    ``--plan`` accepts an absolute path and the tests point it at a tmp dir. An
+    unguarded call turned a validation run into a ValueError traceback with no output at
+    all — found by the tests in ``tests/test_mutate_validate.py``, which is the whole
+    reason a reporting path needs them too.
+    """
+    try:
+        return path.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def anchor_problem(mutation: Mutation, text: str) -> str | None:
+    """Why ``mutation``'s anchor is unusable against ``text``, or ``None`` if it is fine.
+
+    THE ONE DEFINITION of "is this anchor usable", read by both the sweep's upfront
+    validation and :func:`validate_plans`. The two want different POLICIES — a sweep must
+    stop at the first offender because proceeding half-configured is worse than not
+    starting, while validation must report every offender in one pass so a fix is one
+    round trip — but they must never disagree about what an offender IS. A second copy of
+    this rule would let the validator pass a plan the sweep then refuses to run.
+    """
+    found = text.count(mutation.find)
+    if found == 0:
+        return "anchor not found"
+    if found > 1:
+        # ASCII: this string is printed, and cp1252 turns an em-dash into a replacement
+        # character right next to the count the reader came for.
+        return f"anchor appears {found} times - make it unique"
+    return None
+
+
+def _refuse_validation_during_a_sweep(*, force: bool) -> None:
+    """Refuse to validate while a sweep marker exists.
+
+    A DIFFERENT reason from :func:`_refuse_on_existing_marker`'s, so it gets its own
+    message rather than borrowing that one: nothing here writes, so there is no mutation
+    to bake in. The problem is that a sweep has a file mutated RIGHT NOW, which means the
+    anchor it replaced currently reads as "not found" — validation would report a healthy
+    plan as rotted, which is the same mid-sweep false alarm the marker exists to prevent,
+    arriving from a new direction.
+    """
+    if not MARKER_PATH.exists() or force:
+        return
+    try:
+        age = marker_age(MARKER_PATH.read_text(encoding="utf-8"))
+    except OSError:  # pragma: no cover - unreadable marker is still a marker
+        age = None
+    note = f"{int(age.total_seconds() // 60)}m old" if age is not None else "undatable"
+    raise SystemExit(
+        f"REFUSING TO VALIDATE: {MARKER_PATH.name} exists ({note}).\n"
+        "  A sweep has a file mutated right now, so the anchor it replaced would read as\n"
+        "  missing and this pass would report a healthy plan as rotted.\n"
+        "  Wait for the sweep to finish, or pass --force if the tree is verified clean.\n"
+    )
+
+
+def validate_plans(plans: list[Path], *, force: bool = False) -> int:
+    """``--validate``: check every anchor in every plan resolves EXACTLY ONCE.
+
+    Applies no mutation, runs no test, writes no marker, touches no file. That is the
+    whole point: an anchor is a substring of source, so any refactor can invalidate one,
+    and a plan whose anchor has rotted goes QUIET rather than red — it aborts before its
+    first mutation and reports nothing unless somebody runs it. ``fault_ladder.json`` sat
+    at zero applied mutations for an unknown period while reading as covered.
+
+    Reports EVERY offender rather than the first, because the fix is per-anchor and a
+    fail-fast pass would need one CI round trip per rotted entry.
+
+    Deliberately NOT a sweep. A sweep applies a mutation and runs a test subset per entry,
+    which is minutes of compute and the wrong thing to ask of every PR; this is a few
+    milliseconds of string counting and catches the whole failure mode both real incidents
+    hit. Real mutation signal still comes from running the plans.
+
+    There is deliberately no ``--only``-style filter here: a filtered validation in CI
+    would look like a gate while leaving most plans unchecked.
+    """
+    _refuse_validation_during_a_sweep(force=force)
+    if not plans:
+        raise SystemExit(f"no mutation plans found under {_rel(PLANS_DIR)}")
+
+    texts: dict[Path, str | None] = {}
+
+    def _text(path: Path) -> str | None:
+        if path not in texts:
+            try:
+                texts[path] = path.read_text(encoding="utf-8")
+            except OSError:
+                texts[path] = None
+        return texts[path]
+
+    checked = 0
+    problems: list[tuple[str, str, str, str]] = []
+    for plan in sorted(plans):
+        rel_plan = _rel(plan)
+        for m in _load_plan(plan):
+            checked += 1
+            text = _text(m.file)
+            rel_file = _rel(m.file)
+            if text is None:
+                problems.append((rel_plan, m.label, rel_file, "no such file"))
+                continue
+            problem = anchor_problem(m, text)
+            if problem:
+                problems.append((rel_plan, m.label, rel_file, problem))
+
+    # ASCII only in what this prints. The message is read in a CI log and on a Windows
+    # console, and cp1252 renders a stray em-dash as a replacement character right where
+    # the reader is looking for a count.
+    if not problems:
+        plural = "plan" if len(plans) == 1 else "plans"
+        print(f"OK: {checked} anchors across {len(plans)} {plural} each resolve exactly once.")
+        return 0
+
+    current = ""
+    for rel_plan, label, rel_file, problem in problems:
+        if rel_plan != current:
+            print(f"\n{rel_plan}")
+            current = rel_plan
+        print(f"  {problem}")
+        print(f"    label: {label}")
+        print(f"    file : {rel_file}")
+    print(
+        f"\nFAIL: {len(problems)} of {checked} anchors do not resolve exactly once, across "
+        f"{len({p[0] for p in problems})} plan(s).\n"
+        "A plan with a bad anchor applies NO mutations: it aborts before the first one, so\n"
+        "it reads as covered while proving nothing. Repoint the anchor at the code as it is\n"
+        "now, keeping the harm the label describes, then re-run that whole plan."
+    )
+    return 1
 
 
 def _load_plan(path: Path) -> list[Mutation]:
@@ -431,14 +587,33 @@ def main() -> int:
         action="store_true",
         help="undo what a hard-killed sweep left behind, then clear the marker",
     )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help=(
+            "check every anchor in every plan resolves exactly once, then stop. "
+            "Applies nothing, runs no tests. With --plan, checks that plan alone"
+        ),
+    )
     args = parser.parse_args()
 
-    # --restore reads the plan path out of the marker, so it needs no --plan. Checked
-    # here rather than with argparse groups so the error names the actual requirement.
+    # --restore reads the plan path out of the marker, and --validate defaults to every
+    # plan, so neither needs --plan. Checked here rather than with argparse groups so the
+    # error names the actual requirement.
     if args.restore:
         return restore_from_marker()
+    if args.validate:
+        # --plan narrows it for local use; the default is EVERY plan, because a
+        # validation that covered one plan would look like a gate and check almost
+        # nothing.
+        plans = (
+            [args.plan if args.plan.is_absolute() else REPO_ROOT / args.plan]
+            if args.plan is not None
+            else sorted(PLANS_DIR.glob("*.json"))
+        )
+        return validate_plans(plans, force=args.force)
     if args.plan is None:
-        parser.error("--plan is required (or use --restore)")
+        parser.error("--plan is required (or use --validate / --restore)")
 
     mutations = _load_plan(args.plan if args.plan.is_absolute() else REPO_ROOT / args.plan)
     if args.only:
@@ -468,14 +643,15 @@ def main() -> int:
         if not m.file.exists():
             raise SystemExit(f"{m.label}: no such file {m.file}")
         originals.setdefault(m.file, m.file.read_bytes())
-        text = originals[m.file].decode("utf-8")
-        found = text.count(m.find)
-        if found == 0:
-            raise SystemExit(f"{m.label}: anchor not found in {m.file.relative_to(REPO_ROOT)}")
-        if found > 1:
+        # Same rule ``--validate`` applies, from the same function — see
+        # :func:`anchor_problem`. The POLICY differs and that is deliberate: a sweep stops
+        # at the first offender, because starting half-configured is worse than not
+        # starting, while validation reports them all.
+        problem = anchor_problem(m, originals[m.file].decode("utf-8"))
+        if problem:
             raise SystemExit(
-                f"{m.label}: anchor appears {found} times in "
-                f"{m.file.relative_to(REPO_ROOT)} — make it unique"
+                f"{m.label}: {problem} in {m.file.relative_to(REPO_ROOT)}\n"
+                "  Run `python scripts/mutate.py --validate` to see every rotted anchor."
             )
 
     def _restore_all(*_signal_args: object) -> None:
