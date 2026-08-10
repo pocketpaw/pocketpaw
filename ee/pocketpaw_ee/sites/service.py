@@ -1,6 +1,22 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-08-11 (RX-4 — the agent can tell whether a site is actually live): added
+# ``build_wire_state`` (pure) and ``site_build_status`` (a read). ``_to_response``
+# already gave the frontend ``build_status`` / ``build_reason`` / ``build_job_id``, and
+# the frontend polls them next to ``url`` knowing a site can be live and simultaneously
+# mid-rebuild. The chat agent had neither the fields nor that knowledge, and on react —
+# the only engine where ``build_runs_async`` is True — that meant a first publish handed
+# it ``url=""`` and a re-publish handed it the PREVIOUS deploy's url, both reported as
+# success. ``build_wire_state`` derives ``build_in_progress`` and ``is_live`` from the
+# row once, so the publish response and the status tool cannot disagree; the raw status
+# still passes through verbatim. ``build_in_progress`` reads an unknown status as IN
+# PROGRESS, deliberately the OPPOSITE of ``build_state.should_enqueue`` (a redundant
+# build costs one sandbox; a spurious "your site is live" costs trust), and is derived
+# from ``TERMINAL_STATUSES`` so a new state defaults to in-progress here for free.
+# ``site_build_status`` exists because an async publish returns before the build starts:
+# without a later read, "queued" is a dead end.
+#
 # Updated 2026-08-11 (RX-3 — the react track gets an EDIT lane): added
 # ``edit_react_component``, the react peer of ``edit_svelte_component``. Until this
 # existed there was no way to change a react site: this module's edit entry points
@@ -3209,6 +3225,109 @@ async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | N
     # Prefer the newest doc that carries a real url (the freshest live build);
     # fall back to the newest doc overall when none has one.
     return next((d for d in docs if d.url), docs[0])
+
+
+def build_wire_state(doc: _SiteDoc | None) -> dict[str, Any]:
+    """The build fields an AGENT-facing tool reports, derived in ONE place (RX-4).
+
+    ``_to_response`` already surfaces ``build_status`` / ``build_reason`` /
+    ``build_job_id`` to the frontend, which polls them alongside ``url`` and knows
+    that a site can be live and simultaneously mid-rebuild. The chat agent has no
+    such knowledge and cannot poll, so it needs the same three fields PLUS the
+    conclusion drawn from them. This function is that conclusion, and it lives here
+    rather than in the two calling handlers because the publish response and the
+    build-status tool disagreeing about whether a site is live is worse than either
+    being wrong on its own.
+
+    The three raw fields pass through VERBATIM, matching ``_to_response``: a
+    ``build_status`` this deploy predates must never be normalised against a known
+    set, because mapping it to "none" would tell a caller nothing is building about
+    a build that is running.
+
+    ``build_in_progress`` reads an unknown status as IN PROGRESS. That is the WIRE
+    direction and it is deliberately the OPPOSITE of ``build_state.should_enqueue``,
+    which treats an unknown status as terminal — both are right on their own axis
+    (see ``build_state``'s header: a redundant build costs one sandbox, while a
+    spurious "your site is live" costs the user's trust). Derived from
+    ``TERMINAL_STATUSES`` rather than from ``IN_FLIGHT_STATUSES`` so a state added
+    to the machine defaults to in-progress here without anyone remembering to
+    update this function.
+
+    ``is_live`` is the only field an agent should gate "show the user this url" on.
+    It requires a real url AND a successful deploy AND no build in flight, because
+    each of the three is individually insufficient:
+
+      * a FIRST async publish creates the Site doc with ``url=""`` and
+        ``deployed=False`` (``_enqueue_static_build`` — honest, nothing is serving
+        yet), so ``url`` alone is an empty string the agent would hand over;
+      * a RE-publish deliberately KEEPS the previous deploy's ``url`` and
+        ``deployed=True`` so a rebuild never reports a working site as down, so
+        those two alone say "live" while serving the pre-change page;
+      * ``build_status`` alone cannot tell a never-built pocket ("none") from a
+        finished one.
+
+    Pure and I/O-free, so it is directly unit-testable, and it takes ``None`` for a
+    pocket with no Site doc at all (never published) rather than making every caller
+    write the same empty shape.
+    """
+    from pocketpaw_ee.sites.build_state import TERMINAL_STATUSES
+
+    if doc is None:
+        return {
+            "url": "",
+            "deployed": False,
+            "build_status": "none",
+            "build_reason": None,
+            "build_job_id": None,
+            "build_in_progress": False,
+            "is_live": False,
+        }
+    status = getattr(doc, "build_status", "none")
+    in_progress = status != "none" and status not in TERMINAL_STATUSES
+    url = doc.url or ""
+    return {
+        "url": url,
+        "deployed": bool(doc.deployed),
+        "build_status": status,
+        "build_reason": getattr(doc, "build_reason", None),
+        "build_job_id": getattr(doc, "build_job_id", None),
+        "build_in_progress": in_progress,
+        "is_live": bool(url) and bool(doc.deployed) and not in_progress,
+    }
+
+
+async def site_build_status(*, workspace_id: str, pocket_id: str) -> dict[str, Any]:
+    """Read a pocket's current build + live state. READ-ONLY (RX-4).
+
+    The answer to "is it up yet?" on a turn AFTER the publish. Without it the queued
+    state a react publish returns is a dead end: the agent learns a build was
+    enqueued and then has no way to ever discover it finished, because
+    ``build_runs_async("react")`` means the publish call returned before the build
+    even started.
+
+    Resolves the ONE canonical Site doc for the pocket through
+    ``canonical_site_for_pocket``, which is tenant-scoped on ``workspace_id`` and
+    dedupe-aware — the same resolution ``pocket_status`` uses, so the two cannot
+    report different sites for one pocket.
+
+    A pocket with no Site doc returns ``published=False`` rather than raising. From
+    the agent's side "this was never published" is the useful answer and is correct
+    whether the pocket has no site or does not exist; the read cannot leak across
+    tenants either way, because the query is filtered on ``workspace``.
+
+    No plan gate: nothing is mutated, and a workspace that has lost the Sites
+    feature reading its own build state changes nothing it could not already see in
+    the /sites UI. The tenancy filter IS the access check here.
+    """
+    doc = await canonical_site_for_pocket(workspace_id, pocket_id)
+    state = build_wire_state(doc)
+    return {
+        "pocket_id": pocket_id,
+        "site_id": str(doc.id) if doc is not None else None,
+        "name": doc.name if doc is not None else "",
+        "published": doc is not None,
+        **state,
+    }
 
 
 async def canonical_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:

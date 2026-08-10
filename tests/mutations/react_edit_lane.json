@@ -195,6 +195,89 @@
     ]
   },
   {
+    "label": "is_live stops requiring a url, so a first async publish (url=\"\") reports the site as live and the agent hands the user an empty string",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        \"is_live\": bool(url) and bool(doc.deployed) and not in_progress,",
+    "replace": "        \"is_live\": bool(doc.deployed) and not in_progress,",
+    "tests": [
+      "tests/ee/sites/test_agent_build_visibility.py::TestIsLive::test_a_settled_build_with_no_url_is_still_not_live"
+    ]
+  },
+  {
+    "label": "is_live ignores the in-flight build, so a re-publish reports the PREVIOUS deploy's url as though the change were already live",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        \"is_live\": bool(url) and bool(doc.deployed) and not in_progress,",
+    "replace": "        \"is_live\": bool(url) and bool(doc.deployed),",
+    "tests": [
+      "tests/ee/sites/test_agent_build_visibility.py::TestIsLive::test_a_republish_over_a_live_site_is_not_live_at_this_version",
+      "tests/ee/agent/test_sites_mcp_server/test_build_status_tool.py::TestPublishResponseCarriesBuildState::test_a_republish_over_a_live_site_is_not_reported_as_current"
+    ]
+  },
+  {
+    "label": "build_in_progress is derived from IN_FLIGHT_STATUSES, so an unknown status reads as terminal and a running build is reported live (the wire contract is the opposite of should_enqueue's)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    in_progress = status != \"none\" and status not in TERMINAL_STATUSES",
+    "replace": "    in_progress = status in __import__(\"pocketpaw_ee.sites.build_state\", fromlist=[\"x\"]).IN_FLIGHT_STATUSES",
+    "tests": [
+      "tests/ee/sites/test_agent_build_visibility.py::TestUnknownStatusReadsAsInProgress::test_an_unrecognised_status_is_in_progress_not_live"
+    ]
+  },
+  {
+    "label": "build_status is normalised against a known set instead of passing through verbatim, so a status this deploy predates is reported as \"nothing is building\"",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    status = getattr(doc, \"build_status\", \"none\")\n    in_progress =",
+    "replace": "    status = getattr(doc, \"build_status\", \"none\")\n    status = status if status in TERMINAL_STATUSES else \"none\"\n    in_progress =",
+    "tests": [
+      "tests/ee/sites/test_agent_build_visibility.py::TestUnknownStatusReadsAsInProgress::test_an_unrecognised_status_is_in_progress_not_live"
+    ]
+  },
+  {
+    "label": "the publish response goes back to the five hand-built keys, so the agent never sees the build state at all",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
+    "find": "                \"name\": doc.name,\n                **state,",
+    "replace": "                \"name\": doc.name,\n                \"url\": doc.url,\n                \"deployed\": doc.deployed,",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_build_status_tool.py::TestPublishResponseCarriesBuildState::test_a_first_async_publish_does_not_read_as_a_live_site"
+    ]
+  },
+  {
+    "label": "the queued publish message stops naming the status tool, so the agent learns a build is running and can never find out how it ended",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
+    "find": "            \"and that you can check again in a moment with \"\n            \"`get_site_build_status`.\"",
+    "replace": "            \"and that it should be up shortly.\"",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_build_status_tool.py::TestPublishResponseCarriesBuildState::test_a_first_async_publish_does_not_read_as_a_live_site"
+    ]
+  },
+  {
+    "label": "the build-status tool is not registered on the server, so its id is whitelisted but nothing answers a call",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
+    "find": "            publish,\n            get_site_build_status,",
+    "replace": "            publish,",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_build_status_tool.py::TestRegistration::test_the_built_server_lists_the_status_tool"
+    ]
+  },
+  {
+    "label": "the build-status tool id leaves SITES_TOOL_IDS, so the /sites allow-list filters the tool out silently and every handler test still passes",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
+    "find": "    EDIT_REACT_COMPONENT_TOOL_ID,\n    GET_SITE_BUILD_STATUS_TOOL_ID,\n)",
+    "replace": "    EDIT_REACT_COMPONENT_TOOL_ID,\n)",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_build_status_tool.py::TestRegistration::test_status_tool_id_is_on_the_shared_allowlist",
+      "tests/ee/agent/test_sites_mcp_server/test_mcp_tool.py::TestSitesMcpServerRegistration::test_server_name_and_tool_id"
+    ]
+  },
+  {
+    "label": "site_build_status drops the tenancy filter by resolving the doc without the workspace, so one workspace reads another's build state",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    doc = await canonical_site_for_pocket(workspace_id, pocket_id)\n    state = build_wire_state(doc)",
+    "replace": "    doc = await _SiteDoc.find_one({\"pocket_id\": pocket_id})  # global-read: mutation\n    state = build_wire_state(doc)",
+    "tests": [
+      "tests/ee/sites/test_agent_build_visibility.py::test_status_is_tenant_scoped"
+    ]
+  },
+  {
     "label": "the react create step stops naming the edit tool, so a follow-up change goes back to a second create_react_site and a second site pocket",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
     "find": "            \"`mcp__pocketpaw_sites_manager__edit_react_component` with the SAME \"",

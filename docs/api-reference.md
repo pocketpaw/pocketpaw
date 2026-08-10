@@ -2,6 +2,15 @@
 docs/api-reference.md — Hand-maintained reference for cloud REST endpoints
 that are not covered by the per-endpoint Mintlify pages under docs/api/.
 
+Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-4) — documented the build-lane
+fields now on the `publish` tool response and the new read-only
+`get_site_build_status` tool, in the same MCP section. Both are recorded here
+because the *reason* they exist is not visible from their field lists: `url` and
+`deployed` are individually insufficient to answer "is this site live", and on
+react they actively mislead (a first publish returns `url: ""`, a re-publish
+returns the previous deploy's url). Anyone reading only the field names would
+reasonably use `url` directly, which is the defect.
+
 Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — added the "Sites —
 Agent Editing Tools (in-process MCP)" section documenting `edit_react_component`
 and the per-engine split that decides which editing tool a site gets. This is
@@ -1395,6 +1404,57 @@ Errors (relayed to the agent as `is_error` with the code, so it can fix and retr
 Every write goes through `pockets_service.set_react_source_file`, which emits
 `PocketUpdated` and records a draft `ArtifactVersion` snapshotting the full edited
 source map — so an edit is a reviewable Branch draft a later publish promotes.
+
+### Build state on the `publish` response
+
+`publish` returns `{ok, message, site: {...}}`. The `site` object carries the five
+original keys (`id`, `pocket_id`, `name`, `url`, `deployed`) plus the build lane's
+state:
+
+| Key | Notes |
+|-----|-------|
+| `build_status` | `none` \| `queued` \| `building` \| `built` \| `failed`. Passed through **verbatim** — an unrecognised value is never normalised. |
+| `build_reason` | `"<rung>:<cause>"` explaining how the build settled. `null` until one does. A `failed` status without this is unactionable. |
+| `build_job_id` | Handle for the queued build. Persisted, so it survives a reload. |
+| `build_in_progress` | Derived. `true` while a build is running, **and for any unrecognised `build_status`**. |
+| `is_live` | Derived. The only field to gate "show the user the url" on. |
+
+`is_live` requires a non-empty `url` **and** `deployed` **and** no build in flight,
+because each is individually insufficient. This matters on **react**, the only engine
+where `build_runs_async(engine)` is true:
+
+- On a **first** publish, `_enqueue_static_build` creates the Site doc with `url: ""`
+  and `deployed: false`. That is honest — nothing is serving yet, and the worker flips
+  both when the deploy succeeds — but it means `url` alone is an empty string.
+- On a **re-publish**, `url` and `deployed` deliberately keep the *previous* deploy's
+  values so a rebuild never reports a working site as down. Both say "live" while the
+  url serves the pre-change page.
+- `build_status` alone cannot tell a never-built pocket (`none`) from a finished one.
+
+`build_in_progress` reads an unknown status as in-progress, which is the wire contract
+and the deliberate **opposite** of `build_state.should_enqueue`, which treats an
+unknown status as terminal. Both are correct on their own axis: a redundant build costs
+one sandbox, while a spurious "your site is live" costs the user's trust.
+
+The derivation lives in `sites.service.build_wire_state` and is shared with the status
+tool below, so the two surfaces cannot disagree about whether a site is live.
+
+### `get_site_build_status`
+
+Read-only. Takes `pocket_id` and returns `{ok, message, pocket_id, site_id, name,
+published, url, deployed, build_status, build_reason, build_job_id, build_in_progress,
+is_live}`.
+
+This exists because a react publish is **asynchronous**: the `publish` call returns
+before the build starts, so its response can never report how the build ended. Without
+a later read, `queued` is a dead end — the agent learns a build was enqueued and has no
+way to discover it finished.
+
+A pocket with no Site doc returns `published: false` rather than an error; from the
+caller's side "this was never published" is the useful answer, and it is correct whether
+the pocket has no site or does not exist. The read resolves the canonical Site doc
+through `canonical_site_for_pocket`, which is tenant-scoped on the workspace — that
+filter is the access check, and there is no plan gate because nothing is mutated.
 
 ## Fabric — Transform Mappings (source→Fabric ingest)
 
