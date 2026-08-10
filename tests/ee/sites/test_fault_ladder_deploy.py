@@ -27,6 +27,7 @@ from __future__ import annotations
 import pytest
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.sites import service as sites_service
+
 from tests.ee.sites.faults import (
     FailingCloudflare,
     FailingWorkersDeploy,
@@ -89,9 +90,7 @@ class TestF4DeployFailsAndThePreviousDeploymentSurvives:
     silently repoints every visitor at a worker that was never uploaded.
     """
 
-    async def test_a_5xx_deploy_raises_rather_than_reporting_success(
-        self, beanie_test_db
-    ) -> None:
+    async def test_a_5xx_deploy_raises_rather_than_reporting_success(self, beanie_test_db) -> None:
         cf = FailingCloudflare(status=503)
         with pytest.raises(ValidationError) as err:
             await _publish("pk-f4-raise", _cloudflare=cf)
@@ -140,9 +139,7 @@ class TestF4DeployFailsAndThePreviousDeploymentSurvives:
         with pytest.raises(ValidationError):
             await _publish("pk-f4-first", _cloudflare=FailingCloudflare())
 
-        status = await sites_service.pocket_status(
-            workspace_id="ws-fault", pocket_id="pk-f4-first"
-        )
+        status = await sites_service.pocket_status(workspace_id="ws-fault", pocket_id="pk-f4-first")
         assert status.is_live is False
         assert status.deployed_at is None
 

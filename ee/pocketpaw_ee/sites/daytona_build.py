@@ -415,13 +415,21 @@ def classify_build(
 #: it packs one NESTED INSIDE it without complaint. Neither engine emits that shape today,
 #: so this closes a latent 500 MB-artifact path rather than a live bug.
 #:
-#: Written as the member name the tar actually produces. Under ``-C <dir> .`` members are
-#: recorded as ``./x``, so the pattern has to match that form. Verified against bsdtar 3.8.4,
-#: where it prunes the directory and everything under it and leaves an innocently-named
-#: ``node_modules_report.html`` alone. The Daytona image is ``debian_slim``, i.e. GNU tar —
-#: whose exclude-anchoring differs in the deeper-nesting case, so the real-sandbox round-trip
-#: is what confirms behaviour beyond the top level.
-_EXCLUDED_MEMBER = "./node_modules"
+#: DELIBERATELY UNANCHORED — no ``./`` prefix, and that is the whole point.
+#:
+#: This was ``"./node_modules"``, written to match the member form ``-C <dir> .`` produces,
+#: and verified against bsdtar, which matches an exclude pattern unanchored either way. The
+#: Daytona image is ``debian_slim``, i.e. GNU tar, which ANCHORS a pattern containing a
+#: slash — so ``./node_modules`` matched only the top-level directory there and a
+#: ``dist/sub/node_modules`` shipped. CI caught exactly that, and it is not hypothetical:
+#: measured on GNU tar 1.35, ``--exclude=./node_modules`` leaves ``./sub/node_modules/``
+#: in the archive while ``--exclude=node_modules`` removes every one at any depth.
+#:
+#: A bare name is matched unanchored by BOTH tars, so this form closes the hole on the
+#: image and keeps the dev box agreeing with CI. It still prunes only a path COMPONENT
+#: named exactly ``node_modules``, so an innocently-named ``node_modules_report.html``
+#: survives.
+_EXCLUDED_MEMBER = "node_modules"
 
 
 def artifact_tar_command(
