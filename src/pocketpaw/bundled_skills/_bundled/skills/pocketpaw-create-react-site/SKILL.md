@@ -307,15 +307,22 @@ fall back to another engine. The tool fails closed when the map is missing
 ## STEP 4 — Stop at the draft (publish only when asked)
 
 **Default: create the draft, do NOT publish.** After `create_react_site`
-returns, the pocket exists as a reviewable **draft** the user can preview in-app
-right now (open **/sites** → the site's **Preview** tab). Publishing deploys it
-to the public edge (and, on a paid tier, can open a checkout), so taking it live
-is the user's call.
+returns, the pocket exists as a reviewable **draft** under **/sites**.
+Publishing deploys it to the public edge (and, on a paid tier, can open a
+checkout), so taking it live is the user's call.
 
-So **do NOT call `publish` by default.** Tell the user the draft is ready, point
-them at the Preview, and offer to take it live — e.g. *"Your Bright Smile site
-is ready as a draft. Preview it under /sites, and say **publish** when you're
-happy with it."* Then stop.
+⚠️ **On the react track the draft shows its SOURCE, not the page.** The in-app
+Preview has a client-side render lane for svelte and for html, and none for
+react — a react draft falls through to the code viewer, so what the user sees
+under /sites is your `.tsx` files. The rendered page needs the Vite build, which
+only a publish runs. **Do not tell the user they can look at their page.** Say
+the draft is ready, be specific that /sites shows the source until it is built,
+and offer to build and publish it.
+
+So **do NOT call `publish` by default.** e.g. *"Your Bright Smile site is ready
+as a draft — you'll find its code under /sites; React sites render once they're
+built, so say **publish** when you want me to build it and put it live."* Then
+stop.
 
 **Publish in this same turn ONLY if the user's request already asked to go
 live** — "publish it", "make it live", "ship it", "put it online":
@@ -325,13 +332,69 @@ mcp__pocketpaw_sites_manager__publish(pocket_id = <the id from STEP 3>)
 ```
 
 The generator materializes your `source` onto the React skeleton, runs the Vite
-build, prerenders `<App />` into the HTML, and deploys the static output. Show
-the user the returned `url` plus a pointer to **/sites**. Relay any `ok: false`
-error — never claim a phantom publish.
+build, prerenders `<App />` into the HTML, and deploys the static output. Relay
+any `ok: false` error — never claim a phantom publish.
+
+⚠️ **A react publish does NOT return a live site, and its `url` is not one.**
+React is the only engine whose build runs **off-request**: `publish` queues the
+build in an ephemeral sandbox, returns immediately, and a worker deploys it
+later. The response's `url` / `deployed` describe the site as it stands *before*
+the new build lands, and they lie in both directions:
+
+- **First publish** — `deployed: false` and `url: ""`, because nothing is
+  serving yet. There is no link to give. Do **not** show an empty url, and do
+  **not** invent one.
+- **Re-publish** — `url` and `deployed` keep the **previous** deploy's values, so
+  the live site is never reported as down mid-rebuild. That url serves the
+  **old** content. Presenting it as the new page is the more damaging mistake,
+  because it looks like it worked.
+
+So report the build as **queued**, say that react builds finish after the
+publish call returns, and point the user at **/sites**, where the build status
+and the final url appear. Never present a url from a publish response as live
+without a build status that says it is. ("Your site's build is queued — it'll
+appear under /sites once it finishes, usually a minute or two.")
 
 **If the build fails on the prerender pass**, the message names the cause. The
 common ones are a `window`/`document` touched during render (guard it) and a
 component that returns nothing at rest. Both are the prerender rule above.
+
+### If the user then asks for a CHANGE — edit, never re-create
+
+"Shorten the headline", "make the nav sticky", "add a testimonials section" is
+an **edit of the site you just made**, not a new one. `create_react_site` has no
+update mode: calling it again mints a **second** site pocket and leaves the one
+the user is looking at untouched. Edit the existing pocket instead:
+
+```
+mcp__pocketpaw_sites_manager__edit_react_component(
+  pocket_id      = <the id from STEP 3>,
+  component_path = "src/components/Hero.tsx",
+  edits          = [{"old_string": "<copied verbatim, must match exactly once>",
+                     "new_string": "<the replacement>"}]
+)
+```
+
+- Send a targeted **`edits`** diff, not the whole file. Pass `new_source`
+  instead only for a genuine rewrite — **exactly one** of the two per call.
+- Each `old_string` must match that file **exactly once**; include surrounding
+  context so it is unique.
+- **Adding a section is TWO calls**: `create=True` + `new_source` to write
+  `src/components/Testimonials.tsx`, then a second call with `edits` on
+  `src/App.tsx` to import and render it. Stop after the first and you have
+  shipped a component nothing renders.
+- The generator-owned paths above stay refused, so an edit **cannot** add a
+  dependency.
+- Every rule in this skill still binds — above all the **prerender rule**: an
+  edit that swaps a static value for a `useState(0)` + count-up effect bakes
+  "0" into the shipped HTML.
+- **The edit stages a DRAFT**; it does not publish. Do not send the user to look
+  at the change — /sites shows a react draft's source, not the rendered page.
+  Say what changed, and publish only when they ask.
+
+The full edit brain is `pocketpaw-edit-react-site` — load it when the user is on
+the site's own refine chat. The essentials are inlined here because this create
+surface loads only the skill you are reading.
 
 ## Quality bar — done right when
 
@@ -352,6 +415,9 @@ component that returns nothing at rest. Both are the prerender rule above.
 ## Related tools (via MCP)
 
 - `mcp__pocketpaw_sites_manager__create_react_site` — persist the source map (STEP 3)
+- `mcp__pocketpaw_sites_manager__edit_react_component` — CHANGE a component of an
+  existing react site (STEP 4). The tool for every follow-up edit; never
+  re-create.
 - `mcp__pocketpaw_sites_manager__publish` — deploy, on explicit request (STEP 4)
 - `mcp__pocketpaw_design_systems__list_design_systems` / `get_design_system` — the token starting point
 - `mcp__pocketpaw_palette__scale_from_color` / `extract_palette` — brand colour
