@@ -56,7 +56,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from pocketpaw_ee.sites.engines import is_source_engine, needs_node_build, static_output_rel
+from pocketpaw_ee.sites.engines import (
+    is_source_engine,
+    needs_node_build,
+    resolve_static_output_rel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -351,11 +355,19 @@ def inline_document(
 
 def _built_root(pocket_id: str, engine: str) -> Path:
     """Where a pocket's servable files land on disk: PERF-3's persistent per-pocket
-    build dir (``build_home()/<pocket_id>/``) plus the per-engine static-output
-    subdir (``.svelte-kit/cloudflare`` for ripple/svelte, ``.`` for html)."""
+    build dir (``build_home()/<pocket_id>/``) plus the static-output subdir
+    (``.svelte-kit/cloudflare`` for ripple and dynamic svelte, ``build`` for a STATIC
+    svelte site, ``.`` for html).
+
+    SL-1 — resolved against the build dir rather than derived from the engine name.
+    This is the call site that most needs the probe: it reconstructs a path from a
+    pocket id with no generate in scope, so there is no generator result to read a
+    reported ``staticDir`` off. The persistent per-pocket build dir IS the project
+    dir, which is exactly what the resolver needs."""
     from pocketpaw_ee.sites.generator_client import build_home
 
-    return build_home() / pocket_id / static_output_rel(engine)
+    project_dir = build_home() / pocket_id
+    return project_dir / resolve_static_output_rel(project_dir, engine)
 
 
 def _built_static_dir(pocket_id: str, engine: str) -> Path | None:
@@ -416,7 +428,9 @@ async def _build_static_dir(
         pocket_id=getattr(site, "pocket_id", None),
         smoke=False,
     )
-    static_dir = Path(build.project_dir, static_output_rel(engine))
+    static_dir = Path(
+        build.project_dir, resolve_static_output_rel(build.project_dir, engine)
+    )
     return static_dir if (static_dir / "index.html").is_file() else None
 
 
