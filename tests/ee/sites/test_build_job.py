@@ -51,10 +51,17 @@ from tests.ee.sites.faults import (
     sandbox_dies_mid_build,
 )
 
-#: A marked secret planted in build stderr. If this string ever appears on the Site row,
+#: A marked value planted in build stderr. If this string ever appears on the Site row,
 #: the lane is surfacing the user's own build output — the exact leak ``build_reason``'s
 #: fixed vocabulary exists to prevent.
-STDERR_SECRET = "TS2304 near sk_live_CANARY_DO_NOT_PERSIST"
+#:
+#: DELIBERATELY NOT SHAPED LIKE A REAL CREDENTIAL, and that is a correction rather than a
+#: style choice. The first version of this canary was written to look like a live
+#: payment-provider key — the obvious instinct when the property under test is "a secret
+#: must not leak" — and the repo's own secret scanner failed the branch, because a scanner
+#: reading a diff cannot tell a test fixture from a committed key. "Unique enough to search
+#: for" and "realistic" are independent properties, and only the first one is needed here.
+STDERR_SECRET = "TS2304 near CANARY_MUST_NOT_PERSIST"
 
 
 #: The engine input a scaffold receives. Only ``siteConfig`` matters to these tests.
@@ -463,7 +470,9 @@ class TestSettlingAFinishedAttempt:
             )
         )
         assert STDERR_SECRET not in got.reason
-        assert "sk_live" not in got.reason
+        # Also on a FRAGMENT, so a reason that truncated the tail rather than dropping it
+        # still fails — a partial leak is a leak.
+        assert "CANARY" not in got.reason
 
     def test_every_reason_is_a_greppable_identifier(self) -> None:
         """Same property F7 asserts over the classifier's reasons, restated over the

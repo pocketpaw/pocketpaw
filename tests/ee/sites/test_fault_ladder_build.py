@@ -797,12 +797,17 @@ class TestF2AndF7TheRecordedRowNamesItsRung:
 
     def test_no_recorded_reason_can_carry_build_stderr(self) -> None:
         """``build_reason`` is surfaceable; a build's stderr is the user's own code and can
-        carry a token pasted into a config. Every rung is driven with a marked secret in
-        the tail, so a settlement that interpolated it would show up here rather than in
-        production."""
+        carry a token pasted into a config. Every rung is driven with a marked value in the
+        tail, so a settlement that interpolated it would show up here rather than in
+        production.
+
+        The marker is deliberately NOT shaped like a real credential. Writing one that looks
+        like a live provider key is the instinct this test's own subject invites, and it
+        fails the repo's secret scan — a scanner reading a diff cannot tell a fixture from a
+        committed key. The assertion needs uniqueness, not realism."""
         from pocketpaw_ee.sites.daytona_runner import BuildRunResult, BuildTimings
 
-        secret = "sk_live_LADDER_CANARY"
+        secret = "LADDER_CANARY_MUST_NOT_PERSIST"
         for name, base in _all_classifications().items():
             poisoned = db.BuildClassification(
                 outcome=base.outcome,
