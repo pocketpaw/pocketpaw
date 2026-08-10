@@ -32,13 +32,22 @@
 # WHAT THIS MODULE DELIBERATELY DOES NOT DO: talk to Daytona. The whole point is that
 # the decision procedure is testable without a sandbox, because it is the part that
 # must be right. Wiring lives in the caller.
+#
+# Updated 2026-08-11 (SG-7, fault ladder): added :func:`verify_artifact` and
+# :func:`promised_artifact_bytes`, which read the DOWNLOADED bytes rather than the
+# sentinel's claims about them. See the block above that function for why it earns its
+# place on top of the tar command's own exclusion, and for why its rejections split on
+# ``retryable`` — a truncated transfer is transient, an unreadable full-size artifact is
+# not. Still no Daytona in this module: it is handed bytes, it does not fetch them.
 from __future__ import annotations
 
+import io
 import json
 import logging
 import math
 import os
 import shlex
+import tarfile
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -223,13 +232,21 @@ class BuildClassification:
         """True when the CLASSIFICATION cleared the build — not when its bytes were checked.
 
         Corrected 2026-08-10 (SG-7): this used to claim "there is a verified artifact to
-        deploy", which overpromised in a way that matters. It is derived from the sentinel
-        alone, so it stays True when the download afterwards returns zero bytes or a
-        truncated payload — nothing here has seen the artifact.
+        deploy", which overpromised in a way that matters. Read on a classification that
+        came straight out of :func:`classify_build`, it is derived from the sentinel alone,
+        so it stays True when the download afterwards returns zero bytes or a truncated
+        payload — nothing here has seen the artifact.
 
-        A caller must therefore gate a deploy on ``BuildRunResult.ok`` (which also requires
-        bytes to have arrived), never on this flag by itself. Whoever wires this lane owns
-        the download verification; see the SG-7 wiring contracts.
+        Updated 2026-08-11: ``daytona_runner.run_build`` now runs :func:`verify_artifact`
+        over the downloaded bytes and REPLACES this classification with a non-deployable
+        one when they are rejected, so the flag does follow the bytes on the result that
+        runner hands back. That is a property of the runner, not of this property, and the
+        distinction is load-bearing: anything that classifies without downloading (the
+        classifier's own tests, a future caller that only wants the verdict) still gets the
+        sentinel-only reading.
+
+        A caller must therefore still gate a deploy on ``BuildRunResult.ok``, which also
+        requires bytes to have arrived, rather than on this flag by itself.
         """
         return self.outcome == "completed_ok"
 
@@ -475,6 +492,128 @@ def artifact_tar_command(
 
 
 # ---------------------------------------------------------------------------
+# Verifying the artifact BYTES, not the sentinel's claims about them
+# ---------------------------------------------------------------------------
+#
+# WHY THIS EXISTS ALONGSIDE THE TAR COMMAND, which already scopes the archive to the
+# output dir AND excludes :data:`_EXCLUDED_MEMBER`. Two reasons, and neither is "in case
+# the command is wrong in a way we could have reasoned about":
+#
+#   1. THE EXCLUSION IS A FLAG ON A BINARY THIS PROCESS NEVER RUNS. Its behaviour is the
+#      tar implementation's, not ours, and the two implementations in play already
+#      disagreed once: GNU tar (what ``debian_slim`` runs) anchors a pattern containing a
+#      slash, bsdtar does not, so ``--exclude=./node_modules`` passed locally and shipped
+#      a nested ``node_modules`` in CI. That was found by a test, not by a reader, and the
+#      class of bug — "the command still looks correct" — is exactly what a check on the
+#      resulting bytes catches and a check on the command cannot.
+#   2. NOTHING ELSE IN THE LANE LOOKS AT THE TRANSFER. An empty, truncated or corrupt
+#      download is invisible to the sentinel by construction: the sentinel is written
+#      inside the sandbox, before any bytes cross the wire.
+#
+# The include-list plus the exclusion remain the PRIMARY defence and are tested directly,
+# by running the real tar over a real node_modules tree
+# (tests/ee/sites/test_fault_ladder_build.py). This is the backstop, and the only gate in
+# the lane that has read the artifact.
+
+#: A path segment that must never appear in a deployable artifact.
+_FORBIDDEN_SEGMENT = "node_modules"
+
+
+@dataclass(frozen=True)
+class ArtifactRejection:
+    """Why an artifact may not be deployed, and whether trying again could help.
+
+    ``retryable`` is decided HERE rather than by the caller because the answer differs per
+    reason and is not obvious from outside: a truncated download is a transient property
+    of the TRANSFER, while an unreadable full-size artifact is a durable property of what
+    the BUILD produced. Collapsing the two either burns a publish on a network blip or
+    spends a second sandbox re-proving a deterministic failure.
+    """
+
+    reason: str
+    retryable: bool
+
+
+def _readable_size(value: Any) -> int | None:
+    """A positive artifact size, or ``None`` when the value is unusable.
+
+    ``bool`` is rejected for the same reason :func:`_coerce_exit` rejects it: ``True``
+    would otherwise read as a promised size of one byte.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
+
+
+def promised_artifact_bytes(sentinel: str | bytes | dict[str, Any] | None) -> int | None:
+    """The artifact size the sentinel promised, or ``None`` when it cannot be read.
+
+    Exists so the runner can compare the promise against what actually arrived without
+    re-implementing sentinel parsing or widening :class:`BuildClassification`.
+    """
+    parsed = _parse_sentinel(sentinel)
+    if parsed is None:
+        return None
+    return _readable_size(parsed.get("artifact_bytes"))
+
+
+def verify_artifact(
+    payload: bytes | None, *, expected_bytes: int | None = None
+) -> ArtifactRejection | None:
+    """Check the DOWNLOADED artifact. Returns a rejection, or ``None`` when it is fit.
+
+    The last gate before a deploy, and the only one that reads the artifact itself rather
+    than the sentinel's claims about it. Every rejection must stop the deploy rather than
+    shrink it: a partial deploy and a blank site are worse outcomes than a failed publish,
+    because they overwrite something that was working.
+
+    ``expected_bytes`` is the size the sentinel promised (see
+    :func:`promised_artifact_bytes`). It is what separates a transfer failure from a bad
+    build, and that separation is the whole basis of the ``retryable`` split:
+
+    * ``artifact_empty`` — nothing arrived. RETRYABLE: the build reported a size, so the
+      bytes existed in the sandbox and it is the download that failed.
+    * ``artifact_truncated`` — fewer bytes than promised. RETRYABLE for the same reason,
+      and kept DISTINCT from empty because "nothing arrived" and "half arrived" send an
+      operator to different places.
+    * ``artifact_unreadable`` — the promised size arrived and will not open as a gzip tar.
+      NOT retryable: the transfer did its job, so the content is what is wrong and a
+      second attempt reproduces it.
+    * ``artifact_contains_node_modules`` — the tar command's exclusion leaked. NOT
+      retryable, and never the user's fault.
+
+    When no size was promised, a failure defaults to RETRYABLE. That asymmetry is
+    deliberate and matches ``build_state.build_is_stale``: a redundant build costs one
+    sandbox, whereas calling a transient failure permanent costs the user their publish.
+
+    Reads only the tar INDEX, so cost is bounded by member count, not by artifact size.
+    """
+    promised = _readable_size(expected_bytes)
+    got = len(payload) if payload else 0
+
+    if got == 0:
+        return ArtifactRejection("artifact_empty", retryable=True)
+    if promised is not None and got < promised:
+        return ArtifactRejection("artifact_truncated", retryable=True)
+
+    try:
+        with tarfile.open(fileobj=io.BytesIO(payload or b""), mode="r:gz") as tar:
+            names = tar.getnames()
+    except (tarfile.TarError, OSError, EOFError, ValueError):
+        # A full-size payload that will not open is garbage the build produced. With no
+        # promised size we cannot tell that from a truncated transfer, so take the safe
+        # direction and allow a retry.
+        return ArtifactRejection("artifact_unreadable", retryable=promised is None)
+
+    for name in names:
+        # Normalise the leading "./" the tar command produces before splitting, so a
+        # member recorded as "./node_modules/x" is caught the same as "node_modules/x".
+        if _FORBIDDEN_SEGMENT in name.replace("\\", "/").split("/"):
+            return ArtifactRejection("artifact_contains_node_modules", retryable=False)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # The in-sandbox wrapper
 # ---------------------------------------------------------------------------
 
@@ -610,11 +749,14 @@ __all__ = [
     "STDERR_TAIL_BYTES",
     "TIMEOUT_FLOOR_SECONDS",
     "TIMEOUT_SAFETY_FACTOR",
+    "ArtifactRejection",
     "BuildClassification",
     "BuildOutcome",
     "artifact_tar_command",
     "build_timeout_seconds",
     "build_wrapper_script",
     "classify_build",
+    "promised_artifact_bytes",
     "resolve_build_timeout_seconds",
+    "verify_artifact",
 ]

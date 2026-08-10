@@ -111,6 +111,13 @@
 # thing that would undo this. If you are reading this because you were about to do it: the
 # primary reason above is live, so re-make the security decision first — do not reason from
 # the retracted claim that the signed key is gone.
+#
+# Updated 2026-08-11 (SG-7, fault ladder): the downloaded artifact now passes through
+# ``daytona_build.verify_artifact`` before the result is assembled, so an empty, truncated,
+# unreadable or ``node_modules``-carrying artifact demotes the classification to a
+# non-deployable ``infra_lost`` and the bytes are dropped, instead of leaving ``deployable``
+# True on a result a caller would deploy. The rejection carries its OWN ``retryable``: a
+# truncated transfer is worth another attempt, a build that produced garbage is not.
 from __future__ import annotations
 
 import logging
@@ -125,6 +132,8 @@ from pocketpaw_ee.sites.daytona_build import (
     artifact_tar_command,
     build_wrapper_script,
     classify_build,
+    promised_artifact_bytes,
+    verify_artifact,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -400,6 +409,38 @@ async def run_build(
                     blames_user=False,
                     stderr_tail=classification.stderr_tail,
                 )
+            else:
+                # SG-7: verify the BYTES, not the sentinel's claims about them. Runs here
+                # because it is the first moment the artifact exists locally, and before
+                # the return because ``deployable`` is the flag a caller deploys on —
+                # leaving it True for an empty or node_modules-carrying artifact is how a
+                # blank or 500 MB site ships.
+                #
+                # NEVER ``blames_user``: a leaked exclusion and a failed transfer are both
+                # ours, and telling the user their build is broken would be a lie.
+                # ``retryable`` comes from the rejection rather than being fixed here,
+                # because only the rejection knows whether the transfer or the build is at
+                # fault.
+                rejection = verify_artifact(
+                    artifact, expected_bytes=promised_artifact_bytes(sentinel)
+                )
+                if rejection is not None:
+                    logger.warning(
+                        "daytona_runner: artifact rejected (%s, retryable=%s)",
+                        rejection.reason,
+                        rejection.retryable,
+                    )
+                    classification = BuildClassification(
+                        outcome="infra_lost",
+                        reason=rejection.reason,
+                        retryable=rejection.retryable,
+                        blames_user=False,
+                        stderr_tail=classification.stderr_tail,
+                    )
+                    # Dropped rather than returned alongside the rejection: a caller that
+                    # read the bytes off a result it did not gate on would deploy exactly
+                    # what this check refused.
+                    artifact = None
         t_extracted = time.monotonic()
     finally:
         # Explicit teardown. Swallows its own errors: a delete that fails must not mask
