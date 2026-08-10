@@ -18,10 +18,10 @@
     ]
   },
   {
-    "label": "bool exit codes are coerced instead of rejected, so build_exit=False deploys an unbuilt site",
+    "label": "bool exit codes are coerced instead of rejected, so build_exit=False deploys an unbuilt site [re-anchored 2026-08-11: verify_artifact's _readable_size carries the identical guard line, so the one-line anchor became ambiguous and would have aborted this whole plan]",
     "file": "ee/pocketpaw_ee/sites/daytona_build.py",
-    "find": "    if isinstance(value, bool) or not isinstance(value, int):",
-    "replace": "    if not isinstance(value, int):",
+    "find": "    if isinstance(value, bool) or not isinstance(value, int):\n        return None\n    return value\n",
+    "replace": "    if not isinstance(value, int):\n        return None\n    return value\n",
     "tests": [
       "tests/ee/sites/test_daytona_build.py"
     ]

@@ -217,8 +217,13 @@ RUNG_SCAFFOLD_EMPTY = "scaffold_empty"
 #: sandbox could not be created. Nothing ran, so it is ours and retryable.
 RUNG_SANDBOX_UNAVAILABLE = "sandbox_unavailable"
 #: The classification cleared the build and the download delivered no bytes. Distinct
-#: from ``artifact_empty`` (which the sentinel catches) because this one is a property of
-#: the TRANSFER, so it is worth another attempt.
+#: from the sentinel's ``artifact_empty`` because this one is a property of the TRANSFER,
+#: so it is worth another attempt.
+#:
+#: Updated 2026-08-11: ``run_build`` now verifies the bytes and reports that same
+#: condition as ``infra_lost:artifact_empty``, so this rung is no longer reached from that
+#: path. It remains the guard for any OTHER result carrying ``deployable`` with no bytes —
+#: see :func:`resolve_build_settlement` for why that is kept rather than removed.
 RUNG_ARTIFACT_MISSING = "artifact_missing"
 #: The enqueue itself failed after the row was already stamped ``queued``. Written by the
 #: enqueue helper so the row lands TERMINAL instead of pinned in flight.
@@ -273,11 +278,20 @@ def resolve_build_settlement(result: BuildRunResult, *, attempts_left: int = 0) 
     is not — and a rung that lies about retryability either burns a publish that a second
     attempt would have fixed, or retries something no attempt can fix.
 
-    Truncation — a payload that arrives SHORTER than the sentinel's ``artifact_bytes`` —
-    is NOT distinguished here. That needs the promised size threaded off the sentinel,
-    which is banked on ``spike/sites-artifact-verification`` along with the rest of the
-    four-way artifact classification. Until it lands, a truncated download settles as
-    ``built``; the gap is real, is not new, and is recorded rather than papered over.
+    Updated 2026-08-11: THE ``deployable``-BUT-NOT-``ok`` CASE NO LONGER ARRIVES FROM
+    ``run_build``. That runner verifies the downloaded bytes itself and demotes the
+    classification, so an empty download now reaches here already named
+    ``infra_lost:artifact_empty`` — and a TRUNCATED one, which used to settle as ``built``
+    because nothing compared the promise against what arrived, reaches here as
+    ``infra_lost:artifact_truncated``. Both are more precise than this rung could be, so
+    the first branch handles them.
+
+    THE ``artifact_missing`` BRANCH STAYS ANYWAY, and not as decoration: this function's
+    contract is over a ``BuildRunResult``, not over "a result that came from ``run_build``".
+    A result assembled anywhere else — a future caller, a partial re-implementation, a test
+    — can still carry ``deployable`` with no bytes, and the branch is what stops that being
+    settled as ``built``. Deleting it would make the safe reading depend on an invariant
+    held one module away.
     """
     classification = result.classification
     if result.ok:

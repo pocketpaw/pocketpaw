@@ -56,11 +56,11 @@ def ok_sentinel(**over: Any) -> dict[str, Any]:
         "install_exit": 0,
         "build_exit": 0,
         "artifact_rel": "dist",
-        # Promises what ``FaultyDaytonaClient`` actually hands back, rather than a round
-        # number. A TRUTHFULNESS fix, not scaffolding for a gate: nothing compares the two
-        # today, so a hardcoded 4096 beside a ~170-byte artifact is simply a fiction a
-        # reader would have to discover. It also matters the moment download verification
-        # arrives, since that is precisely the comparison it will make.
+        # The promised size MUST agree with what the fake actually hands back, because
+        # ``verify_artifact`` compares the two (2026-08-11): a sentinel promising 4096 bytes
+        # beside a ~170-byte artifact is a TRUNCATED transfer, so a hardcoded number here
+        # would make every happy-path test in the ladder fail for the wrong reason. It
+        # started as a truthfulness fix while nothing compared them; it is now load-bearing.
         "artifact_bytes": len(clean_artifact()),
         "stderr_tail": "",
     }
@@ -98,6 +98,43 @@ def clean_artifact() -> bytes:
             "./assets/app.js": b"console.log(1)",
         }
     )
+
+
+def artifact_with_node_modules() -> bytes:
+    """A well-formed artifact that nonetheless carries ``node_modules``.
+
+    The shape a leaked exclusion would produce: ``dist/node_modules/`` becomes
+    ``./node_modules/`` once packed with ``-C dist``. It cannot be produced by putting a
+    tree on disk and running the real command — that is what the include-list tests do, and
+    they now pass — so a hand-built tar is the only way to exercise what the byte gate does
+    when the exclusion does NOT hold, which is the case it exists for.
+
+    Deliberately a VALID tar: rejecting garbage is the easy half, and the interesting half
+    is rejecting something that opens cleanly.
+    """
+    return tar_bytes(
+        {
+            "./index.html": b"<!doctype html>",
+            "./node_modules/.bin/vite": b"#!/usr/bin/env node",
+            "./node_modules/react/index.js": b"module.exports = {}",
+        }
+    )
+
+
+def truncated_artifact() -> bytes:
+    """The first 40 bytes of a healthy artifact — a transfer that died part-way."""
+    return clean_artifact()[:40]
+
+
+def garbage_artifact(size: int) -> bytes:
+    """``size`` bytes that are not a tar at all.
+
+    Used with a sentinel promising exactly ``size``, so the FULL promised payload arrives
+    and is still unreadable. That combination is what distinguishes "the build produced
+    garbage" (not retryable) from "the transfer lost bytes" (retryable), and it is the only
+    way to exercise the non-retryable branch.
+    """
+    return b"x" * size
 
 
 # ---------------------------------------------------------------------------
@@ -439,9 +476,11 @@ __all__ = [
     "FailingCloudflare",
     "FailingWorkersDeploy",
     "FaultyDaytonaClient",
+    "artifact_with_node_modules",
     "clean_artifact",
     "cloudflare_error",
     "daytona_unconfigured",
+    "garbage_artifact",
     "ok_sentinel",
     "pack_with_real_tar",
     "sandbox_create_fails",
@@ -449,5 +488,6 @@ __all__ = [
     "screenshot_always_fails",
     "tar_bytes",
     "tar_is_available",
+    "truncated_artifact",
     "write_project_tree",
 ]
