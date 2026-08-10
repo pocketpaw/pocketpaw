@@ -1,0 +1,170 @@
+[
+  {
+    "label": "the worker refusal is gone, so a dynamic svelte site's static leftovers are served as though they were the site and the customer reads our packaging failure as their site being broken",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "    if shape.is_server_rendered:\n        return _refuse(REASON_SERVER_RENDERED, _SERVER_RENDERED_DETAIL, shape)",
+    "replace": "    if False:\n        return _refuse(REASON_SERVER_RENDERED, _SERVER_RENDERED_DETAIL, shape)",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "an artifact carrying a worker reports itself as renderer-free, so the one fact the gate exists to notice is invisible to it",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "    def is_server_rendered(self) -> bool:\n        return bool(self.server_entries)",
+    "replace": "    def is_server_rendered(self) -> bool:\n        return False",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "the scan stops recording worker members, so the gate sees a clean artifact and only the post-store cross-check stands between a worker-rendered tree and being served",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "            if any(seg in SERVER_ENTRY_NAMES for seg in segments):\n                server.append(\"/\".join(segments))",
+    "replace": "            if False:\n                server.append(\"/\".join(segments))",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "a worker member written with a backslash separator is not seen as a worker, so the same artifact is refused on one host and served on the other",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "    return tuple(part for part in name.replace(\"\\\\\", \"/\").split(\"/\") if part not in (\"\", \".\"))",
+    "replace": "    return tuple(part for part in name.split(\"/\") if part not in (\"\", \".\"))",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "the routing table is no longer recorded, so an artifact that names a renderer it does not contain passes the gate as if it were complete",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "            if segments[-1] == ROUTING_TABLE_NAME:\n                routes.append(\"/\".join(segments))",
+    "replace": "            if False:\n                routes.append(\"/\".join(segments))",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "the incomplete-artifact refusal is gone, so a build whose server entry got stripped somewhere in packaging is previewed as a finished static site",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "    if shape.declares_absent_renderer:\n        return _refuse(REASON_INCOMPLETE_ARTIFACT, _INCOMPLETE_DETAIL, shape)",
+    "replace": "    if False:\n        return _refuse(REASON_INCOMPLETE_ARTIFACT, _INCOMPLETE_DETAIL, shape)",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "incompleteness stops requiring a routing table, so every self-contained static build is refused as incomplete and no site can be previewed at all",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "        return bool(self.routing_tables) and not self.server_entries",
+    "replace": "        return bool(self.routing_tables) or not self.server_entries",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "an index.html anywhere in the tree counts as the home page, so a build with only docs/index.html is admitted and the preview opens onto its own 404",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "            if segments == (ENTRY_DOCUMENT_NAME,):\n                entry_document = True",
+    "replace": "            if segments[-1] == ENTRY_DOCUMENT_NAME:\n                entry_document = True",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "a refusal leaves the previous build's preview in place, so the one surface allowed to say a build is correct keeps saying it about a different build",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "    if artifact_preview.discard_preview(site_id):",
+    "replace": "    if False:",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "the gate and the unpack are no longer cross-checked, so a worker the name scan missed is served from the stored tree with nothing left to notice it",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "    if snapshot.unpacked.server_entries:",
+    "replace": "    if False:",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "the project probe guesses the output dir from the engine name, so a static svelte landing build is reported as producing no home page — the exact failure SL-1's resolvers exist to prevent",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "    out_dir = Path(project_dir) / resolve_static_output_rel(project_dir, normalized)",
+    "replace": "    out_dir = Path(project_dir) / static_output_rel(normalized)",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "a project dir is no longer probed for a worker, so a locally-built dynamic site is previewed from the shell adapter-cloudflare left behind",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "    if resolve_emits_server_worker(project_dir, normalized):",
+    "replace": "    if False:",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "unreadable build output raises out of the gate instead of refusing, so a truncated download is reported to the customer as a failed build",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "        shape = scan_artifact(artifact)\n    except ArtifactRejected as exc:",
+    "replace": "        shape = scan_artifact(artifact)\n    except SystemExit as exc:",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "a build with no artifact is scanned anyway, so 'nothing was built yet' surfaces as a type error out of the preview call",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "    if not artifact:\n        return _refuse(\n            REASON_NO_ARTIFACT,",
+    "replace": "    if False:\n        return _refuse(\n            REASON_NO_ARTIFACT,",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "an engine that runs no build is assessed as if it produced an artifact, hiding a routing bug behind a preview of whatever tree arrived",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "    routing bug and should be loud).\n    \"\"\"\n    normalized = normalize_engine(engine)\n    if static_output_rel(normalized) == \".\":",
+    "replace": "    routing bug and should be loud).\n    \"\"\"\n    normalized = normalize_engine(engine)\n    if False:",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "a store refusal escapes into the build lane, so a build that already succeeded is reported as failed because its preview could not be unpacked",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "    except ArtifactRejected as exc:\n        # The store REFUSED the artifact",
+    "replace": "    except SystemExit as exc:\n        # The store REFUSED the artifact",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "an unforeseen failure while storing escapes into the build lane, so one bad preview costs a publish that had already worked",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "    except Exception:  # noqa: BLE001 - a preview must never cost anybody a build",
+    "replace": "    except SystemExit:  # mutated: the swallow is gone",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "the default exposure becomes the app's own origin, so customer JavaScript runs where the session cookie lives before anybody decided that it should",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "    if not raw:\n        return EXPOSURE_LOOPBACK",
+    "replace": "    if not raw:\n        return EXPOSURE_APP_ORIGIN",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "a typo in the exposure config is passed through as a mode, so previews stop resolving an address for a setting the operator believes is the default",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "    if raw not in _KNOWN_EXPOSURES:",
+    "replace": "    if False:",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "every exposure resolves to loopback, so an operator who configured a public preview origin silently gets a 127.0.0.1 URL that only works on the API box",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "    if mode == EXPOSURE_LOOPBACK:",
+    "replace": "    if True:",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "an unset preview origin yields an empty base URL, so every preview link is a bare path that resolves against whichever page opened it",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "        if not origin:\n            raise PreviewExposureNotConfigured(",
+    "replace": "        if False:\n            raise PreviewExposureNotConfigured(",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "an undecided exposure raises out of the preview call, so a build that succeeded is reported as failed because nobody has picked an origin yet",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "    except PreviewExposureNotConfigured as exc:",
+    "replace": "    except SystemExit as exc:",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "the app-origin refusal stops naming the cookie mechanic, so whoever hits it adds a sandbox attribute and breaks the page's own assets instead",
+    "file": "ee/pocketpaw_ee/sites/truth_lane.py",
+    "find": "            \"JavaScript would execute where the session cookie lives, and a CSP sandbox \"",
+    "replace": "            \"JavaScript would run somewhere it should not. \"",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  },
+  {
+    "label": "the caller's resolved worker expectation is ignored, so every healthy static svelte preview logs that the artifact may be incomplete and the warning stops meaning anything",
+    "file": "ee/pocketpaw_ee/sites/artifact_preview.py",
+    "find": "    expected_worker = (\n        emits_server_worker(engine) if expect_server_worker is None else expect_server_worker\n    )",
+    "replace": "    expected_worker = emits_server_worker(engine)",
+    "tests": ["tests/ee/sites/test_truth_lane.py"]
+  }
+]

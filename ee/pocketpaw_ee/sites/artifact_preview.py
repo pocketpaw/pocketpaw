@@ -22,6 +22,20 @@
 #      not the commercial terms. It is not permission and must never be cited as
 #      such.
 #
+# Updated 2026-08-10 (SG-10 wiring — this module now has a caller). ``truth_lane.py``
+# is it, and it sits IN FRONT of everything here: it refuses an artifact whose pages are
+# rendered by a ``_worker.js`` we cannot execute, so such an artifact is never stored and
+# never served. Nothing in this module changed shape as a result — the guards, the skip
+# and the refusals are the same — except ``store_artifact``/``safe_store_artifact``,
+# which grew an optional ``expect_server_worker``. That exists because the
+# ``emits_server_worker(engine)`` cross-check below asks the ENGINE NAME a question the
+# name stopped being able to answer at SL-1: engine ``"svelte"`` now covers a static
+# landing build with no worker and a dynamic one with a load-bearing worker, so the
+# check warned "the artifact may be incomplete" on every healthy static svelte preview.
+# A caller that resolved the answer off the artifact passes it in; ``None`` keeps the old
+# behaviour for every other caller. No signal is lost — the missing-worker case
+# ``truth_lane`` suppresses here, it refuses outright, which is louder than a log line.
+#
 # Choosing static REMOVES constraints. The in-tab runtime needs cross-origin
 # isolation, and COEP ``require-corp`` blocks presigned-S3 images — exactly what the
 # sites gallery cards render. ``credentialless`` dodges that but is Chromium/Firefox
@@ -390,7 +404,13 @@ def unpack_artifact(artifact: bytes, dest: Path) -> UnpackedArtifact:
     )
 
 
-def store_artifact(site_id: str, artifact: bytes, *, engine: str) -> PreviewSnapshot:
+def store_artifact(
+    site_id: str,
+    artifact: bytes,
+    *,
+    engine: str,
+    expect_server_worker: bool | None = None,
+) -> PreviewSnapshot:
     """Unpack ``artifact`` as this site's preview, replacing any previous one.
 
     Refuses an engine whose static output is the project ROOT (``html``, whose
@@ -404,6 +424,14 @@ def store_artifact(site_id: str, artifact: bytes, *, engine: str) -> PreviewSnap
     means the build lane changed shape underneath us. It is a warning and not a
     refusal because either way the static tree is still previewable, and a preview
     that refused to open would hide the discrepancy instead of surfacing it.
+
+    ``expect_server_worker`` OVERRIDES that engine-name expectation, and exists because
+    since SL-1 the engine name cannot answer it: engine ``"svelte"`` spans a static
+    landing build (``adapter-static``, no worker) and a dynamic one
+    (``adapter-cloudflare``, worker), so the name-only predicate warns "the artifact may
+    be incomplete" on every healthy static svelte preview. A caller that has resolved
+    the answer off the artifact passes it here. ``None`` keeps the historical
+    engine-name behaviour, so every existing call site is unchanged.
 
     Unpacks into a temporary sibling and swaps it in, so a failure part-way through
     leaves the PREVIOUS preview intact rather than a half-written tree serving a
@@ -431,7 +459,10 @@ def store_artifact(site_id: str, artifact: bytes, *, engine: str) -> PreviewSnap
         shutil.rmtree(incoming, ignore_errors=True)
         raise
 
-    if unpacked.server_entries and not emits_server_worker(engine):
+    expected_worker = (
+        emits_server_worker(engine) if expect_server_worker is None else expect_server_worker
+    )
+    if unpacked.server_entries and not expected_worker:
         logger.warning(
             "sites.artifact_preview: %s artifact for site %s carried a server entry (%s) "
             "even though this engine emits none — the build lane may have changed shape",
@@ -439,7 +470,7 @@ def store_artifact(site_id: str, artifact: bytes, *, engine: str) -> PreviewSnap
             site_id,
             ", ".join(unpacked.server_entries),
         )
-    elif emits_server_worker(engine) and not unpacked.server_entries:
+    elif expected_worker and not unpacked.server_entries:
         logger.warning(
             "sites.artifact_preview: %s artifact for site %s carried NO server entry, "
             "though this engine always emits one — the artifact may be incomplete",
@@ -464,7 +495,11 @@ def store_artifact(site_id: str, artifact: bytes, *, engine: str) -> PreviewSnap
 
 
 def safe_store_artifact(
-    site_id: str, artifact: bytes | None, *, engine: str
+    site_id: str,
+    artifact: bytes | None,
+    *,
+    engine: str,
+    expect_server_worker: bool | None = None,
 ) -> PreviewSnapshot | None:
     """:func:`store_artifact` that never raises — returns ``None`` on any failure.
 
@@ -472,11 +507,18 @@ def safe_store_artifact(
     failed because a preview could not be unpacked, so this swallows everything the
     way ``screenshot.safe_take_*`` does for card images. The strict form stays
     available for a caller that is asking for a preview and is entitled to the error.
+
+    NOT THE TRUTH LANE. This stores whatever unpacks; it asks no question about whether
+    the artifact can be RENDERED faithfully, so a worker-rendered artifact stores its
+    static leftovers here and serves them. ``truth_lane.open_preview`` is the gated
+    entry point, and it is the one a preview surface should call.
     """
     if not artifact:
         return None
     try:
-        return store_artifact(site_id, artifact, engine=engine)
+        return store_artifact(
+            site_id, artifact, engine=engine, expect_server_worker=expect_server_worker
+        )
     except Exception:  # noqa: BLE001 — a preview must never cost anybody a publish
         logger.warning(
             "sites.artifact_preview: could not store a preview for site %s", site_id, exc_info=True
