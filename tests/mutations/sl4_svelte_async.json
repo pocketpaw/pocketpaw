@@ -20,10 +20,10 @@
     ]
   },
   {
-    "label": "SL-4: the fork stops passing the site to the predicate and lets it default, so a dynamic svelte publish is treated as static — this is why the parameters have no defaults, and the mutation proves the call site cannot regress silently",
+    "label": "SL-4: the publish's DYNAMIC fork is removed, so a dynamic svelte site falls through to the async fork. Before SL-4 that only cost it the provision job and it still built inline; now it is QUEUED, and the artifact the lane produces has its _worker.js dropped at unpack — a site that cannot serve is pushed to the edge",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    if prebuilt_project_dir is None and build_runs_async(\n        engine, pattern=pattern, ripple_spec=ripple_spec\n    ):",
-    "replace": "    if prebuilt_project_dir is None and build_runs_async(\n        engine, pattern=None, ripple_spec=None\n    ):",
+    "find": "    if _is_dynamic(pattern, ripple_spec):\n        return await _provision_dynamic_site(",
+    "replace": "    if False:\n        return await _provision_dynamic_site(",
     "tests": [
       "tests/ee/sites/test_async_publish.py::TestTheSvelteTrackForksOnTheSite::test_a_dynamic_svelte_publish_never_enters_the_build_lane",
       "tests/ee/sites/test_async_publish.py::TestTheSvelteTrackForksOnTheSite::test_an_unstamped_dynamic_svelte_publish_also_stays_out"
