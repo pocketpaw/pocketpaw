@@ -1017,8 +1017,7 @@ async def test_every_sites_mode_knows_the_concierge_exists(label: str, meta: Sur
     precisely because no mode carried it, so this is parametrized across all
     five dispatched (engine, mode) combinations rather than spot-checking one.
     """
-    preamble = await sites_handler.build_preamble(WORKSPACE, USER, meta)
-    lower = preamble.lower()
+    lower = (await sites_handler.build_preamble(WORKSPACE, USER, meta)).text.lower()
 
     assert "concierge" in lower, f"{label}: preamble never mentions the concierge"
     # Named as the thing the visitor actually sees on the page.
@@ -1037,8 +1036,7 @@ async def test_concierge_block_never_promises_a_configuration_tool(
     declares them — so the preamble has to route the user to the dashboard
     instead of naming a tool that would hard-error.
     """
-    preamble = await sites_handler.build_preamble(WORKSPACE, USER, meta)
-    lower = preamble.lower()
+    lower = (await sites_handler.build_preamble(WORKSPACE, USER, meta)).text.lower()
 
     # No fabricated tool ids for concierge configuration.
     for phantom in (
@@ -1064,8 +1062,7 @@ async def test_create_ties_the_concierge_to_publish_not_to_the_draft() -> None:
     """
     for engine in (None, "svelte", "ripple"):
         meta = SurfaceMeta(route_path="/sites", engine=engine)
-        preamble = await sites_handler.build_preamble(WORKSPACE, USER, meta)
-        lower = preamble.lower()
+        lower = (await sites_handler.build_preamble(WORKSPACE, USER, meta)).text.lower()
         # The concierge arrives WITH the publish, not with the draft.
         assert "publish" in lower
         concierge_at = lower.index("concierge")
@@ -1097,7 +1094,7 @@ async def test_concierge_awareness_does_not_depend_on_the_mcp_tool_id_import() -
         preamble = await sites_handler.build_preamble(
             WORKSPACE, USER, SurfaceMeta(route_path="/sites")
         )
-        assert "concierge" in preamble.lower()
+        assert "concierge" in preamble.text.lower()
     finally:
         registry._MCP_TOOL_IDS_CACHE = original
 
