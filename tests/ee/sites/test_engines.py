@@ -5,6 +5,24 @@
 # html) plus the empty / missing / unknown-engine fallback contract that the
 # scattered ``pocket.get("engine") or "ripple"`` call sites relied on.
 #
+# Edited 2026-08-10 (SL-1 — the static svelte landing lane): added
+# TestResolveStaticOutputRel + TestResolveEmitsServerWorker for the two new
+# artifact-resolving predicates. These use REAL tmp_path dirs rather than mocks,
+# because reading the filesystem is the entire behaviour under test — a mocked
+# filesystem here would test the mock.
+#
+# Two cases carry most of the weight. `test_build_wins_when_both_exist` pins the probe
+# ORDER, so a project dir built both before and after SL-1 cannot have its stale
+# adapter-cloudflare tree shadow the current build. `test_a_worker_DIRECTORY_still_counts`
+# pins existence-over-is_file, because adapter-cloudflare emits `_worker.js` as a
+# DIRECTORY once an app is large enough — an is_file() check would report "no worker"
+# for a big dynamic site and deploy it assets-only, replacing a working site with a
+# broken one.
+#
+# Mutation-verified: tests/mutations/sites_sl1_resolvers.json, 5/5 caught. This suite
+# is also the deterministic gate for SL-1, because tests/ee/sites at large is ~89 red
+# and order-dependent on dev independently of this change.
+#
 # Edited 2026-08-07 (RX-1 — the react engine): added react to every predicate's
 # coverage and to the fallback parametrizations, plus a class for the new fifth
 # predicate ``emits_server_worker``. The load-bearing new case is react's
@@ -99,6 +117,103 @@ class TestStaticOutputRel:
     @pytest.mark.parametrize("value", [None, "", "unknown"])
     def test_default_output_matches_ripple(self, value: str | None) -> None:
         assert engines.static_output_rel(value) == ".svelte-kit/cloudflare"
+
+
+class TestResolveStaticOutputRel:
+    """SL-1 — the svelte track spans two adapters, so the output dir is a fact about
+    the ARTIFACT rather than about the engine string. These are deliberately real
+    temp dirs: the whole point of the resolver is that it reads the filesystem, so a
+    mocked one would test the mock."""
+
+    def test_static_svelte_resolves_to_build(self, tmp_path) -> None:
+        (tmp_path / "build").mkdir()
+        assert engines.resolve_static_output_rel(tmp_path, "svelte") == "build"
+
+    def test_dynamic_svelte_resolves_to_the_adapter_cloudflare_tree(self, tmp_path) -> None:
+        (tmp_path / ".svelte-kit" / "cloudflare").mkdir(parents=True)
+        assert (
+            engines.resolve_static_output_rel(tmp_path, "svelte") == ".svelte-kit/cloudflare"
+        )
+
+    def test_build_wins_when_both_exist(self, tmp_path) -> None:
+        # THE ORDER TEST. A project dir that has been built before AND after SL-1
+        # carries both trees; the stale adapter-cloudflare one must not shadow the
+        # current build. Reversing the probe order silently serves the old artifact,
+        # which is the failure this asserts against.
+        (tmp_path / "build").mkdir()
+        (tmp_path / ".svelte-kit" / "cloudflare").mkdir(parents=True)
+        assert engines.resolve_static_output_rel(tmp_path, "svelte") == "build"
+
+    def test_neither_present_falls_back_to_the_nominal_value(self, tmp_path) -> None:
+        # Total, never raising — the caller then reports a missing build against a
+        # concrete path, which is a truer error than the predicate refusing to decide.
+        assert (
+            engines.resolve_static_output_rel(tmp_path, "svelte") == ".svelte-kit/cloudflare"
+        )
+
+    @pytest.mark.parametrize(
+        ("engine", "expected"),
+        [("ripple", ".svelte-kit/cloudflare"), ("html", "."), ("react", "dist")],
+    )
+    def test_non_svelte_engines_ignore_the_filesystem(
+        self, tmp_path, engine: str, expected: str
+    ) -> None:
+        # A decoy `build/` dir is present for every one of them. Only svelte probes,
+        # so ripple/html/react must return their nominal value regardless — otherwise
+        # this change would silently repoint react and html deploys too.
+        (tmp_path / "build").mkdir()
+        assert engines.resolve_static_output_rel(tmp_path, engine) == expected
+
+    def test_accepts_a_str_path(self, tmp_path) -> None:
+        # Call sites pass both str and Path (``build.project_dir`` is a str).
+        (tmp_path / "build").mkdir()
+        assert engines.resolve_static_output_rel(str(tmp_path), "svelte") == "build"
+
+
+class TestResolveEmitsServerWorker:
+    """The deploy-shape half. Getting this wrong points ``main`` at a worker that does
+    not exist, which fails the deploy outright."""
+
+    def test_static_svelte_emits_no_worker(self, tmp_path) -> None:
+        (tmp_path / "build").mkdir()
+        assert engines.resolve_emits_server_worker(tmp_path, "svelte") is False
+
+    def test_dynamic_svelte_emits_a_worker(self, tmp_path) -> None:
+        out = tmp_path / ".svelte-kit" / "cloudflare"
+        out.mkdir(parents=True)
+        (out / "_worker.js").write_text("export default {}")
+        assert engines.resolve_emits_server_worker(tmp_path, "svelte") is True
+
+    def test_a_worker_DIRECTORY_still_counts(self, tmp_path) -> None:
+        # adapter-cloudflare emits _worker.js as a DIRECTORY once an app is large
+        # enough (_worker.js/chunks/0.js). An is_file() check would report "no worker"
+        # for a big dynamic site and deploy it assets-only — replacing a working site
+        # with a broken one. This is the mutation that must not escape.
+        out = tmp_path / ".svelte-kit" / "cloudflare"
+        (out / "_worker.js" / "chunks").mkdir(parents=True)
+        (out / "_worker.js" / "chunks" / "0.js").write_text("//")
+        assert engines.resolve_emits_server_worker(tmp_path, "svelte") is True
+
+    def test_ripple_with_a_worker_is_unchanged(self, tmp_path) -> None:
+        out = tmp_path / ".svelte-kit" / "cloudflare"
+        out.mkdir(parents=True)
+        (out / "_worker.js").write_text("export default {}")
+        assert engines.resolve_emits_server_worker(tmp_path, "ripple") is True
+
+    @pytest.mark.parametrize("engine", ["html", "react"])
+    def test_serverless_engines_short_circuit(self, tmp_path, engine: str) -> None:
+        # Never a worker on these tracks, even if a stray _worker.js is lying around —
+        # the engine-level answer is authoritative for them and must not be overridden
+        # by a file that cannot be theirs.
+        (tmp_path / "dist").mkdir()
+        (tmp_path / "dist" / "_worker.js").write_text("stray")
+        (tmp_path / "_worker.js").write_text("stray")
+        assert engines.resolve_emits_server_worker(tmp_path, engine) is False
+
+    def test_missing_output_dir_reports_no_worker(self, tmp_path) -> None:
+        # Nothing built yet: no worker is the honest answer, and the caller's own
+        # missing-build check is what turns this into an error.
+        assert engines.resolve_emits_server_worker(tmp_path, "svelte") is False
 
 
 class TestNormalizeEngine:
